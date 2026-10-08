@@ -305,7 +305,7 @@ impl JobRunner {
     }
 
     /// Request cancellation of a queued or running job. Returns whether a
-    /// live job received the request.
+    /// live or lost job received the request.
     pub async fn cancel(&self, job_id: Uuid) -> anyhow::Result<bool> {
         let token = self
             .cancels
@@ -314,6 +314,22 @@ impl JobRunner {
             .get(&job_id)
             .cloned();
         let Some(token) = token else {
+            if let Some(record) = self.store.get(job_id).await? {
+                if record.state == JobState::Lost {
+                    #[cfg(target_os = "linux")]
+                    if let Some((mode, user_runtime_dir)) = systemd_scope_mode() {
+                        let scope = SystemdScope {
+                            unit: format!("sandboxed-node-job-{}.scope", job_id.simple()),
+                            mode,
+                            user_runtime_dir,
+                        };
+                        if !stop_systemd_scope(&scope).await {
+                            return Ok(false);
+                        }
+                    }
+                    return self.store.cancel_if_lost(job_id).await;
+                }
+            }
             return Ok(false);
         };
         token.cancel();
@@ -425,6 +441,7 @@ impl JobRunner {
                     .iter()
                     .any(|profile| profile == "antigravity")
                     .then(|| {
+                        crate::antigravity::clear_all_historical_error_steps(&mission_dir);
                         let log = log_path.clone();
                         let home = mission_dir.clone();
                         let stop = thought_stop.clone();
@@ -551,7 +568,7 @@ async fn run_logged_command_with_deadline(
         .append(true)
         .open(log_path)?;
     let stderr_file = stdout_file.try_clone()?;
-    let (mut cmd, systemd_scope) = contain_command(cmd, environment)?;
+    let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path)?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
@@ -590,7 +607,9 @@ async fn run_logged_command_with_deadline(
 fn contain_command(
     cmd: tokio::process::Command,
     environment: CommandEnvironment,
+    log_path: &Path,
 ) -> std::io::Result<(tokio::process::Command, Option<SystemdScope>)> {
+    let _ = log_path;
     // Cargo's lib and binary test harnesses do not run sandboxed-node's main,
     // so they cannot service the hidden trampoline entrypoint. Construction
     // is covered directly below; execution tests retain the process-group
@@ -611,8 +630,13 @@ fn contain_command(
     #[cfg(target_os = "linux")]
     {
         if let Some((mode, user_runtime_dir)) = systemd_scope_mode() {
+            let scope_id = (environment == CommandEnvironment::Clear)
+                .then(|| log_path.file_stem()?.to_str())
+                .flatten()
+                .and_then(|stem| Uuid::parse_str(stem).ok())
+                .unwrap_or_else(Uuid::new_v4);
             let scope = SystemdScope {
-                unit: format!("sandboxed-node-job-{}.scope", Uuid::new_v4().simple()),
+                unit: format!("sandboxed-node-job-{}.scope", scope_id.simple()),
                 mode,
                 user_runtime_dir,
             };
@@ -1688,6 +1712,42 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("job {job_id} did not reach a terminal state in time");
+    }
+
+    #[tokio::test]
+    async fn cancel_transitions_lost_job_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let job_id = Uuid::new_v4();
+        let mission_id = Uuid::new_v4();
+        let payload = JobPayload::RawCommand {
+            command: "sleep 30".into(),
+            side_question: false,
+            long_running: false,
+            timeout_secs: None,
+            env: None,
+            managed_auth: vec![],
+        };
+        store
+            .create(
+                job_id,
+                mission_id,
+                serde_json::to_string(&payload).unwrap(),
+                dir.path().join("job.log").display().to_string(),
+            )
+            .await
+            .unwrap();
+        store.mark_running(job_id).await.unwrap();
+        store.recover_on_start().await.unwrap();
+        assert_eq!(
+            store.get(job_id).await.unwrap().unwrap().state,
+            JobState::Lost
+        );
+        let runner = JobRunner::spawn(store.clone(), dir.path().into(), 1, 30);
+        assert!(runner.cancel(job_id).await.unwrap());
+        let record = store.get(job_id).await.unwrap().unwrap();
+        assert_eq!(record.state, JobState::Cancelled);
+        assert!(record.finished_at.is_some());
     }
 }
 

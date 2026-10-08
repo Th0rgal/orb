@@ -36,6 +36,7 @@ mod local_wakeups;
 mod machine_metrics;
 mod routed_opencode;
 mod session_preview;
+mod skills;
 mod transfers;
 mod uploads;
 mod voice;
@@ -190,6 +191,8 @@ fn main() {
             software::software_inventory,
             software::software_update,
             software::software_cancel,
+            skills::local_skills_status,
+            skills::local_skills_sync,
             local_agents::local_agents_cyber_capabilities,
             local_agents::local_agents_scan,
             local_agents::local_antigravity_models,

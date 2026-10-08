@@ -3,6 +3,7 @@ import { connectionVersion, getApiUrl, getJwt, isConnected, type Mission } from 
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { formatToolDetail, isSyntheticUserMessage } from "./inboxModel";
 import { inboxConfig } from "./inboxSettings";
+import { messageImages } from "./messageImages";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
 import { remoteLog as parseRemoteLog } from "./remoteLog";
 import { sideQuestionKey } from "./sideQuestionStorage";
@@ -142,7 +143,7 @@ function cleanUserText(raw: string): string {
   if (wake) {
     return `Background task \`${wake.task}\` (${wake.command}) finished${wake.killed ? " (killed)" : ""}`;
   }
-  return pres.trim();
+  return messageImages(pres).text.replace(/\[Image #\d+\]/gi, "").trim();
 }
 
 function cleanAssistantText(raw: string): string {

@@ -266,3 +266,29 @@ it("streaming keeps the identity of blocks that did not change", () => {
   expect(third[0]).toBe(first[0]);
   expect(third.at(-1)).toMatchObject({ t: "p" });
 });
+
+it("renders nested indented bullet and numbered lists instead of collapsing dashed lines onto one line", () => {
+  const src = [
+    "### 2.2 Assumptions That Mask a Code / Logic Edge Case",
+    "1. **Assumption `A7` in `APR-1`**:",
+    "   - **What it masks**: `setApr` and `setAprs` do not check `!isEpochRunning`.",
+    "   - **Client view**: Agreed that APR should stay fixed during a fixed-rate epoch.",
+    "   - **Recommendation**: Guard `setApr` and `setAprs`.",
+    "2. **Checkpoint Coherence `A-P1`**:",
+    "   - **What it masks**: `depositDuringEpoch` mints shares.",
+    "   - **PoC for William**:",
+    "     - `test_CE_4_forcedAccounting`: lowers `priceAA` by 1-wei rounding.",
+    "     - `test_CE_4_materialDrop`: lowers `priceAA` by > 1 bp.",
+    "",
+    "---",
+    "",
+    "After divider.",
+  ].join("\n");
+  const { container } = render(() => <MdView text={src} />);
+  const topItems = container.querySelectorAll(":scope > .md > ol > li");
+  expect(topItems).toHaveLength(2);
+  expect(topItems[0].querySelectorAll(":scope > ul > li")).toHaveLength(3);
+  expect(topItems[1].querySelectorAll(":scope > ul > li")).toHaveLength(2);
+  expect(topItems[1].querySelectorAll(":scope > ul > li ul > li")).toHaveLength(2);
+  expect(container.querySelector("hr")).not.toBeNull();
+});

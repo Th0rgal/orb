@@ -513,6 +513,8 @@ pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'stat
         || failure.contains("Internal error encountered")
         || failure.contains("UNAVAILABLE (code 503)")
         || failure.contains("DEADLINE_EXCEEDED (code 504)")
+        || failure.contains("The stream was interrupted")
+        || failure.contains("There was a network issue connecting to the server")
     {
         Some("Antigravity transient upstream error")
     } else {

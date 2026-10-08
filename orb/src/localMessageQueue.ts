@@ -493,11 +493,18 @@ export function startLocalQueueWorker(){
      row.state='accepted';row.receipt=receipt;
      await update(key,row.id,stored=>{stored.state='accepted';stored.receipt=receipt;delete stored.error;});
      follow(row);
-    }catch(error){if(valid())await update(key,row.id,stored=>{
-     // Without a connection nothing was sent: the message keeps its place and goes out when the connection returns.
-     if(stored.state==='queued'&&offline(error)){stored.error='Waiting for the connection to come back.';return;}
-     if(/^Local launch deferred: directory busy/.test(error instanceof Error?error.message:String(error))){stored.state='queued';stored.error='Waiting for another local mission to release this directory.';delete stored.claimedAt;return;}
-     if(stored.state==='queued'||/^Local launch rejected:/.test(error instanceof Error?error.message:String(error)))stored.state='error';stored.error=stored.state==='dispatching'?`Launch outcome uncertain. Retry will check that the previous run stopped. ${String(error)}`:String(error);});}
+    }catch(error){
+     let scheduleRetry:number|undefined;
+     if(valid())await update(key,row.id,stored=>{
+      // Without a connection nothing was sent: the message keeps its place and goes out when the connection returns.
+      if(stored.state==='queued'&&offline(error)){stored.error='Waiting for the connection to come back.';return;}
+      const msg=error instanceof Error?error.message:String(error);
+      if(/^Local launch deferred: directory busy/.test(msg)){stored.state='queued';stored.error='Waiting for another local mission to release this directory.';delete stored.claimedAt;return;}
+      if(/^Local launch rejected: 409:.*already has non-terminal run/i.test(msg)){stored.state='queued';stored.retryAfter=Date.now()+400;scheduleRetry=stored.retryAfter;delete stored.error;delete stored.claimedAt;return;}
+      if(stored.state==='queued'||/^Local launch rejected:/.test(msg))stored.state='error';stored.error=stored.state==='dispatching'?`Launch outcome uncertain. Retry will check that the previous run stopped. ${String(error)}`:String(error);
+     });
+     if(scheduleRetry)scheduleRetryWake(scheduleRetry);
+    }
    }
   }catch{/* Durable entries stay available for the next attempt. */}
   finally{busy=false;if(again&&valid()){again=false;queueMicrotask(()=>void tick());}}

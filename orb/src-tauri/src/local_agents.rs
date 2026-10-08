@@ -602,7 +602,10 @@ fn find_orphan_mission_pids(id: &str, session_id: Option<&str>) -> Vec<u32> {
         if cmd.is_empty() {
             continue;
         }
-        let matches_mission = !id.is_empty() && cmd.iter().any(|arg| arg.contains(id));
+        let matches_mission = uuid::Uuid::parse_str(id).is_ok()
+            && cmd
+                .windows(2)
+                .any(|pair| pair[0] == "--mission-id" && pair[1] == id);
         let matches_session = session.is_some_and(|sid| {
             cmd.windows(2).any(|pair| {
                 matches!(
@@ -1722,7 +1725,7 @@ fn pipe_output(
                     text_out.native_activity(&value);
                     if matches!(
                         value["type"].as_str(),
-                        Some("tool_use" | "tool_call" | "tool_call_update")
+                        Some("tool_use" | "tool_call" | "tool_call_update" | "reasoning")
                     ) {
                         text_out.publish_activities();
                     }
@@ -2176,7 +2179,10 @@ fn drive_codex(
             break;
         }
         text.native_activity(&value);
-        if matches!(method, "item/started" | "item/completed") {
+        if matches!(
+            method,
+            "item/started" | "item/completed" | "turn/plan/updated"
+        ) {
             text.publish_activities();
         }
         items.apply(&value, text);

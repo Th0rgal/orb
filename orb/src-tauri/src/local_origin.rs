@@ -45,7 +45,7 @@ impl Record {
 }
 /// Local work Core has not accepted yet is the only truth about itself.
 fn pending(r: &Record) -> bool {
-    r.acked < r.snapshot.sequence || r.snapshot.status == "active"
+    !r.rejected() && (r.acked < r.snapshot.sequence || r.snapshot.status == "active")
 }
 fn account(c: &Connection) -> Result<PathBuf, String> {
     use base64::Engine;
@@ -182,7 +182,12 @@ async fn start_worker(path: PathBuf, c: Connection) {
                 let status = if !p.done {
                     "active"
                 } else if p.exit_code.is_some_and(|code| code != 0) || p.error.is_some() {
-                    "failed"
+                    if p.exit_code == Some(137) || p.exit_code == Some(143) || p.exit_code.is_none()
+                    {
+                        "interrupted"
+                    } else {
+                        "failed"
+                    }
                 } else {
                     "awaiting_user"
                 };
@@ -197,6 +202,12 @@ async fn start_worker(path: PathBuf, c: Connection) {
                     if write(&path, &record).is_err() {
                         break;
                     }
+                }
+            } else if record.snapshot.status == "active" {
+                record.snapshot.sequence += 1;
+                record.snapshot.status = "interrupted".into();
+                if write(&path, &record).is_err() {
+                    break;
                 }
             }
             if record.acked < record.snapshot.sequence || record.snapshot.status == "active" {
@@ -480,7 +491,34 @@ pub async fn local_origin_launch(
         }
         record.acked = record.snapshot.sequence;
         write(&path, &record)?;
-        crate::routed_opencode::start(request, &connection.api_url, &connection.token).await
+        let started =
+            crate::routed_opencode::start(request, &connection.api_url, &connection.token).await;
+        if let Err(ref error) = started {
+            record.snapshot.status = "failed".into();
+            record.snapshot.sequence += 1;
+            record.snapshot.error = Some(error.clone());
+            if let Ok(c) = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+            {
+                if let Ok(r) = c
+                    .post(format!(
+                        "{}/api/control/local-origins",
+                        connection.api_url.trim_end_matches('/')
+                    ))
+                    .bearer_auth(&connection.token)
+                    .json(&record.snapshot)
+                    .send()
+                    .await
+                {
+                    if r.status().is_success() {
+                        record.acked = record.snapshot.sequence;
+                    }
+                }
+            }
+        }
+        started
     }
     .await;
     if started.is_ok() {
@@ -488,9 +526,11 @@ pub async fn local_origin_launch(
         write(&path, &record)?;
     }
     if let Err(error) = started {
-        record.snapshot.status = "failed".into();
-        record.snapshot.sequence += 1;
-        record.snapshot.error = Some(error);
+        if record.snapshot.status != "failed" {
+            record.snapshot.status = "failed".into();
+            record.snapshot.sequence += 1;
+            record.snapshot.error = Some(error);
+        }
         write(&path, &record)?;
     }
     let result = view(&record);

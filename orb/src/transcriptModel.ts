@@ -239,6 +239,13 @@ export class TranscriptReducer {
         this.items.push({kind:"tool",key:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),done:ev.type==="tool_result"});return;
       }
       case "error": this.close(); this.items.push({kind:"error",key:this.key("error"),text:str(d.message)});return;
+      case "mission_status_changed": {
+        const status = str(d.status).toLowerCase();
+        if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled"].includes(status)) {
+          this.close();
+        }
+        return;
+      }
     }
   }
 }

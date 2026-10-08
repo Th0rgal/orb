@@ -38,7 +38,16 @@ fn lock_at(root: &Path, id: &str) -> Result<RunLock, String> {
 fn lock(id: &str) -> Result<RunLock, String> {
     let root = std::path::PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?)
         .join(".orb/run-locks");
-    lock_at(&root, id)
+    let deadline = std::time::Instant::now() + Duration::from_millis(600);
+    loop {
+        if let Ok(guard) = lock_at(&root, id) {
+            return Ok(guard);
+        }
+        if !stopped(id).unwrap_or(false) || std::time::Instant::now() >= deadline {
+            return lock_at(&root, id);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 fn stopped(id: &str) -> Result<bool, String> {
     match local_agents::local_agents_poll(id.to_string()) {
@@ -157,7 +166,11 @@ fn workspace_quiet(cwd: &str) -> Result<(), String> {
             .with_cwd(UpdateKind::Always)
             .with_exe(UpdateKind::Always),
     );
-    for process in system.processes().values() {
+    let self_pid = std::process::id();
+    for (pid, process) in system.processes() {
+        if pid.as_u32() == self_pid {
+            continue;
+        }
         let name = process.name().to_string_lossy().to_lowercase();
         if process_blocks_workspace(&name, process.cwd(), &root) {
             return Err(
@@ -407,17 +420,21 @@ mod protocol_tests {
         let handle = std::thread::spawn(move || {
             let mut requests = vec![];
             for (index, (status, body)) in responses.into_iter().enumerate() {
-                let (mut socket, _) = listener.accept().unwrap();
+                let Ok((mut socket, _)) = listener.accept() else {
+                    break;
+                };
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
                 let mut bytes = vec![];
                 let mut byte = [0];
                 while !bytes.ends_with(b"\r\n\r\n") {
-                    socket.read_exact(&mut byte).unwrap();
+                    if socket.read_exact(&mut byte).is_err() {
+                        break;
+                    }
                     bytes.push(byte[0]);
                 }
-                let headers = String::from_utf8(bytes).unwrap();
+                let headers = String::from_utf8(bytes).unwrap_or_default();
                 let len = headers
                     .lines()
                     .find_map(|l| {
@@ -427,7 +444,9 @@ mod protocol_tests {
                     })
                     .unwrap_or(0);
                 let mut payload = vec![0; len];
-                socket.read_exact(&mut payload).unwrap();
+                if socket.read_exact(&mut payload).is_err() {
+                    break;
+                }
                 requests.push(if payload.is_empty() {
                     Value::Null
                 } else {

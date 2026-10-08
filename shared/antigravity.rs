@@ -165,6 +165,24 @@ pub fn clear_historical_error_steps(home: &std::path::Path, session: Option<&str
     }
 }
 
+/// Clear historical `step_type = 17` error rows across all conversation DBs in `home`.
+/// Used on remote nodes before spawning a raw `agy` command where the resumed
+/// conversation ID is embedded in the command string.
+pub fn clear_all_historical_error_steps(home: &std::path::Path) {
+    let dir = home.join(".gemini/antigravity-cli/conversations");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("db") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                clear_historical_error_steps(home, Some(stem));
+            }
+        }
+    }
+}
+
 fn decode_varint(buf: &[u8], mut pos: usize) -> Option<(u64, usize)> {
     let mut val = 0u64;
     let mut shift = 0u32;
@@ -465,16 +483,15 @@ impl Stream {
             self.session = Some(id.into());
         }
         if kind == "result" {
-            self.success = body["status"] == "SUCCESS";
-            if self.success {
-                if let Some(session) = self.session.as_deref() {
-                    for &step in &self.active_command_steps {
-                        self.background_tasks
-                            .entry(format!("{session}/task-{step}"))
-                            .or_insert(true);
-                    }
+            if let Some(session) = self.session.as_deref() {
+                for &step in &self.active_command_steps {
+                    self.background_tasks
+                        .entry(format!("{session}/task-{step}"))
+                        .or_insert(true);
                 }
-            } else {
+            }
+            self.success = body["status"] == "SUCCESS";
+            if !self.success {
                 self.error = Some(
                     body["error"]
                         .as_str()
@@ -487,6 +504,7 @@ impl Stream {
                             )
                         }),
                 );
+                self.reconcile_stream_post_response_failure();
             }
             let mut events = self.close_responses();
             if let Some(response) = body["response"].as_str().filter(|s| !s.is_empty()) {
@@ -799,19 +817,72 @@ impl Stream {
         }
     }
 
+    fn is_reconcilable_post_response_error(err: &str) -> bool {
+        err.ends_with("(response may be truncated)")
+            || err.contains("There was a network issue connecting to the server")
+            || err.starts_with("API error (attempt ")
+            || err.contains("The stream was interrupted")
+            || err.contains("Malformed function call:")
+    }
+
+    /// Reconcile a false `postResponseFailure` directly from the observed `stream-json`
+    /// events when `agy` recovered from an earlier mid-turn `error_message` step (e.g. a
+    /// background task notification woke `agy` after `"The stream was interrupted"`) and
+    /// later completed at least one subsequent `DONE` `agent_response` with non-empty text.
+    fn reconcile_stream_post_response_failure(&mut self) {
+        if self.identity_error || self.success || self.agent_response_active {
+            return;
+        }
+        let Some(err) = self.error.as_deref() else {
+            return;
+        };
+        if !Self::is_reconcilable_post_response_error(err) {
+            return;
+        }
+        let Some((&last_step_idx, last_step)) = self.completed_steps.last_key_value() else {
+            return;
+        };
+        if last_step.step_type != "agent_response"
+            || last_step.state != "DONE"
+            || last_step.text_len == 0
+        {
+            return;
+        }
+        let last_error_idx = self
+            .completed_steps
+            .iter()
+            .rev()
+            .find(|(_, step)| step.step_type == "error_message")
+            .map(|(&idx, _)| idx);
+        if let Some(err_idx) = last_error_idx {
+            let recovered_after_error =
+                self.completed_steps.range((err_idx + 1)..).any(|(_, s)| {
+                    s.step_type == "tool" || (s.step_type == "agent_response" && s.state == "DONE")
+                });
+            if !recovered_after_error || err_idx >= last_step_idx {
+                return;
+            }
+            self.reconciled_post_response_failure = true;
+            self.success = true;
+            self.error = None;
+            self.error_marker = None;
+        }
+    }
+
     /// Reconcile a false `postResponseFailure` emitted by `agy` 1.2.10 / 1.3.1 when a
     /// resumed conversation had a historical `CortexStepErrorMessage` (`step_type = 17`)
     /// from an earlier turn.
     ///
     /// In `agy`, `postResponseFailure` always appends `" (response may be truncated)"` to
     /// `result.error`. If the current turn's final step in `completed_steps` is a `DONE`
-    /// `agent_response` with non-empty text, no `error_message` step occurred during this
-    /// turn, and the native `transcript.jsonl` confirms that final step is `PLANNER_RESPONSE`
-    /// with status `DONE` and no subsequent `ERROR_MESSAGE` step, then the turn completed
-    /// cleanly and the historical error step is neutralized.
+    /// `agent_response` with non-empty text, no `error_message` step occurred at or after
+    /// that final response, and the native `transcript.jsonl` confirms that final step is
+    /// `PLANNER_RESPONSE` with status `DONE` and no subsequent `ERROR_MESSAGE` step, then
+    /// the turn completed cleanly and the historical error step is neutralized.
     fn reconcile_false_post_response_failure(&mut self, home: &std::path::Path, session: &str) {
         if self.reconciled_post_response_failure {
             self.error_marker = None;
+            clear_historical_error_steps(home, Some(session));
             return;
         }
         if self.identity_error || self.success || self.agent_response_active {
@@ -820,9 +891,7 @@ impl Stream {
         let Some(err) = self.error.as_deref() else {
             return;
         };
-        if !err.ends_with("(response may be truncated)")
-            && !err.contains("There was a network issue connecting to the server")
-        {
+        if !Self::is_reconcilable_post_response_error(err) {
             return;
         }
         let Some((&last_step_idx, last_step)) = self.completed_steps.last_key_value() else {
@@ -833,14 +902,21 @@ impl Stream {
             || last_step.text_len == 0
             || self
                 .completed_steps
-                .values()
-                .any(|step| step.step_type == "error_message")
+                .iter()
+                .any(|(&idx, step)| step.step_type == "error_message" && idx >= last_step_idx)
         {
             return;
         }
         let Some(&first_step_idx) = self.completed_steps.keys().next() else {
             return;
         };
+        let floor_idx = self
+            .completed_steps
+            .iter()
+            .rev()
+            .find(|(_, step)| step.step_type == "error_message")
+            .map(|(&idx, _)| idx + 1)
+            .unwrap_or(first_step_idx);
         let path = home
             .join(".gemini/antigravity-cli/brain")
             .join(session)
@@ -856,7 +932,7 @@ impl Stream {
             let Some(idx) = entry["step_index"].as_u64() else {
                 continue;
             };
-            if idx < first_step_idx {
+            if idx < floor_idx {
                 continue;
             };
             if entry["type"] == "ERROR_MESSAGE" || idx > last_step_idx {
@@ -1783,5 +1859,153 @@ mod tests {
         clean_stream.session = Some(session.to_owned());
         clean_stream.reconcile_orphan_transcript_turn(home.path(), Some(2642));
         assert!(clean_stream.finish().is_ok());
+    }
+
+    #[test]
+    fn clear_all_historical_error_steps_and_api_attempt_reconcile() {
+        let home = tempfile::tempdir().unwrap();
+        let conv_dir = home.path().join(".gemini/antigravity-cli/conversations");
+        std::fs::create_dir_all(&conv_dir).unwrap();
+        let session = "a2664f62-92f7-48f4-a506-ae80c95dca3a";
+        let db_path = conv_dir.join(format!("{session}.db"));
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, step_payload BLOB);",
+        )
+        .unwrap();
+        // Field 24 (0xc2, 0x01) -> length 4 -> Field 3 (0x1a) -> length 2 -> Field 1 (0x08, 0x01)
+        let raw_payload = vec![0xc2u8, 0x01, 0x04, 0x1a, 0x02, 0x08, 0x01];
+        conn.execute(
+            "INSERT INTO steps VALUES (1299, 17, 6, ?1)",
+            rusqlite::params![raw_payload],
+        )
+        .unwrap();
+        drop(conn);
+
+        clear_all_historical_error_steps(home.path());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let updated: Vec<u8> = conn
+            .query_row(
+                "SELECT step_payload FROM steps WHERE idx = 1299",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(updated.ends_with(&[0x20, 0x01]));
+
+        let logs_dir = home
+            .path()
+            .join(".gemini/antigravity-cli/brain")
+            .join(session)
+            .join(".system_generated/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("transcript.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "step_index": 2234,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "Final EV Bench report completed."
+                })
+            ),
+        )
+        .unwrap();
+
+        let mut stream = Stream::default();
+        stream.feed(&json!({
+            "event": "init",
+            "conversation_id": session
+        }));
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": session,
+                "step_index": 2234,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Final EV Bench report completed."
+            }
+        }));
+        stream.feed(&json!({
+            "event": "result",
+            "result": {
+                "conversation_id": session,
+                "status": "ERROR",
+                "error": "API error (attempt 1): UNAVAILABLE (code 503): The service is currently unavailable."
+            }
+        }));
+        stream.reconcile_transcript_background_tasks(home.path());
+        assert!(stream.reconciled_post_response_failure);
+        assert!(stream.success);
+        assert!(stream.error.is_none());
+        assert!(stream.finish().is_ok());
+    }
+
+    #[test]
+    fn mid_turn_recovered_stream_interruption_reconciles_and_preserves_unfinished_task_guard() {
+        let session = "1e2969c3-c37e-4bfb-816b-876b6df1f6a4";
+        let mut stream = Stream::default();
+        stream.feed(&json!({"event": "init", "conversation_id": session}));
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": session,
+                "step_index": 11540,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Starting compose build."
+            }
+        }));
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": session,
+                "step_index": 11541,
+                "state": "DONE",
+                "step_type": "error_message",
+                "duration_seconds": 0
+            }
+        }));
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": session,
+                "step_index": 12634,
+                "state": "ACTIVE",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "name": "run_command",
+                    "parameters": {"CommandLine": "lake build SigGolfCandidate.Packaging.Ready"}
+                }
+            }
+        }));
+        stream.feed(&json!({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": session,
+                "step_index": 12635,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "La compilation de C = 7 310 est en cours, j'attends sa fin."
+            }
+        }));
+        stream.feed(&json!({
+            "event": "result",
+            "result": {
+                "conversation_id": session,
+                "status": "ERROR",
+                "error": "The stream was interrupted. Please continue the task you were working on."
+            }
+        }));
+        assert!(stream.reconciled_post_response_failure);
+        assert!(stream.success);
+        assert!(stream.error.is_none());
+        let err = stream.finish().unwrap_err();
+        assert!(err.contains("1e2969c3-c37e-4bfb-816b-876b6df1f6a4/task-12634"));
+        assert!(stream.is_retryable());
     }
 }

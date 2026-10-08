@@ -120,12 +120,14 @@ function inlineText(text: string, links = true): JSX.Element[] {
 }
 
 type Align = "left" | "center" | "right";
+export type ListItem = { text: string; sub?: Block[] };
 type Block =
+  | { t: "hr" }
   | { t: "math"; text: string }
   | { t: "h"; n: number; text: string }
   | { t: "p"; text: string }
-  | { t: "ul"; items: string[] }
-  | { t: "ol"; items: string[]; start: number }
+  | { t: "ul"; items: (string | ListItem)[] }
+  | { t: "ol"; items: (string | ListItem)[]; start: number }
   | { t: "pre"; lang: string; text: string }
   | { t: "quote"; text: string }
   | { t: "table"; heads: string[]; rows: string[][]; aligns: Align[] };
@@ -173,6 +175,95 @@ function readTable(lines: string[], start: number): { block: Extract<Block, { t:
 export function parseMarkdown(src: string): Block[] {
   return timed("markdown", () => parseBlocks(src));
 }
+function isHrLine(line: string): boolean {
+  const t = line.trim();
+  return /^(?:-[ \t]*){3,}$|^(?:\*[ \t]*){3,}$|^(?:_[ \t]*){3,}$/.test(t);
+}
+function listMarker(line: string): { kind: "ul" | "ol"; indent: number; start?: number; rest: string } | null {
+  if (isHrLine(line)) return null;
+  const ul = /^( *)[-*+]\s+(.*)$/.exec(line);
+  if (ul) return { kind: "ul", indent: ul[1].length, rest: ul[2] };
+  const ol = /^( *)(\d+)\.\s+(.*)$/.exec(line);
+  if (ol) return { kind: "ol", indent: ol[1].length, start: Number(ol[2]), rest: ol[3] };
+  return null;
+}
+function readList(lines: string[], startIdx: number, baseIndent: number, kind: "ul" | "ol"): { block: Extract<Block, { t: "ul" | "ol" }>; next: number } {
+  const items: (string | ListItem)[] = [];
+  let i = startIdx;
+  let startNum = 1;
+  const firstMarker = listMarker(lines[i]);
+  if (firstMarker?.start !== undefined) startNum = firstMarker.start;
+  while (i < lines.length) {
+    const m = listMarker(lines[i]);
+    if (!m || m.kind !== kind || m.indent !== baseIndent) break;
+    const headLines: string[] = [m.rest];
+    const subLines: string[] = [];
+    i++;
+    while (i < lines.length) {
+      const nextLine = lines[i];
+      if (!nextLine.trim()) {
+        // A blank line ends the list unless the next non-empty line is indented
+        // continuation/sub-list or another sibling item at the same indent.
+        let look = i + 1;
+        while (look < lines.length && !lines[look].trim()) look++;
+        if (look >= lines.length) break;
+        const afterBlank = lines[look];
+        const nextM = listMarker(afterBlank);
+        if (nextM && nextM.indent === baseIndent && nextM.kind === kind) {
+          i = look;
+          break;
+        }
+        const lead = /^ */.exec(afterBlank)?.[0].length ?? 0;
+        if (lead > baseIndent) {
+          subLines.push("");
+          i++;
+          continue;
+        }
+        break;
+      }
+      if (isHrLine(nextLine) || /^ {0,3}#{1,6}\s/.test(nextLine) || readTable(lines, i)) break;
+      const nextM = listMarker(nextLine);
+      if (nextM) {
+        if (nextM.indent < baseIndent) break;
+        if (nextM.indent === baseIndent) break;
+        subLines.push(nextLine);
+        i++;
+        continue;
+      }
+      const lead = /^ */.exec(nextLine)?.[0].length ?? 0;
+      if (subLines.length > 0) {
+        if (lead <= baseIndent && (nextLine.trimStart().startsWith("```") || /^ {0,3}>/.test(nextLine))) break;
+        subLines.push(nextLine);
+        i++;
+        continue;
+      }
+      if (nextLine.trimStart().startsWith("```") || /^ {0,3}>/.test(nextLine)) {
+        if (lead > baseIndent) {
+          subLines.push(nextLine);
+          i++;
+          continue;
+        }
+        break;
+      }
+      headLines.push(nextLine.trim());
+      i++;
+    }
+    const text = headLines.join(" ");
+    if (subLines.length > 0) {
+      const nonEmptyIndents = subLines.filter((l) => l.trim()).map((l) => /^ */.exec(l)?.[0].length ?? 0);
+      const strip = nonEmptyIndents.length ? Math.min(...nonEmptyIndents) : 0;
+      const dedented = subLines.map((l) => (l.length >= strip ? l.slice(strip) : l.trimStart())).join("\n");
+      const sub = parseBlocks(dedented);
+      items.push(sub.length ? { text, sub } : text);
+    } else {
+      items.push(text);
+    }
+  }
+  return {
+    block: kind === "ol" ? { t: "ol", items, start: startNum } : { t: "ul", items },
+    next: i,
+  };
+}
 function parseBlocks(src: string): Block[] {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const out: Block[] = [];
@@ -194,34 +285,35 @@ function parseBlocks(src: string): Block[] {
       else out.push({t: 'p', text: lines.slice(start).join('\n')});
       continue;
     }
-    if (line.startsWith("```")) {
-      const lang = line.slice(3).trim();
+    if (line.trimStart().startsWith("```")) {
+      const fenceIndent = /^ */.exec(line)?.[0].length ?? 0;
+      const lang = line.trimStart().slice(3).trim();
       const buf: string[] = [];
       i++;
-      while (i < lines.length && !lines[i].startsWith("```")) buf.push(lines[i++]);
+      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
+        const raw = lines[i++];
+        buf.push(fenceIndent > 0 && raw.startsWith(" ".repeat(fenceIndent)) ? raw.slice(fenceIndent) : raw);
+      }
       if (i < lines.length) i++;
       out.push({ t: "pre", lang, text: buf.join("\n") });
       continue;
     }
-    const hm = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (isHrLine(line)) {
+      out.push({ t: "hr" });
+      i++;
+      continue;
+    }
+    const hm = /^ {0,3}(#{1,6})\s+(.*)$/.exec(line);
     if (hm) {
       out.push({ t: "h", n: hm[1].length, text: hm[2] });
       i++;
       continue;
     }
-    if (/^\d+\.\s+/.test(line)) {
-      const start = Number(line.match(/^\d+/)![0]);
-      const items: string[] = [];
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) items.push(lines[i++].replace(/^\d+\.\s+/, ''));
-      out.push({t: 'ol', items, start}); continue;
-    }
-    if (/^[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^[-*]\s+/, ""));
-        i++;
-      }
-      out.push({ t: "ul", items });
+    const marker = listMarker(line);
+    if (marker) {
+      const parsed = readList(lines, i, marker.indent, marker.kind);
+      out.push(parsed.block);
+      i = parsed.next;
       continue;
     }
     if (/^ {0,3}>/.test(line)) {
@@ -247,11 +339,11 @@ function parseBlocks(src: string): Block[] {
     while (
       i < lines.length &&
       lines[i].trim() &&
-      !/^#{1,6}\s/.test(lines[i]) &&
-      !/^[-*]\s+/.test(lines[i]) &&
-      !/^\d+\.\s+/.test(lines[i]) &&
+      !isHrLine(lines[i]) &&
+      !/^ {0,3}#{1,6}\s/.test(lines[i]) &&
+      !listMarker(lines[i]) &&
       !/^\s*(?:\$\$|\\\[)/.test(lines[i]) &&
-      !lines[i].startsWith("```") &&
+      !lines[i].trimStart().startsWith("```") &&
       !/^ {0,3}>/.test(lines[i]) &&
       !readTable(lines, i)
     ) {
@@ -266,7 +358,8 @@ function parseBlocks(src: string): Block[] {
 /** Search the same block content without mounting historical Markdown. */
 export function markdownText(source:string):string{
  const plain=(text:string):string=>text.replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
- return parseMarkdown(source).map(block=>block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(plain).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text)).join('\n');
+ const blockText=(block:Block):string=>block.t==='hr'?'':block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(it=>typeof it==='string'?plain(it):[plain(it.text),...(it.sub?.map(blockText)??[])].filter(Boolean).join('\n')).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text);
+ return parseMarkdown(source).map(blockText).filter(Boolean).join('\n');
 }
 
 /** The same block again keeps its object, so the list keeps its DOM. */
@@ -283,12 +376,20 @@ export function incrementalMarkdown() {
     if (!text.startsWith(previous)) { boundary = 0; stable = []; unstable = []; }
     previous = text;
     const tail = text.slice(boundary);
-    let fenced = false, math = false, end = 0, offset = 0;
+    let fenced = false, math = false, inList = false, end = 0, offset = 0;
     for (const line of tail.split("\n").slice(0, -1)) {
       offset += line.length + 1;
-      if (line.startsWith("```")) fenced = !fenced;
+      if (line.trimStart().startsWith("```")) fenced = !fenced;
       if (!fenced && ["$$", "\\[", "\\]"].includes(line.trim())) math = !math;
-      if (!fenced && !math && !line.trim()) end = offset;
+      if (!fenced && !math) {
+        if (listMarker(line)) inList = true;
+        else if (!line.trim()) {
+          if (!inList) end = offset;
+          inList = false;
+        } else if (!/^ /.test(line)) {
+          inList = false;
+        }
+      }
     }
     if (end) {
       stable = [...stable, ...parseMarkdown(tail.slice(0, end))];
@@ -302,55 +403,71 @@ export function incrementalMarkdown() {
   };
 }
 
+function renderListItem(it: string | ListItem, compact?: boolean): JSX.Element {
+  if (typeof it === "string") return <li>{inline(it)}</li>;
+  return (
+    <li>
+      {inline(it.text)}
+      <Show when={it.sub?.length}>
+        <For each={it.sub}>{(sub) => renderBlock(sub, compact)}</For>
+      </Show>
+    </li>
+  );
+}
+
+function renderBlock(b: Block, compact?: boolean): JSX.Element {
+  return b.t === "hr" ? (
+    <hr />
+  ) : b.t === "math" ? (
+    <MathFormula text={b.text} display />
+  ) : b.t === "h" && b.n === 1 ? (
+    <h1>{inline(b.text)}</h1>
+  ) : b.t === "h" && b.n === 2 ? (
+    <h2>{inline(b.text)}</h2>
+  ) : b.t === "h" ? (
+    <h3>{inline(b.text)}</h3>
+  ) : b.t === "ol" ? (
+    <ol start={b.start}>{b.items.map((item) => renderListItem(item, compact))}</ol>
+  ) : b.t === "ul" ? (
+    <ul>{b.items.map((it) => renderListItem(it, compact))}</ul>
+  ) : b.t === "pre" ? (
+    <CodeBlock text={b.text} lang={b.lang} />
+  ) : b.t === "quote" ? (
+    <blockquote>
+      <MdView text={b.text} compact={compact} />
+    </blockquote>
+  ) : b.t === "table" ? (
+    <div class="md-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {b.heads.map((h, i) => (
+              <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h)}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {b.rows.map((row) => (
+            <tr>
+              {row.map((c, i) => (
+                <td style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(c)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : (
+    <p>{inline(b.text)}</p>
+  );
+}
+
 export function MdView(p: { text: string; compact?: boolean }) {
   const parse = incrementalMarkdown();
   const blocks = createMemo(() => parse(p.text));
   return (
     <div class={`md ${p.compact ? "md-compact" : ""}`}>
-      <For each={blocks()}>
-        {(b) =>
-          b.t === "math" ? <MathFormula text={b.text} display/> : b.t === "h" && b.n === 1 ? (
-            <h1>{inline(b.text)}</h1>
-          ) : b.t === "h" && b.n === 2 ? (
-            <h2>{inline(b.text)}</h2>
-          ) : b.t === "h" ? (
-            <h3>{inline(b.text)}</h3>
-          ) : b.t === "ol" ? <ol start={b.start}>{b.items.map(item => <li>{inline(item)}</li>)}</ol> : b.t === "ul" ? (
-            <ul>
-              {b.items.map((it) => (
-                <li>{inline(it)}</li>
-              ))}
-            </ul>
-          ) : b.t === "pre" ? (
-            <CodeBlock text={b.text} lang={b.lang}/>
-          ) : b.t === "quote" ? (
-            <blockquote><MdView text={b.text} compact={p.compact} /></blockquote>
-          ) : b.t === "table" ? (
-            <div class="md-table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    {b.heads.map((h, i) => (
-                      <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h)}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {b.rows.map((row) => (
-                    <tr>
-                      {row.map((c, i) => (
-                        <td style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(c)}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p>{inline(b.text)}</p>
-          )
-        }
-      </For>
+      <For each={blocks()}>{(b) => renderBlock(b, p.compact)}</For>
     </div>
   );
 }
@@ -403,13 +520,24 @@ function hlLine(line: string): JSX.Element {
       </>
     );
   if (line.startsWith("```")) return <span class="md-fence">{line}</span>;
-  if (/^[-*]\s/.test(line))
+  if (/^ *[-*+]\s/.test(line)) {
+    const m = /^( *[-*+]\s+)(.*)$/.exec(line)!;
     return (
       <>
-        <span class="md-p">{line.slice(0, 2)}</span>
-        {hlInline(line.slice(2))}
+        <span class="md-p">{m[1]}</span>
+        {hlInline(m[2])}
       </>
     );
+  }
+  if (/^ *\d+\.\s/.test(line)) {
+    const m = /^( *\d+\.\s+)(.*)$/.exec(line)!;
+    return (
+      <>
+        <span class="md-p">{m[1]}</span>
+        {hlInline(m[2])}
+      </>
+    );
+  }
   if (line.startsWith("> "))
     return (
       <>

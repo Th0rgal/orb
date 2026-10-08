@@ -7,6 +7,7 @@ import * as Ic from "./icons";
 import { getApiUrl, updateController, type ControllerPatch, type ControllerView } from "./api";
 import { ignoredCronFields, scheduleExpression } from "./cronSchema";
 import { SchedulePicker } from "./SchedulePicker";
+import { knownSkillNames } from "./SkillsSettings";
 
 
 export type CronDraft = {
@@ -309,6 +310,7 @@ export function CronForm(p: {
           </For>
           <input
             class="cs-skill-input"
+            list="orb-known-skills"
             placeholder={draft.skills.length ? "Add skill" : "No skills attached. Add one"}
             value={skillInput()}
             onInput={(e) => setSkillInput(e.currentTarget.value)}
@@ -322,6 +324,11 @@ export function CronForm(p: {
             }}
             onBlur={addSkill}
           />
+          <datalist id="orb-known-skills">
+            <For each={knownSkillNames().filter((name) => !draft.skills.includes(name))}>
+              {(name) => <option value={name} />}
+            </For>
+          </datalist>
         </div>
       </Section>
 

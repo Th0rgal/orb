@@ -19,7 +19,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { goalDraft, planObjective } from "./goal";
 
 import { messagePresentation } from "./messagePresentation";
-import { latestChecklist, toolArgs, toolName, workSummary } from "./workModel";
+import { computeDiffStats, latestChecklist, parseChecklist, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
 export { buildTranscript, applyStreamEvent } from "./transcriptModel";
 export type { StreamItem } from "./transcriptModel";
@@ -31,6 +31,8 @@ function disclosure(key:string,initial=false){
  const [explicit,setExplicit]=createSignal(state?.has(key)??false);
  return [open,(value:boolean)=>{state?.set(key,value);setExplicit(true);setOpen(value);},explicit] as const;
 }
+
+const dismissedChecklists = new Set<string>();
 
 /** Inline code and bold spans inside thought summaries, so raw backticks don't clutter the transcript. */
 function thinkInline(text: string): JSX.Element[] {
@@ -63,36 +65,111 @@ function toolTarget(name: string, args: unknown): string {
     case "exec_command":
     case "run_terminal_command":
     case "shell_command":
+    case "run_command":
     case "bash":
+    case "shell":
     case "terminal":
-      t = pick("command", "cmd", "preview");
+      t = pick("command", "cmd", "CommandLine", "preview");
       break;
     case "read_file":
     case "write_file":
     case "edit_file":
+    case "view_file":
+    case "view_file_outline":
+    case "view_code_item":
+    case "replace_file_content":
+    case "multi_replace_file_content":
+    case "write_to_file":
     case "read":
     case "write":
     case "edit":
-      t = pick("file_path", "filePath", "path", "file", "preview");
+      t = pick("file_path", "filePath", "path", "file", "TargetFile", "AbsolutePath", "preview");
       break;
     case "grep":
     case "glob":
+    case "list":
+    case "list_dir":
+    case "find_by_name":
+    case "grep_search":
     case "search_files":
-      t = pick("pattern", "query", "preview");
+      t = pick("pattern", "query", "Pattern", "Query", "path", "SearchPath", "DirectoryPath", "preview");
       break;
     case "task":
+    case "agent":
     case "delegate_task":
       t = pick("description", "prompt", "preview");
       break;
     case "webfetch":
     case "web_fetch":
-      t = pick("url", "preview");
+    case "read_url_content":
+      t = pick("url", "Url", "preview");
+      break;
+    case "websearch":
+    case "web_search":
+    case "search_web":
+      t = pick("query", "Query", "preview");
+      break;
+    case "skill":
+      t = pick("name", "preview");
       break;
     default:
-      t = pick("file_path", "path", "command", "query", "url", "pattern", "prompt", "description", "preview");
+      t = pick("file_path", "filePath", "path", "TargetFile", "AbsolutePath", "command", "CommandLine", "query", "url", "pattern", "prompt", "description", "name", "preview");
   }
   if (t.length > 90) t = `${t.slice(0, 90)}…`;
   return t;
+}
+
+function toolArgsBadges(name: string, args: unknown): string[] {
+  const a = toolArgs(args);
+  if (!a) return [];
+  const badges: string[] = [];
+  const n = toolName(name);
+  if (n === "read" || n === "read_file" || n === "view_file") {
+    if (typeof a.offset === "number") badges.push(`offset=${a.offset}`);
+    if (typeof a.limit === "number") badges.push(`limit=${a.limit}`);
+    if (typeof a.StartLine === "number" && typeof a.EndLine === "number") badges.push(`L${a.StartLine}-${a.EndLine}`);
+  } else if (n === "grep" || n === "grep_search") {
+    if (typeof a.include === "string" && a.include.trim()) badges.push(`include=${a.include.trim()}`);
+  } else if (n === "task" || n === "agent") {
+    const sub = typeof a.subagent_type === "string" ? a.subagent_type : typeof a.agent === "string" ? a.agent : "";
+    if (sub.trim()) badges.push(sub.trim());
+  }
+  return badges;
+}
+
+function ToolGlyph(p: { name: string }) {
+  const kind = () => {
+    const n = toolName(p.name);
+    if (n === "task" || n === "agent" || n === "delegate_task") return "agent";
+    if (n === "todowrite" || n === "update_plan") return "plan";
+    if (n === "webfetch" || n === "web_fetch" || n === "websearch" || n === "web_search" || n === "search_web" || n === "read_url_content") return "web";
+    return workKind(p.name);
+  };
+  return (
+    <span class="st-tool-glyph" data-kind={kind()} aria-hidden="true">
+      {kind() === "read" ? <Ic.FileIcon size={13} />
+        : kind() === "search" ? <Ic.SearchIcon size={13} />
+        : kind() === "command" ? <Ic.CmdIcon size={13} />
+        : kind() === "edit" ? <Ic.PencilIcon size={13} />
+        : kind() === "agent" ? <Ic.BranchIcon size={13} />
+        : kind() === "plan" ? <Ic.PlanIcon size={13} />
+        : kind() === "web" ? <Ic.ExternalIcon size={13} />
+        : <Ic.GearIcon size={13} />}
+    </span>
+  );
+}
+
+export function DiffBadges(p: { stats: DiffStats }) {
+  return (
+    <span class="st-diff-badges" aria-label={`+${p.stats.additions} -${p.stats.deletions}`}>
+      <Show when={p.stats.additions > 0 || p.stats.deletions === 0}>
+        <span class="st-diff-add">+{p.stats.additions}</span>
+      </Show>
+      <Show when={p.stats.deletions > 0}>
+        <span class="st-diff-del">-{p.stats.deletions}</span>
+      </Show>
+    </span>
+  );
 }
 
 function resultText(result: unknown): string {
@@ -234,10 +311,35 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
 
 function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
   const [open, setOpen] = disclosure(`tool:${p.item.key}`,false);
+  const [copied, setCopied] = createSignal(false);
   const anchored=anchoredDisclosure();
   let toggle!:HTMLButtonElement;
   const target = () => toolTarget(p.item.name, p.item.args);
+  const badges = createMemo(() => toolArgsBadges(p.item.name, p.item.args));
+  const diff = createMemo(() => computeDiffStats(p.item));
+  const checklist = createMemo(() => parseChecklist(p.item.name, p.item.args));
   const failed=()=>{const r=toolArgs(p.item.result);return !!r&&(!!r.error||r.status==="failed"||r.is_error===true);};
+  const isCommand = () => workKind(p.item.name) === "command";
+  const commandText = () => {
+    const a = toolArgs(p.item.args);
+    if (!a) return "";
+    for (const k of ["command", "cmd", "CommandLine"]) {
+      if (typeof a[k] === "string" && a[k].trim()) return a[k].trim();
+    }
+    return "";
+  };
+  const outputOnly = () => {
+    const r = p.item.result;
+    if (r == null) return "";
+    if (typeof r === "string") return r;
+    const obj = toolArgs(r);
+    if (obj) {
+      for (const k of ["output", "stdout", "result", "error", "message"]) {
+        if (typeof obj[k] === "string" && obj[k].trim()) return obj[k];
+      }
+    }
+    return resultText(r);
+  };
   const detail = () => {
     const parts: string[] = [];
     if (p.item.args != null) parts.push(typeof p.item.args === "string" ? p.item.args : JSON.stringify(p.item.args, null, 2));
@@ -246,16 +348,47 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
     if(p.item.unresolved)parts.push("This turn ended without a recorded result for this action.");
     return parts.join("\n\n");
   };
+  const copyDetail = () => {
+    const text = isCommand() && commandText() ? `$ ${commandText()}${outputOnly() ? "\n\n" + outputOnly() : ""}` : detail();
+    if (!text) return;
+    void copyText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    }).catch(() => {});
+  };
   return (
-    <div class={`st-tool ${open() ? "open" : ""}`}>
+    <div class={`st-tool ${open() ? "open" : ""} ${failed() ? "is-failed" : ""}`} data-kind={workKind(p.item.name)}>
       <Show when={open()}>
-        <pre class="st-tool-detail">{detail() || "(no details)"}</pre>
+        <Show when={checklist()?.length} fallback={
+          <div class="st-tool-detail-wrap">
+            <button type="button" class="icon-btn st-tool-copy" aria-label={copied() ? "Copied" : "Copy tool output"} title={copied() ? "Copied" : "Copy"} onClick={(e) => { e.stopPropagation(); copyDetail(); }}>
+              <Show when={copied()} fallback={<Ic.CopyIcon size={12} />}><Ic.CheckIcon size={12} /></Show>
+            </button>
+            <Show when={isCommand() && commandText()} fallback={<pre class="st-tool-detail">{detail() || "(no details)"}</pre>}>
+              <pre class="st-tool-detail st-tool-bash"><span class="st-bash-cmd">$ {commandText()}</span><Show when={outputOnly()}>{"\n\n"}{outputOnly()}</Show><Show when={p.item.unresolved}>{"\n\n"}This turn ended without a recorded result for this action.</Show></pre>
+            </Show>
+          </div>
+        }>
+          <div class="st-tool-detail st-tool-checklist">
+            <ol><For each={checklist()!}>{task => <li data-status={task.status}><span class="task-state">{task.status === "completed" ? "✓" : task.status === "cancelled" ? "−" : task.status === "in_progress" ? "◉" : "○"}</span><span>{task.text}</span></li>}</For></ol>
+          </div>
+        </Show>
       </Show>
       <button class="st-tool-head" ref={toggle} aria-expanded={open()} onClick={() => anchored(toggle,()=>setOpen(!open()))}>
         <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
+        <ToolGlyph name={p.item.name} />
         <span class="st-tool-name">{p.item.name}</span>
         <Show when={target()}>
           <span class="st-tool-target">{target()}</span>
+        </Show>
+        <Show when={badges().length}>
+          <span class="st-tool-badges"><For each={badges()}>{b => <span class="st-tool-badge">{b}</span>}</For></span>
+        </Show>
+        <Show when={checklist()?.length}>
+          <span class="st-tool-badge">{checklist()!.filter(t => t.status === "completed").length}/{checklist()!.length}</span>
+        </Show>
+        <Show when={diff()}>
+          {d => <DiffBadges stats={d()} />}
         </Show>
         <span class="st-tool-state">
           <Show when={p.item.done} fallback={<Ic.Spinner size={12} />}>
@@ -327,6 +460,15 @@ function WorkFold(p: { items: WorkItem[] }) {
     return `${cur.name} ${toolTarget(cur.name, cur.args) ?? ""}`.trim();
   };
   const summary = createMemo(() => workSummary(p.items));
+  const totalDiff = createMemo<DiffStats | null>(() => {
+    let additions = 0, deletions = 0, has = false;
+    for (const t of p.items) {
+      if (t.kind !== "tool") continue;
+      const d = computeDiffStats(t);
+      if (d) { has = true; additions += d.additions; deletions += d.deletions; }
+    }
+    return has ? { additions, deletions } : null;
+  });
   return (
     <div class={`st-work ${open() ? "open" : ""}`}>
       <Show when={open()}>
@@ -342,6 +484,9 @@ function WorkFold(p: { items: WorkItem[] }) {
         <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
         <Show when={running()} fallback={<span class="st-work-label">{summary()}</span>}>
           <span class="st-work-label shimmer">{current()}</span>
+        </Show>
+        <Show when={!running() && totalDiff()}>
+          {d => <DiffBadges stats={d()} />}
         </Show>
       </button>
 
@@ -379,6 +524,58 @@ export function ThoughtSequence(p: { items: Array<Extract<StreamItem, { kind: "t
       </Show>
       <Show when={latest()}>{(t) => <ThinkBlock item={t()} />}</Show>
     </>
+  );
+}
+
+function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
+  const [collapsed, setCollapsed] = createSignal(false);
+  const [dismissed, setDismissed] = createSignal(dismissedChecklists.has(p.key));
+  createEffect(() => {
+    setDismissed(dismissedChecklists.has(p.key));
+  });
+  const completedCount = () => p.tasks.filter(task => task.status === "completed").length;
+  const allDone = () => p.tasks.length > 0 && p.tasks.every(task => task.status === "completed" || task.status === "cancelled");
+  const activeTask = () =>
+    p.tasks.find(t => t.status === "in_progress") ??
+    p.tasks.find(t => t.status === "pending") ??
+    p.tasks.filter(t => t.status === "completed").at(-1) ??
+    p.tasks[0];
+  const dismiss = () => {
+    dismissedChecklists.add(p.key);
+    setDismissed(true);
+  };
+  return (
+    <Show when={!dismissed()}>
+      <section class={`mission-tasks ${collapsed() ? "collapsed" : ""} ${allDone() ? "is-done" : ""}`} id="mission-tasks" aria-label="Tasks" tabIndex={-1}>
+        <div class="tasks-heading">
+          <button type="button" class="tasks-heading-toggle" aria-expanded={!collapsed()} onClick={() => setCollapsed(v => !v)}>
+            <Ic.ChevronDown size={13} class={`tasks-chev ${collapsed() ? "collapsed" : ""}`} />
+            <strong>Tasks</strong>
+            <span class="tasks-count">{completedCount()}/{p.tasks.length} completed</span>
+            <Show when={collapsed() && activeTask()}>
+              <span class="tasks-preview">{activeTask()!.text}</span>
+            </Show>
+          </button>
+          <Show when={allDone()}>
+            <button
+              type="button"
+              class="icon-btn tasks-dismiss"
+              aria-label="Dismiss completed tasks"
+              title="Dismiss completed tasks"
+              onClick={dismiss}
+            >
+              <Ic.CheckIcon size={13} />
+            </button>
+          </Show>
+        </div>
+        <Show when={!collapsed()}>
+          <progress aria-label="Task progress" max={p.tasks.length} value={completedCount()} />
+          <ol><For each={p.tasks}>{task => <li data-status={task.status}>
+            <span class={`task-state ${task.status === "in_progress" ? "shimmer" : ""}`} aria-label={task.status.replaceAll("_", " ")}>{task.status === "completed" ? "✓" : task.status === "cancelled" ? "−" : task.status === "in_progress" ? "◉" : "○"}</span><span class="task-text">{task.text}</span>
+          </li>}</For></ol>
+        </Show>
+      </section>
+    </Show>
   );
 }
 
@@ -449,13 +646,7 @@ export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<voi
         }}
       </For>}</VirtualTurns></DisclosureState.Provider>
       <Show when={checklist()?.tasks.length}>
-        <section class="mission-tasks" id="mission-tasks" aria-label="Tasks" tabIndex={-1}>
-          <div class="tasks-heading"><strong>Tasks</strong><span>{checklist()!.tasks.filter(task => task.status === "completed").length}/{checklist()!.tasks.length} completed</span></div>
-          <progress aria-label="Task progress" max={checklist()!.tasks.length} value={checklist()!.tasks.filter(task => task.status === "completed").length} />
-          <ol><For each={checklist()!.tasks}>{task => <li data-status={task.status}>
-            <span class={`task-state ${task.status === "in_progress" ? "shimmer" : ""}`} aria-label={task.status.replaceAll("_", " ")}>{task.status === "completed" ? "✓" : task.status === "cancelled" ? "−" : task.status === "in_progress" ? "◉" : "○"}</span><span>{task.text}</span>
-          </li>}</For></ol>
-        </section>
+        <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} />
       </Show>
     </>
   );

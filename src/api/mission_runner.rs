@@ -1943,6 +1943,20 @@ pub(crate) async fn set_control_state_for_mission(
     });
 }
 
+fn opencode_unique_tool_call_id(part: &serde_json::Value) -> String {
+    let call_id =
+        extract_str(part, &["callID", "call_id", "toolCallID", "id"]).unwrap_or("unknown");
+    let part_id = extract_str(part, &["id", "partID", "partId"]).filter(|id| *id != call_id);
+    let msg_id = extract_str(part, &["messageID", "messageId", "message_id"]);
+    if let Some(pid) = part_id {
+        format!("{pid}:{call_id}")
+    } else if let Some(mid) = msg_id {
+        format!("{mid}:{call_id}")
+    } else {
+        call_id.to_string()
+    }
+}
+
 fn handle_tool_part_update(
     part: &serde_json::Value,
     state: &mut OpencodeSseState,
@@ -1954,9 +1968,7 @@ fn handle_tool_part_update(
         .and_then(|v| v.as_str())
         .unwrap_or("running");
 
-    let tool_call_id = extract_str(part, &["callID", "call_id", "toolCallID", "id"])
-        .unwrap_or("unknown")
-        .to_string();
+    let tool_call_id = opencode_unique_tool_call_id(part);
 
     let tool_name = extract_str(part, &["tool", "name"])
         .or_else(|| extract_str(state_obj, &["tool", "name"]))
@@ -2037,9 +2049,7 @@ fn opencode_tool_event_pair_for_completed_part(
         return handle_tool_part_update(part, state, mission_id).map(|event| (event, None));
     }
 
-    let tool_call_id = extract_str(part, &["callID", "call_id", "toolCallID", "id"])
-        .unwrap_or("unknown")
-        .to_string();
+    let tool_call_id = opencode_unique_tool_call_id(part);
     let tool_name = extract_str(part, &["tool", "name"])
         .or_else(|| extract_str(state_obj, &["tool", "name"]))
         .unwrap_or("unknown")

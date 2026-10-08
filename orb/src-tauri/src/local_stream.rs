@@ -252,6 +252,29 @@ impl Output {
         self.publish_activities();
     }
     pub fn native_activity(&self, value: &serde_json::Value) {
+        if value["type"].as_str() == Some("reasoning") {
+            let part = &value["part"];
+            let Some(text) = part["text"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                return;
+            };
+            let raw_id = part["id"].as_str().unwrap_or("opencode");
+            let id = format!("native:reasoning:{raw_id}");
+            let mut activities = self.2.lock().unwrap();
+            let index = activities
+                .iter()
+                .position(|a| a.id == id)
+                .unwrap_or_else(|| {
+                    activities.push(Activity::new(id, "Thinking".into(), "thinking", false));
+                    activities.len() - 1
+                });
+            activities[index].detail = Some(text.chars().take(8000).collect());
+            activities[index].finish("completed");
+            return;
+        }
         if matches!(
             value["type"].as_str(),
             Some("tool_call" | "tool_call_update")
@@ -294,6 +317,46 @@ impl Output {
             return;
         }
         let method = value["method"].as_str().unwrap_or("");
+        if method == "turn/plan/updated" {
+            let Some(plan) = value.pointer("/params/plan").and_then(|v| v.as_array()) else {
+                return;
+            };
+            let normalized: Option<Vec<serde_json::Value>> = plan
+                .iter()
+                .map(|entry| {
+                    let step = entry.get("step")?.as_str()?;
+                    if step.trim().is_empty() {
+                        return None;
+                    }
+                    let status = match entry.get("status")?.as_str()? {
+                        "pending" => "pending",
+                        "inProgress" | "in_progress" => "in_progress",
+                        "completed" => "completed",
+                        _ => return None,
+                    };
+                    Some(serde_json::json!({ "step": step, "status": status }))
+                })
+                .collect();
+            let Some(plan) = normalized else {
+                return;
+            };
+            let mut activities = self.2.lock().unwrap();
+            let id = format!("native:plan:{}", activities.len());
+            let mut item = Activity::new(id, "update_plan".into(), "tool", false);
+            let mut payload = serde_json::json!({ "input": { "plan": plan } });
+            if let Some(exp) = value
+                .pointer("/params/explanation")
+                .and_then(|v| v.as_str())
+            {
+                payload["input"]["explanation"] = serde_json::json!(exp);
+            }
+            item.detail = Some(serde_json::to_string_pretty(&payload).unwrap_or_default());
+            item.finish("completed");
+            activities.push(item);
+            drop(activities);
+            self.publish_activities();
+            return;
+        }
         let opencode = value["type"] == "tool_use";
         if !opencode && !matches!(method, "item/started" | "item/completed") {
             return;
@@ -313,16 +376,27 @@ impl Output {
                 "dynamicToolCall" | "mcpToolCall" => {
                     (item["tool"].as_str().unwrap_or("Tool"), "tool")
                 }
+                "toolCall" | "tool_call" | "functionCall" | "function_call" => {
+                    (item["name"].as_str().unwrap_or("Tool"), "tool")
+                }
                 "webSearch" => ("Search the web", "tool"),
                 "fileChange" => ("Edit files", "tool"),
                 "collabAgentToolCall" => ("Agent", "agent"),
                 _ => return,
             }
         };
-        let Some(id) = item[if opencode { "callID" } else { "id" }].as_str() else {
+        let Some(raw_call_id) = item[if opencode { "callID" } else { "id" }].as_str() else {
             return;
         };
-        let id = format!("native:{id}");
+        let id = if opencode {
+            if let Some(pid) = item["id"].as_str().filter(|pid| *pid != raw_call_id) {
+                format!("native:{pid}:{raw_call_id}")
+            } else {
+                format!("native:{raw_call_id}")
+            }
+        } else {
+            format!("native:{raw_call_id}")
+        };
         let mut activities = self.2.lock().unwrap();
         let index = activities
             .iter()
@@ -338,8 +412,23 @@ impl Output {
             item["status"].as_str()
         }
         .unwrap_or("");
-        // Only public tool data; encrypted/raw reasoning is never rendered.
-        if category != "thinking" {
+        // Only public tool/summary data; encrypted/raw reasoning is never rendered.
+        if category == "thinking" {
+            let summary = item["summary"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|part| part["text"].as_str().or_else(|| part.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .or_else(|| item["summary"].as_str().map(str::to_owned))
+                .or_else(|| item["text"].as_str().map(str::to_owned))
+                .filter(|s| !s.trim().is_empty());
+            if let Some(summary) = summary {
+                activity.detail = Some(summary.chars().take(8000).collect());
+            }
+        } else {
             let data = if opencode { &item["state"] } else { item };
             activity.detail = Some(
                 serde_json::to_string_pretty(data)
@@ -404,17 +493,56 @@ impl Output {
         }
         if value["type"] == "assistant" {
             if let Some(blocks) = value["message"]["content"].as_array() {
+                for block in blocks {
+                    if block["type"] == "thinking" {
+                        if let Some(thinking) = block["thinking"].as_str().filter(|s| !s.is_empty())
+                        {
+                            if let Some(last) = activities
+                                .iter_mut()
+                                .rev()
+                                .find(|a| a.id.starts_with("thinking:"))
+                            {
+                                last.detail = Some(thinking.chars().take(8000).collect());
+                            }
+                        }
+                    }
+                }
                 for block in blocks.iter().filter(|b| b["type"] == "tool_use") {
+                    let block_id = block["id"].as_str().unwrap_or("");
+                    let name = block["name"].as_str().unwrap_or("Tool");
+                    if !block_id.is_empty() && !activities.iter().any(|a| a.id == block_id) {
+                        activities.push(Activity::new(
+                            block_id.to_owned(),
+                            name.into(),
+                            if name == "Agent" {
+                                "agent"
+                            } else if name == "Bash" {
+                                "command"
+                            } else {
+                                "tool"
+                            },
+                            false,
+                        ));
+                    }
                     if let Some(activity) = activities
                         .iter_mut()
                         .find(|a| Some(a.id.as_str()) == block["id"].as_str())
                     {
-                        if let Some(label) = block["input"]["description"].as_str() {
-                            activity.label = label.chars().take(240).collect();
+                        if !matches!(name, "TodoWrite" | "todowrite" | "update_plan") {
+                            if let Some(label) = block["input"]["description"].as_str() {
+                                activity.label = label.chars().take(240).collect();
+                            }
                         }
-                        if let Some(command) = block["input"]["command"].as_str() {
-                            activity.detail = Some(command.chars().take(8000).collect());
-                        }
+                        activity.detail = Some(
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "name": name,
+                                "input": block["input"],
+                            }))
+                            .unwrap_or_default()
+                            .chars()
+                            .take(8000)
+                            .collect(),
+                        );
                     }
                 }
             }
@@ -449,6 +577,26 @@ impl Output {
                         },
                         false,
                     ));
+                }
+            }
+        }
+        if value["type"] == "stream_event" && event["type"] == "content_block_delta" {
+            if let Some(thinking) = event
+                .pointer("/delta/thinking")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                if let Some(last) = activities
+                    .last_mut()
+                    .filter(|a| a.id.starts_with("thinking:"))
+                {
+                    let mut text = last.detail.take().unwrap_or_default();
+                    if text.len() < 8000 {
+                        text.push_str(thinking);
+                        last.detail = Some(text.chars().take(8000).collect());
+                    } else {
+                        last.detail = Some(text);
+                    }
                 }
             }
         }
@@ -757,6 +905,19 @@ mod tests {
         assert!(output.activities()[1].done && output.activities()[1].failed);
         output.native_activity(&serde_json::json!({"method":"item/started","params":{"item":{"id":"c","type":"reasoning","encrypted_content":"private"}}}));
         assert_eq!(output.activities()[2].detail, None);
+        output.native_activity(&serde_json::json!({"type":"reasoning","part":{"id":"r1","text":"Inspecting OpenCode components"}}));
+        assert_eq!(output.activities()[3].kind, "thinking");
+        assert_eq!(
+            output.activities()[3].detail.as_deref(),
+            Some("Inspecting OpenCode components")
+        );
+        output.native_activity(&serde_json::json!({"method":"turn/plan/updated","params":{"plan":[{"step":"Check components","status":"inProgress"}]}}));
+        assert_eq!(output.activities()[4].label, "update_plan");
+        assert!(output.activities()[4]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("in_progress"));
     }
 
     use serde_json::json;

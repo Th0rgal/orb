@@ -52,8 +52,7 @@ pub fn merge(
     incoming: &Confirmation,
     now: u64,
 ) -> bool {
-    if local_pending
-        || (incoming.status.is_none() && incoming.title.is_none() && !incoming.deleted)
+    if local_pending || (incoming.status.is_none() && incoming.title.is_none() && !incoming.deleted)
     {
         return false;
     }

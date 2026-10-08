@@ -56,7 +56,7 @@ const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Pro
 import { MenuList, PopupMenu, type MenuEntry } from "./Menu";
 import { MdSource, MdView, mdSource, safeHref, setMdSource, toggleMdSource } from "./Markdown";
 import { streamMission, heldAfterHistory, type StreamEvent } from "./stream";
-import { latestChecklist } from "./workModel";
+import { latestChecklist, localActivitiesToStreamItems } from "./workModel";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
@@ -128,13 +128,14 @@ import {
   listNodeAntigravityModels,
 } from "./api";
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
+const SkillsSettings = lazy(() => import("./SkillsSettings").then(module => ({ default: module.SkillsSettings })));
 import { InboxPage } from "./Inbox";
 import { buildInboxSections } from "./inboxModel";
 import { InboxSettings } from "./inboxSettings";
 import { pendingMissionInteraction } from "./missionAttention";
 import { markMissionRead, unreadVersion } from "./missionUnread";
 
-const PAGES = new Set(["inbox", "cloud-agent", "settings", "inbox-settings", "btw-settings", "hermes-settings", "routing", "machines", "providers", "execution"]);
+const PAGES = new Set(["inbox", "cloud-agent", "settings", "inbox-settings", "btw-settings", "hermes-settings", "skills-settings", "routing", "machines", "providers", "execution"]);
 
 const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "Auto"];
 
@@ -1508,14 +1509,14 @@ export default function App() {
       context: previewContext()?.id === id ? previewContext()?.pct : null };
   });
 
-  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "inbox-settings" || selected() === "btw-settings" || selected() === "hermes-settings";
+  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "inbox-settings" || selected() === "btw-settings" || selected() === "hermes-settings" || selected() === "skills-settings";
   const openSettings = () => {
     open("settings");
   };
   const leaveSettings = () => {
     const h = history();
     for (let i = hIdx() - 1; i >= 0; i--) {
-      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "inbox-settings" && h[i] !== "btw-settings" && h[i] !== "hermes-settings") {
+      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "inbox-settings" && h[i] !== "btw-settings" && h[i] !== "hermes-settings" && h[i] !== "skills-settings") {
         if (selected() === "routing" && !confirmLeaveRouting(() => { if (open(h[i], false)) setHIdx(i); })) return;
         if (open(h[i], false)) setHIdx(i);
         return;
@@ -1953,6 +1954,7 @@ export default function App() {
             </button>
             <div class="settings-nav-gap" />
             <button class={`row ${selected() === "settings" ? "active" : ""}`} onClick={() => open("settings")}><span class="row-ico"><Ic.GearIcon /></span><span class="row-label">Client</span></button>
+            <button class={`row ${selected() === "skills-settings" ? "active" : ""}`} onClick={() => open("skills-settings")}><span class="row-ico"><Ic.SkillsIcon /></span><span class="row-label">Skills</span></button>
             <button class={`row ${selected() === "inbox-settings" ? "active" : ""}`} onClick={() => open("inbox-settings")}><span class="row-ico"><Ic.InboxIcon /></span><span class="row-label">Inbox</span></button>
             <button class={`row ${selected() === "hermes-settings" ? "active" : ""}`} onClick={() => open("hermes-settings")}><span class="row-ico"><ProviderLogo type="hermes" /></span><span class="row-label">Hermes</span></button>
             <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Btw</span></button>
@@ -1994,6 +1996,7 @@ export default function App() {
             <Match when={selected() === "settings" || selected() === "execution"}>
               <span>Settings · Client</span>
             </Match>
+            <Match when={selected() === "skills-settings"}><span>Settings · Skills</span></Match>
             <Match when={selected() === "inbox-settings"}><span>Settings · Inbox</span></Match>
             <Match when={selected() === "hermes-settings"}><span>Settings · Hermes</span></Match>
             <Match when={selected() === "btw-settings"}><span>Settings · Btw</span></Match>
@@ -2291,6 +2294,7 @@ export default function App() {
               onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
               onCreated={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
           </Match>
+          <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
           <Match when={selected() === "inbox-settings"}><InboxSettings /></Match>
           <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
           <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
@@ -2992,18 +2996,33 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
     for(const draft of drafts){if((!draft.waiting||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
     const list = [...canonical,...projected];
+    const nativeTools = clientPlaced() ? localActivitiesToStreamItems(localActivities(p.id)) : [];
+    const lastUserIdx = list.reduce((last, item, idx) => item.kind === "user" && !item.queued ? idx : last, -1);
+    const hasCanonicalToolsAfterUser = list.slice(lastUserIdx + 1).some(item => item.kind === "tool");
+    const withNativeTools = nativeTools.length && !hasCanonicalToolsAfterUser
+      ? (() => {
+          const copy = [...list];
+          let insertAt = copy.length;
+          for (let i = copy.length - 1; i > lastUserIdx; i--) {
+            if (copy[i].kind === "text") insertAt = i;
+            else break;
+          }
+          copy.splice(insertAt, 0, ...nativeTools);
+          return copy;
+        })()
+      : list;
     const live = localLiveText(p.id);
     // The server rewrites a local run's reply in place without re-emitting it,
     // so a transcript fetched mid-run holds a prefix of the live text.
     let stale = -1;
-    for (let i = list.length - 1; i >= 0 && list[i].kind !== "user"; i--) {
-      const item = list[i];
+    for (let i = withNativeTools.length - 1; i >= 0 && withNativeTools[i].kind !== "user"; i--) {
+      const item = withNativeTools[i];
       if (item.kind === "text" && live.startsWith(item.text)) { stale = i; break; }
     }
     const liveItem = { kind: "text" as const, key: `local:${p.id}`, text: live, live: localRunActive(p.id) };
-    const withLive = !live || list.some(item => item.kind === "text" && item.text === live) ? list
-      : stale >= 0 ? list.map((item, i) => i === stale ? liveItem : item)
-      : [...list, liveItem];
+    const withLive = !live || withNativeTools.some(item => item.kind === "text" && item.text === live) ? withNativeTools
+      : stale >= 0 ? withNativeTools.map((item, i) => i === stale ? liveItem : item)
+      : [...withNativeTools, liveItem];
     if (busy()) return withLive;
     // Terminal mission: force-close any bubble left open by a dropped
     // assistant_message finalizer.
@@ -3276,7 +3295,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                 <Show when={row().state==='error'}><button onClick={()=>void deliverResend()}>Retry</button></Show>
               </div>
             </div>}</Show>
-            <Show when={clientPlaced() && localActivities(p.id).length}>
+            <Show when={clientPlaced() && localActivities(p.id).some(a => a.kind === "status" || a.id === "antigravity:status" || a.background || a.id.startsWith("task:"))}>
               <AgentActivity items={localActivities(p.id)} running={localRunActive(p.id)} completed={activityShouldCollapse(mission()?.status, localRunActive(p.id))} />
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
@@ -3358,9 +3377,6 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           <Show when={mission()?.local_sync_pending}><div class="dim" role="status">{mission()?.local_sync_error || "Saved on this computer · syncing to Core…"}</div></Show>
           <Show when={sendError() || error() || queueError()}>
             <ErrorNotice error={(sendError() || error() || queueError())!} title={sendError() ? "Couldn’t send your message" : "Couldn’t load the conversation"} onDismiss={sendError() ? undefined : () => { setError(null); setQueueError(null); }}><Show when={sendError()&&optimistic()}><button onClick={()=>{const draft=optimistic();if(draft?.retry)draft.retry();else if(draft)void sendMsg(draft.text,draft.images,followAttach(),draft.id);}}>Retry</button></Show></ErrorNotice>
-          </Show>
-          <Show when={latestChecklist(viewItems())?.tasks.length}>
-            <button class="tasks-jump" onClick={() => { const tasks = scroller?.querySelector<HTMLElement>(".mission-tasks"); tasks?.scrollIntoView({ behavior: "smooth", block: "center" }); tasks?.focus({ preventScroll: true }); }}>Tasks</button>
           </Show>
           <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} onMission={setMission} onError={setError} onFork={p.onFork} />
         </div>

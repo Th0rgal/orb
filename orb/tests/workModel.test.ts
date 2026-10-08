@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { latestChecklist, parseChecklist, workSummary } from "../src/workModel";
+import { computeDiffStats, latestChecklist, localActivitiesToStreamItems, parseChecklist, workSummary } from "../src/workModel";
 import { buildTranscript } from "../src/transcriptModel";
 import fixtures from "./fixtures/task-tools.json";
 import importer from "./fixtures/importer-events.json";
@@ -53,4 +53,47 @@ describe("factual work summaries",()=>{
 import nativePlan from "./fixtures/codex-plan-notification.json";
 it("reads the same native Codex normalization fixture exercised by the Rust translator",()=>{
   expect(parseChecklist("update_plan",nativePlan.normalized)).toEqual([{text:"Inspect implementation",status:"in_progress"},{text:"Run tests",status:"pending"}]);
+});
+
+it("converts local activities from OpenCode, Claude Code, Codex, and Antigravity into StreamItems with checklists and diffs", () => {
+  const items = localActivitiesToStreamItems([
+    {
+      id: "native:call_0",
+      label: "todowrite",
+      kind: "tool",
+      done: true,
+      failed: false,
+      detail: JSON.stringify({
+        status: "completed",
+        input: { todos: [{ content: "Task A", status: "completed" }, { content: "Task B", status: "in_progress" }] },
+      }),
+    },
+    {
+      id: "native:call_1",
+      label: "edit",
+      kind: "tool",
+      done: true,
+      failed: false,
+      detail: JSON.stringify({
+        status: "completed",
+        input: { filePath: "src/App.tsx", oldString: "foo", newString: "bar\nbaz" },
+        metadata: { filediff: { file: "src/App.tsx", additions: 2, deletions: 1 } },
+      }),
+    },
+    {
+      id: "thinking:0",
+      label: "Thinking",
+      kind: "thinking",
+      done: true,
+      failed: false,
+      detail: "Inspecting local stream",
+    },
+  ]);
+  expect(latestChecklist(items)?.tasks).toEqual([
+    { text: "Task A", status: "completed" },
+    { text: "Task B", status: "in_progress" },
+  ]);
+  const editTool = items.find((i): i is Extract<typeof items[number], { kind: "tool" }> => i.kind === "tool" && i.name === "edit")!;
+  expect(computeDiffStats(editTool)).toEqual({ file: "src/App.tsx", additions: 2, deletions: 1 });
+  expect(workSummary(items)).toBe("Edited 1 file · 1 other tool");
 });

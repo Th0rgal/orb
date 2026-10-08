@@ -850,6 +850,47 @@ impl NativeGrokObserver {
         self.streaming == LogStreaming::Unsupported || self.log_offset >= self.log_len
     }
 
+    /// When a remote node restarts while a job is running in its transient
+    /// systemd scope, the node marks its SQLite row `lost`, yet the CLI in
+    /// the surviving scope may still write its terminal result event to the
+    /// log file. Synthesize a terminal `NodeJobStatus` once the streamed log
+    /// has caught up and recorded a native completion or error.
+    pub(crate) fn synthesize_lost_terminal(&self, status: &NodeJobStatus) -> Option<NodeJobStatus> {
+        if status.state != "lost" || !self.caught_up() {
+            return None;
+        }
+        let stream_finished = self.stream.ended
+            || self.stream.error.is_some()
+            || self.stream.auth_required
+            || self
+                .stream
+                .antigravity
+                .as_ref()
+                .is_some_and(|s| s.success || s.error.is_some());
+        if !stream_finished {
+            return None;
+        }
+        let succeeded = self.stream.ended
+            && self.stream.error.is_none()
+            && !self.stream.auth_required
+            && self
+                .stream
+                .antigravity
+                .as_ref()
+                .is_none_or(|s| s.finish().is_ok());
+        let mut recovered = status.clone();
+        recovered.state = if succeeded {
+            "succeeded".to_string()
+        } else {
+            "failed".to_string()
+        };
+        recovered.exit_code = Some(if succeeded { 0 } else { 1 });
+        if succeeded {
+            recovered.error = None;
+        }
+        Some(recovered)
+    }
+
     async fn apply_chunk(
         &mut self,
         chunk: &JobLogChunk,

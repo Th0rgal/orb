@@ -450,7 +450,10 @@ export async function startLocal(req: StartLocal): Promise<ClientRunReceipt> {
     // An uncertain native start keeps the lease until polling proves it stopped.
     launching.delete(req.id);
     await reconcileLocalRun(req.id);
-    recordLocalFailure(req.id, e);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/^Local launch deferred:/.test(msg) && !/already has non-terminal run|still running locally|starting in another Orb window/i.test(msg)) {
+      recordLocalFailure(req.id, e);
+    }
     throw e;
   } finally {
     pendingLaunches.delete(req.id);
@@ -480,7 +483,8 @@ export async function pollLocal(id: string): Promise<PollLocal> {
 /** The native runner survives webview reloads; frontend flags do not. */
 const reconciling=new Map<string,Promise<void>>();
 export function reconcileLocalRun(id:string):Promise<void>{
- const pending=reconciling.get(id);if(pending)return pending;
+ const pending=reconciling.get(id);
+ if(pending)return pending.then(()=>reconcileRun(id));
  const work=reconcileRun(id).finally(()=>reconciling.delete(id));reconciling.set(id,work);return work;
 }
 async function reconcileRun(id: string): Promise<void> {
@@ -623,7 +627,88 @@ export async function prepareProjectSkills(project: string, cwd: string, harness
   });
 }
 
+export interface PreflightStatus {
+  python3_ready: boolean;
+  python3_version?: string | null;
+  pyyaml_ready: boolean;
+  preflight_error?: string | null;
+  identity_ready: boolean;
+  identity_fingerprint?: string | null;
+  identity_updated_at?: number | null;
+}
+
+export interface HarnessSkillTarget {
+  id: string;
+  name: string;
+  global_rel: string;
+  global_path: string;
+  project_rel: string;
+  exists: boolean;
+  skill_count: number;
+  synced_count: number;
+  canonical_total: number;
+  missing_skills: string[];
+}
+
+export interface SkillSourceInfo {
+  id: string;
+  label: string;
+  path: string;
+  exists: boolean;
+  skill_count: number;
+}
+
+export interface DiscoveredSkill {
+  name: string;
+  description?: string | null;
+  origin: string;
+  source_path?: string | null;
+  harnesses: string[];
+  managed: boolean;
+  content_preview?: string | null;
+}
+
+export interface LocalSkillsReport {
+  checked_at: number;
+  home_dir: string;
+  preflight: PreflightStatus;
+  sources: SkillSourceInfo[];
+  harnesses: HarnessSkillTarget[];
+  skills: DiscoveredSkill[];
+}
+
+export interface SyncSkillPayload {
+  name: string;
+  content: string;
+  files?: Array<{ rel: string; content: string }>;
+}
+
+export interface SyncSkillsResult {
+  synced_skills: number;
+  harnesses_updated: number;
+  skipped_unmanaged: string[];
+  report: LocalSkillsReport;
+}
+
+export async function localSkillsStatus(): Promise<LocalSkillsReport | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return (await invoke("local_skills_status")) as LocalSkillsReport;
+}
+
+export async function localSkillsSync(options: { librarySkills?: SyncSkillPayload[]; pruneRemoved?: boolean } = {}): Promise<SyncSkillsResult> {
+  const invoke = tauriInvoke();
+  if (!invoke) throw new Error("Unified local skill sync requires the Orb desktop app.");
+  return (await invoke("local_skills_sync", {
+    request: {
+      library_skills: options.librarySkills ?? [],
+      prune_removed: options.pruneRemoved ?? false,
+    },
+  })) as SyncSkillsResult;
+}
+
 async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof tauriInvoke>>){
  try {if(await invoke("local_agents_cyber_capabilities")===2)return;}catch{}
  throw Error("Update Orb desktop before requesting a cyber program on this computer. Your selection was not silently omitted.");
 }
+

@@ -541,4 +541,18 @@ it('auto-resumes an Antigravity turn that ended while a background task was stil
  expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
 
+it('requeues without flashing an error when a Send now launch briefly races an active non-terminal run on Core',async()=>{
+ mocks.active=false;
+ mocks.launch.mockRejectedValueOnce(new Error('Local launch rejected: 409: mission 123 already has non-terminal run abc generation 1'));
+ stop=startLocalQueueWorker();
+ await enqueueLocalMessage(request,'send-now-msg');
+ await vi.advanceTimersByTimeAsync(50);
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')[0].state).toBe('queued');
+ expect(queuedLocalMessages('mission')[0].error).toBeUndefined();
+ await vi.advanceTimersByTimeAsync(500);
+ expect(mocks.launch).toHaveBeenCalledTimes(2);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+
 

@@ -161,7 +161,7 @@ def prepare_skills(root, directory):
     source = (root / "current/skill").resolve(strict=True)
     directory = Path(directory).resolve()
     receipt = json.loads((source.parent / "receipt.json").read_text())
-    for relative in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills"]:
+    for relative in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills", ".grok/skills"]:
         try:
             with directory_fd(directory, Path(relative).parts, create=True) as fd:
                 name = "development-identity"
@@ -355,7 +355,7 @@ def prepare_generation(root, bundle):
     helper =
     helper = {stage}/git-credential
 ''')
-        write(stage / "gitignore", "\n".join([f"/{d}/development-identity" for d in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills"]]) + "\n/.paloma/development-identity.json\n")
+        write(stage / "gitignore", "\n".join([f"/{d}/development-identity" for d in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills", ".grok/skills"]]) + "\n/.paloma/development-identity.json\n")
         write(stage / "gh/hosts.yml", "github.com:\n    user: Th0rgal\n    git_protocol: ssh\n    oauth_token: " + json.dumps(s["GITHUB_TOKEN"]) + "\n")
         write(stage / "skill/SKILL.md", bundle["skill"])
         atomic_json(stage / "receipt.json", {"created_at": int(time.time()), "library_revision": bundle["library_revision"], "signing_fingerprint": FINGERPRINT})

@@ -310,3 +310,12 @@ export const ReopenIcon = (p: P) => <I {...p}>
 </I>;
 
 export const FlaskIcon = (p: P) => <I {...p}><path d="M6 2h4M6.8 2v4.2L3.3 12a1.3 1.3 0 0 0 1.1 2h7.2a1.3 1.3 0 0 0 1.1-2L9.2 6.2V2M5.1 9.2h5.8"/></I>;
+
+export const SkillsIcon = (p: P) => (
+  <I {...p}>
+    <path d="M2.5 5.2 8 2.4l5.5 2.8L8 8z" />
+    <path d="M2.5 8.2 8 11l5.5-2.8" />
+    <path d="M2.5 11.2 8 14l5.5-2.8" />
+  </I>
+);
+

@@ -209,6 +209,20 @@ impl JobStore {
         .await
     }
 
+    /// Transition a job marked `lost` after a node restart to `cancelled`
+    /// once its containment scope is confirmed stopped or absent.
+    pub async fn cancel_if_lost(&self, id: Uuid) -> anyhow::Result<bool> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE jobs SET state = 'cancelled', finished_at = ?2
+                 WHERE id = ?1 AND state = 'lost'",
+                params![id.to_string(), now_rfc3339()],
+            )
+            .map(|updated| updated == 1)
+        })
+        .await
+    }
+
     /// Record a terminal state for the job.
     pub async fn finish(
         &self,

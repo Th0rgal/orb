@@ -15869,19 +15869,48 @@ async fn poll_remote_job(
                     continue;
                 }
             }
-            Ok(status) => {
+            Ok(mut status) => {
                 failures = 0;
-                let terminal = crate::remote_node::job_state_confirms_termination(&status.state);
                 if let Some(observer) = grok.as_mut() {
                     observer.pump(&client, &node, &shared_token).await;
                     observer
                         .check_startup(&status, &client, &node, &shared_token)
                         .await;
-                    if terminal && !observer.caught_up() {
+                    if let Some(recovered) = observer.synthesize_lost_terminal(&status) {
+                        status = recovered;
+                    }
+                    if crate::remote_node::job_state_confirms_termination(&status.state)
+                        && !observer.caught_up()
+                    {
                         terminal_observation = Some(status.clone());
                         continue;
                     }
                 }
+                if status.state == "lost" && inactive_status.is_none() {
+                    let content = format!(
+                        "Remote node '{}' restarted while running job {} ({}). Marking the mission failed.",
+                        node.id,
+                        job_id,
+                        status.error.as_deref().unwrap_or("node restarted while job was active"),
+                    );
+                    let _ = finalize_remote_mission(
+                        &owner,
+                        mission_id,
+                        Some(job_id),
+                        &node.id,
+                        false,
+                        content,
+                        "remote_node_lost",
+                        grok.is_some(),
+                        grok.as_ref()
+                            .and_then(remote_grok::NativeGrokObserver::usage),
+                        Some(ledger_dir),
+                    )
+                    .await;
+                    fleet.record_outcome(outcome("lost", None, status.error.clone(), false));
+                    continue;
+                }
+                let terminal = crate::remote_node::job_state_confirms_termination(&status.state);
                 if terminal {
                     terminal_observation = Some(status.clone());
                     // Publish the observed node result before terminal mission/lease

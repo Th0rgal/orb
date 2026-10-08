@@ -998,12 +998,20 @@ fn handle_tool_part_update(
     tracing::debug!(status = %status, "Tool part status");
 
     // Extract common fields
-    let tool_call_id = part
+    let call_id = part
         .get("callID")
         .or_else(|| part.get("id"))
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+        .unwrap_or("unknown");
+    let part_id = part
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|id| *id != call_id);
+    let tool_call_id = if let Some(pid) = part_id {
+        format!("{pid}:{call_id}")
+    } else {
+        call_id.to_string()
+    };
 
     let tool_name = part
         .get("tool")

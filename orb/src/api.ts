@@ -1188,3 +1188,35 @@ export function completeProviderOAuth(id: string, code: string) {
 export async function listNodeAntigravityModels(nodeId: string): Promise<[string,string][]> {
  return api(`/api/providers/antigravity-models${nodeId === "core" ? "" : `?node_id=${encodeURIComponent(nodeId)}`}`, {signal: AbortSignal.timeout(20000)});
 }
+
+export interface LibrarySkillSummary {
+  name: string;
+  description?: string | null;
+  path: string;
+  source?: { type: string; identifier?: string; version?: string };
+  setup_commands?: string[];
+}
+
+export interface LibrarySkill extends LibrarySkillSummary {
+  content: string;
+  files?: Array<{ name: string; path: string; content: string }>;
+  references?: string[];
+}
+
+export async function listLibrarySkills(): Promise<LibrarySkillSummary[]> {
+  const data = await api<LibrarySkillSummary[]>("/api/library/skill");
+  return Array.isArray(data) ? data : [];
+}
+
+export async function getLibrarySkill(name: string): Promise<LibrarySkill> {
+  return api<LibrarySkill>(`/api/library/skill/${encodeURIComponent(name)}`);
+}
+
+export async function saveLibrarySkill(name: string, content: string): Promise<void> {
+  await api(`/api/library/skill/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+}
+

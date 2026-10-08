@@ -140,6 +140,51 @@ test("Gemini progress survives persisted snapshot refreshes",async({page})=>{
  // Periodic recovery rebuilds cached history plus newly persisted revisions.
  await page.evaluate(events=>(window as any).transcriptHarness.reset(events),[first,tool,latest]);
  await expect(page.locator(".st-text")).toHaveText(latest.data.content);
- await page.evaluate(events=>(window as any).transcriptHarness.reset(events),[first,tool,latest,first]);
- await expect(page.locator(".st-text")).toHaveText(latest.data.content);
+  await page.evaluate(events=>(window as any).transcriptHarness.reset(events),[first,tool,latest,first]);
+  await expect(page.locator(".st-text")).toHaveText(latest.data.content);
+});
+
+test("OpenCode / Cursor-styled tool components, diff badges, collapsible & dismissible Tasks, and nested Markdown lists render cleanly",async({page})=>{
+  await page.goto("/tests/transcript.html");
+  await page.waitForFunction(()=>!!(window as any).transcriptHarness);
+  await page.evaluate(()=> (window as any).transcriptHarness.reset([
+    {type:"user_message",data:{id:"u1",content:"Refactor Transcript.tsx and verify nested Markdown lists."}},
+    {type:"thinking",data:{content:"Inspecting `src/Transcript.tsx` and **workModel**.",done:true}},
+    {type:"tool_call",data:{tool_call_id:"t-read",name:"read",args:{filePath:"src/Transcript.tsx",offset:1,limit:120}}},
+    {type:"tool_result",data:{tool_call_id:"t-read",name:"read",result:"1: import ..."}},
+    {type:"tool_call",data:{tool_call_id:"t-edit",name:"edit",args:{filePath:"src/Transcript.tsx",oldString:"old line 1\nold line 2",newString:"new line 1\nnew line 2\nnew line 3\nnew line 4"}}},
+    {type:"tool_result",data:{tool_call_id:"t-edit",name:"edit",result:"Edit applied successfully."}},
+    {type:"tool_call",data:{tool_call_id:"t-bash",name:"bash",args:{command:"pnpm test && pnpm build"}}},
+    {type:"tool_result",data:{tool_call_id:"t-bash",name:"bash",result:"✓ 94 tests passed\n✓ built in 4.2s"}},
+    {type:"tool_call",data:{tool_call_id:"t-todo",name:"todowrite",args:{todos:[
+      {content:"Inspect OpenCode & Cursor components",status:"completed",priority:"high"},
+      {content:"Remove redundant bottom Tasks button & add dismiss button",status:"completed",priority:"high"},
+      {content:"Fix nested Markdown lists in FilePanel",status:"completed",priority:"high"}
+    ]}}},
+    {type:"tool_result",data:{tool_call_id:"t-todo",name:"todowrite",result:"ok"}},
+    {type:"assistant_message",data:{id:"a1",content:[
+      "### 2.2 Assumptions That Mask a Code / Logic Edge Case",
+      "1. **Assumption `A7` (No mid-epoch APR setter call) in `APR-1` (`CE-APR-1`)**:",
+      "   - **What it masks**: On `54502d1`, `IdleCreditVault.setApr` and `setAprs` do not check `!isEpochRunning`.",
+      "   - **Client view**: Agreed that APR should stay fixed during a fixed-rate epoch.",
+      "   - **Recommendation**: Guard `setApr`, `setAprs`, and `setMaxApr`.",
+      "2. **Checkpoint Coherence `A-P1` Across Mid-Epoch Deposits (`CE-4`)**:",
+      "   - **What it masks**: `depositDuringEpoch` mints shares while adding only `amount` to `lastNAVAA/BB`.",
+      "   - **PoC for William (`tests/solidity/Price1DepositDuringEpoch.t.sol`)**:",
+      "     - `test_CE_4_forcedAccountingAfterMidEpochDepositLowersPriceAA`: lowers `priceAA` by 1-wei rounding.",
+      "     - `test_CE_4_materialDropWithJuniorAdjustment`: lowers `priceAA` by > 1 bp (~6.9 bps)."
+    ].join("\n")}}
+  ]));
+  await expect(page.locator(".st-work-head .st-diff-add")).toHaveText("+4");
+  await expect(page.locator(".st-work-head .st-diff-del")).toHaveText("-2");
+  await page.locator(".st-work-head").click();
+  await page.locator(".st-tool-head", { hasText: "bash" }).click();
+  await expect(page.locator(".st-bash-cmd")).toHaveText("$ pnpm test && pnpm build");
+  await expect(page.locator(".mission-tasks")).toContainText("3/3 completed");
+  await expect(page.locator(".tasks-dismiss")).toBeVisible();
+  await expect(page.locator(".st-text ol > li")).toHaveCount(2);
+  await expect(page.locator(".st-text ol > li").first().locator("ul > li")).toHaveCount(3);
+  await page.screenshot({path:"test-results/orb-components-cursor-style.png", fullPage: true});
+  await page.locator(".tasks-dismiss").click();
+  await expect(page.locator(".mission-tasks")).toHaveCount(0);
 });

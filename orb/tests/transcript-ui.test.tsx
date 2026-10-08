@@ -86,3 +86,62 @@ it("latest checklist is visible outside folded raw work, with real progress and 
   const {container:followUpContainer}=render(()=><Transcript items={afterFollowUp}/>);
   expect(followUpContainer.querySelector('.mission-tasks')).toBeNull();
 });
+
+it("allows collapsing and dismissing a completed checklist to reclaim conversation space", () => {
+  const items = buildTranscript([
+    ev("tool_call", {
+      tool_call_id: "done-list",
+      name: "todowrite",
+      args: {
+        todos: [
+          { content: "First step", status: "completed", priority: "high" },
+          { content: "Second step", status: "completed", priority: "medium" },
+        ],
+      },
+    }),
+  ]);
+  const { container } = render(() => <Transcript items={items} />);
+  expect(container.querySelector(".mission-tasks")).not.toBeNull();
+  const toggle = container.querySelector<HTMLButtonElement>(".tasks-heading-toggle")!;
+  toggle.click();
+  expect(container.querySelector(".mission-tasks.collapsed")).not.toBeNull();
+  expect(container.querySelector(".mission-tasks ol")).toBeNull();
+  toggle.click();
+  expect(container.querySelector(".mission-tasks ol")).not.toBeNull();
+  const dismiss = container.querySelector<HTMLButtonElement>(".tasks-dismiss")!;
+  expect(dismiss).not.toBeNull();
+  dismiss.click();
+  expect(container.querySelector(".mission-tasks")).toBeNull();
+});
+
+it("renders diff badges, argument badges, and bash output formatting inside tool rows", () => {
+  const items = buildTranscript([
+    ev("tool_call", {
+      tool_call_id: "edit-1",
+      name: "edit",
+      args: { filePath: "src/App.tsx", oldString: "a\nb", newString: "a\nc\nd" },
+    }),
+    ev("tool_result", { tool_call_id: "edit-1", name: "edit", result: "Edit applied" }),
+    ev("tool_call", {
+      tool_call_id: "read-1",
+      name: "read",
+      args: { filePath: "src/Transcript.tsx", offset: 10, limit: 50 },
+    }),
+    ev("tool_result", { tool_call_id: "read-1", name: "read", result: "10: line" }),
+    ev("tool_call", {
+      tool_call_id: "bash-1",
+      name: "bash",
+      args: { command: "pnpm test" },
+    }),
+    ev("tool_result", { tool_call_id: "bash-1", name: "bash", result: "All tests passed" }),
+  ]);
+  const { container } = render(() => <Transcript items={items} />);
+  expect(container.querySelector(".st-work-head .st-diff-add")?.textContent).toBe("+2");
+  expect(container.querySelector(".st-work-head .st-diff-del")?.textContent).toBe("-1");
+  container.querySelector<HTMLButtonElement>(".st-work-head")!.click();
+  expect([...container.querySelectorAll(".st-tool-badge")].map(el => el.textContent)).toEqual(["offset=10", "limit=50"]);
+  const bashHead = [...container.querySelectorAll<HTMLButtonElement>(".st-tool-head")].find(b => b.textContent?.includes("bash"))!;
+  bashHead.click();
+  expect(container.querySelector(".st-bash-cmd")?.textContent).toBe("$ pnpm test");
+  expect(container.querySelector(".st-tool-bash")?.textContent).toContain("All tests passed");
+});
