@@ -32,7 +32,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -249,8 +251,8 @@ fun OrbAppRoot(
                     onNewAgent = { folder ->
                         push(OrbNavScreen.Conversation(currentScreen.project, null, folder))
                     },
-                    onOpenDocuments = {
-                        push(OrbNavScreen.Documents(currentScreen.project, ""))
+                    onOpenDocuments = { dirPath ->
+                        push(OrbNavScreen.Documents(currentScreen.project, dirPath))
                     }
                 )
             }
@@ -948,7 +950,7 @@ fun OrbProjectPage(
     onBack: () -> Unit,
     onOpenMission: (OrbRow) -> Unit,
     onNewAgent: (folder: String?) -> Unit,
-    onOpenDocuments: () -> Unit
+    onOpenDocuments: (directoryPath: String) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val missions by core.missions.collectAsState()
@@ -967,13 +969,21 @@ fun OrbProjectPage(
     var showMenu by remember { mutableStateOf(false) }
     var showColorDialog by remember { mutableStateOf(false) }
     var showNewFolderDialog by remember { mutableStateOf(false) }
+    var newFolderParent by remember { mutableStateOf("") }
     var newFolderDraft by remember { mutableStateOf("") }
     var isRefreshing by remember { mutableStateOf(false) }
+    var folderActionError by remember { mutableStateOf<String?>(null) }
 
     val expandedParents = remember { mutableStateMapOf<String, Boolean>() }
     val collapsedFolders = remember { mutableStateMapOf<String, Boolean>() }
     val customFolders = remember { mutableStateMapOf<String, Boolean>() }
     var contextMenuMission by remember { mutableStateOf<OrbRow?>(null) }
+    var contextMenuFolder by remember { mutableStateOf<String?>(null) }
+    var renameFolderTarget by remember { mutableStateOf<String?>(null) }
+    var renameFolderDraft by remember { mutableStateOf("") }
+    var moveFolderTarget by remember { mutableStateOf<String?>(null) }
+    var moveFolderDraft by remember { mutableStateOf("") }
+    var deleteFolderTarget by remember { mutableStateOf<String?>(null) }
 
     val projectSlug = remember(liveProject) {
         OrbProjectAppearance.slug(liveProject)
@@ -1155,6 +1165,136 @@ fun OrbProjectPage(
         }
     }
 
+    suspend fun migrateFolderMissions(oldPath: String, destination: String) {
+        val affected = projectMissions.filter { m ->
+            val f = OrbMissionTree.folderPath(m) ?: ""
+            f == oldPath || f.startsWith("$oldPath/")
+        }
+        for (m in affected) {
+            val f = OrbMissionTree.folderPath(m) ?: ""
+            val suffix = f.removePrefix(oldPath)
+            val targetFolder = destination + suffix
+            val tags = OrbJSON.strList(m.raw, "tags")
+                .filter { it.isNotEmpty() && !it.startsWith("orb-folder:") }
+                .toMutableList()
+            if (targetFolder.isNotEmpty()) {
+                tags.add("orb-folder:$targetFolder")
+            }
+            runCatching {
+                core.request(
+                    path = "/api/control/missions/${core.encodeComponent(m.id)}/project",
+                    method = "POST",
+                    body = mapOf("project" to projectSlug, "tags" to tags)
+                )
+            }
+        }
+    }
+
+    fun performRenameFolder(folderPath: String, rawNewName: String) {
+        val input = rawNewName.trim()
+        if (input.isEmpty() || input.contains("/") || input.contains("\\")) {
+            folderActionError = "Enter a folder name without slashes."
+            return
+        }
+        val parent = if (folderPath.contains('/')) folderPath.substringBeforeLast('/') else ""
+        val destination = if (parent.isEmpty()) input else "$parent/$input"
+        if (destination == folderPath) return
+        folderActionError = null
+        scope.launch {
+            try {
+                val encoded = core.encodeComponent(projectSlug)
+                val inManifest = manifestFolders.any { it == folderPath || it.startsWith("$folderPath/") }
+                if (inManifest) {
+                    core.request(
+                        path = "/api/projects/$encoded/file/transfer",
+                        method = "POST",
+                        body = mapOf("path" to folderPath, "destination" to destination, "copy" to false)
+                    )
+                } else {
+                    core.request(
+                        path = "/api/projects/$encoded/file/mkdir",
+                        method = "POST",
+                        body = mapOf("path" to destination)
+                    )
+                }
+                customFolders.remove(folderPath)
+                customFolders[destination] = true
+                migrateFolderMissions(folderPath, destination)
+                loadProjectData()
+                core.refreshMissionsQuietly()
+            } catch (e: Throwable) {
+                folderActionError = e.message ?: "Failed to rename folder"
+            }
+        }
+    }
+
+    fun performMoveFolder(folderPath: String, rawDestParent: String) {
+        val parent = rawDestParent.trim().trim('/')
+        val base = folderPath.substringAfterLast('/')
+        val destination = if (parent.isEmpty()) base else "$parent/$base"
+        if (destination == folderPath) return
+        if (destination.startsWith("$folderPath/")) {
+            folderActionError = "Cannot move a folder inside itself."
+            return
+        }
+        folderActionError = null
+        scope.launch {
+            try {
+                val encoded = core.encodeComponent(projectSlug)
+                val inManifest = manifestFolders.any { it == folderPath || it.startsWith("$folderPath/") }
+                if (inManifest) {
+                    core.request(
+                        path = "/api/projects/$encoded/file/transfer",
+                        method = "POST",
+                        body = mapOf("path" to folderPath, "destination" to destination, "copy" to false)
+                    )
+                } else {
+                    core.request(
+                        path = "/api/projects/$encoded/file/mkdir",
+                        method = "POST",
+                        body = mapOf("path" to destination)
+                    )
+                }
+                customFolders.remove(folderPath)
+                customFolders[destination] = true
+                migrateFolderMissions(folderPath, destination)
+                loadProjectData()
+                core.refreshMissionsQuietly()
+            } catch (e: Throwable) {
+                folderActionError = e.message ?: "Failed to move folder"
+            }
+        }
+    }
+
+    fun performDeleteFolder(folderPath: String) {
+        val hasActiveOrCompletedMissions = projectMissions.any { m ->
+            if (OrbMissionTree.isArchived(m)) return@any false
+            val f = OrbMissionTree.folderPath(m) ?: ""
+            f == folderPath || f.startsWith("$folderPath/")
+        }
+        if (hasActiveOrCompletedMissions) {
+            folderActionError = "Move or archive the agents in \"$folderPath\" before deleting it."
+            return
+        }
+        folderActionError = null
+        scope.launch {
+            try {
+                val encoded = core.encodeComponent(projectSlug)
+                val encodedPath = core.encodeComponent(folderPath)
+                core.request(
+                    path = "/api/projects/$encoded/file?path=$encodedPath",
+                    method = "DELETE"
+                )
+                val toRemove = customFolders.keys.filter { it == folderPath || it.startsWith("$folderPath/") }
+                toRemove.forEach { customFolders.remove(it) }
+                manifestFolders = manifestFolders.filterNot { it == folderPath || it.startsWith("$folderPath/") }
+                loadProjectData()
+            } catch (e: Throwable) {
+                folderActionError = e.message ?: "Failed to delete folder"
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1235,6 +1375,7 @@ fun OrbProjectPage(
                                 },
                                 onClick = {
                                     showMenu = false
+                                    newFolderParent = ""
                                     newFolderDraft = ""
                                     showNewFolderDialog = true
                                 }
@@ -1256,7 +1397,7 @@ fun OrbProjectPage(
                                 },
                                 onClick = {
                                     showMenu = false
-                                    onOpenDocuments()
+                                    onOpenDocuments("")
                                 }
                             )
                         }
@@ -1312,6 +1453,16 @@ fun OrbProjectPage(
                         }
                     }
 
+                    folderActionError?.let { err ->
+                        item(key = "folder_action_error") {
+                            OrbNotice(
+                                title = err,
+                                log = null,
+                                modifier = Modifier.padding(vertical = 6.dp)
+                            )
+                        }
+                    }
+
                     // Unfiled missions first (matching iOS OrbProjectPage)
                     val flatUnfiled = OrbMissionTree.flatten(
                         unfiledRoots,
@@ -1341,42 +1492,125 @@ fun OrbProjectPage(
                     // Folder sections
                     foldersMap.forEach { (folderPath, rootsInFolder) ->
                         val collapsed = collapsedFolders[folderPath] == true
+                        val folderDepth = (folderPath.count { it == '/' }).coerceAtLeast(0)
+                        val folderIndentDp = minOf(36, folderDepth * 12).dp
                         item(key = "folder_hdr_$folderPath") {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .orbPressClickable {
-                                        collapsedFolders[folderPath] = !collapsed
-                                    }
-                                    .padding(vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                OrbSfIcons.FolderOutline(
-                                    color = OrbProjectAppearance.color(liveProject),
-                                    size = 18.dp
-                                )
-                                Text(
-                                    text = folderPath.substringAfterLast('/'),
-                                    color = Color.White,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Icon(
-                                    imageVector = if (collapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
-                                    contentDescription = null,
-                                    tint = OrbStyle.icon,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Icon(
-                                    imageVector = Icons.Default.Add,
-                                    contentDescription = "New in folder",
-                                    tint = OrbStyle.textSecondary,
+                            Box {
+                                Row(
                                     modifier = Modifier
-                                        .size(20.dp)
-                                        .orbPressClickable { onNewAgent(folderPath) }
-                                )
+                                        .fillMaxWidth()
+                                        .padding(start = folderIndentDp)
+                                        .combinedClickable(
+                                            onClick = {
+                                                collapsedFolders[folderPath] = !collapsed
+                                            },
+                                            onLongClick = {
+                                                contextMenuFolder = folderPath
+                                            }
+                                        )
+                                        .padding(vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    OrbSfIcons.FolderOutline(
+                                        color = OrbProjectAppearance.color(liveProject),
+                                        size = 18.dp
+                                    )
+                                    Text(
+                                        text = folderPath.substringAfterLast('/'),
+                                        color = Color.White,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Icon(
+                                        imageVector = if (collapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                                        contentDescription = null,
+                                        tint = OrbStyle.icon,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.Add,
+                                        contentDescription = "New in folder",
+                                        tint = OrbStyle.textSecondary,
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .orbPressClickable { onNewAgent(folderPath) }
+                                    )
+                                }
+
+                                DropdownMenu(
+                                    expanded = contextMenuFolder == folderPath,
+                                    onDismissRequest = { contextMenuFolder = null },
+                                    containerColor = OrbStyle.elevated
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("New agent in folder", color = Color.White) },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Add, contentDescription = null, tint = Color.White)
+                                        },
+                                        onClick = {
+                                            contextMenuFolder = null
+                                            onNewAgent(folderPath)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("New subfolder", color = Color.White) },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.CreateNewFolder, contentDescription = null, tint = Color.White)
+                                        },
+                                        onClick = {
+                                            contextMenuFolder = null
+                                            newFolderParent = folderPath
+                                            newFolderDraft = ""
+                                            showNewFolderDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Folder context files", color = Color.White) },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Description, contentDescription = null, tint = Color.White)
+                                        },
+                                        onClick = {
+                                            contextMenuFolder = null
+                                            onOpenDocuments(folderPath)
+                                        }
+                                    )
+                                    HorizontalDivider(color = OrbStyle.border)
+                                    DropdownMenuItem(
+                                        text = { Text("Rename", color = Color.White) },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White)
+                                        },
+                                        onClick = {
+                                            contextMenuFolder = null
+                                            renameFolderDraft = folderPath.substringAfterLast('/')
+                                            renameFolderTarget = folderPath
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Move…", color = Color.White) },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White)
+                                        },
+                                        onClick = {
+                                            contextMenuFolder = null
+                                            moveFolderDraft = if (folderPath.contains('/')) folderPath.substringBeforeLast('/') else ""
+                                            moveFolderTarget = folderPath
+                                        }
+                                    )
+                                    HorizontalDivider(color = OrbStyle.border)
+                                    DropdownMenuItem(
+                                        text = { Text("Delete…", color = OrbStyle.error) },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Delete, contentDescription = null, tint = OrbStyle.error)
+                                        },
+                                        onClick = {
+                                            contextMenuFolder = null
+                                            deleteFolderTarget = folderPath
+                                        }
+                                    )
+                                }
                             }
                         }
 
@@ -1501,10 +1735,18 @@ fun OrbProjectPage(
 
     if (showNewFolderDialog) {
         AlertDialog(
-            onDismissRequest = { showNewFolderDialog = false },
+            onDismissRequest = {
+                showNewFolderDialog = false
+                newFolderParent = ""
+            },
             containerColor = OrbStyle.elevated,
             titleContentColor = Color.White,
-            title = { Text("New folder", fontWeight = FontWeight.SemiBold) },
+            title = {
+                Text(
+                    text = if (newFolderParent.isEmpty()) "New folder" else "New subfolder in ${newFolderParent.substringAfterLast('/')}",
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
             text = {
                 Box(
                     modifier = Modifier
@@ -1531,17 +1773,21 @@ fun OrbProjectPage(
                 TextButton(
                     onClick = {
                         val f = newFolderDraft.trim().trim('/')
+                        val parent = newFolderParent.trim().trim('/')
                         showNewFolderDialog = false
+                        newFolderParent = ""
                         if (f.isNotEmpty()) {
-                            customFolders[f] = true
+                            val fullPath = if (parent.isEmpty()) f else "$parent/$f"
+                            customFolders[fullPath] = true
                             val slug = liveProject.str("slug", "id") ?: liveProject.id
                             scope.launch {
                                 runCatching {
                                     core.request(
                                         "/api/projects/${core.encodeComponent(slug)}/file/mkdir",
                                         method = "POST",
-                                        body = mapOf("path" to f)
+                                        body = mapOf("path" to fullPath)
                                     )
+                                    loadProjectData()
                                 }
                             }
                         }
@@ -1551,7 +1797,144 @@ fun OrbProjectPage(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showNewFolderDialog = false }) {
+                TextButton(
+                    onClick = {
+                        showNewFolderDialog = false
+                        newFolderParent = ""
+                    }
+                ) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
+    renameFolderTarget?.let { targetFolder ->
+        AlertDialog(
+            onDismissRequest = { renameFolderTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text("Rename folder", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    if (renameFolderDraft.isEmpty()) {
+                        Text("Folder name", color = OrbStyle.textMuted, fontSize = 14.sp)
+                    }
+                    BasicTextField(
+                        value = renameFolderDraft,
+                        onValueChange = { renameFolderDraft = it },
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val next = renameFolderDraft
+                        renameFolderTarget = null
+                        performRenameFolder(targetFolder, next)
+                    }
+                ) {
+                    Text("Rename", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameFolderTarget = null }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
+    moveFolderTarget?.let { targetFolder ->
+        AlertDialog(
+            onDismissRequest = { moveFolderTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text("Move folder", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Destination parent folder within $projectName (leave empty for project root):",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 13.sp
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                    ) {
+                        if (moveFolderDraft.isEmpty()) {
+                            Text("Project root", color = OrbStyle.textMuted, fontSize = 14.sp)
+                        }
+                        BasicTextField(
+                            value = moveFolderDraft,
+                            onValueChange = { moveFolderDraft = it },
+                            textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                            cursorBrush = SolidColor(Color.White),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val destParent = moveFolderDraft
+                        moveFolderTarget = null
+                        performMoveFolder(targetFolder, destParent)
+                    }
+                ) {
+                    Text("Move", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { moveFolderTarget = null }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
+    deleteFolderTarget?.let { targetFolder ->
+        AlertDialog(
+            onDismissRequest = { deleteFolderTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text("Delete folder?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    text = "Delete \"$targetFolder\" and all context files inside? This cannot be undone.",
+                    color = OrbStyle.textSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteFolderTarget = null
+                        performDeleteFolder(targetFolder)
+                    }
+                ) {
+                    Text("Delete", color = OrbStyle.error, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteFolderTarget = null }) {
                     Text("Cancel", color = OrbStyle.textSecondary)
                 }
             }

@@ -2,8 +2,10 @@ package sh.sandboxed.dashboard.orb
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,14 +28,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.DriveFileMove
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -56,7 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun OrbProjectDocumentsPage(
     core: OrbCore,
@@ -77,6 +87,16 @@ fun OrbProjectDocumentsPage(
     var loading by remember(cacheKey) { mutableStateOf(entries.isEmpty()) }
     var error by remember(cacheKey) { mutableStateOf<String?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
+
+    var contextMenuPath by remember { mutableStateOf<String?>(null) }
+    var showNewFolderDialog by remember { mutableStateOf(false) }
+    var newFolderParent by remember { mutableStateOf(directoryPath) }
+    var newFolderDraft by remember { mutableStateOf("") }
+    var renameTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var renameDraft by remember { mutableStateOf("") }
+    var moveTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var moveDraft by remember { mutableStateOf("") }
+    var deleteTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
 
     val pageTitle = remember(directoryPath) {
         if (directoryPath.isEmpty()) "Project context" else directoryPath.substringAfterLast('/').ifEmpty { "Project context" }
@@ -143,7 +163,26 @@ fun OrbProjectDocumentsPage(
                     .weight(1f)
                     .padding(horizontal = 14.dp)
             )
-            Spacer(modifier = Modifier.size(40.dp))
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .orbPressClickable {
+                        newFolderParent = directoryPath
+                        newFolderDraft = ""
+                        showNewFolderDialog = true
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CreateNewFolder,
+                    contentDescription = "New folder",
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
 
         PullToRefreshBox(
@@ -218,61 +257,123 @@ fun OrbProjectDocumentsPage(
                                 val size = entry.int("size") ?: 0
                                 val updated = OrbJSON.relative(entry.str("updated_at"))
 
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .orbPressClickable {
-                                            if (isDir) {
-                                                onOpenDirectory(childPath)
-                                            } else {
-                                                val rawWithPath = entry.raw.toMutableMap()
-                                                rawWithPath["path"] = childPath
-                                                onOpenFile(OrbRow(rawWithPath, childPath))
+                                Box {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .combinedClickable(
+                                                onClick = {
+                                                    if (isDir) {
+                                                        onOpenDirectory(childPath)
+                                                    } else {
+                                                        val rawWithPath = entry.raw.toMutableMap()
+                                                        rawWithPath["path"] = childPath
+                                                        onOpenFile(OrbRow(rawWithPath, childPath))
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    contextMenuPath = childPath
+                                                }
+                                            )
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isDir) Icons.Default.Folder else Icons.Default.Description,
+                                            contentDescription = null,
+                                            tint = OrbStyle.icon,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            Text(
+                                                text = name,
+                                                color = Color.White,
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (!isDir && size > 0) {
+                                                Text(
+                                                    text = formatBytes(size),
+                                                    color = OrbStyle.textMuted,
+                                                    fontSize = 11.sp
+                                                )
                                             }
                                         }
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = if (kind == "directory" || kind == "dir") Icons.Default.Folder else Icons.Default.Description,
-                                        contentDescription = null,
-                                        tint = OrbStyle.icon,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                                    ) {
-                                        Text(
-                                            text = name,
-                                            color = Color.White,
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (kind != "directory" && kind != "dir" && size > 0) {
+                                        if (updated.isNotEmpty()) {
                                             Text(
-                                                text = formatBytes(size),
+                                                text = updated,
                                                 color = OrbStyle.textMuted,
-                                                fontSize = 11.sp
+                                                fontSize = 12.sp
                                             )
                                         }
-                                    }
-                                    if (updated.isNotEmpty()) {
-                                        Text(
-                                            text = updated,
-                                            color = OrbStyle.textMuted,
-                                            fontSize = 12.sp
+                                        Icon(
+                                            imageVector = Icons.Default.ChevronRight,
+                                            contentDescription = null,
+                                            tint = OrbStyle.textMuted,
+                                            modifier = Modifier.size(12.dp)
                                         )
                                     }
-                                    Icon(
-                                        imageVector = Icons.Default.ChevronRight,
-                                        contentDescription = null,
-                                        tint = OrbStyle.textMuted,
-                                        modifier = Modifier.size(12.dp)
-                                    )
+
+                                    DropdownMenu(
+                                        expanded = contextMenuPath == childPath,
+                                        onDismissRequest = { contextMenuPath = null },
+                                        containerColor = OrbStyle.elevated
+                                    ) {
+                                        if (isDir) {
+                                            DropdownMenuItem(
+                                                text = { Text("New subfolder", color = Color.White) },
+                                                leadingIcon = {
+                                                    Icon(Icons.Default.CreateNewFolder, contentDescription = null, tint = Color.White)
+                                                },
+                                                onClick = {
+                                                    contextMenuPath = null
+                                                    newFolderParent = childPath
+                                                    newFolderDraft = ""
+                                                    showNewFolderDialog = true
+                                                }
+                                            )
+                                            HorizontalDivider(color = OrbStyle.border)
+                                        }
+                                        DropdownMenuItem(
+                                            text = { Text("Rename", color = Color.White) },
+                                            leadingIcon = {
+                                                Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White)
+                                            },
+                                            onClick = {
+                                                contextMenuPath = null
+                                                renameDraft = name
+                                                renameTarget = childPath to isDir
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Move…", color = Color.White) },
+                                            leadingIcon = {
+                                                Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White)
+                                            },
+                                            onClick = {
+                                                contextMenuPath = null
+                                                moveDraft = if (childPath.contains('/')) childPath.substringBeforeLast('/') else ""
+                                                moveTarget = childPath to isDir
+                                            }
+                                        )
+                                        HorizontalDivider(color = OrbStyle.border)
+                                        DropdownMenuItem(
+                                            text = { Text("Delete…", color = OrbStyle.error) },
+                                            leadingIcon = {
+                                                Icon(Icons.Default.Delete, contentDescription = null, tint = OrbStyle.error)
+                                            },
+                                            onClick = {
+                                                contextMenuPath = null
+                                                deleteTarget = childPath to isDir
+                                            }
+                                        )
+                                    }
                                 }
 
                                 if (idx < entries.lastIndex) {
@@ -287,6 +388,258 @@ fun OrbProjectDocumentsPage(
                 }
             }
         }
+    }
+
+    if (showNewFolderDialog) {
+        AlertDialog(
+            onDismissRequest = { showNewFolderDialog = false },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = {
+                Text(
+                    text = if (newFolderParent.isEmpty()) "New folder" else "New subfolder in ${newFolderParent.substringAfterLast('/')}",
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    if (newFolderDraft.isEmpty()) {
+                        Text("Folder name", color = OrbStyle.textMuted, fontSize = 14.sp)
+                    }
+                    BasicTextField(
+                        value = newFolderDraft,
+                        onValueChange = { newFolderDraft = it },
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val f = newFolderDraft.trim().trim('/')
+                        val parent = newFolderParent.trim().trim('/')
+                        showNewFolderDialog = false
+                        if (f.isNotEmpty()) {
+                            val fullPath = if (parent.isEmpty()) f else "$parent/$f"
+                            scope.launch {
+                                try {
+                                    core.request(
+                                        "/api/projects/${core.encodeComponent(slug)}/file/mkdir",
+                                        method = "POST",
+                                        body = mapOf("path" to fullPath)
+                                    )
+                                    load()
+                                } catch (e: Throwable) {
+                                    error = e.message ?: "Failed to create folder"
+                                }
+                            }
+                        }
+                    }
+                ) {
+                    Text("Create", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewFolderDialog = false }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
+    renameTarget?.let { (targetPath, isDir) ->
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text(if (isDir) "Rename folder" else "Rename file", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    if (renameDraft.isEmpty()) {
+                        Text(if (isDir) "Folder name" else "File name", color = OrbStyle.textMuted, fontSize = 14.sp)
+                    }
+                    BasicTextField(
+                        value = renameDraft,
+                        onValueChange = { renameDraft = it },
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val next = renameDraft.trim()
+                        renameTarget = null
+                        if (next.isEmpty() || next.contains('/') || next.contains('\\')) {
+                            error = "Enter a name without slashes."
+                            return@TextButton
+                        }
+                        val parent = if (targetPath.contains('/')) targetPath.substringBeforeLast('/') else ""
+                        val dest = if (parent.isEmpty()) next else "$parent/$next"
+                        if (dest != targetPath) {
+                            scope.launch {
+                                try {
+                                    core.request(
+                                        "/api/projects/${core.encodeComponent(slug)}/file/transfer",
+                                        method = "POST",
+                                        body = mapOf("path" to targetPath, "destination" to dest, "copy" to false)
+                                    )
+                                    load()
+                                } catch (e: Throwable) {
+                                    error = e.message ?: "Failed to rename"
+                                }
+                            }
+                        }
+                    }
+                ) {
+                    Text("Rename", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
+    moveTarget?.let { (targetPath, isDir) ->
+        AlertDialog(
+            onDismissRequest = { moveTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text(if (isDir) "Move folder" else "Move file", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Destination parent folder (leave empty for project root):",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 13.sp
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                    ) {
+                        if (moveDraft.isEmpty()) {
+                            Text("Project root", color = OrbStyle.textMuted, fontSize = 14.sp)
+                        }
+                        BasicTextField(
+                            value = moveDraft,
+                            onValueChange = { moveDraft = it },
+                            textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                            cursorBrush = SolidColor(Color.White),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val parent = moveDraft.trim().trim('/')
+                        moveTarget = null
+                        val base = targetPath.substringAfterLast('/')
+                        val dest = if (parent.isEmpty()) base else "$parent/$base"
+                        if (dest != targetPath) {
+                            if (isDir && dest.startsWith("$targetPath/")) {
+                                error = "Cannot move a folder inside itself."
+                                return@TextButton
+                            }
+                            scope.launch {
+                                try {
+                                    core.request(
+                                        "/api/projects/${core.encodeComponent(slug)}/file/transfer",
+                                        method = "POST",
+                                        body = mapOf("path" to targetPath, "destination" to dest, "copy" to false)
+                                    )
+                                    load()
+                                } catch (e: Throwable) {
+                                    error = e.message ?: "Failed to move"
+                                }
+                            }
+                        }
+                    }
+                ) {
+                    Text("Move", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { moveTarget = null }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
+    deleteTarget?.let { (targetPath, isDir) ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text(if (isDir) "Delete folder?" else "Delete file?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    text = if (isDir) "Delete \"$targetPath\" and all contents inside? This cannot be undone." else "Delete \"$targetPath\"? This cannot be undone.",
+                    color = OrbStyle.textSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteTarget = null
+                        scope.launch {
+                            try {
+                                core.request(
+                                    "/api/projects/${core.encodeComponent(slug)}/file?path=${core.encodeComponent(targetPath)}",
+                                    method = "DELETE"
+                                )
+                                entries = entries.filterNot { e ->
+                                    val n = e.str("name") ?: e.id
+                                    val p = e.str("path") ?: if (directoryPath.isEmpty()) n else "$directoryPath/$n"
+                                    p == targetPath
+                                }
+                                load()
+                            } catch (e: Throwable) {
+                                error = e.message ?: "Failed to delete"
+                            }
+                        }
+                    }
+                ) {
+                    Text("Delete", color = OrbStyle.error, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
     }
 }
 

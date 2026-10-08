@@ -599,6 +599,12 @@ struct OrbProjectPage: View {
     @State private var error = ""
     @State private var newFolder = false
     @State private var folderName = ""
+    @State private var newFolderParent = ""
+    @State private var renamingFolder: String?
+    @State private var renameFolderDraft = ""
+    @State private var movingFolder: String?
+    @State private var moveFolderDraft = ""
+    @State private var deletingFolder: String?
     @State private var loadedArchived = false
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
@@ -652,6 +658,13 @@ struct OrbProjectPage: View {
         return all.filter { !$0.isEmpty }.sorted()
     }
     private func shown(_ folder: String) -> Bool { !search.isEmpty || !collapsed.contains(where: { folder.hasPrefix($0 + "/") }) }
+    private static func folderParent(_ path: String) -> String {
+        guard let idx = path.lastIndex(of: "/") else { return "" }
+        return String(path[..<idx])
+    }
+    private static func folderBaseName(_ path: String) -> String {
+        path.split(separator: "/").last.map(String.init) ?? path
+    }
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -680,7 +693,7 @@ struct OrbProjectPage: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { Menu {
                 Picker("Show", selection: $filter) { ForEach(["All", "Working", "Needs attention", "Archived"], id: \.self) { Text($0) } }
-                Button("New folder") { newFolder = true }
+                Button("New folder") { newFolderParent = ""; folderName = ""; newFolder = true }
                 OrbProjectColorMenu(project: project.id)
                 NavigationLink("Project context") { OrbDocuments(project: project.id, path: "") }
             } label: { OrbCircle(symbol: "ellipsis") }.accessibilityLabel("Project actions") }
@@ -691,7 +704,43 @@ struct OrbProjectPage: View {
                     .accessibilityLabel("New agent").accessibilityIdentifier("new-agent")
             }
         }
-        .alert("New folder", isPresented: $newFolder) { TextField("Folder name", text: $folderName); Button("Create") { Task { await mkdir() } }; Button("Cancel", role: .cancel) {} }
+        .alert(newFolderParent.isEmpty ? "New folder" : "New subfolder in \(Self.folderBaseName(newFolderParent))", isPresented: $newFolder) {
+            TextField("Folder name", text: $folderName)
+            Button("Create") { Task { await mkdir() } }
+            Button("Cancel", role: .cancel) { newFolderParent = ""; folderName = "" }
+        }
+        .alert("Rename folder", isPresented: Binding(get: { renamingFolder != nil }, set: { if !$0 { renamingFolder = nil } })) {
+            TextField("Folder name", text: $renameFolderDraft)
+            Button("Rename") {
+                if let folder = renamingFolder {
+                    Task { await renameFolder(folder, to: renameFolderDraft) }
+                }
+            }
+            Button("Cancel", role: .cancel) { renamingFolder = nil }
+        }
+        .alert("Move folder", isPresented: Binding(get: { movingFolder != nil }, set: { if !$0 { movingFolder = nil } })) {
+            TextField("Destination folder (empty for root)", text: $moveFolderDraft)
+            Button("Move") {
+                if let folder = movingFolder {
+                    Task { await moveFolder(folder, into: moveFolderDraft) }
+                }
+            }
+            Button("Cancel", role: .cancel) { movingFolder = nil }
+        } message: {
+            Text("Enter destination parent folder path within \(project.name), or leave empty to move to the project root.")
+        }
+        .alert("Delete folder?", isPresented: Binding(get: { deletingFolder != nil }, set: { if !$0 { deletingFolder = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let folder = deletingFolder {
+                    Task { await deleteFolder(folder) }
+                }
+            }
+            Button("Cancel", role: .cancel) { deletingFolder = nil }
+        } message: {
+            if let folder = deletingFolder {
+                Text("Delete \"\(folder)\" and all context files inside? This cannot be undone.")
+            }
+        }
         .task { await load() }.refreshable { await load(force: true) }
         .onChange(of: filter) { _, newValue in
             if newValue == "Archived" && !loadedArchived {
@@ -733,17 +782,60 @@ struct OrbProjectPage: View {
                 } label: {
                     HStack(spacing: 10) {
                         OrbListIcon(symbol: "folder", color: appearance.color(project.id))
-                        Text(folder.split(separator: "/").last.map(String.init) ?? folder)
+                        Text(Self.folderBaseName(folder))
                             .font(.subheadline.weight(.semibold))
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(OrbStyle.icon)
                             .rotationEffect(.degrees(collapsed.contains(folder) ? 0 : 90))
-                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }.accessibilityIdentifier("folder.\(folder)")
                 NavigationLink { OrbConversation(missionID: nil, project: project.id, folder: folder) } label: { Image(systemName: "plus").font(.system(size: 14)).frame(width: 44, height: 44) }.accessibilityLabel("New agent in \(folder)")
-            }.padding(.leading, CGFloat(min(36, max(0, folder.split(separator: "/").count - 1) * 12))).padding(.top, 2)
+            }
+            .contentShape(Rectangle())
+            .contextMenu {
+                NavigationLink {
+                    OrbConversation(missionID: nil, project: project.id, folder: folder)
+                } label: {
+                    Label("New agent in folder", systemImage: "plus.bubble")
+                }
+                Button {
+                    newFolderParent = folder
+                    folderName = ""
+                    newFolder = true
+                } label: {
+                    Label("New subfolder", systemImage: "folder.badge.plus")
+                }
+                NavigationLink {
+                    OrbDocuments(project: project.id, path: folder)
+                } label: {
+                    Label("Folder context files", systemImage: "doc.text")
+                }
+                Divider()
+                Button {
+                    renameFolderDraft = Self.folderBaseName(folder)
+                    renamingFolder = folder
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button {
+                    moveFolderDraft = Self.folderParent(folder)
+                    movingFolder = folder
+                } label: {
+                    Label("Move…", systemImage: "folder")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    deletingFolder = folder
+                } label: {
+                    Label("Delete…", systemImage: "trash")
+                }
+            }
+            .padding(.leading, CGFloat(min(36, max(0, folder.split(separator: "/").count - 1) * 12))).padding(.top, 2)
             if !collapsed.contains(folder) || !search.isEmpty {
                 ForEach(flatten(nestedRoots.filter { $0.mission.folder == folder })) { item in
                     missionRowView(item)
@@ -888,8 +980,107 @@ struct OrbProjectPage: View {
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
     private func mkdir() async {
-        guard !folderName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        do { _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file/mkdir", method: "POST", body: .object(["path": .string(folderName)])); folderName = ""; await load(force: true) }
-        catch { self.error = error.localizedDescription }
+        let trimmed = folderName.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else { return }
+        let fullPath = newFolderParent.isEmpty ? trimmed : "\(newFolderParent)/\(trimmed)"
+        do {
+            _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file/mkdir", method: "POST", body: .object(["path": .string(fullPath)]))
+            folderName = ""
+            newFolderParent = ""
+            OrbReadCache.invalidate("project:\(project.id)")
+            OrbReadCache.invalidate("project:\(project.id):all")
+            await load(force: true)
+        } catch { self.error = error.localizedDescription }
+    }
+    private func migrateFolderMissions(from oldPath: String, to destination: String) async {
+        let affected = missions.filter { $0.folder == oldPath || $0.folder.hasPrefix(oldPath + "/") }
+        for m in affected {
+            let suffix = String(m.folder.dropFirst(oldPath.count))
+            let targetFolder = destination + suffix
+            var tags = m.raw["tags"].items.map(\.text).filter { !$0.isEmpty && !$0.hasPrefix("orb-folder:") }
+            if !targetFolder.isEmpty {
+                tags.append("orb-folder:\(targetFolder)")
+            }
+            _ = try? await api.call(
+                "/api/control/missions/\(OrbCore.escape(m.id))/project",
+                method: "POST",
+                body: .object([
+                    "project": .string(project.id),
+                    "tags": .array(tags.map(OrbJSON.string))
+                ])
+            )
+        }
+    }
+    private func renameFolder(_ folder: String, to rawNewName: String) async {
+        let input = rawNewName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty && !input.contains("/") && !input.contains("\\") else {
+            self.error = "Enter a folder name without slashes."
+            return
+        }
+        let parent = Self.folderParent(folder)
+        let destination = parent.isEmpty ? input : "\(parent)/\(input)"
+        guard destination != folder else { return }
+        do {
+            if folders.contains(where: { $0 == folder || $0.hasPrefix(folder + "/") }) {
+                _ = try await api.call(
+                    "/api/projects/\(OrbCore.escape(project.id))/file/transfer",
+                    method: "POST",
+                    body: .object(["path": .string(folder), "destination": .string(destination), "copy": .bool(false)])
+                )
+            } else {
+                _ = try await api.call(
+                    "/api/projects/\(OrbCore.escape(project.id))/file/mkdir",
+                    method: "POST",
+                    body: .object(["path": .string(destination)])
+                )
+            }
+            await migrateFolderMissions(from: folder, to: destination)
+            OrbReadCache.invalidate("project:\(project.id)")
+            OrbReadCache.invalidate("project:\(project.id):all")
+            await load(force: true)
+        } catch { self.error = error.localizedDescription }
+    }
+    private func moveFolder(_ folder: String, into rawParent: String) async {
+        let parent = rawParent.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let base = Self.folderBaseName(folder)
+        let destination = parent.isEmpty ? base : "\(parent)/\(base)"
+        guard destination != folder else { return }
+        if destination.hasPrefix(folder + "/") {
+            self.error = "Cannot move a folder inside itself."
+            return
+        }
+        do {
+            if folders.contains(where: { $0 == folder || $0.hasPrefix(folder + "/") }) {
+                _ = try await api.call(
+                    "/api/projects/\(OrbCore.escape(project.id))/file/transfer",
+                    method: "POST",
+                    body: .object(["path": .string(folder), "destination": .string(destination), "copy": .bool(false)])
+                )
+            } else {
+                _ = try await api.call(
+                    "/api/projects/\(OrbCore.escape(project.id))/file/mkdir",
+                    method: "POST",
+                    body: .object(["path": .string(destination)])
+                )
+            }
+            await migrateFolderMissions(from: folder, to: destination)
+            OrbReadCache.invalidate("project:\(project.id)")
+            OrbReadCache.invalidate("project:\(project.id):all")
+            await load(force: true)
+        } catch { self.error = error.localizedDescription }
+    }
+    private func deleteFolder(_ folder: String) async {
+        let hasMissions = missions.contains { $0.state != "acknowledged" && ($0.folder == folder || $0.folder.hasPrefix(folder + "/")) }
+        if hasMissions {
+            self.error = "Move or archive the agents in \"\(folder)\" before deleting it."
+            return
+        }
+        do {
+            _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file?path=\(OrbCore.escape(folder))", method: "DELETE")
+            folders.removeAll { $0 == folder || $0.hasPrefix(folder + "/") }
+            OrbReadCache.invalidate("project:\(project.id)")
+            OrbReadCache.invalidate("project:\(project.id):all")
+            await load(force: true)
+        } catch { self.error = error.localizedDescription }
     }
 }
