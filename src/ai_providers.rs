@@ -604,13 +604,33 @@ impl AIProviderStore {
     }
 
     /// Persist a browser-provisioned account before making it visible to readers.
-    pub(crate) async fn persist_account(&self, mut provider: AIProvider) -> std::io::Result<()> {
+    pub(crate) async fn persist_account(
+        &self,
+        mut provider: AIProvider,
+        reconnect: bool,
+    ) -> std::io::Result<()> {
         let mut providers = self.providers.write().await;
         let mut updated = providers.clone();
-        if updated.is_empty() {
-            provider.is_default = true;
+        if reconnect {
+            let latest = updated.get_mut(&provider.id).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Account was removed")
+            })?;
+            if latest.provider_type != ProviderType::Mistral || !latest.mistral_subscription {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Account changed while signing in",
+                ));
+            }
+            // A browser exchange can take minutes. Preserve settings changed
+            // during that interval and never resurrect a deleted account.
+            latest.api_key = provider.api_key.take();
+            latest.updated_at = provider.updated_at;
+        } else {
+            if updated.is_empty() {
+                provider.is_default = true;
+            }
+            updated.insert(provider.id, provider);
         }
-        updated.insert(provider.id, provider);
         let values: Vec<_> = updated.values().collect();
         let contents = serde_json::to_vec_pretty(&values).map_err(std::io::Error::other)?;
         self.write_private_snapshot(&contents)?;

@@ -173,6 +173,7 @@ async fn persist_registered_account(
     session: &Arc<Mutex<Session>>,
     store: &crate::ai_providers::AIProviderStore,
     account: AIProvider,
+    reconnect: bool,
 ) -> Result<(), Error> {
     // Serialize the commit with removal from the registry. Cancellation does
     // not wait for the in-flight network exchange before unregistering it.
@@ -184,7 +185,7 @@ async fn persist_registered_account(
         return Err((StatusCode::CONFLICT, "Mistral login was cancelled.".into()));
     }
     store
-        .persist_account(account)
+        .persist_account(account, reconnect)
         .await
         .map_err(|_| failure("Could not save the Mistral account. Start a new login."))
 }
@@ -258,7 +259,14 @@ async fn status(State(state): State<App>, Path(id): Path<String>) -> Result<Json
     account.mistral_subscription = true;
     account.use_for_backends = Some(vec!["opencode".into()]);
     account.updated_at = chrono::Utc::now();
-    persist_registered_account(&id, &session, &state.ai_providers, account).await?;
+    persist_registered_account(
+        &id,
+        &session,
+        &state.ai_providers,
+        account,
+        s.target.is_some(),
+    )
+    .await?;
     super::ai_providers::sync_store_to_opencode(
         &state.ai_providers,
         &state.config.working_dir,
@@ -315,9 +323,11 @@ mod tests {
         .unwrap();
         let account = AIProvider::new(ProviderType::Mistral, "Cancelled".into());
         let account_id = account.id;
-        assert!(persist_registered_account(&id, &session, &store, account)
-            .await
-            .is_err());
+        assert!(
+            persist_registered_account(&id, &session, &store, account, false)
+                .await
+                .is_err()
+        );
         assert!(store.get(account_id).await.is_none());
         drop(exchange);
         let _ = cancellation.await.unwrap().unwrap();
@@ -363,7 +373,7 @@ mod tests {
         account.api_key = Some("test-only-key".into());
         account.mistral_subscription = true;
         let id = account.id;
-        store.persist_account(account).await.unwrap();
+        store.persist_account(account, false).await.unwrap();
         let reloaded = crate::ai_providers::AIProviderStore::new(path.clone()).await;
         let saved = reloaded.get(id).await.unwrap();
         assert!(saved.mistral_subscription);
@@ -386,7 +396,36 @@ mod tests {
         let store = crate::ai_providers::AIProviderStore::new(path.join("providers.json")).await;
         let account = AIProvider::new(ProviderType::Mistral, "Mistral Vibe".into());
         let id = account.id;
-        assert!(store.persist_account(account).await.is_err());
+        assert!(store.persist_account(account, false).await.is_err());
+        assert!(store.get(id).await.is_none());
+    }
+    #[tokio::test]
+    async fn reconnect_preserves_settings_and_does_not_resurrect_deleted_accounts() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            crate::ai_providers::AIProviderStore::new(directory.path().join("providers.json"))
+                .await;
+        let mut original = AIProvider::new(ProviderType::Mistral, "Original".into());
+        original.mistral_subscription = true;
+        let id = original.id;
+        store
+            .persist_account(original.clone(), false)
+            .await
+            .unwrap();
+        let mut edited = store.get(id).await.unwrap();
+        edited.name = "Renamed during sign-in".into();
+        edited.priority = 7;
+        edited.enabled = false;
+        store.update(id, edited).await.unwrap();
+        original.api_key = Some("new-test-key".into());
+        store.persist_account(original.clone(), true).await.unwrap();
+        let saved = store.get(id).await.unwrap();
+        assert_eq!(saved.name, "Renamed during sign-in");
+        assert_eq!(saved.priority, 7);
+        assert!(!saved.enabled);
+        assert_eq!(saved.api_key.as_deref(), Some("new-test-key"));
+        store.delete(id).await;
+        assert!(store.persist_account(original, true).await.is_err());
         assert!(store.get(id).await.is_none());
     }
 }
