@@ -500,6 +500,12 @@ impl GrokStream {
                         updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
                     }
                 }
+                Some("reasoning") => {
+                    if let Some(text) = part["text"].as_str().filter(|t| !t.is_empty()) {
+                        self.thinking = text.to_string();
+                        updates.push(StreamUpdate::ThinkingSnapshot(self.thinking.clone()));
+                    }
+                }
                 Some("tool_use") => {
                     let update = serde_json::json!({
                         "toolCallId": part["callID"], "name": part["tool"],
@@ -515,6 +521,18 @@ impl GrokStream {
                         update,
                         completed: true,
                     });
+                }
+                Some("step_finish") => {
+                    if let Some(reason) = part["reason"].as_str() {
+                        if matches!(reason, "stop" | "end_turn" | "EndTurn") {
+                            self.ended = true;
+                            self.stop_reason = Some("end_turn".to_string());
+                            updates.push(StreamUpdate::End);
+                        } else {
+                            self.ended = false;
+                            self.stop_reason = Some(reason.to_string());
+                        }
+                    }
                 }
                 Some("error") => {
                     self.error = Some(value["error"].to_string());
@@ -1904,7 +1922,10 @@ async fn continue_inner(
     }
     let prompt = content.clone().unwrap_or_else(|| {
         if mission.goal_mode {
-            if mission.backend == "antigravity" {
+            if matches!(
+                mission.backend.as_str(),
+                "antigravity" | "opencode" | "claudecode"
+            ) {
                 if let Some(objective) = mission.goal_objective.as_ref() {
                     return format!("/goal {objective}\n\n{}", super::INTERRUPTED_RESUME_PROMPT);
                 }
@@ -2162,15 +2183,21 @@ mod tests {
     fn opencode_stream_preserves_session_text_and_tools_across_chunks() {
         let mut stream = GrokStream::default();
         let lines = concat!(
+            "{\"type\":\"reasoning\",\"sessionID\":\"ses_test\",\"part\":{\"text\":\"Planning\"}}\n",
             "{\"type\":\"text\",\"sessionID\":\"ses_test\",\"part\":{\"text\":\"Checking files\"}}\n",
             "{\"type\":\"tool_use\",\"sessionID\":\"ses_test\",\"part\":{\"callID\":\"call_1\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"pwd\"},\"output\":\"/workspace\"}}}\n",
-            "{\"type\":\"text\",\"sessionID\":\"ses_test\",\"part\":{\"text\":\"Done\"}}\n"
+            "{\"type\":\"step_finish\",\"sessionID\":\"ses_test\",\"part\":{\"reason\":\"tool-calls\"}}\n",
+            "{\"type\":\"text\",\"sessionID\":\"ses_test\",\"part\":{\"text\":\"Done\"}}\n",
+            "{\"type\":\"step_finish\",\"sessionID\":\"ses_test\",\"part\":{\"reason\":\"stop\"}}\n"
         );
         let mut updates = stream.feed(&lines[..17]);
         updates.extend(stream.feed(&lines[17..]));
         assert_eq!(stream.session_id.as_deref(), Some("ses_test"));
+        assert_eq!(stream.thinking, "Planning");
         assert_eq!(stream.text, "Checking files\n\nDone");
         assert!(stream.progress);
+        assert!(stream.ended);
+        assert_eq!(stream.stop_reason.as_deref(), Some("end_turn"));
         assert!(updates.iter().any(|u| matches!(
             u,
             StreamUpdate::Tool {

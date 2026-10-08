@@ -76,6 +76,14 @@ pub fn overlays(
             if !config.is_object() {
                 return Err("OpenCode inline config must be an object".into());
             }
+            if config.get("permission").is_none() {
+                config["permission"] = json!({
+                    "*": "allow",
+                    "external_directory": { "*": "allow" },
+                    "doom_loop": "allow",
+                    "read": { "*": "allow" }
+                });
+            }
             if config.get("mcp").is_none() {
                 config["mcp"] = json!({})
             }

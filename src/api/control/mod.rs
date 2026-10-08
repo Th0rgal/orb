@@ -13229,6 +13229,12 @@ fn positional_prompt(prompt: &str) -> String {
 pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "*": "allow",
+            "external_directory": { "*": "allow" },
+            "doom_loop": "allow",
+            "read": { "*": "allow" }
+        },
         "provider": {
             "builtin": {
                 "npm": "@ai-sdk/openai-compatible",
