@@ -168,6 +168,26 @@ async fn session(id: &str) -> Result<Arc<Mutex<Session>>, Error> {
 fn response(s: &Session) -> Json<Value> {
     Json(json!({"status":s.status,"message":s.message}))
 }
+async fn persist_registered_account(
+    id: &str,
+    session: &Arc<Mutex<Session>>,
+    store: &crate::ai_providers::AIProviderStore,
+    account: AIProvider,
+) -> Result<(), Error> {
+    // Serialize the commit with removal from the registry. Cancellation does
+    // not wait for the in-flight network exchange before unregistering it.
+    let registered = sessions().lock().await;
+    if !registered
+        .get(id)
+        .is_some_and(|entry| Arc::ptr_eq(entry, session))
+    {
+        return Err((StatusCode::CONFLICT, "Mistral login was cancelled.".into()));
+    }
+    store
+        .persist_account(account)
+        .await
+        .map_err(|_| failure("Could not save the Mistral account. Start a new login."))
+}
 async fn status(State(state): State<App>, Path(id): Path<String>) -> Result<Json<Value>, Error> {
     let session = session(&id).await?;
     let mut s = session.lock().await;
@@ -238,11 +258,7 @@ async fn status(State(state): State<App>, Path(id): Path<String>) -> Result<Json
     account.mistral_subscription = true;
     account.use_for_backends = Some(vec!["opencode".into()]);
     account.updated_at = chrono::Utc::now();
-    state
-        .ai_providers
-        .persist_account(account)
-        .await
-        .map_err(|_| failure("Could not save the Mistral account. Start a new login."))?;
+    persist_registered_account(&id, &session, &state.ai_providers, account).await?;
     super::ai_providers::sync_store_to_opencode(
         &state.ai_providers,
         &state.config.working_dir,
@@ -254,7 +270,8 @@ async fn status(State(state): State<App>, Path(id): Path<String>) -> Result<Json
     Ok(response(&s))
 }
 async fn cancel(Path(id): Path<String>) -> Result<Json<Value>, Error> {
-    if let Some(session) = sessions().lock().await.remove(&id) {
+    let removed = sessions().lock().await.remove(&id);
+    if let Some(session) = removed {
         let mut s = session.lock().await;
         s.status = "failed";
         s.verifier.clear();
@@ -269,6 +286,42 @@ pub(super) fn routes() -> Router<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn cancellation_during_exchange_prevents_account_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            crate::ai_providers::AIProviderStore::new(directory.path().join("providers.json"))
+                .await;
+        let id = format!("mistral-{}", uuid::Uuid::new_v4());
+        let session = Arc::new(Mutex::new(Session {
+            process: "test".into(),
+            poll_url: "test".into(),
+            verifier: "test".into(),
+            expires: chrono::Utc::now() + chrono::Duration::minutes(1),
+            target: None,
+            status: "pending",
+            message: None,
+        }));
+        sessions().lock().await.insert(id.clone(), session.clone());
+        let exchange = session.lock().await;
+        let cancel_id = id.clone();
+        let cancellation = tokio::spawn(async move { cancel(Path(cancel_id)).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while sessions().lock().await.contains_key(&id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let account = AIProvider::new(ProviderType::Mistral, "Cancelled".into());
+        let account_id = account.id;
+        assert!(persist_registered_account(&id, &session, &store, account)
+            .await
+            .is_err());
+        assert!(store.get(account_id).await.is_none());
+        drop(exchange);
+        let _ = cancellation.await.unwrap().unwrap();
+    }
     #[test]
     fn login_destinations_are_confined_to_mistral() {
         assert!(allowed_url(
