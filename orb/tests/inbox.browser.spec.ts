@@ -22,8 +22,8 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
       backend: "claudecode",
       remote_node_id: "dgx-spark",
       history: [],
-      created_at: "2026-10-07T11:50:00Z",
-      updated_at: "2026-10-07T11:58:00Z",
+      created_at: "2026-04-17T11:50:00Z",
+      updated_at: "2026-04-17T11:58:00Z",
     },
     {
       id: "m-perm",
@@ -32,8 +32,8 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
       project: "orb",
       backend: "claudecode",
       history: [],
-      created_at: "2026-10-07T11:40:00Z",
-      updated_at: "2026-10-07T11:56:00Z",
+      created_at: "2026-04-17T11:40:00Z",
+      updated_at: "2026-04-17T11:56:00Z",
     },
     {
       id: "m-question",
@@ -49,8 +49,8 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
             "Should swipe-right mark the conversation as Done immediately with an Undo toast, or open a confirmation sheet?",
         },
       ],
-      created_at: "2026-10-07T11:20:00Z",
-      updated_at: "2026-10-07T11:52:00Z",
+      created_at: "2026-04-17T11:20:00Z",
+      updated_at: "2026-04-17T11:52:00Z",
     },
     {
       id: "m-failed",
@@ -59,8 +59,8 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
       project: "paloma",
       backend: "claudecode",
       terminal_reason: "Docker daemon unreachable in host workspace.",
-      created_at: "2026-10-07T11:10:00Z",
-      updated_at: "2026-10-07T11:51:00Z",
+      created_at: "2026-04-17T11:10:00Z",
+      updated_at: "2026-04-17T11:51:00Z",
     },
     {
       id: "m-done",
@@ -76,8 +76,8 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
             "Updated the scroll thumb track to remain hidden until pointer hover and verified all Playwright checks pass.",
         },
       ],
-      created_at: "2026-10-07T10:00:00Z",
-      updated_at: "2026-10-07T11:30:00Z",
+      created_at: "2026-04-17T10:00:00Z",
+      updated_at: "2026-04-17T11:30:00Z",
     },
     {
       id: "m-child-fail",
@@ -85,8 +85,8 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
       status: "failed",
       project: "paloma",
       parent_mission_id: "m-done",
-      created_at: "2026-10-07T11:25:00Z",
-      updated_at: "2026-10-07T11:32:00Z",
+      created_at: "2026-04-17T11:25:00Z",
+      updated_at: "2026-04-17T11:32:00Z",
     },
   ];
 
@@ -193,8 +193,36 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
       const body = req.postDataJSON() as { mission_id: string; content: string };
       sentMessages.push({ id: body.mission_id, content: body.content });
       const target = missions.find((m) => m.id === body.mission_id);
-      if (target) target.status = "running";
+      if (target) {
+        target.status = "running";
+        target.history = [
+          ...(target.history ?? []),
+          { role: "user", content: body.content },
+        ];
+      }
       await route.fulfill({ json: { id: "msg-1", queued: false } });
+      return;
+    }
+
+    if (path === "/api/control/stream" && req.method() === "GET") {
+      const mid = url.searchParams.get("mission");
+      if (mid === "m-question" && sentMessages.some((m) => m.id === "m-question")) {
+        const sseBody = [
+          `event: text_delta\ndata: ${JSON.stringify({ content: "Implemented swipe-right with Undo toast.", sequence: 10 })}\n\n`,
+          `event: assistant_message\ndata: ${JSON.stringify({ content: "Implemented swipe-right with Undo toast.", sequence: 11 })}\n\n`,
+        ].join("");
+        await route.fulfill({
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+          body: sseBody,
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+        body: "",
+      });
       return;
     }
 
@@ -267,9 +295,12 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await page.keyboard.press("r");
   await expect(questionRow.locator(".inbox-peek-drawer")).toBeVisible();
   await expect(questionRow.locator(".inbox-peek-status-card")).toContainText("Should swipe-right mark the conversation as Done");
-  const replyInput = questionRow.locator(".inbox-reply-input");
+  await expect(questionRow.locator(".inbox-peek-composer .composer")).toBeVisible();
+  await expect(questionRow.locator(".inbox-peek-composer .plus")).toBeVisible();
+  const replyInput = questionRow.locator(".inbox-peek-composer textarea");
   await expect(replyInput).toBeFocused();
   await replyInput.fill("Use swipe-right with an Undo toast.");
+  await expect(questionRow.locator(".inbox-peek-composer .send")).toBeVisible();
   await replyInput.press("Enter");
 
   await expect.poll(() => sentMessages.length).toBe(2);
@@ -277,8 +308,20 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
     id: "m-question",
     content: "Use swipe-right with an Undo toast.",
   });
-  // Replied mission immediately leaves the actionable list
-  await expect(questionRow).toBeHidden();
+  // Peek drawer stays open after sending a message, row transitions from unread to read in-place,
+  // and both the sent user message and live-streamed assistant response appear inside Peek
+  await expect(questionRow).toBeVisible();
+  await expect(questionRow.locator(".inbox-peek-drawer")).toBeVisible();
+  await expect(questionRow).toHaveAttribute("data-inbox-unread", "false");
+  await expect(questionRow.locator(".inbox-peek-transcript .user").last()).toContainText(
+    "Use swipe-right with an Undo toast.",
+  );
+  await expect(questionRow.locator(".inbox-peek-transcript .st-text").last()).toContainText(
+    "Implemented swipe-right with Undo toast.",
+  );
+  // Close the Peek drawer on m-question with Escape
+  await replyInput.press("Escape");
+  await expect(questionRow.locator(".inbox-peek-drawer")).toBeHidden();
 
   // Verify m-done shows the Asked/outcome overview, omits redundant Completed badge, shows failed child track pill, and supports Space unified peek & reply preview
   const doneRow = page.locator('[data-inbox-id="m-done"]');
@@ -303,11 +346,25 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
 
   await page.keyboard.press("Space");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeVisible();
-  await expect(doneRow.locator(".inbox-peek-drawer")).toContainText(
+  await expect(doneRow.locator(".inbox-peek-transcript .user")).toContainText(
     "Hide the sidebar scroll thumb until hover.",
+  );
+  // Verify there is no legacy vertical .inbox-peek-role.user box
+  await expect(doneRow.locator(".inbox-peek-role")).toHaveCount(0);
+  await expect(doneRow.locator(".inbox-peek-transcript .st-text")).toContainText(
+    "Updated the scroll thumb track to remain hidden",
   );
   await expect(doneRow.locator(".inbox-peek-status-card")).toContainText(
     "Updated the scroll thumb track to remain hidden",
+  );
+  // Verify the Peek scroll container is anchored to the bottom on open
+  const scrollMetrics = await doneRow.locator(".inbox-peek-scroll").evaluate((el) => ({
+    scrollTop: el.scrollTop,
+    clientHeight: el.clientHeight,
+    scrollHeight: el.scrollHeight,
+  }));
+  expect(scrollMetrics.scrollTop + scrollMetrics.clientHeight).toBeGreaterThanOrEqual(
+    scrollMetrics.scrollHeight - 8,
   );
   await page.keyboard.press("Space");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeHidden();
@@ -334,6 +391,221 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await modelPill.click();
   await expect(page.locator(".settings-body h2")).toHaveText("Inbox");
   await expect(page.getByLabel("Inbox summary model")).toHaveValue("builtin/smart");
+});
+
+test("Inbox Peek renders shared Transcript with inline images, attached context, WorkFold, and bottom-anchored scroll without reset on poll", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "test-token");
+    localStorage.setItem("orb-theme", "dark");
+  });
+
+  const tinyPngDataUrl =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  const userPrompt = [
+    "[Image #1] Lorsque j'ajoute une image dans l'application de bureau, cela devrait aussi m'ajouter l'image comme dans un bloc.",
+    "",
+    `[Image #1] [Uploaded: ${tinyPngDataUrl}]`,
+    "",
+    "<!-- paloma:attachment:11111111-2222-3333-4444-555555555555 -->",
+    "Attached context: read `.paloma/messages/11111111-2222-3333-4444-555555555555/.paloma/attach.md` (paths in that manifest are relative to `.paloma/messages/11111111-2222-3333-4444-555555555555`).",
+  ].join("\n");
+
+  const longAssistantReply = [
+    "### Analyse & Correctif",
+    "",
+    "1. Réutilisation du composant `<Transcript>` dans `orb/src/Inbox.tsx` afin de partager exactement le rendu de `MissionView`.",
+    "2. Prise en charge native des miniatures `<MessageImage>` avec `<Lightbox>` et du badge `Attached context`.",
+    "3. Ancrage du scroll en bas à l'ouverture sur le dernier message et suppression des remounts DOM lors des polls.",
+    "",
+    "```tsx",
+    "export function renderPeekTranscript(items: StreamItem[]) {",
+    "  return <Transcript items={items} />;",
+    "}",
+    "```",
+    "",
+    "Paragraphe supplémentaire 1 pour dépasser la hauteur de 360px du conteneur de défilement et vérifier que le scroll démarre bien tout en bas.",
+    "",
+    "Paragraphe supplémentaire 2 : toutes les vérifications unitaires et navigateur passent sans aucun clignotement.",
+    "",
+    "Paragraphe final visible tout en bas du tiroir Peek.",
+  ].join("\n");
+
+  const missions = [
+    {
+      id: "m-peek-rich",
+      title: "Tu travailles sur l'ORB, enfin anciennement sandbox.sh",
+      status: "completed",
+      project: "orb",
+      backend: "claudecode",
+      history: [
+        { role: "user", content: userPrompt },
+        { role: "assistant", content: longAssistantReply },
+      ],
+      created_at: "2026-10-08T12:00:00Z",
+      updated_at: "2026-10-08T12:30:00Z",
+    },
+  ];
+
+  await page.route("**/api/**", async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const path = url.pathname;
+
+    if (path === "/api/projects") {
+      await route.fulfill({
+        json: { projects: [{ slug: "orb", title: "Sandboxed", color: "blue" }] },
+      });
+      return;
+    }
+    if (path === "/api/control/missions" && req.method() === "GET") {
+      await route.fulfill({ json: missions });
+      return;
+    }
+    if (path === "/api/control/missions/m-peek-rich/events") {
+      await route.fulfill({
+        headers: {
+          "X-Orb-Events-Protocol": "1",
+          "X-Has-More": "false",
+          "X-Next-Cursor": "3",
+          "X-Page-Max-Sequence": "3",
+          "X-Max-Sequence": "3",
+        },
+        json: [
+          {
+            id: 1,
+            sequence: 1,
+            event_type: "user_message",
+            timestamp: "2026-10-08T12:00:00Z",
+            content: userPrompt,
+          },
+          {
+            id: 2,
+            sequence: 2,
+            event_type: "tool_call",
+            timestamp: "2026-10-08T12:05:00Z",
+            tool_call_id: "call-edit-1",
+            tool_name: "Edit",
+            content: JSON.stringify({ file_path: "orb/src/Inbox.tsx" }),
+          },
+          {
+            id: 3,
+            sequence: 3,
+            event_type: "tool_result",
+            timestamp: "2026-10-08T12:05:02Z",
+            tool_call_id: "call-edit-1",
+            tool_name: "Edit",
+            content: "ok",
+          },
+          {
+            id: 4,
+            sequence: 4,
+            event_type: "agent_message",
+            timestamp: "2026-10-08T12:30:00Z",
+            content: longAssistantReply,
+          },
+        ],
+      });
+      return;
+    }
+    if (path.endsWith("/queue") && req.method() === "GET") {
+      await route.fulfill({ json: [] });
+      return;
+    }
+    await route.fulfill({ json: {} });
+  });
+
+  await page.goto("/");
+  const inboxNav = page.locator("#orb-sidebar").getByRole("button", { name: /Inbox/ });
+  await expect(inboxNav).toBeVisible({ timeout: 15000 });
+  await page.keyboard.press("Meta+KeyI");
+  const row = page.locator('[data-inbox-id="m-peek-rich"]');
+  await expect(row).toBeVisible();
+
+  // Verify legacy "Sandboxed" project title for slug "orb" is normalized to "Orb"
+  await expect(row.locator(".inbox-project-name")).toHaveText("Orb");
+
+  // Verify the Asked row stripped [Image #1] and [Uploaded: ...] cleanly
+  await expect(row.locator(".inbox-task-text")).toContainText(
+    "Lorsque j'ajoute une image dans l'application de bureau",
+  );
+  await expect(row.locator(".inbox-task-text")).not.toContainText("[Uploaded:");
+
+  // Open Peek drawer
+  await row.hover();
+  await page.keyboard.press("Space");
+  const drawer = row.locator(".inbox-peek-drawer");
+  await expect(drawer).toBeVisible();
+
+  // Verify shared Composer is rendered inside Peek with "Send follow-up" placeholder and + attachment button
+  const composer = drawer.locator(".inbox-peek-composer .composer");
+  await expect(composer).toBeVisible();
+  await expect(composer.locator(".plus")).toBeVisible();
+  await expect(composer.locator("textarea")).toHaveAttribute("placeholder", /Send follow-up/);
+
+  // Verify outer .inbox-page does not become unnecessarily scrollable when a single Peek card is open
+  const pageScrollMetrics = await page.locator(".inbox-page").evaluate((el) => ({
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+  }));
+  expect(pageScrollMetrics.scrollHeight).toBeLessThanOrEqual(pageScrollMetrics.clientHeight);
+
+  // Verify shared Transcript elements render: .user bubble, .message-image thumbnail, .user-context badge, .st-work fold, and .st-text Markdown
+  const userBubble = drawer.locator(".inbox-peek-transcript .user");
+  await expect(userBubble).toBeVisible();
+  await expect(userBubble.locator(".message-image img")).toBeVisible();
+  await expect(userBubble.locator(".message-image span")).toHaveText("#1");
+  await expect(userBubble.locator(".user-context")).toHaveText("Attached context");
+  await expect(drawer.locator(".inbox-peek-transcript .st-work")).toContainText("Edited 1 file");
+  await expect(drawer.locator(".inbox-peek-transcript .st-text")).toContainText(
+    "Paragraphe final visible tout en bas du tiroir Peek.",
+  );
+
+  // Verify scroll started at the bottom (on the latest message)
+  const scroller = drawer.locator(".inbox-peek-scroll");
+  await expect
+    .poll(async () => {
+      const m = await scroller.evaluate((el) => ({
+        top: el.scrollTop,
+        ch: el.clientHeight,
+        sh: el.scrollHeight,
+      }));
+      return m.sh > m.ch && m.top + m.ch >= m.sh - 8;
+    })
+    .toBe(true);
+
+  if (process.env.ORB_SCREENSHOT_DIR) {
+    await page.screenshot({
+      path: `${process.env.ORB_SCREENSHOT_DIR}/orb-desktop-inbox-rich-peek.png`,
+    });
+  }
+
+  // Tag the DOM node inside .inbox-peek-transcript, scroll up to 40px, and wait across a 5.5s poll cycle
+  // to verify neither DOM identity nor scrollTop resets/blinks.
+  await scroller.evaluate((el) => {
+    (el.querySelector(".user") as HTMLElement & { __peekTag?: string }).__peekTag = "alive";
+    el.scrollTop = 40;
+    el.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(5500);
+  const afterPoll = await scroller.evaluate((el) => ({
+    scrollTop: el.scrollTop,
+    tag: (el.querySelector(".user") as HTMLElement & { __peekTag?: string })?.__peekTag,
+  }));
+  expect(afterPoll.tag).toBe("alive");
+  expect(afterPoll.scrollTop).toBe(40);
+
+  if (process.env.ORB_SCREENSHOT_DIR) {
+    await scroller.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await page.screenshot({
+      path: `${process.env.ORB_SCREENSHOT_DIR}/orb-desktop-inbox-rich-peek-top.png`,
+    });
+  }
 });
 
 test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1", async ({ page }) => {

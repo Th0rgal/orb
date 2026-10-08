@@ -602,4 +602,51 @@ describe("classifyInboxMission & buildInboxSections", () => {
       "Morpho Midnight Solidity Import & EVM Parity",
     );
   });
+
+  it("strips [Image #N] and [Uploaded: ...] from lastRequest while preserving raw StreamItem references for Transcript in buildPeekStreamItems", async () => {
+    const { buildPeekStreamItems, extractLastRequest } = await import("../src/inboxModel");
+
+    const imgMission = makeMission({
+      id: "m-img-peek",
+      title: "Tu travailles sur l'ORB, enfin anciennement sandbox.sh",
+      status: "completed",
+      project: "orb",
+    });
+
+    const userItem: StreamItem = {
+      kind: "user",
+      key: "u-img-1",
+      text: "[Image #1] Lorsque j'ajoute une image dans l'application de bureau, cela devrait aussi m'ajouter l'image comme dans un bloc.\n\n[Image #1] [Uploaded: /root/.sandboxed-sh/uploads/core/1775647709226-image.png]\n\n<!-- paloma:attachment:11111111-2222-3333-4444-555555555555 -->\nAttached context:\n- File: orb/src/Composer.tsx",
+    };
+    const toolItem: StreamItem = {
+      kind: "tool",
+      key: "t-img-1",
+      callId: "c-img-1",
+      name: "edit",
+      done: true,
+      args: { file_path: "orb/src/Composer.tsx" },
+    };
+    const assistantItem: StreamItem = {
+      kind: "text",
+      key: "a-img-1",
+      text: "C'est fait dans `orb/src/Composer.tsx` : l'image collée affiche désormais la miniature.",
+      live: false,
+    };
+
+    const req = extractLastRequest(imgMission, [userItem, toolItem, assistantItem]);
+    expect(req).toBe(
+      "Lorsque j'ajoute une image dans l'application de bureau, cela devrait aussi m'ajouter l'image comme dans un bloc.",
+    );
+    expect(req).not.toContain("[Image #1]");
+    expect(req).not.toContain("[Uploaded:");
+
+    const peek = buildPeekStreamItems(imgMission, [userItem, toolItem, assistantItem], "", false);
+    expect(peek.hiddenTurnCount).toBe(0);
+    expect(peek.items).toHaveLength(3);
+    // Exact object identity is preserved so Solid's Transcript store reconciliation does not remount DOM nodes
+    expect(peek.items[0]).toBe(userItem);
+    expect(peek.items[1]).toBe(toolItem);
+    expect(peek.items[2]).toBe(assistantItem);
+  });
 });
+

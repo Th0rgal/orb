@@ -6,19 +6,43 @@ import {
   createSignal,
   onCleanup,
   onMount,
+  untrack,
+  useContext,
+  type JSX,
 } from "solid-js";
 import {
   api,
   archiveMission,
+  cancelMission,
+  connectionVersion,
   isConnected,
   reopenMission,
   sendMissionMessage,
   type Mission,
   type ProjectSummary,
 } from "./api";
+import { Composer } from "./App";
+import { chipToAttachment, type AttachChip } from "./attach";
 import { ErrorNotice } from "./ErrorNotice";
+import {
+  FileReferenceContext,
+  type ReferenceResolver,
+} from "./fileReferenceContext";
+import {
+  createFileClient,
+  fileScopeKey,
+  parseFileTarget,
+  type FileRef,
+  type FileSource,
+} from "./fileResources";
 import { hasFocusScope } from "./focusScope";
 import * as Ic from "./icons";
+import {
+  imagePrompt,
+  stageLocalImages,
+  stageRemoteImages,
+  type DraftImage,
+} from "./imageAttachments";
 import {
   getCachedInboxDigest,
   inboxDigestVersion,
@@ -26,18 +50,31 @@ import {
 } from "./inboxDigest";
 import {
   buildInboxSections,
+  buildPeekStreamItems,
   isSyntheticUserMessage,
   type InboxItem,
   type InboxOption,
 } from "./inboxModel";
 import { inboxConfig } from "./inboxSettings";
-import { MdView as Markdown } from "./Markdown";
+import {
+  bindWorkspace,
+  localBinding,
+  materializeMentions,
+  prepareProjectSkills,
+  refreshLocalBindings,
+  writeLocalFiles,
+} from "./localAgents";
+import { enqueueLocalMessage } from "./localMessageQueue";
 import { pendingMissionInteraction } from "./missionAttention";
 import {
   loadTranscript,
   peekReadyTranscript,
+  peekTranscript,
   prefetchTranscript,
+  putTranscript,
+  putTranscriptItems,
   refreshTranscript,
+  retainTranscript,
   transcriptVersion,
 } from "./missionCache";
 import {
@@ -49,6 +86,9 @@ import {
 import { rememberApprovedPlan } from "./PlanProgress";
 import { projectColor } from "./projectAppearance";
 import { InboxSkeleton } from "./Skeleton";
+import { streamMission, type StreamEvent } from "./stream";
+import { Transcript, type StreamItem } from "./Transcript";
+import { applyStreamEvent } from "./transcriptModel";
 
 export type InboxViewMode = "unread" | "attention" | "all";
 
@@ -63,6 +103,186 @@ const invokeLocalInteraction = (command: string, args: Record<string, unknown>) 
   }
   return host.__TAURI_INTERNALS__.invoke(command, args);
 };
+
+function MissionFileScope(p: {
+  mission: Mission;
+  onOpenMission: (id: string) => void;
+  children: JSX.Element;
+}) {
+  const parent = useContext(FileReferenceContext);
+  let client = createFileClient({ mission: p.mission });
+  let rootPromise: Promise<FileSource[]> | undefined;
+  const cache = new Map<string, Promise<FileRef[]>>();
+  let queue = new Map<string, Array<(refs: FileRef[]) => void>>();
+  let batchTimer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+
+  const scopeKey = createMemo(() => fileScopeKey({ mission: p.mission }));
+
+  createEffect(() => {
+    scopeKey();
+    generation += 1;
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = undefined;
+    }
+    for (const callbacks of queue.values()) {
+      callbacks.forEach((cb) => cb([]));
+    }
+    queue = new Map();
+    client = createFileClient({ mission: p.mission });
+    rootPromise = undefined;
+    cache.clear();
+  });
+
+  onCleanup(() => {
+    generation += 1;
+    if (batchTimer) clearTimeout(batchTimer);
+  });
+
+  const ensureRoots = () => {
+    if (!rootPromise) {
+      rootPromise = client.roots().catch((err) => {
+        rootPromise = undefined;
+        throw err;
+      });
+    }
+    return rootPromise;
+  };
+
+  async function flushReferences() {
+    batchTimer = undefined;
+    const pending = queue;
+    queue = new Map();
+    const g = generation;
+    const c = client;
+    try {
+      const roots = await ensureRoots();
+      const paths = [...pending.keys()];
+      const all = new Map<string, FileRef[]>();
+      for (let i = 0; i < paths.length; i += 64) {
+        await Promise.all(
+          roots
+            .filter((s) => s.available)
+            .map(async (root) => {
+              try {
+                const reply = await c.call(root.id, {
+                  action: "resolve",
+                  paths: paths.slice(i, i + 64),
+                });
+                for (const r of reply.results ?? []) {
+                  all.set(r.reference, [
+                    ...(all.get(r.reference) ?? []),
+                    ...r.matches.map((m) => ({ ...m, source: root.id })),
+                  ]);
+                }
+              } catch {
+                /* unavailable sources never manufacture a link */
+              }
+            }),
+        );
+      }
+      for (const [path, callbacks] of pending) {
+        callbacks.forEach((cb) =>
+          cb(g === generation ? (all.get(path) ?? []) : []),
+        );
+      }
+    } catch {
+      for (const callbacks of pending.values()) {
+        callbacks.forEach((cb) => cb([]));
+      }
+    }
+  }
+
+  const resolver: ReferenceResolver = {
+    async loadImage(path) {
+      scopeKey();
+      const g = generation;
+      const c = client;
+      const preview = c.imagePreview(path);
+      if (preview) return preview;
+      const extension = path.split(".").at(-1)?.toLowerCase();
+      const mime = (
+        {
+          png: "image/png",
+          jpg: "image/jpeg",
+          jpeg: "image/jpeg",
+          webp: "image/webp",
+          gif: "image/gif",
+        } as Record<string, string>
+      )[extension ?? ""];
+      if (!mime) return null;
+      cache.delete(path);
+      const refs = await resolver.resolve(path);
+      if (g !== generation) return null;
+      if (!refs.length) {
+        rootPromise = undefined;
+        const url = await c.loadUploadedImage(path);
+        if (g !== generation) {
+          if (url) URL.revokeObjectURL(url);
+          return null;
+        }
+        return url;
+      }
+      const ref = refs[0];
+      const chunks: Uint8Array[] = [];
+      let offset = 0;
+      while (true) {
+        const part = await c.call(ref.source, {
+          action: "download",
+          path: ref.path,
+          offset,
+        });
+        if (g !== generation) return null;
+        if (!part.bytes?.length || !part.size || part.size > 20 * 1024 * 1024)
+          return null;
+        chunks.push(new Uint8Array(part.bytes));
+        offset += part.bytes.length;
+        if (offset >= part.size) break;
+        if (offset > 20 * 1024 * 1024) return null;
+      }
+      return URL.createObjectURL(new Blob(chunks as BlobPart[], { type: mime }));
+    },
+    resolve(raw) {
+      const parsed = parseFileTarget(raw);
+      if (!parsed) return Promise.resolve([]);
+      const path = parsed.path;
+      if (!cache.has(path)) {
+        cache.set(
+          path,
+          new Promise((resolve) => {
+            queue.set(path, [...(queue.get(path) ?? []), resolve]);
+            if (!batchTimer)
+              batchTimer = setTimeout(() => void flushReferences(), 80);
+          }),
+        );
+      }
+      return cache
+        .get(path)!
+        .then((refs) => refs.map((r) => ({ ...r, line: parsed.line })));
+    },
+    open(refs) {
+      if (parent && refs.length > 0) {
+        parent.open(refs);
+      } else {
+        p.onOpenMission(p.mission.id);
+      }
+    },
+    search(query) {
+      if (parent) {
+        parent.search(query);
+      } else {
+        p.onOpenMission(p.mission.id);
+      }
+    },
+  };
+
+  return (
+    <FileReferenceContext.Provider value={resolver}>
+      {p.children}
+    </FileReferenceContext.Provider>
+  );
+}
 
 export function InboxPage(p: {
   missions: ReadonlyArray<Mission>;
@@ -82,6 +302,7 @@ export function InboxPage(p: {
   const [replyingId, setReplyingId] = createSignal<string | null>(null);
   const [peekedIds, setPeekedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [expandedPeekIds, setExpandedPeekIds] = createSignal<ReadonlySet<string>>(new Set());
+  const [seenUnreadIds, setSeenUnreadIds] = createSignal<ReadonlySet<string>>(new Set());
   const [peekReplyDrafts, setPeekReplyDrafts] = createSignal<Record<string, string>>({});
   const [busyIds, setBusyIds] = createSignal<ReadonlySet<string>>(new Set());
   const [dismissedIds, setDismissedIds] = createSignal<ReadonlySet<string>>(new Set());
@@ -96,6 +317,7 @@ export function InboxPage(p: {
 
   let undoTimer: ReturnType<typeof setTimeout> | undefined;
   let listContainerRef: HTMLDivElement | undefined;
+  const peekedSectionById = new Map<string, "needs_you" | "ready">();
 
   onMount(() => {
     const clock = setInterval(() => setNowMs(Date.now()), 30_000);
@@ -126,11 +348,39 @@ export function InboxPage(p: {
     return buildInboxSections(
       visibleMissions,
       p.projects,
-      (id) => peekReadyTranscript(id)?.items,
+      (id) => (peekReadyTranscript(id) ?? peekTranscript(id))?.items,
       (id) => pendingMissionInteraction(id),
       nowMs(),
     );
   });
+
+  // Remember items that were unread during the current Inbox session so interacting with them
+  // (e.g. replying in Peek or toggling read state) transitions their visual styling to .read
+  // without yanking the card out from under the user until they switch tabs or mark Done.
+  createEffect(() => {
+    const secs = allSections();
+    const currentUnread = [...secs.needsYou, ...secs.ready].filter((i) => i.unread);
+    for (const item of secs.needsYou) peekedSectionById.set(item.id, "needs_you");
+    for (const item of secs.ready) peekedSectionById.set(item.id, "ready");
+    if (!currentUnread.length) return;
+    setSeenUnreadIds((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const item of currentUnread) {
+        if (!next.has(item.id)) {
+          next.add(item.id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  });
+
+  const switchViewMode = (mode: InboxViewMode) => {
+    if (viewMode() === mode) return;
+    setSeenUnreadIds(new Set<string>());
+    setViewMode(mode);
+  };
 
   const itemById = createMemo(() => {
     const map = new Map<string, InboxItem>();
@@ -144,18 +394,29 @@ export function InboxPage(p: {
   const refreshedTranscriptAt = new Map<string, number>();
 
   const matchesViewMode = (item: InboxItem, mode = viewMode()): boolean => {
-    if (mode === "unread") return item.unread;
+    if (peekedIds().has(item.id)) return true;
+    if (mode === "unread") return item.unread || seenUnreadIds().has(item.id);
     if (mode === "attention") return item.attention;
     return true;
   };
 
-  const modeFilteredNeedsYou = createMemo(() =>
-    allSections().needsYou.filter((item) => matchesViewMode(item)),
-  );
+  const modeFilteredNeedsYou = createMemo(() => {
+    const secs = allSections();
+    const peekedWorking = secs.working.filter(
+      (item) =>
+        peekedIds().has(item.id) &&
+        (peekedSectionById.get(item.id) ?? "needs_you") === "needs_you",
+    );
+    return [...secs.needsYou, ...peekedWorking].filter((item) => matchesViewMode(item));
+  });
 
-  const modeFilteredReady = createMemo(() =>
-    allSections().ready.filter((item) => matchesViewMode(item)),
-  );
+  const modeFilteredReady = createMemo(() => {
+    const secs = allSections();
+    const peekedWorking = secs.working.filter(
+      (item) => peekedIds().has(item.id) && peekedSectionById.get(item.id) === "ready",
+    );
+    return [...secs.ready, ...peekedWorking].filter((item) => matchesViewMode(item));
+  });
 
   const availableProjects = createMemo(() => {
     const counts = new Map<string, { slug: string; title: string; count: number }>();
@@ -202,7 +463,10 @@ export function InboxPage(p: {
   );
 
   const workingIds = createMemo<string[]>(
-    () => allSections().working.map((item) => item.id),
+    () =>
+      allSections()
+        .working.filter((item) => !peekedIds().has(item.id))
+        .map((item) => item.id),
     [],
     { equals: sameIdList },
   );
@@ -274,7 +538,7 @@ export function InboxPage(p: {
   });
 
   const markItemAndChildrenRead = (item: InboxItem) => {
-    markMissionRead(item.mission);
+    markMissionRead(item.mission, true, Boolean(item.interaction));
     if (item.childSummary?.failedChildren.length) {
       markMissionsRead(item.childSummary.failedChildren.map((c) => c.mission));
     }
@@ -282,13 +546,7 @@ export function InboxPage(p: {
 
   const toggleReadState = (item: InboxItem) => {
     if (item.unread) {
-      const items = actionableItems();
-      const idx = items.findIndex((x) => x.id === item.id);
-      const nextFocus = items[idx + 1]?.id ?? items[idx - 1]?.id ?? null;
       markItemAndChildrenRead(item);
-      if (viewMode() === "unread" && focusedId() === item.id) {
-        setFocusedId(nextFocus);
-      }
     } else {
       markMissionUnread(item.mission);
     }
@@ -310,7 +568,7 @@ export function InboxPage(p: {
   const focusReplyInput = (id: string) => {
     queueMicrotask(() => {
       const input = listContainerRef?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
-        `[data-inbox-id="${CSS.escape(id)}"] .inbox-reply-input`,
+        `[data-inbox-id="${CSS.escape(id)}"] .inbox-peek-composer textarea, [data-inbox-id="${CSS.escape(id)}"] .inbox-reply-input`,
       );
       input?.focus();
     });
@@ -318,6 +576,9 @@ export function InboxPage(p: {
 
   const openUnifiedDrawer = (item: InboxItem, opts?: { focusInput?: boolean; toggle?: boolean }) => {
     setFocusedId(item.id);
+    if (item.category === "needs_you" || item.category === "ready") {
+      peekedSectionById.set(item.id, item.category);
+    }
     const isCurrentlyOpen = peekedIds().has(item.id);
     if (isCurrentlyOpen && opts?.toggle) {
       if (opts.focusInput && replyingId() !== item.id) {
@@ -379,20 +640,82 @@ export function InboxPage(p: {
     openUnifiedDrawer(item, { toggle: false, focusInput: true });
   };
 
+  const [liveEventsByMission, setLiveEventsByMission] = createSignal<
+    Record<string, StreamEvent[]>
+  >({});
+
+  const pushMissionLiveEvent = (missionId: string, ev: StreamEvent) => {
+    setLiveEventsByMission((prev) => ({
+      ...prev,
+      [missionId]: [...(prev[missionId] ?? []), ev],
+    }));
+  };
+
+  const appendUserEventToTranscript = (
+    missionId: string,
+    messageId: string,
+    content: string,
+    queued: boolean,
+    attached: boolean,
+  ) => {
+    const ev: StreamEvent = {
+      type: "user_message",
+      eventId: messageId,
+      data: {
+        id: messageId,
+        content,
+        queued,
+        receipt: true,
+        attached,
+      },
+    };
+    pushMissionLiveEvent(missionId, ev);
+    const snap = peekReadyTranscript(missionId) ?? peekTranscript(missionId);
+    const baseItems = snap?.items ?? [];
+    const nextItems = applyStreamEvent(baseItems, ev);
+    if (snap) {
+      putTranscript(missionId, {
+        ...snap,
+        items: nextItems,
+        stream: [...snap.stream, ev],
+      });
+    } else {
+      putTranscript(missionId, {
+        items: nextItems,
+        stream: [ev],
+        fromLog: true,
+      });
+    }
+  };
+
   const retryMission = async (item: InboxItem) => {
     if (busyIds().has(item.id)) return;
     setError(null);
     addBusy(item.id);
     markItemAndChildrenRead(item);
     try {
+      const msgId = crypto.randomUUID();
       const result = await sendMissionMessage(
         item.id,
         "Continue from where you left off.",
         [],
-        crypto.randomUUID(),
+        msgId,
       );
       if (result.replacement) {
         p.onMissionUpdated?.(result.replacement);
+      }
+      if (peekedIds().has(item.id)) {
+        appendUserEventToTranscript(
+          item.id,
+          result.id || msgId,
+          "Continue from where you left off.",
+          Boolean(result.queued),
+          false,
+        );
+        p.onMissionUpdated?.({ ...item.mission, status: "running" });
+        void refreshTranscript(item.id).catch(() => {});
+        void p.onRefresh();
+        return;
       }
       setDismissedIds((prev) => new Set(prev).add(item.id));
       void p.onRefresh();
@@ -421,6 +744,12 @@ export function InboxPage(p: {
     const idx = items.findIndex((x) => x.id === item.id);
     const nextFocus = items[idx + 1]?.id ?? items[idx - 1]?.id ?? null;
     setDismissedIds((prev) => new Set(prev).add(item.id));
+    setSeenUnreadIds((prev) => {
+      if (!prev.has(item.id)) return prev;
+      const next = new Set(prev);
+      next.delete(item.id);
+      return next;
+    });
     closeUnifiedDrawer(item.id);
     setFocusedId(nextFocus);
     if (undoTimer) clearTimeout(undoTimer);
@@ -491,35 +820,87 @@ export function InboxPage(p: {
     }
   };
 
-  const submitUnifiedReply = async (item: InboxItem) => {
-    const text = (peekReplyDrafts()[item.id] ?? "").trim();
-    if (!text || busyIds().has(item.id)) return;
+  const submitUnifiedReply = async (
+    item: InboxItem,
+    rawText: string,
+    images: DraftImage[] = [],
+    chips: AttachChip[] = [],
+  ): Promise<boolean> => {
+    const text = rawText.trim();
+    if ((!text && !images.length) || busyIds().has(item.id)) return false;
     setError(null);
     addBusy(item.id);
+    if (item.category === "needs_you" || item.category === "ready") {
+      peekedSectionById.set(item.id, item.category);
+    }
     markItemAndChildrenRead(item);
     try {
-      const result = await sendMissionMessage(item.id, text, [], crypto.randomUUID());
+      const mission = item.mission;
+      const clientPlaced = Boolean(mission.tags?.includes("placement:client"));
+      const msgId = crypto.randomUUID();
+      if (clientPlaced) {
+        const sendVersion = connectionVersion();
+        await refreshLocalBindings().catch(() => {});
+        const binding = localBinding(item.id);
+        if (!binding) {
+          throw new Error("This session runs on the computer that started it. Your draft is kept.");
+        }
+        const project = mission.project;
+        if (!project) {
+          throw new Error("This mission has no project, so its files cannot be copied. Your draft is kept.");
+        }
+        const plan = await materializeMentions(project, text, chips);
+        await prepareProjectSkills(project, binding.cwd, binding.harness, binding.bin);
+        if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
+        const imagePaths = await stageLocalImages(binding.cwd, images);
+        const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
+        if (connectionVersion() !== sendVersion) {
+          throw new Error("Connection changed. Your draft is kept.");
+        }
+        const displaySent = imagePrompt(text, imagePaths, images);
+        await enqueueLocalMessage(
+          {
+            id: item.id,
+            harness: binding.harness,
+            bin: binding.bin,
+            cwd: binding.cwd,
+            prompt: sent,
+            model: mission.model_override ?? binding.model,
+            imagePaths,
+          },
+          displaySent,
+          { id: msgId, replace: false, waiting: false },
+        );
+        appendUserEventToTranscript(item.id, msgId, displaySent, false, chips.length > 0);
+      } else {
+        const attachments = chips.map(chipToAttachment);
+        const sent = imagePrompt(text, await stageRemoteImages(images, mission), images);
+        const result = await sendMissionMessage(item.id, sent, attachments, msgId);
+        if (result.replacement) {
+          p.onMissionUpdated?.(result.replacement);
+        } else {
+          p.onMissionUpdated?.({ ...mission, status: "running" });
+        }
+        appendUserEventToTranscript(
+          item.id,
+          result.id || msgId,
+          sent,
+          Boolean(result.queued),
+          chips.length > 0,
+        );
+      }
       setPeekReplyDrafts((prev) => {
         const next = { ...prev };
         delete next[item.id];
         return next;
       });
-      closeUnifiedDrawer(item.id);
-      if (result.replacement) {
-        p.onMissionUpdated?.(result.replacement);
-      }
-      // Once replied, the agent goes back to work; remove from actionable list immediately
-      setDismissedIds((prev) => new Set(prev).add(item.id));
+      // Keep the Peek drawer open so the user sees their sent message and the live-streamed reply
+      void refreshTranscript(item.id).catch(() => {});
       void p.onRefresh();
-      setTimeout(() => {
-        setDismissedIds((prev) => {
-          const next = new Set(prev);
-          next.delete(item.id);
-          return next;
-        });
-      }, 2500);
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       removeBusy(item.id);
     }
@@ -530,7 +911,7 @@ export function InboxPage(p: {
     if (!interaction || busyIds().has(item.id)) return;
     setError(null);
     addBusy(item.id);
-    markMissionRead(item.mission);
+    markItemAndChildrenRead(item);
     try {
       const answer = option.action
         ? { action: option.action, feedback: "" }
@@ -673,6 +1054,12 @@ export function InboxPage(p: {
           const isPeeked = () => peekedIds().has(id);
           const isPeekExpanded = () => expandedPeekIds().has(id);
           const isBusy = () => busyIds().has(id);
+          const isMissionRunning = () => {
+            const s = currentItem().mission.status;
+            return Boolean(
+              s && ["active", "running", "pending", "queued", "starting", "resuming"].includes(s),
+            );
+          };
           const color = () => projectColor(currentItem().projectSlug);
           const digest = createMemo(() => {
             inboxDigestVersion();
@@ -742,26 +1129,131 @@ export function InboxPage(p: {
             return true;
           });
 
-          const visiblePeekTurns = createMemo(() => {
-            const it = currentItem();
-            const all = it.allPeekTurns?.length ? it.allPeekTurns : it.peekTurns;
-            if (isPeekExpanded() || all.length <= 4) return all;
-            return all.slice(-4);
+          const appendLiveEvent = (ev: StreamEvent) => {
+            pushMissionLiveEvent(id, ev);
+            const snap = peekReadyTranscript(id) ?? peekTranscript(id);
+            const curItems = snap?.items ?? [];
+            const nextItems = applyStreamEvent(curItems, ev);
+            if (nextItems !== curItems) {
+              if (snap) {
+                putTranscript(id, { ...snap, items: nextItems });
+              } else {
+                putTranscriptItems(id, nextItems);
+              }
+            }
+          };
+
+          const rawTranscriptItems = createMemo<StreamItem[] | undefined>(
+            () => {
+              transcriptVersion();
+              return (peekReadyTranscript(id) ?? peekTranscript(id))?.items;
+            },
+            undefined,
+            { equals: (a, b) => a === b },
+          );
+
+          // Live SSE stream while Peek drawer is open so user replies and agent turns stream in real time
+          createEffect(() => {
+            if (!isPeeked() || !isConnected()) return;
+            const release = retainTranscript(id);
+            const stopStream = streamMission(
+              id,
+              (ev) => {
+                if (ev.type === "mission_status_changed" || ev.type === "status") {
+                  if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
+                    const nextStatus = ev.data.status;
+                    const curM = untrack(() => currentItem().mission);
+                    p.onMissionUpdated?.({
+                      ...curM,
+                      status: nextStatus,
+                      status_message:
+                        typeof ev.data.summary === "string"
+                          ? ev.data.summary
+                          : curM.status_message,
+                    });
+                  }
+                  void refreshTranscript(id).catch(() => {});
+                  void p.onRefresh();
+                  return;
+                }
+                appendLiveEvent(ev);
+              },
+              () => {
+                void refreshTranscript(id).catch(() => {});
+              },
+            );
+            onCleanup(() => {
+              stopStream();
+              release();
+            });
           });
 
-          const hiddenPeekCount = createMemo(() => {
-            const it = currentItem();
-            const all = it.allPeekTurns?.length ? it.allPeekTurns : it.peekTurns;
-            return Math.max(0, all.length - visiblePeekTurns().length);
+          const missionScopeKey = createMemo(() =>
+            fileScopeKey({ mission: currentItem().mission }),
+          );
+
+          const stableMission = createMemo(() => {
+            missionScopeKey();
+            return untrack(() => currentItem().mission);
           });
+
+          const missionPeekKey = createMemo(() => {
+            const m = currentItem().mission;
+            const hLen = Array.isArray(m.history) ? m.history.length : 0;
+            const lastH = hLen > 0 ? m.history![hLen - 1]?.content ?? "" : "";
+            return [
+              m.id,
+              m.status ?? "",
+              m.terminal_reason ?? "",
+              m.status_message ?? "",
+              m.remote_job?.error ?? "",
+              m.goal_objective ?? "",
+              m.title ?? "",
+              hLen,
+              lastH.slice(-120),
+            ].join("\u0000");
+          });
+
+          const peekStream = createMemo(() => {
+            missionPeekKey();
+            const txItems = rawTranscriptItems();
+            const liveEvs = liveEventsByMission()[id];
+            const expanded = isPeekExpanded();
+            const it = untrack(() => currentItem());
+            return buildPeekStreamItems(
+              it.mission,
+              txItems,
+              it.summary,
+              expanded,
+              6,
+              liveEvs,
+            );
+          });
+
+          const hiddenPeekCount = createMemo(() => peekStream().hiddenTurnCount);
+
+          let peekScrollEl: HTMLDivElement | undefined;
+          let nearBottom = true;
+
+          const [composerRevision, setComposerRevision] = createSignal<{
+            text: string;
+            append?: boolean;
+          }>();
+          const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
 
           const appendToReplyDraft = (snippet: string) => {
-            const cur = (peekReplyDrafts()[id] ?? "").trim();
-            const next = cur ? `${cur}\n${snippet}` : snippet;
-            setPeekReplyDrafts((prev) => ({ ...prev, [id]: next }));
+            setComposerRevision({ text: snippet, append: true });
             setReplyingId(id);
             focusReplyInput(id);
           };
+
+          const uploadTarget = createMemo(() => {
+            const m = currentItem().mission;
+            if (m.tags?.includes("placement:client")) return "local";
+            return m.remote_node_id ?? m.remote_job?.node_id ?? "core";
+          });
+          const stableProjectSlug = createMemo(() => currentItem().mission.project ?? undefined);
+          const stableBackend = createMemo(() => currentItem().mission.backend);
 
           return (
             <article
@@ -770,7 +1262,11 @@ export function InboxPage(p: {
               data-inbox-tone={currentItem().tone}
               data-inbox-unread={currentItem().unread ? "true" : "false"}
               onMouseEnter={() => {
-                if (!replyingId() || !document.activeElement?.classList.contains("inbox-reply-input")) {
+                if (
+                  !replyingId() ||
+                  (!document.activeElement?.closest(".inbox-peek-composer") &&
+                    !document.activeElement?.classList.contains("inbox-reply-input"))
+                ) {
                   setFocusedId(id);
                 }
               }}
@@ -1055,18 +1551,36 @@ export function InboxPage(p: {
 
                   <div class="inbox-peek-head">
                     <div class="inbox-peek-head-left">
-                      <span class="inbox-peek-caption">Recent turns</span>
+                      <span class="inbox-peek-caption">Conversation</span>
+                      <Show when={isMissionRunning()}>
+                        <span class="inbox-peek-live-pill" role="status">
+                          <Ic.RunningDots />
+                          <span>Streaming</span>
+                        </span>
+                      </Show>
                       <Show when={hiddenPeekCount() > 0}>
                         <button
                           type="button"
                           class="inbox-peek-more-btn"
                           onClick={(e) => {
                             e.stopPropagation();
+                            const scroller = peekScrollEl;
+                            const prevHeight = scroller?.scrollHeight ?? 0;
+                            const prevTop = scroller?.scrollTop ?? 0;
+                            nearBottom = false;
                             setExpandedPeekIds((prev) => {
                               const next = new Set(prev);
                               next.add(id);
                               return next;
                             });
+                            if (scroller) {
+                              queueMicrotask(() => {
+                                const delta = scroller.scrollHeight - prevHeight;
+                                if (delta > 0 && prevTop > 0) {
+                                  scroller.scrollTop = prevTop + delta;
+                                }
+                              });
+                            }
                           }}
                         >
                           Show {hiddenPeekCount()} earlier {hiddenPeekCount() === 1 ? "turn" : "turns"}
@@ -1089,100 +1603,99 @@ export function InboxPage(p: {
 
                   <div
                     class="inbox-peek-scroll"
+                    data-find-conversation
+                    onScroll={(e) => {
+                      const el = e.currentTarget;
+                      nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 64;
+                    }}
                     ref={(el) => {
-                      createEffect(() => {
-                        visiblePeekTurns();
-                        if (!isPeekExpanded()) {
-                          queueMicrotask(() => {
-                            el.scrollTop = 0;
-                          });
+                      peekScrollEl = el;
+                      nearBottom = true;
+                      const scrollToBottomIfPinned = () => {
+                        if (nearBottom && el.isConnected) {
+                          el.scrollTop = el.scrollHeight;
                         }
-                      });
+                      };
+                      scrollToBottomIfPinned();
+                      queueMicrotask(scrollToBottomIfPinned);
+                      requestAnimationFrame(scrollToBottomIfPinned);
+                      const content = el.querySelector(".inbox-peek-transcript");
+                      if (content && typeof ResizeObserver !== "undefined") {
+                        const ro = new ResizeObserver(() => {
+                          scrollToBottomIfPinned();
+                        });
+                        ro.observe(content);
+                        onCleanup(() => ro.disconnect());
+                      }
                     }}
                   >
-                    <div class="inbox-peek-turns">
-                      <For each={visiblePeekTurns()}>
-                        {(turn) => (
-                          <>
-                            <Show when={turn.workReceipt}>
-                              {(receipt) => (
-                                <details class={`inbox-peek-work ${receipt().failed ? "failed" : ""}`}>
-                                  <summary class="inbox-peek-work-sum">
-                                    <span>
-                                      {receipt().failed ? "Failed" : "Worked"} — {receipt().summary}
-                                    </span>
-                                  </summary>
-                                  <Show when={receipt().details.length > 0}>
-                                    <ul class="inbox-peek-work-list">
-                                      <For each={receipt().details}>
-                                        {(line) => <li>{line}</li>}
-                                      </For>
-                                    </ul>
-                                  </Show>
-                                </details>
-                              )}
-                            </Show>
-                            <div class={`inbox-peek-turn ${turn.role}`}>
-                              <span class={`inbox-peek-role ${turn.role}`}>
-                                {turn.role === "user" ? "You" : turn.role === "error" ? "Error" : "Agent"}
-                              </span>
-                              <div class="inbox-peek-turn-body">
-                                <Markdown text={turn.markdown || turn.text} />
-                              </div>
-                            </div>
-                          </>
-                        )}
-                      </For>
+                    <div class="inbox-peek-transcript">
+                      <MissionFileScope
+                        mission={stableMission()}
+                        onOpenMission={(mid) => {
+                          markItemAndChildrenRead(currentItem());
+                          p.onOpenMission(mid);
+                        }}
+                      >
+                        <Transcript items={peekStream().items} />
+                      </MissionFileScope>
                     </div>
                   </div>
 
-                  <form
-                    class="inbox-peek-reply-bar"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void submitUnifiedReply(currentItem());
+                  <div
+                    class="inbox-peek-composer"
+                    onFocusIn={() => setReplyingId(id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape" && !e.defaultPrevented) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeUnifiedDrawer(id);
+                      }
                     }}
                   >
-                    <input
-                      type="text"
-                      class="inbox-reply-input"
-                      placeholder={`Reply to ${currentItem().projectTitle}… (status context above)`}
-                      aria-label={`Reply to ${effectiveHeadline()}`}
-                      value={peekReplyDrafts()[id] ?? ""}
+                    <Composer
+                      placeholder="Send follow-up"
+                      picker={false}
+                      busy={isBusy() || isMissionRunning()}
                       disabled={isBusy()}
-                      onFocus={() => setReplyingId(id)}
-                      onInput={(e) =>
-                        setPeekReplyDrafts((prev) => ({
-                          ...prev,
-                          [id]: e.currentTarget.value,
-                        }))
+                      autofocus={isReplying()}
+                      revision={composerRevision()}
+                      scope={`m:${id}`}
+                      uploadTarget={uploadTarget()}
+                      backend={stableBackend()}
+                      projectSlug={stableProjectSlug()}
+                      onAttachments={setFollowAttach}
+                      onDraft={(text) =>
+                        setPeekReplyDrafts((prev) =>
+                          prev[id] === text ? prev : { ...prev, [id]: text },
+                        )
                       }
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          closeUnifiedDrawer(id);
+                      onStop={() => {
+                        void cancelMission(id)
+                          .then(() => {
+                            void refreshTranscript(id).catch(() => {});
+                            void p.onRefresh();
+                          })
+                          .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+                      }}
+                      onSendError={(err) => setError(err)}
+                      onSend={async (text, images) => {
+                        nearBottom = true;
+                        const ok = await submitUnifiedReply(
+                          currentItem(),
+                          text,
+                          images,
+                          followAttach(),
+                        );
+                        if (ok && peekScrollEl) {
+                          queueMicrotask(() => {
+                            if (peekScrollEl) peekScrollEl.scrollTop = peekScrollEl.scrollHeight;
+                          });
                         }
+                        return ok;
                       }}
                     />
-                    <Show when={isReplying() || (peekReplyDrafts()[id] ?? "").trim()}>
-                      <button
-                        type="button"
-                        class="s-btn sm quiet"
-                        disabled={isBusy()}
-                        onClick={() => closeUnifiedDrawer(id)}
-                      >
-                        Cancel <kbd class="inbox-act-kbd">Esc</kbd>
-                      </button>
-                    </Show>
-                    <button
-                      type="submit"
-                      class="s-btn sm primary"
-                      disabled={isBusy() || !(peekReplyDrafts()[id] ?? "").trim()}
-                    >
-                      Send <Ic.ReturnIcon size={12} />
-                    </button>
-                  </form>
+                  </div>
                 </div>
               </Show>
             </article>
@@ -1259,7 +1772,7 @@ export function InboxPage(p: {
               <Ic.InboxIcon size={22} />
             </div>
             <strong>No backend connected</strong>
-            <p>Connect to your sandboxed.sh backend to triage active and completed agents.</p>
+            <p>Connect to your Orb backend to triage active and completed agents.</p>
             <button type="button" class="s-btn primary" onClick={p.onOpenSettings}>
               Connect backend
             </button>
@@ -1274,7 +1787,7 @@ export function InboxPage(p: {
               data-inbox-filter="unread"
               aria-selected={viewMode() === "unread"}
               class={`inbox-mode-tab ${viewMode() === "unread" ? "on" : ""}`}
-              onClick={() => setViewMode("unread")}
+              onClick={() => switchViewMode("unread")}
             >
               <span class="inbox-unread-dot" aria-hidden="true" />
               <span>Unread</span>
@@ -1286,7 +1799,7 @@ export function InboxPage(p: {
               data-inbox-filter="attention"
               aria-selected={viewMode() === "attention"}
               class={`inbox-mode-tab ${viewMode() === "attention" ? "on" : ""}`}
-              onClick={() => setViewMode("attention")}
+              onClick={() => switchViewMode("attention")}
             >
               <span>Needs attention</span>
               <span class="inbox-filter-count">{allSections().attentionCount}</span>
@@ -1297,7 +1810,7 @@ export function InboxPage(p: {
               data-inbox-filter="all"
               aria-selected={viewMode() === "all"}
               class={`inbox-mode-tab ${viewMode() === "all" ? "on" : ""}`}
-              onClick={() => setViewMode("all")}
+              onClick={() => switchViewMode("all")}
             >
               <span>All</span>
               <span class="inbox-filter-count">{allSections().totalActionable}</span>
@@ -1431,7 +1944,7 @@ export function InboxPage(p: {
                     <button
                       type="button"
                       class="s-btn"
-                      onClick={() => setViewMode("all")}
+                      onClick={() => switchViewMode("all")}
                     >
                       View all ({allSections().totalActionable})
                     </button>

@@ -2,12 +2,14 @@ import { isBtwMission, type Mission, type ProjectSummary } from "./api";
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { DEFAULT_PROJECT } from "./defaultProject";
 import { displayTitle } from "./goal";
+import { messageImages } from "./messageImages";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
 import type { PendingInteraction } from "./missionAttention";
 import { nodeLabel } from "./missionLaunch";
 import { isMissionUnread, missionResponseTimestampMs } from "./missionUnread";
 import { remoteLog as parseRemoteLog } from "./remoteLog";
-import type { StreamItem } from "./transcriptModel";
+import type { StreamEvent } from "./stream";
+import { applyStreamEvent, type StreamItem } from "./transcriptModel";
 import { toolArgs, toolName, workSummary } from "./workModel";
 
 export const INBOX_SENTENCE_MAX_CHARS = 112;
@@ -49,6 +51,12 @@ export type InboxPeekTurn = {
   text: string;
   markdown?: string;
   workReceipt?: InboxPeekWorkReceipt;
+};
+
+export type InboxPeekStream = {
+  items: StreamItem[];
+  hiddenTurnCount: number;
+  totalTurnCount: number;
 };
 
 export type InboxChildFailure = {
@@ -150,6 +158,9 @@ export function stripMarkdownToProse(raw: string): string {
   let text = raw
     // Remove fenced code blocks, keeping a short inline hint if prose is otherwise empty or a bare lead-in
     .replace(/```[\s\S]*?```/g, " ")
+    // Strip image attachment transport markers like [Image #1] or [Uploaded: /path/to/img.png]
+    .replace(/\[Image #\d+\]/gi, " ")
+    .replace(/\[Uploaded:\s*[^\]]+\]/gi, " ")
     // Remove markdown headings, blockquotes, horizontal rules
     .replace(/^\s*#{1,6}\s+/gm, "")
     .replace(/^\s*>\s?/gm, "")
@@ -639,7 +650,7 @@ function cleanUserMarkdown(raw: string): string {
   if (wake) {
     return `Background task \`${wake.task}\` (\`${wake.command}\`) finished.${wake.output ? `\n\n\`\`\`\n${wake.output.slice(0, 600)}\n\`\`\`` : ""}`;
   }
-  return pres.trim();
+  return messageImages(pres).text.trim();
 }
 
 export function isSyntheticUserMessage(raw: string): boolean {
@@ -943,6 +954,290 @@ export function extractPeekTurns(
   return extractAllPeekTurns(mission, items, summaryFallback, 24).slice(-3);
 }
 
+/**
+ * Build a stable StreamItem[] list for rendering the shared `<Transcript>` component
+ * inside the Inbox Peek drawer. Preserves original StreamItem object references and keys
+ * whenever possible so Solid's keyed store reconciliation updates without unmounting DOM nodes,
+ * and keeps raw user message presentation/image markers intact so `<UserTurn>` renders
+ * `<MessageImage>` thumbnails, `<Lightbox>`, `<GoalTag>`, and `Attached context` badges.
+ */
+export function buildPeekStreamItems(
+  mission: Mission,
+  rawItems?: StreamItem[],
+  summaryFallback?: string,
+  expanded = false,
+  maxCollapsedBlocks = 6,
+  liveEvents?: StreamEvent[],
+): InboxPeekStream {
+  let out: StreamItem[] = [];
+
+  if (rawItems && rawItems.length > 0) {
+    for (let i = 0; i < rawItems.length; i++) {
+      const item = rawItems[i];
+      if (item.kind === "user") {
+        if (item.queued || !item.text.trim()) continue;
+        const presText = parseMessagePresentation(item.text).text.trim();
+        if (!parseBackgroundWake(presText) && isSyntheticUserMessage(item.text)) {
+          continue;
+        }
+        out.push(item);
+      } else if (item.kind === "error") {
+        if (!item.text.trim()) continue;
+        const md = cleanAssistantMarkdown(humanizeStatusText(item.text) || item.text.trim());
+        const clean = stripMarkdownToProse(md);
+        const isActualError =
+          /^(error|fatal|panic|remote\s+\S+\s+run|native\s+codex\s+goal\s+stopped|command\s+exited|failed\b)/i.test(
+            clean,
+          ) || md.length < 220;
+        if (!isActualError) {
+          out.push({
+            kind: "text",
+            key: item.key || `err-text:${mission.id}:${i}`,
+            text: md,
+            live: false,
+          });
+        } else if (md !== item.text) {
+          out.push({
+            kind: "error",
+            key: item.key || `err:${mission.id}:${i}`,
+            text: md,
+          });
+        } else {
+          out.push(item);
+        }
+      } else {
+        out.push(item);
+      }
+    }
+
+    // If the event log was empty or started mid-session (e.g. only live events after mission.history),
+    // prepend any missing turns from mission.history so prior context never disappears.
+    if (Array.isArray(mission.history) && mission.history.length > 0) {
+      const firstHist = mission.history.find(
+        (h) => h.role === "user" && h.content?.trim() && !isSyntheticUserMessage(h.content),
+      );
+      const hasFirstHistUser =
+        !firstHist ||
+        out.some((i) => i.kind === "user" && i.text.trim() === firstHist.content.trim());
+      if (!hasFirstHistUser) {
+        const prefix: StreamItem[] = [];
+        for (let i = 0; i < mission.history.length; i++) {
+          const entry = mission.history[i];
+          if (!entry.content?.trim()) continue;
+          if (entry.role === "user") {
+            if (isSyntheticUserMessage(entry.content)) continue;
+            if (out.some((it) => it.kind === "user" && it.text.trim() === entry.content.trim())) {
+              continue;
+            }
+            prefix.push({
+              kind: "user",
+              key: `history:${mission.id}:${i}`,
+              text: entry.content,
+            });
+          } else if (entry.role === "assistant") {
+            const md = cleanAssistantMarkdown(entry.content);
+            if (!md) continue;
+            if (out.some((it) => it.kind === "text" && it.text.trim() === md.trim())) {
+              continue;
+            }
+            prefix.push({
+              kind: "text",
+              key: `history:${mission.id}:${i}`,
+              text: md,
+              live: false,
+            });
+          }
+        }
+        if (prefix.length > 0) {
+          out = [...prefix, ...out];
+        }
+      }
+    }
+
+    if (!out.some((i) => i.kind === "user")) {
+      const firstHistUser = mission.history?.find(
+        (h) => h.role === "user" && h.content?.trim() && !isSyntheticUserMessage(h.content),
+      )?.content;
+      const rawFallback =
+        firstHistUser ||
+        (mission.goal_mode && mission.goal_objective
+          ? `/goal ${mission.goal_objective.replace(/^\/goal\s+/i, "")}`
+          : (mission.goal_objective || displayTitle(mission.title) || "").trim());
+      if (rawFallback && rawFallback.toLowerCase() !== "untitled") {
+        out.unshift({
+          kind: "user",
+          key: `initial:${mission.id}`,
+          text: rawFallback,
+        });
+      }
+    }
+    const histLastAssistant = Array.isArray(mission.history)
+      ? [...mission.history].reverse().find((h) => h.role === "assistant" && h.content?.trim())
+      : undefined;
+    const histLastUser = Array.isArray(mission.history)
+      ? [...mission.history].reverse().find((h) => h.role === "user" && h.content?.trim() && !isSyntheticUserMessage(h.content))
+      : undefined;
+    const lastOutUser = [...out].reverse().find((i) => i.kind === "user");
+    const hasNewerUserAfterHistory =
+      lastOutUser?.kind === "user" &&
+      histLastUser?.content &&
+      lastOutUser.text.trim() !== histLastUser.content.trim();
+    if (histLastAssistant?.content && !out.some((i) => i.kind === "text") && !hasNewerUserAfterHistory) {
+      const md = cleanAssistantMarkdown(histLastAssistant.content);
+      if (md) {
+        out.push({
+          kind: "text",
+          key: `history-tail:${mission.id}`,
+          text: md,
+          live: false,
+        });
+      }
+    }
+  } else if (Array.isArray(mission.history) && mission.history.length > 0) {
+    for (let i = 0; i < mission.history.length; i++) {
+      const entry = mission.history[i];
+      if (!entry.content?.trim()) continue;
+      if (entry.role === "user") {
+        if (isSyntheticUserMessage(entry.content)) continue;
+        out.push({
+          kind: "user",
+          key: `history:${mission.id}:${i}`,
+          text: entry.content,
+        });
+      } else if (entry.role === "assistant") {
+        const md = cleanAssistantMarkdown(entry.content);
+        if (md) {
+          out.push({
+            kind: "text",
+            key: `history:${mission.id}:${i}`,
+            text: md,
+            live: false,
+          });
+        }
+      }
+    }
+  }
+
+  if (liveEvents && liveEvents.length > 0) {
+    let liveBase: StreamItem[] = [];
+    for (const ev of liveEvents) {
+      if (ev.type === "user_message") {
+        const content = String(ev.data?.content ?? "").trim();
+        if (
+          content &&
+          out.some(
+            (i) => i.kind === "user" && i.text.trim() === content,
+          )
+        ) {
+          continue;
+        }
+      }
+      if (ev.type === "assistant_message" || ev.type === "text_delta") {
+        const content = String(ev.data?.content ?? "").trim();
+        if (
+          content &&
+          out.some(
+            (i) => i.kind === "text" && !i.live && i.text.trim() === content,
+          )
+        ) {
+          continue;
+        }
+      }
+      liveBase = applyStreamEvent(liveBase, ev);
+    }
+    if (liveBase.length > 0) {
+      out = [...out, ...liveBase];
+    }
+  }
+
+  const errDetail =
+    humanizeStatusText(mission.remote_job?.error) ||
+    humanizeStatusText(mission.status_message) ||
+    humanizeStatusText(mission.terminal_reason);
+  if (
+    errDetail &&
+    (mission.status === "failed" ||
+      mission.status === "blocked" ||
+      mission.status === "not_feasible") &&
+    !out.some((i) => i.kind === "error")
+  ) {
+    const clippedErr = clipToSentence(errDetail, 240);
+    const lastTextItem = [...out].reverse().find((i) => i.kind === "text");
+    const lastText = (lastTextItem?.kind === "text" ? lastTextItem.text : "").toLowerCase();
+    const errPrefix = clippedErr.slice(0, 32).toLowerCase();
+    if (!lastText || !errPrefix || !lastText.includes(errPrefix)) {
+      out.push({
+        kind: "error",
+        key: `terminal-error:${mission.id}`,
+        text: errDetail,
+      });
+    }
+  }
+
+  if (out.length === 0 && summaryFallback) {
+    out.push(
+      mission.status === "failed" || mission.status === "blocked"
+        ? { kind: "error", key: `fallback:${mission.id}`, text: summaryFallback }
+        : { kind: "text", key: `fallback:${mission.id}`, text: summaryFallback, live: false },
+    );
+  }
+
+  // Partition `out` into logical blocks (each `user` message or `[work/tools + assistant text/error]` block)
+  // so collapsed Peek shows the most recent blocks while keeping the latest user prompt visible.
+  const blockStarts: number[] = [];
+  let inWorkRun = false;
+  for (let i = 0; i < out.length; i++) {
+    const kind = out[i].kind;
+    if (kind === "tool" || kind === "think") {
+      if (!inWorkRun) {
+        blockStarts.push(i);
+        inWorkRun = true;
+      }
+    } else if (kind === "text" || kind === "error") {
+      if (!inWorkRun) {
+        blockStarts.push(i);
+      }
+      inWorkRun = false;
+    } else {
+      blockStarts.push(i);
+      inWorkRun = false;
+    }
+  }
+
+  const totalTurnCount = blockStarts.length;
+  if (expanded || totalTurnCount <= maxCollapsedBlocks) {
+    return {
+      items: out,
+      hiddenTurnCount: 0,
+      totalTurnCount,
+    };
+  }
+
+  const sliceStartBlockIdx = totalTurnCount - maxCollapsedBlocks;
+  const sliceStartItemIdx = blockStarts[sliceStartBlockIdx];
+  const tailSlice = out.slice(sliceStartItemIdx);
+
+  // If the tail slice has no user prompt (e.g. a single prompt followed by many intermediate
+  // narration steps), keep the latest user item at the top of Peek so the prompt & images stay visible.
+  if (!tailSlice.some((i) => i.kind === "user")) {
+    for (let i = sliceStartItemIdx - 1; i >= 0; i--) {
+      if (out[i].kind === "user") {
+        return {
+          items: [out[i], ...tailSlice],
+          hiddenTurnCount: Math.max(1, sliceStartBlockIdx - 1),
+          totalTurnCount,
+        };
+      }
+    }
+  }
+
+  return {
+    items: tailSlice,
+    hiddenTurnCount: sliceStartBlockIdx,
+    totalTurnCount,
+  };
+}
+
 const RETRYABLE_STATUSES = new Set(["failed", "interrupted", "blocked", "not_feasible"]);
 
 export function condenseMissionHeadline(raw: string, projectTitle?: string): string {
@@ -1030,9 +1325,13 @@ export function buildInboxItem(
   if (category === "hidden") return null;
 
   const projectSlug = mission.project || DEFAULT_PROJECT.slug;
-  const projectTitle =
+  const rawProjectTitle =
     projects.find((p) => p.slug === projectSlug)?.title ||
     (projectSlug === DEFAULT_PROJECT.slug ? DEFAULT_PROJECT.title : projectSlug);
+  const projectTitle =
+    projectSlug === "orb" && /^sandboxed(?:\.sh)?$/i.test(rawProjectTitle.trim())
+      ? "Orb"
+      : rawProjectTitle;
 
   const rawTitle = displayTitle(mission.title);
   const firstUserItem = items?.find(

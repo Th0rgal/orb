@@ -45,14 +45,15 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  const schedule=()=>{if(!frame)frame=requestAnimationFrame(()=>{frame=0;update();});};
  type Segment={key:string;item?:T;height:number};
  const stable=new Map<string,Segment>();
- const segments=createMemo(()=>timed("turns segments",()=>{
+ const [segments,setSegments]=createSignal<Segment[]>([]);
+ createEffect(()=>timed("turns segments",()=>{
   const rows=layout(),v=viewport(),keep=pinned(),out:Segment[]=[];let gap=0,gapStart='';
   const spacer=()=>{if(!gap)return;const key=`gap:${gapStart}`;let row=stable.get(key);if(!row){row={key,height:gap};stable.set(key,row);}row.height=gap;out.push(row);gap=0;};
   rows.forEach((row,index)=>{
-   const visible=rows.length<=30||keep.has(row.item.key)||index===rows.length-1||(row.top+row.height>=v.top-2*v.height&&row.top<=v.top+3*v.height);
-   if(visible){spacer();let value=stable.get(row.item.key);if(!value){value={key:row.item.key,item:row.item,height:0};stable.set(value.key,value);}out.push(value);}
+   const visible=!scroller||scroller.clientHeight===0||rows.length<=30||keep.has(row.item.key)||index===rows.length-1||(row.top+row.height>=v.top-2*v.height&&row.top<=v.top+3*v.height);
+   if(visible){spacer();let value=stable.get(row.item.key);if(!value){value={key:row.item.key,item:row.item,height:0};stable.set(value.key,value);}else{value.item=row.item;}out.push(value);}
    else{if(!gap)gapStart=row.item.key;gap+=row.height;}
-  });spacer();return out;
+  });spacer();setSegments(out);
  }));
  function Row(props:{segment:Segment}){
   let element!:HTMLDivElement;
@@ -70,7 +71,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   });
   return props.segment.item?<div ref={element} data-turn-key={props.segment.key} style={{display:'flow-root'}}>{p.children(props.segment.item)}</div>:<div aria-hidden="true" style={{height:`${segments().find(s=>s.key===props.segment.key)?.height??0}px`}}/>;
  }
- createEffect(()=>{p.items;queueMicrotask(schedule);});
+ createEffect(()=>{p.items.length;queueMicrotask(schedule);});
  onMount(()=>{
   scroller=root.closest<HTMLElement>('.scroll,[data-find-conversation]')??undefined;
   const target=scroller??window;target.addEventListener('scroll',schedule,{passive:true});window.addEventListener('resize',schedule);document.addEventListener('selectionchange',schedule);root.addEventListener('focusin',schedule);root.addEventListener('focusout',schedule);root.addEventListener('click',schedule);
