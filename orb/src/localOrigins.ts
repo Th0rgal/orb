@@ -24,12 +24,18 @@ export const localPending=(mission:Mission)=>!!mission.local_sync_pending||(miss
 let lastObservation=0;
 /** Orders requests and accepted changes made by this window, even within one millisecond. */
 export const observe=()=>lastObservation=Math.max(Date.now(),lastObservation+1);
-export interface Confirmation {id:string;status?:string;title?:string;observed_at:number}
+export interface Confirmation {id:string;status?:string;title?:string;deleted?:boolean;observed_at:number}
 /** Persist what Core confirmed. The journal keeps the newest observation and ignores unsynchronized work. */
 export async function confirmLocalOrigins(confirmations:Confirmation[]):Promise<void>{
  const invoke=nativeInvoke();if(!invoke||!getJwt()||!confirmations.length)return;
  try{await invoke('local_origin_confirm',{connection:{api_url:getApiUrl(),token:getJwt()},confirmations});}
  catch{/* The list on screen already comes from Core; an older desktop build only loses the offline copy. */}
+}
+/** Retire local-origin journals and bindings once Core confirms deletion. */
+export function confirmDeletedLocalOrigins(ids:string[],observedAt=observe()):Promise<void>{
+ const unique=[...new Set(ids.filter(Boolean))];
+ for(const id of unique)unlistedReads.delete(id);
+ return confirmLocalOrigins(unique.map(id=>({id,deleted:true,observed_at:observedAt})));
 }
 /** Compare Core's answer with the journal and remember archive, restore and title changes. */
 export function rememberCoreState(local:Mission[],remote:Mission[],observedAt:number):Promise<void>{
@@ -47,10 +53,15 @@ export async function unlistedCoreState(local:Mission[],listed:Mission[],read:(i
  const missing=local.filter(mission=>!seen.has(mission.id)&&!localPending(mission)).slice(0,20);
  // The list refreshes every few seconds; a conversation outside it is read far less often.
  const now=Date.now(),due=missing.filter(mission=>{const last=unlistedReads.get(mission.id);return !last||now-last.at>=(last.mission&&LIVE_STATUSES.has(last.mission.status)?UNLISTED_LIVE_MS:UNLISTED_SETTLED_MS);});
+ const deletedIds:string[]=[];
  await Promise.allSettled(due.map(async mission=>{
   try{const value=await read(mission.id);unlistedReads.set(mission.id,{at:Date.now(),mission:value?.id?value:undefined});}
-  catch{unlistedReads.set(mission.id,{at:Date.now(),mission:undefined});}
+  catch(error){
+   unlistedReads.set(mission.id,{at:Date.now(),mission:undefined});
+   if((error as {status?:number})?.status===404||/\b404\b|not found/i.test(String(error)))deletedIds.push(mission.id);
+  }
  }));
+ if(deletedIds.length)await confirmDeletedLocalOrigins(deletedIds);
  return missing.flatMap(mission=>{const value=unlistedReads.get(mission.id)?.mission;return value?[value]:[];});
 }
 const UNLISTED_LIVE_MS=30_000,UNLISTED_SETTLED_MS=10*60_000;

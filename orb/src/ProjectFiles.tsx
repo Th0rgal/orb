@@ -462,11 +462,24 @@ export function LiveProjectsSection(p: {
           const subtree = missionSubtree(known, [id]);
           const mission = await api<Mission>(`/api/control/missions/${id}`);
           if (version !== connectionVersion()) break;
-          // Preserve live and explicitly paused agents. DELETE also checks
-          // all descendants against the current server runner registry.
-          if (["active", "waiting_background", "paused"].includes(mission.status)
-            || subtree.some(m => m.id !== id && ["active", "waiting_background", "paused"].includes(m.status)))
+          // Preserve live running agents. DELETE also checks all descendants
+          // against the current server runner registry.
+          if (["active", "waiting_background"].includes(mission.status)
+            || subtree.some(m => m.id !== id && ["active", "waiting_background"].includes(m.status)))
             throw new Error("Stop or finish this agent before deleting it.");
+          const pausedIds = [
+            ...(mission.status === "paused" ? [id] : []),
+            ...subtree.filter(m => m.id !== id && m.status === "paused").map(m => m.id),
+          ];
+          for (const pausedId of pausedIds) {
+            await api(`/api/control/missions/${encodeURIComponent(pausedId)}/status`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "acknowledged" }),
+            });
+            if (version !== connectionVersion()) break;
+          }
+          if (version !== connectionVersion()) break;
           const result = await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}`, {method: "DELETE"});
           if (version !== connectionVersion()) break;
           const serverDeleted = new Set(result?.deleted_ids ?? []);
@@ -474,11 +487,19 @@ export function LiveProjectsSection(p: {
             if (extraId !== id && !serverDeleted.has(extraId)) {
               const child = knownById.get(extraId);
               if (child && !child.parent_mission_id && child.callback_parent_mission_id) {
+                if (child.status === "paused") {
+                  await api(`/api/control/missions/${encodeURIComponent(extraId)}/status`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ status: "acknowledged" }),
+                  }).catch(() => {});
+                }
                 await api(`/api/control/missions/${extraId}`, {method: "DELETE"}).catch(() => {});
               }
             }
           }
           const removed = [...new Set([id, ...covered, ...serverDeleted, ...subtree.map(m => m.id)])];
+          void import("./localOrigins").then(m => m.confirmDeletedLocalOrigins(removed));
           for (const rid of removed) {
             deletedInSession.add(rid);
             pendingRemoved.add(rid);
@@ -489,6 +510,7 @@ export function LiveProjectsSection(p: {
           // An already-removed mission is the desired result, including a race
           // between the GET and DELETE or a child removed with its parent.
           if (error instanceof ApiError && error.status === 404) {
+            void import("./localOrigins").then(m => m.confirmDeletedLocalOrigins(covered));
             for (const rid of covered) {
               deletedInSession.add(rid);
               pendingRemoved.add(rid);
@@ -2110,7 +2132,7 @@ export function LiveProjectsSection(p: {
       <Show when={deleteTargets().length}>
         <Dialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} onClose={() => setDeleteTargets([])}
           footer={<><DialogButton onClick={() => setDeleteTargets([])}>Cancel</DialogButton><DialogButton variant="destructive" onClick={() => void deleteSelected()}>Delete</DialogButton></>}>
-          <p>This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running or paused will be kept.</p>
+          <p>This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running will be kept.</p>
         </Dialog>
       </Show>
       <Show when={archiveMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={archiveDeleteMenuItems(menu.slug)} onClose={() => setArchiveMenu(null)} />}</Show>

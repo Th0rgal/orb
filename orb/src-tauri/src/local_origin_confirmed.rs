@@ -9,6 +9,8 @@ pub struct Confirmed {
     pub status: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub deleted: bool,
     /// Client clock, in milliseconds, when the confirming request started.
     pub observed_at: u64,
 }
@@ -19,6 +21,8 @@ pub struct Confirmation {
     pub status: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub deleted: bool,
     pub observed_at: u64,
 }
 impl Confirmation {
@@ -48,7 +52,9 @@ pub fn merge(
     incoming: &Confirmation,
     now: u64,
 ) -> bool {
-    if local_pending || (incoming.status.is_none() && incoming.title.is_none()) {
+    if local_pending
+        || (incoming.status.is_none() && incoming.title.is_none() && !incoming.deleted)
+    {
         return false;
     }
     let mut next = current.clone().unwrap_or_default();
@@ -60,6 +66,9 @@ pub fn merge(
     }
     if incoming.title.is_some() {
         next.title = incoming.title.clone();
+    }
+    if incoming.deleted {
+        next.deleted = true;
     }
     next.observed_at = incoming.observed_at;
     *current = Some(next);
@@ -89,8 +98,23 @@ mod tests {
             id: "id".into(),
             status: status.map(Into::into),
             title: title.map(Into::into),
+            deleted: false,
             observed_at: at,
         }
+    }
+    #[test]
+    fn confirmed_deletion_persists_once_synchronized() {
+        let mut saved = None;
+        let del = Confirmation {
+            id: "id".into(),
+            status: None,
+            title: None,
+            deleted: true,
+            observed_at: 15,
+        };
+        assert!(!merge(&mut saved, true, &del, 100));
+        assert!(merge(&mut saved, false, &del, 100));
+        assert!(saved.unwrap().deleted);
     }
     #[test]
     fn archive_restore_and_title_survive_a_restart() {
@@ -169,6 +193,7 @@ mod tests {
         let mut saved = Some(Confirmed {
             status: Some("acknowledged".into()),
             title: None,
+            deleted: false,
             observed_at: 5,
         });
         assert!(!merge(

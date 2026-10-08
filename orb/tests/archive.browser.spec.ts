@@ -37,6 +37,12 @@ test('one collapsed archive spans projects, while completion stays in place; res
    if(path.endsWith('/archived/status'))missions[2].status=request.postDataJSON().status;
    return route.fulfill({json:{}});
   }
+  if(request.method()==='DELETE'&&path==='/api/control/missions/archived'){
+   if(missions[2].status==='paused')return route.fulfill({status:409,body:'Cannot delete a paused mission'});
+   writes.push({path,method:'DELETE'});
+   missions.splice(2,1);
+   return route.fulfill({json:{deleted_ids:['archived']}});
+  }
   const json=path==='/api/projects'?{projects:[{slug:'one',title:'First project'},{slug:'two',title:'Second project'}]}
    :path==='/api/control/missions'?missions.filter(m=>(!url.searchParams.has('project')||m.project===url.searchParams.get('project'))&&(!url.searchParams.has('status')||m.status===url.searchParams.get('status')))
    :path==='/api/control/missions/archived'?missions[2]
@@ -63,13 +69,22 @@ test('one collapsed archive spans projects, while completion stays in place; res
  await expect(projects.getByRole('button',{name:'Second project',exact:true})).toHaveAttribute('aria-expanded','false');
  await row.click({button:'right'});await page.getByRole('menuitem',{name:'Restore',exact:true}).click();
  await expect(archiveTree.getByRole('button',{name:/Archived nested conversation/})).toHaveCount(0);
- await expect(projects.getByRole('button',{name:/Archived nested conversation/})).toBeVisible();
+ const restoredRow=projects.getByRole('button',{name:/Archived nested conversation/});
+ await expect(restoredRow).toBeVisible();
  await expect(projects.getByRole('button',{name:'Second project',exact:true})).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('button',{name:'notes',exact:true})).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('button',{name:'deep',exact:true})).toHaveAttribute('aria-expanded','true');
  expect(writes).toEqual([{path:'/api/control/missions/archived/status',body:{status:'paused'}}]);
  expect(missions[2].tags).toEqual(['orb-folder:notes/deep']);
  await page.screenshot({path:'/tmp/orb-shared-archives.png'});
+ await restoredRow.click({button:'right'});await page.getByRole('menuitem',{name:'Delete agent…',exact:true}).click();
+ await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
+ await expect(restoredRow).toHaveCount(0);
+ expect(writes).toEqual([
+  {path:'/api/control/missions/archived/status',body:{status:'paused'}},
+  {path:'/api/control/missions/archived/status',body:{status:'acknowledged'}},
+  {path:'/api/control/missions/archived',method:'DELETE'},
+ ]);
  await page.reload();await expect(archives).toHaveAttribute('aria-expanded','false');
 });
 

@@ -90,6 +90,32 @@ impl Store {
             .retain(|_, channel| channel.send(next.clone()).is_ok());
         Ok(())
     }
+
+    fn remove(&mut self, dir: &std::path::Path, ids: &[String]) -> Result<(), String> {
+        let previous = self.snapshot.as_ref().ok_or("Bindings not initialized")?;
+        if !ids.iter().any(|id| previous.bindings.contains_key(id)) {
+            return Ok(());
+        }
+        let mut next = previous.clone();
+        for id in ids {
+            next.bindings.remove(id);
+        }
+        next.revision += 1;
+        crate::project_context_store::atomic(
+            &dir.join("local-bindings.json"),
+            &serde_json::to_vec(&next.bindings).map_err(|e| e.to_string())?,
+        )?;
+        self.snapshot = Some(next.clone());
+        self.subscribers
+            .retain(|_, channel| channel.send(next.clone()).is_ok());
+        Ok(())
+    }
+}
+
+pub fn remove_local_bindings(ids: &[String]) -> Result<(), String> {
+    let mut store = store().lock().map_err(|e| e.to_string())?;
+    store.load()?;
+    store.remove(&directory()?, ids)
 }
 
 /// Reconcile the on-disk owner record before deciding a session belongs elsewhere.

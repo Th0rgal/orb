@@ -280,7 +280,9 @@ pub async fn local_origin_list(connection: Connection) -> Result<Vec<Value>, Str
         let record = read(&path)?;
         // Core owns successor history after refusing this initial receipt.
         // Keep the journal for diagnostics, but never overlay or retry it.
-        if record.rejected() {
+        if record.rejected()
+            || (!pending(&record) && record.confirmed.as_ref().is_some_and(|c| c.deleted))
+        {
             continue;
         }
         // Fully synchronized history is served by Core; retain the disk journal.
@@ -297,12 +299,31 @@ pub async fn local_origin_confirm(
     connection: Connection,
     confirmations: Vec<Confirmation>,
 ) -> Result<(), String> {
-    let root = account(&connection)?;
-    if !root.exists() || confirmations.is_empty() {
+    if confirmations.is_empty() {
         return Ok(());
     }
     for confirmation in &confirmations {
         confirmation.validate()?;
+    }
+    let deleted_ids: Vec<String> = confirmations
+        .iter()
+        .filter(|c| c.deleted)
+        .map(|c| c.id.clone())
+        .collect();
+    if !deleted_ids.is_empty() {
+        let _ = crate::bindings::remove_local_bindings(&deleted_ids);
+        if let Ok(home) = std::env::var("HOME") {
+            let locks = PathBuf::from(home).join(".orb/run-locks");
+            for id in &deleted_ids {
+                if uuid::Uuid::parse_str(id).is_ok() {
+                    let _ = std::fs::remove_file(locks.join(format!("{id}.lock")));
+                }
+            }
+        }
+    }
+    let root = account(&connection)?;
+    if !root.exists() {
+        return Ok(());
     }
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
     for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {

@@ -19,10 +19,10 @@ it('does not replace a newer Core conversation with a completed local snapshot',
 
 /** The desktop journal as Rust keeps it: newest observation wins, unsynchronized work is never overruled. */
 function journal(rows:any[]){
- const confirmed=new Map<string,{status?:string;title?:string;observed_at:number}>();
+ const confirmed=new Map<string,{status?:string;title?:string;deleted?:boolean;observed_at:number}>();
  const pending=(row:any)=>!!row.local_sync_pending||row.status==='active';
  const invoke=vi.fn(async(command:string,args:any)=>{
-  if(command==='local_origin_list')return rows.map(row=>{const c=confirmed.get(row.id),shown=c&&!pending(row)?{...row,status:c.status??row.status,title:c.title??row.title}:row;return {...shown,local_run_active:row.status==='active'};});
+  if(command==='local_origin_list')return rows.flatMap(row=>{const c=confirmed.get(row.id);if(!pending(row)&&c?.deleted)return [];const shown=c&&!pending(row)?{...row,status:c.status??row.status,title:c.title??row.title}:row;return [{...shown,local_run_active:row.status==='active'}];});
   if(command==='local_origin_confirm'){for(const c of args.confirmations){const row=rows.find(r=>r.id===c.id),old=confirmed.get(c.id);if(!row||pending(row)||(old&&c.observed_at<=old.observed_at))continue;confirmed.set(c.id,{...old,...c});}return;}
   throw new Error(`unknown command ${command}`);
  });
@@ -128,6 +128,21 @@ it('learns about an archive the default list leaves out, and keeps an emptied ti
  expect(asked.some(url=>url.endsWith('/missions/unsynced'))).toBe(false);
  vi.stubGlobal('fetch',offline());
  expect((await listMissions()).find(m=>m.id==='done')).toMatchObject({status:'acknowledged',title:''});
+});
+it('retires a synchronized local mission once Core confirms 404 or explicit deletion',async()=>{
+ setConnection('http://core.test','token');const {confirmed}=journal([done,unsynced]);
+ const {forgetUnlistedReads}=await import('../src/localOrigins');
+ forgetUnlistedReads();
+ vi.stubGlobal('fetch',vi.fn(async(input:any)=>{
+  const url=String(input);
+  if(url.endsWith('/api/control/missions'))return new Response('[]');
+  return new Response('Not found',{status:404});
+ }));
+ await listMissions();
+ expect(confirmed.get('done')?.deleted).toBe(true);
+ expect(confirmed.get('unsynced')).toBeUndefined();
+ vi.stubGlobal('fetch',offline());
+ expect((await listMissions()).map(m=>m.id)).toEqual(['unsynced']);
 });
 
 it('shares concurrent native scans and reads fresh rows after completion',async()=>{
