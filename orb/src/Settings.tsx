@@ -111,7 +111,7 @@ function LocalAgentsCard() {
         {(id) => {
           const found = () => row(id);
           return (
-            <Row title={label[id]} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : "Not found"}>
+            <Row title={label[id]} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
               <input
                 class="s-input"
                 aria-label={`${label[id]} path`}
