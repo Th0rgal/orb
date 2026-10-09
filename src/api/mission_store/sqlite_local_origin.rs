@@ -28,7 +28,7 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
    // Plain INSERT is intentional: an offline record can NEVER adopt, replace,
    // or restart an existing mission, even when its UUID collides.
    let tags=serde_json::to_string(&o.tags.iter().cloned().chain(std::iter::once("placement:client".to_owned())).collect::<Vec<_>>()).map_err(err)?;
-   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?10,'orb-client')",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort]).map_err(err)?;
+   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin,agent) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?10,'orb-client',?12)",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort,o.initial_agent()]).map_err(err)?;
    if let Some(objective)=o.prompt.trim().strip_prefix("/goal").filter(|rest| rest.starts_with(char::is_whitespace)).map(str::trim).filter(|rest| !rest.is_empty()) {
     tx.execute("UPDATE missions SET goal_mode=1,goal_objective=?2 WHERE id=?1",params![id,objective]).map_err(err)?;
    }
@@ -75,6 +75,58 @@ mod tests {
             error: None,
         }
     }
+    #[tokio::test]
+    async fn local_origin_preserves_initial_vibe_plan_without_overwriting_later_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(temp.path().to_path_buf(), "vibe-plan-origin")
+            .await
+            .unwrap();
+        for (backend, prompt, expected) in [
+            ("vibe", "/plan Inspect the change", Some("plan")),
+            ("vibe", "Implement the change", None),
+            ("vibe", "/planet", None),
+            ("claudecode", "/plan Inspect the change", None),
+        ] {
+            let mut s = snapshot();
+            s.origin.backend = backend.into();
+            s.origin.prompt = prompt.into();
+            let id = s.origin.id;
+            sync(&store, s.clone()).await.unwrap();
+            assert_eq!(
+                store
+                    .get_mission(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                expected
+            );
+            // A subsequent sync of the original prompt must not reset a user mode change.
+            store
+                .conn
+                .lock()
+                .await
+                .execute(
+                    "UPDATE missions SET agent='build' WHERE id=?1",
+                    [id.to_string()],
+                )
+                .unwrap();
+            s.sequence += 1;
+            sync(&store, s).await.unwrap();
+            assert_eq!(
+                store
+                    .get_mission(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                Some("build")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn local_origin_records_goal_metadata() {
         let temp = tempfile::tempdir().unwrap();

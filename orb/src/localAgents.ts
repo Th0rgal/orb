@@ -596,7 +596,9 @@ export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {k
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
  catch(error){if(/unknown command|command .*not found/i.test(String(error)))throw new Error("Update Orb desktop to enable local launches with offline support. Your draft is kept.");throw error;}
- await rememberBinding(mission.id,{harness:request.harness,bin:request.bin,cwd:mission.working_directory ?? request.cwd,model:request.model,effort:request.effort});
+ // Native launch owns the durable binding, including mode and resumed session.
+ // Refresh it instead of replacing it after the first turn or an idempotent replay.
+ await refreshLocalBindings();
  await reconcileLocalRun(mission.id);
  return mission;
 }
