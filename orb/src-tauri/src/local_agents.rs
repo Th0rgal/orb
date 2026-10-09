@@ -1177,8 +1177,10 @@ fn spawn_vibe(
     let guard = output.reader();
     thread::spawn(move || {
         let _guard = guard;
-        let mut stream = crate::vibe::Stream::default();
-        stream.session = expected;
+        let mut stream = crate::vibe::Stream {
+            session: expected,
+            ..Default::default()
+        };
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else {
                 break;

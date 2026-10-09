@@ -71,8 +71,10 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         let mut reader = BufReader::new(stderr);
         let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
     });
-    let mut stream = crate::vibe::Stream::default();
-    stream.session = ctx.session_id.map(str::to_string);
+    let mut stream = crate::vibe::Stream {
+        session: ctx.session_id.map(str::to_string),
+        ..Default::default()
+    };
     let mut bound = false;
     loop {
         let line = tokio::select! {
