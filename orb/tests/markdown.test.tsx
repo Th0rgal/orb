@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@solidjs/testing-library";
 import { parseMarkdown, MdView } from "../src/Markdown";
+import { MATH_REPLY } from "./markdown-math.fixture";
 
 const HEX_ZEROS = `On this DGX Spark the generator runs at about **1.29 billion addresses/s** (mean of three 20 s GB10 runs: 1299 / 1287 / 1281 M addr/s).
 
@@ -291,4 +292,33 @@ it("renders nested indented bullet and numbered lists instead of collapsing dash
   expect(topItems[1].querySelectorAll(":scope > ul > li")).toHaveLength(2);
   expect(topItems[1].querySelectorAll(":scope > ul > li ul > li")).toHaveLength(2);
   expect(container.querySelector("hr")).not.toBeNull();
+});
+
+
+describe("LaTeX in mission replies", () => {
+  it("renders numeric formulas and display math embedded in a list", () => {
+    const text = MATH_REPLY;
+    const {container} = render(() => <MdView text={text}/>);
+    expect(container.querySelectorAll(".katex")).toHaveLength(4);
+    expect(container.querySelectorAll(".md-math-block .katex-display")).toHaveLength(1);
+    expect(container.querySelector("strong .katex")).not.toBeNull();
+    expect(container.querySelector(".katex-error")).toBeNull();
+    expect([...container.querySelectorAll("annotation")].map(node => node.textContent)).toEqual([
+      String.raw`2^{64} - 9\,999 \le \text{amount} + \text{fee} \le 2^{64} - 1\,617`,
+      String.raw`2^{64} \approx 1.84 \times 10^{19}`, String.raw`8\,383`, String.raw`2 \times 10^{15}`,
+    ]);
+  });
+
+  it("preserves prices, escaped dollars and code alongside numeric and symbolic math", () => {
+    const text = [
+      "Prices: $15 and $20. Escaped: \\$5. Code: `$2^{64}$`. Math: $123$, $x + 1$, and \\(2^8\\).",
+      "", "```text", "$$2^{64}$$", "```",
+    ].join("\n");
+    const {container} = render(() => <MdView text={text}/>);
+    expect(container.querySelectorAll(".katex")).toHaveLength(3);
+    expect(container.textContent).toContain("Prices: $15 and $20. Escaped: $5.");
+    expect(container.querySelector("p code")?.textContent).toBe("$2^{64}$");
+    expect(container.querySelector("pre")?.textContent).toBe("$$2^{64}$$");
+    expect(container.querySelector(".katex-error")).toBeNull();
+  });
 });

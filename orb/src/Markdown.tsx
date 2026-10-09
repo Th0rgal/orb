@@ -35,7 +35,7 @@ function fileLinkTarget(raw: string): string {
 }
 
 function plainInline(text: string, links: boolean): JSX.Element[] {
-  text = text.replace(/\\([\\`*_[\]{}()#+.!|>-])/g, "$1");
+  text = text.replace(/\\([\\`*_[\]{}()#+.!|>$-])/g, "$1");
   if (!links) return [text];
   const result: JSX.Element[] = [];
   const pattern = /https?:\/\/[^\s<>"`]+/gi;
@@ -63,11 +63,12 @@ function MathFormula(p: {text: string; display?: boolean}) {
 }
 function inline(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
-  // Keep code spans opaque; currency such as "$15 and $20" is ordinary text.
+  // Keep code spans opaque. Numeric math is valid; currency such as "$15 and
+  // $20" stays text because a closing delimiter cannot precede a digit/word.
   // Emphasis that wraps a code span is taken whole first, or the span would
   // split it and leave its asterisks as text. Links likewise stay whole so
   // code-formatted labels do not expose their brackets and destination.
-  const pattern = /(?<![\\*])\*\*(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\w\\])\$(?!\s|\d)([^$\n]+?)(?<!\s)\$(?!\w)/g;
+  const pattern = /(?<![\\*])\*\*(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\\$])\$\$([^\n]+?)\$\$(?!\$)|(?<![\w\\$])\$(?![\s$])([^$\n]+?)(?<!\s)\$(?![\w$])/g;
   let last = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
@@ -76,7 +77,7 @@ function inline(text: string, links = true): JSX.Element[] {
     else if (match[0].startsWith('![')) out.push(<img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>);
     else if (match[0].startsWith('[')) out.push(...inlineText(match[0], links));
     else if (match[0].startsWith('`')) out.push(...inlineText(match[0], links));
-    else out.push(<MathFormula text={match[3] ?? match[4]}/>);
+    else out.push(<MathFormula text={match[3] ?? match[4] ?? match[5]} display={match[4] !== undefined}/>);
     last = match.index! + match[0].length;
   }
   if (last < text.length) out.push(...inlineText(text.slice(last), links));
