@@ -1188,6 +1188,7 @@ fn transfer_harnesses(
         ("opencode", "opencode"),
         ("claude", "claudecode"),
         ("agy", "antigravity"),
+        ("vibe-acp", "vibe"),
     ]
     .into_iter()
     .filter(|(bin, _)| {
@@ -1200,6 +1201,23 @@ fn transfer_harnesses(
 }
 #[cfg(test)]
 mod transfer_harness_tests {
+    #[test]
+    fn installed_vibe_acp_is_advertised_by_backend_id() {
+        let dir = tempfile::tempdir().unwrap();
+        // The interactive entrypoint alone cannot serve the ACP runner.
+        std::fs::write(dir.path().join("vibe"), "fixture").unwrap();
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), false, false).is_empty());
+
+        std::fs::write(dir.path().join("vibe-acp"), "fixture").unwrap();
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, false),
+            vec!["vibe"]
+        );
+
+        std::fs::remove_file(dir.path().join("vibe-acp")).unwrap();
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), true, true).is_empty());
+    }
+
     #[test]
     fn installed_claude_is_advertised_by_backend_id() {
         let dir = tempfile::tempdir().unwrap();

@@ -1207,6 +1207,43 @@ impl NativeGrokObserver {
         }
     }
 
+    async fn release_unstarted_vibe_claim(&self, status: &NodeJobStatus) {
+        // A missing identity is proof only after reading the complete terminal
+        // log. A lost node or truncated tail may hide an admitted native session.
+        if self.streaming != LogStreaming::Supported
+            || !self.pumped_to_end
+            || !matches!(status.state.as_str(), "succeeded" | "failed" | "cancelled")
+            || self.session_persisted.is_some()
+            || !self
+                .stream
+                .vibe
+                .as_ref()
+                .is_some_and(|s| s.session.is_none())
+        {
+            return;
+        }
+        let run = match self
+            .owner
+            .mission_store
+            .get_latest_mission_run(self.mission_id)
+            .await
+        {
+            Ok(Some(run)) if run.owner_actor_id == super::remote_job_lease_owner(self.job_id) => {
+                SessionUpdateRun::from(&run)
+            }
+            _ => return,
+        };
+        if let Err(error) = self
+            .owner
+            .mission_store
+            .release_native_prompt_no_launch(self.mission_id, "vibe", Some(&run), self.job_id)
+            .await
+        {
+            tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, %error,
+                "Could not release unstarted remote Vibe claim");
+        }
+    }
+
     /// Terminal decision for the job. Flushes the parser, closes an open
     /// thinking block, and reports the native CLI outcome.
     pub(crate) async fn verdict(
@@ -1285,6 +1322,9 @@ impl NativeGrokObserver {
         let allocated = take_allocated_claude_session(self.job_id);
         if self.stream.claude && !success {
             self.forget_unstarted_claude_session(allocated).await;
+        }
+        if !success {
+            self.release_unstarted_vibe_claim(status).await;
         }
         let mut content = self
             .stream
@@ -2223,6 +2263,79 @@ mod tests {
     const SPARK_STREAM: &str =
         include_str!("../../../tests/fixtures/native_grok_goal_resume.jsonl");
     const SPARK_TEXT: &str = include_str!("../../../tests/fixtures/native_grok_goal_resume.txt");
+
+    #[tokio::test]
+    async fn vibe_remote_startup_claim_requires_complete_terminal_log_without_identity() {
+        use crate::api::mission_store::SqliteMissionStore;
+        for (streaming, caught_up, state, identity, release) in [
+            (LogStreaming::Supported, true, "failed", false, true),
+            (LogStreaming::Supported, true, "cancelled", false, true),
+            (LogStreaming::Supported, false, "failed", false, false),
+            (LogStreaming::Unsupported, true, "failed", false, false),
+            (LogStreaming::Supported, true, "lost", false, false),
+            (LogStreaming::Supported, true, "running", false, false),
+            (LogStreaming::Supported, true, "failed", true, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = Arc::new(
+                SqliteMissionStore::new(dir.path().into(), "vibe-remote-claim")
+                    .await
+                    .unwrap(),
+            );
+            let mission = store
+                .create_mission(None, None, None, None, None, Some("vibe"), None)
+                .await
+                .unwrap();
+            let job_id = Uuid::new_v4();
+            let run = store
+                .begin_mission_run(
+                    mission.id,
+                    &super::super::remote_job_lease_owner(job_id),
+                    None,
+                )
+                .await
+                .unwrap();
+            let fence = SessionUpdateRun::from(&run);
+            assert!(store
+                .claim_native_prompt(mission.id, "vibe", None, Some(&fence), job_id)
+                .await
+                .unwrap());
+            let owner = RemoteMissionOwner {
+                mission_store: store.clone(),
+                events_tx: None,
+            };
+            let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job_id)
+                .await
+                .unwrap();
+            observer.streaming = streaming;
+            observer.pumped_to_end = caught_up;
+            if identity {
+                observer.stream.vibe.as_mut().unwrap().session = Some("native-session".into());
+            }
+            let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+                "job_id":job_id, "mission_id":mission.id, "state":state,
+                "exit_code":1, "created_at":"2026-10-09T00:00:00Z"
+            }))
+            .unwrap();
+            let verdict = observer.verdict(&status, "node").await;
+            assert!(!verdict.success);
+            assert_eq!(
+                !store
+                    .native_prompt_attempted(mission.id, "vibe")
+                    .await
+                    .unwrap(),
+                release,
+                "streaming={streaming:?} caught_up={caught_up} state={state} identity={identity}"
+            );
+            assert_eq!(
+                store
+                    .claim_native_prompt(mission.id, "vibe", None, Some(&fence), Uuid::new_v4())
+                    .await
+                    .unwrap(),
+                release
+            );
+        }
+    }
 
     #[test]
     fn opencode_error_is_a_terminal_tool_result() {

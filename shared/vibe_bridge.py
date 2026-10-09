@@ -15,6 +15,10 @@ import sys
 import tempfile
 
 
+class ACPRejected(RuntimeError):
+    """A definitive JSON-RPC rejection, unlike a lost/ambiguous response."""
+
+
 def emit(kind, **values):
     print(json.dumps(dict(type=kind, **values)), flush=True)
 
@@ -130,7 +134,7 @@ def run(args):
             if message.get("id") == request and "method" not in message:
                 if "error" in message:
                     # Error text may contain provider diagnostics; do not echo credentials.
-                    raise RuntimeError("Vibe ACP rejected " + method + " (" + str(message["error"].get("code")) + ")")
+                    raise ACPRejected("Vibe ACP rejected " + method + " (" + str(message["error"].get("code")) + ")")
                 return message.get("result") or {}
             if message.get("method") == "session/request_permission":
                 options = message.get("params", {}).get("options", [])
@@ -162,8 +166,21 @@ def run(args):
             call("_trust/decision", dict(cwd=cwd, decision="trust_cwd"))
         if not session:
             save(journal, dict(cwd=cwd, session=None))
-        state = call("session/load" if session else "session/new", dict(
-            cwd=cwd, mcpServers=[], **({"sessionId": session} if session else {})))
+        try:
+            state = call("session/load" if session else "session/new", dict(
+                cwd=cwd, mcpServers=[], **({"sessionId": session} if session else {})))
+        except ACPRejected:
+            if not session:
+                # Creation was explicitly rejected before any prompt admission.
+                # Keep the sentinel on EOF/transport loss: its outcome is unknown.
+                journal.unlink()
+                if os.name != "nt":
+                    fd = os.open(journal.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+            raise
         session = session or state.get("sessionId")
         if not session:
             raise RuntimeError("Vibe did not return a native session identity")

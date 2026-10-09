@@ -2552,7 +2552,8 @@ pub trait MissionStore: Send + Sync {
     }
 
     /// Release only this new, unbound claim after definitive proof no process
-    /// accepted the prompt. Never call after a child has been returned.
+    /// accepted the prompt. After spawning, that requires a native protocol
+    /// boundary proving the prompt was not admitted, not just a process failure.
     async fn release_native_prompt_no_launch(
         &self,
         _id: Uuid,

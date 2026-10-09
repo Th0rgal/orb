@@ -18,6 +18,10 @@ for line in sys.stdin:
   print(json.dumps(dict(jsonrpc="2.0",method="session/update",params=dict(sessionId="native-1",update=dict(sessionUpdate="agent_message_chunk",content=dict(type="text",text=text))))),flush=True)
  result={}
  if method=="initialize": result={"agentCapabilities":{"loadSession":True}}
+ if method=="session/new" and os.environ.get("NEW_FAIL"):
+  if os.environ["NEW_FAIL"]=="eof": sys.exit(1)
+  print(json.dumps(dict(jsonrpc="2.0",id=m["id"],error=dict(code=-32603,message="rejected"))),flush=True)
+  continue
  if method=="session/load":
   assert p["sessionId"]=="native-1"
   notify("OLD HISTORY")
@@ -127,6 +131,27 @@ class BridgeTest(unittest.TestCase):
         self.assertNotEqual(child.returncode, 0)
         self.assertIn("differs", output)
         self.assertEqual((self.root / "prompts").read_text(), "hello\n")
+
+    def test_rejected_session_creation_can_retry_but_lost_response_cannot(self):
+        for outcome in ("rejected", "eof"):
+            with self.subTest(outcome=outcome):
+                self.env["NEW_FAIL"] = outcome
+                child = self.start()
+                output, _ = child.communicate(timeout=10)
+                self.assertNotEqual(child.returncode, 0, output)
+                self.assertFalse((self.root / "prompts").exists())
+                self.env.pop("NEW_FAIL")
+                child = self.start()
+                output, _ = child.communicate(timeout=10)
+                if outcome == "rejected":
+                    self.assertEqual(child.returncode, 0, output)
+                    (self.root / "prompts").unlink()
+                    for journal in (self.root / ".local/state/sandboxed-vibe").glob("*.json"):
+                        journal.unlink()
+                else:
+                    self.assertNotEqual(child.returncode, 0)
+                    self.assertIn("unresolved launch", output)
+                    self.assertFalse((self.root / "prompts").exists())
 
 
 if __name__ == "__main__":
