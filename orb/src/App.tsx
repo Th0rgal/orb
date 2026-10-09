@@ -445,7 +445,14 @@ export function Composer(p: {
     setDraftReady(false);
     if (!scope) { setDraftReady(true); return; }
     let current=true;
-    onCleanup(() => { current=false; });
+    onCleanup(() => {
+      current=false;
+      // A fast close can happen before hydration enables the persistence
+      // effect. Flush typed content without clearing an untouched disk draft.
+      if (draftReady() || text() || images().length || mode()) {
+        void saveComposerDraft(scope,{text:pendingSend()?.text ?? text(),images:pendingSend()?.images ?? images(),mode:mode(),uploads:uploaded.map(file => ({...file, source:file.source}))}).catch(() => {});
+      }
+    });
     void readComposerDraft(scope).then(draft => {
       if (current && draft && !text() && !images().length) {
         uploaded = (draft.uploads ?? []).map(file => ({...file, connection: file.endpoint === getApiUrl() ? connectionVersion() : -1}));

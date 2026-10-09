@@ -74,7 +74,7 @@ export function ConversationSkeleton() {
   </div>;
 }
 
-/** Two-line placeholder cards matching the Inbox row geometry. */
+/** Two-line placeholders matching the Inbox list geometry. */
 export function InboxSkeleton() {
   return (
     <div class="inbox-skeleton" role="status" aria-label="Loading inbox" aria-busy="true">

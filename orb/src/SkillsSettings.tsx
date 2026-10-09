@@ -833,7 +833,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                   type="button"
                   role="tab"
                   aria-selected={originFilter() === "all"}
-                  class={`inbox-filter-chip ${originFilter() === "all" ? "on" : ""}`}
+                  class={`skills-filter-pill ${originFilter() === "all" ? "on" : ""}`}
                   onClick={() => setOriginFilter("all")}
                 >
                   All
@@ -842,7 +842,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                   type="button"
                   role="tab"
                   aria-selected={originFilter() === "drift"}
-                  class={`inbox-filter-chip ${originFilter() === "drift" ? "on" : ""}`}
+                  class={`skills-filter-pill ${originFilter() === "drift" ? "on" : ""}`}
                   onClick={() => setOriginFilter("drift")}
                 >
                   Unsynced
@@ -851,7 +851,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                   type="button"
                   role="tab"
                   aria-selected={originFilter() === "paloma"}
-                  class={`inbox-filter-chip ${originFilter() === "paloma" ? "on" : ""}`}
+                  class={`skills-filter-pill ${originFilter() === "paloma" ? "on" : ""}`}
                   onClick={() => setOriginFilter("paloma")}
                 >
                   Paloma
@@ -860,7 +860,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                   type="button"
                   role="tab"
                   aria-selected={originFilter() === "library"}
-                  class={`inbox-filter-chip ${originFilter() === "library" ? "on" : ""}`}
+                  class={`skills-filter-pill ${originFilter() === "library" ? "on" : ""}`}
                   onClick={() => setOriginFilter("library")}
                 >
                   Library

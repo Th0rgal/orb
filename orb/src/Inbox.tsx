@@ -4,6 +4,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  createUniqueId,
   onCleanup,
   onMount,
   untrack,
@@ -89,6 +90,7 @@ import { InboxSkeleton } from "./Skeleton";
 import { streamMission, type StreamEvent } from "./stream";
 import { Transcript, type StreamItem } from "./Transcript";
 import { applyStreamEvent } from "./transcriptModel";
+import "./Inbox.css";
 
 export type InboxViewMode = "unread" | "attention" | "all";
 
@@ -295,6 +297,7 @@ export function InboxPage(p: {
   onRefresh: () => Promise<void> | void;
   onMissionUpdated?: (mission: Mission) => void;
 }) {
+  const viewId = createUniqueId();
   const [viewMode, setViewMode] = createSignal<InboxViewMode>("unread");
   const [projectFilter, setProjectFilter] = createSignal<string | null>(null);
   const [showWorking, setShowWorking] = createSignal(false);
@@ -1277,6 +1280,8 @@ export function InboxPage(p: {
               data-inbox-id={id}
               data-inbox-tone={currentItem().tone}
               data-inbox-unread={currentItem().unread ? "true" : "false"}
+              aria-busy={isBusy()}
+              onFocusIn={() => setFocusedId(id)}
               onMouseEnter={() => {
                 if (
                   !replyingId() ||
@@ -1356,6 +1361,7 @@ export function InboxPage(p: {
                           title={isPeeked() ? "Close peek (Esc or Space)" : "Peek conversation & reply inline (Space)"}
                           aria-label={`Peek and reply to ${effectiveHeadline()}`}
                           aria-expanded={isPeeked()}
+                          aria-controls={`${viewId}-peek-${id}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             if (isPeeked()) {
@@ -1512,11 +1518,11 @@ export function InboxPage(p: {
               </Show>
 
               <Show when={isPeeked()}>
-                <div class="inbox-peek-drawer" role="region" aria-label={`Recent turns for ${effectiveHeadline()}`}>
+                <div id={`${viewId}-peek-${id}`} class="inbox-peek-drawer" role="region" aria-label={`Recent turns for ${effectiveHeadline()}`}>
                   <div class="inbox-peek-status-card">
                     <div class="inbox-peek-status-top">
                       <span class="inbox-peek-status-label">
-                        Reply Context & Quick Actions
+                        Reply context
                       </span>
                       <div class="inbox-peek-status-chips">
                         <button
@@ -1528,7 +1534,7 @@ export function InboxPage(p: {
                             appendToReplyDraft(`Regarding status ("${outcomeLine()}"): `);
                           }}
                         >
-                          + Quote status
+                          Quote status
                         </button>
                         <Show when={currentItem().canRetry || currentItem().mission.status === "blocked"}>
                           <button
@@ -1539,7 +1545,7 @@ export function InboxPage(p: {
                               appendToReplyDraft("Resume the goal and resolve the remaining blockers.");
                             }}
                           >
-                            + Resume & unblock
+                            Resume & unblock
                           </button>
                         </Show>
                         <button
@@ -1550,7 +1556,7 @@ export function InboxPage(p: {
                             appendToReplyDraft("Summarize the remaining work and open a PR when checks pass.");
                           }}
                         >
-                          + Ask for next steps
+                          Ask for next steps
                         </button>
                       </div>
                     </div>
@@ -1612,7 +1618,8 @@ export function InboxPage(p: {
                         p.onOpenMission(it.id);
                       }}
                     >
-                      <span>Open thread →</span>
+                      <span>Open thread</span>
+                      <span aria-hidden="true">↗</span>
                       <kbd class="inbox-act-kbd" aria-hidden="true">↵</kbd>
                     </button>
                   </div>
@@ -1796,11 +1803,24 @@ export function InboxPage(p: {
         }
       >
         <div class="inbox-toolbar">
-          <div class="inbox-mode-tabs" role="tablist" aria-label="Inbox filter">
+          <div class="inbox-mode-tabs" role="tablist" aria-label="Inbox filter"
+            onKeyDown={(e) => {
+              if (e.isComposing || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              const modes: InboxViewMode[] = ["unread", "attention", "all"];
+              const index = modes.indexOf(viewMode());
+              const next = e.key === "Home" ? 0 : e.key === "End" ? 2 : (index + (e.key === "ArrowRight" ? 1 : 2)) % 3;
+              switchViewMode(modes[next]);
+              e.currentTarget.querySelector<HTMLButtonElement>(`[data-inbox-filter="${modes[next]}"]`)?.focus({ preventScroll: true });
+            }}>
             <button
               type="button"
               role="tab"
               data-inbox-filter="unread"
+              id={`${viewId}-unread`}
+              aria-controls={`${viewId}-results`}
+              tabIndex={viewMode() === "unread" ? 0 : -1}
               aria-selected={viewMode() === "unread"}
               class={`inbox-mode-tab ${viewMode() === "unread" ? "on" : ""}`}
               onClick={() => switchViewMode("unread")}
@@ -1813,6 +1833,9 @@ export function InboxPage(p: {
               type="button"
               role="tab"
               data-inbox-filter="attention"
+              id={`${viewId}-attention`}
+              aria-controls={`${viewId}-results`}
+              tabIndex={viewMode() === "attention" ? 0 : -1}
               aria-selected={viewMode() === "attention"}
               class={`inbox-mode-tab ${viewMode() === "attention" ? "on" : ""}`}
               onClick={() => switchViewMode("attention")}
@@ -1824,6 +1847,9 @@ export function InboxPage(p: {
               type="button"
               role="tab"
               data-inbox-filter="all"
+              id={`${viewId}-all`}
+              aria-controls={`${viewId}-results`}
+              tabIndex={viewMode() === "all" ? 0 : -1}
               aria-selected={viewMode() === "all"}
               class={`inbox-mode-tab ${viewMode() === "all" ? "on" : ""}`}
               onClick={() => switchViewMode("all")}
@@ -1851,6 +1877,7 @@ export function InboxPage(p: {
             <button
               type="button"
               class={`inbox-filter-chip ${projectFilter() === null ? "on" : ""}`}
+              aria-pressed={projectFilter() === null}
               onClick={() => setProjectFilter(null)}
             >
               All projects
@@ -1860,6 +1887,7 @@ export function InboxPage(p: {
                 <button
                   type="button"
                   class={`inbox-filter-chip ${projectFilter() === proj.slug ? "on" : ""}`}
+                  aria-pressed={projectFilter() === proj.slug}
                   onClick={() =>
                     setProjectFilter(projectFilter() === proj.slug ? null : proj.slug)
                   }
@@ -1881,6 +1909,7 @@ export function InboxPage(p: {
           </div>
         </Show>
 
+        <div id={`${viewId}-results`} role="tabpanel" aria-labelledby={`${viewId}-${viewMode()}`} aria-busy={p.loading || undefined}>
         <Show when={showWorking() && workingIds().length > 0}>
           <section class="inbox-sec working-sec" aria-label="Working quietly">
             <div class="inbox-sec-head">
@@ -1975,7 +2004,7 @@ export function InboxPage(p: {
                     </button>
                   </Show>
                   <button type="button" class="s-btn" onClick={p.onNewAgent}>
-                    New Agent
+                    New agent
                   </button>
                 </div>
               </div>
@@ -2015,6 +2044,7 @@ export function InboxPage(p: {
             </Show>
           </Show>
         </Show>
+        </div>
       </Show>
 
       <Show when={undoItem()}>

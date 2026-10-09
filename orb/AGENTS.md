@@ -9,3 +9,6 @@ The executable gallery is `tests/overlays.html`. Validate using `pnpm build`,
 relevant `pnpm exec vitest run ...` tests and
 `pnpm exec playwright test --config=playwright.overlays.config.ts`.
 Preserve native form semantics, IME input, drafts, and single in-flight mutations.
+
+For Inbox presentation changes, follow [the Inbox contract](../docs/ui/inbox.md)
+and run its Chromium/WebKit references and triage checks.
