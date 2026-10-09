@@ -479,6 +479,10 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 .transcript-scroll-thumb[hidden] { display:none; }
 .transcript-scroll-thumb.hovered, .transcript-scroll-thumb.dragging { width:8px; background:var(--scroll-thumb-hover); }
 .col { width: 100%; max-width: var(--col); margin: 0 auto; }
+/* Offscreen turns skip style/layout: long transcripts otherwise make every
+   composer keystroke relayout the whole conversation. */
+.scroll { contain: layout paint; }
+.scroll .col > * { content-visibility: auto; contain-intrinsic-size: auto 160px; }
 .scroll .col { padding: 16px 0 24px; user-select: text; -webkit-user-select: text; cursor: auto; font-size: 13px; line-height: 21px; }
 
 .sk-transcript { margin-top: 8px; }
