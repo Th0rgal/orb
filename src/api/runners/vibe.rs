@@ -13,6 +13,8 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         Ok(true) => {},
         _ => return AgentResult::failure("Vibe has an unresolved or superseded launch; recover its native session before retrying", 0).with_terminal_reason(TerminalReason::NativeContinuityRequired),
     }
+    let release =
+        |bound| release_unbound_claim(store.as_ref(), ctx.mission_id, run.as_ref(), claim, bound);
     let cli = crate::api::mission_runner::get_backend_string_setting("vibe", "cli_path")
         .unwrap_or_else(|| "vibe-acp".into());
     let current_message = match ctx.extras {
@@ -65,6 +67,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     if let Some(input) = stdin.as_mut() {
         if input.write_all(prompt.as_bytes()).await.is_err() {
             stop(&mut child).await;
+            release(false).await;
             return AgentResult::failure("Cannot deliver Vibe prompt", 0);
         }
     }
@@ -84,6 +87,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             _ = ctx.cancel.cancelled() => {
                 finish_thinking(&ctx.events_tx, ctx.mission_id, &mut stream);
                 stop(&mut child).await; drain.abort();
+                release(bound).await;
                 return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
             },
             line = lines.next_line() => line,
@@ -119,8 +123,12 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
                 {
                     stop(&mut child).await;
                     drain.abort();
+                    release(false).await;
                     return *result;
                 }
+                // After identity persistence, a partial acknowledgement is ambiguous:
+                // retain the session/claim so a retry resumes the same conversation.
+                bound = true;
                 if let Some(mut input) = stdin.take() {
                     if input.write_all(b"{\"continue\":true}\n").await.is_err() {
                         stream.error = Some("Vibe identity acknowledgement failed".into());
@@ -128,7 +136,6 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
                         break;
                     }
                 }
-                bound = true;
             }
         }
         if stream.text.len() != old_text {
@@ -169,11 +176,13 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let status = tokio::select! {
         _ = ctx.cancel.cancelled() => {
             stop(&mut child).await; drain.abort();
+            release(bound).await;
             return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
         },
         status = child.wait() => status,
     };
     drain.abort();
+    release(bound).await;
     match stream.finish() {
         Ok(()) if status.is_ok_and(|status| status.success()) => {
             AgentResult::success(stream.text, 0)
@@ -184,7 +193,28 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             result.err().unwrap_or_else(|| "Vibe process failed".into()),
             0,
         )
-        .with_terminal_reason(TerminalReason::NativeContinuityRequired),
+        .with_terminal_reason(if bound {
+            TerminalReason::NativeContinuityRequired
+        } else {
+            TerminalReason::LlmError
+        }),
+    }
+}
+
+async fn release_unbound_claim(
+    store: &dyn crate::api::mission_store::MissionStore,
+    mission_id: uuid::Uuid,
+    run: Option<&crate::api::mission_store::SessionUpdateRun>,
+    claim: uuid::Uuid,
+    bound: bool,
+) {
+    if !bound {
+        if let Err(error) = store
+            .release_native_prompt_no_launch(mission_id, "vibe", run, claim)
+            .await
+        {
+            tracing::warn!(%mission_id, %error, "Could not release Vibe pre-prompt claim");
+        }
     }
 }
 
@@ -220,6 +250,56 @@ fn finish_thinking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn vibe_startup_failure_releases_only_an_unbound_claim() {
+        use crate::api::mission_store::{
+            FileMissionStore, InMemoryMissionStore, MissionStore, SqliteMissionStore,
+        };
+        use std::sync::Arc;
+        for kind in ["memory", "file", "sqlite"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = match kind {
+                "file" => Arc::new(
+                    FileMissionStore::new(dir.path().into(), "vibe")
+                        .await
+                        .unwrap(),
+                ),
+                "sqlite" => Arc::new(
+                    SqliteMissionStore::new(dir.path().into(), "vibe")
+                        .await
+                        .unwrap(),
+                ),
+                _ => Arc::new(InMemoryMissionStore::new()),
+            };
+            let mission = store
+                .create_mission(None, None, None, None, None, Some("vibe"), None)
+                .await
+                .unwrap();
+            let first = uuid::Uuid::new_v4();
+            assert!(store
+                .claim_native_prompt(mission.id, "vibe", None, None, first)
+                .await
+                .unwrap());
+            release_unbound_claim(store.as_ref(), mission.id, None, first, false).await;
+            let retry = uuid::Uuid::new_v4();
+            assert!(
+                store
+                    .claim_native_prompt(mission.id, "vibe", None, None, retry)
+                    .await
+                    .unwrap(),
+                "{kind}: startup can retry"
+            );
+            release_unbound_claim(store.as_ref(), mission.id, None, retry, true).await;
+            assert!(
+                !store
+                    .claim_native_prompt(mission.id, "vibe", None, None, uuid::Uuid::new_v4())
+                    .await
+                    .unwrap(),
+                "{kind}: admitted prompt cannot be duplicated"
+            );
+        }
+    }
+
     // Intermediate snapshots must be cumulative; completion is the durable row.
     #[test]
     fn thinking_snapshot_contains_all_chunks() {
