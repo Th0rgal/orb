@@ -12,8 +12,11 @@ from types import SimpleNamespace
 BRIDGE = Path(__file__).resolve().parents[1] / "shared/vibe_bridge.py"
 FAKE = '''#!/usr/bin/env python3
 import json, os, sys
+session_created=False
 for line in sys.stdin:
  m=json.loads(line); method=m["method"]; p=m["params"]
+ if os.environ.get("REQUEST_LOG"):
+  with open(os.environ["REQUEST_LOG"],"a") as log: log.write(json.dumps(m)+"\\n")
  def notify(text):
   print(json.dumps(dict(jsonrpc="2.0",method="session/update",params=dict(sessionId="native-1",update=dict(sessionUpdate="agent_message_chunk",content=dict(type="text",text=text))))),flush=True)
  result={}
@@ -26,7 +29,23 @@ for line in sys.stdin:
   assert p["sessionId"]=="native-1"
   notify("OLD HISTORY")
  if method in ("session/new","session/load"):
+  session_created=True
   result={"sessionId":"native-1","modes":{"availableModes":[{"id":"auto-approve"},{"id":"plan"}]}}
+  if os.environ.get("MODERN_MODEL_CONFIG"):
+   result["configOptions"]=[{"id":"model","category":"model","type":"select","currentValue":"other","options":[{"value":"sandboxed-selected","name":"selected"}]}]
+ if method=="session/set_model" and os.environ.get("MODERN_MODEL_CONFIG"):
+  print(json.dumps(dict(jsonrpc="2.0",id=m["id"],error=dict(code=-32601,message="unsupported"))),flush=True)
+  continue
+ if method=="session/set_config_option":
+  assert p==dict(sessionId="native-1",configId="model",value="sandboxed-selected")
+ if method=="_trust/status" and os.environ.get("TRUST_REQUIRED"):
+  result={"details":{"availableDecisions":["trust_cwd"]}}
+ if method=="_trust/decision":
+  assert session_created and p["sessionId"]=="native-1" and p["cwd"]==os.getcwd()
+  assert p["decision"]=="trust_cwd"
+  if os.environ.get("TRUST_FAIL"):
+   print(json.dumps(dict(jsonrpc="2.0",id=m["id"],error=dict(code=-32600,message="trust rejected"))),flush=True)
+   continue
  if method=="session/prompt":
   open(os.environ["PROMPT_MARKER"],"a").write(p["prompt"][0]["text"]+"\\n")
   notify("NEW ANSWER")
@@ -78,6 +97,61 @@ class BridgeTest(unittest.TestCase):
         output, errors = child.communicate(json.dumps({"prompt": prompt}) + '\n{"continue":true}\n', timeout=10)
         self.assertEqual(child.returncode, 0, errors + output)
         self.assertEqual((self.root / "prompts").read_text(), prompt + "\n")
+
+    def test_session_scoped_trust_follows_durable_identity_and_parent_ack(self):
+        log = self.root / "requests.jsonl"
+        self.env.update(TRUST_REQUIRED="1", REQUEST_LOG=str(log))
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                log.write_text("")
+                child = self.start("--ack", *(["--resume", "native-1"] if resume else []))
+                self.assertEqual(json.loads(child.stdout.readline())["session_id"], "native-1")
+                journals = list((self.root / ".local/state/sandboxed-vibe").glob("*.json"))
+                self.assertEqual(json.loads(journals[0].read_text())["session"], "native-1")
+                requests = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual([r["method"] for r in requests],
+                                 ["initialize", "session/load" if resume else "session/new"])
+                output, errors = child.communicate('{"continue":true}\n', timeout=10)
+                self.assertEqual(child.returncode, 0, errors + output)
+                requests = [json.loads(line) for line in log.read_text().splitlines()]
+                methods = [r["method"] for r in requests]
+                self.assertLess(methods.index("_trust/decision"), methods.index("session/prompt"))
+                for request in requests:
+                    if request["method"].startswith("_trust/"):
+                        self.assertEqual(request["params"]["sessionId"], "native-1")
+                        self.assertEqual(request["params"]["cwd"], str(self.root.resolve()))
+
+    def test_rejected_trust_retains_native_identity_and_never_prompts(self):
+        log = self.root / "requests.jsonl"
+        self.env.update(TRUST_REQUIRED="1", TRUST_FAIL="1", REQUEST_LOG=str(log))
+        child = self.start()
+        output, _ = child.communicate(timeout=10)
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn("rejected _trust/decision", output)
+        self.assertFalse((self.root / "prompts").exists())
+        journals = list((self.root / ".local/state/sandboxed-vibe").glob("*.json"))
+        self.assertEqual(json.loads(journals[0].read_text())["session"], "native-1")
+
+        self.env.pop("TRUST_FAIL")
+        log.write_text("")
+        child = self.start()
+        output, errors = child.communicate(timeout=10)
+        self.assertEqual(child.returncode, 0, errors + output)
+        methods = [json.loads(line)["method"] for line in log.read_text().splitlines()]
+        self.assertIn("session/load", methods)
+        self.assertNotIn("session/new", methods)
+        self.assertEqual((self.root / "prompts").read_text(), "hello\n")
+
+    def test_advertised_model_config_uses_standard_config_option(self):
+        log = self.root / "requests.jsonl"
+        self.env.update(MODERN_MODEL_CONFIG="1", REQUEST_LOG=str(log))
+        child = self.start("--model", "mistral/selected-model")
+        output, errors = child.communicate(timeout=10)
+        self.assertEqual(child.returncode, 0, errors + output)
+        requests = [json.loads(line) for line in log.read_text().splitlines()]
+        methods = [request["method"] for request in requests]
+        self.assertNotIn("session/set_model", methods)
+        self.assertLess(methods.index("session/set_config_option"), methods.index("session/prompt"))
 
     def test_prompt_file_and_concurrent_session_lock(self):
         child = self.start("--ack")

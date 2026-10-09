@@ -160,10 +160,6 @@ def run(args):
                     clientInfo=dict(name="sandboxed.sh", version="1")))
         if session and not info.get("agentCapabilities", {}).get("loadSession"):
             raise RuntimeError("This Vibe version cannot resume native sessions")
-        # Explicitly trust only the mission directory, through Vibe's own API.
-        trust = call("_trust/status", dict(cwd=cwd))
-        if "trust_cwd" in (trust.get("details") or {}).get("availableDecisions", []):
-            call("_trust/decision", dict(cwd=cwd, decision="trust_cwd"))
         if not session:
             save(journal, dict(cwd=cwd, session=None))
         try:
@@ -188,13 +184,25 @@ def run(args):
         emit("session", session_id=session)
         if args.ack and json.loads(sys.stdin.readline()).get("continue") is not True:
             raise RuntimeError("Parent did not persist the Vibe native identity")
+        # Vibe >=2.25.5 anchors trust decisions to an existing session. 2.19.1
+        # also accepts sessionId, so use the same session-scoped API on both.
+        # Journal/ack first: a failed trust decision must not lose the session.
+        trust = call("_trust/status", dict(cwd=cwd, sessionId=session))
+        if "trust_cwd" in (trust.get("details") or {}).get("availableDecisions", []):
+            call("_trust/decision", dict(cwd=cwd, sessionId=session, decision="trust_cwd"))
         modes = state.get("modes", {}).get("availableModes", [])
         desired = "plan" if args.mode == "plan" else "auto-approve"
         if not any(mode.get("id") == desired for mode in modes):
             raise RuntimeError("Vibe does not advertise the requested mode: " + desired)
         call("session/set_mode", dict(sessionId=session, modeId=desired))
         if args.model:
-            call("session/set_model", dict(sessionId=session, modelId="sandboxed-selected"))
+            model_option = next((option for option in state.get("configOptions", [])
+                                 if option.get("category") == "model" or option.get("id") == "model"), None)
+            if model_option:
+                call("session/set_config_option", dict(sessionId=session,
+                     configId=model_option["id"], value="sandboxed-selected"))
+            else:
+                call("session/set_model", dict(sessionId=session, modelId="sandboxed-selected"))
         active = True
         result = call("session/prompt", dict(sessionId=session, prompt=[dict(type="text", text=args.prompt)]))
         emit("result", stop_reason=result.get("stopReason"))
