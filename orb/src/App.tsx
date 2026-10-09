@@ -1253,7 +1253,7 @@ export default function App() {
   /** What the harness menu shows next to each harness for the selected machine. */
   const remoteSupport = (backend: string): { state: RemoteSupport; note: string } => {
     const machine = newMachine();
-    if (!isConnected() || machine === "core") return { state: "unknown", note: "" };
+    if (!isConnected() || machine === "core" || machine === "local") return { state: "unknown", note: "" };
     const rl = remoteLaunch();
     if (rl.state === "loading") return { state: "unknown", note: `checking ${nodeLabel(machine)}…` };
     const support = remoteHarnessSupport(rl.capability, backend);
