@@ -1,4 +1,12 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+
+async function expectReference(locator: Locator, name: string) {
+  // The general suite also runs on Linux. Only the dedicated macOS projects
+  // have matching reference images; all behavior assertions still run there.
+  if (test.info().project.metadata.inboxVisualReferences) {
+    await expect(locator).toHaveScreenshot(name);
+  }
+}
 
 async function openInbox(page: Page, theme = "dark", empty = false, aiSummary = false) {
   await page.clock.setFixedTime(new Date("2026-10-09T12:00:00Z"));
@@ -59,7 +67,7 @@ for (const theme of ["dark", "light"]) {
     await openInbox(page, theme);
     const inbox = page.locator(".inbox-page");
     await page.mouse.move(0, 0);
-    await expect(inbox).toHaveScreenshot(`list-${theme}.png`);
+    await expectReference(inbox, `list-${theme}.png`);
     const row = page.locator('[data-inbox-id="done"]');
     const before = await row.locator(".inbox-headline").boundingBox();
     await row.hover();
@@ -68,7 +76,7 @@ for (const theme of ["dark", "light"]) {
     await expect(row.locator("textarea")).toBeFocused();
     await expect(row.getByRole("button", { name: "Original conversation", exact: true })).toHaveAttribute("aria-expanded", "false");
     await expect(row.locator(".inbox-mission-context")).not.toHaveAttribute("open", "");
-    await expect(row).toHaveScreenshot(`preview-${theme}.png`);
+    await expectReference(row, `preview-${theme}.png`);
     await page.keyboard.press("Escape");
     await page.setViewportSize({ width: 390, height: 844 });
     await page.mouse.move(0, 0);
@@ -76,13 +84,13 @@ for (const theme of ["dark", "light"]) {
       await expect(actions).toHaveCSS("opacity", "1");
       await expect(actions).toHaveCSS("pointer-events", "auto");
     }
-    await expect(inbox).toHaveScreenshot(`list-mobile-${theme}.png`);
+    await expectReference(inbox, `list-mobile-${theme}.png`);
     expect(await inbox.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     const rowBox = (await row.boundingBox())!;
     const contentBox = (await row.locator(".inbox-row-main-col").boundingBox())!;
     expect(contentBox.x + contentBox.width).toBeLessThan(rowBox.x + rowBox.width);
     await row.getByRole("button", { name: /^Peek and reply/ }).click();
-    await expect(row).toHaveScreenshot(`preview-mobile-${theme}.png`);
+    await expectReference(row, `preview-mobile-${theme}.png`);
     expect(await inbox.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     for (const button of await row.locator(".inbox-triage-btns button").all()) {
       const box = (await button.boundingBox())!;
@@ -96,13 +104,13 @@ for (const theme of ["dark", "light"]) {
     await page.keyboard.press("ArrowDown");
     const row = page.locator('[data-inbox-id="failed"]');
     await expect(row.locator(".inbox-row-title-btn")).toBeFocused();
-    await expect(row).toHaveScreenshot(`keyboard-row-${theme}.png`);
+    await expectReference(row, `keyboard-row-${theme}.png`);
   });
 
   test(`Inbox empty state: ${theme}`, async ({ page }) => {
     await openInbox(page, theme, true);
     await expect(page.getByRole("status")).toContainText("All caught up on unread responses");
-    await expect(page.locator(".inbox-page")).toHaveScreenshot(`empty-${theme}.png`);
+    await expectReference(page.locator(".inbox-page"), `empty-${theme}.png`);
   });
 }
 
@@ -222,7 +230,7 @@ for (const theme of ["dark", "light"]) {
     await expect(row.locator(".inbox-mission-context")).not.toHaveAttribute("open", "");
     await expect(row.locator(".inbox-peek-transcript")).toHaveCount(0);
     await expect(row).not.toContainText("Ask for next steps");
-    await expect(row).toHaveScreenshot(`overview-${theme}.png`);
+    await expectReference(row, `overview-${theme}.png`);
     const input = row.locator("textarea");
     await input.fill("My draft. ");
     await row.getByRole("button", { name: "Verify draft restoration on Android too.", exact: true }).click();
@@ -235,7 +243,9 @@ for (const theme of ["dark", "light"]) {
     await expect(input).toHaveValue(/My draft/);
     await page.setViewportSize({ width: 390, height: 844 });
     await row.getByRole("button", { name: "Original conversation", exact: true }).click();
-    await expect(row).toHaveScreenshot(`overview-mobile-${theme}.png`);
+    // Resizing can put the pointer over a suggestion, changing its hover color.
+    await page.mouse.move(0, 0);
+    await expectReference(row, `overview-mobile-${theme}.png`);
     expect(await page.locator(".inbox-page").evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   });
 }

@@ -1,5 +1,11 @@
 # Inbox presentation
 
+Run `pnpm exec playwright test --config=playwright.inbox.config.ts` from `orb/`
+for the dedicated Chromium/WebKit checks. Committed visual references are macOS
+captures and are compared by this configuration on macOS. The general browser
+suite and Linux runs retain every behavior assertion without comparing against
+another platform's font rendering.
+
 The Inbox uses separate rounded message cards with a quiet border, neutral selected rows,
 13px content, a 15px title, and 28px controls. `orb/src/Inbox.css` owns its layout
 and reuses the surface, control radius, focus and theme tokens from the
