@@ -1239,11 +1239,11 @@ impl NativeGrokObserver {
             || !self.pumped_to_end
             || !matches!(status.state.as_str(), "succeeded" | "failed" | "cancelled")
             || self.session_persisted.is_some()
-            || !self
+            || self
                 .stream
                 .vibe
                 .as_ref()
-                .is_some_and(|s| s.session.is_none())
+                .is_none_or(|s| s.session.is_some())
         {
             return;
         }
