@@ -8,8 +8,9 @@ and a quiet filled background for the current project. Status colors describe
 agent state; routine actions remain neutral.
 
 Row hover, selection and preview backgrounds have square corners so their
-edges meet the list separators continuously. Individual controls retain the
-shared control radius.
+edges meet the list separators continuously. Keyboard row navigation adds a thin,
+square inset focus border around the full row; the title has no separate rounded
+ring. Individual action controls retain the shared control radius.
 
 Keep the collapsed list to the title and result. The goal, original request and
 reply shortcuts belong in the native `Reply context` disclosure inside Peek.

@@ -76,6 +76,15 @@ for (const theme of ["dark", "light"]) {
     }
   });
 
+  test(`Inbox keyboard row focus has square edges: ${theme}`, async ({ page }) => {
+    await openInbox(page, theme);
+    await page.getByRole("tab", { name: /^Unread/ }).focus();
+    await page.keyboard.press("ArrowDown");
+    const row = page.locator('[data-inbox-id="failed"]');
+    await expect(row.locator(".inbox-row-title-btn")).toBeFocused();
+    await expect(row).toHaveScreenshot(`keyboard-row-${theme}.png`);
+  });
+
   test(`Inbox empty state: ${theme}`, async ({ page }) => {
     await openInbox(page, theme, true);
     await expect(page.getByRole("status")).toContainText("All caught up on unread responses");

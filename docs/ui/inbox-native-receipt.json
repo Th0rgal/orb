@@ -1,18 +1,28 @@
 {
-  "created_at": "2026-10-09T11:14:36.793115+00:00",
-  "base_commit": "4e1c483d455137b63869b8fe73dad7caf400b7a9",
+  "created_at": "2026-10-09T12:46:15.208929+00:00",
+  "base_commit": "6625810e81059940c0d0715b406d92bec3a9468f",
   "branch": "feat/orb-overlay-system",
   "source_path": "/Users/thomas/work/paloma/sandboxed_sh-overlay-system",
-  "frontend_source_sha256": "3889e8128f776a63727d0c7deec2f27463a2cb4efc837ce84029aaf818e6cd1a",
-  "dist_index_sha256": "933d1a97a1877e0c4c8414ba49816608ef0a46c44e3e050aae277b5608d6dd46",
-  "raw_build_sha256": "638abccd33d96ccffd9047ba7917774d37ee8dd7934928945e1baf4ee5e3a20b",
+  "frontend_source_sha256": "ef0f99bd6847a4de6756ddc250d35e0af621a18ef1689969a9069eac31d47d8e",
+  "dist_index_sha256": "801877bcd1b365102966152f33478adb8cab32cc132bc06aa5e6e316506fbd1e",
+  "raw_build_sha256": "b7aec6d121879b235cde0cd1af29762185888295eb46a5d99296c90db193f859",
   "copy_verified_before_signing": true,
   "installed_app": "/Applications/Orb Overlays.app",
   "bundle_identifier": "md.thomas.orb.overlays",
-  "signed_executable_sha256": "a3c61e65d53a8c5aee8cd4d4fa7492810d72ce8bcca459200c9447178686cea5",
+  "signed_executable_sha256": "9cb158ee94441446b5d9e8bfeee2ba0618afdc604a14afb75b6231c8b9b2d04b",
   "sidecar_sha256": "d0608e79b347f296f27be9130f8a97f6b8aae9b2f8232b3939c7e72579cba03b",
   "main_app_unchanged_sha256": "bcfa350c02f64c6f5093923777e76d370f3fc9d628cfa0c6f44c736cb7b64a14",
   "signature": "ad-hoc; codesign --verify --deep --strict passed",
-  "backup_path": "/tmp/Orb Overlays-before-inbox.app",
-  "previous_candidate_backup": "/tmp/Orb Overlays-before-square-rows.app"
+  "backup_path": "/tmp/Orb Overlays-before-square-focus.app",
+  "preserved_worker_pids": [
+    42889,
+    87815
+  ],
+  "verification": {
+    "build": "passed",
+    "new_focus_checks": "4 passed, Chromium/WebKit and light/dark",
+    "inbox_suite": "19 passed, 2 skipped, 1 Chromium preview-scroll timeout",
+    "preview_scroll_retry": "passed in isolation",
+    "native_keyboard_focus": "Verified in installed Orb Overlays: keyboard-selected row has a thin square border; no rounded title ring."
+  }
 }
