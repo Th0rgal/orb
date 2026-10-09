@@ -3910,9 +3910,11 @@ async fn run_mission_turn(
     {
         return result;
     }
+    let mut has_machine_transfer = false;
     let mission_working_directory = if let Some(store) = mission_store.as_ref() {
         match super::control::machine_transfer::committed(store, mission_id).await {
             Ok(Some(action)) => {
+                has_machine_transfer = true;
                 if action.destination != crate::api::mission_store::transfer::Machine::Core {
                     return AgentResult::failure("Mission execution moved away from Core", 0);
                 }
@@ -4554,13 +4556,12 @@ async fn run_mission_turn(
             is_continuation,
         ),
         "vibe" => (
-            if session_id.is_none() {
-                // A machine transfer starts a fresh native conversation with
-                // the durable mission context, rather than dropping history.
-                convo.clone()
-            } else {
-                user_message.clone()
-            },
+            crate::vibe::turn_prompt(
+                session_id.as_deref(),
+                has_machine_transfer,
+                &convo,
+                &user_message,
+            ),
             is_continuation,
         ),
         "antigravity" => (

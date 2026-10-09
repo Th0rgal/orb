@@ -13,6 +13,21 @@ pub fn plan_mode(agent: Option<&str>, prompt: &str) -> bool {
             .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
 }
 
+/// A transferred first turn already contains its complete portable history.
+pub fn turn_prompt(
+    session: Option<&str>,
+    transferred: bool,
+    conversation: &str,
+    message: &str,
+) -> String {
+    if session.is_none() && !transferred {
+        conversation
+    } else {
+        message
+    }
+    .into()
+}
+
 pub fn args(
     cli: &str,
     mission: &str,
@@ -162,5 +177,21 @@ mod tests {
         assert_eq!(stream.text, "answer");
         stream.feed(&json!({"type":"session","session_id":"different"}));
         assert!(stream.finish().is_err());
+    }
+}
+
+#[cfg(test)]
+mod transfer_prompt_tests {
+    #[test]
+    fn fresh_transfer_and_resumed_prompts_frame_history_once() {
+        let history = "prior turn";
+        let portable = "prior turn\ncurrent message";
+        let framed = format!("{history}\n{portable}");
+        assert_eq!(super::turn_prompt(None, false, &framed, portable), framed);
+        assert_eq!(super::turn_prompt(None, true, &framed, portable), portable);
+        assert_eq!(
+            super::turn_prompt(Some("native"), true, &framed, "next turn"),
+            "next turn"
+        );
     }
 }
