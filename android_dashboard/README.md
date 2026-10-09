@@ -299,13 +299,10 @@ Then export the matching `RELEASE_*` env vars and `assembleRelease` will pick up
 
 ## Design system
 
-- Dark-first, `#121214` background
-- `#6366F1` indigo accent (matches iOS)
-- Glass-morphism cards (`GlassCard` component) on `#1C1C1C` with a 6 % white border
-- Semantic colors: `#22C55E` success, `#EAB308` warning, `#EF4444` error, `#3B82F6` info
-- Typography: SF Pro analog (Compose default sans-serif) for UI, monospace for terminal / tool args / fingerprints
-
-All tokens live in `ui/theme/Color.kt`.
+The native Orb UI uses `orb/OrbTheme.kt` and shared Material radii from
+`ui/theme/Theme.kt`. It follows the [mobile UI contract](../docs/ui/mobile.md):
+neutral surfaces, continuous Inbox rows and compact controls with native touch
+areas. Older dashboard views may still use explicit legacy colors; shared Material controls use the neutral palette.
 
 ## Known gaps vs iOS
 

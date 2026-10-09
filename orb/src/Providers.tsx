@@ -9,7 +9,7 @@ import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import * as Ic from "./icons";
-import { Dialog, DialogButton, Field } from "./Dialog";
+import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { Toggle } from "./Settings";
 import {
   api,
@@ -488,7 +488,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
           </div>
         </Dialog>
       </Show>
-      <Show when={removing()}>{account => <Dialog title={`Remove ${account().name} and all credentials?`} busy={removeBusy()} onClose={() => setRemoving(null)} footer={<DialogButton disabled={removeBusy()} onClick={() => void remove()}>Remove provider and credentials</DialogButton>}><p class="s-row-desc">This deletes the subscription login and any independent API key saved on this provider. Running work may need another account.</p><Show when={removeError()}><ErrorNotice error={removeError()!}/></Show></Dialog>}</Show>
+      <Show when={removing()}>{account => <ConfirmDialog title={`Remove ${account().name}?`} description="This deletes the subscription login and any independent API key saved on this provider. Running work may need another account." action="Remove provider and credentials" destructive busy={removeBusy()} error={removeError()} onConfirm={() => void remove()} onClose={() => setRemoving(null)}/>}</Show>
       <Show when={keyEditor()} keyed>{target => <ApiKeyDialog provider={target === "new" ? undefined : target} onClose={() => setKeyEditor(null)} onDone={() => { setKeyEditor(null); p.onRefresh(); }}/>}</Show>
       <Show when={reauth()}>
         {(a) => (
@@ -551,8 +551,8 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
     } catch { setError("Couldn’t save the API key. Check the connection and try again."); }
     finally { setBusy(false); }
   };
-  return <Dialog title={p.provider ? "Edit API key" : "Add API key"} description={p.provider ? `Update the API key stored for ${p.provider.name}.` : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
-    footer={<><DialogButton disabled={busy()} onClick={p.onClose}>Cancel</DialogButton><DialogButton variant="primary" disabled={busy() || !secret().trim() || !effectiveName() || (!p.provider && type()==="custom" && !/^https?:\/\//.test(url()))} onClick={() => void save()}>{busy() ? "Saving…" : "Save"}</DialogButton></>}>
+  return <Dialog title={p.provider ? "Edit API key" : "Add API key"} dirty={!!secret() || name() !== (p.provider?.name ?? "") || !!url()} description={p.provider ? `Update the API key stored for ${p.provider.name}.` : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
+    footer={requestClose => <><DialogButton disabled={busy()} onClick={requestClose}>Cancel</DialogButton><DialogButton variant="primary" disabled={busy() || !secret().trim() || !effectiveName() || (!p.provider && type()==="custom" && !/^https?:\/\//.test(url()))} onClick={() => void save()}>{busy() ? "Saving…" : "Save"}</DialogButton></>}>
     <Show when={!p.provider}>
       <div class="field">
         <span>Provider</span>
@@ -596,7 +596,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
           <span>{p.provider ? "New API key" : "API key"}</span>
           <Show when={hint()?.env}><code class="p-key-env">{hint()!.env}</code></Show>
         </div>
-        <input class="s-input p-key-secret" type="password" autocomplete="new-password" spellcheck={false} placeholder={hint()?.placeholder ?? "Enter API key…"} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void save(); } }} />
+        <input class="s-input p-key-secret" type="password" autocomplete="new-password" spellcheck={false} placeholder={hint()?.placeholder ?? "Enter API key…"} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); void save(); } }} />
       </div>
     </div>
     <p class="s-row-desc p-key-foot-note">{p.provider ? "Enter a replacement key. The saved key is never displayed." : "Encrypted at rest on the connected backend and never shown again."}</p>
@@ -700,10 +700,14 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
       });
   };
   onMount(beginLogin);
+  const [closing, setClosing] = createSignal(false);
   const closeLogin = async () => {
+    if (closing() || phase() === "finishing") return;
+    setClosing(true);
     const s = session();
     try { if (polledLogin && s && !completed) await cancelSubscriptionLogin(s.id); completed = true; p.onClose(); }
     catch (e) { setError(`Could not cancel sign-in: ${String(e)}`); }
+    finally { setClosing(false); }
   };
   const retryLogin = async () => {
     if (resetting()) return;
@@ -742,14 +746,19 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   return (
     <Dialog
       title={`${p.provider.id ? "Reconnect" : "Connect"} ${p.provider.name}`}
-      busy={phase() === "finishing"}
+      busy={phase() === "finishing" || closing()} dirty={!!paste().trim()}
       onClose={() => void closeLogin()}
-      footer={
+      footer={requestClose =>
         <>
           <Show when={phase() === "failed"}><DialogButton disabled={resetting()} onClick={() => void retryLogin()}>Try again</DialogButton></Show>
-          <DialogButton disabled={phase() === "finishing"} onClick={() => void closeLogin()}>
-            {phase() === "failed" ? "Close login" : "Cancel"}
+          <DialogButton disabled={phase() === "finishing" || closing()} onClick={requestClose}>
+            {phase() === "failed" ? "Close" : "Cancel"}
           </DialogButton>
+          <Show when={(phase() === "awaiting" || phase() === "finishing" || phase() === "failed") && !!session() && session()?.flow !== "device"}>
+            <DialogButton variant="primary" disabled={phase() === "finishing" || closing() || !paste().trim()} onClick={submitPaste}>
+              {phase() === "finishing" ? "Submitting…" : "Submit callback"}
+            </DialogButton>
+          </Show>
         </>
       }
     >
@@ -758,12 +767,12 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
       </Show>
       <Show when={phase() === "failed"}>
         <p class="s-lead">Could not complete the login.</p>
-        <ErrorNotice error={error()!} />
+        <Show when={!session()}><ErrorNotice error={error()!} /></Show>
         <Show when={/^(404|405)\b/.test(error() ?? "")}>
           <p class="s-row-desc">This backend build does not expose the login endpoints yet — deploy the updated sandboxed.sh first.</p>
         </Show>
       </Show>
-      <Show when={phase() === "awaiting" || phase() === "finishing"}>
+      <Show when={phase() === "awaiting" || phase() === "finishing" || (phase() === "failed" && !!session())}>
         <p class="s-lead">
           {session()?.instructions ?? (session()?.flow === "device"
             ? "Authorize in the browser window that just opened and enter the code shown — the login completes automatically."
@@ -787,20 +796,14 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
               placeholder={polledLogin && session()?.flow !== "code" ? "http://localhost:54545/callback?code=…&state=…" : "Paste the code or full redirect URL"}
               value={paste()}
               onInput={(e) => setPaste(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === "Enter" && submitPaste()}
+              onKeyDown={(e) => {if (!e.isComposing && e.key === "Enter") {e.preventDefault(); submitPaste();}}}
             />
           </Field>
         </Show>
         <Show when={error()}>
           <ErrorNotice error={error()!} />
         </Show>
-        <Show when={session()?.flow !== "device"}>
-          <div class="p-acc-actions">
-            <DialogButton variant="primary" disabled={phase() === "finishing" || !paste().trim()} onClick={submitPaste}>
-              {phase() === "finishing" ? "Submitting…" : "Submit callback"}
-            </DialogButton>
-          </div>
-        </Show>
+
       </Show>
     </Dialog>
   );

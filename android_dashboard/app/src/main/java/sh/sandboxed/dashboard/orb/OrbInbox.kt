@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -48,11 +49,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -1659,7 +1670,7 @@ fun OrbInboxView(
                     top = 8.dp,
                     bottom = if (lastDismissedItem != null) 76.dp else 28.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(0.dp)
             ) {
                 item(key = "header") {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1673,10 +1684,8 @@ fun OrbInboxView(
                         ) {
                             Row(
                                 modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(OrbStyle.surface)
-                                    .border(1.dp, OrbStyle.border, CircleShape)
-                                    .padding(3.dp),
+                                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                    .padding(bottom = 1.dp),
                                 horizontalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
                                 OrbInboxFilterMode.entries.forEach { mode ->
@@ -1688,10 +1697,13 @@ fun OrbInboxView(
                                     }
                                     Row(
                                         modifier = Modifier
-                                            .clip(CircleShape)
-                                            .background(if (active) OrbStyle.elevated else Color.Transparent)
+                                            .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                            .drawBehind {
+                                                if (active) drawLine(OrbStyle.textSecondary, Offset(0f, size.height), Offset(size.width, size.height), 2.dp.toPx())
+                                            }
+                                            .semantics { selected = active; role = Role.Tab }
                                             .orbPressClickable { filterMode = mode }
-                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            .heightIn(min = 48.dp).padding(horizontal = 8.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
@@ -1699,7 +1711,7 @@ fun OrbInboxView(
                                             Box(
                                                 modifier = Modifier
                                                     .size(6.dp)
-                                                    .clip(CircleShape)
+                                                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
                                                     .background(Color(0xFF0A84FF))
                                             )
                                         }
@@ -1727,8 +1739,8 @@ fun OrbInboxView(
                                 val compactWorking = unreadCount > 0
                                 Row(
                                     modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(if (showRunningSection) OrbStyle.elevated else OrbStyle.surface)
+                                        .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                        .background(if (showRunningSection) OrbStyle.elevated else Color.Transparent)
                                         .border(
                                             1.dp,
                                             if (showRunningSection) OrbStyle.borderStrong else OrbStyle.border,
@@ -1867,7 +1879,7 @@ fun OrbInboxView(
                     item(key = "working_section") {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             OrbInboxSectionHeader(
-                                title = "WORKING IN BACKGROUND",
+                                title = "Working in background",
                                 count = workingMissions.size
                             )
                             workingMissions.forEach { mission ->
@@ -1877,9 +1889,8 @@ fun OrbInboxView(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(OrbStyle.surface)
-                                        .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+                                        .drawBehind { drawLine(OrbStyle.border, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
+                                        .heightIn(min = 48.dp)
                                         .orbPressClickable { onSelectMission(mission, project) }
                                         .padding(horizontal = 12.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -2001,7 +2012,7 @@ fun OrbInboxView(
                     if (needsInputItems.isNotEmpty()) {
                         item(key = "needs_you_header") {
                             OrbInboxSectionHeader(
-                                title = "NEEDS YOU",
+                                title = "Needs you",
                                 count = needsInputItems.size
                             )
                         }
@@ -2057,7 +2068,7 @@ fun OrbInboxView(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 OrbInboxSectionHeader(
-                                    title = "READY FOR REVIEW",
+                                    title = "Ready for review",
                                     count = finishedItems.size
                                 )
                                 Spacer(modifier = Modifier.weight(1f))
@@ -2203,7 +2214,6 @@ private fun OrbSwipeableInboxCard(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(14.dp))
                     .background(bgColor)
                     .padding(horizontal = 18.dp),
                 contentAlignment = when (direction) {
@@ -2247,7 +2257,7 @@ private fun OrbSwipeableInboxCard(
 @Composable
 private fun OrbInboxSectionHeader(title: String, count: Int) {
     Row(
-        modifier = Modifier.padding(top = 2.dp),
+        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -2255,8 +2265,7 @@ private fun OrbInboxSectionHeader(title: String, count: Int) {
             text = title,
             color = OrbStyle.textMuted,
             fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.5.sp,
+            fontWeight = FontWeight.Medium,
             maxLines = 1,
             softWrap = false
         )
@@ -2297,15 +2306,17 @@ private fun OrbInboxCard(
 
     Column(
         modifier = modifier
+            .testTag("inbox.row.${item.id}")
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(OrbStyle.surface)
-            .border(
-                1.dp,
-                if (isReplying) OrbStyle.borderStrong else OrbStyle.border,
-                RoundedCornerShape(14.dp)
-            )
-            .padding(horizontal = 13.dp, vertical = 11.dp),
+            .background(if (isReplying || isPeeked) OrbStyle.surface else Color.Transparent)
+            .drawBehind { drawLine(OrbStyle.border, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
+            .semantics {
+                stateDescription = if (item.isUnread) "Unread" else "Read"
+                customActions = listOf(CustomAccessibilityAction(if (item.isUnread) "Mark read" else "Mark unread") {
+                    onToggleRead(); true
+                })
+            }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Column(
@@ -2314,101 +2325,26 @@ private fun OrbInboxCard(
                 .orbPressClickable { onSelectMission() },
             verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            // Line 1: Unread dot (tappable) + Project dot + Project name + · + Goal tag + Headline + Badge + Time
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                if (item.isUnread) {
-                    Box(
-                        modifier = Modifier
-                            .size(14.dp)
-                            .orbPressClickable { onToggleRead() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF0A84FF))
-                        )
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(pColor)
-                )
-                Text(
-                    text = pName,
-                    color = OrbStyle.textSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 105.dp)
-                )
-                Text(
-                    text = "·",
-                    color = OrbStyle.textMuted,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    softWrap = false
-                )
-                if (item.isGoal) {
-                    Text(
-                        text = "Goal",
-                        color = OrbStyle.inboxBlue,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false,
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(OrbStyle.inboxBlue.copy(alpha = 0.14f))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-                Text(
-                    text = item.headline,
-                    color = Color.White,
-                    fontSize = 14.5.sp,
-                    fontWeight = if (item.isUnread) FontWeight.SemiBold else FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
+                Box(Modifier.size(5.dp).clip(CircleShape).background(pColor))
+                Text(pName, color = OrbStyle.textSecondary, fontSize = 12.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 if (showBadge) {
-                    Text(
-                        text = item.badge,
-                        color = item.tone.foreground,
-                        fontSize = 10.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false,
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(item.tone.background)
-                            .padding(horizontal = 7.dp, vertical = 2.5.dp)
-                    )
+                    Text(item.badge, color = item.tone.foreground, fontSize = 11.sp, maxLines = 1)
                 }
-                val rel = OrbJSON.relative(item.updatedAt)
-                if (rel.isNotEmpty()) {
-                    Text(
-                        text = rel,
-                        color = OrbStyle.textMuted,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
+                Text(OrbJSON.relative(item.updatedAt), color = OrbStyle.textMuted, fontSize = 11.sp, maxLines = 1)
             }
+            Text(
+                item.headline, color = OrbStyle.textPrimary, fontSize = 15.sp,
+                fontWeight = if (item.isUnread) FontWeight.Medium else FontWeight.Normal,
+                maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
 
             // Follow-up request line ("Asked: ...") when distinct from mission headline
-            if (!item.lastRequest.isNullOrEmpty()) {
+            if ((isPeeked || isReplying) && !item.lastRequest.isNullOrEmpty()) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(5.dp)
@@ -2432,20 +2368,20 @@ private fun OrbInboxCard(
                 }
             }
 
-            // AI Overview / 4-line summary
+            // Keep the collapsed summary short; the complete response is available in Peek.
             if (item.summary.isNotEmpty()) {
                 Text(
                     text = item.summary,
                     color = OrbStyle.textSecondary,
                     fontSize = 13.sp,
                     lineHeight = 18.sp,
-                    maxLines = 4,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
             // Work receipt chip
-            if (!item.workReceipt.isNullOrEmpty()) {
+            if (isPeeked && !item.workReceipt.isNullOrEmpty()) {
                 Text(
                     text = item.workReceipt,
                     color = OrbStyle.textMuted,
@@ -2576,25 +2512,25 @@ private fun OrbInboxCard(
             if (item.canRetry) {
                 Row(
                     modifier = Modifier
-                        .clip(CircleShape)
-                        .background(OrbStyle.warning.copy(alpha = 0.12f))
-                        .border(1.dp, OrbStyle.warning.copy(alpha = 0.32f), CircleShape)
+                        .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                        .background(Color.Transparent)
+
                         .orbPressClickable(enabled = !isSending) {
                             onSendQuickReply("Continue from where you left off.")
                         }
-                        .padding(horizontal = 9.dp, vertical = 5.dp),
+                        .heightIn(min = 48.dp).padding(horizontal = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Refresh,
                         contentDescription = null,
-                        tint = OrbStyle.warning,
+                        tint = OrbStyle.textSecondary,
                         modifier = Modifier.size(11.dp)
                     )
                     Text(
                         text = "Retry",
-                        color = OrbStyle.warning,
+                        color = OrbStyle.textSecondary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
@@ -2605,11 +2541,11 @@ private fun OrbInboxCard(
 
             Box(
                 modifier = Modifier
-                    .clip(CircleShape)
-                    .background(if (isPeeked) OrbStyle.elevated else Color.White.copy(alpha = 0.04f))
-                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                    .background(if (isPeeked) OrbStyle.elevated else Color.Transparent)
+
                     .orbPressClickable { onTogglePeek() }
-                    .padding(horizontal = 9.dp, vertical = 5.dp)
+                    .heightIn(min = 48.dp).padding(horizontal = 9.dp)
             ) {
                 Text(
                     text = "Peek",
@@ -2625,11 +2561,11 @@ private fun OrbInboxCard(
 
             Row(
                 modifier = Modifier
-                    .clip(CircleShape)
-                    .background(if (isReplying) OrbStyle.elevated else Color.White.copy(alpha = 0.04f))
-                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                    .background(if (isReplying) OrbStyle.elevated else Color.Transparent)
+
                     .orbPressClickable { onToggleReply() }
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                    .heightIn(min = 48.dp).padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -2651,11 +2587,11 @@ private fun OrbInboxCard(
 
             Row(
                 modifier = Modifier
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.04f))
-                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                    .background(Color.Transparent)
+
                     .orbPressClickable { onDismiss() }
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                    .heightIn(min = 48.dp).padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -2678,7 +2614,7 @@ private fun OrbInboxCard(
 
         if (isPeeked) {
             Column(
-                modifier = Modifier.padding(top = 2.dp),
+                modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (isLoadingPeek && peekTurns.isEmpty()) {
@@ -2775,9 +2711,9 @@ private fun OrbInboxCard(
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(OrbStyle.controlRadius))
                         .background(Color.Black.copy(alpha = 0.28f))
-                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(10.dp))
+                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.controlRadius))
                         .padding(horizontal = 11.dp, vertical = 8.dp)
                 ) {
                     if (replyDraft.isEmpty()) {
@@ -2795,7 +2731,7 @@ private fun OrbInboxCard(
                         textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 32.dp)
                     )
                 }
                 val canSend = replyDraft.trim().isNotEmpty() && !isSending
@@ -2804,6 +2740,7 @@ private fun OrbInboxCard(
                         .clip(CircleShape)
                         .background(if (canSend) Color.White else Color.White.copy(alpha = 0.08f))
                         .orbPressClickable(enabled = canSend) { onSendQuickReply(replyDraft) }
+                        .heightIn(min = 48.dp)
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {

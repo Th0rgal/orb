@@ -40,11 +40,13 @@ export function dialogCases(browserName: "chromium" | "webkit") {
         await page.setViewportSize({ width: 390, height: 500 });
         const panel = page.getByRole("dialog", { name: "New cron", exact: true });
         const small = (await panel.boundingBox())!;
-        expect(small.x).toBeGreaterThanOrEqual(19); expect(small.y).toBeGreaterThanOrEqual(19);
-        expect(small.y + small.height).toBeLessThanOrEqual(481);
+        expect(small.x).toBeGreaterThanOrEqual(16); expect(small.y).toBeGreaterThanOrEqual(16);
+        expect(small.y + small.height).toBeLessThanOrEqual(484);
         expect(await panel.locator(".dlg-body").evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
         await page.screenshot({ path: `test-results/modal-narrow-${browserName}-${theme}.png` });
         await panel.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(page.getByRole("button", {name:"Keep editing"})).toBeFocused();
+        await page.getByRole("button", {name:"Discard draft"}).click();
         await expect(page.getByRole("dialog")).toHaveCount(0);
         expect(errors).toEqual([]);
       });

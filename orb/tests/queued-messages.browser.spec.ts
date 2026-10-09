@@ -120,6 +120,9 @@ test('rapidly stacking multiple messages and deleting from the queue gives insta
   return {sendLatencies};
  });
  for(const ms of sendMetrics.sendLatencies)expect(ms).toBeLessThan(16);
+ // Finish the fixture's pending-to-durable handoff before measuring durable
+ // deletion; otherwise its still-pending duplicate can briefly reappear.
+ await page.evaluate(async()=>await (window as any).queueSettled());
  await expect(page.locator('button[aria-label="Remove queued message: rapid stack 2"]')).toBeAttached();
  const deleteMetrics=await page.evaluate(()=>{
   const delBtn=document.querySelector('button[aria-label="Remove queued message: rapid stack 2"]') as HTMLButtonElement|null;

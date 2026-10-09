@@ -257,9 +257,9 @@ test("composer effort: shown after harness and model for Codex, and sent on crea
   await expect(picks).toHaveText(["Codex", "GPT-6 Astra", "Default"]);
 
   await picks.nth(2).click();
-  const menu = page.locator(".picks .menu");
-  await expect(menu.locator(".pick-name")).toHaveText(["Default", "Low", "Medium", "High", "XHigh", "Max"]);
-  await menu.getByRole("button", { name: /High/ }).first().click();
+  const menu = page.locator(".picker");
+  await expect(menu.locator(".picker-row-copy > span")).toHaveText(["Default", "Low", "Medium", "High", "XHigh", "Max"]);
+  await menu.getByRole("option", { name: /High/ }).first().click();
   await expect(picks.nth(2)).toHaveText(/High/);
 
   await page.getByPlaceholder("Describe a task, / for commands, @ for context").fill("ship it");
@@ -276,23 +276,23 @@ test("composer effort: absent for a harness the core ignores effort for, and res
   const picks = page.locator(".picks .model:not(.cyber-pill)");
 
   await picks.nth(2).click();
-  await page.locator(".picks .menu").getByRole("button", { name: /Max/ }).first().click();
+  await page.locator(".picker").getByRole("option", { name: /Max/ }).first().click();
   await expect(picks.nth(2)).toHaveText(/Max/);
 
   // Codex → OpenCode: the core forces model_effort to null there, so the
   // control disappears rather than offering a level that would be dropped.
   await picks.nth(0).click();
-  await page.locator(".picks .menu").getByRole("button", { name: "OpenCode" }).click();
+  await page.locator(".picker").getByRole("option", { name: /^OpenCode/ }).click();
   await expect(page.locator(".picks .model:not(.cyber-pill)")).toHaveText(["OpenCode", "Smart (Default)"]);
 
   // Returning to Codex does not resurrect the dropped level.
   await page.locator(".picks .model:not(.cyber-pill)").nth(0).click();
-  await page.locator(".picks .menu").getByRole("button", { name: "Codex" }).click();
+  await page.locator(".picker").getByRole("option", { name: /^Codex/ }).click();
   await expect(page.locator(".picks .model:not(.cyber-pill)").nth(2)).toHaveText(/Default/);
 
   // ...and a launch on the effort-less harness omits the field entirely.
   await page.locator(".picks .model:not(.cyber-pill)").nth(0).click();
-  await page.locator(".picks .menu").getByRole("button", { name: "OpenCode" }).click();
+  await page.locator(".picker").getByRole("option", { name: /^OpenCode/ }).click();
   await page.getByPlaceholder("Describe a task, / for commands, @ for context").fill("ship it");
   await page.keyboard.press("Enter");
   await expect.poll(() => posts.length).toBe(1);
@@ -419,6 +419,7 @@ test("folder rename changes the real path, carries its agents, and supports canc
   await expect(page.getByLabel("Folder name", { exact: true })).toHaveValue("reference");
   await page.getByLabel("Folder name", { exact: true }).fill("Discard this");
   await page.keyboard.press("Escape");
+  await page.getByRole("button", {name:"Discard changes"}).click();
   expect(transfers).toEqual([]);
   await page.locator(".row.folder", { hasText: "reference" }).click({ button: "right" });
   await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
@@ -494,6 +495,7 @@ test("file actions rename, cut/paste, copy/paste, move and delete actual paths",
   await page.getByRole('button',{name:'Move',exact:true}).click();
   await expect(page.getByRole('alert')).toContainText('already exists');
   await page.keyboard.press('Escape');
+  await page.getByRole('button', {name:'Discard changes'}).click();
   await page.locator('[data-tree-id="pf:test:renamed.md"] .row.file').click({button:'right'});
   await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();
   await page.getByRole('button',{name:'Delete',exact:true}).click();
@@ -550,6 +552,6 @@ test('a refused sidebar action explains itself in a dialog, not inside the proje
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('alert')).toContainText('Choose a different name or folder');
   await expect(page.locator('.sidebar .error-notice, nav .error-notice')).toHaveCount(0);
-  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await dialog.locator('.dlg-foot').getByRole('button',{name:'Close',exact:true}).click();
   await expect(dialog).toHaveCount(0);
 });

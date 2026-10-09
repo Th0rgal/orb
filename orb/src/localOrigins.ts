@@ -21,6 +21,11 @@ export async function localOrigins(missionId?:string):Promise<Mission[]>{
  * The shown status may be one Core confirmed, so only the journal's own run state counts;
  * a desktop build without that field never shows confirmed statuses. */
 export const localPending=(mission:Mission)=>!!mission.local_sync_pending||(mission.local_run_active??mission.status==="active");
+/** Local output wins while syncing; Core still owns mutable next-turn settings.
+ * Otherwise a running journal's launch-time effort undoes a successful settings patch. */
+export function withCoreEffort(local:Mission,core?:Mission):Mission {
+ return core ? {...local,model_effort:core.model_effort} : local;
+}
 let lastObservation=0;
 /** Orders requests and accepted changes made by this window, even within one millisecond. */
 export const observe=()=>lastObservation=Math.max(Date.now(),lastObservation+1);

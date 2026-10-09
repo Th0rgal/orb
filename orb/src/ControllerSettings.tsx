@@ -1,5 +1,6 @@
+import { useContext } from "solid-js";
 import { Select } from "./Select";
-import { ConfirmDialog } from "./Dialog";
+import { ConfirmDialog, DialogActions, DialogCloseContext } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { createStore } from "solid-js/store";
@@ -94,6 +95,7 @@ export function CronForm(p: {
   const [draft, setDraft] = createStore<CronDraft>({ ...initialDraft(), ...(restored?.draft ?? {}) });
   const [confirmDiscard, setConfirmDiscard] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const [deleteBusy, setDeleteBusy] = createSignal(false);
   const [deleteError, setDeleteError] = createSignal<string | null>(null);
   const [base, setBase] = createSignal<CronDraft>({ ...initialDraft(), ...(restored?.base ?? {}) });
   const [saving, setSaving] = createSignal(false);
@@ -207,6 +209,21 @@ export function CronForm(p: {
     setDraft(base());
     setSkillInput("");
     setError(null);
+  };
+
+  const requestClose = () => {
+    if (saving() || deleteBusy()) return;
+    if (dirtyCount() || skillInput().trim()) setConfirmDiscard(true);
+    else { discard(); p.onClose?.(); }
+  };
+  const registerClose = useContext(DialogCloseContext);
+  if (registerClose) onCleanup(registerClose(requestClose));
+  const deleteCron = async () => {
+    if (!p.onDelete || p.deleting || deleteBusy()) return;
+    setDeleteBusy(true); setDeleteError(null);
+    try { await p.onDelete(); setConfirmDelete(false); }
+    catch (e) { setDeleteError(e instanceof Error ? e.message : String(e)); }
+    finally { setDeleteBusy(false); }
   };
 
   const addSkill = () => {
@@ -362,31 +379,27 @@ export function CronForm(p: {
 
       </fieldset>
       <Show when={p.creating || dirtyCount() > 0 || skillInput().trim() || error()}>
-        <div class="cs-save-area">
+        <DialogActions><div class="cs-save-area">
           <Show when={error()}><ErrorNotice error={error()!} title="Couldn’t save the controller" /></Show>
           <div class="cs-savebar">
           <span>{`${dirtyCount()} unsaved change${dirtyCount() === 1 ? "" : "s"}`}</span>
           <span class="dlg-spacer" />
-          <Show when={p.onClose}><button class="s-btn sm quiet" disabled={saving()} onClick={(event) => {
-            event.currentTarget.focus();
-            if (dirtyCount() || skillInput().trim()) setConfirmDiscard(true);
-            else { discard(); p.onClose?.(); }
-          }}>Cancel</button></Show>
-          <button class="s-btn sm quiet" disabled={saving()} onClick={discard}>
+          <Show when={p.onClose}><button class="s-btn sm quiet" disabled={saving()} onClick={(event) => { event.currentTarget.focus({preventScroll:true}); requestClose(); }}>Cancel</button></Show>
+          <button class="s-btn sm quiet" disabled={saving()} onClick={() => setConfirmDiscard(true)}>
             Discard
           </button>
           <button class="s-btn sm primary" disabled={saving() || (p.creating && usesProjectRoute() && !!p.deliveryRoute && !p.deliveryRoute.ready) || (!p.creating && dirtyCount() === 0 && !skillInput().trim())} onClick={save}>
             {saving() ? (p.creating ? "Creating…" : "Saving…") : (p.creating ? "Create" : "Save")}
           </button>
           </div>
-        </div>
+        </div></DialogActions>
       </Show>
       <Show when={confirmDiscard()}><ConfirmDialog title="Discard this cron draft?"
-        description="Your unsaved changes will be discarded." action="Discard draft" cancelLabel="Keep editing" destructive
+        description="Your unsaved changes will be discarded." action="Discard draft" cancelLabel="Keep editing" destructive={false}
         onClose={() => setConfirmDiscard(false)} onConfirm={() => { setConfirmDiscard(false); discard(); p.onClose?.(); }} /></Show>
-      <Show when={confirmDelete()}><ConfirmDialog title="Delete cron?"
-        description={`Delete ${p.view.job?.name || "this cron"} from Hermes? This cannot be undone.`} action="Delete" busy={p.deleting} error={deleteError()}
-        onClose={() => !p.deleting && setConfirmDelete(false)} onConfirm={() => void p.onDelete?.().then(() => setConfirmDelete(false)).catch((e) => setDeleteError(e instanceof Error ? e.message : String(e)))} /></Show>
+      <Show when={confirmDelete()}><ConfirmDialog destructive title="Delete cron?"
+        description={`Delete ${p.view.job?.name || "this cron"} from Hermes? This cannot be undone.`} action="Delete" busy={p.deleting || deleteBusy()} error={deleteError()}
+        onClose={() => !p.deleting && !deleteBusy() && setConfirmDelete(false)} onConfirm={() => void deleteCron()} /></Show>
     </div>
   );
 }

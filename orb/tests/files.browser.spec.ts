@@ -95,6 +95,11 @@ test("Cursor-style files preserve chat, resolve references and navigate Markdown
   await expect(find).not.toBeVisible();
   await page.keyboard.press('Meta+Shift+f');
   await expect(page.locator('.main')).not.toBeVisible();
+  await page.evaluate(()=>(window as any).openOverlayTest());
+  await expect(page.getByRole('dialog',{name:'Rename example'})).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.file-panel.maximized')).toBeVisible();
   const expanded=await page.locator('.file-panel').boundingBox();
   expect(expanded!.x).toBe(220);expect(expanded!.width).toBe(1480);
   await page.locator('.app').evaluate(el=>el.classList.add('sb-hidden'));

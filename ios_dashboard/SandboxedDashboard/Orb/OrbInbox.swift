@@ -1408,8 +1408,8 @@ struct OrbInboxView: View {
                         emptyInboxState
                     } else {
                         if !filteredNeedsYou.isEmpty {
-                            sectionHeader(title: "NEEDS YOU", count: filteredNeedsYou.count)
-                            VStack(spacing: 8) {
+                            sectionHeader(title: "Needs you", count: filteredNeedsYou.count)
+                            VStack(spacing: 0) {
                                 ForEach(filteredNeedsYou) { item in
                                     inboxCard(item)
                                 }
@@ -1418,7 +1418,7 @@ struct OrbInboxView: View {
 
                         if !filteredReady.isEmpty {
                             HStack {
-                                sectionHeader(title: "READY FOR REVIEW", count: filteredReady.count)
+                                sectionHeader(title: "Ready for review", count: filteredReady.count)
                                 Spacer()
                                 Button {
                                     OrbHaptics.success()
@@ -1431,7 +1431,7 @@ struct OrbInboxView: View {
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("inbox.markAllDone")
                             }
-                            VStack(spacing: 8) {
+                            VStack(spacing: 0) {
                                 ForEach(filteredReady) { item in
                                     inboxCard(item)
                                 }
@@ -1499,19 +1499,19 @@ struct OrbInboxView: View {
                                     .fixedSize(horizontal: true, vertical: false)
                             }
                             .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(
-                                active ? OrbStyle.elevated : Color.clear,
-                                in: Capsule()
-                            )
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                            .overlay(alignment: .bottom) {
+                                Rectangle().fill(active ? OrbStyle.textSecondary : Color.clear).frame(height: 2)
+                            }
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("inbox.filter.\(mode.rawValue)")
+                        .accessibilityAddTraits(active ? .isSelected : [])
                     }
                 }
                 .padding(3)
-                .background(OrbStyle.surface, in: Capsule())
-                .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+
 
                 if !computed.working.isEmpty {
                     let compactWorking = unreadCount > 0
@@ -1531,13 +1531,14 @@ struct OrbInboxView: View {
                                 .fixedSize(horizontal: true, vertical: false)
                         }
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                         .background(
-                            showWorking ? OrbStyle.elevated : OrbStyle.surface,
-                            in: Capsule()
+                            showWorking ? OrbStyle.elevated : Color.clear,
+                            in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                         )
                         .overlay(
-                            Capsule().stroke(showWorking ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: OrbStyle.controlRadius).stroke(showWorking ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -1563,9 +1564,9 @@ struct OrbInboxView: View {
                         }
                         .foregroundStyle(OrbStyle.textSecondary)
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .background(OrbStyle.surface, in: Capsule())
-                        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("inbox.markAllRead")
@@ -1587,13 +1588,14 @@ struct OrbInboxView: View {
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                         .background(
-                            selectedProject == nil ? OrbStyle.elevated : OrbStyle.surface,
-                            in: Capsule()
+                            selectedProject == nil ? OrbStyle.elevated : Color.clear,
+                            in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                         )
                         .overlay(
-                            Capsule().stroke(selectedProject == nil ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: OrbStyle.controlRadius).stroke(selectedProject == nil ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain)
@@ -1624,13 +1626,14 @@ struct OrbInboxView: View {
                                 .fixedSize(horizontal: true, vertical: false)
                         }
                         .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                         .background(
-                            active ? OrbStyle.elevated : OrbStyle.surface,
-                            in: Capsule()
+                            active ? OrbStyle.elevated : Color.clear,
+                            in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                         )
                         .overlay(
-                            Capsule().stroke(active ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: OrbStyle.controlRadius).stroke(active ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -1641,7 +1644,7 @@ struct OrbInboxView: View {
 
     private var workingSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader(title: "WORKING IN BACKGROUND", count: computed.working.count)
+            sectionHeader(title: "Working in background", count: computed.working.count)
             VStack(spacing: 6) {
                 ForEach(computed.working) { item in
                     Button {
@@ -1681,11 +1684,11 @@ struct OrbInboxView: View {
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
-                        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(OrbStyle.border, lineWidth: 1)
-                        )
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                        .overlay(alignment: .top) {
+                            Rectangle().fill(OrbStyle.border).frame(height: 1)
+                        }
                     }
                     .buttonStyle(OrbPressButtonStyle())
                 }
@@ -1697,8 +1700,7 @@ struct OrbInboxView: View {
     private func sectionHeader(title: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.5)
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(OrbStyle.textMuted)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
@@ -1725,77 +1727,35 @@ struct OrbInboxView: View {
                 onOpenMission(item.row)
             } label: {
                 VStack(alignment: .leading, spacing: 5) {
-                    // Line 1: Unread dot + Project dot + Project name + Goal tag + Headline + Badge + Time
-                    HStack(alignment: .center, spacing: 6) {
-                        if item.unread {
-                            Circle()
-                                .fill(Color.blue)
-                                .frame(width: 7, height: 7)
-                                .onTapGesture {
-                                    OrbHaptics.selection()
-                                    withAnimation(.snappy(duration: 0.2)) {
-                                        markItemAndChildrenRead(item)
-                                    }
-                                }
-                        }
+                    HStack(spacing: 6) {
                         Circle()
                             .fill(appearance.color(item.projectSlug) ?? OrbStyle.icon)
-                            .frame(width: 7, height: 7)
+                            .frame(width: 5, height: 5)
                         Text(item.projectTitle)
-                            .font(.caption.weight(.medium))
+                            .font(.caption)
                             .foregroundStyle(OrbStyle.textSecondary)
                             .lineLimit(1)
-                            .truncationMode(.tail)
-                        Text("·")
-                            .font(.caption)
-                            .foregroundStyle(OrbStyle.textMuted)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                        if item.isGoal {
-                            Text("Goal")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255))
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(
-                                    Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255).opacity(0.14),
-                                    in: Capsule()
-                                )
-                        }
-                        Text(item.headline)
-                            .font(.subheadline.weight(item.unread ? .semibold : .medium))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .layoutPriority(1)
-
-                        Spacer(minLength: 4)
-
+                        Spacer(minLength: 8)
                         if showBadge {
                             Text(item.badge)
-                                .font(.system(size: 10.5, weight: .semibold))
+                                .font(.caption2)
                                 .foregroundStyle(item.tone.foreground)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2.5)
-                                .background(item.tone.background, in: Capsule())
                         }
-
                         if !item.updatedAt.isEmpty {
                             Text(OrbStyle.relativeTime(item.updatedAt))
                                 .font(.caption2)
                                 .foregroundStyle(OrbStyle.textMuted)
                                 .monospacedDigit()
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
                         }
                     }
+                    Text(item.headline)
+                        .font(.subheadline.weight(item.unread ? .medium : .regular))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                     // Follow-up request line ("Asked: ...") when distinct from mission headline
-                    if let lastReq = item.lastRequest, !lastReq.isEmpty {
+                    if (isPeeked || isReplying), let lastReq = item.lastRequest, !lastReq.isEmpty {
                         HStack(spacing: 5) {
                             Text("Asked:")
                                 .font(.caption2.weight(.semibold))
@@ -1810,15 +1770,15 @@ struct OrbInboxView: View {
                         }
                     }
 
-                    // AI Overview / 4-line summary
+                    // Keep the collapsed summary short; the complete response is available in Peek.
                     Text(item.summary)
                         .font(.footnote)
                         .foregroundStyle(OrbStyle.textSecondary)
-                        .lineLimit(4)
+                        .lineLimit(3)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if let receipt = item.workReceipt, !receipt.isEmpty {
+                    if isPeeked, let receipt = item.workReceipt, !receipt.isEmpty {
                         Text(receipt)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(OrbStyle.textMuted)
@@ -1932,11 +1892,11 @@ struct OrbInboxView: View {
                                 .lineLimit(1)
                                 .fixedSize(horizontal: true, vertical: false)
                         }
-                        .foregroundStyle(OrbStyle.warning)
+                        .foregroundStyle(OrbStyle.textSecondary)
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(OrbStyle.warning.opacity(0.12), in: Capsule())
-                        .overlay(Capsule().stroke(OrbStyle.warning.opacity(0.32), lineWidth: 1))
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+
                     }
                     .buttonStyle(.plain)
                     .disabled(isBusy)
@@ -1953,9 +1913,10 @@ struct OrbInboxView: View {
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(isPeeked ? OrbStyle.elevated : Color.white.opacity(0.04), in: Capsule())
-                        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                        .background(isPeeked ? OrbStyle.elevated : Color.clear, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
+
                 }
                 .buttonStyle(.plain)
                 .disabled(isBusy)
@@ -1987,12 +1948,13 @@ struct OrbInboxView: View {
                     }
                     .foregroundStyle(isReplying ? .primary : OrbStyle.textSecondary)
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
                     .background(
-                        isReplying ? OrbStyle.elevated : Color.white.opacity(0.04),
-                        in: Capsule()
+                        isReplying ? OrbStyle.elevated : Color.clear,
+                        in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                     )
-                    .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+
                 }
                 .buttonStyle(.plain)
                 .disabled(isBusy)
@@ -2012,9 +1974,9 @@ struct OrbInboxView: View {
                     }
                     .foregroundStyle(OrbStyle.textSecondary)
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.04), in: Capsule())
-                    .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+
                 }
                 .buttonStyle(.plain)
                 .disabled(isBusy)
@@ -2089,9 +2051,10 @@ struct OrbInboxView: View {
                     }
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .frame(minHeight: 44)
+                    .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous)
                             .stroke(OrbStyle.borderStrong, lineWidth: 1)
                     )
 
@@ -2110,29 +2073,32 @@ struct OrbInboxView: View {
                             )
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
                             .background(
                                 replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                     ? Color.white.opacity(0.08)
                                     : Color.white,
-                                in: Capsule()
+                                in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                             )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("inbox.send.\(item.id)")
                     .disabled(isBusy || replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 11)
-        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isReplying ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
-        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(isReplying || isPeeked ? OrbStyle.surface : Color.clear)
+        // Row surfaces meet the continuous separators without rounded card edges.
+        .overlay(alignment: .top) { Rectangle().fill(OrbStyle.border).frame(height: 1) }
         .opacity(isBusy ? 0.6 : 1.0)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inbox.row.\(item.id)")
+        .accessibilityValue(item.unread ? "Unread" : "Read")
+        .accessibilityAction(named: "Mark read") { markItemAndChildrenRead(item) }
         .contextMenu {
             Button {
                 markItemAndChildrenRead(item)

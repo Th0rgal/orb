@@ -6,7 +6,7 @@ import {
   createUniqueId,
   onCleanup,
 } from "solid-js";
-import { Portal } from "solid-js/web";
+import { Popover } from "./Popover";
 import * as Ic from "./icons";
 import { PlanDetails, type PlanProgressData } from "./PlanProgress";
 import { GoalTag } from "./goal";
@@ -29,13 +29,11 @@ export interface SessionPreviewData {
 export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; plan?: PlanProgressData }) {
   const tipId = createUniqueId();
   const [open, setOpen] = createSignal(false);
-  const [position, setPosition] = createSignal({ left: 0, top: 0, width: 340 });
   const [git, setGit] = createSignal<{
     repository: string;
     branch?: string | null;
   } | null>(null);
   let button!: HTMLButtonElement;
-  let panel: HTMLDivElement | undefined;
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
   let generation = 0;
@@ -48,18 +46,8 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
     cancelTimers();
     setOpen(false);
   };
-  const place = () => {
-    const rect = button.getBoundingClientRect();
-    const width = Math.min(360, window.innerWidth - 24);
-    setPosition({
-      left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
-      top: rect.bottom + 8,
-      width,
-    });
-  };
   const show = () => {
     cancelTimers();
-    place();
     setOpen(true);
     if (!p.data.local || !p.data.directory || Date.now() - checkedAt < 15000)
       return;
@@ -89,30 +77,7 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
     setGit(null);
     close();
   });
-  const escape = (e: KeyboardEvent) => {
-    if (open() && e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      close();
-    }
-  };
-  const outside = (e: PointerEvent) => {
-    if (
-      !button.contains(e.target as Node) &&
-      !panel?.contains(e.target as Node)
-    )
-      close();
-  };
-  window.addEventListener("keydown", escape, true);
-  window.addEventListener("pointerdown", outside);
-  window.addEventListener("resize", close);
-  onCleanup(() => {
-    generation++;
-    cancelTimers();
-    window.removeEventListener("keydown", escape, true);
-    window.removeEventListener("pointerdown", outside);
-    window.removeEventListener("resize", close);
-  });
+  onCleanup(() => {generation++; cancelTimers();});
   return (
     <>
       <button
@@ -134,23 +99,7 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
         </Show>
       </button>
       <Show when={open()}>
-        <Portal>
-          <div
-            ref={panel}
-            id={tipId}
-            role="tooltip"
-            class="session-preview"
-            style={{
-              left: `${position().left}px`,
-              top: `${position().top}px`,
-              width: `${position().width}px`,
-              "max-height": `calc(100vh - ${position().top + 12}px)`,
-            }}
-            onPointerEnter={() => clearTimeout(hideTimer)}
-            onPointerLeave={leave}
-            onFocusIn={() => clearTimeout(hideTimer)}
-            onFocusOut={e => { if (!panel?.contains(e.relatedTarget as Node)) leave(); }}
-          >
+        <Popover anchor={button} id={tipId} label="Session details" class="session-preview" width={360} trap={false} restoreFocus={false} onClose={close} onMouseEnter={() => clearTimeout(hideTimer)} onMouseLeave={leave}>
             <div class="session-preview-title">{p.data.title}</div>
             <Show when={p.data.parent}><div class="session-preview-row"><span>Parent session</span><span>{p.data.parent}</span></div></Show>
             <Show when={p.data.children}><div class="session-preview-row"><span>Worker sessions</span><span>{p.data.children}</span></div></Show>
@@ -212,8 +161,7 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
                 Project · {p.data.project}
               </div>
             </Show>
-          </div>
-        </Portal>
+        </Popover>
       </Show>
     </>
   );

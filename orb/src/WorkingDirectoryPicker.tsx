@@ -1,3 +1,5 @@
+import { navigateOverlayItems } from "./overlayNavigation";
+import { Popover } from "./Popover";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { api, type Mission } from "./api";
 import {
@@ -108,6 +110,8 @@ export function WorkingDirectoryPicker(p: {
   const [browsedDir, setBrowsedDir] = createSignal(".");
   const [resolvedDir, setResolvedDir] = createSignal<string | null>(null);
   const [entries, setEntries] = createSignal<FsEntry[]>([]);
+  const [listingError, setListingError] = createSignal("");
+  const [folderError, setFolderError] = createSignal("");
   const [fileCount, setFileCount] = createSignal(0);
   const [loading, setLoading] = createSignal(false);
   const [liveAvailable, setLiveAvailable] = createSignal(false);
@@ -158,7 +162,7 @@ export function WorkingDirectoryPicker(p: {
   async function loadDir(targetDir: string) {
     const seq = ++requestSeq;
     const queryPath = normalizePath(targetDir) || ".";
-    setLoading(true);
+    setLoading(true); setListingError("");
     try {
       const endpoint =
         p.machine === "core"
@@ -180,7 +184,7 @@ export function WorkingDirectoryPicker(p: {
       setResolvedDir(queryPath.startsWith("/") ? queryPath : null);
       setEntries([]);
       setFileCount(0);
-      setLiveAvailable(false);
+      setLiveAvailable(false); setListingError("Could not load folders. Check the connection and try again.");
     } finally {
       if (seq === requestSeq) setLoading(false);
     }
@@ -243,7 +247,7 @@ export function WorkingDirectoryPicker(p: {
     if (!name || creatingBusy()) return;
     const base = effectiveDir() || ".";
     const target = joinPath(base, name);
-    setCreatingBusy(true);
+    setCreatingBusy(true); setFolderError("");
     try {
       const mkdirUrl =
         p.machine === "core"
@@ -253,12 +257,14 @@ export function WorkingDirectoryPicker(p: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: target }),
-      }).catch(() => {});
+      });
       setCreatingFolder(false);
       setNewFolderName("");
       saveRecentDir(p.machine, target);
       setRecents(loadRecentDirs(p.machine));
       navigateTo(target, true);
+    } catch {
+      setFolderError("Could not create the folder. Check its name and your access, then try again.");
     } finally {
       setCreatingBusy(false);
     }
@@ -275,17 +281,6 @@ export function WorkingDirectoryPicker(p: {
     void loadDir(initial);
   });
 
-  createEffect(() => {
-    if (!open()) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (rootRef && !rootRef.contains(e.target as Node)) {
-        if (p.value.trim()) saveRecentDir(p.machine, p.value);
-        setOpen(false);
-      }
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    onCleanup(() => window.removeEventListener("pointerdown", onPointerDown));
-  });
 
   const choose = async () => {
     setError("");
@@ -335,7 +330,7 @@ export function WorkingDirectoryPicker(p: {
         <span>{label()}</span>
       </button>
       <Show when={open()}>
-        <div class="menu directory-menu" role="dialog" aria-label={`Folder on ${machineTitle()}`}>
+        <Popover class="directory-menu" label={`Folder on ${machineTitle()}`} anchor={rootRef?.querySelector("button") ?? undefined} width={420} busy={creatingBusy()} onClose={() => {if (p.value.trim()) saveRecentDir(p.machine,p.value); setOpen(false);}}>
           <div class="directory-menu-head">
             <div class="directory-menu-title">
               <span class="directory-machine-ico">
@@ -440,6 +435,7 @@ export function WorkingDirectoryPicker(p: {
                   }
                 }}
                 onKeyDown={(e) => {
+                  if (e.isComposing) return;
                   if (e.key === "Enter") {
                     e.preventDefault();
                     finish();
@@ -476,6 +472,7 @@ export function WorkingDirectoryPicker(p: {
                 value={newFolderName()}
                 onInput={(e) => setNewFolderName(e.currentTarget.value)}
                 onKeyDown={(e) => {
+                  if (e.isComposing) return;
                   if (e.key === "Enter") {
                     e.preventDefault();
                     void submitNewFolder();
@@ -496,7 +493,8 @@ export function WorkingDirectoryPicker(p: {
             </div>
           </Show>
 
-          <div class="directory-browser-list" role="listbox" aria-label="Folders">
+          <Show when={folderError()}><p role="alert" class="field-error">{folderError()}</p></Show>
+          <div class="directory-browser-list" role="listbox" aria-label="Folders" onKeyDown={e => navigateOverlayItems(e, e.currentTarget, "[role=option]")}>
             <button
               type="button"
               role="option"
@@ -565,6 +563,7 @@ export function WorkingDirectoryPicker(p: {
               </div>
             </Show>
 
+            <Show when={listingError()}><div class="picker-state" role="alert">{listingError()}<button class="dlg-button" onClick={() => void loadDir(browsedDir())}>Try again</button></div></Show>
             <Show when={!loading() && liveAvailable()}>
               <div class="directory-section-label">
                 <span>Folders in {effectiveDir() ? effectiveDir().split("/").pop() || "/" : "workspace"}</span>
@@ -645,13 +644,14 @@ export function WorkingDirectoryPicker(p: {
               Done
             </button>
           </div>
-        </div>
+        </Popover>
       </Show>
       <Show when={error()}>
-        <div role="alert" class="menu directory-menu">
-          {error()}
-          <button onClick={() => setError("")}>Dismiss</button>
-        </div>
+        <Popover label="Folder error" onClose={() => setError("")} class="directory-menu">
+          <div role="alert">
+          {error()}</div>
+          <button onClick={() => setError("")}>Close</button>
+        </Popover>
       </Show>
     </div>
   );

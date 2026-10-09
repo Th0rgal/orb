@@ -51,14 +51,14 @@ final class OrbLiveUITests: XCTestCase {
         try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-home-prod.png"))
 
         homeInbox.tap()
-        XCTAssertTrue(app.staticTexts["NEEDS YOU"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Needs you"].waitForExistence(timeout: 20))
         Thread.sleep(forTimeInterval: 1.0)
         try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-inbox-prod.png"))
 
         let workingPill = app.buttons["inbox.workingPill"]
         if workingPill.exists {
             workingPill.tap()
-            XCTAssertTrue(app.staticTexts["WORKING IN BACKGROUND"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.staticTexts["Working in background"].waitForExistence(timeout: 5))
             Thread.sleep(forTimeInterval: 0.4)
             try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-inbox-working-prod.png"))
             workingPill.tap()

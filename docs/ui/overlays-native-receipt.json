@@ -1,0 +1,61 @@
+{
+  "tauri_overrides": {
+    "identifier": "md.thomas.orb.overlays",
+    "productName": "Orb Overlays",
+    "build": {
+      "beforeBuildCommand": ""
+    },
+    "app": {
+      "windows": [
+        {
+          "title": "Orb Overlays \u2014 verification",
+          "width": 1470,
+          "height": 923,
+          "minWidth": 720,
+          "minHeight": 480,
+          "titleBarStyle": "Overlay",
+          "hiddenTitle": true,
+          "trafficLightPosition": {
+            "x": 12,
+            "y": 20
+          },
+          "transparent": true,
+          "backgroundThrottling": "disabled"
+        }
+      ]
+    }
+  },
+  "created_at": "2026-10-09T08:49:55.735696+00:00",
+  "base_commit": "960b656faa9962b036c46e045cf7beb5f3814199",
+  "branch": "feat/orb-overlay-system",
+  "source_path": "/Users/thomas/work/paloma/sandboxed_sh-overlay-system",
+  "frontend_source_sha256": "f65572f7d0e33e46b8022b37424265213b4ecfd74486f9e0e281b66122464bfc",
+  "dist_index_sha256": "7d0aa707a22996f5c8381e58a27c594ba2d16b7d31df7505acb2033b2fe7b35c",
+  "raw_build_sha256": "a1fdf5b10dc8b9a54a12d9b60a4e3ef165eecce091d9f0e8ef1854ab945e581e",
+  "copy_verified_before_signing": true,
+  "installed_app": "/Applications/Orb Overlays.app",
+  "bundle_identifier": "md.thomas.orb.overlays",
+  "signed_executable_sha256": "5bf61a1168a1e034cc6332e2c35bb5706aaeee9ed7f9cd44d1a2a9ffa0422937",
+  "sidecar_sha256": "d0608e79b347f296f27be9130f8a97f6b8aae9b2f8232b3939c7e72579cba03b",
+  "main_app_unchanged_sha256": "d0f760fa182123993b743cfe3a8159abaff6331475d14d5b4eed2d4f3ebc90b3",
+  "signature": "ad-hoc; codesign --verify --deep --strict passed",
+  "native_verification": {
+    "verified_at": "2026-10-09T08:52:57.882418+00:00",
+    "foreground_pid": 45913,
+    "foreground_executable": "/Applications/Orb Overlays.app/Contents/MacOS/orb",
+    "final_build_checks": [
+      "untouched Rename closes directly",
+      "keyboard navigation resumes from originating agent row"
+    ],
+    "earlier_same_branch_checks": [
+      "project draft preservation and cancellation",
+      "provider nested select and cancellation",
+      "SSH draft preservation and cancellation",
+      "agent deletion cancelled",
+      "three-level Fork menus dismissed without activation",
+      "new cron draft preservation and cancellation",
+      "message edit cancelled without sending"
+    ],
+    "unsafe_actions_submitted": false
+  }
+}

@@ -11,6 +11,37 @@ final class OrbFlowUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    @MainActor func testPolishedInboxAndReplyLayout() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18766", "-orb_test_reset", "YES", "-orb_open_inbox"]
+        app.launch()
+        let row = app.otherElements["inbox.row.reconnect"]
+        XCTAssertTrue(row.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Needs you"].exists)
+        XCTAssertFalse(app.staticTexts["Goal"].exists)
+        capture(app, "polished-inbox")
+        let working = app.buttons["inbox.workingPill"]
+        working.tap()
+        XCTAssertTrue(app.staticTexts["Working in background"].exists)
+        capture(app, "polished-inbox-working")
+        working.tap()
+        let peek = app.buttons["inbox.peek.reconnect"]
+        XCTAssertGreaterThanOrEqual(peek.frame.height, 44)
+        peek.tap()
+        capture(app, "polished-inbox-preview")
+        let reply = app.buttons["inbox.reply.reconnect"]
+        XCTAssertGreaterThanOrEqual(reply.frame.height, 44)
+        reply.tap()
+        let input = app.textFields.matching(NSPredicate(format: "placeholderValue BEGINSWITH 'Send follow-up' OR placeholderValue BEGINSWITH 'Reply to'")).firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap(); input.typeText("Unsent layout check")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let send = app.buttons["inbox.send.reconnect"]
+        XCTAssertGreaterThanOrEqual(send.frame.height, 44)
+        XCTAssertTrue(send.isHittable)
+        capture(app, "polished-inbox-keyboard")
+        // Only fixture data is touched; no reply is submitted.
+    }
     @MainActor func testLoadingCacheLatestMessagesAndModeMenu() async throws {
         var reset = URLRequest(url: URL(string: "http://127.0.0.1:18771/__reset")!)
         reset.httpMethod = "POST"
@@ -137,6 +168,7 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["picker.model"].waitForExistence(timeout: 10))
         capture(app, "compact-agent-settings")
         app.buttons["Done"].tap()
+        XCTAssertEqual(input.value as? String, "Explain the calculation\nand compare the assumptions.")
     }
     @MainActor func testLoginSurvivesRelaunchAndRenewsInvalidToken() async throws {
         let app = XCUIApplication()

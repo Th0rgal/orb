@@ -1,3 +1,4 @@
+import {createSignal, Show} from "solid-js";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@solidjs/testing-library";
 import fixtures from "./fixtures/hermes-jobs.json";
@@ -73,6 +74,7 @@ describe("shared cron form", () => {
     render(() => <CronForm draftKey="test" view={view()} save={save} onSaved={() => {}} />);
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Unfinished edit");
     fireEvent.click(screen.getByText("Discard"));
+    fireEvent.click(screen.getByRole("button", {name:"Discard draft"}));
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(fixtures.hourly.name);
     expect(save).not.toHaveBeenCalled();
   });
@@ -152,8 +154,9 @@ describe("schedule and menu interaction", () => {
   });
   it("supports menu arrows and Escape focus restoration", () => {
     const trigger = document.createElement("button"); document.body.append(trigger); trigger.focus();
-    const close = vi.fn();
-    render(() => <PopupMenu x={20} y={20} onClose={close} items={[{ kind: "item", label: "Folder", onClick: () => {} }, { kind: "item", label: "Cron", onClick: () => {} }]} />);
+    const [show, setShow] = createSignal(true);
+    const close = vi.fn(() => setShow(false));
+    render(() => <Show when={show()}><PopupMenu x={20} y={20} onClose={close} items={[{ kind: "item", label: "Folder", onClick: () => {} }, { kind: "item", label: "Cron", onClick: () => {} }]} /></Show>);
     expect(document.activeElement?.textContent).toBe("Folder");
     fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
     expect(document.activeElement?.textContent).toBe("Cron");

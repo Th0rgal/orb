@@ -44,18 +44,18 @@ describe("session title preview", () => {
       name: "Session details: Audit",
     });
     fireEvent.pointerEnter(title);
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("dialog", {name: "Session details"})).toBeNull();
     await vi.advanceTimersByTimeAsync(220);
     expect(screen.getByText("feat/preview")).toBeTruthy();
     expect(screen.getByText("/work/verity")).toBeTruthy();
     expect(screen.getByText(/≈ 12% context/)).toBeTruthy();
     fireEvent.pointerLeave(title);
-    fireEvent.pointerEnter(screen.getByRole("tooltip"));
+    fireEvent.mouseEnter(screen.getByRole("dialog", {name: "Session details"}));
     await vi.advanceTimersByTimeAsync(200);
-    expect(screen.getByRole("tooltip")).toBeTruthy();
-    fireEvent.pointerLeave(screen.getByRole("tooltip"));
+    expect(screen.getByRole("dialog", {name: "Session details"})).toBeTruthy();
+    fireEvent.mouseLeave(screen.getByRole("dialog", {name: "Session details"}));
     await vi.advanceTimersByTimeAsync(150);
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("dialog", {name: "Session details"})).toBeNull();
     fireEvent.focus(title);
     expect(localSessionGit).toHaveBeenCalledTimes(1);
   });
@@ -64,20 +64,20 @@ describe("session title preview", () => {
     const title = screen.getByRole("button");
     fireEvent.focus(title);
     expect(title.getAttribute("aria-describedby")).toBe(
-      screen.getByRole("tooltip").id,
+      screen.getByRole("dialog", {name: "Session details"}).id,
     );
     fireEvent.keyDown(title, { key: "Escape" });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("dialog", {name: "Session details"})).toBeNull();
   });
   it("updates context without dismissing and closes when the session changes", () => {
     const [data, setData] = createSignal(base);
     render(() => <SessionPreview data={data()} />);
     fireEvent.focus(screen.getByRole("button"));
     setData({ ...base, context: 20 });
-    expect(screen.getByRole("tooltip")).toBeTruthy();
+    expect(screen.getByRole("dialog", {name: "Session details"})).toBeTruthy();
     expect(screen.getByText(/≈ 20% context/)).toBeTruthy();
     setData({ ...base, id: "b", title: "Different" });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("dialog", {name: "Session details"})).toBeNull();
   });
   it("does not probe local Git for remote sessions or invent unknown metadata", () => {
     render(() => (

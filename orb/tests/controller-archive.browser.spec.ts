@@ -90,7 +90,8 @@ test('delete cron via right-click in sidebar and from Settings page', async ({pa
   const settingsConfirmDlg = page.getByRole('dialog',{name:'Delete cron?'});
   await expect(settingsConfirmDlg).toBeVisible();
   await settingsConfirmDlg.getByRole('button',{name:'Delete',exact:true}).click();
-  await expect(page.getByText('This project has no controller cron in Hermes.')).toBeVisible();
+  await expect(controllerRow).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 
   expect(deletedEndpoints).toEqual(['DELETE /crons/extra-1', 'DELETE /controller']);
   expect(errors).toEqual([]);

@@ -75,11 +75,11 @@ it("opens attached images full-window, navigates with arrow keys and closes with
  const dialog=await screen.findByRole('dialog');
  expect(dialog.querySelector('.lightbox-image')?.getAttribute('src')).toBe(a);
  expect(dialog.textContent).toContain('1 / 2');
- fireEvent.keyDown(window,{key:'ArrowRight'});
+ fireEvent.keyDown(dialog,{key:'ArrowRight'});
  await waitFor(()=>expect(dialog.querySelector('.lightbox-image')?.getAttribute('src')).toBe(b));
- fireEvent.keyDown(window,{key:'ArrowRight'});
+ fireEvent.keyDown(dialog,{key:'ArrowRight'});
  expect(dialog.textContent).toContain('2 / 2');
- fireEvent.keyDown(window,{key:'ArrowLeft'});
+ fireEvent.keyDown(dialog,{key:'ArrowLeft'});
  await waitFor(()=>expect(dialog.textContent).toContain('1 / 2'));
  fireEvent.keyDown(document.activeElement ?? dialog,{key:'Escape'});
  await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());

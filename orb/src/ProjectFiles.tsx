@@ -1,3 +1,4 @@
+import { useTooltip } from "./Tooltip";
 import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import type {UploadSource} from "./uploads";
@@ -62,7 +63,7 @@ import {
   type ControllerView as ControllerData,
 } from "./api";
 import { CronGlyph, untilLabel } from "./Controller";
-import { ConfirmDialog, Dialog, DialogButton, PromptSheet } from "./Dialog";
+import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
 import { Select } from "./Select";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { copyText } from "./clipboard";
@@ -93,25 +94,6 @@ const ROW_TIP_ID = "orb-row-tip";
 /** Full title plus known repo/branch/machine lines. Never invented. */
 export function rowDetail(title: string, extra: Array<string | undefined | null> = []): RowTipContent {
   return { title, meta: extra.map((part) => part?.trim()).filter((part): part is string => !!part) };
-}
-
-/** Prefer overlapping the row's trailing edge (Cursor); otherwise below. Clamp to the viewport. */
-export function placeRowTip(
-  row: { top: number; left: number; right: number; bottom: number },
-  size: { width: number; height: number },
-  view: { width: number; height: number },
-  gap = 8,
-) {
-  const pad = 8;
-  const overlap = Math.min(32, Math.max(12, row.right - row.left - 40));
-  const start = row.right - overlap;
-  const beside = view.width - start - pad >= Math.min(size.width, 120);
-  const x = beside ? start : row.left;
-  const y = beside ? row.top : row.bottom + gap;
-  return {
-    x: Math.max(pad, Math.min(x, view.width - size.width - pad)),
-    y: Math.max(pad, Math.min(y, view.height - size.height - pad)),
-  };
 }
 
 /**
@@ -165,69 +147,7 @@ function MachineBadge(p: { name?: string | null }) {
   );
 }
 
-function useRowTip() {
-  const [tip, setTip] = createSignal<{ title: string; meta: string[]; x: number; y: number } | null>(null);
-  let timer = 0;
-  let gen = 0;
-  let owner: HTMLElement | null = null;
-  let card: HTMLDivElement | undefined;
-  const unlink = () => { owner?.removeAttribute("aria-describedby"); owner = null; };
-  const hide = () => { window.clearTimeout(timer); timer = 0; gen++; unlink(); setTip(null); };
-  const place = (el: HTMLElement, content: RowTipContent, size = { width: 240, height: 44 }) => {
-    const pos = placeRowTip(el.getBoundingClientRect(), size, { width: window.innerWidth, height: window.innerHeight });
-    setTip({ ...content, ...pos });
-    requestAnimationFrame(() => {
-      if (owner !== el || !card || card.hidden) return;
-      const next = placeRowTip(el.getBoundingClientRect(), { width: card.offsetWidth, height: card.offsetHeight }, { width: window.innerWidth, height: window.innerHeight });
-      setTip((cur) => cur && owner === el && (cur.x !== next.x || cur.y !== next.y) ? { ...cur, ...next } : cur);
-    });
-  };
-  const show = (content: RowTipContent, el: HTMLElement) => {
-    window.clearTimeout(timer);
-    const id = ++gen;
-    timer = window.setTimeout(() => {
-      if (id !== gen || !el.isConnected) return;
-      timer = 0;
-      unlink();
-      owner = el;
-      el.setAttribute("aria-describedby", ROW_TIP_ID);
-      place(el, content);
-    }, 480);
-  };
-  const bind = (content: RowTipContent) => ({
-    onPointerEnter: (e: { currentTarget: HTMLElement }) => show(content, e.currentTarget),
-    onPointerLeave: hide,
-    onPointerDown: hide,
-    onFocus: (e: { currentTarget: HTMLElement }) => {
-      if (!e.currentTarget.matches(":focus-visible") || e.currentTarget.closest('.sidebar-tree[data-pointer-focus="true"]')) return;
-      show(content, e.currentTarget);
-    },
-    onBlur: hide,
-  });
-  onMount(() => {
-    const dismiss = (e: Event) => {
-      if (!timer && !tip()) return;
-      if (e.type === "keydown") {
-        if ((e as KeyboardEvent).key !== "Escape") return;
-        e.preventDefault();
-        e.stopPropagation();
-      }
-      hide();
-    };
-    window.addEventListener("scroll", dismiss, true);
-    window.addEventListener("keydown", dismiss, true);
-    window.addEventListener("pointerdown", dismiss, true);
-    window.addEventListener("resize", dismiss);
-    onCleanup(() => {
-      window.removeEventListener("scroll", dismiss, true);
-      window.removeEventListener("keydown", dismiss, true);
-      window.removeEventListener("pointerdown", dismiss, true);
-      window.removeEventListener("resize", dismiss);
-    });
-  });
-  onCleanup(hide);
-  return { tip, bind, hide, id: ROW_TIP_ID, setCard: (el: HTMLDivElement) => { card = el; } };
-}
+
 
 export function LiveProjectsSection(p: {
   activityMissions?: Mission[];
@@ -332,6 +252,7 @@ export function LiveProjectsSection(p: {
   const selectedAgentSet = createMemo(() => new Set(selectedAgents()));
   const selectedRowIds = createMemo(() => selectionActive() ? selectedTreeSet() : undefined);
   const [deleteTargets, setDeleteTargets] = createSignal<string[]>([]);
+  const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);
   const [batchBusy, setBatchBusy] = createSignal(false);
   const [pendingMoves, setPendingMoves] = createSignal<string[]>([]);
   let selectionAnchor: string | null = null;
@@ -432,6 +353,8 @@ export function LiveProjectsSection(p: {
           const failures = deleteFailures.splice(0, deleteFailures.length);
           setActionError(`Couldn’t delete ${failures.length} agent(s). ${failures.join("; ")}`);
         }
+        setDeleteConfirmBusy(false);
+        if (!deleteFailures.length && !actionError()) setDeleteTargets([]);
         bumpProjects();
       }
     });
@@ -536,8 +459,9 @@ export function LiveProjectsSection(p: {
     const version = connectionVersion();
     const currentlyDeleting = deletingIds();
     const targets = deleteTargets().filter(id => !currentlyDeleting.has(id) && !deletedInSession.has(id));
-    setDeleteTargets([]);
-    if (!targets.length) return;
+    if (deleteConfirmBusy()) return;
+    if (!targets.length) {setDeleteTargets([]); return;}
+    setDeleteConfirmBusy(true);
     setActionError(null);
     const allLoaded = allKnownMissions();
     for (const id of targets) {
@@ -597,7 +521,7 @@ export function LiveProjectsSection(p: {
     if (ids.length === 1) { setPendingMoves([]); beginMove(id); }
     else { setPendingMoves(ids); setCutId(ids[0]); setActionError(null); }
   };
-  const [forkTarget, setForkTarget] = createSignal<{ x: number; y: number; mission: Mission } | null>(null);
+  const [forkTarget, setForkTarget] = createSignal<{ anchor?: HTMLButtonElement; mission: Mission } | null>(null);
   const [makingCron, setMakingCron] = createSignal(false);
   const [cronWarning, setCronWarning] = createSignal<string | null>(null);
   const [cronFolder, setCronFolder] = createSignal("");
@@ -622,10 +546,10 @@ export function LiveProjectsSection(p: {
   };
   const beginFileAction = (slug: string, path: string, kind: "rename" | "move" | "delete", directory = false) => {
     setFileMenu(null); setActionMenu(null); setMultiSelectMenu(null);
-    setFileAction({ slug, path, kind, directory });
     // A folder renamed on this device before paths could change keeps that name as the suggestion.
     setFileActionValue(kind === "rename" ? (directory ? folderLabel(slug, path) : fileBaseName(path)) : fileParent(path));
     setFileActionError(null);
+    setFileAction({ slug, path, kind, directory });
   };
   const refreshFileParents = async (slug: string, path: string, destination?: string) => {
     await loadDir(slug, fileParent(path), true);
@@ -709,7 +633,7 @@ export function LiveProjectsSection(p: {
   const [renameError, setRenameError] = createSignal<string | null>(null);
   const [renaming, setRenaming] = createSignal(false);
   const [actionError, setActionError] = createSignal<string | null>(null);
-  const rowTip = useRowTip();
+  const rowTip = useTooltip<RowTipContent>(ROW_TIP_ID, tip => <><div class="row-tip-title">{tip.title}</div><For each={tip.meta}>{line => <div class="row-tip-meta">{line}</div>}</For></>);
   const currentConnection = (version: number) => isConnected() && connectionVersion() === version;
   const requests = createSidebarRequests();
   const warmed = new Set<string>();
@@ -1056,16 +980,17 @@ export function LiveProjectsSection(p: {
   const beginRename = (slug: string) => {
     const project = projects().find((x) => x.slug === slug);
     const title = (project?.title || slug).trim();
-    setRename({ slug, title });
+    // NameDialog captures its clean value when mounted. Publish the target last.
     setRenameValue(title);
     setRenameError(null);
+    setRename({ slug, title });
   };
   const beginMissionRename = (mission: Mission) => {
     setMissionMenu(null);
     setForkTarget(null);
-    setRename({ missionId: mission.id, title: mission.title ?? "" });
     setRenameValue(mission.title ?? "");
     setRenameError(null);
+    setRename({ missionId: mission.id, title: mission.title ?? "" });
   };
   const saveRename = async () => {
     const target = rename();
@@ -1649,7 +1574,7 @@ export function LiveProjectsSection(p: {
     ...(isArchived(mission) ? [{ kind: "sep" as const }, ...archiveDeleteMenuItems()] : []),
   ] : [
     {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
-    ...(!mission.backend?.startsWith("cloud_") ? [{ kind: "item" as const, label: "Fork conversation", icon: Ic.BranchIcon, openOnHover: true, onClick: (anchor?: HTMLButtonElement) => { const rect = anchor?.parentElement?.getBoundingClientRect(); setForkTarget({ mission, x: rect ? rect.right + 3 : x, y: anchor?.getBoundingClientRect().top ?? y }); } }] : []),
+    ...(!mission.backend?.startsWith("cloud_") ? [{ kind: "item" as const, label: "Fork conversation", icon: Ic.BranchIcon, openOnHover: true, onClick: (anchor?: HTMLButtonElement) => { setForkTarget({ mission, anchor }); } }] : []),
     ...(["completed", "failed", "interrupted", "acknowledged", "cancelled"].includes(mission.status)
       ? [{ kind: "item" as const, label: isArchived(mission) ? "Restore" : "Reopen", icon: Ic.ReopenIcon, onClick: () => void reopenConversation(mission) }] : []),
     { kind: "item", label: "Move", icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id) },
@@ -2121,7 +2046,7 @@ export function LiveProjectsSection(p: {
         <div class="row note">{error()} <button class="text-btn" onClick={() => refresh(true)}>Retry</button></div>
       </Show>
       <Show when={cronWarning()}><ErrorNotice error={cronWarning()!} /></Show>
-      <Show when={actionError()}>{error => <ErrorDialog error={error()} onClose={() => setActionError(null)} />}</Show>
+      <Show when={!deleteTargets().length && actionError()}>{error => <ErrorDialog error={error()} onClose={() => setActionError(null)} />}</Show>
       <Show when={importStatus()}><div class="row note" role="status">{importStatus()}</div></Show>
       <div ref={dropTree} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} /></div>
       <Show when={projects().length === 0 && !error()}>
@@ -2142,10 +2067,9 @@ export function LiveProjectsSection(p: {
         </div>
       </Show>
       <Show when={deleteTargets().length}>
-        <Dialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} onClose={() => setDeleteTargets([])}
-          footer={<><DialogButton onClick={() => setDeleteTargets([])}>Cancel</DialogButton><DialogButton variant="destructive" onClick={() => void deleteSelected()}>Delete</DialogButton></>}>
-          <p>This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running will be kept.</p>
-        </Dialog>
+        <ConfirmDialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} destructive action="Delete"
+          description="This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running will be kept."
+          busy={deleteConfirmBusy()} error={actionError()} onConfirm={() => void deleteSelected()} onClose={() => {setActionError(null);setDeleteTargets([]);}}/>
       </Show>
       <Show when={archiveMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={archiveDeleteMenuItems(menu.slug)} onClose={() => setArchiveMenu(null)} />}</Show>
       <Show when={multiSelectMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={multiSelectMenuItems(menu.treeIds)} onClose={() => setMultiSelectMenu(null)} />}</Show>
@@ -2160,7 +2084,7 @@ export function LiveProjectsSection(p: {
       <Show when={deleteCronTarget()} keyed>{target => {
         const count = target.items && target.items.length > 1 ? target.items.length : 1;
         return (
-          <ConfirmDialog
+          <ConfirmDialog destructive
             title={count > 1 ? `Delete ${count} crons?` : "Delete cron?"}
             description={
               count > 1
@@ -2185,11 +2109,11 @@ export function LiveProjectsSection(p: {
         { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(menu.slug, menu.path, "delete") },
       ]} />}</Show>
       <Show when={fileAction()} keyed>{target => <Show when={target.kind === "delete"} fallback={
-        <PromptSheet title={`${target.kind === "rename" ? "Rename" : "Move"} ${target.directory ? "folder" : "file"}`} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.directory ? `${target.path} — its files, agents and crons keep their place inside.` : target.path}
+        <NameDialog allowEmpty={target.kind === "move"} title={`${target.kind === "rename" ? "Rename" : "Move"} ${target.directory ? "folder" : "file"}`} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.directory ? `${target.path} — its files, agents and crons keep their place inside.` : target.path}
           label={target.kind === "rename" ? (target.directory ? "Folder name" : "File name") : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
           action={target.kind === "rename" ? "Rename" : "Move"} busy={fileBusy()} error={fileActionError()}
           disabled={target.kind === "rename" && !fileActionValue().trim()} onAction={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} />
-      }><ConfirmDialog title={target.directory ? "Delete folder?" : "Delete file?"} description={target.directory ? `Delete ${target.path} and all files and subfolders inside? This cannot be undone.` : `Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>
+      }><ConfirmDialog destructive title={target.directory ? "Delete folder?" : "Delete file?"} description={target.directory ? `Delete ${target.path} and all files and subfolders inside? This cannot be undone.` : `Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>
       <Show when={actionMenu()}>
         {(menu) => <PopupMenu {...menu()} focus={actionFocus()} items={menuItems(menu().slug, menu().path)} onClose={() => setActionMenu(null)} />}
       </Show>
@@ -2197,29 +2121,22 @@ export function LiveProjectsSection(p: {
         {(menu) => <PopupMenu x={menu().x} y={menu().y} focus={false} items={missionMenuItems(menu().mission, menu().x, menu().y)} onDismissSubmenu={() => setForkTarget(null)} onClose={() => { setForkTarget(null); setMissionMenu(null); }}>
           <Show when={forkTarget()}>{target =>
             <ForkMission mission={target().mission} choices={p.forkChoices?.(target().mission) ?? p.harnessChoices} onOpen={() => p.onForkOpen?.(target().mission)} destination={missionDestination(target().mission)}
-              position={{ x: target().x, y: target().y }} onClose={() => setForkTarget(null)}
+              anchor={target().anchor} onClose={() => setForkTarget(null)}
               onFork={mission => { setForkTarget(null); setMissionMenu(null); p.onFork(mission); }} />
           }</Show>
         </PopupMenu>}
       </Show>
-      <div ref={rowTip.setCard} id={rowTip.id} class="row-tip" role="tooltip" hidden={!rowTip.tip()} style={rowTip.tip() ? { left: `${rowTip.tip()!.x}px`, top: `${rowTip.tip()!.y}px` } : undefined}>
-        <Show when={rowTip.tip()}>{(tip) => (
-          <>
-            <div class="row-tip-title">{tip().title}</div>
-            <For each={tip().meta}>{(line) => <div class="row-tip-meta">{line}</div>}</For>
-          </>
-        )}</Show>
-      </div>
+      {rowTip.surface}
       <Show when={rename()}>
         {(target) => (
-          <PromptSheet
-            title="Rename"
+          <NameDialog
+            title={"missionId" in target() ? "Rename agent" : "path" in target() ? "Rename folder" : "Rename project"}
             hint={"path" in target() ? "Display name saved on this device. Files and agent paths stay the same." : "slug" in target() ? (target() as { slug: string }).slug : undefined}
             label={"missionId" in target() ? "Mission name" : "path" in target() ? "Folder name" : "Project name"}
             placeholder={"missionId" in target() ? "Mission name" : "path" in target() ? "Folder name" : "Project name"}
             value={renameValue()}
             onInput={setRenameValue}
-            action="Save"
+            action="Rename"
             busy={renaming()}
             disabled={!renameValue().trim()}
             error={renameError()}
@@ -2230,7 +2147,7 @@ export function LiveProjectsSection(p: {
       </Show>
       <Show when={newFolder()}>
         {(target) => (
-          <PromptSheet
+          <NameDialog
             title="New folder"
             hint={`in ${target().path ? `${target().slug}/${target().path}` : target().slug}`}
             label="Folder name"
@@ -2248,7 +2165,7 @@ export function LiveProjectsSection(p: {
       </Show>
       <Show when={newFile()}>
         {(target) => (
-          <PromptSheet
+          <NameDialog
             title="New file"
             hint={`in ${target().path ? `${target().slug}/${target().path}` : target().slug}`}
             label="File name"
@@ -2269,7 +2186,7 @@ export function LiveProjectsSection(p: {
         <p>{cronUnsupported() ? "This backend does not support project crons yet. Update the connected backend, then choose Check again. Your canonical controller and existing project content remain available." : cronRetryable[slug()] ? "Project crons could not refresh. Previously loaded jobs are retained. Try again when the scheduler is available." : "The backend rejected this cron request. Check backend access and configuration, then check again. Previously loaded jobs are retained."}</p>
       </Dialog>}</Show>
       <Show when={newCron()}>
-        {(slug) => <Dialog size="wide" busy={makingCron()} title={cronFolder() ? `New cron · ${cronFolder()}` : "New cron"} onClose={() => !makingCron() && setNewCron(null)} footer={<span>Unfinished drafts are kept until saved or discarded.</span>}>
+        {(slug) => <Dialog size="wide" busy={makingCron()} title={cronFolder() ? `New cron · ${cronFolder()}` : "New cron"} onClose={() => !makingCron() && setNewCron(null)}>
           <CronForm creating deliveryRoute={{ ready: cronDefaults()?.route_ready ?? false, loading: !cronDefaults() && !defaultsError(), error: defaultsError() }} onBusyChange={setMakingCron} draftKey={`create:${slug()}:${cronFolder()}`} view={{ slug: slug(), job: { id: "", name: "", schedule: "every 1h", enabled: true, failure_streak: 0 }, runs: [] }}
             save={async (draft) => getProjectCronFromJob(slug(), await createProjectCron(slug(), { ...draft, folder: cronFolder() }))}
             onClose={() => setNewCron(null)} onSaved={(view, warning) => {

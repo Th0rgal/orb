@@ -1,3 +1,4 @@
+import { hasOverlay } from "./overlayLayer";
 import * as TreeIcon from "./sidebarIcons";
 import {
   lazy,
@@ -500,7 +501,7 @@ export function FilePanelProvider(p: {
   onMount(()=>{window.addEventListener("pointerdown",trackPane,true);window.addEventListener("focusin",trackPane,true);});
   onCleanup(()=>{window.removeEventListener("pointerdown",trackPane,true);window.removeEventListener("focusin",trackPane,true);});
   function keys(e: KeyboardEvent) {
-    if (!available()) return;
+    if (!available() || e.defaultPrevented || e.isComposing || hasOverlay()) return;
     if (opened() && filePaneFocused && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase()==="b" && !e.isComposing) {
       e.preventDefault();e.stopImmediatePropagation();
       if(!e.repeat)setTree(v=>!v);
@@ -553,7 +554,7 @@ export function FilePanelProvider(p: {
     }
   }
   const closeSideOnEscape = (event: KeyboardEvent) => {
-    if (event.key === "Escape" && !event.defaultPrevented && sideVisible()) {
+    if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && !hasOverlay() && sideVisible()) {
       event.preventDefault();setSideVisible(false);
     }
   };

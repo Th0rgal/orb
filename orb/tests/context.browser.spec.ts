@@ -13,9 +13,10 @@ test('context conflict comparison fits the panel and keeps resolution conditiona
  });
  await page.goto('/tests/context.html');await page.getByRole('button',{name:'History',exact:true}).click();
  await page.getByRole('button',{name:'Compare',exact:true}).click();await expect(page.getByText('Shared version')).toBeVisible();
- const panel=page.getByRole('region',{name:'Context file history'});expect(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
+ const panel=page.getByRole('dialog',{name:'Context file history'});expect(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
  await page.screenshot({path:'/tmp/orb-context-history.png'});
  await page.getByRole('button',{name:'Use variant',exact:true}).click();expect(operations).toEqual([expect.objectContaining({base:2,hash:'variant',path:'notes.md'})]);
+ await expect(panel).not.toHaveAttribute('aria-busy','true');
  await page.keyboard.press('Escape');await expect(panel).toHaveCount(0);
 });
 

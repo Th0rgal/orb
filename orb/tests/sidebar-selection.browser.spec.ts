@@ -34,8 +34,10 @@ for (const action of ['delete', 'move'] as const) test(`sidebar range/toggle sel
   if(action==='delete') {
     await page.getByRole('menuitem',{name:'Delete 2 agents…'}).click();
     await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
-    await expect.poll(()=>writes.length).toBe(2);await expect(row(0)).toHaveCount(0);await expect(row(2)).toBeVisible();
-    await expect(page.getByText(/Couldn’t delete 1 agent/)).toBeVisible();
+    await expect.poll(()=>writes.length).toBe(2);
+    await expect(page.getByRole("dialog")).toContainText("Couldn’t delete 1 agent");
+    await page.getByRole("dialog").getByRole("button",{name:"Cancel",exact:true}).click();
+    await expect(row(0)).toHaveCount(0);await expect(row(2)).toBeVisible();
   } else {
     await page.getByRole('menuitem',{name:'Move 2 agents',exact:true}).click();
     await page.getByRole('button',{name:'Two',exact:true}).click({button:'right'});

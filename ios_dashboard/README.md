@@ -17,6 +17,10 @@ Native SwiftUI iOS client for **Orb**, located in `SandboxedDashboard/Orb`.
 - **Shared Project Context & Files** (`OrbDocuments.swift`, `OrbAttachments.swift`, `OrbMessageImages.swift`) — Read and edit synchronized Markdown `@context` files, preview images, and upload attachments.
 - **Unified Settings** (`OrbSettings.swift`, `OrbMachinesSettings.swift`, `OrbProvidersSettings.swift`) — Configure your **Backend** connection, manage **Providers** (including CLIProxyAPI OAuth logins and quota inspection), and view **Machines** (registered remote nodes plus the shared `/api/settings/ssh-hosts` address book).
 
+## Presentation
+
+Native surfaces, Inbox density and device checks follow the [mobile UI contract](../docs/ui/mobile.md).
+
 ## Requirements
 
 - Xcode 16.0+ (with iOS 26 SDK in CI)

@@ -98,7 +98,7 @@ test("sidebar rows stay compact with distinct hover/selected and delayed real me
   const liveBox = (await live.boundingBox())!;
   const tipBox = (await tip.boundingBox())!;
   expect(tipBox.x).toBeGreaterThan(liveBox.x);
-  expect(tipBox.x).toBeLessThan(liveBox.x + liveBox.width);
+  expect(tipBox.x).toBeGreaterThanOrEqual(liveBox.x + liveBox.width);
   await page.screenshot({ path: "test-results/orb-sidebar-tooltip.png" });
   await page.keyboard.press("Escape");
   await expect(tip).toBeHidden();
@@ -195,7 +195,7 @@ test("project action menu is compact, pointer hover has no focus ring, keyboard 
   await expect(first).toBeFocused();
   await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
   await expect.poll(() => menu.evaluate((el) => Number(getComputedStyle(el).opacity))).toBe(1);
-  expect(await menu.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(255, 255, 255)");
+  expect(await menu.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(250, 250, 250)");
   await page.screenshot({ path: "test-results/orb-project-menu-light.png" });
 });
 

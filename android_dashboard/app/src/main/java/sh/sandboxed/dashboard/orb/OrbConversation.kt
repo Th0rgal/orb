@@ -1106,9 +1106,9 @@ fun OrbConversationPage(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
+                        .clip(RoundedCornerShape(OrbStyle.panelRadius))
                         .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(16.dp))
+                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
                         .padding(10.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -1251,13 +1251,13 @@ fun OrbConversationPage(
                 }
             }
 
-            //Composer Capsule Card
+            // Shared composer surface; touch targets are sized separately from its border.
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(22.dp))
+                    .clip(RoundedCornerShape(OrbStyle.panelRadius))
                     .background(OrbStyle.surface)
-                    .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(22.dp))
+                    .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -1277,7 +1277,7 @@ fun OrbConversationPage(
                     if (inputText.isEmpty()) {
                         Text(
                             text = when (composeMode) {
-                                OrbComposeMode.Message -> "Message agent… (/ for modes)"
+                                OrbComposeMode.Message -> "Message agent…"
                                 OrbComposeMode.Plan -> "Ask agent to draft a plan…"
                                 OrbComposeMode.Goal -> "Describe autonomous goal…"
                             },
@@ -1307,11 +1307,12 @@ fun OrbConversationPage(
                     Box {
                         Box(
                             modifier = Modifier
-                                .size(30.dp)
+                                .size(48.dp)
+                                .orbPressClickable { showAttachMenu = true }
+                                .padding(9.dp)
                                 .clip(CircleShape)
                                 .background(OrbStyle.card)
-                                .border(1.dp, OrbStyle.border, CircleShape)
-                                .orbPressClickable { showAttachMenu = true },
+                                .border(1.dp, OrbStyle.border, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -1384,11 +1385,10 @@ fun OrbConversationPage(
                     Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                         Row(
                             modifier = Modifier
-                                .clip(CircleShape)
-                                .background(OrbStyle.card)
-                                .border(1.dp, OrbStyle.border, CircleShape)
+                                .clip(RoundedCornerShape(OrbStyle.controlRadius))
                                 .orbPressClickable { showAgentPicker = true }
-                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                                .heightIn(min = 48.dp)
+                                .padding(horizontal = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
@@ -1419,11 +1419,12 @@ fun OrbConversationPage(
                     if (isLive && missionId != null) {
                         Box(
                             modifier = Modifier
-                                .size(30.dp)
+                                .size(48.dp)
+                                .orbPressClickable(enabled = !isStopping) { stopMission() }
+                                .padding(9.dp)
                                 .clip(CircleShape)
                                 .background(OrbStyle.card)
-                                .border(1.dp, OrbStyle.borderStrong, CircleShape)
-                                .orbPressClickable(enabled = !isStopping) { stopMission() },
+                                .border(1.dp, OrbStyle.borderStrong, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -1438,10 +1439,11 @@ fun OrbConversationPage(
                     val canSend = inputText.trim().isNotEmpty() || pendingAttachments.isNotEmpty()
                     Box(
                         modifier = Modifier
-                            .size(30.dp)
+                            .size(48.dp)
+                            .orbPressClickable(enabled = canSend) { sendTurn() }
+                            .padding(9.dp)
                             .clip(CircleShape)
-                            .background(if (canSend) Color.White else OrbStyle.card)
-                            .orbPressClickable(enabled = canSend) { sendTurn() },
+                            .background(if (canSend) Color.White else OrbStyle.card),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(

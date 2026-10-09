@@ -1,3 +1,5 @@
+import { navigateOverlayItems } from "./overlayNavigation";
+import { Popover } from "./Popover";
 import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministration} from "./machineDestinations";
 import {connectionVersion} from "./api";
 import {nodeLabel} from "./missionLaunch";
@@ -102,9 +104,6 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   };
   onMount(() => {
     void load();
-    const close = (e: PointerEvent) => { if (!busy() && !action() && !root.parentElement?.contains(e.target as Node)) p.onClose(); };
-    window.addEventListener("pointerdown", close);
-    onCleanup(() => window.removeEventListener("pointerdown", close));
   });
   onCleanup(() => { alive = false; cancelled = true; });
   const stopSource = async () => {
@@ -177,19 +176,11 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     try { if (a) await transferRequest(p.mission.id, { op: "cancel", transfer_id: a.id }); p.onClose(); }
     catch (e) { fail(e); }
   };
-  const keys = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && !busy()) { e.preventDefault(); if (action()) void cancel(); else p.onClose(); }
-    if (["ArrowUp", "ArrowDown"].includes(e.key) && !selected()) {
-      const items = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
-      const index = items.indexOf(document.activeElement as HTMLButtonElement);
-      e.preventDefault(); items[(index + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
-    }
-  };
   const STEPS = ["Prepare", "Copy", "Verify", "Activate"];
   // The step in hand: preparing until an inventory exists, then the stage of the move.
   const step = () => !action()?.manifest ? 0 : stage().startsWith("Verifying") ? 2 : stage().startsWith("Activating") ? 3 : 1;
   const back = () => { setSelected(undefined); setError(""); queueMicrotask(() => root.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()); };
-  return <div ref={root} class="menu machine-transfer-menu" classList={{ "transfer-dialog": !!selected() }} role={selected() ? "dialog" : "menu"} aria-label="Change machine" onKeyDown={keys}>
+  return <Popover ref={el => {root = el;}} class={`machine-transfer-menu ${selected() ? "transfer-dialog" : ""}`} label="Change machine" width={360} placement="top-start" busy={busy()} onClose={() => {if(action()) void cancel(); else p.onClose();}} onKeyDown={e => {if (!selected()) navigateOverlayItems(e, root, "[role=menuitem]");}}>
     <Show when={!selected()}>
       <div class="menu-group">Change machine…</div>
       <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
@@ -234,5 +225,5 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       </footer>
     </Show>
     <Show when={error() && !selected()}><ErrorNotice error={error()} /><Show when={!loading()}><button class="menu-item" onClick={() => void load(true)}>Retry</button></Show></Show>
-  </div>;
+  </Popover>;
 }

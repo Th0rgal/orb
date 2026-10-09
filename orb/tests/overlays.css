@@ -1,0 +1,5 @@
+.overlay-gallery { min-height:100vh; background:var(--bg); color:var(--fg); padding:32px; font:13px/1.5 var(--sans); }
+.overlay-gallery h1 { font-size:20px; font-weight:500; }
+.gallery-actions { display:flex; flex-wrap:wrap; gap:8px; margin:24px 0; }
+.gallery-actions .dlg-button { border-color:var(--overlay-border); }
+.gallery-message { max-width:740px; margin-top:40px; }

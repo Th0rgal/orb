@@ -61,6 +61,7 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,11 +76,13 @@ import kotlin.math.PI
 import kotlin.math.cos
 
 object OrbStyle {
-    // Exact RGB equivalents of iOS OrbStyle:
+    val controlRadius = 6.dp
+    val panelRadius = 12.dp
+
+    // Shared neutral palette with the iOS and desktop clients:
     // Color(white: 0.073) -> 19, 19, 19 (#131313)
     val background = Color(0xFF131313)
-    // Color(white: 0.105) -> 27, 27, 27 (#1B1B1B)
-    val surface = Color(0xFF1B1B1B)
+    val surface = Color(0xFF191919)
     // Color(white: 0.125) -> 32, 32, 32 (#202020)
     val card = Color(0xFF202020)
     // Color(white: 0.155) -> 40, 40, 40 (#272727)
@@ -92,7 +95,7 @@ object OrbStyle {
     // Color(red: 0.42, green: 0.42, blue: 0.42) -> 108, 108, 108 (#6C6C6C)
     val textMuted = Color(0xFF6C6C6C)
     val border = Color.White.copy(alpha = 0.08f)
-    val borderStrong = Color.White.copy(alpha = 0.14f)
+    val borderStrong = Color(0xFF333333)
     // Color(red: 0.45, green: 0.79, blue: 0.57) -> 115, 201, 145 (#73C991)
     val success = Color(0xFF73C991)
     // Color(red: 0.84, green: 0.63, blue: 0.42) -> 214, 161, 106 (#D6A16A)
@@ -133,6 +136,7 @@ fun Modifier.orbPressClickable(
         .clickable(
             interactionSource = interactionSource,
             indication = null,
+            role = Role.Button,
             enabled = enabled,
             onClick = onClick
         )

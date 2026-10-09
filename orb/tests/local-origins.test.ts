@@ -6,7 +6,7 @@ it('shows a locally journaled mission and its text while Core is offline',async(
  const mission={id:'local-id',title:'Offline task',status:'active',created_at:'now',updated_at:'now',history:[{role:'user',content:'Do work'},{role:'assistant',content:'Working'}],local_sync_pending:true};
  const invoke=vi.fn(async()=>[mission]);(window as any).__TAURI_INTERNALS__={invoke};
  const fetcher=vi.fn(async()=>{throw new TypeError('offline');});vi.stubGlobal('fetch',fetcher);
- expect(await getMission(mission.id)).toEqual(mission);expect(fetcher).not.toHaveBeenCalled();
+ expect(await getMission(mission.id)).toEqual(mission);expect(fetcher).toHaveBeenCalledTimes(1);
  expect(await listMissions()).toEqual([mission]);
  expect(invoke).toHaveBeenCalledWith('local_origin_list',expect.objectContaining({connection:{api_url:'http://offline.test',token:'token'}}));
 });
@@ -120,7 +120,7 @@ it('learns about an archive the default list leaves out, and keeps an emptied ti
  vi.stubGlobal('fetch',vi.fn(async(input:any)=>{
   const url=String(input);asked.push(url);
   // The default list shows attention rows only: the archived mission is absent.
-  if(url.endsWith('/api/control/missions'))return new Response('[]');
+  if(new URL(url).pathname === '/api/control/missions')return new Response('[]');
   if(url.endsWith('/missions/done'))return new Response(JSON.stringify({...done,status:'acknowledged',title:''}));
   return new Response('Not found',{status:404});
  }));
@@ -135,7 +135,7 @@ it('retires a synchronized local mission once Core confirms 404 or explicit dele
  forgetUnlistedReads();
  vi.stubGlobal('fetch',vi.fn(async(input:any)=>{
   const url=String(input);
-  if(url.endsWith('/api/control/missions'))return new Response('[]');
+  if(new URL(url).pathname === '/api/control/missions')return new Response('[]');
   return new Response('Not found',{status:404});
  }));
  await listMissions();
@@ -156,4 +156,17 @@ it('shares concurrent native scans and reads fresh rows after completion',async(
  resolve([{id:'one'},{id:'two'}]);
  expect(await first).toEqual([{id:'one'}]);expect(await second).toEqual([{id:'two'}]);
  const next=localOrigins();expect(invoke).toHaveBeenCalledTimes(2);resolve([]);await next;
+});
+
+it('keeps local output but reads current Antigravity effort from Core while running',async()=>{
+ setConnection('http://core.test','token');
+ const local={...done,status:'active',backend:'antigravity',model_override:'agy-demo',model_effort:'low',local_sync_pending:true,history:[{role:'assistant',content:'Unsynced output'}]};
+ journal([local]);
+ let effort:string|null='high';
+ vi.stubGlobal('fetch',vi.fn(async(input:any)=>new Response(JSON.stringify(String(input).includes('?')?[{...done,backend:'antigravity',model_override:'agy-demo',model_effort:effort}]:{...done,backend:'antigravity',model_override:'agy-demo',model_effort:effort}))));
+ expect(await getMission('done')).toMatchObject({...local,model_effort:'high'});
+ expect(await listMissions()).toMatchObject([{...local,model_effort:'high'}]);
+ expect(await listProjectMissions('test')).toMatchObject([{...local,model_effort:'high'}]);
+ effort=null;
+ expect(await getMission('done')).toMatchObject({...local,model_effort:null});
 });

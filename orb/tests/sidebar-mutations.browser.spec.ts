@@ -22,7 +22,15 @@ for (const action of ['rename', 'delete'] as const) test(`sidebar preserves view
   const before=await page.locator('.sb-scroll').evaluate(el=>el.scrollTop);
   await page.getByRole('menuitem',{name:action==='rename'?'Rename':'Delete agent…',exact:true}).click();
   const dialog=page.getByRole('dialog');
-  if(action==='rename') { await dialog.getByRole('textbox').fill('Renamed agent'); await dialog.getByRole('button',{name:'Save',exact:true}).click(); await expect(tree.getByRole('button',{name:'Renamed agent',exact:true})).toHaveCount(1); }
+  if(action==='rename') {
+    await expect(dialog.getByRole('textbox')).toHaveValue('Agent 35');
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(target).toBeFocused();
+    await target.click({button:'right'});
+    await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
+  }
+  if(action==='rename') { await dialog.getByRole('textbox').fill('Renamed agent'); await dialog.getByRole('button',{name:'Rename',exact:true}).click(); await expect(tree.getByRole('button',{name:'Renamed agent',exact:true})).toHaveCount(1); }
   else { await dialog.getByRole('button',{name:'Delete',exact:true}).click(); await expect(target).toHaveCount(0); }
   await expect(dialog).toHaveCount(0);
   await page.waitForTimeout(250);
