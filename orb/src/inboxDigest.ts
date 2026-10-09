@@ -25,10 +25,19 @@ export type InboxDigest = {
 const STORAGE_KEY = "orb:inbox-digest:v5";
 const LEGACY_STORAGE_KEY = "orb:inbox-digest:v4";
 const MAX_CACHE_ENTRIES = 160;
-const MAX_CONCURRENT = 4;
+const MAX_CONCURRENT = 6;
 
 const [inboxDigestVersion, setInboxDigestVersion] = createSignal(0);
 export { inboxDigestVersion };
+
+let digestBumpTimer: ReturnType<typeof setTimeout> | undefined;
+function bumpDigestVersion() {
+  if (digestBumpTimer !== undefined) return;
+  digestBumpTimer = setTimeout(() => {
+    digestBumpTimer = undefined;
+    setInboxDigestVersion((v) => v + 1);
+  }, 40);
+}
 
 let memoryCache: Record<string, InboxDigest> | null = null;
 let loadedStorageKey: string | null = null;
@@ -122,7 +131,7 @@ export function storeInboxDigest(
   const cache = ensureCacheLoaded();
   cache[makeCacheKey(missionId, updatedMs, model)] = digest;
   persistCache(cache);
-  setInboxDigestVersion((v) => v + 1);
+  bumpDigestVersion();
 }
 
 function pumpQueue(): void {

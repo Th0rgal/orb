@@ -490,14 +490,18 @@ export function InboxPage(p: {
       const readyTx = peekReadyTranscript(item.id);
       if (!readyTx) {
         refreshedTranscriptAt.set(item.id, item.updatedMs);
-        if (idx < 8) {
+        if (idx < 12) {
           void loadTranscript(item.id)
             .then((snap) => {
-              if (cfg.aiSummary && idx < 10 && !item.interaction) {
+              if (cfg.aiSummary && idx < 12 && !item.interaction) {
                 requestInboxDigest(item.mission, snap.items, item.updatedMs, priority);
               }
             })
-            .catch(() => {});
+            .catch(() => {
+              if (cfg.aiSummary && idx < 12 && !item.interaction) {
+                requestInboxDigest(item.mission, undefined, item.updatedMs, priority);
+              }
+            });
           return;
         }
         prefetchTranscript(item.id);
@@ -505,13 +509,14 @@ export function InboxPage(p: {
         refreshedTranscriptAt.set(item.id, item.updatedMs);
         void refreshTranscript(item.id)
           .then((snap) => {
-            if (cfg.aiSummary && idx < 10 && !item.interaction) {
+            if (cfg.aiSummary && idx < 12 && !item.interaction) {
               requestInboxDigest(item.mission, snap.items, item.updatedMs, priority);
             }
           })
           .catch(() => {});
+        return;
       }
-      if (cfg.aiSummary && idx < 10 && !item.interaction) {
+      if (cfg.aiSummary && idx < 12 && !item.interaction) {
         requestInboxDigest(item.mission, readyTx?.items, item.updatedMs, priority);
       }
     });
@@ -1032,6 +1037,17 @@ export function InboxPage(p: {
         void undoLastDone();
         return;
       }
+      if (e.key === "Escape") {
+        const openId =
+          currentItem && peekedIds().has(currentItem.id)
+            ? currentItem.id
+            : Array.from(peekedIds()).at(-1);
+        if (openId) {
+          e.preventDefault();
+          closeUnifiedDrawer(openId);
+          return;
+        }
+      }
       if ((e.key === "1" || e.key === "2" || e.key === "3") && currentItem?.interaction) {
         const opt = currentItem.interaction.options.find((o) => o.key === e.key);
         if (opt) {
@@ -1337,7 +1353,7 @@ export function InboxPage(p: {
                           type="button"
                           class={`inbox-act-btn ${isPeeked() ? "on" : ""}`}
                           disabled={isBusy()}
-                          title="Peek conversation & reply inline (Space or R)"
+                          title={isPeeked() ? "Close peek (Esc or Space)" : "Peek conversation & reply inline (Space)"}
                           aria-label={`Peek and reply to ${effectiveHeadline()}`}
                           aria-expanded={isPeeked()}
                           onClick={(e) => {
@@ -1350,7 +1366,7 @@ export function InboxPage(p: {
                           }}
                         >
                           <span>{isPeeked() ? "Close" : "Peek & Reply"}</span>
-                          <kbd class="inbox-act-kbd" aria-hidden="true">{isPeeked() ? "Esc" : "R"}</kbd>
+                          <kbd class="inbox-act-kbd" aria-hidden="true">{isPeeked() ? "Esc" : "Space"}</kbd>
                         </button>
                         <button
                           type="button"

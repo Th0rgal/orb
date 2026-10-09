@@ -793,14 +793,14 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
   });
 }
 
-export async function listMissions(): Promise<Mission[]> {
+export async function listMissions(limit = 200): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = (await origins.localOrigins()).filter(m=>!isBtwMission(m));
-  try { const remote = await api<Mission[]>("/api/control/missions", {signal:AbortSignal.timeout(3000)}); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`,{signal:AbortSignal.timeout(3000)}))],observedAt); const pending=local.filter(origins.localPending); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
+  try { const remote = await api<Mission[]>(`/api/control/missions?limit=${limit}`, {signal:AbortSignal.timeout(3000)}); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`,{signal:AbortSignal.timeout(3000)}))],observedAt); const pending=local.filter(origins.localPending); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
   catch(error){if(local.length)return local;throw error;}
 }
 
-export async function listCompletedMissions(limit = 50): Promise<Mission[]> {
+export async function listCompletedMissions(limit = 100): Promise<Mission[]> {
   try {
     const remote = await api<Mission[]>(`/api/control/missions?status=completed&limit=${limit}`, {
       signal: AbortSignal.timeout(3000),

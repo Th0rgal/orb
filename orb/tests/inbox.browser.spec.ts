@@ -289,7 +289,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await expect(questionRow.locator(".inbox-unread-dot")).toHaveCount(0);
   await expect(questionRow.locator(".inbox-project-dot")).toHaveCount(1);
   // Verify keyboard shortcut badges are visible on row actions
-  await expect(questionRow.locator(".inbox-act-btn", { hasText: "Peek & Reply" }).locator("kbd")).toHaveText("R");
+  await expect(questionRow.locator(".inbox-act-btn", { hasText: "Peek & Reply" }).locator("kbd")).toHaveText("Space");
   await expect(questionRow.locator(".inbox-act-btn.done").locator("kbd")).toHaveText("E");
 
   await page.keyboard.press("r");
@@ -366,7 +366,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   expect(scrollMetrics.scrollTop + scrollMetrics.clientHeight).toBeGreaterThanOrEqual(
     scrollMetrics.scrollHeight - 8,
   );
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Escape");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeHidden();
 
   // Mark m-done as Done with 'e', then Undo with 'z'

@@ -130,8 +130,9 @@ import {
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
 const SkillsSettings = lazy(() => import("./SkillsSettings").then(module => ({ default: module.SkillsSettings })));
 import { InboxPage } from "./Inbox";
+import { requestInboxDigest } from "./inboxDigest";
 import { buildInboxSections } from "./inboxModel";
-import { InboxSettings } from "./inboxSettings";
+import { InboxSettings, inboxConfig } from "./inboxSettings";
 import { pendingMissionInteraction } from "./missionAttention";
 import { markMissionRead, unreadVersion } from "./missionUnread";
 
@@ -1273,8 +1274,8 @@ export default function App() {
     try {
       const prev = missions().filter(m => !isMissionDeleting(m.id));
       const [rawFresh, rawCompleted] = await Promise.all([
-        listMissions(),
-        listCompletedMissions(50),
+        listMissions(200),
+        listCompletedMissions(100),
       ]);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       const completed = rawCompleted.filter(m => !isMissionDeleting(m.id));
@@ -1313,6 +1314,27 @@ export default function App() {
       for (const key of cacheRecents()) {
         if (key.startsWith("m:") && !isMissionDeleting(key.slice(2))) prefetchTranscript(key.slice(2));
       }
+      // Pre-warm top unread Inbox transcripts & AI digests in the background so opening Inbox is instant
+      const secs = buildInboxSections(
+        inboxMissions(),
+        liveProjects(),
+        (id) => peekReadyTranscript(id)?.items,
+        pendingMissionInteraction,
+        Date.now(),
+        currentMissionId(),
+      );
+      const cfg = inboxConfig();
+      const topUnread = [...secs.needsYou, ...secs.ready].filter((i) => i.unread).slice(0, 10);
+      topUnread.forEach((item, idx) => {
+        const readyTx = peekReadyTranscript(item.id);
+        if (readyTx) {
+          if (cfg.aiSummary && !item.interaction) {
+            requestInboxDigest(item.mission, readyTx.items, item.updatedMs, 10 + idx);
+          }
+        } else {
+          prefetchTranscript(item.id);
+        }
+      });
     } catch {
       /* keep last good list */
     } finally {

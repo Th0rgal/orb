@@ -937,7 +937,7 @@ export function LiveProjectsSection(p: {
   };
   const pumpWarmup = () => {
     if (!cacheCanPrefetch()) return;
-    while (warmupActive < 2 && warmupQueue.length) {
+    while (warmupActive < 4 && warmupQueue.length) {
       const slug = warmupQueue.shift()!;
       warmupActive++;
       void warmupOne(slug).finally(() => {

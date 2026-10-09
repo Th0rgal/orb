@@ -12,8 +12,17 @@ const heightKey = (id: string) => `c:${connectionVersion()}:m:${id}:h`;
 const [transcriptVersion, setTranscriptVersion] = createSignal(0);
 export { transcriptVersion };
 
+let bumpTimer: ReturnType<typeof setTimeout> | undefined;
+function bumpTranscriptVersion() {
+  if (bumpTimer !== undefined) return;
+  bumpTimer = setTimeout(() => {
+    bumpTimer = undefined;
+    setTranscriptVersion((v) => v + 1);
+  }, 16);
+}
+
 const active=new Map<string,{refs:number;snapshot?:TranscriptSnap}>();
-function saveSnapshot(scope:string,snapshot:TranscriptSnap){const entry=active.get(scope);if(entry)entry.snapshot=snapshot;else cachePut(scope,snapshot);setTranscriptVersion(v=>v+1);}
+function saveSnapshot(scope:string,snapshot:TranscriptSnap){const entry=active.get(scope);if(entry)entry.snapshot=snapshot;else cachePut(scope,snapshot);bumpTranscriptVersion();}
 export function retainTranscript(id:string):()=>void{
  const scope=key(id);let entry=active.get(scope);
  if(entry)entry.refs++;else{entry={refs:1,snapshot:cachePeek<TranscriptSnap>(scope)};cacheDelete(scope);active.set(scope,entry);}
@@ -142,7 +151,7 @@ const PREFETCH_PAUSE_MS=10*60_000,PREFETCH_RETRY_MS=60_000;
 const prefetchQueue=new Map<string,string>();
 let prefetchActive=0;
 function pumpPrefetch(){
- while(prefetchActive<2&&prefetchQueue.size){
+ while(prefetchActive<4&&prefetchQueue.size){
   const [scope,id]=prefetchQueue.entries().next().value!;
   prefetchQueue.delete(scope);
   if(scope!==key(id)||peekReadyTranscript(id)||jobs.has(scope))continue;
