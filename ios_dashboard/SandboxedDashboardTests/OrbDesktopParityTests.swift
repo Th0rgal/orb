@@ -138,9 +138,9 @@ final class OrbDesktopParityTests: XCTestCase {
         XCTAssertEqual(OrbStyle.missionTitle("/goal Fix iOS scroll bleed\nExtra details"), "Fix iOS scroll bleed")
     }
 
-    func testInboxModelCategorizesAndClipsToSentence() throws {
+    @MainActor func testInboxModelCategorizesAndClipsToSentence() throws {
         XCTAssertEqual(
-            OrbInboxModel.clipToSentence("## Summary\nImplemented **Inbox** for Orb. It keeps working agents quiet."),
+            OrbInboxModel.clipToSentence("## Summary\nImplemented **Inbox** for Orb. It keeps working agents quiet.", maxChars: 40),
             "Implemented Inbox for Orb."
         )
         XCTAssertEqual(

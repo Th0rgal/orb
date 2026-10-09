@@ -1,6 +1,10 @@
 package sh.sandboxed.dashboard.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Shapes
+import androidx.compose.ui.unit.dp
+import sh.sandboxed.dashboard.orb.OrbStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -11,17 +15,34 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 private val DarkColors = darkColorScheme(
-    primary = Palette.Accent,
-    onPrimary = Palette.TextPrimary,
-    secondary = Palette.AccentLight,
-    background = Palette.BackgroundPrimary,
+    primary = OrbStyle.textPrimary,
+    onPrimary = OrbStyle.background,
+    primaryContainer = OrbStyle.elevated,
+    onPrimaryContainer = OrbStyle.textPrimary,
+    secondary = OrbStyle.textSecondary,
+    onSecondary = OrbStyle.background,
+    secondaryContainer = OrbStyle.card,
+    onSecondaryContainer = OrbStyle.textPrimary,
+    tertiary = OrbStyle.textSecondary,
+    onTertiary = OrbStyle.background,
+    tertiaryContainer = OrbStyle.elevated,
+    onTertiaryContainer = OrbStyle.textPrimary,
+    background = OrbStyle.background,
     onBackground = Palette.TextPrimary,
-    surface = Palette.Card,
+    surface = OrbStyle.surface,
     onSurface = Palette.TextPrimary,
-    surfaceVariant = Palette.CardElevated,
+    surfaceVariant = OrbStyle.card,
     onSurfaceVariant = Palette.TextSecondary,
+    surfaceTint = OrbStyle.textPrimary,
+    surfaceDim = OrbStyle.background,
+    surfaceBright = OrbStyle.elevated,
+    surfaceContainerLowest = OrbStyle.background,
+    surfaceContainerLow = OrbStyle.surface,
+    surfaceContainer = OrbStyle.card,
+    surfaceContainerHigh = OrbStyle.elevated,
+    surfaceContainerHighest = OrbStyle.elevated,
     error = Palette.Error,
-    outline = Palette.BorderElevated,
+    outline = OrbStyle.borderStrong,
 )
 
 private val AppTypography = Typography(
@@ -42,6 +63,13 @@ fun SandboxedTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = DarkColors,
         typography = AppTypography,
+        shapes = Shapes(
+            extraSmall = RoundedCornerShape(OrbStyle.controlRadius),
+            small = RoundedCornerShape(OrbStyle.controlRadius),
+            medium = RoundedCornerShape(OrbStyle.panelRadius),
+            large = RoundedCornerShape(OrbStyle.panelRadius),
+            extraLarge = RoundedCornerShape(16.dp),
+        ),
         content = content,
     )
 }

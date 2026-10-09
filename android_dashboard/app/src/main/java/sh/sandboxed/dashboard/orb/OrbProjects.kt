@@ -383,20 +383,16 @@ fun OrbHomeScreen(
                     OrbSfIcons.PersonCropCircle(color = Color.White, size = 21.dp)
                 }
 
-                // Center Segmented Capsule: Projects | Inbox (exact iOS homeModePicker styling)
+                // Shared quiet navigation treatment with the iOS home picker.
                 Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.border, CircleShape)
-                        .padding(3.dp),
+                    modifier = Modifier.padding(3.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     val isProjects = selectedTab == OrbTopTab.Projects
                     Box(
                         modifier = Modifier
-                            .clip(CircleShape)
+                            .clip(RoundedCornerShape(OrbStyle.controlRadius))
                             .background(if (isProjects) OrbStyle.elevated else Color.Transparent)
                             .orbPressClickable { onSelectTab(OrbTopTab.Projects) }
                             .padding(horizontal = 11.dp, vertical = 5.dp),
@@ -415,7 +411,7 @@ fun OrbHomeScreen(
                     val isInbox = selectedTab == OrbTopTab.Inbox
                     Row(
                         modifier = Modifier
-                            .clip(CircleShape)
+                            .clip(RoundedCornerShape(OrbStyle.controlRadius))
                             .background(if (isInbox) OrbStyle.elevated else Color.Transparent)
                             .orbPressClickable { onSelectTab(OrbTopTab.Inbox) }
                             .padding(horizontal = 11.dp, vertical = 5.dp),
@@ -433,7 +429,7 @@ fun OrbHomeScreen(
                         if (inboxCount > 0) {
                             Box(
                                 modifier = Modifier
-                                    .clip(CircleShape)
+                                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
                                     .background(if (isInbox) Color.White else OrbStyle.card)
                                     .padding(horizontal = 6.dp, vertical = 1.5.dp),
                                 contentAlignment = Alignment.Center

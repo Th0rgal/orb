@@ -3,14 +3,16 @@ import UIKit
 
 enum OrbStyle {
     static let background = Color(white: 0.073)
-    static let surface = Color(white: 0.105)
+    static let surface = Color(white: 25 / 255)
     static let card = Color(white: 0.125)
     static let elevated = Color(white: 0.155)
     static let icon = Color(red: 138 / 255, green: 138 / 255, blue: 138 / 255)
     static let textSecondary = Color(red: 155 / 255, green: 155 / 255, blue: 155 / 255)
     static let textMuted = Color(red: 108 / 255, green: 108 / 255, blue: 108 / 255)
     static let border = Color.white.opacity(0.08)
-    static let borderStrong = Color.white.opacity(0.14)
+    static let borderStrong = Color(white: 51 / 255)
+    static let controlRadius: CGFloat = 6
+    static let panelRadius: CGFloat = 12
     static let success = Color(red: 115 / 255, green: 201 / 255, blue: 145 / 255)
     static let warning = Color(red: 214 / 255, green: 161 / 255, blue: 106 / 255)
     static let error = Color(red: 235 / 255, green: 111 / 255, blue: 111 / 255)
@@ -376,11 +378,12 @@ struct OrbHome: View {
                     .padding(.vertical, 5)
                     .background(
                         homeTab == "projects" ? OrbStyle.elevated : Color.clear,
-                        in: Capsule()
+                        in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                     )
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("home.tab.projects")
+            .accessibilityAddTraits(homeTab == "projects" ? .isSelected : [])
 
             Button {
                 withAnimation(.snappy(duration: 0.2)) { homeTab = "inbox" }
@@ -401,7 +404,7 @@ struct OrbHome: View {
                             .padding(.vertical, 1.5)
                             .background(
                                 homeTab == "inbox" ? Color.white : OrbStyle.card,
-                                in: Capsule()
+                                in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                             )
                     }
                 }
@@ -409,15 +412,14 @@ struct OrbHome: View {
                 .padding(.vertical, 5)
                 .background(
                     homeTab == "inbox" ? OrbStyle.elevated : Color.clear,
-                    in: Capsule()
+                    in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
                 )
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("home.tab.inbox")
+            .accessibilityAddTraits(homeTab == "inbox" ? .isSelected : [])
         }
         .padding(3)
-        .background(OrbStyle.surface, in: Capsule())
-        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
         .fixedSize(horizontal: true, vertical: false)
     }
 

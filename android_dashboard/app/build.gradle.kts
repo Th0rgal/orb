@@ -15,6 +15,8 @@ android {
         targetSdk = 36
         versionCode = 11
         versionName = "1.5.1"
+        manifestPlaceholders["orbAppLabel"] = "@string/app_name"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -40,6 +42,11 @@ android {
             }
         }
         debug {
+            // Device UI checks use isolated data and leave the installed account untouched.
+            if (providers.gradleProperty("orbPreview").isPresent) {
+                applicationIdSuffix = ".preview"
+                manifestPlaceholders["orbAppLabel"] = "Orb Preview"
+            }
             isMinifyEnabled = false
         }
     }
@@ -106,5 +113,5 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.4.0")
 }

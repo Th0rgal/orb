@@ -839,8 +839,8 @@ struct OrbConversation: View {
             }
         }
         .padding(6)
-        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(OrbStyle.borderStrong))
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.borderStrong))
         .padding(.bottom, 6)
         .transition(.opacity.combined(with: .move(edge: .bottom)))
         .accessibilityElement(children: .contain)
@@ -1016,7 +1016,7 @@ struct OrbConversation: View {
                     .foregroundStyle(OrbStyle.textSecondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.04), in: Capsule())
+                    .background(Color.clear, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
                     .frame(minHeight: 44)
                 }
                 .buttonStyle(.plain)
@@ -1033,8 +1033,8 @@ struct OrbConversation: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(OrbStyle.borderStrong, lineWidth: 1))
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.borderStrong, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-composer")
     }

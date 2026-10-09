@@ -1,0 +1,57 @@
+{
+  "base_commit": "9ab89557b3d90831597bfbfaac84ee84ca96f9e3",
+  "worktree": "/Users/thomas/work/paloma/sandboxed_sh-overlay-system",
+  "source_sha256": {
+    "android_dashboard/app/build.gradle.kts": "0ded07a6d8b94a99c44c7f1c35b18f9a3cd265dbfd314808cf66409f3f3f792d",
+    "android_dashboard/app/src/main/AndroidManifest.xml": "d5faf25f46a032590242ba7c02748f773100ed6cce61f7958baecc3f60657b84",
+    "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbConversation.kt": "d5a230a8549c66e9ce6f9d6581adee52135eef333270f2479afb943c4bd005b5",
+    "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbInbox.kt": "9792bb403cf31840b8cb65f504164c509c18a2c45ab0369901b61f1878214007",
+    "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbProjects.kt": "7b1aad5a12caa2290dddae314995bedc4d51b3029d129e9fc406e575364da76e",
+    "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbTheme.kt": "29e3ebc29d85ce35ad9a1377cb89b8da29e37de37ce25b4f57e887e8219b6ad2",
+    "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/ui/theme/Theme.kt": "4396ab8a697c8a6215ecee9fab8d56b66e62e1102e0e582bf17a504ce19f0724",
+    "ios_dashboard/SandboxedDashboard/Orb/OrbConversation.swift": "13ec95bd731ec6de10880f131cc249e50743ae25608af11ed6a6a31f2c56a5c5",
+    "ios_dashboard/SandboxedDashboard/Orb/OrbInbox.swift": "39958b8dfe7f030bfd98750fb34d5eda0c75853ac6601377696650df984d7557",
+    "ios_dashboard/SandboxedDashboard/Orb/OrbProjects.swift": "b3f76482859e4f4d6b871d56165fdfd74934d1613338a0e730a83645e9485d30"
+  },
+  "ios": {
+    "simulator": "iPhone 17 Pro / iOS 26.5",
+    "bundle_id": "md.thomas.openagent.dashboard",
+    "built_binary": "/tmp/orb-mobile-derived/Build/Products/Debug-iphonesimulator/Orb.app/Orb",
+    "built_binary_sha256": "9fa686be3297554c80ae2e730361d00e7ff4b052b7becf878ce58da72556ab10",
+    "installed_binary_sha256": "9fa686be3297554c80ae2e730361d00e7ff4b052b7becf878ce58da72556ab10",
+    "acceptance_bundle": "/tmp/orb-mobile-ios-acceptance.xcresult",
+    "acceptance": "2 UI tests and 12 parity unit tests passed",
+    "draft_bundle": "/tmp/orb-mobile-ios-draft.xcresult",
+    "draft_preservation_test": "Passed",
+    "original_simulator_data_restored": [
+      {
+        "directory": "Documents",
+        "verified_files": 0
+      },
+      {
+        "directory": "Library",
+        "verified_files": 89
+      },
+      {
+        "directory": "tmp",
+        "verified_files": 9
+      },
+      {
+        "directory": "SystemData",
+        "verified_files": 0
+      }
+    ],
+    "original_data_backup": "/tmp/orb-mobile-original-simulator-data",
+    "fixture_data_backup": "/tmp/orb-mobile-fixture-data-preserved"
+  },
+  "android": {
+    "device": "Pixel 8 / Android 17",
+    "preview_package": "sh.sandboxed.dashboard.preview",
+    "apk_sha256": "87b48beae46ca55e0e9f5a31ab2db93922d35441c170fcf2a549b275cbcc0ed5",
+    "installed_apk_sha256": "87b48beae46ca55e0e9f5a31ab2db93922d35441c170fcf2a549b275cbcc0ed5",
+    "normal_package_path": "/data/app/~~kdRx_93MZBAtLw05_cpmYQ==/sh.sandboxed.dashboard-R4y7nO2YGG15zeK19FH7QA==/base.apk",
+    "normal_package_sha256": "cac74ac0d872e8fa6b73a55d936b4558639659fe3729f7ad30637e283137e964",
+    "build_log": "/tmp/orb-mobile-android-acceptance-build.log",
+    "visual_acceptance": "Pending device unlock; new UI Automator tests compiled but not executed successfully"
+  }
+}
