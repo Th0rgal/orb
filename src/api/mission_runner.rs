@@ -3910,9 +3910,14 @@ async fn run_mission_turn(
     {
         return result;
     }
+    // Preserve command intent before operator notes, attachments or transferred
+    // history can be prepended to the text delivered to the harness.
+    let vibe_user_message = (backend_id == "vibe").then(|| user_message.clone());
+    let mut has_machine_transfer = false;
     let mission_working_directory = if let Some(store) = mission_store.as_ref() {
         match super::control::machine_transfer::committed(store, mission_id).await {
             Ok(Some(action)) => {
+                has_machine_transfer = true;
                 if action.destination != crate::api::mission_store::transfer::Machine::Core {
                     return AgentResult::failure("Mission execution moved away from Core", 0);
                 }
@@ -3998,6 +4003,8 @@ async fn run_mission_turn(
         // Pin Codex instead of inheriting the global DEFAULT_MODEL, which is
         // usually a Claude/OpenCode slug and invalid for the Codex CLI.
         config.default_model = Some(resolve_codex_default_model());
+    } else if backend_id == "vibe" && model_override.is_none() {
+        config.default_model = Some("mistral/mistral-vibe-cli-latest".into());
     } else if backend_id == "antigravity" && model_override.is_none() {
         config.default_model = None;
     } else if backend_id == "grok" && model_override.is_none() {
@@ -4551,6 +4558,15 @@ async fn run_mission_turn(
             },
             is_continuation,
         ),
+        "vibe" => (
+            crate::vibe::turn_prompt(
+                session_id.as_deref(),
+                has_machine_transfer,
+                &convo,
+                &user_message,
+            ),
+            is_continuation,
+        ),
         "antigravity" => (
             if session_id.is_none() {
                 let framed = crate::util::frame_turn_prompt(&history_context, &user_message);
@@ -4578,6 +4594,10 @@ async fn run_mission_turn(
                     status: Some(Arc::clone(&status)),
                     history: &history,
                     max_history_total_chars: config.context.max_history_total_chars,
+                }
+            } else if backend_id == "vibe" {
+                super::runners::TurnExtras::Vibe {
+                    current_message: vibe_user_message.as_deref().unwrap_or(&user_message),
                 }
             } else if backend_id == "antigravity" {
                 super::runners::TurnExtras::Antigravity {
@@ -9446,6 +9466,21 @@ pub async fn check_backend_prerequisites(
             let cli = cli_path.unwrap_or("codex");
             check_codex_prerequisites(&workspace_exec, cwd, cli).await
         }
+        "vibe" => {
+            let cli_available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("vibe-acp")).await;
+            let python = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                workspace_exec.output(
+                    cwd,
+                    "python3",
+                    &["-c".into(), crate::vibe::PYTHON_VERSION_CHECK.into()],
+                    HashMap::new(),
+                ),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok_and(|output| output.status.success()));
+            BackendPreflightResult { backend_id: "vibe".into(), available: cli_available && python, cli_available, auto_install_possible: false, missing_dependencies: if cli_available && python { vec![] } else { vec!["Mistral Vibe (vibe-acp) and Python 3.9+".into()] }, message: Some("Install mistral-vibe with uv tool install mistral-vibe; Core uses the connected Mistral provider".into()) }
+        }
         "antigravity" => {
             let available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("agy")).await;
             BackendPreflightResult { backend_id: "antigravity".into(), available, cli_available: available, auto_install_possible: false, missing_dependencies: if available { vec![] } else { vec!["agy CLI".into()] }, message: Some("Install Antigravity CLI and sign in as the execution user with agy; verify access with agy models".into()) }
@@ -9526,7 +9561,7 @@ pub async fn check_backend_prerequisites(
             auto_install_possible: false,
             missing_dependencies: vec![format!("unknown backend: {}", backend_id)],
             message: Some(format!(
-                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, grok, antigravity, chatgpt_ui",
+                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, grok, antigravity, vibe, chatgpt_ui",
                 backend_id
             )),
         },

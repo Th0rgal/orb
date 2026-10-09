@@ -51,18 +51,20 @@ it('surfaces permanent refusals and bounds repeated network failures', async()=>
   expect(request).toHaveBeenCalledTimes(3);
 });
 
-it('resets an Antigravity binding once per activated transfer even at the same path', async()=>{
+it.each(['antigravity','vibe'])('resets a %s binding once per activated transfer even at the same path', async(harness)=>{
  const agents=await import('../src/localAgents');
  const {adoptTransferredWorkspace}=await import('../src/machineTransfer');
  vi.spyOn(clients,'machineIdentity').mockResolvedValue('computer');
- let binding:any={harness:'antigravity',bin:'/agy',cwd:'/same',sessionId:'old-native',transferId:'old-transfer'};
+ vi.spyOn(api,'getMission').mockResolvedValue({agent:'plan'} as any);
+ let binding:any={harness,bin:'/native',cwd:'/same',sessionId:'old-native',transferId:'old-transfer'};
  vi.spyOn(agents,'localBinding').mockImplementation(()=>binding);
- vi.spyOn(agents,'refreshLocalAgents').mockResolvedValue([{id:'antigravity',bin:'agy',path:'/agy',installed:true}]);
+ vi.spyOn(agents,'refreshLocalAgents').mockResolvedValue([{id:harness,bin:'native',path:'/native',installed:true}]);
  const remember=vi.spyOn(agents,'rememberBinding').mockImplementation(async(_id,next)=>{binding=next;});
- const action:TransferAction={id:'new-transfer',mission_id:'mission',phase:'activated',source:{kind:'node',id:'node'},destination:{kind:'client',id:'computer'},backend:'antigravity',destination_root:'/same',created_at:''};
+ const action:TransferAction={id:'new-transfer',mission_id:'mission',phase:'activated',source:{kind:'node',id:'node'},destination:{kind:'client',id:'computer'},backend:harness,destination_root:'/same',created_at:''};
  await adoptTransferredWorkspace(action);
  expect(binding.sessionId).toBeUndefined();
  expect(binding.transferId).toBe('new-transfer');
+ expect(binding.planMode).toBe(harness === 'vibe');
  binding.sessionId='new-native';
  await adoptTransferredWorkspace(action);
  expect(remember).toHaveBeenCalledTimes(1);

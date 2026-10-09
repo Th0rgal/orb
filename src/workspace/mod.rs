@@ -3946,7 +3946,10 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
         }
 
         // Collect skills (for backends that use skill contents directly)
-        if matches!(backend_id, "claudecode" | "codex" | "grok" | "antigravity") {
+        if matches!(
+            backend_id,
+            "claudecode" | "codex" | "grok" | "antigravity" | "vibe"
+        ) {
             let skill_names = match resolve_workspace_skill_names(workspace, lib).await {
                 Ok(names) => {
                     tracing::debug!(
@@ -4057,7 +4060,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
 
     let unified_mcp = if matches!(
         backend_id,
-        "codex" | "claudecode" | "opencode" | "grok" | "antigravity"
+        "codex" | "claudecode" | "opencode" | "grok" | "antigravity" | "vibe"
     ) {
         if let Some(user) = boss_user_id {
             let (url, token) = crate::control_mcp::launch::bootstrap(mission_id, user)
@@ -6668,6 +6671,59 @@ WORKING_DIR = "/workspaces/mission-old"
             verify_explicit_mission_working_directory_owner(&workspace, &boss_worktree).unwrap(),
             boss
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn vibe_mission_preparation_installs_configured_library_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let library_path = temp.path().join("library");
+        std::fs::create_dir_all(library_path.join("skill/vibe-check")).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&library_path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .current_dir(&library_path)
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/library.git"
+            ])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(
+            library_path.join("skill/vibe-check/SKILL.md"),
+            "---\nname: vibe-check\ndescription: Native skill test\n---\nVIBE_LIBRARY_SKILL\n",
+        )
+        .unwrap();
+        let library = LibraryStore::new(library_path, "https://example.invalid/library.git")
+            .await
+            .unwrap();
+        let mut workspace = Workspace::default_host(temp.path().join("workspace"));
+        workspace.skills = vec!["vibe-check".into()];
+        let mcp = McpRegistry::new(temp.path()).await;
+        let directory = prepare_mission_workspace_with_skills_backend(
+            &mut workspace,
+            &mcp,
+            Some(&library),
+            Uuid::new_v4(),
+            "vibe",
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let installed =
+            std::fs::read_to_string(directory.join(".vibe/skills/vibe-check/SKILL.md")).unwrap();
+        assert!(installed.contains("VIBE_LIBRARY_SKILL"));
     }
 
     #[tokio::test]

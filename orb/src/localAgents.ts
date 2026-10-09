@@ -21,7 +21,7 @@ export function recordLocalFailure(id:string, error:unknown) {
   setLocalFailures(previous => { const next={...previous}; if(message)next[id]=message;else delete next[id];
     try {localStorage.setItem("orb.localFailures",JSON.stringify(next));} catch {} return next; });
 }
-export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "antigravity"] as const;
+export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "antigravity", "vibe"] as const;
 export type LocalHarnessId = (typeof LOCAL_HARNESSES)[number];
 
 const FILE_CAP = 512 * 1024;
@@ -48,6 +48,7 @@ export interface LocalBinding {
   effort?: string;
   sessionId?: string;
   transferId?: string;
+  planMode?: boolean;
 }
 
 export interface LocalFile {
@@ -187,8 +188,8 @@ export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
     try {
       const rows = await invoke("local_agents_scan", { request: { overrides: paths } }) as ScanRow[];
       // Older desktop builds tied `installed` to the version probe succeeding.
-      // A resolved path is enough to launch; missing version only limits capabilities.
-      setInstalled(Array.isArray(rows) ? rows.map(row => ({...row, installed: !!row.path})) : []);
+      // Vibe also checks its bridge interpreter; retain that native preflight result.
+      setInstalled(Array.isArray(rows) ? rows.map(row => ({...row, installed: !!row.path && (row.id !== "vibe" || row.installed)})) : []);
       scannedAt = Date.now(); scannedPaths = key;
       refreshLocalAntigravityModels();
       return installed();
@@ -595,7 +596,9 @@ export async function startLocalOrigin(request: Omit<StartLocal,"id">, draft: {k
  let mission:import("./api").Mission;
  try{mission=await invoke("local_origin_launch",{request:{...request,id:"",session_id:null,image_paths:request.imagePaths??[]},draft,connection:{api_url:getApiUrl(),token:getJwt()}}) as import("./api").Mission;}
  catch(error){if(/unknown command|command .*not found/i.test(String(error)))throw new Error("Update Orb desktop to enable local launches with offline support. Your draft is kept.");throw error;}
- await rememberBinding(mission.id,{harness:request.harness,bin:request.bin,cwd:mission.working_directory ?? request.cwd,model:request.model,effort:request.effort});
+ // Native launch owns the durable binding, including mode and resumed session.
+ // Refresh it instead of replacing it after the first turn or an idempotent replay.
+ await refreshLocalBindings();
  await reconcileLocalRun(mission.id);
  return mission;
 }

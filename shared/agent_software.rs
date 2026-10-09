@@ -22,6 +22,7 @@ const TOOLS: &[(&str, &str, &str, Option<&str>)] = &[
     ("opencode", "OpenCode", "opencode", Some("opencode-ai")),
     ("grok", "Grok", "grok", None),
     ("antigravity", "Antigravity", "agy", None),
+    ("vibe", "Mistral Vibe", "vibe-acp", None),
 ];
 pub fn now() -> u64 {
     SystemTime::now()

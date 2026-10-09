@@ -3,15 +3,16 @@
 //! Scans canonical local skill sources (`~/work/skills/skills`, `~/work/paloma/skills`,
 //! `~/.sandboxed-sh/library/skill`, `sandboxed_sh/context/sandboxed-library/skill`,
 //! and `~/.config/sandboxed-sh/development-identity/current/skill`) as well as the
-//! 5 local user-level harness directories:
+//! 6 local user-level harness directories:
 //! - Claude Code: `~/.claude/skills`
 //! - Codex: `~/.codex/skills`
 //! - Antigravity & Codex: `~/.agents/skills`
 //! - OpenCode: `~/.config/opencode/skills`
 //! - Grok: `~/.grok/skills`
+//! - Mistral Vibe: `~/.vibe/skills`
 //!
 //! Synchronization copies canonical skills (plus optional Library skills supplied by the
-//! frontend) into all 5 harness directories using an explicit ownership marker
+//! frontend) into all 6 harness directories using an explicit ownership marker
 //! (`.managed-by-orb-skills` / `.managed-by-agent-skills-repo`) so user-authored
 //! unmanaged skills are never overwritten or deleted.
 
@@ -45,6 +46,7 @@ const HARNESS_TARGETS: &[(&str, &str, &str, &str)] = &[
         ".opencode/skills",
     ),
     ("grok", "Grok", ".grok/skills", ".grok/skills"),
+    ("vibe", "Mistral Vibe", ".vibe/skills", ".vibe/skills"),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -760,7 +762,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_frontmatter_and_syncs_across_all_five_harnesses() {
+    fn parses_frontmatter_and_syncs_across_all_six_harnesses() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path();
 
@@ -791,7 +793,7 @@ mod tests {
 
         // Initial inspection shows drift (0/2 synced in each harness).
         let initial = inspect_local_skills_in(home).expect("inspect");
-        assert_eq!(initial.harnesses.len(), 5);
+        assert_eq!(initial.harnesses.len(), 6);
         for h in &initial.harnesses {
             assert_eq!(h.synced_count, 0);
             assert_eq!(h.canonical_total, 2);
@@ -813,10 +815,10 @@ mod tests {
         .expect("sync");
 
         assert_eq!(sync_res.synced_skills, 3);
-        assert_eq!(sync_res.harnesses_updated, 5);
+        assert_eq!(sync_res.harnesses_updated, 6);
         assert!(sync_res.skipped_unmanaged.is_empty());
 
-        // Verify all 5 harness directories now have proof-helper, paloma-fleet, and core-audit,
+        // Verify all 6 harness directories now have proof-helper, paloma-fleet, and core-audit,
         // and custom-user-skill is still preserved in ~/.agents/skills.
         for (_, _, global_rel, _) in HARNESS_TARGETS {
             let root = home.join(global_rel);

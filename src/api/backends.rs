@@ -25,7 +25,7 @@ pub struct BackendResponse {
 impl From<BackendInfo> for BackendResponse {
     fn from(info: BackendInfo) -> Self {
         Self {
-            native_plan: matches!(info.id.as_str(), "codex" | "claudecode"),
+            native_plan: matches!(info.id.as_str(), "codex" | "claudecode" | "vibe"),
             id: info.id,
             name: info.name,
         }
@@ -58,7 +58,7 @@ pub async fn get_backend(
     let registry = state.backend_registry.read().await;
     match registry.get(&id) {
         Some(backend) => Ok(Json(BackendResponse {
-            native_plan: matches!(backend.id(), "codex" | "claudecode"),
+            native_plan: matches!(backend.id(), "codex" | "claudecode" | "vibe"),
             id: backend.id().to_string(),
             name: backend.name().to_string(),
         })),

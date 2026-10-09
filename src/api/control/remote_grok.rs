@@ -139,8 +139,9 @@ pub(crate) fn execution(
     }
 }
 
-/// Planning-time check that the selected node advertises the `grok`
-/// managed-auth profile. A node whose last heartbeat lacks it is refused with
+/// Planning-time check of node-specific prerequisites. Vibe uses a fresh
+/// capability probe (CLI plus Python); managed-auth harnesses use their profile.
+/// A node whose last heartbeat lacks the profile is refused with
 /// [`REMOTE_AUTH_REQUIRED`] before any mission exists; a node without any
 /// cached heartbeat is probed once. Missing capability evidence fails closed.
 pub(crate) async fn require_node_managed_auth(
@@ -148,6 +149,20 @@ pub(crate) async fn require_node_managed_auth(
     node_id: &str,
     plan: &RemoteHarnessPlan,
 ) -> Result<(), String> {
+    if matches!(plan, RemoteHarnessPlan::Vibe { .. }) {
+        let unavailable = format!("REMOTE_HARNESS_UNAVAILABLE: remote node '{node_id}' is not ready for Mistral Vibe; install vibe-acp and Python 3.9+ as the node execution user");
+        let capabilities = super::machine_transfer::node_transfer_capabilities(state, node_id)
+            .await
+            .map_err(|(_, reason)| format!("{unavailable}. {reason}"))?;
+        return if capabilities["harnesses"]
+            .as_array()
+            .is_some_and(|harnesses| harnesses.iter().any(|harness| harness == "vibe"))
+        {
+            Ok(())
+        } else {
+            Err(unavailable)
+        };
+    }
     let profile = match plan {
         RemoteHarnessPlan::Grok { .. } => "grok",
         RemoteHarnessPlan::Antigravity { .. } => "antigravity",
@@ -233,6 +248,7 @@ pub(crate) enum StreamUpdate {
 #[derive(Debug, Default)]
 pub(crate) struct GrokStream {
     antigravity: Option<crate::antigravity::Stream>,
+    vibe: Option<crate::vibe::Stream>,
     claude: bool,
     claude_message_streamed: bool,
     claude_boundary: bool,
@@ -336,6 +352,34 @@ impl GrokStream {
             self.diagnostics.push_back(diagnostic);
             return;
         };
+        if let Some(stream) = self.vibe.as_mut() {
+            let tools = stream.feed(&value);
+            if stream.session != self.session_id {
+                self.session_id = stream.session.clone();
+                if let Some(id) = &self.session_id {
+                    updates.push(StreamUpdate::SessionId(id.clone()));
+                }
+            }
+            if self.text != stream.text {
+                self.text = stream.text.clone();
+                updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
+            }
+            if self.thinking != stream.thinking {
+                self.thinking = stream.thinking.clone();
+                updates.push(StreamUpdate::ThinkingSnapshot(self.thinking.clone()));
+            }
+            self.progress = true;
+            self.ended = stream.success;
+            self.stop_reason = stream.success.then(|| "end_turn".into());
+            self.error = stream.error.clone();
+            for tool in tools {
+                updates.push(StreamUpdate::Tool {
+                    completed: tool["type"] == "tool_call_update",
+                    update: tool,
+                });
+            }
+            return;
+        }
         if let Some(stream) = self.antigravity.as_mut() {
             if value["event"] == "thought_update" {
                 if value["conversation_id"].as_str() != stream.session.as_deref() {
@@ -764,7 +808,7 @@ impl NativeGrokObserver {
             Ok(Some(mission))
                 if matches!(
                     mission.backend.as_str(),
-                    GROK_BACKEND | "opencode" | "codex" | "antigravity"
+                    GROK_BACKEND | "opencode" | "codex" | "antigravity" | "vibe"
                 ) || (mission.backend == "claudecode" && mission.session_id.is_some()) =>
             {
                 mission
@@ -778,6 +822,10 @@ impl NativeGrokObserver {
             session_persisted: mission.session_id.clone(),
             stream: GrokStream {
                 claude: mission.backend == "claudecode",
+                vibe: (mission.backend == "vibe").then(|| crate::vibe::Stream {
+                    session: mission.session_id.clone(),
+                    ..Default::default()
+                }),
                 antigravity: (mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = mission.session_id.clone();
@@ -924,6 +972,10 @@ impl NativeGrokObserver {
             self.log_len = chunk.log_len;
             self.stream = GrokStream {
                 claude: self.mission.backend == "claudecode",
+                vibe: (self.mission.backend == "vibe").then(|| crate::vibe::Stream {
+                    session: self.session_persisted.clone(),
+                    ..Default::default()
+                }),
                 antigravity: (self.mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = self.session_persisted.clone();
@@ -1170,6 +1222,43 @@ impl NativeGrokObserver {
         }
     }
 
+    async fn release_unstarted_vibe_claim(&self, status: &NodeJobStatus) {
+        // A missing identity is proof only after reading the complete terminal
+        // log. A lost node or truncated tail may hide an admitted native session.
+        if self.streaming != LogStreaming::Supported
+            || !self.pumped_to_end
+            || !matches!(status.state.as_str(), "succeeded" | "failed" | "cancelled")
+            || self.session_persisted.is_some()
+            || !self
+                .stream
+                .vibe
+                .as_ref()
+                .is_some_and(|s| s.session.is_none())
+        {
+            return;
+        }
+        let run = match self
+            .owner
+            .mission_store
+            .get_latest_mission_run(self.mission_id)
+            .await
+        {
+            Ok(Some(run)) if run.owner_actor_id == super::remote_job_lease_owner(self.job_id) => {
+                SessionUpdateRun::from(&run)
+            }
+            _ => return,
+        };
+        if let Err(error) = self
+            .owner
+            .mission_store
+            .release_native_prompt_no_launch(self.mission_id, "vibe", Some(&run), self.job_id)
+            .await
+        {
+            tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, %error,
+                "Could not release unstarted remote Vibe claim");
+        }
+    }
+
     /// Terminal decision for the job. Flushes the parser, closes an open
     /// thinking block, and reports the native CLI outcome.
     pub(crate) async fn verdict(
@@ -1226,6 +1315,14 @@ impl NativeGrokObserver {
                 self.stream.error = Some(err);
             }
         }
+        if let Some(stream) = &self.stream.vibe {
+            if self.stream.error.is_none() {
+                self.stream.error = stream.finish().err();
+            }
+            if self.session_persisted != stream.session {
+                self.stream.error = Some("Vibe identity was not durably persisted".into());
+            }
+        }
         let success = succeeded
             && self
                 .stream
@@ -1240,6 +1337,9 @@ impl NativeGrokObserver {
         let allocated = take_allocated_claude_session(self.job_id);
         if self.stream.claude && !success {
             self.forget_unstarted_claude_session(allocated).await;
+        }
+        if !success {
+            self.release_unstarted_vibe_claim(status).await;
         }
         let mut content = self
             .stream
@@ -1500,7 +1600,7 @@ pub(crate) async fn reject_local_followup(
 pub(crate) fn local_resume_refusal(mission: &Mission, placement: &RemotePlacement) -> String {
     if matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "claudecode"
+        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "vibe" | "claudecode"
     ) {
         format!(
             "{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {} runs natively on remote node '{}'; \
@@ -1836,7 +1936,7 @@ async fn continue_inner(
     };
     if !matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "claudecode"
+        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "vibe" | "claudecode"
     ) {
         return Err((
             StatusCode::CONFLICT,
@@ -1958,7 +2058,15 @@ async fn continue_inner(
     } else {
         RESUME_SOURCE.to_string()
     };
-    let plan = if mission.backend == "antigravity" {
+    let plan = if mission.backend == "vibe" {
+        vibe_continuation_plan(
+            mission.agent.as_deref(),
+            mission.model_override.clone(),
+            &history_prompt,
+            prompt.clone(),
+            session_id.clone(),
+        )
+    } else if mission.backend == "antigravity" {
         RemoteHarnessPlan::Antigravity {
             effort: mission.model_effort.clone(),
             model: mission.model_override.clone(),
@@ -2076,9 +2184,57 @@ fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
+fn vibe_continuation_plan(
+    agent: Option<&str>,
+    model: Option<String>,
+    raw_prompt: &str,
+    prompt: String,
+    session: Option<String>,
+) -> RemoteHarnessPlan {
+    RemoteHarnessPlan::Vibe {
+        plan: crate::vibe::plan_mode(agent, raw_prompt),
+        model,
+        prompt,
+        resume_session_id: session,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vibe_transfer_turn_keeps_raw_plan_intent_and_portable_history() {
+        let wrapped = "Transferred history\n\n/plan Inspect only".to_string();
+        let RemoteHarnessPlan::Vibe {
+            plan,
+            prompt,
+            resume_session_id,
+            ..
+        } = vibe_continuation_plan(
+            Some("build"),
+            None,
+            "/plan Inspect only",
+            wrapped.clone(),
+            None,
+        )
+        else {
+            panic!("Vibe plan expected")
+        };
+        assert!(plan);
+        assert_eq!(prompt, wrapped);
+        assert_eq!(resume_session_id, None);
+        let RemoteHarnessPlan::Vibe { plan, .. } = vibe_continuation_plan(
+            Some("build"),
+            None,
+            "Implement",
+            "/plan old history".into(),
+            Some("native".into()),
+        ) else {
+            panic!("Vibe plan expected")
+        };
+        assert!(!plan);
+    }
 
     #[test]
     fn antigravity_remote_thoughts_require_matching_native_identity() {
@@ -2171,6 +2327,79 @@ mod tests {
     const SPARK_STREAM: &str =
         include_str!("../../../tests/fixtures/native_grok_goal_resume.jsonl");
     const SPARK_TEXT: &str = include_str!("../../../tests/fixtures/native_grok_goal_resume.txt");
+
+    #[tokio::test]
+    async fn vibe_remote_startup_claim_requires_complete_terminal_log_without_identity() {
+        use crate::api::mission_store::SqliteMissionStore;
+        for (streaming, caught_up, state, identity, release) in [
+            (LogStreaming::Supported, true, "failed", false, true),
+            (LogStreaming::Supported, true, "cancelled", false, true),
+            (LogStreaming::Supported, false, "failed", false, false),
+            (LogStreaming::Unsupported, true, "failed", false, false),
+            (LogStreaming::Supported, true, "lost", false, false),
+            (LogStreaming::Supported, true, "running", false, false),
+            (LogStreaming::Supported, true, "failed", true, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn MissionStore> = Arc::new(
+                SqliteMissionStore::new(dir.path().into(), "vibe-remote-claim")
+                    .await
+                    .unwrap(),
+            );
+            let mission = store
+                .create_mission(None, None, None, None, None, Some("vibe"), None)
+                .await
+                .unwrap();
+            let job_id = Uuid::new_v4();
+            let run = store
+                .begin_mission_run(
+                    mission.id,
+                    &super::super::remote_job_lease_owner(job_id),
+                    None,
+                )
+                .await
+                .unwrap();
+            let fence = SessionUpdateRun::from(&run);
+            assert!(store
+                .claim_native_prompt(mission.id, "vibe", None, Some(&fence), job_id)
+                .await
+                .unwrap());
+            let owner = RemoteMissionOwner {
+                mission_store: store.clone(),
+                events_tx: None,
+            };
+            let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job_id)
+                .await
+                .unwrap();
+            observer.streaming = streaming;
+            observer.pumped_to_end = caught_up;
+            if identity {
+                observer.stream.vibe.as_mut().unwrap().session = Some("native-session".into());
+            }
+            let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+                "job_id":job_id, "mission_id":mission.id, "state":state,
+                "exit_code":1, "created_at":"2026-10-09T00:00:00Z"
+            }))
+            .unwrap();
+            let verdict = observer.verdict(&status, "node").await;
+            assert!(!verdict.success);
+            assert_eq!(
+                !store
+                    .native_prompt_attempted(mission.id, "vibe")
+                    .await
+                    .unwrap(),
+                release,
+                "streaming={streaming:?} caught_up={caught_up} state={state} identity={identity}"
+            );
+            assert_eq!(
+                store
+                    .claim_native_prompt(mission.id, "vibe", None, Some(&fence), Uuid::new_v4())
+                    .await
+                    .unwrap(),
+                release
+            );
+        }
+    }
 
     #[test]
     fn opencode_error_is_a_terminal_tool_result() {

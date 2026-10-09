@@ -16,6 +16,7 @@ pub(crate) mod live_session;
 pub(crate) mod midturn;
 pub(crate) mod opencode;
 pub(crate) mod stream_guard;
+pub(crate) mod vibe;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -117,6 +118,9 @@ pub(crate) enum TurnExtras<'a> {
     Antigravity {
         current_message: &'a str,
     },
+    Vibe {
+        current_message: &'a str,
+    },
     Codex {
         current_message: &'a str,
         tool_hub: Option<Arc<FrontendToolHub>>,
@@ -160,6 +164,18 @@ pub(crate) struct ClaudeCodeRunner;
 pub(crate) struct OpenCodeRunner;
 pub(crate) struct CodexRunner;
 pub(crate) struct GrokRunner;
+pub(crate) struct VibeRunner;
+impl HarnessRunner for VibeRunner {
+    fn name(&self) -> &'static str {
+        "vibe"
+    }
+    fn run_turn<'a>(
+        &'a self,
+        ctx: TurnContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = AgentResult> + Send + 'a>> {
+        Box::pin(vibe::run(ctx))
+    }
+}
 pub(crate) struct AntigravityRunner;
 impl HarnessRunner for AntigravityRunner {
     fn name(&self) -> &'static str {
@@ -365,6 +381,7 @@ pub(crate) fn runner_for(backend_id: &str) -> Option<&'static dyn HarnessRunner>
         "codex" => Some(&CodexRunner),
         "grok" => Some(&GrokRunner),
         "antigravity" => Some(&AntigravityRunner),
+        "vibe" => Some(&VibeRunner),
         "chatgpt_ui" => Some(&ChatGptUiRunner),
         _ => None,
     }
@@ -597,6 +614,7 @@ mod tests {
             "codex",
             "grok",
             "antigravity",
+            "vibe",
             "chatgpt_ui",
         ] {
             let runner = runner_for(backend).expect("runner exists");

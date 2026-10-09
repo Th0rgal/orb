@@ -13,7 +13,9 @@ for (let i=0;i<300;i++) events.push(
  {type:"assistant_message",data:{content:`Inspect file ${i}. Done.`,id:`a${i}`}}
 );
 const [items,setItems]=createSignal(buildTranscript(events));
-render(()=><main id="transcript"><Transcript items={items()}/></main>,document.getElementById("root")!);
+// Match the bounded conversation scroller used by the app. Without it the
+// transcript deliberately renders every turn for non-scrolling embeddings.
+render(()=><main id="transcript" class="scroll" style={{height:'100vh',overflow:'auto'}}><Transcript items={items()}/></main>,document.getElementById("root")!);
 Object.assign(window,{transcriptHarness:{
  reset:(ev:StreamEvent[])=>setItems(buildTranscript(ev)),
  apply:(ev:StreamEvent)=>setItems(v=>applyStreamEvent(v,ev)),
@@ -21,7 +23,7 @@ Object.assign(window,{transcriptHarness:{
  const renderTimes:number[]=[], replayTimes:number[]=[];
  for(let i=0;i<20;i++){
    const replayStart=performance.now(); const replay=buildTranscript(events); replayTimes.push(performance.now()-replayStart);
-   const mount=document.createElement("div");document.body.append(mount);
+   const mount=document.createElement("div");mount.className="scroll";mount.style.cssText="height:900px;overflow:auto";document.body.append(mount);
    const start=performance.now();const dispose=render(()=><Transcript items={replay}/>,mount);void mount.offsetHeight;
    renderTimes.push(performance.now()-start);dispose();mount.remove();await new Promise(requestAnimationFrame);
  }

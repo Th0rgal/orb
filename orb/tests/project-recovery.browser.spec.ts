@@ -20,10 +20,11 @@ test('projects recover from an empty successful response without reloading the a
   return route.fulfill({json});
  });
  await page.goto('/');
- await expect(page.locator('.sb-scroll')).toContainText('Couldn’t load projects');
+ const responseError='Couldn’t read the server response for GET /api/projects.';
+ await expect(page.locator('.sb-scroll')).toContainText(responseError);
  await expect(page.locator('.sb-scroll')).not.toContainText('data.projects');
  ready=true;
  await page.locator('.sb-scroll').getByRole('button',{name:'Retry',exact:true}).click();
  await expect(page.getByRole('button',{name:'Verity',exact:true})).toBeVisible();
- await expect(page.locator('.sb-scroll')).not.toContainText('Couldn’t load projects');
+ await expect(page.locator('.sb-scroll')).not.toContainText(responseError);
 });

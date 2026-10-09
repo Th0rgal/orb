@@ -77,8 +77,10 @@ export type SlashItem = {
 };
 
 export function composerModes(backend?: string | null, planSupported = false): SlashItem[] {
-  if (backend && !GOAL_HARNESSES.has(backend)) return [];
-  return [{ id: "goal", section: "Modes", label: "Goal", title: "Keep iterating until this objective is met" }, ...(planSupported ? [{id:"plan" as const,section:"Modes" as const,label:"Plan",title:"Plan before making changes"}] : [])];
+  const modes: SlashItem[] = [];
+  if (!backend || GOAL_HARNESSES.has(backend)) modes.push({ id: "goal", section: "Modes", label: "Goal", title: "Keep iterating until this objective is met" });
+  if (planSupported) modes.push({id:"plan",section:"Modes",label:"Plan",title:"Plan before making changes"});
+  return modes;
 }
 
 /** `/` plus a query with no whitespace — the Cursor slash palette trigger. */

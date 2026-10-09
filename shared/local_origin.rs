@@ -20,6 +20,12 @@ pub struct Origin {
     #[serde(default)]
     pub tags: Vec<String>,
 }
+impl Origin {
+    /// Initial mode only: replay must not undo a later operator mode change.
+    pub fn initial_agent(&self) -> Option<&'static str> {
+        (self.backend == "vibe" && crate::vibe::plan_mode(None, &self.prompt)).then_some("plan")
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub origin: Origin,

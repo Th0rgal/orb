@@ -16,6 +16,19 @@ test("pasted image stays in the draft until removed or accepted",async({page})=>
  await expect(page.getByAltText('Image #1', {exact:true})).toBeVisible();
  await expect(field).toHaveValue('Inspect this picture[Image #1]');
  await page.screenshot({path:'test-results/orb-image-paste.png'});
+ // Rendering precedes the debounced IndexedDB write. Reload only once the
+ // persisted draft contains both parts, so this exercises durable restoration.
+ await expect.poll(()=>page.evaluate(async()=>{
+  const database=await new Promise<IDBDatabase>((resolve,reject)=>{
+   const request=indexedDB.open('orb-composer-drafts',1);
+   request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+  });
+  try{return await new Promise(resolve=>{
+   const request=database.transaction('drafts').objectStore('drafts').get('new-agent');
+   request.onsuccess=()=>resolve({text:request.result?.text,images:request.result?.images?.length});
+   request.onerror=()=>resolve(null);
+  });}finally{database.close();}
+ })).toEqual({text:'Inspect this picture[Image #1]',images:1});
  await page.reload();
  await expect(page.getByAltText('Image #1', {exact:true})).toBeVisible();
  await expect(field).toHaveValue('Inspect this picture[Image #1]');

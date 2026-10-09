@@ -2576,6 +2576,7 @@ pub fn default_backends_for_provider(provider_type: ProviderType) -> Vec<String>
         ProviderType::OpenAI => vec!["opencode".to_string(), "codex".to_string()],
         ProviderType::Google => vec!["opencode".to_string()],
         ProviderType::Xai => vec!["opencode".to_string(), "grok".to_string()],
+        ProviderType::Mistral => vec!["opencode".to_string(), "vibe".to_string()],
         _ => vec!["opencode".to_string()],
     }
 }

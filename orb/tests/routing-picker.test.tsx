@@ -31,3 +31,20 @@ it("filters suggestions, selects with the keyboard, and preserves custom IDs", (
   fireEvent.keyDown(input, { key: "Escape" });
   expect(screen.queryByRole("listbox")).toBeNull();
 });
+
+it("shows distinct model IDs behind shared names and removes exact ID duplicates", () => {
+  const onInput = vi.fn();
+  render(() => <RoutingPicker label="Model" value="" onInput={onInput} options={[
+    { id: "mistral-medium-latest", name: "mistral-medium-latest", detail: "Listed by provider" },
+    { id: "mistral-medium-3.5", name: "mistral-medium-latest", detail: "Listed by provider" },
+    { id: "mistral-vibe-cli-latest", name: "mistral-medium-latest", detail: "Listed by provider" },
+    { id: "mistral-medium-latest", name: "mistral-medium-latest", detail: "Listed by provider" },
+  ]} />);
+  fireEvent.focus(screen.getByRole("combobox"));
+  const choices = screen.getAllByRole("option");
+  expect(choices).toHaveLength(3);
+  expect(choices[1].textContent).toContain("mistral-medium-3.5");
+  expect(choices[2].textContent).toContain("mistral-vibe-cli-latest");
+  fireEvent.pointerDown(choices[1]);
+  expect(onInput).toHaveBeenCalledWith("mistral-medium-3.5");
+});

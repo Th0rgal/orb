@@ -11,7 +11,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
   const [effortAnchor, setEffortAnchor] = createSignal<HTMLButtonElement>();
   const [busy, setBusy] = createSignal(false), [error, setError] = createSignal("");
   const choices = () => p.choices.find(choice => choice.backend.id === backend())?.models ?? [];
-  const unavailable = (id: string) => !!p.mission.remote_node_id && !["grok", "claudecode", "opencode", "antigravity"].includes(id);
+  const unavailable = (id: string) => !!p.mission.remote_node_id && !["grok", "claudecode", "opencode", "antigravity", "vibe"].includes(id);
   const key = crypto.randomUUID();
   onMount(() => p.onOpen?.());
   const fork = async (effort = "") => {

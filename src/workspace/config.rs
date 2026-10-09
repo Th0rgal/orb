@@ -1503,11 +1503,19 @@ pub async fn write_backend_config(
             )
             .await
         }
-        "antigravity" => {
+        "antigravity" | "vibe" => {
             // Native OAuth and the scoped MCP overlay belong to agy/the launcher.
             // Avoid writing unrelated provider credentials or OpenCode config.
             if let Some(skills) = skill_contents {
-                write_codex_skills_to_workspace(&workspace_dir.join(".agents"), skills).await?;
+                write_codex_skills_to_workspace(
+                    &workspace_dir.join(if backend_id == "vibe" {
+                        ".vibe"
+                    } else {
+                        ".agents"
+                    }),
+                    skills,
+                )
+                .await?;
             }
             Ok(())
         }

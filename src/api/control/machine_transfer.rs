@@ -336,7 +336,7 @@ fn supplement_legacy_claude(capabilities: &mut Value, inventory: &Value) {
         }
     }
 }
-async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value, Error> {
+pub(super) async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value, Error> {
     let mut capabilities = node_request(state, id, "/machine-transfer/capabilities", None).await?;
     if capabilities["version"].as_u64() == Some(1)
         && !capabilities["harnesses"]
@@ -454,6 +454,33 @@ async fn core_antigravity_ready(state: &AppState, model: Option<&str>) -> bool {
         .is_ok_and(|models| model.is_none_or(|wanted| models.iter().any(|(id, _)| id == wanted)))
 }
 
+async fn core_vibe_workspace_ready(
+    working_dir: &std::path::Path,
+    workspace: Option<&crate::workspace::Workspace>,
+    cli: Option<&str>,
+) -> bool {
+    if !crate::backend::vibe::core_auth_configured(working_dir).await {
+        return false;
+    }
+    let Some(workspace) = workspace else {
+        return false;
+    };
+    super::super::mission_runner::check_backend_prerequisites(workspace, "vibe", cli)
+        .await
+        .available
+}
+
+async fn core_vibe_ready(state: &AppState) -> bool {
+    let workspace = state.workspaces.get(Uuid::nil()).await;
+    let cli = super::super::mission_runner::get_backend_string_setting("vibe", "cli_path");
+    core_vibe_workspace_ready(
+        &state.config.working_dir,
+        workspace.as_ref(),
+        cli.as_deref(),
+    )
+    .await
+}
+
 async fn capabilities(state: &AppState) -> Vec<Value> {
     let mut harnesses: Vec<_> = state
         .backend_registry
@@ -478,12 +505,26 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
     if !ready {
         harnesses.retain(|id| id != "antigravity");
     }
+    if !core_vibe_ready(state).await {
+        harnesses.retain(|id| id != "vibe");
+    }
     let mut rows = vec![
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
+    let vibe_auth = crate::backend::vibe::core_auth_configured(&state.config.working_dir).await;
     let answers = listed_node_capabilities(state).await;
     for (node, result) in state.config.remote_nodes.nodes.iter().zip(answers) {
-        rows.push(match result {Ok(v)=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":v["harnesses"]}),Err((_,e))=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":e})});
+        rows.push(match result {
+            Ok(mut capabilities) => {
+                if !vibe_auth {
+                    if let Some(harnesses) = capabilities["harnesses"].as_array_mut() {
+                        harnesses.retain(|harness| harness.as_str() != Some("vibe"));
+                    }
+                }
+                json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":capabilities["harnesses"]})
+            }
+            Err((_, error)) => json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":error}),
+        });
     }
     rows
 }
@@ -598,6 +639,14 @@ async fn validate_destination(
     backend: &str,
     model: Option<&str>,
 ) -> Result<(), Error> {
+    if backend == "vibe"
+        && !matches!(dest, Machine::Client { .. })
+        && !crate::backend::vibe::core_auth_configured(&state.config.working_dir).await
+    {
+        return Err(conflict(
+            "Connect an enabled Mistral provider in Core before transferring a Vibe mission",
+        ));
+    }
     match dest {
         Machine::Node { id } => {
             if state.fleet.is_cordoned(id) {
@@ -633,6 +682,9 @@ async fn validate_destination(
             }
             if backend == "antigravity" && !core_antigravity_ready(state, model).await {
                 return Err(conflict("Antigravity or the selected model is not ready in the Core workspace; check agy sign-in and models before transferring"));
+            }
+            if backend == "vibe" && !core_vibe_ready(state).await {
+                return Err(conflict("Vibe is not ready in the Core workspace; check the connected Mistral provider, vibe-acp and Python 3.9+ before transferring"));
             }
         }
         Machine::Client { id } => {
@@ -1364,6 +1416,41 @@ pub async fn local_origin(
 mod portable_context_tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn core_vibe_transfer_requires_auth_and_workspace_prerequisites() {
+        use std::os::unix::fs::PermissionsExt;
+        let area = tempfile::tempdir().unwrap();
+        let mut workspace = crate::workspace::Workspace::default_host(area.path().into());
+        let cli = area.path().join("vibe-fixture");
+        std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ready = || core_vibe_workspace_ready(area.path(), Some(&workspace), cli.to_str());
+        assert!(!ready().await, "missing Mistral credentials");
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Mistral,
+            "Mistral".into(),
+        );
+        provider.api_key = Some("fixture-key".into());
+        let path = area.path().join(crate::util::AI_PROVIDERS_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(&[provider]).unwrap()).unwrap();
+        assert!(!core_vibe_workspace_ready(area.path(), None, cli.to_str()).await);
+        assert!(
+            !core_vibe_workspace_ready(area.path(), Some(&workspace), Some("/missing/vibe-acp"))
+                .await
+        );
+        assert!(ready().await, "configured CLI and Python are ready");
+        // A rejected Python probe must also hide/reject this transfer destination.
+        let python = area.path().join("python3");
+        std::fs::write(&python, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        workspace
+            .env_vars
+            .insert("PATH".into(), area.path().display().to_string());
+        assert!(!core_vibe_workspace_ready(area.path(), Some(&workspace), cli.to_str()).await);
+    }
 
     fn action(content: String) -> Transfer {
         Transfer {

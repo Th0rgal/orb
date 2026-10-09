@@ -2552,7 +2552,8 @@ pub trait MissionStore: Send + Sync {
     }
 
     /// Release only this new, unbound claim after definitive proof no process
-    /// accepted the prompt. Never call after a child has been returned.
+    /// accepted the prompt. After spawning, that requires a native protocol
+    /// boundary proving the prompt was not admitted, not just a process failure.
     async fn release_native_prompt_no_launch(
         &self,
         _id: Uuid,
@@ -4851,10 +4852,9 @@ fn select_harness_session(
     if let Some(id) = mission.session_id.as_ref() {
         sessions.insert(mission.backend.clone(), id.clone());
     }
-    sessions
-        .get(target)
-        .cloned()
-        .or_else(|| (!matches!(target, "grok" | "antigravity")).then(|| allocated_id.to_string()))
+    sessions.get(target).cloned().or_else(|| {
+        (!matches!(target, "grok" | "antigravity" | "vibe")).then(|| allocated_id.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -4863,100 +4863,102 @@ mod harness_session_tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn antigravity_allocates_native_identity_only_after_launch() {
-        for kind in ["memory", "file", "sqlite"] {
-            let dir = tempfile::tempdir().unwrap();
-            let store: Arc<dyn MissionStore> = match kind {
-                "file" => Arc::new(
-                    FileMissionStore::new(dir.path().into(), "antigravity")
-                        .await
-                        .unwrap(),
-                ),
-                "sqlite" => Arc::new(
-                    SqliteMissionStore::new(dir.path().into(), "antigravity")
-                        .await
-                        .unwrap(),
-                ),
-                _ => Arc::new(InMemoryMissionStore::new()),
-            };
-            let mission = store
-                .create_mission(None, None, None, None, None, Some("antigravity"), None)
-                .await
-                .unwrap();
-            assert!(
-                mission.session_id.is_none(),
-                "{kind}: no synthetic conversation ID"
-            );
-            let mut sessions = HashMap::new();
-            let other = store
-                .create_mission(None, None, None, None, None, Some("claudecode"), None)
-                .await
-                .unwrap();
-            assert!(select_harness_session(
-                &other,
-                Some("antigravity"),
-                "placeholder",
-                &mut sessions
-            )
-            .is_none());
-            let switched = store
-                .update_mission_run_settings(
-                    other.id,
-                    Some("antigravity"),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+    async fn native_harnesses_allocate_identity_only_after_launch() {
+        for harness in ["antigravity", "vibe"] {
+            for kind in ["memory", "file", "sqlite"] {
+                let dir = tempfile::tempdir().unwrap();
+                let store: Arc<dyn MissionStore> = match kind {
+                    "file" => Arc::new(
+                        FileMissionStore::new(dir.path().into(), harness)
+                            .await
+                            .unwrap(),
+                    ),
+                    "sqlite" => Arc::new(
+                        SqliteMissionStore::new(dir.path().into(), harness)
+                            .await
+                            .unwrap(),
+                    ),
+                    _ => Arc::new(InMemoryMissionStore::new()),
+                };
+                let mission = store
+                    .create_mission(None, None, None, None, None, Some(harness), None)
+                    .await
+                    .unwrap();
+                assert!(
+                    mission.session_id.is_none(),
+                    "{kind}: no synthetic conversation ID"
+                );
+                let mut sessions = HashMap::new();
+                let other = store
+                    .create_mission(None, None, None, None, None, Some("claudecode"), None)
+                    .await
+                    .unwrap();
+                assert!(select_harness_session(
+                    &other,
+                    Some(harness),
                     "placeholder",
+                    &mut sessions
                 )
-                .await
-                .unwrap();
-            assert!(
-                switched.session_id.is_none(),
-                "{kind}: actual store handoff must not invent identity"
-            );
-            assert!(store
-                .update_mission_session_id(other.id, "native-conversation", "antigravity", None)
-                .await
-                .unwrap());
-            store
-                .update_mission_run_settings(
-                    other.id,
-                    Some("claudecode"),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    "other-placeholder",
-                )
-                .await
-                .unwrap();
-            let resumed = store
-                .update_mission_run_settings(
-                    other.id,
-                    Some("antigravity"),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    "placeholder",
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resumed.session_id.as_deref(),
-                Some("native-conversation"),
-                "{kind}: restore the real native identity"
-            );
-            sessions.insert("antigravity".into(), "native-conversation".into());
-            assert_eq!(
-                select_harness_session(&other, Some("antigravity"), "placeholder", &mut sessions)
-                    .as_deref(),
-                Some("native-conversation")
-            );
+                .is_none());
+                let switched = store
+                    .update_mission_run_settings(
+                        other.id,
+                        Some(harness),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        "placeholder",
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    switched.session_id.is_none(),
+                    "{kind}: actual store handoff must not invent identity"
+                );
+                assert!(store
+                    .update_mission_session_id(other.id, "native-conversation", harness, None)
+                    .await
+                    .unwrap());
+                store
+                    .update_mission_run_settings(
+                        other.id,
+                        Some("claudecode"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        "other-placeholder",
+                    )
+                    .await
+                    .unwrap();
+                let resumed = store
+                    .update_mission_run_settings(
+                        other.id,
+                        Some(harness),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        "placeholder",
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resumed.session_id.as_deref(),
+                    Some("native-conversation"),
+                    "{kind}: restore the real native identity"
+                );
+                sessions.insert(harness.into(), "native-conversation".into());
+                assert_eq!(
+                    select_harness_session(&other, Some(harness), "placeholder", &mut sessions)
+                        .as_deref(),
+                    Some("native-conversation")
+                );
+            }
         }
     }
 

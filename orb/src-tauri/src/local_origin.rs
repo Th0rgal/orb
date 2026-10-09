@@ -102,8 +102,12 @@ fn view(r: &Record) -> Value {
         .map(str::trim)
         .filter(|rest| !rest.is_empty());
     let (status, title) = confirmed::shown(r.confirmed.as_ref(), pending(r), &s.status, &o.title);
-    json!({"id":o.id,"title":title,"status":status,"project":o.project,"tags":o.tags.iter().cloned().chain(std::iter::once("placement:client".into())).collect::<Vec<_>>(),"backend":o.backend,"model_override":o.model,"model_effort":o.effort,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_run_active":s.status=="active","local_sync_error":r.error})
+    json!({"id":o.id,"title":title,"status":status,"project":o.project,"tags":o.tags.iter().cloned().chain(std::iter::once("placement:client".into())).collect::<Vec<_>>(),"backend":o.backend,"agent":o.initial_agent(),"model_override":o.model,"model_effort":o.effort,"working_directory":o.cwd,"created_at":o.created_at,"updated_at":o.created_at,"history":[{"role":"user","content":o.prompt},{"role":"assistant","content":s.text}],"goal_mode":objective.is_some(),"goal_objective":objective,"status_message":s.error,"local_sync_pending":r.acked<s.sequence,"local_run_active":s.status=="active","local_sync_error":r.error})
 }
+fn initial_binding(request: &local_agents::StartRequest, origin: &Origin) -> Value {
+    json!({"harness":request.harness,"bin":request.bin,"cwd":request.cwd,"model":request.model,"effort":request.effort,"planMode":origin.initial_agent() == Some("plan")})
+}
+
 fn workers() -> &'static Mutex<HashSet<PathBuf>> {
     static W: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     W.get_or_init(|| Mutex::new(HashSet::new()))
@@ -455,9 +459,7 @@ pub async fn local_origin_launch(
     write(&path, &record)?;
     crate::local_bindings(
         Some(id.to_string()),
-        Some(
-            json!({"harness":request.harness,"bin":request.bin,"cwd":request.cwd,"model":request.model,"effort":request.effort}),
-        ),
+        Some(initial_binding(&request, &record.snapshot.origin)),
     )?;
     // Core must know the durable identity before it can issue this mission's
     // MCP grant. Registering the snapshot never dispatches a second harness.
@@ -541,6 +543,55 @@ pub async fn local_origin_launch(
 #[cfg(test)]
 mod rejection_tests {
     use super::*;
+    #[test]
+    fn local_origin_binding_and_view_preserve_initial_vibe_plan() {
+        for (backend, prompt, plan) in [
+            ("vibe", "/plan Inspect the change", true),
+            ("vibe", "  /plan\nInspect the change", true),
+            ("vibe", "Implement the change", false),
+            ("vibe", "/planet", false),
+            ("codex", "/plan Inspect the change", false),
+        ] {
+            let record: Record = serde_json::from_value(json!({
+                "snapshot": {"origin": {
+                    "id": uuid::Uuid::new_v4(), "run_id": uuid::Uuid::new_v4(),
+                    "client_id": uuid::Uuid::new_v4(), "title": "test", "project": "test",
+                    "backend": backend, "model": null, "cwd": "/tmp", "prompt": prompt,
+                    "created_at": "2026-09-30T00:00:00Z", "tags": []
+                }, "sequence": 1, "text": "", "status": "active", "error": null},
+                "acked": 0, "error": null
+            }))
+            .unwrap();
+            let request = local_agents::StartRequest {
+                harness: backend.into(),
+                bin: "vibe-acp".into(),
+                cwd: "/tmp".into(),
+                prompt: prompt.into(),
+                ..Default::default()
+            };
+            let binding = initial_binding(&request, &record.snapshot.origin);
+            // The launch persists this exact value before starting the native process.
+            let restored: Value = serde_json::from_str(&binding.to_string()).unwrap();
+            assert_eq!(restored["planMode"], plan);
+            assert_eq!(view(&record)["agent"].as_str(), plan.then_some("plan"));
+            if backend == "vibe" {
+                let next_turn = crate::vibe::args(
+                    "vibe-acp",
+                    "mission",
+                    None,
+                    Some("session"),
+                    "Continue",
+                    restored["planMode"].as_bool().unwrap(),
+                    true,
+                );
+                assert_eq!(
+                    next_turn.windows(2).any(|pair| pair == ["--mode", "plan"]),
+                    plan
+                );
+            }
+        }
+    }
+
     #[test]
     fn legacy_conflict_journal_is_retired_without_deleting_history() {
         let record = json!({

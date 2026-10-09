@@ -1164,6 +1164,7 @@ async fn transfer_capabilities(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     check_auth(&headers, &state)?;
     let paths = std::env::var_os("PATH").unwrap_or_default();
+    let python_ready = vibe_python_available().await;
     let harnesses = transfer_harnesses(
         &paths,
         state.managed_auth.advertised().iter().any(|p| p == "grok"),
@@ -1172,15 +1173,32 @@ async fn transfer_capabilities(
             .advertised()
             .iter()
             .any(|p| p == "antigravity"),
+        python_ready,
     );
     Ok(Json(
         serde_json::json!({"version":2,"harnesses":harnesses,"features":["links","selection"]}),
     ))
 }
+async fn vibe_python_available() -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::process::Command::new("python3")
+            .args(["-c", sandboxed_sh::vibe::PYTHON_VERSION_CHECK])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok_and(|status| status.success()))
+}
+
 fn transfer_harnesses(
     paths: &std::ffi::OsStr,
     grok_auth: bool,
     antigravity_auth: bool,
+    python_ready: bool,
 ) -> Vec<&'static str> {
     [
         ("grok", "grok"),
@@ -1188,12 +1206,14 @@ fn transfer_harnesses(
         ("opencode", "opencode"),
         ("claude", "claudecode"),
         ("agy", "antigravity"),
+        ("vibe-acp", "vibe"),
     ]
     .into_iter()
     .filter(|(bin, _)| {
         std::env::split_paths(paths).any(|p| p.join(bin).is_file())
             && (*bin != "grok" || grok_auth)
             && (*bin != "agy" || antigravity_auth)
+            && (*bin != "vibe-acp" || python_ready)
     })
     .map(|(_, backend)| backend)
     .collect()
@@ -1201,34 +1221,52 @@ fn transfer_harnesses(
 #[cfg(test)]
 mod transfer_harness_tests {
     #[test]
+    fn installed_vibe_acp_is_advertised_by_backend_id() {
+        let dir = tempfile::tempdir().unwrap();
+        // The interactive entrypoint alone cannot serve the ACP runner.
+        std::fs::write(dir.path().join("vibe"), "fixture").unwrap();
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), false, false, true).is_empty());
+
+        std::fs::write(dir.path().join("vibe-acp"), "fixture").unwrap();
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), false, false, false).is_empty());
+        assert_eq!(
+            super::transfer_harnesses(dir.path().as_os_str(), false, false, true),
+            vec!["vibe"]
+        );
+
+        std::fs::remove_file(dir.path().join("vibe-acp")).unwrap();
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), true, true, true).is_empty());
+    }
+
+    #[test]
     fn installed_claude_is_advertised_by_backend_id() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("claude"), "fixture").unwrap();
         std::fs::write(dir.path().join("grok"), "fixture").unwrap();
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), false, false),
+            super::transfer_harnesses(dir.path().as_os_str(), false, false, true),
             vec!["claudecode"]
         );
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), true, false),
+            super::transfer_harnesses(dir.path().as_os_str(), true, false, true),
             vec!["grok", "claudecode"]
         );
         std::fs::write(dir.path().join("agy"), "fixture").unwrap();
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), false, true),
+            super::transfer_harnesses(dir.path().as_os_str(), false, true, true),
             vec!["claudecode", "antigravity"]
         );
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), false, false),
+            super::transfer_harnesses(dir.path().as_os_str(), false, false, true),
             vec!["claudecode"]
         );
         std::fs::remove_file(dir.path().join("agy")).unwrap();
         assert_eq!(
-            super::transfer_harnesses(dir.path().as_os_str(), false, true),
+            super::transfer_harnesses(dir.path().as_os_str(), false, true, true),
             vec!["claudecode"]
         );
         std::fs::remove_file(dir.path().join("claude")).unwrap();
-        assert!(super::transfer_harnesses(dir.path().as_os_str(), false, false).is_empty());
+        assert!(super::transfer_harnesses(dir.path().as_os_str(), false, false, true).is_empty());
     }
 }
 

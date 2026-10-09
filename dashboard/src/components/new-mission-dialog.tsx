@@ -11,7 +11,7 @@ import type { Workspace } from '@/lib/api';
 import { isBackendAvailable, useBackendConfigs } from '@/lib/use-backend-configs';
 import { toast } from '@/components/toast';
 
-const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'grok', 'antigravity', 'chatgpt_ui'] as const;
+const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'grok', 'antigravity', 'vibe', 'chatgpt_ui'] as const;
 const CHATGPT_UI_BACKEND_ID = 'chatgpt_ui';
 
 const CHATGPT_UI_CANONICAL_MODEL = 'gpt-5.6-pro';
@@ -156,6 +156,7 @@ export function NewMissionDialog({
       { id: 'codex', name: 'Codex' },
       { id: 'grok', name: 'Grok Build' },
       { id: 'antigravity', name: 'Antigravity CLI' },
+      { id: 'vibe', name: 'Mistral Vibe' },
       { id: 'chatgpt_ui', name: 'ChatGPT UI (experimental)' },
     ],
     }
@@ -275,6 +276,8 @@ export function NewMissionDialog({
           { id: 'build', name: 'Build' },
           { id: 'plan', name: 'Plan' },
         ];
+      } else if (backend.id === 'vibe') {
+        agents = [{ id: 'build', name: 'Build' }, { id: 'plan', name: 'Plan' }];
       } else if (backend.id === 'antigravity') {
         agents = [{ id: 'build', name: 'Build' }];
       } else if (backend.id === CHATGPT_UI_BACKEND_ID) {
@@ -364,6 +367,7 @@ export function NewMissionDialog({
     if (selectedBackend === 'claudecode') return new Set(['anthropic']);
     if (selectedBackend === 'codex') return new Set(['openai']);
     if (selectedBackend === 'grok') return new Set(['xai']);
+    if (selectedBackend === 'vibe') return new Set(['mistral']);
     return null;
   }, [selectedBackend]);
 
@@ -386,7 +390,7 @@ export function NewMissionDialog({
       if (providerAllowlist && !providerAllowlist.has(provider.id)) continue;
       for (const model of provider.models) {
         const value =
-          selectedBackend === 'opencode'
+          (selectedBackend === 'opencode' || selectedBackend === 'vibe')
             ? `${provider.id}/${model.id}`
             : model.id;
         options.push({
@@ -576,7 +580,7 @@ export function NewMissionDialog({
       return;
     }
 
-    for (const backendId of ['grok', 'codex', 'antigravity']) {
+    for (const backendId of ['grok', 'codex', 'antigravity', 'vibe']) {
       const agent = allAgents.find(a => a.backend === backendId);
       if (agent) {
         setSelectedAgentValue(agent.value);
@@ -647,12 +651,12 @@ export function NewMissionDialog({
   const getCreateOptions = (): NewMissionDialogOptions => {
     const parsed = parseSelectedValue(selectedAgentValue);
     const agentValue =
-      (['grok', 'antigravity'].includes(selectedBackend) && parsed?.agent === 'build')
+      (['grok', 'antigravity', 'vibe'].includes(selectedBackend) && parsed?.agent === 'build')
         ? undefined
         : parsed?.agent || undefined;
     const trimmedModel = modelOverride.trim();
     const normalizedModel =
-      selectedBackend === 'opencode'
+      (selectedBackend === 'opencode' || selectedBackend === 'vibe')
         ? trimmedModel
         : trimmedModel.includes('/')
           ? trimmedModel.split('/').pop() || ''
@@ -983,6 +987,8 @@ export function NewMissionDialog({
                 <p className="text-xs text-white/30 mt-1.5">
                   {isAntigravity
                     ? 'Models discovered from the selected workspace’s Antigravity account.'
+                    : selectedBackend === 'vibe'
+                    ? 'Use mistral/model format (e.g., mistral/mistral-vibe-cli-latest).'
                     : selectedBackend === 'opencode'
                     ? 'Use provider/model format (e.g., openai/gpt-5.6-sol).'
                     : 'Use the raw model ID (e.g., gpt-6-astra or claude-opus-5).'}

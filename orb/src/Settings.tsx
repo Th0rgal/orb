@@ -93,6 +93,7 @@ function LocalAgentsCard() {
     codex: "Codex",
     grok: "Grok",
     antigravity: "Antigravity CLI",
+    vibe: "Mistral Vibe",
     opencode: "OpenCode",
   };
   const save = (id: string) => {
@@ -106,11 +107,11 @@ function LocalAgentsCard() {
           {busy() ? "Scanning…" : "Scan"}
         </button>
       </Row>
-      <For each={["claudecode", "codex", "grok", "opencode", "antigravity"]}>
+      <For each={["claudecode", "codex", "grok", "opencode", "antigravity", "vibe"]}>
         {(id) => {
           const found = () => row(id);
           return (
-            <Row title={label[id]} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : "Not found"}>
+            <Row title={label[id]} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
               <input
                 class="s-input"
                 aria-label={`${label[id]} path`}
