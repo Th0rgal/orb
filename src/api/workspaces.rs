@@ -2385,7 +2385,7 @@ async fn check_backend_preflight(
 
     let cli_path = if matches!(
         backend_id.as_str(),
-        "claudecode" | "codex" | "antigravity" | "chatgpt_ui"
+        "claudecode" | "codex" | "antigravity" | "chatgpt_ui" | "vibe"
     ) {
         state
             .backend_configs
