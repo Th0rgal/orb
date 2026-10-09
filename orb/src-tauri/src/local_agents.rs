@@ -1158,7 +1158,7 @@ fn spawn_vibe(
             request.model.as_deref(),
             request.session_id.as_deref(),
             prompt,
-            plan.is_some(),
+            crate::vibe::plan_mode(None, &request.prompt),
             true,
         ))
         .stdin(Stdio::piped())

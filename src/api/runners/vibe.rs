@@ -19,11 +19,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         super::TurnExtras::Vibe { current_message } => current_message,
         _ => ctx.message,
     };
-    let plan = ctx.agent == Some("plan")
-        || current_message
-            .trim()
-            .strip_prefix("/plan")
-            .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace));
+    let plan = crate::vibe::plan_mode(ctx.agent, current_message);
     let model = ctx.model.unwrap_or("mistral/mistral-vibe-cli-latest");
     let args = crate::vibe::args(
         &cli,
@@ -79,6 +75,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     loop {
         let line = tokio::select! {
             _ = ctx.cancel.cancelled() => {
+                finish_thinking(&ctx.events_tx, ctx.mission_id, &mut stream);
                 stop(&mut child).await; drain.abort();
                 return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
             },
@@ -135,7 +132,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         }
         if stream.thinking.len() != old_thinking {
             let _ = ctx.events_tx.send(AgentEvent::Thinking {
-                content: stream.thinking[old_thinking..].into(),
+                content: stream.thinking.clone(),
                 done: false,
                 mission_id: Some(ctx.mission_id),
             });
@@ -161,6 +158,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             let _ = ctx.events_tx.send(event);
         }
     }
+    finish_thinking(&ctx.events_tx, ctx.mission_id, &mut stream);
     let status = tokio::select! {
         _ = ctx.cancel.cancelled() => {
             stop(&mut child).await; drain.abort();
@@ -195,5 +193,44 @@ async fn stop(child: &mut tokio::process::Child) {
         .is_err()
     {
         let _ = child.kill().await;
+    }
+}
+
+fn finish_thinking(
+    events_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+    mission_id: uuid::Uuid,
+    stream: &mut crate::vibe::Stream,
+) {
+    if !stream.thinking.is_empty() {
+        let _ = events_tx.send(AgentEvent::Thinking {
+            content: std::mem::take(&mut stream.thinking),
+            done: true,
+            mission_id: Some(mission_id),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Intermediate snapshots must be cumulative; completion is the durable row.
+    #[test]
+    fn thinking_snapshot_contains_all_chunks() {
+        let mut stream = crate::vibe::Stream::default();
+        stream.feed(&serde_json::json!({"type":"session","session_id":"native"}));
+        for chunk in ["first ", "second"] {
+            stream.feed(&serde_json::json!({"type":"update","update":{"sessionUpdate":"agent_thought_chunk","content":{"text":chunk}}}));
+        }
+        let (events, mut receiver) = tokio::sync::broadcast::channel(4);
+        let mission_id = uuid::Uuid::new_v4();
+        finish_thinking(&events, mission_id, &mut stream);
+        assert!(
+            matches!(receiver.try_recv().unwrap(), AgentEvent::Thinking { content, done: true, mission_id: Some(id) } if content == "first second" && id == mission_id)
+        );
+        finish_thinking(&events, mission_id, &mut stream);
+        assert!(
+            receiver.try_recv().is_err(),
+            "Only one terminal snapshot should persist"
+        );
     }
 }

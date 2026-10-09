@@ -3,6 +3,14 @@ use serde_json::{json, Value};
 
 pub const BRIDGE: &str = include_str!("vibe_bridge.py");
 
+pub fn plan_mode(agent: Option<&str>, prompt: &str) -> bool {
+    agent == Some("plan")
+        || prompt
+            .trim()
+            .strip_prefix("/plan")
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+}
+
 pub fn args(
     cli: &str,
     mission: &str,
@@ -125,6 +133,14 @@ impl Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plan_mode_accepts_selected_agent_or_explicit_command() {
+        assert!(plan_mode(Some("plan"), "Inspect the workspace"));
+        assert!(plan_mode(None, "/plan inspect"));
+        assert!(!plan_mode(None, "/planet"));
+        assert!(!plan_mode(Some("build"), "Inspect the workspace"));
+    }
+
     #[test]
     fn native_result_is_required_and_identity_cannot_change() {
         let mut stream = Stream::default();

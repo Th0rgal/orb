@@ -2005,6 +2005,7 @@ async fn continue_inner(
     };
     let plan = if mission.backend == "vibe" {
         RemoteHarnessPlan::Vibe {
+            plan: crate::vibe::plan_mode(mission.agent.as_deref(), &prompt),
             model: mission.model_override.clone(),
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),

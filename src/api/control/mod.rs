@@ -9039,6 +9039,9 @@ fn normalize_model_override_for_backend(backend: Option<&str>, raw_model: &str) 
             crate::api::runners::opencode::normalize_opencode_model_id(trimmed).into_owned(),
         );
     }
+    if backend == Some("vibe") {
+        return Some(trimmed.to_string());
+    }
     if backend == Some("codex") && trimmed == "gpt-5.6" {
         return Some("gpt-5.6-sol".to_string());
     }
@@ -12995,6 +12998,7 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteHarnessPlan {
     Vibe {
+        plan: bool,
         model: Option<String>,
         prompt: String,
         resume_session_id: Option<String>,
@@ -13103,7 +13107,7 @@ pub(crate) fn plan_remote_harness(
         .filter(|m| !m.is_empty())
         .map(str::to_string);
     match backend {
-        "vibe" => Ok(RemoteHarnessPlan::Vibe { model, prompt, resume_session_id: None }),
+        "vibe" => Ok(RemoteHarnessPlan::Vibe { plan: crate::vibe::plan_mode(None, &prompt), model, prompt, resume_session_id: None }),
         "codex" => Ok(RemoteHarnessPlan::Codex {
             effort: None,
             fast_mode: false,
@@ -13295,6 +13299,7 @@ pub(crate) fn remote_execution_for_plan(
     let label = plan.label();
     match plan {
         RemoteHarnessPlan::Vibe {
+            plan,
             model,
             prompt,
             resume_session_id,
@@ -13309,7 +13314,7 @@ pub(crate) fn remote_execution_for_plan(
                 ),
                 resume_session_id.as_deref(),
                 prompt,
-                false,
+                *plan,
                 false,
             );
             RemoteExecution {
@@ -13511,6 +13516,21 @@ pub(crate) fn remote_launch_key_name(mission_id: Uuid) -> String {
 #[cfg(test)]
 mod vibe_plan_tests {
     use super::*;
+    #[test]
+    fn vibe_model_keeps_its_proxy_provider_prefix() {
+        assert_eq!(
+            normalize_model_override_for_backend(Some("vibe"), " mistral/mistral-medium-latest "),
+            Some("mistral/mistral-medium-latest".into())
+        );
+    }
+
+    #[test]
+    fn vibe_remote_plan_preserves_read_only_mode() {
+        let plan = plan_remote_harness(None, "vibe", None, Some("/plan inspect this")).unwrap();
+        let execution = remote_execution_for_plan(&plan, "https://core.test", "test-key");
+        assert!(execution.command.ends_with("'--mode' 'plan'"));
+    }
+
     #[test]
     fn vibe_remote_plan_uses_proxy_without_exposing_the_key_in_argv() {
         let plan = plan_remote_harness(
@@ -14580,6 +14600,9 @@ async fn submit_leased_remote_job(
     plan: &RemoteHarnessPlan,
 ) -> Result<Mission, String> {
     let mut resolved_plan = plan.clone();
+    if let RemoteHarnessPlan::Vibe { plan, prompt, .. } = &mut resolved_plan {
+        *plan = *plan || crate::vibe::plan_mode(mission.agent.as_deref(), prompt);
+    }
     let cyber_selection = if matches!(plan, RemoteHarnessPlan::Codex { .. }) {
         cyber::promote(&state.config.working_dir, mission.id)?
     } else {
