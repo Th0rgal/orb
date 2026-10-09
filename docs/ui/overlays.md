@@ -42,7 +42,9 @@ Titles use 15px/500; body and controls use 13px. Inputs are 32px and buttons 28p
 The 16px viewport inset and scrolling body keep actions reachable in small windows.
 
 Secondary actions are transparent; primary actions are neutral; red marks irreversible
-actions. Keyboard focus is a separate outline, not a hover or selection color.
+actions. Keyboard focus in modals uses a separate outline. Anchored menus use a muted inset
+marker on commands and a subtle existing-border change on search fields, without
+an outer blue ring. Keep that keyboard cue distinct from hover and selection.
 Active search results are different from committed values. Arrow navigation must
 never commit a value. Disabled options cannot receive an activation.
 

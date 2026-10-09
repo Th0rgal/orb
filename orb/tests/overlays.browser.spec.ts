@@ -190,3 +190,24 @@ test('Antigravity effort saves, survives reopening and retains the previous valu
  await expect(trigger()).toHaveAccessibleName('Reasoning effort: Default (High)');
  expect(patches.at(-1)).toEqual({model_effort:''});
 });
+
+for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard navigation works: ${theme}`,async({page})=>{
+ await page.goto(`/tests/overlays.html?theme=${theme}`);
+ await page.getByRole('button',{name:'Choose model',exact:true}).click();
+ const search=page.getByRole('combobox');
+ await expect(search).toBeFocused();
+ await expect(search).toHaveCSS('outline-style','none');
+ await expect(search).toHaveCSS('box-shadow','none');
+ await page.keyboard.press('ArrowDown');
+ await page.keyboard.press('Enter');
+ await expect(page.getByRole('dialog')).toHaveCount(0);
+ await page.getByRole('button',{name:'Actions',exact:true}).click();
+ await page.keyboard.press('ArrowDown');
+ await page.keyboard.press('Home');
+ const item=page.getByRole('menuitem',{name:'Rename…'});
+ await expect(item).toBeFocused();
+ await expect(item).toHaveCSS('outline-style','none');
+ expect(await item.evaluate(el=>getComputedStyle(el).boxShadow)).not.toBe('none');
+ await page.keyboard.press('Escape');
+ await expect(page.getByRole('button',{name:'Actions',exact:true})).toBeFocused();
+});

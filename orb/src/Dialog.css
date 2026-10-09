@@ -27,7 +27,7 @@
 .dlg-button-destructive { color: var(--red); background: transparent; border-color: var(--red); }
 .dlg-button-destructive:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 12%, transparent); }
 .dlg button:disabled, .overlay-popover button:disabled { opacity: .45; cursor: default; }
-.dlg :is(button, input, textarea, select):focus-visible, .overlay-popover :is(button, input, textarea, select):focus-visible, .dlg-button:focus-visible { outline: 2px solid var(--overlay-focus); outline-offset: 2px; }
+.dlg :is(button, input, textarea, select):focus-visible, .dlg-button:focus-visible { outline: 2px solid var(--overlay-focus); outline-offset: 2px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .field > label { color: var(--fg); font-size: 13px; }
 .field-description { color: var(--fg-2); font-size: 13px; }
@@ -68,3 +68,9 @@
 
 .dlg-foot .cs-save-area { position:static; margin:0; width:100%; }
 .dlg-foot .cs-savebar { position:static; margin:0; padding:0; border:0; background:transparent; box-shadow:none; }
+
+/* Anchored menus use quiet, inset keyboard cues instead of an outer blue ring. */
+.overlay-popover :is(button, input, textarea, select):focus-visible { outline: 0; box-shadow: none; }
+.overlay-popover :is(input, textarea, select):focus-visible { border-color: var(--fg-3); }
+.overlay-popover button:focus-visible { box-shadow: inset 2px 0 var(--fg-3); }
+.overlay-popover button:is([role="menuitem"], [role="option"]):focus { background: var(--overlay-hover); box-shadow: inset 2px 0 var(--fg-3); }
