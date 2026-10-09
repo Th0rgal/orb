@@ -46,6 +46,7 @@ import {
 } from "./imageAttachments";
 import {
   getCachedInboxDigest,
+  getCurrentInboxDigest,
   inboxDigestVersion,
   requestInboxDigest,
 } from "./inboxDigest";
@@ -91,6 +92,15 @@ import { streamMission, type StreamEvent } from "./stream";
 import { Transcript, type StreamItem } from "./Transcript";
 import { applyStreamEvent } from "./transcriptModel";
 import "./Inbox.css";
+
+function InboxInline(p: { text: string }) {
+  return <For each={p.text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)}>{part =>
+    part.startsWith("`") && part.endsWith("`") && part.length > 2
+      ? <code class="inbox-inline-code">{part.slice(1, -1)}</code>
+      : part.startsWith("**") && part.endsWith("**") && part.length > 4
+        ? <strong>{part.slice(2, -2)}</strong> : part
+  }</For>;
+}
 
 export type InboxViewMode = "unread" | "attention" | "all";
 
@@ -294,6 +304,7 @@ export function InboxPage(p: {
   onOpenSettings: () => void;
   onOpenInboxSettings?: () => void;
   onNewAgent: () => void;
+  onDeleteMission?: (id: string) => void;
   onRefresh: () => Promise<void> | void;
   onMissionUpdated?: (mission: Mission) => void;
 }) {
@@ -354,6 +365,8 @@ export function InboxPage(p: {
       (id) => (peekReadyTranscript(id) ?? peekTranscript(id))?.items,
       (id) => pendingMissionInteraction(id),
       nowMs(),
+      undefined,
+      inboxConfig(),
     );
   });
 
@@ -606,11 +619,10 @@ export function InboxPage(p: {
     }
 
     if (!isCurrentlyOpen) {
-      setPeekedIds((prev) => {
-        const next = new Set(prev);
-        next.add(item.id);
-        return next;
-      });
+      // Only one conversation is previewed at a time. Unmounting the old
+      // Composer flushes its mission-scoped draft; switching must not clear it.
+      setReplyingId(null);
+      setPeekedIds(new Set([item.id]));
       if (!peekReadyTranscript(item.id)) {
         void loadTranscript(item.id).catch(() => {});
       } else {
@@ -1062,11 +1074,22 @@ export function InboxPage(p: {
           return;
         }
       }
-      if ((e.key === "1" || e.key === "2" || e.key === "3") && currentItem?.interaction) {
-        const opt = currentItem.interaction.options.find((o) => o.key === e.key);
-        if (opt) {
+      if (/^[1-9]$/.test(e.key) && currentItem) {
+        // Live permission/question options own their existing number keys.
+        if (currentItem.interaction) {
+          const opt = currentItem.interaction.options.find((o) => o.key === e.key);
+          if (opt) {
+            e.preventDefault();
+            void triggerOption(currentItem, opt);
+          }
+          return;
+        }
+        if (!peekedIds().has(currentItem.id)) return;
+        const row = listContainerRef?.querySelector<HTMLElement>(`[data-inbox-id="${CSS.escape(currentItem.id)}"]`);
+        const button = row?.querySelector<HTMLButtonElement>(`[data-inbox-shortcut="${e.key}"]`);
+        if (button && !button.disabled) {
           e.preventDefault();
-          void triggerOption(currentItem, opt);
+          button.click();
         }
       }
     };
@@ -1096,68 +1119,42 @@ export function InboxPage(p: {
             if (!inboxConfig().aiSummary) return undefined;
             return getCachedInboxDigest(id, currentItem().updatedMs);
           });
-          const normalizeCmp = (s: string) =>
-            s
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, " ")
-              .trim();
-          const isGenericBoilerplate = (s: string) =>
-            /^(execute|complete|continue|run|perform)\s+the\s+.*(mission|goal|objective|task)/i.test(s) ||
-            /^mission\s+.*(stopped|completed|finished|blocked)\b/i.test(s) ||
-            /no conversation details/i.test(s);
-
-          const effectiveHeadline = createMemo(() => {
-            const aiGoal = digest()?.goal?.trim();
-            if (aiGoal && !isGenericBoilerplate(aiGoal) && aiGoal.length <= 72) {
-              return aiGoal;
-            }
-            return currentItem().headline;
-          });
-
-          const taskLine = createMemo(() => {
-            const aiTask = digest()?.task?.trim();
-            if (aiTask && !isGenericBoilerplate(aiTask) && !isSyntheticUserMessage(aiTask)) return aiTask;
-            return currentItem().lastRequest?.trim();
-          });
-
-          const outcomeLine = createMemo(() => {
-            const aiOutcome = digest()?.outcome?.trim();
-            if (aiOutcome && !isGenericBoilerplate(aiOutcome)) return aiOutcome;
-            return currentItem().summary;
-          });
-
-          const goalContextLine = createMemo(() => {
-            const aiGoal = digest()?.goal?.trim();
-            const rawGoal = currentItem().goalSummary?.trim();
-            // When AI goal becomes the headline, show the underlying goalSummary if it adds context;
-            // or if AI goal was too long for headline, show AI goal here.
-            const candidate =
-              aiGoal && effectiveHeadline() !== aiGoal ? aiGoal : rawGoal;
-            if (!candidate || isGenericBoilerplate(candidate)) return undefined;
-            const nc = normalizeCmp(candidate);
-            const nh = normalizeCmp(effectiveHeadline());
-            const no = normalizeCmp(outcomeLine());
-            if (!nc || nc === nh || nc === no) return undefined;
-            if (nh.length >= 16 && (nc.startsWith(nh.slice(0, 16)) || nh.startsWith(nc.slice(0, 16)))) {
-              return undefined;
-            }
-            return candidate;
-          });
-
+          const currentDigest = createMemo(() => inboxConfig().aiSummary && !isMissionRunning() && !isBusy() ? getCurrentInboxDigest(id, currentItem().updatedMs) : undefined);
+          const normalizeCmp = (s: string) => s.toLocaleLowerCase().replace(/[`*_#]/g, "").replace(/\s+/g, " ").trim();
+          const effectiveHeadline = () => currentItem().headline;
+          const taskLine = () => currentItem().lastRequest?.trim();
+          const contextLine = () => currentDigest()?.context || currentItem().goalSummary || (showTaskLine() ? taskLine() : undefined);
+          const outcomeLine = createMemo(() => digest()?.outcome?.trim() || currentItem().summary);
+          const unresolvedLine = () => currentDigest()?.unresolved;
           const showTaskLine = createMemo(() => {
-            if (currentItem().interaction) return false;
-            const t = taskLine();
-            if (!t || isSyntheticUserMessage(t)) return false;
-            const nt = normalizeCmp(t);
-            const nh = normalizeCmp(effectiveHeadline());
-            const ng = normalizeCmp(goalContextLine() ?? "");
-            const no = normalizeCmp(outcomeLine());
-            if (!nt || nt === nh || nt === ng || nt === no) return false;
-            if (nh.length >= 18 && (nt.startsWith(nh.slice(0, 18)) || nh.startsWith(nt.slice(0, 18)))) {
-              return false;
-            }
-            return true;
+            const task = taskLine();
+            if (currentItem().interaction || !task || isSyntheticUserMessage(task)) return false;
+            return ![effectiveHeadline(), outcomeLine()].some(line => normalizeCmp(line) === normalizeCmp(task));
           });
+          const [showResponse, setShowResponse] = createSignal(isMissionRunning());
+          // Live replies remain visible, but completed transcripts start folded so
+          // the operator can read the result and reply without a wall of history.
+          createEffect(() => { if (isMissionRunning()) setShowResponse(true); });
+          const responseId = `${viewId}-response-${id}`;
+          const [sourceNotice, setSourceNotice] = createSignal<string>();
+          const revealSource = (quote: string) => {
+            setSourceNotice(undefined);
+            setExpandedPeekIds(previous => new Set([...previous, id]));
+            setShowResponse(true);
+            requestAnimationFrame(() => {
+              nearBottom = false;
+              const needle = normalizeCmp(quote.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/```[^\n]*\n/g, ""));
+              peekScrollEl?.querySelectorAll("[data-inbox-source]").forEach(element => element.removeAttribute("data-inbox-source"));
+              const source = Array.from(peekScrollEl?.querySelectorAll<HTMLElement>(".st-text, .user, .error-notice") ?? [])
+                .find(element => normalizeCmp(element.textContent ?? "").includes(needle));
+              if (source) {
+                source.setAttribute("data-inbox-source", "true");
+                source.scrollIntoView({ block: "nearest", behavior: "instant" });
+              } else {
+                setSourceNotice("This passage is outside the preview. Open the thread to see the full conversation.");
+              }
+            });
+          };
 
           const appendLiveEvent = (ev: StreamEvent) => {
             pushMissionLiveEvent(id, ev);
@@ -1403,6 +1400,20 @@ export function InboxPage(p: {
                     </div>
                   </div>
 
+                  <Show when={isPeeked() && contextLine()}>
+                    <details class="inbox-mission-context">
+                      <summary class="inbox-peek-status-label">
+                        <span class="inbox-digest-label">Context</span>
+                        <span class="inbox-context-line"><InboxInline text={contextLine()!} /></span>
+                        <Ic.ChevronDown />
+                      </summary>
+                      <Show when={currentDigest()?.contextDetails}><p class="inbox-context-details"><InboxInline text={currentDigest()!.contextDetails!} /></p></Show>
+                      <Show when={showTaskLine()}>
+                        <p class="inbox-task-row"><span class="inbox-digest-label">Latest request</span><span class="inbox-task-text">{taskLine()}</span></p>
+                      </Show>
+                    </details>
+                  </Show>
+
                   <button
                     type="button"
                     class="inbox-row-main"
@@ -1415,26 +1426,18 @@ export function InboxPage(p: {
                     aria-label={`${currentItem().unread ? "Unread. " : ""}${currentItem().projectTitle}: ${effectiveHeadline()}. ${currentItem().badge}. ${outcomeLine()}`}
                   >
                     <div class="inbox-row-bottom">
+                      <span class="inbox-summary-origin">{digest()?.aiGenerated ? "AI summary" : "Latest update"}</span>
                       <p
                         class="inbox-summary"
                         title={
                           digest()?.aiGenerated
-                            ? `AI Overview (${digest()?.model || inboxConfig().model})`
+                            ? `AI summary · ${digest()?.model || inboxConfig().model}${currentDigest() ? "" : " · Updating"}`
                             : undefined
                         }
                       >
-                        <For each={outcomeLine().split(/(`[^`]+`|\*\*[^*]+\*\*)/g)}>
-                          {(part) =>
-                            part.startsWith("`") && part.endsWith("`") && part.length > 2 ? (
-                              <code class="inbox-inline-code">{part.slice(1, -1)}</code>
-                            ) : part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
-                              <strong>{part.slice(2, -2)}</strong>
-                            ) : (
-                              part
-                            )
-                          }
-                        </For>
-                        <Show when={!currentItem().interaction && currentItem().workReceiptSummary}>
+                        <InboxInline text={outcomeLine()} />
+                        <Show when={unresolvedLine()}><span class="inbox-unresolved"><InboxInline text={unresolvedLine()!} /></span></Show>
+                        <Show when={!currentItem().interaction && currentItem().workReceiptSummary && !digest()?.aiGenerated}>
                           <span class="inbox-work-chip" title="Tools executed in the latest turn">
                             {" "}· {currentItem().workReceiptSummary}
                           </span>
@@ -1518,69 +1521,22 @@ export function InboxPage(p: {
 
               <Show when={isPeeked()}>
                 <div id={`${viewId}-peek-${id}`} class="inbox-peek-drawer" role="region" aria-label={`Recent turns for ${effectiveHeadline()}`}>
-                  <details class="inbox-peek-status-card">
-                    <summary class="inbox-peek-status-label">Reply context <Ic.ChevronDown /></summary>
-                    <div class="inbox-peek-status-top">
-                      <div class="inbox-peek-status-chips">
-                        <button
-                          type="button"
-                          class="inbox-context-chip"
-                          title="Insert current status summary into your reply"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            appendToReplyDraft(`Regarding status ("${outcomeLine()}"): `);
-                          }}
-                        >
-                          Quote status
-                        </button>
-                        <Show when={currentItem().canRetry || currentItem().mission.status === "blocked"}>
-                          <button
-                            type="button"
-                            class="inbox-context-chip"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              appendToReplyDraft("Resume the goal and resolve the remaining blockers.");
-                            }}
-                          >
-                            Resume & unblock
-                          </button>
-                        </Show>
-                        <button
-                          type="button"
-                          class="inbox-context-chip"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            appendToReplyDraft("Summarize the remaining work and open a PR when checks pass.");
-                          }}
-                        >
-                          Ask for next steps
-                        </button>
-                      </div>
-                    </div>
-                    <Show when={showTaskLine()}>
-                      <p class="inbox-task-row"><span class="inbox-digest-label">Asked</span><span class="inbox-task-text">{taskLine()}</span></p>
-                    </Show>
-                    <p class="inbox-peek-status-text">
-                      <strong>Goal:</strong>{" "}
-                      {goalContextLine() ||
-                        currentItem().mission.goal_objective ||
-                        effectiveHeadline()}
-                      <Show when={outcomeLine()}>
-                        <span class="inbox-peek-status-sub"> — {outcomeLine()}</span>
-                      </Show>
-                    </p>
-                  </details>
+                  <Show when={currentDigest()?.decision}>
+                    <p class="inbox-task-row"><span class="inbox-digest-label">To decide</span><span class="inbox-decision"><InboxInline text={currentDigest()!.decision!} /></span></p>
+                  </Show>
 
                   <div class="inbox-peek-head">
                     <div class="inbox-peek-head-left">
-                      <span class="inbox-peek-caption">Conversation</span>
+                      <button type="button" class="inbox-response-toggle" aria-expanded={showResponse()} aria-controls={responseId} onClick={() => setShowResponse(!showResponse())}>
+                        <Ic.ChevronDown /><span>Original conversation</span>
+                      </button>
                       <Show when={isMissionRunning()}>
                         <span class="inbox-peek-live-pill" role="status">
                           <Ic.RunningDots />
                           <span>Streaming</span>
                         </span>
                       </Show>
-                      <Show when={hiddenPeekCount() > 0}>
+                      <Show when={showResponse() && hiddenPeekCount() > 0}>
                         <button
                           type="button"
                           class="inbox-peek-more-btn"
@@ -1624,7 +1580,9 @@ export function InboxPage(p: {
                     </button>
                   </div>
 
+                  <Show when={showResponse()}>
                   <div
+                    id={responseId}
                     class="inbox-peek-scroll"
                     data-find-conversation
                     onScroll={(e) => {
@@ -1665,6 +1623,34 @@ export function InboxPage(p: {
                     </div>
                   </div>
 
+                  </Show>
+                  <Show when={currentDigest()?.sources?.length}>
+                    <details class="inbox-sources">
+                      <summary class="inbox-peek-status-label">Sources <Ic.ChevronDown /></summary>
+                      <For each={currentDigest()?.sources}>{source =>
+                        <button type="button" class="inbox-source" title="Show this passage in the conversation" onClick={() => revealSource(source.quote)}>
+                          “{source.quote}” <span aria-hidden="true">↗</span>
+                        </button>
+                      }</For>
+                      <Show when={sourceNotice()}><p class="inbox-source-notice" role="status">{sourceNotice()}</p></Show>
+                    </details>
+                  </Show>
+                    <div class="inbox-suggestions" role="group" aria-label="Suggested actions">
+                      <span class="inbox-digest-label">Suggested actions</span>
+                      <For each={currentDigest()?.suggestions}>{(suggestion, index) =>
+                        <button type="button" class="inbox-context-chip" data-inbox-shortcut={!currentItem().interaction && index() < 9 ? index() + 1 : undefined} disabled={isBusy()} title="Insert this suggestion into your draft" onClick={() => appendToReplyDraft(suggestion)}>
+                          <Show when={!currentItem().interaction && index() < 9}><kbd class="inbox-action-key" aria-hidden="true">{index() + 1}</kbd></Show>{suggestion}
+                        </button>
+                      }</For>
+                      <button type="button" class="inbox-context-chip inbox-state-action" data-inbox-shortcut={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 9 ? (currentDigest()?.suggestions?.length ?? 0) + 1 : undefined} disabled={isBusy() || isMissionRunning() || currentItem().mission.execution?.state === "running"} onClick={() => void markDone(currentItem())}>
+                        <Show when={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 9}><kbd class="inbox-action-key" aria-hidden="true">{(currentDigest()?.suggestions?.length ?? 0) + 1}</kbd></Show><Ic.ArchiveIcon size={12} /> Mark done &amp; archive
+                      </button>
+                      <Show when={p.onDeleteMission}>
+                        <button type="button" class="inbox-context-chip inbox-delete-action" data-inbox-shortcut={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 8 ? (currentDigest()?.suggestions?.length ?? 0) + 2 : undefined} disabled={isBusy() || isMissionRunning() || currentItem().mission.execution?.state === "running"} onClick={() => p.onDeleteMission?.(id)}>
+                          <Show when={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 8}><kbd class="inbox-action-key" aria-hidden="true">{(currentDigest()?.suggestions?.length ?? 0) + 2}</kbd></Show><Ic.TrashIcon size={12} /> Delete…
+                        </button>
+                      </Show>
+                    </div>
                   <div
                     class="inbox-peek-composer"
                     onFocusIn={() => setReplyingId(id)}
@@ -1704,6 +1690,7 @@ export function InboxPage(p: {
                       onSendError={(err) => setError(err)}
                       onSend={async (text, images) => {
                         nearBottom = true;
+                        setShowResponse(true);
                         const ok = await submitUnifiedReply(
                           currentItem(),
                           text,

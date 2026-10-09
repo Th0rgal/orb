@@ -294,7 +294,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
 
   await page.keyboard.press("r");
   await expect(questionRow.locator(".inbox-peek-drawer")).toBeVisible();
-  await expect(questionRow.locator(".inbox-peek-status-card")).toContainText("Should swipe-right mark the conversation as Done");
+  await expect(questionRow.locator(".inbox-summary")).toContainText("Should swipe-right mark the conversation as Done");
   await expect(questionRow.locator(".inbox-peek-composer .composer")).toBeVisible();
   await expect(questionRow.locator(".inbox-peek-composer .plus")).toBeVisible();
   const replyInput = questionRow.locator(".inbox-peek-composer textarea");
@@ -344,7 +344,9 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
 
   await page.keyboard.press("Space");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeVisible();
-  await doneRow.locator("summary").click();
+  await expect(doneRow.locator(".inbox-mission-context")).not.toHaveAttribute("open", "");
+  await doneRow.locator(".inbox-mission-context summary").click();
+  await doneRow.getByRole("button", { name: "Original conversation", exact: true }).click();
   await expect(doneRow.locator(".inbox-task-text")).toHaveText("Hide the sidebar scroll thumb until hover.");
   await expect(doneRow.locator(".inbox-peek-transcript .user")).toContainText(
     "Hide the sidebar scroll thumb until hover.",
@@ -354,7 +356,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await expect(doneRow.locator(".inbox-peek-transcript .st-text")).toContainText(
     "Updated the scroll thumb track to remain hidden",
   );
-  await expect(doneRow.locator(".inbox-peek-status-card")).toContainText(
+  await expect(doneRow.locator(".inbox-mission-context")).not.toContainText(
     "Updated the scroll thumb track to remain hidden",
   );
   // Verify the Peek scroll container is anchored to the bottom on open
@@ -548,7 +550,9 @@ test("Inbox Peek renders shared Transcript with inline images, attached context,
   }));
   expect(pageScrollMetrics.scrollHeight).toBeLessThanOrEqual(pageScrollMetrics.clientHeight);
 
-  await drawer.locator("summary").click();
+  await expect(row.locator(".inbox-mission-context")).not.toHaveAttribute("open", "");
+  await row.locator(".inbox-mission-context summary").click();
+  await drawer.getByRole("button", { name: "Original conversation", exact: true }).click();
   // Verify the Asked row stripped [Image #1] and [Uploaded: ...] cleanly.
   await expect(row.locator(".inbox-task-text")).toContainText(
     "Lorsque j'ajoute une image dans l'application de bureau",
@@ -636,7 +640,7 @@ test("Inbox renders live production missions and projects when ORB_INBOX_PROD=1"
   // Wait for skeleton to finish and real production rows or zero state to appear
   await expect(page.locator(".inbox-skeleton")).toBeHidden({ timeout: 15000 });
   await page
-    .locator('.inbox-summary[title^="AI Overview"]')
+    .locator('.inbox-summary[title^="AI summary"]')
     .first()
     .waitFor({ state: "attached", timeout: 12000 })
     .catch(() => {});

@@ -241,9 +241,9 @@ describe("classifyInboxMission & buildInboxSections", () => {
     expect(sections.unreadCount).toBe(2); // m-unread + m-rust-err
     expect(sections.attentionCount).toBe(1); // m-rust-err (failed)
 
-    // Deduplicated headline when goal title matches project title ("Orb" + "/goal Orb")
+    // Preserve the conversation title even when it matches its project.
     expect(unreadItem.isGoal).toBe(true);
-    expect(unreadItem.headline).toBe("Orb objective");
+    expect(unreadItem.headline).toBe("Orb");
 
     // Cleaned Rust Some(1) error text
     const errItem = sections.needsYou.find((i) => i.id === "m-rust-err")!;
@@ -282,7 +282,7 @@ describe("classifyInboxMission & buildInboxSections", () => {
     expect(isMissionUnread(completedMission)).toBe(false);
   });
 
-  it("attaches childSummary to parent orchestrator missions and surfaces unread child track failures", () => {
+  it("keeps child details without surfacing their failures as parent notifications by default", () => {
     const parentPareto = makeMission({
       id: "d04c77b2-7028-4c03-b7c1-ab20b818e0f3",
       title: "Pareto",
@@ -331,11 +331,11 @@ describe("classifyInboxMission & buildInboxSections", () => {
     expect(parentItem.childSummary?.failed).toBe(1);
     expect(parentItem.childSummary?.failedChildren[0].title).toBe("Track G-4 (CLAIM-1) Proof Closure");
     expect(parentItem.childSummary?.hasUnreadFailure).toBe(true);
-    // Parent surfaces in Unread and Attention because a child track failed unread
-    expect(parentItem.unread).toBe(true);
-    expect(parentItem.attention).toBe(true);
-    expect(sections.unreadCount).toBe(1);
-    expect(sections.attentionCount).toBe(1);
+    // Child details remain available without generating a parent notification.
+    expect(parentItem.unread).toBe(false);
+    expect(parentItem.attention).toBe(false);
+    expect(sections.unreadCount).toBe(0);
+    expect(sections.attentionCount).toBe(0);
     expect(parentItem.peekTurns.map((t) => `${t.role}:${t.text}`)).toEqual([
       "user:Launch the 3 verification tracks.",
       "assistant:Dispatched Track INV-1, Track G-2, and Track G-4.",
@@ -650,3 +650,11 @@ describe("classifyInboxMission & buildInboxSections", () => {
   });
 });
 
+
+it("preserves the conversation title and follows explicit renames without rewriting it", () => {
+  const mission = makeMission({ id: "stable-title", title: "Complete the existing Verity mission, with all 18 remaining functions and EVM parity checks" });
+  const first = buildInboxSections([mission], sampleProjects);
+  expect(first.ready[0].headline).toBe(mission.title);
+  const renamed = { ...mission, title: "The name I chose", updated_at: "2026-10-09T12:00:00Z" };
+  expect(buildInboxSections([renamed], sampleProjects).ready[0].headline).toBe("The name I chose");
+});

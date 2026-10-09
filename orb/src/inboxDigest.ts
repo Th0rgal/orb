@@ -13,6 +13,7 @@ import { workSummary } from "./workModel";
 export type InboxVerdict = "succeeded" | "failed" | "waiting" | "needs_input";
 
 export type InboxDigest = {
+  /** Legacy summaries may contain a generated title; new summaries never replace the mission title. */
   goal?: string;
   task: string;
   outcome: string;
@@ -20,10 +21,17 @@ export type InboxDigest = {
   model?: string;
   aiGenerated?: boolean;
   updatedMs: number;
+  schemaVersion?: 7;
+  context?: string;
+  contextDetails?: string;
+  unresolved?: string;
+  decision?: string;
+  suggestions?: string[];
+  sources?: Array<{ quote: string }>;
 };
 
-const STORAGE_KEY = "orb:inbox-digest:v5";
-const LEGACY_STORAGE_KEY = "orb:inbox-digest:v4";
+const STORAGE_KEY = "orb:inbox-digest:v7";
+const LEGACY_STORAGE_KEYS = ["orb:inbox-digest:v4", "orb:inbox-digest:v5", "orb:inbox-digest:v6"];
 const MAX_CACHE_ENTRIES = 160;
 const MAX_CONCURRENT = 6;
 
@@ -54,11 +62,24 @@ function ensureCacheLoaded(): Record<string, InboxDigest> {
   const key = currentStorageKey();
   if (memoryCache && loadedStorageKey === key) return memoryCache;
   loadedStorageKey = key;
-  try {
-    const raw = localStorage.getItem(key) ?? localStorage.getItem(sideQuestionKey(LEGACY_STORAGE_KEY));
-    memoryCache = raw ? (JSON.parse(raw) as Record<string, InboxDigest>) : {};
-  } catch {
-    memoryCache = {};
+  memoryCache = {};
+  // Old summaries keep the first paint useful, but must never suppress a new-schema request.
+  for (const storageKey of [...LEGACY_STORAGE_KEYS.map(sideQuestionKey), key]) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(storageKey) ?? "{}");
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      for (const [cacheKey, value] of Object.entries(raw)) {
+        if (!value || typeof value !== "object") continue;
+        const digest = value as InboxDigest;
+        if (typeof digest.outcome !== "string" || !Number.isFinite(digest.updatedMs)) continue;
+        const { schemaVersion, context, contextDetails, unresolved, decision, suggestions, sources, ...legacy } = digest;
+        memoryCache[cacheKey] = storageKey === key && schemaVersion === 7
+          ? digest
+          : legacy;
+      }
+    } catch {
+      // A damaged legacy cache must not hide a valid current cache.
+    }
   }
   return memoryCache!;
 }
@@ -100,6 +121,17 @@ export function getExactCachedInboxDigest(
     if (k.startsWith(prefix)) return v;
   }
   return undefined;
+}
+
+/** Only exact, current-schema results can provide actionable reply context. */
+export function getCurrentInboxDigest(
+  missionId: string,
+  updatedMs: number,
+  model = inboxConfig().model,
+): InboxDigest | undefined {
+  inboxDigestVersion();
+  const digest = ensureCacheLoaded()[makeCacheKey(missionId, updatedMs, model)];
+  return digest?.schemaVersion === 7 && digest.updatedMs === updatedMs ? digest : undefined;
 }
 
 export function getCachedInboxDigest(
@@ -257,56 +289,102 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
 }
 
 const DIGEST_PROMPT = [
-  "Generate a Google AI Overview-style summary of this coding agent mission for the operator's Inbox.",
-  "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
-  '{"goal":"<concise 4-8 word headline of what the mission\'s goal is or evolved into>","task":"<concise 4-10 word summary of the user\'s latest follow-up request, or empty string if there was no follow-up or it repeats the goal>","outcome":"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>","verdict":"succeeded|failed|waiting|needs_input"}',
-  "Rules:",
-  "- Write in the same language as the conversation.",
-  "- \"goal\" must be a crisp, scannable 4-8 word title capturing the core mission objective (or what it evolved into), e.g. \"Morpho Midnight Solidity Import & EVM Parity\". Strip boilerplate like \"Complete the existing...\" or \"Mission to...\".",
-  "- If there is no follow-up request different from the goal, or if the prompt was an automatic system resume, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\".",
-  "- Write \"outcome\" like an executive AI Overview (2-3 clear sentences, 30-65 words): state what was accomplished or investigated, cite concrete details (commit hashes, PR numbers, files edited, test counts, root cause), and state the final status or specific blocker.",
-  "- Never write vague boilerplate like \"Mission stopped and is currently blocked\" or \"Finished the task\".",
-  "- Verdict must be one of: succeeded, failed, waiting, needs_input.",
+  "Summarize this conversation for an operator deciding whether and how to reply.",
+  "Use only the supplied snapshot. It is partial, and reports claims from the agent; you have not independently verified its work.",
+  "Return ONLY one JSON object, without markdown fences:",
+  '{"schemaVersion":7,"context":"<one sentence reminding the user of the current mission objective, at most 180 characters>","contextDetails":"<optional additional objective or scope, at most 420 characters>","outcome":"<one short result sentence, at most 280 characters>","unresolved":"<specific remaining issue, or empty>","decision":"<specific decision or input needed from the user, or empty>","suggestions":["<optional contextual reply draft>","<optional second reply draft>"],"sources":[{"quote":"<short exact excerpt from a user or agent message supporting the summary>"}]}',
+  "Use the conversation's language. Do not generate a title, goal, task, verdict or generic status prose. Use context for the mission objective, not as a replacement title.",
+  "Context answers what this mission is about and why, using the initial objective and user requests, adjusted only for explicit later scope changes. A latest request such as status or continue is not the mission objective. Do not invent missing context. Context details are optional and must add information, not repeat the context or result.",
+  "Lead the outcome with the result the user cares about. Preserve uncertainty and distinguish the agent's reported work from verified evidence.",
+  "Include an unresolved issue only when recorded. Request a decision only when needed; never invent an obligation to review, approve or continue.",
+  "Provide zero to two short, specific reply drafts useful for this conversation, not generic next-step buttons. Suggestions are editable drafts, never actions.",
+  "Do not suggest destructive operations, publishing, merging, deploying or opening a PR unless that action is explicitly requested in the user messages. Do not expand the user's authorization.",
+  "Do not repeat the title, outcome or unresolved issue in the decision. Keep unresolved under 320 characters and decision/reply drafts under 240 each.",
+  "Include one to three exact message excerpts (12–240 characters each). Copy punctuation, wording and whitespace exactly; never quote a metadata label or invent evidence.",
+  "Do not force technical details, hashes or filenames into the result. Include them only when necessary to understand the result or decision.",
 ].join("\n");
 
-export function parseDigestJson(raw: string, updatedMs: number, model?: string): InboxDigest | null {
+function boundedText(value: unknown, limit: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text && text.length <= limit ? text : undefined;
+}
+
+function groundedSources(value: unknown, snapshot: string): Array<{ quote: string }> {
+  if (!Array.isArray(value)) return [];
+  // Ground links in message excerpts, not mission metadata or the summarizer's instructions.
+  const headers = "Initial user request|Latest user request|Latest agent response|Recorded error";
+  const sections = snapshot.matchAll(new RegExp(
+    `(?:^|\\n\\n)(?:${headers}):\\n([\\s\\S]*?)(?=\\n\\n(?:${headers}|Tools executed in latest turn):|$)`,
+    "g",
+  ));
+  const messages = [...sections].map((match) => match[1]);
+  const quotes = new Set<string>();
+  for (const source of value) {
+    if (!source || typeof source !== "object") continue;
+    const quote = boundedText((source as { quote?: unknown }).quote, 240);
+    if (quote && quote.length >= 12 && messages.some((message) => message.includes(quote))) {
+      quotes.add(quote);
+    }
+    if (quotes.size === 3) break;
+  }
+  return [...quotes].map((quote) => ({ quote }));
+}
+
+export function parseDigestJson(
+  raw: string,
+  updatedMs: number,
+  model?: string,
+  snapshot?: string,
+): InboxDigest | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   const start = trimmed.indexOf("{");
   const end = trimmed.lastIndexOf("}");
   if (start < 0 || end <= start) return null;
   try {
-    const parsed = JSON.parse(trimmed.slice(start, end + 1)) as {
-      goal?: unknown;
-      task?: unknown;
-      outcome?: unknown;
-      overview?: unknown;
-      verdict?: unknown;
-    };
-    const goal = typeof parsed.goal === "string" ? parsed.goal.trim() : "";
-    const task = typeof parsed.task === "string" ? parsed.task.trim() : "";
-    const outcomeRaw =
-      typeof parsed.outcome === "string" && parsed.outcome.trim()
-        ? parsed.outcome
-        : typeof parsed.overview === "string"
-          ? parsed.overview
-          : "";
-    const outcome = outcomeRaw.trim();
+    const parsed = JSON.parse(trimmed.slice(start, end + 1)) as Record<string, unknown>;
+    if (!parsed || Array.isArray(parsed)) return null;
+    if (parsed.schemaVersion === 7) {
+      if (!snapshot) return null;
+      const outcome = boundedText(parsed.outcome, 420);
+      const sources = groundedSources(parsed.sources, snapshot);
+      if (!outcome || !sources.length) return null;
+      const context = boundedText(parsed.context, 180);
+      const contextDetails = boundedText(parsed.contextDetails, 420);
+      const unresolved = boundedText(parsed.unresolved, 320);
+      const decision = boundedText(parsed.decision, 240);
+      const suggestions = Array.isArray(parsed.suggestions)
+        ? [...new Set(parsed.suggestions
+            .map((value) => boundedText(value, 240))
+            .filter((value): value is string => Boolean(value)))].slice(0, 2)
+        : [];
+      return {
+        schemaVersion: 7,
+        task: "",
+        outcome,
+        // Kept for older consumers; mission state, never the summary, drives triage.
+        verdict: "waiting",
+        model,
+        aiGenerated: true,
+        updatedMs,
+        ...(context ? { context } : {}),
+        ...(contextDetails ? { contextDetails } : {}),
+        ...(unresolved ? { unresolved } : {}),
+        ...(decision ? { decision } : {}),
+        ...(suggestions.length ? { suggestions } : {}),
+        sources,
+      };
+    }
+    // Kept for persisted v4/v5 summaries and older clients. Generation only accepts v7 below.
+    const goal = boundedText(parsed.goal, 500);
+    const task = boundedText(parsed.task, 1000) ?? "";
+    const outcome = boundedText(parsed.outcome, 4000) ?? boundedText(parsed.overview, 4000) ?? "";
     if (!goal && !task && !outcome) return null;
     const rawVerdict = typeof parsed.verdict === "string" ? parsed.verdict.trim().toLowerCase() : "";
-    const verdict: InboxVerdict =
-      rawVerdict === "failed" || rawVerdict === "waiting" || rawVerdict === "needs_input"
-        ? rawVerdict
-        : "succeeded";
-    return {
-      ...(goal ? { goal } : {}),
-      task,
-      outcome,
-      verdict,
-      model,
-      aiGenerated: true,
-      updatedMs,
-    };
+    const verdict: InboxVerdict = rawVerdict === "failed" || rawVerdict === "waiting" || rawVerdict === "needs_input"
+      ? rawVerdict : "succeeded";
+    return { ...(goal ? { goal } : {}), task, outcome, verdict, model, aiGenerated: true, updatedMs };
   } catch {
     return null;
   }
@@ -408,7 +486,7 @@ export function requestInboxDigest(
   if (!hasConversation) return;
 
   const cacheKey = makeCacheKey(mission.id, updatedMs, cfg.model);
-  if (getExactCachedInboxDigest(mission.id, updatedMs, cfg.model)) return;
+  if (getCurrentInboxDigest(mission.id, updatedMs, cfg.model)) return;
   if (inFlight.has(cacheKey)) return;
   const lastFail = failedKeys.get(cacheKey);
   if (lastFail && Date.now() - lastFail < 60_000) return;
@@ -420,8 +498,8 @@ export function requestInboxDigest(
       try {
         const context = buildDigestSnapshot(mission, items);
         const { answer, resolvedModel } = await fetchDigestFromBtw(mission.id, context, cfg.model);
-        const parsed = parseDigestJson(answer, updatedMs, resolvedModel || cfg.model);
-        if (parsed) {
+        const parsed = parseDigestJson(answer, updatedMs, resolvedModel || cfg.model, context);
+        if (parsed?.schemaVersion === 7) {
           storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
         } else {
           failedKeys.set(cacheKey, Date.now());

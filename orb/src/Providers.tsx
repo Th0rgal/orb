@@ -6,7 +6,7 @@ import { codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStat
 import { PopupMenu } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
@@ -207,14 +207,45 @@ export function Providers() {
   const [remote, setRemote] = createSignal<AIProvider[] | null>(null);
   const [add, setAdd] = createSignal(false);
 
-  const reloadRemote = () => {
-    if (isConnected()) {
-      listProviders()
-        .then(setRemote)
-        .catch(() => {});
+  const [loading, setLoading] = createSignal(false);
+  const [loadError, setLoadError] = createSignal<string | null>(null);
+  let request: AbortController | undefined;
+  let generation = 0;
+  const reloadRemote = async () => {
+    request?.abort();
+    const current = ++generation;
+    if (!isConnected()) return;
+    const version = connectionVersion();
+    const controller = new AbortController();
+    request = controller;
+    setLoading(true);
+    setLoadError(null);
+    // Aborting also releases the request; a late response must never populate
+    // a different backend's page or overwrite a newer refresh.
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    const active = () => current === generation && version === connectionVersion() && isConnected();
+    try {
+      const providers = await listProviders(controller.signal);
+      if (active()) setRemote(providers);
+    } catch (error) {
+      if (active()) setLoadError(controller.signal.aborted
+        ? "Loading providers timed out. Check your connection and try again."
+        : String(error));
+    } finally {
+      clearTimeout(timer);
+      if (active()) setLoading(false);
     }
   };
-  onMount(reloadRemote);
+  createEffect(() => {
+    connectionVersion();
+    const connected = isConnected();
+    request?.abort();
+    ++generation;
+    setRemote(null);
+    setLoadError(null);
+    if (connected) void reloadRemote();
+  });
+  onCleanup(() => { ++generation; request?.abort(); });
 
   const live = () => (isConnected() ? remote() : null);
   const [step, setStep] = createSignal<"type" | "method" | "details">("type");
@@ -283,8 +314,14 @@ export function Providers() {
         </div>
       }
     >
-      <Show when={live()} fallback={<div class="page"><p class="s-lead shimmer">Loading providers…</p></div>}>
-        <LiveProviders list={live() ?? []} onRefresh={reloadRemote} />
+      <Show when={live()} fallback={<div class="page">
+        <div class="page-head"><h2>Providers</h2></div>
+        <Show when={loading()}><p class="s-lead shimmer" role="status">Loading providers…</p></Show>
+        <Show when={loadError()}>{error => <ErrorNotice title="Could not load providers" error={error()}>
+          <button class="s-btn" onClick={() => void reloadRemote()}>Try again</button>
+        </ErrorNotice>}</Show>
+      </div>}>
+        <LiveProviders list={live() ?? []} onRefresh={() => void reloadRemote()} loading={loading()} loadError={loadError()} />
       </Show>
     </Show>
   );
@@ -300,7 +337,7 @@ const SUBSCRIPTION_META: Record<string, { vendor: string; desc: string }> = {
   mistral: { vendor: "Mistral AI", desc: "Le Chat Pro / Team · Browser sign-in" },
 };
 
-function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
+function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?: boolean; loadError?: string | null }) {
   const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>({});
   const [keyEditor, setKeyEditor] = createSignal<AIProvider | "new" | null>(null);
   const [reauth, setReauth] = createSignal<AIProvider | null>(null);
@@ -328,8 +365,14 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
       })
       .catch(() => setLoginOptions({available: false, providers: [], reason: "Update the backend to add subscription accounts here."}));
   });
-  const oauth = () => p.list.filter((x) => x.uses_oauth);
-  const keys = () => p.list.filter((x) => !x.uses_oauth);
+  // uses_oauth describes what a provider supports, not the credential in use.
+  // Vibe browser sign-in provisions an API key. For Mistral, uses_oauth is
+  // set by the backend's subscription marker, not by the stored secret type.
+  const isKey = (a: AIProvider) => !(a.provider_type === "mistral" && a.uses_oauth)
+    && ((a.has_api_key === true && a.has_oauth === false) || !a.uses_oauth);
+  const oauth = () => p.list.filter(a => !isKey(a) && a.provider_type !== "google");
+  const modelConnections = () => p.list.filter(a => !isKey(a) && a.provider_type === "google");
+  const keys = () => p.list.filter(isKey);
   const [toggleError, setToggleError] = createSignal<string | null>(null);
   const toggle = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
@@ -378,11 +421,14 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
     <div class="page">
       <div class="page-head">
         <h2>Providers</h2>
-        <button class="s-btn" onClick={() => { void refreshUsage().catch(() => {}); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
+        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(() => {}); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
           Refresh
         </button>
       </div>
       <p class="s-lead">Configured providers from the connected sandboxed.sh backend.</p>
+      <Show when={p.loadError}>{error => <ErrorNotice title="Could not refresh providers" error={error()}>
+        <button class="s-btn" onClick={p.onRefresh}>Try again</button>
+      </ErrorNotice>}</Show>
       <Show when={toggleError()}><p class="s-row-desc c-red" role="alert">{toggleError()}</p></Show>
 
       <section class="s-sec">
@@ -397,6 +443,16 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
           </Show>
         </div>
       </section>
+
+      <Show when={modelConnections().length}>
+        <section class="s-sec" aria-label="Model connections">
+          <h3>Model connections</h3>
+          <p class="s-row-desc p-section-description">Model access through connected credentials, separate from subscription accounts.</p>
+          <div class="s-card">
+            <For each={modelConnections()}>{a => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
+          </div>
+        </section>
+      </Show>
 
       <CloudProviders />
 
@@ -769,7 +825,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         <p class="s-lead">Could not complete the login.</p>
         <Show when={!session()}><ErrorNotice error={error()!} /></Show>
         <Show when={/^(404|405)\b/.test(error() ?? "")}>
-          <p class="s-row-desc">This backend build does not expose the login endpoints yet — deploy the updated sandboxed.sh first.</p>
+          <p class="s-row-desc">This backend build does not expose the login endpoints yet. Deploy the updated sandboxed.sh first.</p>
         </Show>
       </Show>
       <Show when={phase() === "awaiting" || phase() === "finishing" || (phase() === "failed" && !!session())}>
@@ -914,12 +970,13 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
   const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted"].includes(status()) ? "needs_reauth" : "not_configured";
   const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
-  const expandable = () => !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
-  const [open, setOpen] = createSignal(false);
+  const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
+  const expandable = () => a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  const [open, setOpen] = createSignal(a.provider_type === "antigravity");
   const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
   const needsAuth = () => ["needs_reauth", "needs_auth"].includes(status());
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
-  const title = () => email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
+  const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
   return (
     <div class="p-acc-wrap">
       <div class="p-account-header">
@@ -932,6 +989,8 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
           </div>
           <div class="s-row-desc">
             <span class={`p-st ${stClass()}`}>{stLabel()}</span>
+            <Show when={a.provider_type === "antigravity"}><span class="p-dot">·</span><span>Subscription account</span></Show>
+            <Show when={a.provider_type === "google"}><span class="p-dot">·</span><span>{a.has_api_key && !a.has_oauth ? "API key" : "Model routing"}</span></Show>
             <Show when={p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan}>
               <span class="p-dot">·</span><span>{p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan} plan</span>
             </Show>
@@ -943,6 +1002,9 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
         </Show>
         <Show when={expandable()}><span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span></Show>
       </Dynamic>
+      <Show when={mistralSubscription() && !open()}>
+        <button class="s-btn quiet" aria-label="View Mistral monthly usage" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>Monthly usage ↗</button>
+      </Show>
       <Show when={true}><button class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={!!menu()} onClick={e => { const r=e.currentTarget.getBoundingClientRect(); setMenu({x:r.right-170,y:r.bottom+4}); }}><span aria-hidden="true">···</span></button></Show>
       </div>
       <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
@@ -952,7 +1014,13 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
-          <Show when={a.provider_type === "antigravity"}><AntigravityProvider embedded /></Show>
+          <Show when={a.provider_type === "antigravity"}><AntigravityProvider /></Show>
+          <Show when={mistralSubscription()}>
+            <div class="p-detail">
+              <p class="s-row-desc">Mistral provides a monthly allowance. Its live counter is not available through this Vibe connection. Sign in to the Mistral console with the same account to view usage and the reset date.</p>
+              <div class="p-acc-actions"><button class="s-btn quiet" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>View monthly usage ↗</button></div>
+            </div>
+          </Show>
           <Show when={hasProviderUsageDetails(p.usage)}>
             <UsageDetail usage={p.usage!} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
           </Show>

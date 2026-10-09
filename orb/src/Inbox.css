@@ -1,4 +1,4 @@
-/* Inbox is a document list, with the same quiet surfaces and controls as overlays. */
+/* Inbox keeps quiet surfaces with rounded message cards matching the rest of Orb. */
 .inbox-sb-badge {
   flex: none; min-width: 17px; height: 16px; padding: 0 5px;
   border-radius: 4px; background: var(--bg-active); color: var(--fg-2);
@@ -61,18 +61,17 @@
 .inbox-sec-head h3 { margin: 0; font-size: 12px; font-weight: 500; color: var(--fg-2); }
 .inbox-sec-note { margin-left: auto; font-size: 12px; color: var(--inbox-muted); }
 .inbox-clear-btn { margin-left: auto; }
-.inbox-list { display: flex; flex-direction: column; border-top: 1px solid var(--stroke-soft); background: transparent; }
+.inbox-list { display: flex; flex-direction: column; gap: 8px; background: transparent; }
 .inbox-row {
-  position: relative; padding: 10px 12px; background: transparent; border-radius: 0;
-  border-bottom: 1px solid var(--stroke-soft);
+  position: relative; padding: 10px 12px; background: transparent; border-radius: var(--radius-xl);
+  border: 1px solid var(--stroke-soft);
   transition: background-color var(--t) var(--ease);
 }
-.inbox-row:last-child { border-bottom: 0; }
 /* Avoid opacity/transform entrance animations: background WebKit windows can pause
    them at frame zero and leave otherwise accessible rows visually blank. */
 .inbox-row:hover { background: color-mix(in srgb, var(--bg-hover) 55%, transparent); }
 .inbox-row.focused, .inbox-row.peeked { background: color-mix(in srgb, var(--bg-active) 45%, transparent); }
-/* Row navigation focuses the whole square list surface, not a rounded title pill. */
+/* Row navigation follows the rounded message surface. */
 .inbox-row:has(.inbox-row-title-btn:focus-visible) {
   box-shadow: inset 0 0 0 1px var(--overlay-focus);
 }
@@ -142,19 +141,29 @@
 .inbox-perm-code { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--bg-inset); border: 1px solid var(--stroke); color: var(--fg-2); font: 12px/1.5 var(--mono); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .inbox-peek-drawer { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--stroke); }
-.inbox-peek-status-card { color: var(--fg-3); }
 .inbox-peek-status-label { display: flex; align-items: center; gap: 6px; width: fit-content; min-height: 28px; cursor: pointer; list-style: none; border-radius: 4px; }
 .inbox-peek-status-label::-webkit-details-marker { display: none; }
 .inbox-peek-status-label svg { width: 12px; height: 12px; transition: transform var(--t); }
-.inbox-peek-status-card[open] > summary svg { transform: rotate(180deg); }
+.inbox-sources[open] > summary svg { transform: rotate(180deg); }
 .inbox-peek-status-label:focus-visible { outline: 2px solid var(--overlay-focus); outline-offset: 2px; }
-.inbox-peek-status-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
-.inbox-peek-status-label, .inbox-peek-caption { font-size: 12px; font-weight: 400; color: var(--fg-3); }
-.inbox-peek-status-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-.inbox-context-chip { color: var(--fg-3); font-size: 11px; }
-.inbox-peek-status-text { margin: 0; font-size: 12px; line-height: 18px; color: var(--fg-2); overflow-wrap: anywhere; }
-.inbox-peek-status-text strong { font-weight: 500; }
-.inbox-peek-status-sub { color: var(--fg-3); }
+.inbox-context-chip { color: var(--fg-2); font-size: 12px; text-align: left; white-space: normal; }
+.inbox-summary-origin { display: block; margin-bottom: 3px; color: var(--inbox-muted); font-size: 10px; }
+.inbox-row.peeked .inbox-summary { display: block; overflow: visible; }
+.inbox-unresolved { display: block; margin-top: 4px; color: var(--fg-2); }
+.inbox-decision { color: var(--fg-2); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.inbox-suggestions { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+.inbox-suggestions .inbox-context-chip { padding: 4px 6px; border-color: var(--stroke-soft); }
+.inbox-suggestions .inbox-state-action { color: var(--fg-3); }
+.inbox-suggestions .inbox-delete-action { color: var(--red); border-color: color-mix(in srgb, var(--red) 18%, transparent); background: color-mix(in srgb, var(--red) 4%, transparent); }
+.inbox-suggestions .inbox-delete-action:hover:not(:disabled) { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, transparent); background: color-mix(in srgb, var(--red) 9%, transparent); }
+.inbox-source { display: block; width: 100%; padding: 4px 0; text-align: left; color: var(--fg-3); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.inbox-source:hover { color: var(--fg); }
+.inbox-source-notice { margin: 4px 0; color: var(--fg-3); font-size: 12px; }
+.inbox-peek-transcript [data-inbox-source] { background: var(--bg-hover); box-shadow: inset 2px 0 var(--overlay-focus); }
+.inbox-response-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; color: var(--fg-3); font-size: 12px; }
+.inbox-response-toggle svg { width: 12px; height: 12px; transform: rotate(-90deg); }
+.inbox-response-toggle[aria-expanded="true"] svg { transform: none; }
+.inbox-response-toggle:hover { color: var(--fg); }
 .inbox-peek-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .inbox-peek-head-left { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .inbox-peek-live-pill { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-3); font-size: 11px; }
@@ -210,7 +219,6 @@
   .inbox-row-body { flex-direction: column; gap: 8px; }
   .inbox-row-actions { align-self: flex-end; max-width: 100%; }
   .inbox-sec-note { max-width: 50%; text-align: right; }
-  .inbox-peek-status-top { align-items: flex-start; }
 }
 @media (max-width: 420px) {
   .inbox-mode-tabs { justify-content: space-between; gap: 8px; }
@@ -218,5 +226,20 @@
   .inbox-head-right { gap: 2px; }
   .inbox-project-pill { max-width: 88px; }
   .inbox-row { padding: 10px; }
-  .inbox-peek-status-chips { gap: 0; }
+}
+
+/* Keep the objective beside its disclosure; evidence stays below the result. */
+.inbox-mission-context { margin: 2px 0 12px; }
+.inbox-mission-context > summary { width: 100%; align-items: baseline; gap: 8px; }
+.inbox-context-line { color: var(--fg-2); font-size: 13px; line-height: 19px; min-width: 0; overflow-wrap: anywhere; }
+.inbox-mission-context > summary svg { flex: none; align-self: center; }
+.inbox-mission-context[open] > summary svg { transform: rotate(180deg); }
+.inbox-context-details { margin: 6px 0; color: var(--fg-3); font-size: 12px; line-height: 18px; }
+.inbox-sources { color: var(--inbox-muted); font-size: 11px; }
+
+.inbox-action-key {
+  display: inline-grid; place-items: center; flex: none;
+  min-width: 16px; height: 17px; padding: 0 3px;
+  border: 1px solid var(--stroke); border-radius: var(--radius-xs);
+  color: var(--fg-3); font: 10px/1 var(--mono);
 }

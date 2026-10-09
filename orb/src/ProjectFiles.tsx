@@ -150,6 +150,9 @@ function MachineBadge(p: { name?: string | null }) {
 
 
 export function LiveProjectsSection(p: {
+  /** Reuse the same confirmation and deletion pipeline from other views. */
+  deleteRequest?: string | null;
+  onDeleteRequestHandled?: () => void;
   activityMissions?: Mission[];
   /** Details from the open conversation, including restored/local sessions. */
   currentMission?: Mission;
@@ -633,6 +636,12 @@ export function LiveProjectsSection(p: {
   const [renameError, setRenameError] = createSignal<string | null>(null);
   const [renaming, setRenaming] = createSignal(false);
   const [actionError, setActionError] = createSignal<string | null>(null);
+  createEffect(on(() => p.deleteRequest, id => {
+    if (!id) return;
+    setActionError(null);
+    setDeleteTargets([id]);
+    p.onDeleteRequestHandled?.();
+  }));
   const rowTip = useTooltip<RowTipContent>(ROW_TIP_ID, tip => <><div class="row-tip-title">{tip.title}</div><For each={tip.meta}>{line => <div class="row-tip-meta">{line}</div>}</For></>);
   const currentConnection = (version: number) => isConnected() && connectionVersion() === version;
   const requests = createSidebarRequests();

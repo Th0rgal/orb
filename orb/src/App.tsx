@@ -1142,6 +1142,7 @@ export default function App() {
   const [collapsed, setCollapsed] = createStore<Record<string, boolean>>({});
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
   const [sbWidth, setSbWidth] = createSignal(220);
+  const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
   const [streamingId, setStreamingId] = createSignal<string | null>(null);
   const [newFolder, setNewFolder] = createSignal<{ project: string; path: string } | null>(null);
   const folderTags = (project: string | null | undefined) => newFolder()?.project === project && newFolder()?.path ? [`orb-folder:${newFolder()!.path}`] : [];
@@ -1315,6 +1316,7 @@ export default function App() {
         (id) => peekReadyTranscript(id)?.items,
         pendingMissionInteraction,
         currentMissionId(),
+        inboxConfig(),
       ).slice(0, 10);
       const cfg = inboxConfig();
       topUnread.forEach((item, idx) => {
@@ -1394,6 +1396,7 @@ export default function App() {
           (id) => peekReadyTranscript(id)?.items,
           pendingMissionInteraction,
           currentMissionId(),
+          inboxConfig(),
         )
       : 0;
   });
@@ -1909,6 +1912,8 @@ export default function App() {
                     rows[next].focus();
                   }}>
                   <LiveProjectsSection
+                    deleteRequest={deleteMissionRequest()}
+                    onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
                     activityMissions={missions()}
                     currentMission={openMission()?.id === currentMissionId() ? openMission() ?? undefined : undefined}
                     harnessChoices={harnessChoices()}
@@ -1921,6 +1926,7 @@ export default function App() {
                       const removed = new Set(ids.map(id => `m:${id}`));
                       batch(() => {
                         setMissions(rows => rows.filter(m => !idSet.has(m.id)));
+                        setCompletedMissions(rows => rows.filter(m => !idSet.has(m.id)));
                         setProjectMissions(prev => {
                           const next: Record<string, Mission[]> = {};
                           for (const [k, rows] of Object.entries(prev)) {
@@ -2274,6 +2280,7 @@ export default function App() {
         <Switch>
             <Match when={selected() === "inbox"}>
               <InboxPage
+                onDeleteMission={setDeleteMissionRequest}
                 missions={inboxMissions()}
                 projects={liveProjects()}
                 loading={missionsLoading()}

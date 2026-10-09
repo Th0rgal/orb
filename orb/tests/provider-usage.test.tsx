@@ -75,3 +75,15 @@ it("shows a disabled account as disabled whatever its quota", () => {
   expect(effectiveProviderStatus({ ...account("ben"), enabled: false }, usage(100))).toBe("disabled");
   expect(effectiveProviderStatus({ ...account("ben"), enabled: false }, { ...usage(10), status: "needs_reauth" })).toBe("disabled");
 });
+
+it("identifies the Mistral monthly allowance without fabricating an API percentage", async () => {
+  setConnection('http://core.test', 'test-token');
+  const mistral = {...account('Mistral Vibe'),provider_type:'mistral',has_api_key:true,has_oauth:false};
+  vi.stubGlobal('fetch', vi.fn(async (url:string) => new Response(JSON.stringify(url.endsWith('/providers') ? [mistral] : {}))));
+  const ui = render(() => <Providers />);
+  await waitFor(() => expect(ui.getByRole('button', {name:'View Mistral monthly usage'})).toBeTruthy());
+  expect(ui.getByText('Mistral Vibe').closest('section')?.querySelector('h3')?.textContent).toBe('Subscriptions');
+  expect(ui.queryByRole('progressbar')).toBeNull();
+  expect(usageWindows({provider_type:'mistral'})).toEqual([]);
+  expect(effectiveProviderStatus(mistral, {provider_type:'mistral'})).toBe('connected');
+});

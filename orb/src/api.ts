@@ -178,6 +178,8 @@ export interface AIProvider {
   label?: string | null;
   enabled: boolean;
   uses_oauth: boolean;
+  has_api_key?: boolean;
+  has_oauth?: boolean;
   /** "cli_proxy" when CLIProxyAPI owns the OAuth credential (reconnect via proxy login). */
   credential_owner?: "cli_proxy" | "sandboxed_sh";
   account_email?: string | null;
@@ -377,8 +379,8 @@ export async function setProviderEnabled(id: string, enabled: boolean): Promise<
   });
 }
 
-export async function listProviders(): Promise<AIProvider[]> {
-  const data = await api<AIProvider[] | { providers?: AIProvider[] }>("/api/ai/providers");
+export async function listProviders(signal?: AbortSignal): Promise<AIProvider[]> {
+  const data = await api<AIProvider[] | { providers?: AIProvider[] }>("/api/ai/providers", signal ? { signal } : undefined);
   if (Array.isArray(data)) return data;
   return Array.isArray(data.providers) ? data.providers : [];
 }
