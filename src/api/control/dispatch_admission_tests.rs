@@ -85,6 +85,13 @@ impl Harness {
         config.automations_enabled = enabled;
         config.max_parallel_missions = max_parallel;
         config.auth.jwt_secret = Some("mcp-fixture-signing-key".into());
+        if std::env::var_os(VIBE_CONTROL_FIXTURE_CHILD).is_some() {
+            // Only these subprocess-isolated dispatch tests exercise Core's
+            // real loopback MCP bootstrap. Its env and AppState must agree.
+            config.dev_mode = false;
+            config.auth.dashboard_password = Some("unused-fixture-password".into());
+            std::env::set_var("PORT", config.port.to_string());
+        }
         config.remote_nodes.enabled = !nodes.is_empty();
         config.remote_nodes.nodes = nodes;
         let root_agent: AgentRef = Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
@@ -221,10 +228,21 @@ impl Harness {
             )
             .layer(Extension(user.clone()))
             .with_state(state.clone());
+        let mcp_bootstrap = axum::Router::new()
+            .route(
+                "/api/mcp/session",
+                axum::routing::post(crate::control_mcp::gateway::session),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::api::auth::require_auth,
+            ))
+            .with_state(state.clone());
         let app = axum::Router::new()
             .route("/api/health", axum::routing::get(|| async { "ready" }))
             .nest("/api/control", app.clone())
-            .merge(app);
+            .merge(app)
+            .merge(mcp_bootstrap);
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -11876,5 +11894,285 @@ async fn send_queued_now_delivers_live_midturn_without_disturbing_other_queued_m
     assert_eq!(
         rows_after.iter().map(|r| r.id).collect::<Vec<_>>(),
         vec![first_id]
+    );
+}
+
+const VIBE_CONTROL_FIXTURE_CHILD: &str = "VIBE_CONTROL_DISPATCH_TEST_CHILD";
+
+fn isolated_vibe_control_test(test_name: &str) -> bool {
+    if std::env::var(VIBE_CONTROL_FIXTURE_CHILD).ok().as_deref() == Some(test_name) {
+        return false;
+    }
+    // bootstrap() reads JWT_SECRET and PORT from the process environment.
+    // Run exactly one test per child so each fixture can use its own listener
+    // without changing credentials or ports beneath parallel test tasks.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("api::control::dispatch_admission_tests::{test_name}"),
+            "--nocapture",
+        ])
+        .env(VIBE_CONTROL_FIXTURE_CHILD, test_name)
+        .env("JWT_SECRET", "mcp-fixture-signing-key")
+        .env_remove("PORT")
+        .env_remove("SANDBOXED_PUBLIC_URL")
+        .env_remove("PUBLIC_BASE_URL")
+        .env_remove("HERMES_PROJECTS_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated Vibe control regression failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
+// Capture only after the production control dispatcher, workspace preparation,
+// model selection and native prompt framing have reached the Vibe runner.
+// Mission-scoped registration keeps unrelated concurrent tests on the real path.
+type VibeControlCapture = Arc<std::sync::Mutex<Vec<Value>>>;
+static VIBE_CONTROL_FIXTURES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, VibeControlCapture>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn vibe_control_fixture(
+    ctx: &crate::api::runners::TurnContext<'_>,
+) -> Option<crate::agents::AgentResult> {
+    let capture = VIBE_CONTROL_FIXTURES
+        .lock()
+        .unwrap()
+        .get(&ctx.mission_id)
+        .cloned()?;
+    let current_message = match &ctx.extras {
+        crate::api::runners::TurnExtras::Vibe { current_message } => *current_message,
+        _ => panic!("Vibe control dispatch must retain its raw current request"),
+    };
+    capture.lock().unwrap().push(json!({
+        "message": ctx.message,
+        "current_message": current_message,
+        "session_id": ctx.session_id,
+        "model": ctx.model,
+        "agent": ctx.agent,
+        "is_continuation": ctx.is_continuation,
+        "plan": crate::vibe::plan_mode(ctx.agent, current_message),
+    }));
+    Some(crate::agents::AgentResult::success(
+        "Vibe runner reached",
+        0,
+    ))
+}
+
+struct VibeControlRegistration(Uuid);
+impl Drop for VibeControlRegistration {
+    fn drop(&mut self) {
+        VIBE_CONTROL_FIXTURES.lock().unwrap().remove(&self.0);
+    }
+}
+
+async fn captured_vibe_control_turn(
+    h: &Harness,
+    history: Vec<(String, String)>,
+    message: &str,
+    session_id: Option<&str>,
+    agent: &str,
+    model: Option<&str>,
+    force_session_resume: bool,
+) -> Value {
+    let mission = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Vibe dispatch"),
+            None,
+            Some(agent),
+            model,
+            None,
+            Some("vibe"),
+            None,
+        )
+        .await
+        .unwrap();
+    let capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+    VIBE_CONTROL_FIXTURES
+        .lock()
+        .unwrap()
+        .insert(mission.id, capture.clone());
+    let _registration = VibeControlRegistration(mission.id);
+    let mut config = h.state.config.clone();
+    config.default_model = Some("anthropic/claude-not-a-vibe-model".into());
+    let result = Box::pin(super::run_single_control_turn(
+        h.control.mission_store.clone(),
+        config,
+        h.state.root_agent.clone(),
+        h.state.mcp.clone(),
+        h.state.workspaces.clone(),
+        h.state.library.clone(),
+        h.control.events_tx.clone(),
+        h.control.tool_hub.clone(),
+        h.control.status.clone(),
+        CancellationToken::new(),
+        history,
+        message.into(),
+        None,
+        h.control.current_tree.clone(),
+        h.control.progress.clone(),
+        Some(mission.id),
+        Some(mission.workspace_id),
+        Some("vibe".into()),
+        model.map(str::to_owned),
+        None,
+        false,
+        Some(agent.into()),
+        session_id.map(str::to_owned),
+        force_session_resume,
+        None,
+        Some(h.user.clone()),
+        false,
+    ))
+    .await;
+    assert!(result.success, "Vibe control dispatch failed: {result:?}");
+    let grants: i64 = h
+        .state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM mcp_sessions_v1 WHERE mission_id=?1 AND owner=?2",
+            rusqlite::params![mission.id.to_string(), h.user.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        grants > 0,
+        "workspace preparation must obtain a real scoped MCP grant"
+    );
+    let captures = capture.lock().unwrap();
+    assert_eq!(captures.len(), 1);
+    captures[0].clone()
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_fresh_preserves_plan_and_avoids_duplicate_current_request() {
+    if isolated_vibe_control_test(
+        "vibe_control_dispatch_fresh_preserves_plan_and_avoids_duplicate_current_request",
+    ) {
+        return;
+    }
+    let h = Harness::new().await;
+    let message = "/plan VIBE_CONTROL_FRESH";
+    let captured = captured_vibe_control_turn(
+        &h,
+        vec![("user".into(), message.into())],
+        message,
+        None,
+        "build",
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(captured["current_message"], message);
+    assert_eq!(
+        captured["message"]
+            .as_str()
+            .unwrap()
+            .matches("VIBE_CONTROL_FRESH")
+            .count(),
+        1
+    );
+    assert_eq!(captured["model"], "mistral/mistral-vibe-cli-latest");
+    assert_eq!(captured["session_id"], Value::Null);
+    assert_eq!(captured["is_continuation"], false);
+    assert_eq!(captured["plan"], true);
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_history() {
+    if isolated_vibe_control_test(
+        "vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_history",
+    ) {
+        return;
+    }
+    let h = Harness::new().await;
+    let captured = captured_vibe_control_turn(
+        &h,
+        vec![],
+        "Continue the plan",
+        Some("native-vibe-session"),
+        "plan",
+        Some("mistral/devstral-latest"),
+        true,
+    )
+    .await;
+    assert_eq!(captured["message"], "Continue the plan");
+    assert_eq!(captured["current_message"], "Continue the plan");
+    assert_eq!(captured["model"], "mistral/devstral-latest");
+    assert_eq!(captured["session_id"], "native-vibe-session");
+    assert_eq!(captured["is_continuation"], true);
+    assert_eq!(captured["plan"], true);
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_resume_uses_current_request_for_plan_mode() {
+    if isolated_vibe_control_test("vibe_control_dispatch_resume_uses_current_request_for_plan_mode")
+    {
+        return;
+    }
+    let h = Harness::new().await;
+    for (message, expected_plan) in [
+        ("/planet VIBE_CONTROL_BUILD", false),
+        ("/plan VIBE_CONTROL_PLAN", true),
+    ] {
+        let captured = captured_vibe_control_turn(
+            &h,
+            vec![
+                ("user".into(), "/plan OLD_REQUEST".into()),
+                ("assistant".into(), "Old plan".into()),
+                ("user".into(), message.into()),
+            ],
+            message,
+            Some("native-vibe-session"),
+            "build",
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(captured["message"], message);
+        assert_eq!(captured["current_message"], message);
+        assert_eq!(captured["session_id"], "native-vibe-session");
+        assert_eq!(captured["is_continuation"], true);
+        assert_eq!(captured["plan"], expected_plan);
+    }
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_explicit_resume_keeps_identical_prior_request() {
+    if isolated_vibe_control_test(
+        "vibe_control_dispatch_explicit_resume_keeps_identical_prior_request",
+    ) {
+        return;
+    }
+    let h = Harness::new().await;
+    let message = "VIBE_CONTROL_REPEAT";
+    let captured = captured_vibe_control_turn(
+        &h,
+        vec![("user".into(), message.into())],
+        message,
+        None,
+        "build",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(captured["current_message"], message);
+    assert_eq!(
+        captured["message"]
+            .as_str()
+            .unwrap()
+            .matches(message)
+            .count(),
+        2
     );
 }
