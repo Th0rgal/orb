@@ -172,7 +172,7 @@ async function refreshNodeAntigravityModels(machine: string) {
 }
 const harnessChoices = (machine = "core"): HarnessChoice[] => {
   const models = machine === "local" ? (localInstalled().find(row => row.id === "antigravity")?.models ?? []) : (nodeAntigravityModels()[`${connectionVersion()}:${machine}`] ?? []);
-  return destinationHarnessChoices(remoteHarnessChoices(), machine, models);
+  return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed));
 };
 const [harnessPick, setHarnessPickRaw] = createSignal<HarnessPick | null>(loadPick());
 const setHarnessPick = (p: HarnessPick) => {

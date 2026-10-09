@@ -73,7 +73,10 @@ uv tool install --python 3.12 mistral-vibe==2.19.1
 vibe-acp --version
 ```
 
-Python 3 and `vibe-acp` must be on that execution user's PATH. Installation on
+Python 3.9+ and `vibe-acp` must be available to that execution user. Orb also
+resolves the interpreter from Vibe's tool environment (including uv on Windows),
+then tries the platform's Python launchers. Local Vibe offers its native default
+model even when Core has no Mistral provider configured. Installation on
 the Core host does not install it inside an nspawn workspace. Orb Settings →
 Local agents accepts a `vibe-acp` path override. A missing CLI fails preflight;
 it never silently switches to OpenCode. The same version is used for contract

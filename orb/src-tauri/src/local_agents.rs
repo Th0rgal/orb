@@ -173,13 +173,19 @@ fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
                 .filter(|p| p.is_file())
                 .or_else(|| crate::agent_software::resolve(bin));
             let version = path.as_ref().and_then(|p| version_of(p));
+            let interpreter_error = if *id == "vibe" {
+                path.as_ref()
+                    .and_then(|p| vibe_python(&p.to_string_lossy()).err())
+            } else {
+                None
+            };
             ScanRow {
                 models: vec![],
-                auth_error: None,
+                auth_error: interpreter_error.clone(),
                 id: (*id).to_string(),
                 bin: (*bin).to_string(),
                 // A slow version probe must not hide an installed CLI.
-                installed: path.is_some(),
+                installed: path.is_some() && interpreter_error.is_none(),
                 plan_supported: version
                     .as_deref()
                     .is_some_and(|v| native_plan_supported(id, v)),
@@ -1148,7 +1154,9 @@ fn spawn_vibe(
         .strip_prefix("/plan")
         .filter(|s| s.is_empty() || s.starts_with(char::is_whitespace));
     let prompt = plan.map(str::trim).unwrap_or(&request.prompt);
-    let mut command = harness_command("python3");
+    let (python, prefix) = vibe_python(&request.bin)?;
+    let mut command = harness_command(&python);
+    command.args(prefix);
     command
         .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(&request.cwd)
@@ -2780,8 +2788,12 @@ fn native_plan_supported(id: &str, version: &str) -> bool {
 }
 
 fn version_of(path: &Path) -> Option<String> {
-    let mut child = Command::new(path)
-        .arg("--version")
+    command_output(Command::new(path).arg("--version"))
+}
+
+fn command_output(command: &mut Command) -> Option<String> {
+    let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2815,6 +2827,65 @@ fn version_of(path: &Path) -> Option<String> {
             Err(_) => return None,
         }
     }
+}
+
+/// Prefer Vibe's own interpreter, including uv's Windows tool environment.
+/// The bridge needs Python 3.9+; a visible CLI alone does not imply python3 is on PATH.
+fn vibe_python(cli: &str) -> Result<(String, Vec<String>), String> {
+    let mut candidates: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut add_directory = |directory: &Path| {
+        for name in ["python.exe", "python3", "python"] {
+            candidates.push((directory.join(name), vec![]));
+        }
+    };
+    if let Ok(path) = Path::new(cli).canonicalize() {
+        if let Some(directory) = path.parent() {
+            add_directory(directory);
+        }
+    }
+    let tool_root = std::env::var_os("UV_TOOL_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let uv = crate::agent_software::resolve("uv")?;
+            command_output(Command::new(uv).args(["tool", "dir"])).map(PathBuf::from)
+        });
+    if let Some(root) = tool_root {
+        add_directory(&root.join("mistral-vibe/Scripts"));
+        add_directory(&root.join("mistral-vibe/bin"));
+    }
+    for name in ["python3", "python", "py"] {
+        if let Some(path) = crate::agent_software::resolve(name) {
+            candidates.push((
+                path,
+                if name == "py" {
+                    vec!["-3".into()]
+                } else {
+                    vec![]
+                },
+            ));
+        }
+    }
+    for (path, prefix) in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let version = command_output(Command::new(&path).args(&prefix).arg("--version"));
+        let supported = version
+            .as_deref()
+            .and_then(|v| v.strip_prefix("Python "))
+            .and_then(|v| {
+                let mut parts = v.split('.');
+                Some((
+                    parts.next()?.parse::<u32>().ok()?,
+                    parts.next()?.parse::<u32>().ok()?,
+                ))
+            })
+            .is_some_and(|version| version >= (3, 9));
+        if supported {
+            return Ok((path.to_string_lossy().into_owned(), prefix));
+        }
+    }
+    Err("Vibe requires Python 3.9+; install Python or uv's Mistral Vibe tool environment".into())
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
@@ -2874,6 +2945,23 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn vibe_uses_the_tool_interpreter_even_without_python3_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let scripts = dir.path().join("Scripts");
+        std::fs::create_dir(&scripts).unwrap();
+        let cli = scripts.join("vibe-acp.exe");
+        std::fs::write(&cli, "stub").unwrap();
+        let python = scripts.join("python.exe");
+        std::fs::write(&python, "#!/bin/sh\necho 'Python 3.12.0'\n").unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (selected, prefix) = vibe_python(cli.to_str().unwrap()).unwrap();
+        assert_eq!(PathBuf::from(selected), python.canonicalize().unwrap());
+        assert!(prefix.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn retired_gemini_cannot_be_launched_from_saved_requests() {

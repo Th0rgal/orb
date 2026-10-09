@@ -187,8 +187,8 @@ export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
     try {
       const rows = await invoke("local_agents_scan", { request: { overrides: paths } }) as ScanRow[];
       // Older desktop builds tied `installed` to the version probe succeeding.
-      // A resolved path is enough to launch; missing version only limits capabilities.
-      setInstalled(Array.isArray(rows) ? rows.map(row => ({...row, installed: !!row.path})) : []);
+      // Vibe also checks its bridge interpreter; retain that native preflight result.
+      setInstalled(Array.isArray(rows) ? rows.map(row => ({...row, installed: !!row.path && (row.id !== "vibe" || row.installed)})) : []);
       scannedAt = Date.now(); scannedPaths = key;
       refreshLocalAntigravityModels();
       return installed();

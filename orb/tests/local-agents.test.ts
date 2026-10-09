@@ -164,12 +164,13 @@ it('waits for this window’s recovery before launching instead of racing its na
 });
 
 
-it("keeps a discovered CLI available when an older native version probe fails", async () => {
+it("keeps a discovered CLI available while respecting Vibe's interpreter preflight", async () => {
   const {refreshLocalAgents, installedIds} = await import("../src/localAgents");
   const previous = (window as any).__TAURI__;
   (window as any).__TAURI__ = {core:{invoke:vi.fn().mockResolvedValue([
     {id:"opencode",bin:"opencode",path:"/opt/homebrew/bin/opencode",installed:false,version:null},
     {id:"grok",bin:"grok",path:null,installed:false,version:null},
+    {id:"vibe",bin:"vibe-acp",path:"/tools/vibe-acp",installed:false,auth_error:"Python is unavailable"},
   ])}};
   try {
     await refreshLocalAgents();

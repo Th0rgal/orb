@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { destinationHarnessChoices } from "../src/harness-models";
 const core = [{ backend: {id:"antigravity",name:"Antigravity"}, models:[{value:"core-only",label:"Core model"}] }];
 describe("destination account models", () => {
+  it("offers installed local Vibe without a Core Mistral account or catalog entry", () => {
+    const choices = destinationHarnessChoices([], "local", [], true);
+    expect(choices.map(choice => choice.backend.id)).toEqual(["vibe"]);
+    expect(choices[0].models[0].value).toBe("mistral/mistral-vibe-cli-latest");
+    expect(destinationHarnessChoices([], "core", [], true)).toEqual([]);
+    expect(destinationHarnessChoices([], "local", [], false)).toEqual([]);
+    expect(destinationHarnessChoices(choices, "local", [], true)).toEqual(choices);
+  });
   it("does not substitute the Core account for a local or node account", () => {
     for (const machine of ["local", "old-agent", "core"]) {
       expect(destinationHarnessChoices(core, machine, [["agy-demo","Gemini 4 Argon"]])[0].models.map(m=>m.value)).toEqual(["agy-demo"]);
