@@ -109,3 +109,41 @@ test("Inbox keyboard filters, focus and a draft survive closing the preview", as
   await expect(draft).toHaveValue("Keep this unfinished follow-up.");
   await expect(draft).toBeFocused();
 });
+
+
+test("Inbox rows have one keyboard entry and restore focus after replying", async ({ page }) => {
+  await openInbox(page);
+  const title = (id: string) => page.locator(`[data-inbox-id="${id}"] .inbox-row-title-btn`);
+  await page.getByRole("tab", { name: /^Unread/ }).focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(title("failed")).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(title("design")).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(title("failed")).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(title("done")).toBeFocused();
+  await expect(page.locator('.inbox-row-title-btn[tabindex="0"]')).toHaveCount(1);
+  await expect(page.locator('[data-inbox-id="design"] .inbox-act-btn[tabindex="0"]')).toHaveCount(0);
+  await page.keyboard.press("Space");
+  const row = page.locator('[data-inbox-id="done"]');
+  await expect(row.locator(".inbox-peek-drawer")).toBeVisible();
+  await row.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(row.locator("details")).toHaveAttribute("open", "");
+  await expect(row.locator(".inbox-task-text")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(title("done")).toBeFocused();
+  await page.keyboard.press("r");
+  const draft = row.locator("textarea");
+  await expect(draft).toBeFocused();
+  await draft.fill("A reply\nwith two lines");
+  await page.keyboard.press("ArrowUp");
+  await expect(draft).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(title("done")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(row.getByRole("button", { name: /^Peek and reply/ })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(draft).toHaveValue("A reply\nwith two lines");
+});

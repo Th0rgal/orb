@@ -5,17 +5,23 @@ reuses the overlay theme tokens, and keeps the existing triage operations. The
 inline preview uses the shared transcript and composer. An early-close draft
 race found during validation is covered by regression tests.
 
+The refinement removes redundant goal badges, counts and nested card borders;
+keeps the list to title and result; and puts optional request/goal context behind
+a native disclosure. Rows now have roving Tab entry, actual focus movement with
+arrows/J/K and Home/End, and focus restoration after closing Peek.
+
 ## Automated checks
 
 - TypeScript (`tsc --noEmit`) and Vite production build: passed.
-- Inbox Playwright suite, Chromium and WebKit: 14 passed, 2 intentionally skipped
+- Inbox Playwright suite, Chromium and WebKit: 16 passed, 2 intentionally skipped
   opt-in production tests. Covers triage, preview, archive/undo, reply, scrolling,
-  keyboard filters, project filters, focus, draft restoration, long content,
+  keyboard filters, project filters, row focus, native disclosure keys, draft restoration, long content,
   light/dark themes and 390px layouts.
-- Overlay Playwright regression suite, Chromium and WebKit: 16 passed.
-- Skills settings browser regression: 1 passed.
-- Full Vitest suite: 949 passed, 3 skipped, 3 failed in 2 files. The failures are
-  the existing baseline failures below; the 3 new draft tests pass.
+- Targeted Vitest (Inbox model, mission cache and composer drafts): 26 passed.
+- The preceding `7eecdf635` validation also ran the overlay browser suite
+  (16 passed), Skills settings browser check (1 passed), and full Vitest suite
+  (949 passed, 3 skipped, 3 failed in 2 files). These broader suites were not
+  repeated for this Inbox-only refinement. The baseline failures are below.
 - `git diff --check`: passed.
 
 The full unit suite is not green. Its unchanged failures are:
@@ -52,8 +58,13 @@ expansion and inline preview. It does not send messages, retry agents or mark
 conversations done. Browser fixtures exercise those mutation paths against
 mocked APIs.
 
-The final installed build was checked with live data: rows painted correctly,
-the project filter and Peek worked, and an initially empty composer preserved
-a verification draft after Escape and reopening. The verification text was
-cleared afterwards. The app was left on Unread / All projects with no open
-preview, and the existing background context worker was retained.
+The latest refinement was checked with live data: the compact list painted,
+Down from the filter focused the row title, Space opened Peek with context
+collapsed, R placed the caret in the reply composer, and Escape restored title
+focus. No draft was edited or message sent. Only one actionable live row was
+available; cross-row navigation was verified in the browser fixtures.
+
+The preceding installed build also verified the project filter and draft
+restoration after Escape/reopening, then cleared the verification text. The
+latest app was left on Unread with no open preview, and the existing background
+context worker was retained.

@@ -1,31 +1,32 @@
 {
-  "created_at": "2026-10-09T09:11:39.338822+00:00",
-  "base_commit": "2bd15737f8c0934b82215e87a8d4727422518808",
+  "created_at": "2026-10-09T09:43:48.306412+00:00",
+  "base_commit": "7eecdf6353526721e019cd51e55be7395e951a2d",
   "branch": "feat/orb-overlay-system",
   "source_path": "/Users/thomas/work/paloma/sandboxed_sh-overlay-system",
-  "frontend_source_sha256": "4e1e60409a2920f4ad880cef5b33afb59238ab503fb51176d2a692b63e2ae125",
-  "dist_index_sha256": "4461176ee6f0648ab69a1e3687ccfd79865318632248d3d4309a178447224c22",
-  "raw_build_sha256": "0940f356132db84b37f8e633ed25b890249a1565999023e1d4f23ef1eee9b8cc",
+  "frontend_source_sha256": "f34e16339bb44ec6181004fda08ee6fec7c01b030144f3639201040b6f4dc6a4",
+  "dist_index_sha256": "b4bbf3b7504e8e2e7c511a9304dc3b2127ca1f1a92a5c4c0e414723c03808444",
+  "raw_build_sha256": "326acf17077afa002d39261eb2435d517b04a9cbacf1ce2d87750a1e7407893a",
   "copy_verified_before_signing": true,
   "installed_app": "/Applications/Orb Overlays.app",
   "bundle_identifier": "md.thomas.orb.overlays",
-  "signed_executable_sha256": "08d54d578cc330af0db1b1672941790648e851fd135bcdb85d53a1d3f3d8a63b",
+  "signed_executable_sha256": "f9426e7acfe7580fbfcb7aa3accbc81deaa2cb3f55eb1f7ff54ff3bd12c60462",
   "sidecar_sha256": "d0608e79b347f296f27be9130f8a97f6b8aae9b2f8232b3939c7e72579cba03b",
-  "main_app_unchanged_sha256": "d0f760fa182123993b743cfe3a8159abaff6331475d14d5b4eed2d4f3ebc90b3",
+  "main_app_unchanged_sha256": "bcfa350c02f64c6f5093923777e76d370f3fc9d628cfa0c6f44c736cb7b64a14",
   "signature": "ad-hoc; codesign --verify --deep --strict passed",
   "backup_path": "/tmp/Orb Overlays-before-inbox.app",
-  "previous_candidate_backup": "/tmp/Orb Overlays-before-inbox-draft-fix.app",
+  "previous_candidate_backup": "/tmp/Orb Overlays-before-inbox-refinement.app",
   "native_verification": {
-    "verified_at": "2026-10-09T09:12:29.296930+00:00",
-    "foreground_pid": 56053,
+    "verified_at": "2026-10-09T09:44:55.769505+00:00",
+    "foreground_pid": 65720,
     "checks": [
-      "Inbox list painted with live data",
-      "Project filter toggled and restored",
-      "Peek opened and closed",
-      "Initially empty composer draft survived Escape and reopening",
-      "Verification draft cleared; no message sent",
-      "Unread and All projects restored"
+      "Compact Inbox rendered with live data",
+      "Down from filter focused the row title",
+      "Space opened the collapsed-context preview",
+      "R focused the reply composer (visible caret)",
+      "Escape returned focus to the row title",
+      "No messages sent or drafts edited; preview left closed"
     ],
+    "evidence_limit": "One live actionable row; cross-row movement verified in Chromium and WebKit fixtures.",
     "preserved_context_worker_pid": 42889
   }
 }

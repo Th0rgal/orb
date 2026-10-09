@@ -7,6 +7,12 @@ and reuses the surface, control radius, focus and theme tokens from the
 and a quiet filled background for the current project. Status colors describe
 agent state; routine actions remain neutral.
 
+Keep the collapsed list to the title and result. The goal, original request and
+reply shortcuts belong in the native `Reply context` disclosure inside Peek.
+Avoid duplicate total counts, goal badges, permanent shortcut labels and nested
+card borders. The compact settings icon retains the current AI model in its
+accessible label and tooltip.
+
 Keep the triage model and operations in `Inbox.tsx` / `inboxModel.ts` unchanged
 when adjusting presentation. In particular, viewing or replying must not drop
 a row from under the user, running agents remain behind the working toggle,
@@ -23,6 +29,13 @@ keyboard triage. The filter tabs use Left/Right, Home/End and roving Tab focus;
 project filters expose their pressed state. Peek remains an inline region,
 uses the shared Transcript and Composer, and delegates child overlays to the
 shared layer manager.
+
+The active row title is the list's single Tab entry; its actions follow it.
+Down/Up or J/K move actual focus between rows, Home/End reach the first/last
+row, Space previews, R replies and Enter opens the thread. Down from a filter
+enters the first row. Closing Peek returns focus to the row without scrolling;
+marking it done advances focus. Leave native disclosure keys, text selection,
+textarea movement, IME and child overlays alone.
 
 Do not add opacity entrance animations to Inbox rows. They must paint even
 when opened in a background macOS WebKit window. Long summaries are bounded

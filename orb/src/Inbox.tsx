@@ -625,6 +625,7 @@ export function InboxPage(p: {
   };
 
   const closeUnifiedDrawer = (id: string) => {
+    const restoreFocus = document.activeElement?.closest(`[data-inbox-id="${CSS.escape(id)}"]`);
     setPeekedIds((prev) => {
       if (!prev.has(id)) return prev;
       const next = new Set(prev);
@@ -634,6 +635,7 @@ export function InboxPage(p: {
     if (replyingId() === id) {
       setReplyingId(null);
     }
+    if (restoreFocus) focusRow(id, false);
   };
 
   const togglePeek = (item: InboxItem) => {
@@ -760,6 +762,7 @@ export function InboxPage(p: {
     });
     closeUnifiedDrawer(item.id);
     setFocusedId(nextFocus);
+    if (nextFocus) focusRow(nextFocus);
     if (undoTimer) clearTimeout(undoTimer);
     setUndoItem({ id: item.id, title: item.headline, mission: item.mission, wasUnread });
     undoTimer = setTimeout(() => setUndoItem(null), 6000);
@@ -967,10 +970,13 @@ export function InboxPage(p: {
     }
   };
 
-  const scrollFocusedIntoView = (id: string) => {
+  const focusRow = (id: string, scroll = true) => {
+    setFocusedId(id);
     queueMicrotask(() => {
-      const el = listContainerRef?.querySelector<HTMLElement>(`[data-inbox-id="${CSS.escape(id)}"]`);
-      el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      const row = listContainerRef?.querySelector<HTMLElement>(`[data-inbox-id="${CSS.escape(id)}"]`);
+      // Move native focus as well as the highlight so the next Tab stays in this row.
+      row?.querySelector<HTMLButtonElement>(".inbox-row-title-btn")?.focus({ preventScroll: true });
+      if (scroll) row?.scrollIntoView({ block: "nearest" });
     });
   };
 
@@ -978,7 +984,7 @@ export function InboxPage(p: {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing || hasOverlay()) return;
       const target = e.target as HTMLElement | null;
-      if (target && target.matches("input, textarea, select, [contenteditable]")) return;
+      if (target?.closest("input, textarea, select, [contenteditable]")) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
       const items = actionableItems();
@@ -986,31 +992,31 @@ export function InboxPage(p: {
       const currentIdx = items.findIndex((i) => i.id === currentId);
       const currentItem = currentIdx >= 0 ? items[currentIdx] : items[0];
 
-      if (e.key === "ArrowDown" || e.key === "j") {
-        if (!items.length) return;
+      const inRow = !!target?.closest(".inbox-row");
+      const inNavigation = !!target?.closest(".inbox-mode-tabs, .inbox-filters");
+      if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "j" || e.key === "k") {
+        if (!items.length || (!inRow && !inNavigation && target?.closest("button, summary"))) return;
         e.preventDefault();
-        const next = items[(currentIdx + 1) % items.length];
-        setFocusedId(next.id);
-        scrollFocusedIntoView(next.id);
+        const forward = e.key === "ArrowDown" || e.key === "j";
+        const index = inNavigation ? (forward ? 0 : items.length - 1)
+          : (currentIdx + (forward ? 1 : items.length - 1)) % items.length;
+        focusRow(items[Math.max(0, index)].id);
         return;
       }
-      if (e.key === "ArrowUp" || e.key === "k") {
-        if (!items.length) return;
+      if (inRow && (e.key === "Home" || e.key === "End")) {
         e.preventDefault();
-        const prev = items[(currentIdx - 1 + items.length) % items.length];
-        setFocusedId(prev.id);
-        scrollFocusedIntoView(prev.id);
+        focusRow(items[e.key === "Home" ? 0 : items.length - 1].id);
         return;
       }
       if (e.key === "Enter" && currentItem) {
-        if (target?.closest("button:not(.inbox-row-main):not(.inbox-row-title-btn)")) return;
+        if (target?.closest("button:not(.inbox-row-main):not(.inbox-row-title-btn), summary, a[href]")) return;
         e.preventDefault();
         markItemAndChildrenRead(currentItem);
         p.onOpenMission(currentItem.id);
         return;
       }
       if (e.key === " " && currentItem) {
-        if (target?.closest("button:not(.inbox-row-main):not(.inbox-row-title-btn)")) return;
+        if (target?.closest("button:not(.inbox-row-main):not(.inbox-row-title-btn), summary, a[href]")) return;
         e.preventDefault();
         togglePeek(currentItem);
         return;
@@ -1298,6 +1304,8 @@ export function InboxPage(p: {
                     <button
                       type="button"
                       class="inbox-row-title-btn"
+                      tabIndex={isFocused() ? 0 : -1}
+                      aria-keyshortcuts="ArrowDown ArrowUp Home End Space r"
                       title={currentItem().mission.title || effectiveHeadline()}
                       onClick={() => {
                         const it = currentItem();
@@ -1314,12 +1322,6 @@ export function InboxPage(p: {
                         <span class="inbox-project-name">{currentItem().projectTitle}</span>
                       </span>
                       <span class="inbox-sep" aria-hidden="true">·</span>
-                      <Show when={currentItem().isGoal}>
-                        <span class="goal-tag small" aria-hidden="true">
-                          <Ic.TargetIcon size={10} />
-                          <span class="goal-tag-label">Goal</span>
-                        </span>
-                      </Show>
                       <span class="inbox-headline">{effectiveHeadline()}</span>
                       <Show when={currentItem().badge !== "Completed"}>
                         <span class={`inbox-badge ${currentItem().tone}`}>{currentItem().badge}</span>
@@ -1341,6 +1343,7 @@ export function InboxPage(p: {
                           <button
                             type="button"
                             class="inbox-act-btn retry"
+                            tabIndex={isFocused() ? 0 : -1}
                             disabled={isBusy()}
                             title="Retry / resume mission (⇧R)"
                             aria-label={`Retry ${effectiveHeadline()}`}
@@ -1357,6 +1360,7 @@ export function InboxPage(p: {
                         <button
                           type="button"
                           class={`inbox-act-btn ${isPeeked() ? "on" : ""}`}
+                          tabIndex={isFocused() ? 0 : -1}
                           disabled={isBusy()}
                           title={isPeeked() ? "Close peek (Esc or Space)" : "Peek conversation & reply inline (Space)"}
                           aria-label={`Peek and reply to ${effectiveHeadline()}`}
@@ -1377,6 +1381,7 @@ export function InboxPage(p: {
                         <button
                           type="button"
                           class="inbox-act-btn done"
+                          tabIndex={isFocused() ? 0 : -1}
                           disabled={isBusy()}
                           title="Archive & mark done (E)"
                           aria-label={`Mark ${effectiveHeadline()} done`}
@@ -1396,6 +1401,7 @@ export function InboxPage(p: {
                   <button
                     type="button"
                     class="inbox-row-main"
+                    tabIndex={-1}
                     onClick={() => {
                       const it = currentItem();
                       markItemAndChildrenRead(it);
@@ -1403,18 +1409,6 @@ export function InboxPage(p: {
                     }}
                     aria-label={`${currentItem().unread ? "Unread. " : ""}${currentItem().projectTitle}: ${effectiveHeadline()}. ${currentItem().badge}. ${outcomeLine()}`}
                   >
-                    <Show when={goalContextLine()}>
-                      <div class="inbox-goal-row">
-                        <span class="inbox-digest-label">Objective</span>
-                        <span class="inbox-goal-text">{goalContextLine()}</span>
-                      </div>
-                    </Show>
-                    <Show when={showTaskLine()}>
-                      <div class="inbox-task-row">
-                        <span class="inbox-digest-label">Asked</span>
-                        <span class="inbox-task-text">{taskLine()}</span>
-                      </div>
-                    </Show>
                     <div class="inbox-row-bottom">
                       <p
                         class="inbox-summary"
@@ -1519,11 +1513,9 @@ export function InboxPage(p: {
 
               <Show when={isPeeked()}>
                 <div id={`${viewId}-peek-${id}`} class="inbox-peek-drawer" role="region" aria-label={`Recent turns for ${effectiveHeadline()}`}>
-                  <div class="inbox-peek-status-card">
+                  <details class="inbox-peek-status-card">
+                    <summary class="inbox-peek-status-label">Reply context <Ic.ChevronDown /></summary>
                     <div class="inbox-peek-status-top">
-                      <span class="inbox-peek-status-label">
-                        Reply context
-                      </span>
                       <div class="inbox-peek-status-chips">
                         <button
                           type="button"
@@ -1560,6 +1552,9 @@ export function InboxPage(p: {
                         </button>
                       </div>
                     </div>
+                    <Show when={showTaskLine()}>
+                      <p class="inbox-task-row"><span class="inbox-digest-label">Asked</span><span class="inbox-task-text">{taskLine()}</span></p>
+                    </Show>
                     <p class="inbox-peek-status-text">
                       <strong>Goal:</strong>{" "}
                       {goalContextLine() ||
@@ -1569,7 +1564,7 @@ export function InboxPage(p: {
                         <span class="inbox-peek-status-sub"> — {outcomeLine()}</span>
                       </Show>
                     </p>
-                  </div>
+                  </details>
 
                   <div class="inbox-peek-head">
                     <div class="inbox-peek-head-left">
@@ -1727,24 +1722,11 @@ export function InboxPage(p: {
       </Show>
     );
   };
-
-  const headerBadgeCount = () =>
-    viewMode() === "unread"
-      ? allSections().unreadCount
-      : viewMode() === "attention"
-        ? allSections().attentionCount
-        : allSections().totalActionable;
-
   return (
     <div class="page inbox-page" ref={listContainerRef}>
       <div class="page-head inbox-head">
         <div class="inbox-title-group">
           <h2>Inbox</h2>
-          <Show when={headerBadgeCount() > 0}>
-            <span class="inbox-total-pill" aria-label={`${headerBadgeCount()} items`}>
-              {headerBadgeCount()}
-            </span>
-          </Show>
         </div>
 
         <div class="inbox-head-right">
@@ -1772,9 +1754,6 @@ export function InboxPage(p: {
             onClick={() => (p.onOpenInboxSettings ?? p.onOpenSettings)()}
           >
             <Ic.GearIcon size={13} />
-            <span class="inbox-model-pill-label">
-              {inboxConfig().aiSummary ? `AI · ${inboxConfig().model}` : "AI off"}
-            </span>
           </button>
         </div>
       </div>

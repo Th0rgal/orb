@@ -325,9 +325,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
 
   // Verify m-done shows the Asked/outcome overview, omits redundant Completed badge, shows failed child track pill, and supports Space unified peek & reply preview
   const doneRow = page.locator('[data-inbox-id="m-done"]');
-  await expect(doneRow.locator(".inbox-task-text")).toHaveText(
-    "Hide the sidebar scroll thumb until hover.",
-  );
+  await expect(doneRow.locator(".inbox-task-text")).toHaveCount(0);
   await expect(doneRow.locator(".inbox-badge")).toHaveCount(0);
   await expect(doneRow.locator(".inbox-summary")).toContainText(
     "Updated the scroll thumb track to remain hidden until pointer hover and verified all Playwright checks pass.",
@@ -346,6 +344,8 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
 
   await page.keyboard.press("Space");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeVisible();
+  await doneRow.locator("summary").click();
+  await expect(doneRow.locator(".inbox-task-text")).toHaveText("Hide the sidebar scroll thumb until hover.");
   await expect(doneRow.locator(".inbox-peek-transcript .user")).toContainText(
     "Hide the sidebar scroll thumb until hover.",
   );
@@ -372,6 +372,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   // Mark m-done as Done with 'e', then Undo with 'z'
   await page.keyboard.press("e");
   await expect(doneRow).toBeHidden();
+  await expect(page.locator('.inbox-row.focused .inbox-row-title-btn')).toBeFocused();
   await expect(page.locator(".inbox-undo-toast")).toContainText("Fix sidebar scroll thumb");
   await expect.poll(() => statusUpdates.at(-1)).toEqual({
     id: "m-done",
@@ -385,9 +386,9 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   });
   await expect(doneRow).toBeVisible();
 
-  // Clicking the AI model pill opens Settings -> Inbox (defaulting to builtin/smart)
+  // The compact settings control keeps the current model in its accessible label.
   const modelPill = page.locator(".inbox-model-pill");
-  await expect(modelPill).toContainText("AI · builtin/smart");
+  await expect(modelPill).toHaveAttribute("aria-label", "Inbox settings (AI · builtin/smart)");
   await modelPill.click();
   await expect(page.locator(".settings-body h2")).toHaveText("Inbox");
   await expect(page.getByLabel("Inbox summary model")).toHaveValue("builtin/smart");
@@ -528,12 +529,6 @@ test("Inbox Peek renders shared Transcript with inline images, attached context,
   // Verify legacy "Sandboxed" project title for slug "orb" is normalized to "Orb"
   await expect(row.locator(".inbox-project-name")).toHaveText("Orb");
 
-  // Verify the Asked row stripped [Image #1] and [Uploaded: ...] cleanly
-  await expect(row.locator(".inbox-task-text")).toContainText(
-    "Lorsque j'ajoute une image dans l'application de bureau",
-  );
-  await expect(row.locator(".inbox-task-text")).not.toContainText("[Uploaded:");
-
   // Open Peek drawer
   await row.hover();
   await page.keyboard.press("Space");
@@ -546,12 +541,19 @@ test("Inbox Peek renders shared Transcript with inline images, attached context,
   await expect(composer.locator(".plus")).toBeVisible();
   await expect(composer.locator("textarea")).toHaveAttribute("placeholder", /Send follow-up/);
 
-  // Verify outer .inbox-page does not become unnecessarily scrollable when a single Peek card is open
+  // The default compact preview fits; expanding optional context may scroll the page.
   const pageScrollMetrics = await page.locator(".inbox-page").evaluate((el) => ({
     scrollHeight: el.scrollHeight,
     clientHeight: el.clientHeight,
   }));
   expect(pageScrollMetrics.scrollHeight).toBeLessThanOrEqual(pageScrollMetrics.clientHeight);
+
+  await drawer.locator("summary").click();
+  // Verify the Asked row stripped [Image #1] and [Uploaded: ...] cleanly.
+  await expect(row.locator(".inbox-task-text")).toContainText(
+    "Lorsque j'ajoute une image dans l'application de bureau",
+  );
+  await expect(row.locator(".inbox-task-text")).not.toContainText("[Uploaded:");
 
   // Verify shared Transcript elements render: .user bubble, .message-image thumbnail, .user-context badge, .st-work fold, and .st-text Markdown
   const userBubble = drawer.locator(".inbox-peek-transcript .user");
