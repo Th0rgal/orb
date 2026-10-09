@@ -336,7 +336,7 @@ fn supplement_legacy_claude(capabilities: &mut Value, inventory: &Value) {
         }
     }
 }
-async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value, Error> {
+pub(super) async fn node_transfer_capabilities(state: &AppState, id: &str) -> Result<Value, Error> {
     let mut capabilities = node_request(state, id, "/machine-transfer/capabilities", None).await?;
     if capabilities["version"].as_u64() == Some(1)
         && !capabilities["harnesses"]

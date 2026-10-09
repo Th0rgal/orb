@@ -139,8 +139,9 @@ pub(crate) fn execution(
     }
 }
 
-/// Planning-time check that the selected node advertises the `grok`
-/// managed-auth profile. A node whose last heartbeat lacks it is refused with
+/// Planning-time check of node-specific prerequisites. Vibe uses a fresh
+/// capability probe (CLI plus Python); managed-auth harnesses use their profile.
+/// A node whose last heartbeat lacks the profile is refused with
 /// [`REMOTE_AUTH_REQUIRED`] before any mission exists; a node without any
 /// cached heartbeat is probed once. Missing capability evidence fails closed.
 pub(crate) async fn require_node_managed_auth(
@@ -148,6 +149,20 @@ pub(crate) async fn require_node_managed_auth(
     node_id: &str,
     plan: &RemoteHarnessPlan,
 ) -> Result<(), String> {
+    if matches!(plan, RemoteHarnessPlan::Vibe { .. }) {
+        let unavailable = format!("REMOTE_HARNESS_UNAVAILABLE: remote node '{node_id}' is not ready for Mistral Vibe; install vibe-acp and Python 3.9+ as the node execution user");
+        let capabilities = super::machine_transfer::node_transfer_capabilities(state, node_id)
+            .await
+            .map_err(|(_, reason)| format!("{unavailable}. {reason}"))?;
+        return if capabilities["harnesses"]
+            .as_array()
+            .is_some_and(|harnesses| harnesses.iter().any(|harness| harness == "vibe"))
+        {
+            Ok(())
+        } else {
+            Err(unavailable)
+        };
+    }
     let profile = match plan {
         RemoteHarnessPlan::Grok { .. } => "grok",
         RemoteHarnessPlan::Antigravity { .. } => "antigravity",

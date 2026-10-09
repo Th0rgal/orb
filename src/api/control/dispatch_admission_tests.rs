@@ -4971,6 +4971,7 @@ async fn http_idle_message_continuation_captures_predecessor_before_delivery() {
 /// state, and confirms cancellation by moving to `cancelled`.
 struct FixtureNode {
     node: crate::remote_node::RemoteNodeConfig,
+    capabilities: Arc<std::sync::Mutex<(StatusCode, Value)>>,
     state: Arc<std::sync::Mutex<String>>,
     cancels: Arc<std::sync::atomic::AtomicUsize>,
     submissions: Arc<std::sync::Mutex<Vec<Value>>>,
@@ -5005,7 +5006,18 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
     let status_delay = Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO));
     let status_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let log = Arc::new(std::sync::Mutex::new(String::new()));
+    let capabilities = Arc::new(std::sync::Mutex::new((StatusCode::NOT_FOUND, json!({}))));
     let app = axum::Router::new()
+        .route(
+            "/machine-transfer/capabilities",
+            axum::routing::get({
+                let capabilities = capabilities.clone();
+                move || {
+                    let (status, body) = capabilities.lock().unwrap().clone();
+                    async move { (status, Json(body)) }
+                }
+            }),
+        )
         .route(
             "/jobs",
             axum::routing::post({
@@ -5147,6 +5159,7 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
     });
     FixtureNode {
         node,
+        capabilities,
         state,
         cancels,
         submissions,
@@ -5165,6 +5178,108 @@ async fn spawn_fixture_node(id: &str, token_env: &str, initial_state: &str) -> F
 // LOCAL harness (second `user_message`, source=scheduler, run state RUNNING),
 // and the remote job then found its run lease already taken (lease NULL).
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn vibe_node_readiness_rejects_creation_before_persisting_and_is_rechecked_for_resume() {
+    let fixture = spawn_fixture_node(
+        "vibe-readiness",
+        "REMOTE_VIBE_READINESS_TEST_TOKEN",
+        "running",
+    )
+    .await;
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::vibe::VibeBackend::new()));
+    // Core credentials are present: only the selected node's prerequisites fail.
+    let mut provider = crate::ai_providers::AIProvider::new(
+        crate::ai_providers::ProviderType::Mistral,
+        "fixture".into(),
+    );
+    provider.api_key = Some("fixture-only-key".into());
+    let path = h
+        .state
+        .config
+        .working_dir
+        .join(crate::util::AI_PROVIDERS_PATH);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_vec(&vec![provider]).unwrap()).unwrap();
+
+    for reply in [
+        (StatusCode::NOT_FOUND, json!({})), // older node without the endpoint
+        (StatusCode::OK, json!({"version":2,"harnesses":["grok"]})), // missing CLI or Python
+        (StatusCode::OK, json!({"version":2,"harnesses":null})), // invalid evidence
+    ] {
+        *fixture.capabilities.lock().unwrap() = reply;
+        let response = h
+            .state
+            .http_client
+            .post(format!("{}/missions", h.url))
+            .json(&json!({
+                "project":"lido", "writer":false, "backend":"vibe",
+                "model_override":"mistral/mistral-vibe-cli-latest",
+                "remote_node_id":"vibe-readiness", "prompt":"Inspect the workspace"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = response.text().await.unwrap();
+        assert!(error.contains("REMOTE_HARNESS_UNAVAILABLE"), "{error}");
+        assert!(error.contains("vibe-readiness"), "{error}");
+        assert!(error.contains("vibe-acp and Python 3.9+"), "{error}");
+        assert!(h
+            .control
+            .mission_store
+            .list_missions(100, 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(fixture.submissions.lock().unwrap().is_empty());
+        assert!(h
+            .state
+            .projects
+            .live_leases(Some("lido"))
+            .unwrap()
+            .is_empty());
+    }
+
+    // Exercise the same gate used by continuation without dispatching a job.
+    let plan = RemoteHarnessPlan::Vibe {
+        plan: false,
+        model: None,
+        prompt: "Continue".into(),
+        resume_session_id: Some("existing-vibe-session".into()),
+    };
+    *fixture.capabilities.lock().unwrap() =
+        (StatusCode::OK, json!({"version":2,"harnesses":["vibe"]}));
+    remote_grok::require_node_managed_auth(&h.state, &fixture.node.id, &plan)
+        .await
+        .unwrap();
+    *fixture.capabilities.lock().unwrap() = (StatusCode::OK, json!({"version":2,"harnesses":[]}));
+    assert!(
+        remote_grok::require_node_managed_auth(&h.state, &fixture.node.id, &plan)
+            .await
+            .unwrap_err()
+            .contains("vibe-acp and Python 3.9+")
+    );
+    // Other proxy-based harnesses do not gain a capability-endpoint dependency.
+    *fixture.capabilities.lock().unwrap() = (StatusCode::NOT_FOUND, json!({}));
+    remote_grok::require_node_managed_auth(
+        &h.state,
+        &fixture.node.id,
+        &RemoteHarnessPlan::OpenCode {
+            model: None,
+            prompt: "Continue".into(),
+            resume_session_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(fixture.submissions.lock().unwrap().is_empty());
+}
 
 async fn user_prompts(store: &Arc<dyn MissionStore>, mission_id: Uuid) -> Vec<StoredEvent> {
     store
