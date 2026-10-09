@@ -112,7 +112,7 @@ async function sendRequest<T>(path: string, init?: RequestInit): Promise<T> {
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
     ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
   };
-  const res = await fetch(`${getApiUrl()}${path}`, { ...init, headers, signal: init?.signal ?? (!init?.method || init.method.toUpperCase() === 'GET' ? AbortSignal.timeout(30_000) : undefined) });
+  const res = await fetch(`${getApiUrl()}${path}`, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(30_000) });
   if (res.status === 401) {
     if (connectionVersion() === version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");
@@ -310,12 +310,17 @@ export interface HarnessChoice {
   models: BackendModelOption[];
 }
 
+function catalogStorageKey(path: string, token = getJwt()): string {
+  let hash = 2166136261;
+  for (const c of `${getApiUrl()}:${token ?? ""}`) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619);
+  return `orb.catalog:${hash >>> 0}:${path}`;
+}
+
 /** Small read-only catalogs keep local launch available across offline restarts. */
-async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean):Promise<T>{
+async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean, force = false):Promise<T>{
  const version=connectionVersion(),token=getJwt();
- let hash=2166136261;for(const c of `${getApiUrl()}:${token??""}`)hash=Math.imul(hash^c.charCodeAt(0),16777619);
- const key=`orb.catalog:${hash>>>0}:${path}`;
- try{const value=await api<T>(path,{signal:AbortSignal.timeout(3000)});if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion())try{localStorage.setItem(key,JSON.stringify(value));}catch{}return value;}
+ const key=catalogStorageKey(path,token);
+ try{const value=await api<T>(path,force?{method:"GET",signal:AbortSignal.timeout(8000)}:{signal:AbortSignal.timeout(3000)});if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion())try{localStorage.setItem(key,JSON.stringify(value));}catch{}return value;}
  catch(error){
   if(version!==connectionVersion()||getJwt()!==token||error instanceof ApiError)throw error;
   const stored=localStorage.getItem(key);if(stored){try{const value=JSON.parse(stored);if(!valid || valid(value))return value as T;}catch{}}
@@ -528,11 +533,34 @@ export interface ProjectFileEntry {
 
 /** Create (or update) a project record on the core. Slug: lowercase, dashes. */
 export async function createProject(body: { slug: string; title?: string; objective?: string }): Promise<ProjectSummary> {
-  return api("/api/projects", {
+  const created = await api<ProjectSummary>("/api/projects", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  archivedSlugs.delete(body.slug);
+  const record: ProjectSummary = {
+    slug: created?.slug || body.slug,
+    title: created?.title ?? body.title ?? body.slug,
+    objective: created?.objective ?? body.objective ?? null,
+    status: created?.status ?? "active",
+    updated_at: created?.updated_at ?? new Date().toISOString(),
+    color: created?.color ?? null,
+  };
+  try {
+    const key = catalogStorageKey("/api/projects");
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { projects?: ProjectSummary[] };
+      if (parsed && Array.isArray(parsed.projects)) {
+        const idx = parsed.projects.findIndex((p) => p.slug === record.slug);
+        if (idx >= 0) parsed.projects[idx] = { ...parsed.projects[idx], ...record };
+        else parsed.projects.push(record);
+        localStorage.setItem(key, JSON.stringify(parsed));
+      }
+    }
+  } catch { /* ignore storage errors */ }
+  return record;
 }
 
 /** Display-name rename: same slug, new title. */
@@ -550,11 +578,12 @@ export async function archiveProject(slug: string): Promise<void> {
   archivedSlugs.add(slug);
 }
 
-export async function listProjects(): Promise<ProjectSummary[]> {
+export async function listProjects(force = false): Promise<ProjectSummary[]> {
   const fetchedAt = Date.now(), url = getApiUrl();
   const data = await cachedCatalog<{ projects: ProjectSummary[] }>("/api/projects",
     value => !!value && typeof value === "object" && Array.isArray((value as {projects?: unknown}).projects)
-      && (value as {projects: unknown[]}).projects.every(project => !!project && typeof project === "object" && typeof (project as {slug?: unknown}).slug === "string"));
+      && (value as {projects: unknown[]}).projects.every(project => !!project && typeof project === "object" && typeof (project as {slug?: unknown}).slug === "string"),
+    force);
   // Colors ride on the roster; applying them never fails the list.
   try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(() => {}); } catch { /* keep the local colors */ }
   return (data.projects ?? []).filter(

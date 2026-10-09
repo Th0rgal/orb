@@ -44,31 +44,34 @@
 .dlg .cs-input, .dlg .sp-trigger { height: 36px; }
 @media (max-width: 420px) { .dlg .cs-savebar > span:first-child { flex-basis: 100%; } }
 
-/* Project creation uses the same compact surface as sidebar action menus. */
+/* Project creation uses a crisp Cursor-like popover surface with an aligned submit button. */
 .dlg.project-creation {
-  --anchored-dialog-width: 260px;
-  width: 260px;
-  padding: 8px;
-  border-radius: var(--radius-sm);
+  --anchored-dialog-width: 280px;
+  width: 280px;
+  padding: 12px;
+  border-radius: var(--radius-lg);
   background: var(--menu-bg);
-  box-shadow: 0 4px 12px #0002;
+  border: 1px solid var(--stroke-strong);
+  box-shadow: var(--shadow-lg);
 }
-.project-creation .dlg-head { margin: 0 0 6px; padding: 0 4px; gap: 6px; }
-.project-creation .dlg-head h3 { font-size: 12px; font-weight: 400; color: var(--fg-3); }
-.project-creation .dlg-close { width: 24px; height: 24px; }
+.project-creation .dlg-head { margin: 0 0 8px; padding: 0 2px; gap: 6px; }
+.project-creation .dlg-head h3 { font-size: 12.5px; font-weight: 500; color: var(--fg-2); }
+.project-creation .dlg-hint { font-family: var(--mono); font-size: 11px; color: var(--fg-3); background: var(--bg-inset); padding: 1px 5px; border-radius: var(--radius-xs); border: 1px solid var(--stroke-soft); }
+.project-creation .dlg-close { width: 22px; height: 22px; }
 .project-creation .dlg-body { gap: 8px; }
-.project-creation .prompt-row { flex-direction: column; align-items: stretch; gap: 6px; }
+.project-creation .prompt-row { flex-direction: column; align-items: stretch; gap: 8px; }
 .project-creation .prompt-input {
-  flex: none; width: 100%; height: 32px; padding: 0 8px;
-  border-radius: var(--radius-xs); border-color: var(--stroke); background: transparent;
+  flex: none; width: 100%; height: 32px; padding: 0 10px;
+  border-radius: var(--radius-sm); border-color: var(--stroke-strong); background: var(--bg-field);
 }
-.project-creation .prompt-input:focus { border-color: var(--stroke-strong); }
+.project-creation .prompt-input:focus { border-color: var(--fg-3); }
 .project-creation .dlg-button-primary {
-  height: 30px; padding: 0 8px; text-align: left;
-  border-radius: var(--radius-xs); border: 0; background: transparent; color: var(--fg);
-  font-weight: 400; font-size: 13px; justify-content: flex-start;
+  height: 30px; padding: 0 12px; align-self: flex-end;
+  border-radius: var(--radius-sm); border: 1px solid transparent;
+  background: var(--send-bg); color: var(--send-fg);
+  font-weight: 500; font-size: 12.5px; justify-content: center;
 }
-.project-creation .dlg-button-primary:not(:disabled):hover { background: var(--bg-hover); }
+.project-creation .dlg-button-primary:not(:disabled):hover { background: var(--send-bg-hover); }
 /* Attachment preview: the whole window, image fitted, arrows on the sides. */
 .dlg-back:has(> .dlg-lightbox) { padding: 0; }
 .dlg.dlg-lightbox { width: 100vw; height: 100vh; max-width: none; border: 0; border-radius: 0; padding: 12px 16px 16px; }

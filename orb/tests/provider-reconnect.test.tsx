@@ -93,6 +93,7 @@ it("adds a second subscription through the backend capability list without a rec
   const add = await screen.findByRole("button", {name:"Add subscription account"});
   await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(add);
+  expect(screen.getByRole("radio", {name:/Mistral Vibe/i})).toBeTruthy();
   fireEvent.click(screen.getByRole("button", {name:"Continue in browser"}));
   const input = await screen.findByLabelText("Authorization code or redirect URL");
   expect(JSON.parse(requests[0].body as string)).toEqual({provider:"anthropic"});
@@ -162,4 +163,28 @@ it("reconnects a backend-owned Mistral subscription without changing its account
   fireEvent.click(screen.getByRole("menuitem", {name:"Re-authenticate",exact:true}));
   await waitFor(() => expect(started).toBe(true));
   expect(screen.queryByLabelText("Authorization code or redirect URL")).toBeNull();
+});
+
+it("includes Mistral Vibe in subscription options even if the backend capability list omits it", async () => {
+  setConnection("http://core.test", "test-token");
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/cli-proxy-login")) {
+      return new Response(JSON.stringify({
+        available: true,
+        providers: [
+          { id: "anthropic", name: "Claude Pro/Max" },
+          { id: "openai", name: "ChatGPT Plus/Pro" },
+          { id: "xai", name: "SuperGrok" },
+          { id: "kimi", name: "Kimi Code" },
+          { id: "antigravity", name: "Google Antigravity" },
+        ],
+      }));
+    }
+    return new Response(JSON.stringify(url.endsWith("/providers") || url.endsWith("/cloud/accounts") ? [] : {}));
+  }));
+  render(() => <Providers />);
+  const add = await screen.findByRole("button", { name: "Add subscription account" });
+  await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(add);
+  expect(screen.getByRole("radio", { name: /Mistral Vibe/ })).toBeTruthy();
 });

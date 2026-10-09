@@ -786,31 +786,30 @@ export function LiveProjectsSection(p: {
     finally { if (currentConnection(version)) setCronChecking(false); }
   };
 
-  let refreshingVersion: number | undefined;
-  const refresh = () => {
+  let refreshGeneration = 0;
+  const refresh = (force = false) => {
     if (!isConnected()) return;
     const version = connectionVersion();
-    if (refreshingVersion === version) return;
-    refreshingVersion = version;
-    listProjects()
+    const gen = ++refreshGeneration;
+    listProjects(force)
       .then((list) => {
-        if (!currentConnection(version)) return;
+        if (!currentConnection(version) || gen !== refreshGeneration) return;
         setProjects(list);
         setError(null);
         warmupProjects(list);
       })
       .catch((e) => {
-        if (!currentConnection(version)) return;
+        if (!currentConnection(version) || gen !== refreshGeneration) return;
         const msg = e instanceof Error ? e.message : String(e);
         setError(
           /^(404|405)\b/.test(msg)
             ? "This backend build doesn't expose projects yet — update the core."
             : msg,
         );
-      }).finally(() => { if (refreshingVersion === version) refreshingVersion = undefined; });
+      });
   };
   createEffect(on(projectsVersion, () => {
-    refresh();
+    refresh(true);
     for (const slug of Object.keys(expanded)) {
       if (expanded[slug] && !slug.includes(":")) {
         void loadController(slug, true);
@@ -820,6 +819,18 @@ export function LiveProjectsSection(p: {
   }, { defer: true }));
   onMount(() => {
     refresh();
+    const onProjectCreated = (event: Event) => {
+      const detail = (event as CustomEvent<ProjectSummary>).detail;
+      if (!detail?.slug) return;
+      setProjects((current) => current.some((p) => p.slug === detail.slug)
+        ? current.map((p) => p.slug === detail.slug ? { ...p, ...detail } : p)
+        : [...current, detail]);
+      setError(null);
+      setExpanded(detail.slug, true);
+      void loadMissions(detail.slug);
+      void loadDir(detail.slug, "");
+    };
+    window.addEventListener("orb:project-created", onProjectCreated);
     const onCronChanged = (event: Event) => {
       const detail = (event as CustomEvent<{ slug: string; id?: string; deleted?: boolean; targetSlug?: string; folder?: string }>).detail;
       if (!detail?.slug) return;
@@ -861,6 +872,7 @@ export function LiveProjectsSection(p: {
       stop();
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("orb:cron-changed", onCronChanged);
+      window.removeEventListener("orb:project-created", onProjectCreated);
     });
   });
 
@@ -2106,7 +2118,7 @@ export function LiveProjectsSection(p: {
         </button>
       </div>
       <Show when={error()}>
-        <div class="row note">{error()} <button class="text-btn" onClick={refresh}>Retry</button></div>
+        <div class="row note">{error()} <button class="text-btn" onClick={() => refresh(true)}>Retry</button></div>
       </Show>
       <Show when={cronWarning()}><ErrorNotice error={cronWarning()!} /></Show>
       <Show when={actionError()}>{error => <ErrorDialog error={error()} onClose={() => setActionError(null)} />}</Show>

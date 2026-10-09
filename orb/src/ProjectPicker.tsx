@@ -3,7 +3,7 @@ import { For, Show, createMemo, createSignal, createEffect, onMount, onCleanup }
 import * as Ic from "./icons";
 import { trapFocus } from "./focusScope";
 import { PromptSheet } from "./Dialog";
-import { slugify } from "./api";
+import { bumpProjects, slugify } from "./api";
 
 export function ProjectPicker(p: {
   projects: { id: string; name: string }[];
@@ -12,12 +12,15 @@ export function ProjectPicker(p: {
   onSelect: (id: string) => void;
   onCreate: () => void;
   onMachine?: () => void;
+  onRefresh?: () => void;
   onClose: () => void;
 }) {
   const [query,setQuery]=createSignal("");
   const [active,setActive]=createSignal(0);
   const [armed,setArmed]=createSignal(false);
   const rows=createMemo(()=>p.projects.filter(x=>`${x.name} ${x.id}`.toLowerCase().includes(query().trim().toLowerCase())));
+  const filtering=createMemo(()=>query().trim().length>0);
+  const recentRow=createMemo(()=>!filtering()&&rows().length>1 ? (rows().find(x=>x.id===p.selected) ?? rows()[0]) : undefined);
   let root!:HTMLDivElement;
   createEffect(()=>{rows();setActive(0);setArmed(false);});
   onMount(()=>{
@@ -39,16 +42,29 @@ export function ProjectPicker(p: {
         if(e.key==="ArrowDown"||e.key==="ArrowUp"){e.preventDefault();move(e.key==="ArrowDown"?1:-1);}
         else if(e.key==="Enter"){e.preventDefault();const row=rows()[active()];if(row)p.onSelect(row.id);}
       }}/>
-    <div class="project-picker-label">Recents</div>
     <div class="project-options" id="project-options" role="listbox" aria-label="Projects">
-      <For each={rows()}>{(row,index)=><button id={`project-option-${index()}`} role="option" aria-selected={row.id===p.selected} class={`project-option ${armed()&&index()===active()?"highlighted":""}`} onPointerEnter={()=>{setArmed(true);setActive(index());}} onClick={()=>p.onSelect(row.id)}>
+      <Show when={recentRow()}>{(rec)=>{
+        const recIdx=()=>rows().findIndex(r=>r.id===rec().id);
+        return <>
+          <div class="project-picker-label">Recents</div>
+          <button id={`project-option-${recIdx()}`} role="option" aria-selected={rec().id===p.selected} class={`project-option ${armed()&&recIdx()===active()?"highlighted":""} ${rec().id===p.selected?"selected":""}`} onPointerEnter={()=>{setArmed(true);setActive(recIdx());}} onClick={()=>p.onSelect(rec().id)}>
+            <span class="row-project-color" style={{ color: projectColor(rec().id) }}><Ic.FolderIcon size={15}/></span><span class="project-option-name">{rec().name}</span><Show when={rec().id===p.selected}><span class="project-check" aria-label="Current project">✓</span></Show>
+          </button>
+          <div class="project-picker-label">All Projects</div>
+        </>;
+      }}</Show>
+      <Show when={!recentRow()}>
+        <div class="project-picker-label">{filtering()?"Matching Projects":"All Projects"}</div>
+      </Show>
+      <For each={rows()}>{(row,index)=><Show when={!recentRow() || row.id!==recentRow()!.id}><button id={`project-option-${index()}`} role="option" aria-selected={row.id===p.selected} class={`project-option ${armed()&&index()===active()?"highlighted":""} ${row.id===p.selected?"selected":""}`} onPointerEnter={()=>{setArmed(true);setActive(index());}} onClick={()=>p.onSelect(row.id)}>
         <span class="row-project-color" style={{ color: projectColor(row.id) }}><Ic.FolderIcon size={15}/></span><span class="project-option-name">{row.name}</span><Show when={row.id===p.selected}><span class="project-check" aria-label="Current project">✓</span></Show>
-      </button>}</For>
+      </button></Show>}</For>
       <Show when={!rows().length}><p class="project-empty">{p.projects.length?"No matching projects":"No projects yet"}</p></Show>
     </div>
     <div class="project-picker-actions">
       <Show when={p.canCreate}><button onClick={p.onCreate}><Ic.PlusIcon size={15}/>New project…</button></Show>
       <Show when={p.onMachine}><button onClick={() => p.onMachine?.()}><Ic.MachinesIcon size={15}/>Choose machine…</button></Show>
+      <Show when={p.canCreate}><button onClick={() => { if (p.onRefresh) p.onRefresh(); else bumpProjects(); }}><Ic.ReopenIcon size={14}/>Refresh</button></Show>
     </div>
   </div>;
 }
@@ -69,5 +85,5 @@ export function ProjectCreation(p:{anchor?:HTMLElement;existingIds: string[];onC
     catch(e){setError(e instanceof Error?e.message:String(e));}
     finally{setBusy(false);}
   };
-  return <PromptSheet anchor={p.anchor} class="project-creation" title="New project" label="Project name" placeholder="Name your project…" value={name()} onInput={v=>{setName(v);setError(null);}} action={busy()?"Creating…":"Create project"} busy={busy()} disabled={!name().trim()} error={error()} onAction={()=>void submit()} onClose={close} />;
+  return <PromptSheet anchor={p.anchor} class="project-creation" title="New project" hint={slug() ? `/${slug()}` : undefined} label="Project name" placeholder="Name your project…" value={name()} onInput={v=>{setName(v);setError(null);}} action={busy()?"Creating…":"Create project"} busy={busy()} disabled={!name().trim()} error={error()} onAction={()=>void submit()} onClose={close} />;
 }

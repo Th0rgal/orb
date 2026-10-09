@@ -87,7 +87,14 @@ const KINDS: Kind[] = [
   },
   { id: "open-router", name: "OpenRouter", methods: [{ label: "API key", kind: "api", desc: "OPENROUTER_API_KEY" }] },
   { id: "groq", name: "Groq", methods: [{ label: "API key", kind: "api", desc: "GROQ_API_KEY" }] },
-  { id: "mistral", name: "Mistral", methods: [{ label: "API key", kind: "api", desc: "MISTRAL_API_KEY" }] },
+  {
+    id: "mistral",
+    name: "Mistral",
+    methods: [
+      { label: "Mistral Vibe", kind: "oauth", desc: "Mistral Vibe subscription sign-in managed by sandboxed.sh." },
+      { label: "API key", kind: "api", desc: "MISTRAL_API_KEY" },
+    ],
+  },
   { id: "minimax", name: "MiniMax", methods: [{ label: "API key", kind: "api", desc: "MINIMAX_API_KEY" }] },
   { id: "zai", name: "Z.AI", methods: [{ label: "API key", kind: "api", desc: "ZHIPU_API_KEY" }] },
   { id: "custom", name: "Custom", methods: [{ label: "OpenAI-compatible", kind: "api", desc: "Base URL + key." }] },
@@ -284,6 +291,15 @@ export function Providers() {
 }
 
 
+const SUBSCRIPTION_META: Record<string, { vendor: string; desc: string }> = {
+  anthropic: { vendor: "Anthropic", desc: "Claude Code & OpenCode · OAuth via CLIProxyAPI" },
+  openai: { vendor: "OpenAI", desc: "Codex & OpenCode · OAuth via CLIProxyAPI" },
+  xai: { vendor: "xAI", desc: "Grok & OpenCode · OAuth via CLIProxyAPI" },
+  kimi: { vendor: "Moonshot AI", desc: "OpenCode · Device sign-in via CLIProxyAPI" },
+  antigravity: { vendor: "Google", desc: "Antigravity & Gemini models · OAuth via CLIProxyAPI" },
+  mistral: { vendor: "Mistral AI", desc: "Le Chat Pro / Team · Browser sign-in" },
+};
+
 function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
   const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>({});
   const [keyEditor, setKeyEditor] = createSignal<AIProvider | "new" | null>(null);
@@ -301,7 +317,17 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
     catch (error) { setRemoveError(String(error)); }
     finally { setRemoveBusy(false); }
   };
-  onMount(() => { void api<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>("/api/ai/providers/cli-proxy-login").then(setLoginOptions).catch(() => setLoginOptions({available: false, providers: [], reason: "Update the backend to add subscription accounts here."})); });
+  onMount(() => {
+    void api<{available: boolean; providers: {id: string; name: string}[]; reason?: string}>("/api/ai/providers/cli-proxy-login")
+      .then(res => {
+        const providers = Array.isArray(res.providers) ? [...res.providers] : [];
+        if (!providers.some(p => p.id === "mistral")) {
+          providers.push({ id: "mistral", name: "Mistral Vibe" });
+        }
+        setLoginOptions({ ...res, available: true, providers });
+      })
+      .catch(() => setLoginOptions({available: false, providers: [], reason: "Update the backend to add subscription accounts here."}));
+  });
   const oauth = () => p.list.filter((x) => x.uses_oauth);
   const keys = () => p.list.filter((x) => !x.uses_oauth);
   const [toggleError, setToggleError] = createSignal<string | null>(null);
@@ -332,6 +358,22 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
     onCleanup(() => { disposed = true; clearInterval(timer); });
   });
 
+  const confirmAddSubscription = () => {
+    const kind = loginOptions()?.providers.find(x => x.id === addType());
+    if (!kind) return;
+    setAdding(false);
+    setReauth({
+      id: "",
+      provider_type: kind.id,
+      provider_type_name: kind.name,
+      name: kind.name,
+      enabled: true,
+      uses_oauth: true,
+      credential_owner: kind.id === "mistral" ? "sandboxed_sh" : "cli_proxy",
+      status: { type: "needs_auth" },
+    });
+  };
+
   return (
     <div class="page">
       <div class="page-head">
@@ -344,7 +386,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
       <Show when={toggleError()}><p class="s-row-desc c-red" role="alert">{toggleError()}</p></Show>
 
       <section class="s-sec">
-        <div class="section-row"><h3>Subscriptions</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}>Add subscription account</button></div>
+        <div class="section-row"><h3>Subscriptions</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button></div>
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
@@ -370,7 +412,82 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
         </div>
       </section>
 
-      <Show when={adding()}><Dialog title="Add subscription account" onClose={() => setAdding(false)} footer={<DialogButton onClick={() => { const kind = loginOptions()?.providers.find(x => x.id === addType()); if (!kind) return; setAdding(false); setReauth({id: "", provider_type: kind.id, provider_type_name: kind.name, name: kind.name, enabled: true, uses_oauth: true, credential_owner: kind.id === "mistral" ? "sandboxed_sh" : "cli_proxy", status: {type: "needs_auth"}}); }}>Continue in browser</DialogButton>}><Field label="Subscription"><select class="s-input" value={addType()} onChange={e => setAddType(e.currentTarget.value)}><For each={loginOptions()?.providers ?? []}>{kind => <option value={kind.id}>{kind.name}</option>}</For></select></Field><p class="s-row-desc">Choose the account to connect in your browser. You can add more than one account.</p></Dialog></Show>
+      <Show when={adding()}>
+        <Dialog
+          title="Add subscription account"
+          description="Choose a subscription plan to connect in your browser. You can connect multiple accounts."
+          onClose={() => setAdding(false)}
+          footer={
+            <>
+              <DialogButton onClick={() => setAdding(false)}>Cancel</DialogButton>
+              <DialogButton variant="primary" disabled={!addType()} onClick={confirmAddSubscription}>
+                Continue in browser
+              </DialogButton>
+            </>
+          }
+        >
+          <div class="p-sub-picker" role="radiogroup" aria-label="Subscription">
+            <For each={loginOptions()?.providers ?? []}>
+              {(kind, idx) => {
+                const selected = () => addType() === kind.id;
+                const meta = () => SUBSCRIPTION_META[kind.id];
+                return (
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selected()}
+                    autofocus={idx() === 0}
+                    class={`p-sub-option ${selected() ? "selected" : ""}`}
+                    onClick={() => setAddType(kind.id)}
+                    onDblClick={() => {
+                      setAddType(kind.id);
+                      confirmAddSubscription();
+                    }}
+                    onKeyDown={(e) => {
+                      const list = loginOptions()?.providers ?? [];
+                      if (!list.length) return;
+                      if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+                        e.preventDefault();
+                        const next = list[(idx() + 1) % list.length];
+                        if (next) setAddType(next.id);
+                        (e.currentTarget.nextElementSibling as HTMLElement | null)?.focus();
+                      } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+                        e.preventDefault();
+                        const prev = list[(idx() - 1 + list.length) % list.length];
+                        if (prev) setAddType(prev.id);
+                        (e.currentTarget.previousElementSibling as HTMLElement | null)?.focus();
+                      } else if (e.key === "Enter") {
+                        e.preventDefault();
+                        confirmAddSubscription();
+                      }
+                    }}
+                  >
+                    <div class="p-sub-option-logo">
+                      <ProviderLogo type={kind.id} name={kind.name} />
+                    </div>
+                    <div class="p-sub-option-text">
+                      <div class="p-sub-option-title">
+                        <span>{kind.name}</span>
+                        <Show when={meta()?.vendor}>
+                          <span class="p-sub-option-vendor">{meta()!.vendor}</span>
+                        </Show>
+                      </div>
+                      <div class="p-sub-option-desc">
+                        {meta()?.desc ?? "Browser OAuth sign-in"}
+                      </div>
+                    </div>
+                    <span class="p-sub-option-radio" aria-hidden="true">
+                      <Show when={selected()}>
+                        <span class="p-sub-option-dot" />
+                      </Show>
+                    </span>
+                  </button>
+                );
+              }}
+            </For>
+          </div>
+        </Dialog>
+      </Show>
       <Show when={removing()}>{account => <Dialog title={`Remove ${account().name} and all credentials?`} busy={removeBusy()} onClose={() => setRemoving(null)} footer={<DialogButton disabled={removeBusy()} onClick={() => void remove()}>Remove provider and credentials</DialogButton>}><p class="s-row-desc">This deletes the subscription login and any independent API key saved on this provider. Running work may need another account.</p><Show when={removeError()}><ErrorNotice error={removeError()!}/></Show></Dialog>}</Show>
       <Show when={keyEditor()} keyed>{target => <ApiKeyDialog provider={target === "new" ? undefined : target} onClose={() => setKeyEditor(null)} onDone={() => { setKeyEditor(null); p.onRefresh(); }}/>}</Show>
       <Show when={reauth()}>
@@ -394,7 +511,21 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void }) {
   );
 }
 
+const API_KEY_HINTS: Record<string, { env: string; placeholder: string }> = {
+  openai: { env: "OPENAI_API_KEY", placeholder: "sk-proj-…" },
+  anthropic: { env: "ANTHROPIC_API_KEY", placeholder: "sk-ant-…" },
+  xai: { env: "XAI_API_KEY", placeholder: "xai-…" },
+  google: { env: "GEMINI_API_KEY", placeholder: "AIza…" },
+  "open-router": { env: "OPENROUTER_API_KEY", placeholder: "sk-or-v1-…" },
+  groq: { env: "GROQ_API_KEY", placeholder: "gsk_…" },
+  mistral: { env: "MISTRAL_API_KEY", placeholder: "Mistral API key" },
+  minimax: { env: "MINIMAX_API_KEY", placeholder: "eyJ…" },
+  zai: { env: "ZHIPU_API_KEY", placeholder: "Z.AI API key" },
+  custom: { env: "OPENAI_API_KEY", placeholder: "sk-…" },
+};
+
 function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: () => void}) {
+  const apiKinds = KINDS.filter(k => k.methods.some(m => m.kind === "api"));
   const [type, setType] = createSignal(p.provider?.provider_type ?? "openai");
   const [name, setName] = createSignal(p.provider?.name ?? "");
   const [secret, setSecret] = createSignal("");
@@ -402,27 +533,73 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const version = connectionVersion();
+  const selectedKind = createMemo(() => apiKinds.find(k => k.id === type()) ?? apiKinds[0]);
+  const defaultName = createMemo(() => p.provider?.name || `${selectedKind()?.name ?? type()} key`);
+  const effectiveName = createMemo(() => name().trim() || defaultName());
+  const hint = createMemo(() => API_KEY_HINTS[type()]);
   onCleanup(() => setSecret(""));
   const save = async () => {
-    if (busy() || !secret().trim() || !name().trim()) return;
+    if (busy() || !secret().trim() || !effectiveName()) return;
     if (version !== connectionVersion()) { setError("Connection changed. Close and reopen this dialog."); return; }
     setBusy(true); setError("");
     try {
       await api(`/api/ai/providers${p.provider ? `/${encodeURIComponent(p.provider.id)}` : ""}`, {
         method: p.provider ? "PUT" : "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify(p.provider ? {name:name().trim(),api_key:secret().trim()} : {provider_type:type(),name:name().trim(),api_key:secret().trim(),...(type()==="custom" ? {base_url:url().trim()} : {})}),
+        body: JSON.stringify(p.provider ? {name:effectiveName(),api_key:secret().trim()} : {provider_type:type(),name:effectiveName(),api_key:secret().trim(),...(type()==="custom" ? {base_url:url().trim()} : {})}),
       });
       setSecret(""); if (version === connectionVersion()) p.onDone();
     } catch { setError("Couldn’t save the API key. Check the connection and try again."); }
     finally { setBusy(false); }
   };
-  return <Dialog title={p.provider ? "Edit API key" : "Add API key"} busy={busy()} onClose={p.onClose}
-    footer={<><DialogButton disabled={busy()} onClick={p.onClose}>Cancel</DialogButton><DialogButton variant="primary" disabled={busy() || !secret().trim() || !name().trim() || (!p.provider && type()==="custom" && !/^https?:\/\//.test(url()))} onClick={() => void save()}>{busy() ? "Saving…" : "Save"}</DialogButton></>}>
-    <Show when={!p.provider}><Field label="Provider"><select class="s-input" value={type()} onChange={e=>setType(e.currentTarget.value)}><For each={KINDS.filter(k=>k.methods.some(m=>m.kind==="api"))}>{k=><option value={k.id}>{k.name}</option>}</For></select></Field></Show>
-    <Field label="Name"><input class="s-input" value={name()} onInput={e=>setName(e.currentTarget.value)} placeholder="Account name" /></Field>
-    <Show when={!p.provider && type()==="custom"}><Field label="Base URL"><input class="s-input" type="url" value={url()} onInput={e=>setUrl(e.currentTarget.value)} placeholder="https://api.example.com/v1" /></Field></Show>
-    <Field label={p.provider ? "New API key" : "API key"}><input class="s-input" type="password" autocomplete="new-password" spellcheck={false} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} /></Field>
-    <p class="s-row-desc">{p.provider ? "Enter a replacement key. The saved key is never displayed." : "Saved on the connected backend."}</p>
+  return <Dialog title={p.provider ? "Edit API key" : "Add API key"} description={p.provider ? `Update the API key stored for ${p.provider.name}.` : "Choose a provider and enter an API key to store on the connected backend."} busy={busy()} onClose={p.onClose}
+    footer={<><DialogButton disabled={busy()} onClick={p.onClose}>Cancel</DialogButton><DialogButton variant="primary" disabled={busy() || !secret().trim() || !effectiveName() || (!p.provider && type()==="custom" && !/^https?:\/\//.test(url()))} onClick={() => void save()}>{busy() ? "Saving…" : "Save"}</DialogButton></>}>
+    <Show when={!p.provider}>
+      <div class="field">
+        <span>Provider</span>
+        <div class="p-key-picker" role="radiogroup" aria-label="Provider">
+          <For each={apiKinds}>
+            {(k) => {
+              const selected = () => type() === k.id;
+              return (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={selected()}
+                  class={`p-key-option ${selected() ? "selected" : ""}`}
+                  onClick={() => setType(k.id)}
+                >
+                  <span class="p-key-option-logo">
+                    <ProviderLogo type={k.id} name={k.name} />
+                  </span>
+                  <span class="p-key-option-name">{k.name}</span>
+                </button>
+              );
+            }}
+          </For>
+        </div>
+        <select class="s-input sr-only" aria-label="Provider select" tabindex={-1} value={type()} onChange={e=>setType(e.currentTarget.value)}>
+          <For each={apiKinds}>{k=><option value={k.id}>{k.name}</option>}</For>
+        </select>
+      </div>
+    </Show>
+    <div class="p-key-fields">
+      <Field label="Account label">
+        <input class="s-input" value={name()} onInput={e=>setName(e.currentTarget.value)} placeholder={defaultName()} />
+      </Field>
+      <Show when={!p.provider && type()==="custom"}>
+        <Field label="Base URL">
+          <input class="s-input" type="url" value={url()} onInput={e=>setUrl(e.currentTarget.value)} placeholder="https://api.example.com/v1" />
+        </Field>
+      </Show>
+      <div class="field">
+        <div class="p-key-field-head">
+          <span>{p.provider ? "New API key" : "API key"}</span>
+          <Show when={hint()?.env}><code class="p-key-env">{hint()!.env}</code></Show>
+        </div>
+        <input class="s-input p-key-secret" type="password" autocomplete="new-password" spellcheck={false} placeholder={hint()?.placeholder ?? "Enter API key…"} value={secret()} onInput={e=>setSecret(e.currentTarget.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void save(); } }} />
+      </div>
+    </div>
+    <p class="s-row-desc p-key-foot-note">{p.provider ? "Enter a replacement key. The saved key is never displayed." : "Encrypted at rest on the connected backend and never shown again."}</p>
     <Show when={error()}><p role="alert" class="c-red">{error()}</p></Show>
   </Dialog>;
 }

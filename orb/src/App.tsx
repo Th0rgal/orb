@@ -131,7 +131,7 @@ const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ d
 const SkillsSettings = lazy(() => import("./SkillsSettings").then(module => ({ default: module.SkillsSettings })));
 import { InboxPage } from "./Inbox";
 import { requestInboxDigest } from "./inboxDigest";
-import { buildInboxSections } from "./inboxModel";
+import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxModel";
 import { InboxSettings, inboxConfig } from "./inboxSettings";
 import { pendingMissionInteraction } from "./missionAttention";
 import { markMissionRead, unreadVersion } from "./missionUnread";
@@ -452,9 +452,41 @@ export function Composer(p: {
       }
     }).catch(() => {}).finally(() => { if (current) setDraftReady(true); });
   }));
+  let draftTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingDraftSave: { scope: string; draft: Parameters<typeof saveComposerDraft>[1] } | null = null;
+  const flushDraftSave = () => {
+    if (draftTimer !== undefined) {
+      clearTimeout(draftTimer);
+      draftTimer = undefined;
+    }
+    if (pendingDraftSave) {
+      const { scope, draft } = pendingDraftSave;
+      pendingDraftSave = null;
+      void saveComposerDraft(scope, draft).catch(() => {});
+    }
+  };
+  onCleanup(flushDraftSave);
   createEffect(() => {
-    const scope=p.scope;
-    if (draftReady() && scope) void saveComposerDraft(scope,{text:pendingSend()?.text ?? text(),images:pendingSend()?.images ?? images(),mode:mode(),uploads:uploaded.map(file => ({...file, source:file.source}))}).catch(() => {});
+    const scope = p.scope;
+    const ready = draftReady();
+    const curText = pendingSend()?.text ?? text();
+    const curImages = pendingSend()?.images ?? images();
+    const curMode = mode();
+    if (!ready || !scope) return;
+    const draft = {
+      text: curText,
+      images: curImages,
+      mode: curMode,
+      uploads: uploaded.map((file) => ({ ...file, source: file.source })),
+    };
+    if (!curText && !curImages.length && !curMode) {
+      pendingDraftSave = { scope, draft };
+      flushDraftSave();
+      return;
+    }
+    pendingDraftSave = { scope, draft };
+    if (draftTimer !== undefined) clearTimeout(draftTimer);
+    draftTimer = setTimeout(flushDraftSave, 180);
   });
   const [imageError, setImageError] = createSignal<string | null>(null);
   const [readingImages, setReadingImages] = createSignal(false);
@@ -581,10 +613,18 @@ export function Composer(p: {
   const resize = () => {
     const composer = ta.closest<HTMLElement>(".composer");
     if (!composer) return;
+    const val = ta.value;
+    // Fast path for empty or short single-line compact inputs that cannot wrap:
+    // skip collapsing and re-measuring the DOM box on every keystroke.
+    if (!multiline() && !val.includes("\n") && val.length <= 32 && ta.scrollHeight <= 44) {
+      composer.classList.toggle("tall", Boolean(p.tall || images().length));
+      if (!val) ta.style.height = "";
+      return;
+    }
     // Measuring collapses the textarea: hold the composer's box so the
     // transcript above is not resized (and its scroll clamped), and keep the
     // caret line in view afterwards.
-    const follow = document.activeElement === ta && ta.selectionEnd === ta.value.length;
+    const follow = document.activeElement === ta && ta.selectionEnd === val.length;
     const top = ta.scrollTop;
     composer.style.minHeight = `${composer.offsetHeight}px`;
     // Always decide from the compact width. Measuring the current layout makes
@@ -592,7 +632,7 @@ export function Composer(p: {
     composer.classList.remove("tall");
     ta.style.height = "0px";
     ta.style.minHeight = "0";
-    const wrapped = text().includes("\n") || ta.scrollHeight > 44;
+    const wrapped = val.includes("\n") || ta.scrollHeight > 44;
     setMultiline(wrapped);
     composer.classList.toggle("tall", Boolean(p.tall || images().length || wrapped));
     ta.style.height = Math.min(ta.scrollHeight, 220) + "px";
@@ -1161,14 +1201,18 @@ export default function App() {
   const [projectCreationAnchor, setProjectCreationAnchor] = createSignal<HTMLElement>();
   const [newProjectDraft, setNewProjectDraft] = createSignal(false);
   createEffect(on(projectsVersion, () => {
-    if (isConnected()) listProjects().then(setLiveProjects).catch(() => {});
+    if (isConnected()) listProjects(true).then(setLiveProjects).catch(() => {});
   }, { defer: true }));
   const submitNewProject = async (title: string, slug: string) => {
-    await createProject({ slug, title });
-    setLiveProjects((current) => [...current, { slug, title } as ProjectSummary]);
+    const created = await createProject({ slug, title });
+    setLiveProjects((current) => [
+      ...current.filter((p) => p.slug !== created.slug),
+      created,
+    ]);
     bumpProjects();
-    setNewProject(slug);
+    setNewProject(created.slug);
     setNewProjectDraft(false);
+    window.dispatchEvent(new CustomEvent("orb:project-created", { detail: created }));
   };
   const [liveProjects, setLiveProjects] = createSignal<ProjectSummary[]>([]);
   const effectiveNewProject = createMemo(() => isConnected()
@@ -1315,20 +1359,18 @@ export default function App() {
         if (key.startsWith("m:") && !isMissionDeleting(key.slice(2))) prefetchTranscript(key.slice(2));
       }
       // Pre-warm top unread Inbox transcripts & AI digests in the background so opening Inbox is instant
-      const secs = buildInboxSections(
+      const topUnread = listUnreadInboxCandidates(
         inboxMissions(),
         liveProjects(),
         (id) => peekReadyTranscript(id)?.items,
         pendingMissionInteraction,
-        Date.now(),
         currentMissionId(),
-      );
+      ).slice(0, 10);
       const cfg = inboxConfig();
-      const topUnread = [...secs.needsYou, ...secs.ready].filter((i) => i.unread).slice(0, 10);
       topUnread.forEach((item, idx) => {
         const readyTx = peekReadyTranscript(item.id);
         if (readyTx) {
-          if (cfg.aiSummary && !item.interaction) {
+          if (cfg.aiSummary && !item.hasInteraction) {
             requestInboxDigest(item.mission, readyTx.items, item.updatedMs, 10 + idx);
           }
         } else {
@@ -1396,14 +1438,13 @@ export default function App() {
     transcriptVersion();
     unreadVersion();
     return isConnected()
-      ? buildInboxSections(
+      ? countUnreadInboxMissions(
           inboxMissions(),
           liveProjects(),
           (id) => peekReadyTranscript(id)?.items,
           pendingMissionInteraction,
-          Date.now(),
           currentMissionId(),
-        ).unreadCount
+        )
       : 0;
   });
   createEffect(() => {

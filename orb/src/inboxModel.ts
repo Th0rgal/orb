@@ -1311,6 +1311,32 @@ function extractGoalSummary(
   return undefined;
 }
 
+type CachedInboxItemBase = Omit<
+  InboxItem,
+  "mission" | "unread" | "attention" | "relativeTime" | "childSummary" | "peekTurns" | "allPeekTurns"
+> & {
+  missionRef: Mission;
+  missionStatus: string;
+  missionTitle: string | null | undefined;
+  missionUpdatedAt: string;
+  missionLastOutputAt: string | null | undefined;
+  missionStatusMsg: string | null | undefined;
+  missionTerminalReason: string | null | undefined;
+  missionRemoteErr: string | null | undefined;
+  historyLen: number;
+  lastHistoryContent: string | undefined;
+  itemsRef: StreamItem[] | undefined;
+  itemsLen: number;
+  observedKey: string;
+  projectTitle: string;
+  updatedIso: string;
+  baseAttention: boolean;
+  cachedAllPeekTurns?: InboxPeekTurn[];
+  cachedPeekTurns?: InboxPeekTurn[];
+};
+
+const inboxItemBaseCache = new Map<string, CachedInboxItemBase>();
+
 export function buildInboxItem(
   mission: Mission,
   projects: ReadonlyArray<ProjectSummary>,
@@ -1333,93 +1359,326 @@ export function buildInboxItem(
       ? "Orb"
       : rawProjectTitle;
 
-  const rawTitle = displayTitle(mission.title);
-  const firstUserItem = items?.find(
-    (i): i is Extract<StreamItem, { kind: "user" }> =>
-      i.kind === "user" && !i.queued && Boolean(i.text.trim()),
-  )?.text;
-  const firstUser = firstUserItem || mission.history?.find((h) => h.role === "user")?.content;
-  let expandedTitle = rawTitle;
-  if (rawTitle && (rawTitle.endsWith("…") || rawTitle.endsWith("...")) && rawTitle.length <= 46) {
-    const stem = rawTitle.replace(/(?:…|\.\.\.)$/, "").trim().toLowerCase();
-    const candidateSource = String(mission.goal_objective || firstUser || "")
-      .trim()
-      .split(/\r?\n/, 1)[0]
-      ?.trim();
-    if (stem.length >= 16 && candidateSource && candidateSource.toLowerCase().startsWith(stem)) {
-      expandedTitle = clipToSentence(candidateSource, 84);
-    }
-  }
-  let headline =
-    (expandedTitle ? condenseMissionHeadline(expandedTitle, projectTitle) : "") ||
-    (firstUser ? condenseMissionHeadline(clipToSentence(firstUser, 84), projectTitle) : "") ||
-    "Untitled conversation";
+  const observedKey = interaction
+    ? `${interaction.callId}:${interaction.kind}:${interaction.prompt}`
+    : "";
+  const historyLen = mission.history?.length ?? 0;
+  const lastHistoryContent = historyLen > 0 ? mission.history?.[historyLen - 1]?.content : undefined;
+  const itemsLen = items?.length ?? 0;
 
-  const isGoal = Boolean(
-    mission.goal_mode || (mission.title && mission.title.trim().startsWith("/goal")),
-  );
-  if (headline.trim().toLowerCase() === projectTitle.trim().toLowerCase()) {
-    const goalLines = String(mission.goal_objective ?? firstUser ?? "")
-      .split(/\r?\n/)
-      .map((l: string) => stripMarkdownToProse(l))
-      .filter((l: string) => Boolean(l) && l.toLowerCase() !== projectTitle.trim().toLowerCase());
-    if (goalLines.length > 0) {
-      headline = condenseMissionHeadline(goalLines[0], projectTitle);
-    } else if (isGoal) {
-      headline = `${projectTitle} objective`;
+  let base = inboxItemBaseCache.get(mission.id);
+  if (
+    !base ||
+    base.missionStatus !== mission.status ||
+    base.missionTitle !== mission.title ||
+    base.missionUpdatedAt !== mission.updated_at ||
+    base.missionLastOutputAt !== mission.last_output_at ||
+    base.missionStatusMsg !== mission.status_message ||
+    base.missionTerminalReason !== mission.terminal_reason ||
+    base.missionRemoteErr !== mission.remote_job?.error ||
+    base.historyLen !== historyLen ||
+    base.lastHistoryContent !== lastHistoryContent ||
+    base.itemsRef !== items ||
+    base.itemsLen !== itemsLen ||
+    base.observedKey !== observedKey ||
+    base.projectTitle !== projectTitle ||
+    base.category !== category
+  ) {
+    const rawTitle = displayTitle(mission.title);
+    const firstUserItem = items?.find(
+      (i): i is Extract<StreamItem, { kind: "user" }> =>
+        i.kind === "user" && !i.queued && Boolean(i.text.trim()),
+    )?.text;
+    const firstUser = firstUserItem || mission.history?.find((h) => h.role === "user")?.content;
+    let expandedTitle = rawTitle;
+    if (rawTitle && (rawTitle.endsWith("…") || rawTitle.endsWith("...")) && rawTitle.length <= 46) {
+      const stem = rawTitle.replace(/(?:…|\.\.\.)$/, "").trim().toLowerCase();
+      const candidateSource = String(mission.goal_objective || firstUser || "")
+        .trim()
+        .split(/\r?\n/, 1)[0]
+        ?.trim();
+      if (stem.length >= 16 && candidateSource && candidateSource.toLowerCase().startsWith(stem)) {
+        expandedTitle = clipToSentence(candidateSource, 84);
+      }
     }
+    let headline =
+      (expandedTitle ? condenseMissionHeadline(expandedTitle, projectTitle) : "") ||
+      (firstUser ? condenseMissionHeadline(clipToSentence(firstUser, 84), projectTitle) : "") ||
+      "Untitled conversation";
+
+    const isGoal = Boolean(
+      mission.goal_mode || (mission.title && mission.title.trim().startsWith("/goal")),
+    );
+    if (headline.trim().toLowerCase() === projectTitle.trim().toLowerCase()) {
+      const goalLines = String(mission.goal_objective ?? firstUser ?? "")
+        .split(/\r?\n/)
+        .map((l: string) => stripMarkdownToProse(l))
+        .filter((l: string) => Boolean(l) && l.toLowerCase() !== projectTitle.trim().toLowerCase());
+      if (goalLines.length > 0) {
+        headline = condenseMissionHeadline(goalLines[0], projectTitle);
+      } else if (isGoal) {
+        headline = `${projectTitle} objective`;
+      }
+    }
+
+    const summary = extractSummary(mission, items, interaction);
+    const lastRequest = extractLastRequest(mission, items);
+    const goalSummary = extractGoalSummary(mission, headline, firstUser, lastRequest);
+    const workReceiptSummary = extractLatestWorkReceipt(items);
+    const verdict = resolveVerdict(mission, summary, interaction);
+    const { badge, tone } = resolveBadgeAndTone(mission, summary, interaction);
+    const updatedMs = missionResponseTimestampMs(mission);
+    const updatedIso =
+      updatedMs > 0
+        ? new Date(updatedMs).toISOString()
+        : mission.updated_at || mission.last_output_at || mission.created_at;
+    const baseAttention =
+      Boolean(interaction) ||
+      mission.status === "blocked" ||
+      mission.status === "failed" ||
+      mission.status === "not_feasible";
+    const canRetry = RETRYABLE_STATUSES.has(mission.status);
+
+    base = {
+      id: mission.id,
+      missionRef: mission,
+      missionStatus: mission.status,
+      missionTitle: mission.title,
+      missionUpdatedAt: mission.updated_at,
+      missionLastOutputAt: mission.last_output_at,
+      missionStatusMsg: mission.status_message,
+      missionTerminalReason: mission.terminal_reason,
+      missionRemoteErr: mission.remote_job?.error,
+      historyLen,
+      lastHistoryContent,
+      itemsRef: items,
+      itemsLen,
+      observedKey,
+      category,
+      projectSlug,
+      projectTitle,
+      headline,
+      goalSummary,
+      lastRequest,
+      workReceiptSummary,
+      verdict,
+      summary,
+      badge,
+      tone,
+      machine: resolveMachine(mission),
+      updatedMs,
+      updatedIso,
+      isGoal,
+      baseAttention,
+      canRetry,
+      interaction,
+    };
+    inboxItemBaseCache.set(mission.id, base);
+  } else {
+    base.missionRef = mission;
+    base.interaction = interaction;
   }
 
-  const summary = extractSummary(mission, items, interaction);
-  const lastRequest = extractLastRequest(mission, items);
-  const goalSummary = extractGoalSummary(mission, headline, firstUser, lastRequest);
-  const workReceiptSummary = extractLatestWorkReceipt(items);
-  const verdict = resolveVerdict(mission, summary, interaction);
-  const { badge, tone } = resolveBadgeAndTone(mission, summary, interaction);
-  const updatedMs = missionResponseTimestampMs(mission);
-  const updatedIso =
-    updatedMs > 0
-      ? new Date(updatedMs).toISOString()
-      : mission.updated_at || mission.last_output_at || mission.created_at;
+  const cachedBase = base;
   const unread =
     isMissionUnread(mission, selectedMissionId, Boolean(interaction)) ||
     Boolean(childSummary?.hasUnreadFailure);
   const attention =
-    Boolean(interaction) ||
-    mission.status === "blocked" ||
-    mission.status === "failed" ||
-    mission.status === "not_feasible" ||
-    Boolean(childSummary && childSummary.failed > 0);
-  const canRetry = RETRYABLE_STATUSES.has(mission.status);
-  const allPeekTurns = extractAllPeekTurns(mission, items, summary, 24);
-  const peekTurns = allPeekTurns.slice(-3);
+    cachedBase.baseAttention || Boolean(childSummary && childSummary.failed > 0);
 
   return {
-    id: mission.id,
+    id: cachedBase.id,
     mission,
-    category,
-    projectSlug,
-    projectTitle,
-    headline,
-    goalSummary,
-    lastRequest,
-    workReceiptSummary,
-    verdict,
-    summary,
-    badge,
-    tone,
-    machine: resolveMachine(mission),
-    relativeTime: formatRelativeTime(updatedIso, nowMs),
-    updatedMs,
-    isGoal,
+    category: cachedBase.category,
+    projectSlug: cachedBase.projectSlug,
+    projectTitle: cachedBase.projectTitle,
+    headline: cachedBase.headline,
+    goalSummary: cachedBase.goalSummary,
+    lastRequest: cachedBase.lastRequest,
+    workReceiptSummary: cachedBase.workReceiptSummary,
+    verdict: cachedBase.verdict,
+    summary: cachedBase.summary,
+    badge: cachedBase.badge,
+    tone: cachedBase.tone,
+    machine: cachedBase.machine,
+    relativeTime: formatRelativeTime(cachedBase.updatedIso, nowMs),
+    updatedMs: cachedBase.updatedMs,
+    isGoal: cachedBase.isGoal,
     unread,
     attention,
-    canRetry,
-    peekTurns,
-    allPeekTurns,
+    canRetry: cachedBase.canRetry,
+    get allPeekTurns(): InboxPeekTurn[] {
+      if (!cachedBase.cachedAllPeekTurns) {
+        cachedBase.cachedAllPeekTurns = extractAllPeekTurns(
+          cachedBase.missionRef,
+          cachedBase.itemsRef,
+          cachedBase.summary,
+          24,
+        );
+      }
+      return cachedBase.cachedAllPeekTurns;
+    },
+    get peekTurns(): InboxPeekTurn[] {
+      if (!cachedBase.cachedPeekTurns) {
+        const all =
+          cachedBase.cachedAllPeekTurns ??
+          (cachedBase.cachedAllPeekTurns = extractAllPeekTurns(
+            cachedBase.missionRef,
+            cachedBase.itemsRef,
+            cachedBase.summary,
+            24,
+          ));
+        cachedBase.cachedPeekTurns = all.slice(-3);
+      }
+      return cachedBase.cachedPeekTurns;
+    },
     childSummary,
-    interaction,
+    interaction: cachedBase.interaction,
   };
+}
+
+function hasUnresolvedInteractiveTool(
+  mission: Mission,
+  items?: StreamItem[],
+  observed?: PendingInteraction,
+): boolean {
+  if (
+    HIDDEN_STATUSES.has(mission.status) ||
+    mission.status === "completed" ||
+    mission.status === "failed" ||
+    mission.status === "not_feasible"
+  ) {
+    return false;
+  }
+  if (observed) return true;
+  if (!items || !items.length) return false;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "tool" && !item.done && INTERACTIVE_TOOLS.has(item.name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export type UnreadInboxCandidate = {
+  id: string;
+  mission: Mission;
+  category: "needs_you" | "ready";
+  hasInteraction: boolean;
+  updatedMs: number;
+};
+
+/**
+ * Fast O(N) unread classifier that avoids running markdown/regex summarization
+ * over every mission transcript during background polls or sidebar badge updates.
+ */
+export function listUnreadInboxCandidates(
+  missions: ReadonlyArray<Mission>,
+  projects: ReadonlyArray<ProjectSummary>,
+  getTranscript?: (id: string) => StreamItem[] | undefined,
+  getInteraction?: (id: string) => PendingInteraction | undefined,
+  selectedMissionId?: string | null,
+): UnreadInboxCandidate[] {
+  const liveSlugs =
+    projects.length > 0
+      ? new Set([DEFAULT_PROJECT.slug, ...projects.map((p) => p.slug)])
+      : null;
+
+  const unreadFailureByParent = new Set<string>();
+  for (const m of missions) {
+    if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
+    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded-by:"))) continue;
+    const parentId = m.parent_mission_id || m.callback_parent_mission_id;
+    if (!parentId) continue;
+    if (
+      (m.status === "failed" || m.status === "blocked" || m.status === "not_feasible") &&
+      isMissionUnread(m, selectedMissionId, false)
+    ) {
+      unreadFailureByParent.add(parentId);
+    }
+  }
+
+  const out: UnreadInboxCandidate[] = [];
+  for (const mission of missions) {
+    const rawSlug = mission.project?.trim();
+    const observed = getInteraction?.(mission.id);
+    if (liveSlugs) {
+      if (!rawSlug && !mission.tags?.includes("placement:client") && !observed) {
+        continue;
+      }
+      const slug = rawSlug || DEFAULT_PROJECT.slug;
+      if (!liveSlugs.has(slug)) continue;
+    }
+    if (isBtwMission(mission)) continue;
+    const status = mission.status || "";
+    if (HIDDEN_STATUSES.has(status)) continue;
+
+    const needsInteractionCheck =
+      Boolean(observed) || WORKING_STATUSES.has(status) || isSubagentMission(mission);
+    const hasInteraction = needsInteractionCheck
+      ? hasUnresolvedInteractiveTool(mission, getTranscript?.(mission.id), observed)
+      : false;
+
+    let category: "needs_you" | "ready" | null = null;
+    if (hasInteraction) {
+      category = "needs_you";
+    } else if (!isSubagentMission(mission) && !WORKING_STATUSES.has(status)) {
+      if (
+        status === "blocked" ||
+        status === "failed" ||
+        status === "not_feasible" ||
+        status === "awaiting_user" ||
+        status === "waiting_user"
+      ) {
+        category = "needs_you";
+      } else if (
+        status === "completed" ||
+        status === "succeeded" ||
+        status === "paused" ||
+        status === "interrupted"
+      ) {
+        category = "ready";
+      }
+    }
+    if (!category) continue;
+
+    const unread =
+      isMissionUnread(mission, selectedMissionId, hasInteraction) ||
+      unreadFailureByParent.has(mission.id);
+    if (!unread) continue;
+
+    out.push({
+      id: mission.id,
+      mission,
+      category,
+      hasInteraction,
+      updatedMs: missionResponseTimestampMs(mission),
+    });
+  }
+
+  out.sort((a, b) => {
+    if (a.category !== b.category) return a.category === "needs_you" ? -1 : 1;
+    if (a.hasInteraction !== b.hasInteraction) return a.hasInteraction ? -1 : 1;
+    return b.updatedMs - a.updatedMs;
+  });
+  return out;
+}
+
+export function countUnreadInboxMissions(
+  missions: ReadonlyArray<Mission>,
+  projects: ReadonlyArray<ProjectSummary>,
+  getTranscript?: (id: string) => StreamItem[] | undefined,
+  getInteraction?: (id: string) => PendingInteraction | undefined,
+  selectedMissionId?: string | null,
+): number {
+  return listUnreadInboxCandidates(
+    missions,
+    projects,
+    getTranscript,
+    getInteraction,
+    selectedMissionId,
+  ).length;
 }
 
 function urgencyScore(item: InboxItem): number {
