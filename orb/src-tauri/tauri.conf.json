@@ -24,7 +24,8 @@
           "y": 20
         },
         "transparent": true,
-        "backgroundThrottling": "disabled"
+        "backgroundThrottling": "disabled",
+        "devtools": true
       }
     ],
     "withGlobalTauri": true,

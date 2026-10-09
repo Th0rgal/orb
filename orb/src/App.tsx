@@ -610,9 +610,30 @@ export function Composer(p: {
   const mentioned = createMemo(() => mentionedChips(text(), atItems()));
   createEffect(() => p.onAttachments?.(mentioned()));
   const [multiline, setMultiline] = createSignal(false);
+  // Measuring scrollHeight forces a synchronous layout of the whole window on
+  // every keystroke; with a long transcript that made typing lag per letter.
+  // Single-line drafts are decided with canvas text metrics instead.
+  let measureCtx: CanvasRenderingContext2D | null | undefined;
+  let compactWidth = 0;
+  const fitsOneLine = (value: string) => {
+    if (!compactWidth) return false;
+    measureCtx ??= document.createElement("canvas").getContext("2d");
+    if (!measureCtx) return false;
+    measureCtx.font = getComputedStyle(ta).font;
+    return measureCtx.measureText(value).width < compactWidth - 24;
+  };
+  onMount(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => { if (!multiline()) compactWidth = entry.contentRect.width; });
+    observer.observe(ta);
+    onCleanup(() => observer.disconnect());
+  });
   const resize = () => {
     const composer = ta.closest<HTMLElement>(".composer");
     if (!composer) return;
+    // Canvas metrics decide most single-line drafts without touching layout.
+    const value = text();
+    if (!multiline() && !p.tall && !images().length && !value.includes("\n") && fitsOneLine(value)) return;
     const val = ta.value;
     // Fast path for empty or short single-line compact inputs that cannot wrap:
     // skip collapsing and re-measuring the DOM box on every keystroke.
