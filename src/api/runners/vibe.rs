@@ -13,6 +13,11 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let Some(store) = ctx.mission_store.as_ref() else {
         return AgentResult::failure("Vibe requires durable session storage", 0);
     };
+    let transfer =
+        match crate::api::control::machine_transfer::committed(store, ctx.mission_id).await {
+            Ok(transfer) => transfer,
+            Err(error) => return AgentResult::failure(error, 0),
+        };
     let claim = uuid::Uuid::new_v4();
     let run = super::session_update_run();
     match store.claim_native_prompt(ctx.mission_id, "vibe", ctx.session_id, run.as_ref(), claim).await {
@@ -39,7 +44,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         true,
     );
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
-    let env = std::collections::HashMap::from([
+    let mut env = std::collections::HashMap::from([
         (
             "SANDBOXED_VIBE_PROXY_URL".into(),
             format!(
@@ -52,6 +57,9 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             std::env::var("SANDBOXED_PROXY_SECRET").unwrap_or_default(),
         ),
     ]);
+    if let Some(transfer) = transfer {
+        env.insert("SANDBOXED_VIBE_TRANSFER_ID".into(), transfer.id.to_string());
+    }
     let exec = crate::workspace_exec::WorkspaceExec::new(ctx.workspace.clone());
     let cwd = crate::workspace::configured_project_dir(ctx.workspace, ctx.work_dir);
     let mut child = match exec.spawn_streaming(&cwd, "python3", &args, env).await {

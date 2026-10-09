@@ -63,7 +63,7 @@ class BridgeTest(unittest.TestCase):
         self.cli.write_text(FAKE)
         self.cli.chmod(0o700)
         self.env = dict(os.environ, HOME=str(self.root), PROMPT_MARKER=str(self.root / "prompts"))
-        for key in ("SANDBOXED_MCP_WRAPPER", "SANDBOXED_SH_MISSION_ID"):
+        for key in ("SANDBOXED_MCP_WRAPPER", "SANDBOXED_SH_MISSION_ID", "SANDBOXED_VIBE_TRANSFER_ID"):
             self.env.pop(key, None)
 
     def tearDown(self):
@@ -87,6 +87,21 @@ class BridgeTest(unittest.TestCase):
         self.assertNotIn("OLD HISTORY", output)
         self.assertIn("NEW ANSWER", output)
         self.assertEqual((self.root / "prompts").read_text(), "hello\nhello\n")
+
+    def test_transfer_return_uses_new_journal_but_recovers_within_transfer(self):
+        log = self.root / "requests"
+        self.env["REQUEST_LOG"] = str(log)
+        for scope, expected in [(None, "session/new"), ("transfer-one", "session/new"),
+                                ("transfer-one", "session/load"), ("transfer-two", "session/new")]:
+            if scope:
+                self.env["SANDBOXED_VIBE_TRANSFER_ID"] = scope
+            log.write_text("")
+            child = self.start()
+            output, errors = child.communicate(timeout=10)
+            self.assertEqual(child.returncode, 0, errors + output)
+            methods = [json.loads(line)["method"] for line in log.read_text().splitlines()]
+            self.assertIn(expected, methods)
+            self.assertNotIn("session/load" if expected == "session/new" else "session/new", methods)
 
     def test_large_stdin_prompt_preserves_text_and_acknowledgement(self):
         prompt = "a multiline prompt\n" * 16000

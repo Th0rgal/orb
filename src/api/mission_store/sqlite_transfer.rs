@@ -116,7 +116,7 @@ pub(super) async fn save(
                 tags.retain(|t|t!="placement:client"&&!t.starts_with("fork-workspace:"));
                 if matches!(action.destination,Machine::Client{..}){tags.push("placement:client".into());}
                 let now=now_string();
-                tx.execute("UPDATE missions SET working_directory=?2,requires_local_disk=?3,tags=?4,backend=?5,model_override=?6,model_effort=?7,session_id=NULL,deferred_goal=NULL,workspace_id='00000000-0000-0000-0000-000000000000',status='awaiting_user',terminal_reason='machine_transfer',updated_at=?8,agent=NULL,config_profile=NULL WHERE id=?1",params![mid,root,matches!(action.destination,Machine::Core),serde_json::to_string(&tags).map_err(error)?,action.backend,action.model,action.effort,now]).map_err(error)?;
+                tx.execute("UPDATE missions SET working_directory=?2,requires_local_disk=?3,tags=?4,backend=?5,model_override=?6,model_effort=?7,session_id=NULL,deferred_goal=NULL,workspace_id='00000000-0000-0000-0000-000000000000',status='awaiting_user',terminal_reason='machine_transfer',updated_at=?8,agent=CASE WHEN backend=?5 AND ?5='vibe' THEN agent ELSE NULL END,config_profile=NULL WHERE id=?1",params![mid,root,matches!(action.destination,Machine::Core),serde_json::to_string(&tags).map_err(error)?,action.backend,action.model,action.effort,now]).map_err(error)?;
                 // Native identities and unbound-attempt guards belong to the
                 // source machine. The committed transfer authorizes new ones.
                 for table in ["mission_harness_sessions", "mission_native_prompt_attempts", "mission_native_prompt_claims"] {
@@ -193,7 +193,7 @@ mod tests {
                 .await
                 .unwrap();
             let m = store
-                .create_mission(None, None, None, None, None, Some(backend), None)
+                .create_mission(None, None, Some("plan"), None, None, Some(backend), None)
                 .await
                 .unwrap();
             assert!(store
@@ -270,6 +270,11 @@ mod tests {
                 }
             }
             assert!(!store.native_prompt_attempted(m.id, backend).await.unwrap());
+            let transferred = store.get_mission(m.id).await.unwrap().unwrap();
+            assert_eq!(
+                transferred.agent.as_deref(),
+                (backend == "vibe").then_some("plan")
+            );
             assert!(store
                 .get_mission(m.id)
                 .await

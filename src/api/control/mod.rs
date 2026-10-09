@@ -14877,6 +14877,13 @@ async fn submit_leased_remote_job(
         env.insert("SANDBOXED_MCP_API_URL".into(), url);
         env.insert("SANDBOXED_MCP_TOKEN".into(), token);
         env.insert("SANDBOXED_SH_MISSION_ID".into(), mission.id.to_string());
+        if harness == "vibe" {
+            if let Some(transfer) =
+                machine_transfer::committed(&control.mission_store, mission.id).await?
+            {
+                env.insert("SANDBOXED_VIBE_TRANSFER_ID".into(), transfer.id.to_string());
+            }
+        }
         env.insert(
             "SANDBOXED_MCP_WRAPPER".into(),
             "/usr/local/bin/sandboxed-mcp".into(),

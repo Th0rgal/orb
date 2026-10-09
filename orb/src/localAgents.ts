@@ -48,6 +48,7 @@ export interface LocalBinding {
   effort?: string;
   sessionId?: string;
   transferId?: string;
+  planMode?: boolean;
 }
 
 export interface LocalFile {

@@ -66,7 +66,10 @@ def run(args):
         args.prompt = args.prompt[5:].strip()
     root = Path.home() / ".local/state/sandboxed-vibe"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    key = hashlib.sha256((cwd + "\0" + args.mission).encode()).hexdigest()
+    # A committed move starts a fresh native history even when returning to the
+    # same machine/cwd. Keep its stable ID for crash recovery within that move.
+    scope = os.environ.get("SANDBOXED_VIBE_TRANSFER_ID", "")
+    key = hashlib.sha256((cwd + "\0" + args.mission + ("\0" + scope if scope else "")).encode()).hexdigest()
     lock = (root / (key + ".lock")).open("w")
     lock_file(lock)
     journal = root / (key + ".json")

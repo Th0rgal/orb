@@ -1157,6 +1157,11 @@ fn spawn_vibe(
     let (python, prefix) = vibe_python(&request.bin)?;
     let mut command = harness_command(&python);
     command.args(prefix);
+    let bindings = crate::local_bindings(None, None)?;
+    if let Some(transfer) = bindings[&request.id]["transferId"].as_str() {
+        let transfer = uuid::Uuid::parse_str(transfer).map_err(|_| "Invalid transfer identity")?;
+        command.env("SANDBOXED_VIBE_TRANSFER_ID", transfer.to_string());
+    }
     command
         .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(&request.cwd)
@@ -1166,7 +1171,8 @@ fn spawn_vibe(
             request.model.as_deref(),
             request.session_id.as_deref(),
             prompt,
-            crate::vibe::plan_mode(None, &request.prompt),
+            bindings[&request.id]["planMode"].as_bool().unwrap_or(false)
+                || crate::vibe::plan_mode(None, &request.prompt),
             true,
         ))
         .stdin(Stdio::piped())
