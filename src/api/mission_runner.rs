@@ -9464,8 +9464,18 @@ pub async fn check_backend_prerequisites(
         }
         "vibe" => {
             let cli_available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("vibe-acp")).await;
-            let python = command_available(&workspace_exec, cwd, "python3").await;
-            BackendPreflightResult { backend_id: "vibe".into(), available: cli_available && python, cli_available, auto_install_possible: false, missing_dependencies: if cli_available && python { vec![] } else { vec!["Mistral Vibe (vibe-acp) and Python 3".into()] }, message: Some("Install mistral-vibe with uv tool install mistral-vibe; Core uses the connected Mistral provider".into()) }
+            let python = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                workspace_exec.output(
+                    cwd,
+                    "python3",
+                    &["-c".into(), crate::vibe::PYTHON_VERSION_CHECK.into()],
+                    HashMap::new(),
+                ),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok_and(|output| output.status.success()));
+            BackendPreflightResult { backend_id: "vibe".into(), available: cli_available && python, cli_available, auto_install_possible: false, missing_dependencies: if cli_available && python { vec![] } else { vec!["Mistral Vibe (vibe-acp) and Python 3.9+".into()] }, message: Some("Install mistral-vibe with uv tool install mistral-vibe; Core uses the connected Mistral provider".into()) }
         }
         "antigravity" => {
             let available = command_available(&workspace_exec, cwd, cli_path.unwrap_or("agy")).await;

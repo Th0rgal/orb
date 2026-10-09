@@ -4,6 +4,12 @@ use crate::api::control::AgentEvent;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
+    if !crate::backend::vibe::core_auth_configured(ctx.app_working_dir).await {
+        return AgentResult::failure(
+            "Connect an enabled Mistral provider in Core before starting Mistral Vibe",
+            0,
+        );
+    }
     let Some(store) = ctx.mission_store.as_ref() else {
         return AgentResult::failure("Vibe requires durable session storage", 0);
     };
@@ -250,6 +256,48 @@ fn finish_thinking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_core_credentials_rejects_launch_before_claiming_a_prompt() {
+        use crate::api::mission_store::{InMemoryMissionStore, MissionStore};
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = crate::workspace::Workspace::default_host(directory.path().into());
+        let store = Arc::new(InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, Some("vibe"), None)
+            .await
+            .unwrap();
+        let (events_tx, _) = tokio::sync::broadcast::channel(4);
+        let result = run(TurnContext {
+            mission_store: Some(store.clone()),
+            workspace: &workspace,
+            work_dir: directory.path(),
+            message: "Do not execute this prompt",
+            model: None,
+            model_effort: None,
+            fast_mode: false,
+            agent: None,
+            mission_id: mission.id,
+            events_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            app_working_dir: directory.path(),
+            session_id: None,
+            is_continuation: false,
+            extras: super::super::TurnExtras::None,
+        })
+        .await;
+        assert!(!result.success);
+        assert!(result
+            .output
+            .contains("Connect an enabled Mistral provider"));
+        assert!(store
+            .claim_native_prompt(mission.id, "vibe", None, None, uuid::Uuid::new_v4())
+            .await
+            .unwrap());
+    }
+
     #[tokio::test]
     async fn vibe_startup_failure_releases_only_an_unbound_claim() {
         use crate::api::mission_store::{

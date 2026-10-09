@@ -1,6 +1,8 @@
 //! Shared native Vibe ACP transport and event reducer.
 use serde_json::{json, Value};
 
+pub const PYTHON_VERSION_CHECK: &str = "import sys; sys.exit(sys.version_info < (3, 9))";
+
 pub const BRIDGE: &str = include_str!("vibe_bridge.py");
 
 pub fn plan_mode(agent: Option<&str>, prompt: &str) -> bool {
