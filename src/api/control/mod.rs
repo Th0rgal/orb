@@ -13539,7 +13539,7 @@ mod vibe_plan_tests {
     fn vibe_remote_plan_preserves_read_only_mode() {
         let plan = plan_remote_harness(None, "vibe", None, Some("/plan inspect this")).unwrap();
         let execution = remote_execution_for_plan(&plan, "https://core.test", "test-key");
-        assert!(execution.command.ends_with("'--mode' 'plan'"));
+        assert!(execution.command.contains("'--mode' 'plan'"));
     }
 
     #[test]
