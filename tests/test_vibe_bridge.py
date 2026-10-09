@@ -1,10 +1,13 @@
 """ACP boundary tests for durable native identity and prompt admission."""
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 BRIDGE = Path(__file__).resolve().parents[1] / "shared/vibe_bridge.py"
 FAKE = '''#!/usr/bin/env python3
@@ -61,6 +64,46 @@ class BridgeTest(unittest.TestCase):
         self.assertNotIn("OLD HISTORY", output)
         self.assertIn("NEW ANSWER", output)
         self.assertEqual((self.root / "prompts").read_text(), "hello\nhello\n")
+
+    def test_large_stdin_prompt_preserves_text_and_acknowledgement(self):
+        prompt = "a multiline prompt\n" * 16000
+        child = subprocess.Popen(["python3", str(BRIDGE), "--cli", str(self.cli),
+                                  "--mission", "one", "--prompt-stdin", "--ack"],
+                                 cwd=self.root, env=self.env, text=True,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors = child.communicate(json.dumps({"prompt": prompt}) + '\n{"continue":true}\n', timeout=10)
+        self.assertEqual(child.returncode, 0, errors + output)
+        self.assertEqual((self.root / "prompts").read_text(), prompt + "\n")
+
+    def test_prompt_file_and_concurrent_session_lock(self):
+        child = self.start("--ack")
+        self.assertEqual(json.loads(child.stdout.readline())["type"], "session")
+        concurrent = self.start()
+        output, _ = concurrent.communicate(timeout=10)
+        self.assertNotEqual(concurrent.returncode, 0)
+        self.assertFalse((self.root / "prompts").exists())
+        child.communicate('{"continue":true}\n', timeout=10)
+        prompt = self.root / "prompt.txt"
+        prompt.write_text("from file")
+        resumed = subprocess.Popen(["python3", str(BRIDGE), "--cli", str(self.cli),
+                                   "--mission", "one", "--prompt-file", str(prompt)],
+                                  cwd=self.root, env=self.env, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors = resumed.communicate(timeout=10)
+        self.assertEqual(resumed.returncode, 0, errors + output)
+        self.assertEqual((self.root / "prompts").read_text(), "hello\nfrom file\n")
+
+    def test_windows_lock_uses_one_byte_exclusive_lock(self):
+        spec = importlib.util.spec_from_file_location("vibe_bridge_test", BRIDGE)
+        bridge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bridge)
+        calls = []
+        windows = SimpleNamespace(LK_NBLCK=2, locking=lambda fd, mode, size: calls.append((fd, mode, size)))
+        with (self.root / "windows.lock").open("w") as lock:
+            with patch.object(bridge.os, "name", "nt"), patch.dict("sys.modules", {"msvcrt": windows}):
+                bridge.lock_file(lock)
+            self.assertEqual(calls, [(lock.fileno(), 2, 1)])
+            self.assertEqual(lock.tell(), 0)
 
     def test_lost_parent_never_starts_prompt(self):
         child = self.start("--ack")

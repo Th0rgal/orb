@@ -13304,7 +13304,8 @@ pub(crate) fn remote_execution_for_plan(
             prompt,
             resume_session_id,
         } => {
-            let args = crate::vibe::args(
+            let staged = stdin_prompt(prompt);
+            let mut args = crate::vibe::args(
                 "vibe-acp",
                 "runtime",
                 Some(
@@ -13313,26 +13314,36 @@ pub(crate) fn remote_execution_for_plan(
                         .unwrap_or("mistral/mistral-vibe-cli-latest"),
                 ),
                 resume_session_id.as_deref(),
-                prompt,
+                if staged.is_some() { "" } else { prompt },
                 *plan,
                 false,
             );
+            let mut env = HashMap::from([
+                (
+                    "SANDBOXED_VIBE_PROXY_URL".into(),
+                    format!("{}/v1", api_base_url.trim_end_matches('/')),
+                ),
+                ("SANDBOXED_VIBE_PROXY_KEY".into(), proxy_key.into()),
+            ]);
+            let prelude = if let Some(staged) = staged {
+                let index = args.iter().position(|arg| arg == "--prompt").unwrap();
+                args[index] = "--prompt-file".into();
+                args[index + 1] = "/dev/fd/3".into();
+                env.extend(staged.env);
+                staged.prelude
+            } else {
+                String::new()
+            };
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command: format!(
-                    "exec python3 {}",
+                    "{prelude}exec python3 {}",
                     args.iter()
                         .map(|arg| shell_single_quote(arg))
                         .collect::<Vec<_>>()
                         .join(" ")
                 ),
-                env: Some(HashMap::from([
-                    (
-                        "SANDBOXED_VIBE_PROXY_URL".into(),
-                        format!("{}/v1", api_base_url.trim_end_matches('/')),
-                    ),
-                    ("SANDBOXED_VIBE_PROXY_KEY".into(), proxy_key.into()),
-                ])),
+                env: Some(env),
                 label,
             }
         }
@@ -13529,6 +13540,23 @@ mod vibe_plan_tests {
         let plan = plan_remote_harness(None, "vibe", None, Some("/plan inspect this")).unwrap();
         let execution = remote_execution_for_plan(&plan, "https://core.test", "test-key");
         assert!(execution.command.ends_with("'--mode' 'plan'"));
+    }
+
+    #[test]
+    fn vibe_large_remote_prompt_is_staged_outside_argv() {
+        let prompt = "large context ".repeat(30_000);
+        let plan = plan_remote_harness(None, "vibe", None, Some(&prompt)).unwrap();
+        let execution = remote_execution_for_plan(&plan, "https://core.test", "test-key");
+        assert!(execution.command.len() < INLINE_PROMPT_LIMIT);
+        assert!(execution.command.contains("'--prompt-file' '/dev/fd/3'"));
+        let env = execution.env.unwrap();
+        let mut restored = String::new();
+        for part in 0..10 {
+            if let Some(value) = env.get(&format!("{STDIN_PROMPT_ENV}{part}")) {
+                restored.push_str(value);
+            }
+        }
+        assert_eq!(restored, prompt.trim());
     }
 
     #[test]

@@ -61,6 +61,13 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         }
     };
     let mut stdin = child.stdin.take();
+    let prompt = format!("{}\n", serde_json::json!({"prompt":ctx.message}));
+    if let Some(input) = stdin.as_mut() {
+        if input.write_all(prompt.as_bytes()).await.is_err() {
+            stop(&mut child).await;
+            return AgentResult::failure("Cannot deliver Vibe prompt", 0);
+        }
+    }
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let stderr = child.stderr.take().unwrap();
     let drain = tokio::spawn(async move {

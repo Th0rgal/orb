@@ -5,7 +5,6 @@ requires the parent to persist that identity before admitting the prompt.
 No model output or stderr can substitute for an ACP prompt result.
 """
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -20,6 +19,18 @@ def emit(kind, **values):
     print(json.dumps(dict(type=kind, **values)), flush=True)
 
 
+def lock_file(file):
+    if os.name == "nt":
+        import msvcrt
+        file.write("0")
+        file.flush()
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 def save(path, value):
     fd, temporary = tempfile.mkstemp(dir=path.parent)
     try:
@@ -28,17 +39,22 @@ def save(path, value):
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
-        fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        if os.name != "nt":
+            fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
 
 def run(args):
+    if args.prompt_stdin:
+        args.prompt = json.loads(sys.stdin.readline())["prompt"]
+    elif args.prompt_file:
+        args.prompt = Path(args.prompt_file).read_text(encoding="utf-8")
     cwd = str(Path.cwd().resolve())
     args.mission = os.environ.get("SANDBOXED_SH_MISSION_ID", args.mission)
     if args.prompt == "/plan" or args.prompt.startswith("/plan ") or args.prompt.startswith("/plan\n"):
@@ -48,7 +64,7 @@ def run(args):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     key = hashlib.sha256((cwd + "\0" + args.mission).encode()).hexdigest()
     lock = (root / (key + ".lock")).open("w")
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    lock_file(lock)
     journal = root / (key + ".json")
     previous = json.loads(journal.read_text()) if journal.exists() else {}
     session = args.resume or previous.get("session")
@@ -183,7 +199,10 @@ if __name__ == "__main__":
     parser.add_argument("--model")
     parser.add_argument("--mode", choices=["build", "plan"], default="build")
     parser.add_argument("--ack", action="store_true")
-    parser.add_argument("--prompt", required=True)
+    prompt = parser.add_mutually_exclusive_group(required=True)
+    prompt.add_argument("--prompt")
+    prompt.add_argument("--prompt-file")
+    prompt.add_argument("--prompt-stdin", action="store_true")
     try:
         sys.exit(run(parser.parse_args()))
     except Exception as error:

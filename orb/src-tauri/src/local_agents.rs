@@ -294,7 +294,7 @@ pub(crate) fn start_with_env_fenced(
         .trim()
         .strip_prefix("/plan")
         .is_some_and(|s| s.is_empty() || s.starts_with(char::is_whitespace))
-        && !matches!(request.harness.as_str(), "codex" | "claudecode")
+        && !matches!(request.harness.as_str(), "codex" | "claudecode" | "vibe")
     {
         return Err("Native plan mode is not supported by this integration.".into());
     }
@@ -1169,6 +1169,10 @@ fn spawn_vibe(
         .map_err(|e| format!("Cannot start Vibe: {e}"))?;
     let stdout = child.stdout.take().ok_or("Vibe stdout unavailable")?;
     let mut stdin = child.stdin.take().ok_or("Vibe stdin unavailable")?;
+    if let Err(err) = writeln!(stdin, "{}", serde_json::json!({"prompt":prompt})) {
+        let _ = child.kill();
+        return Err(format!("Cannot deliver Vibe prompt: {err}"));
+    }
     let output = output.clone();
     let slot = slot.clone();
     let error = error.clone();

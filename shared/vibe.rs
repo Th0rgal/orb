@@ -28,8 +28,6 @@ pub fn args(
         cli.into(),
         "--mission".into(),
         mission.into(),
-        "--prompt".into(),
-        prompt.into(),
     ];
     for (flag, value) in [("--model", model), ("--resume", session)] {
         if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
@@ -40,7 +38,9 @@ pub fn args(
         args.extend(["--mode".into(), "plan".into()]);
     }
     if ack {
-        args.push("--ack".into());
+        args.extend(["--ack".into(), "--prompt-stdin".into()]);
+    } else {
+        args.extend(["--prompt".into(), prompt.into()]);
     }
     args
 }
@@ -139,6 +139,14 @@ mod tests {
         assert!(plan_mode(None, "/plan inspect"));
         assert!(!plan_mode(None, "/planet"));
         assert!(!plan_mode(Some("build"), "Inspect the workspace"));
+    }
+
+    #[test]
+    fn acknowledged_prompt_uses_stdin_instead_of_process_arguments() {
+        let prompt = "context".repeat(100_000);
+        let argv = args("vibe-acp", "test", None, None, &prompt, false, true);
+        assert!(argv.iter().any(|arg| arg == "--prompt-stdin"));
+        assert!(!argv.iter().any(|arg| arg == &prompt));
     }
 
     #[test]
