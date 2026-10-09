@@ -3850,7 +3850,7 @@ pub(crate) fn claudecode_resume_current_session_message() -> &'static str {
 
 /// Execute a single turn for a mission.
 #[allow(clippy::too_many_arguments)]
-async fn run_mission_turn(
+pub(crate) async fn run_mission_turn(
     mission_store: Option<Arc<dyn crate::api::mission_store::MissionStore>>,
     config: Config,
     _root_agent: AgentRef,
@@ -4524,7 +4524,8 @@ async fn run_mission_turn(
     // For Claude Code, check if this is a continuation turn (has prior assistant response).
     // Note: history may include the current user message before the turn runs,
     // so we check for assistant messages to determine if this is truly a continuation.
-    let is_continuation = history.iter().any(|(role, _)| role == "assistant");
+    let is_continuation = history.iter().any(|(role, _)| role == "assistant")
+        || (backend_id == "vibe" && session_id.is_some());
     // Per-backend message framing + continuation semantics. These are
     // call-site decisions (the runner receives exactly the message it should
     // send): goal-mode missions need the raw `/goal ...` text preserved;

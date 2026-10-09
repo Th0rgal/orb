@@ -11878,3 +11878,187 @@ async fn send_queued_now_delivers_live_midturn_without_disturbing_other_queued_m
         vec![first_id]
     );
 }
+
+// Capture only after the production control dispatcher, workspace preparation,
+// model selection and native prompt framing have reached the Vibe runner.
+// Mission-scoped registration keeps unrelated concurrent tests on the real path.
+type VibeControlCapture = Arc<std::sync::Mutex<Vec<Value>>>;
+static VIBE_CONTROL_FIXTURES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, VibeControlCapture>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn vibe_control_fixture(
+    ctx: &crate::api::runners::TurnContext<'_>,
+) -> Option<crate::agents::AgentResult> {
+    let capture = VIBE_CONTROL_FIXTURES
+        .lock()
+        .unwrap()
+        .get(&ctx.mission_id)
+        .cloned()?;
+    let current_message = match &ctx.extras {
+        crate::api::runners::TurnExtras::Vibe { current_message } => *current_message,
+        _ => panic!("Vibe control dispatch must retain its raw current request"),
+    };
+    capture.lock().unwrap().push(json!({
+        "message": ctx.message,
+        "current_message": current_message,
+        "session_id": ctx.session_id,
+        "model": ctx.model,
+        "agent": ctx.agent,
+        "is_continuation": ctx.is_continuation,
+        "plan": crate::vibe::plan_mode(ctx.agent, current_message),
+    }));
+    Some(crate::agents::AgentResult::success(
+        "Vibe runner reached",
+        0,
+    ))
+}
+
+struct VibeControlRegistration(Uuid);
+impl Drop for VibeControlRegistration {
+    fn drop(&mut self) {
+        VIBE_CONTROL_FIXTURES.lock().unwrap().remove(&self.0);
+    }
+}
+
+async fn captured_vibe_control_turn(
+    h: &Harness,
+    history: Vec<(String, String)>,
+    message: &str,
+    session_id: Option<&str>,
+    agent: &str,
+    model: Option<&str>,
+) -> Value {
+    let mission = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Vibe dispatch"),
+            None,
+            Some(agent),
+            model,
+            None,
+            Some("vibe"),
+            None,
+        )
+        .await
+        .unwrap();
+    let capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+    VIBE_CONTROL_FIXTURES
+        .lock()
+        .unwrap()
+        .insert(mission.id, capture.clone());
+    let _registration = VibeControlRegistration(mission.id);
+    let mut config = h.state.config.clone();
+    config.default_model = Some("anthropic/claude-not-a-vibe-model".into());
+    let result = Box::pin(super::run_single_control_turn(
+        h.control.mission_store.clone(),
+        config,
+        h.state.root_agent.clone(),
+        h.state.mcp.clone(),
+        h.state.workspaces.clone(),
+        h.state.library.clone(),
+        h.control.events_tx.clone(),
+        h.control.tool_hub.clone(),
+        h.control.status.clone(),
+        CancellationToken::new(),
+        history,
+        message.into(),
+        None,
+        h.control.current_tree.clone(),
+        h.control.progress.clone(),
+        Some(mission.id),
+        Some(mission.workspace_id),
+        Some("vibe".into()),
+        model.map(str::to_owned),
+        None,
+        false,
+        Some(agent.into()),
+        session_id.map(str::to_owned),
+        session_id.is_some(),
+        None,
+        Some(h.user.clone()),
+        false,
+    ))
+    .await;
+    assert!(result.success, "Vibe control dispatch failed: {result:?}");
+    let captures = capture.lock().unwrap();
+    assert_eq!(captures.len(), 1);
+    captures[0].clone()
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_fresh_preserves_plan_and_avoids_duplicate_current_request() {
+    let h = Harness::new().await;
+    let message = "/plan VIBE_CONTROL_FRESH";
+    let captured = captured_vibe_control_turn(
+        &h,
+        vec![("user".into(), message.into())],
+        message,
+        None,
+        "build",
+        None,
+    )
+    .await;
+    assert_eq!(captured["current_message"], message);
+    assert_eq!(
+        captured["message"]
+            .as_str()
+            .unwrap()
+            .matches("VIBE_CONTROL_FRESH")
+            .count(),
+        1
+    );
+    assert_eq!(captured["model"], "mistral/mistral-vibe-cli-latest");
+    assert_eq!(captured["session_id"], Value::Null);
+    assert_eq!(captured["is_continuation"], false);
+    assert_eq!(captured["plan"], true);
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_history() {
+    let h = Harness::new().await;
+    let captured = captured_vibe_control_turn(
+        &h,
+        vec![],
+        "Continue the plan",
+        Some("native-vibe-session"),
+        "plan",
+        Some("mistral/devstral-latest"),
+    )
+    .await;
+    assert_eq!(captured["message"], "Continue the plan");
+    assert_eq!(captured["current_message"], "Continue the plan");
+    assert_eq!(captured["model"], "mistral/devstral-latest");
+    assert_eq!(captured["session_id"], "native-vibe-session");
+    assert_eq!(captured["is_continuation"], true);
+    assert_eq!(captured["plan"], true);
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_resume_uses_current_request_for_plan_mode() {
+    let h = Harness::new().await;
+    for (message, expected_plan) in [
+        ("/planet VIBE_CONTROL_BUILD", false),
+        ("/plan VIBE_CONTROL_PLAN", true),
+    ] {
+        let captured = captured_vibe_control_turn(
+            &h,
+            vec![
+                ("user".into(), "/plan OLD_REQUEST".into()),
+                ("assistant".into(), "Old plan".into()),
+                ("user".into(), message.into()),
+            ],
+            message,
+            Some("native-vibe-session"),
+            "build",
+            None,
+        )
+        .await;
+        assert_eq!(captured["message"], message);
+        assert_eq!(captured["current_message"], message);
+        assert_eq!(captured["session_id"], "native-vibe-session");
+        assert_eq!(captured["is_continuation"], true);
+        assert_eq!(captured["plan"], expected_plan);
+    }
+}

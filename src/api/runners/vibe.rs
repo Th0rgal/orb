@@ -12,6 +12,11 @@ fn plan_for_turn(agent: Option<&str>, message: &str, extras: &super::TurnExtras<
 }
 
 pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
+    #[cfg(test)]
+    if let Some(result) = crate::api::control::dispatch_admission_tests::vibe_control_fixture(&ctx)
+    {
+        return result;
+    }
     if !crate::backend::vibe::core_auth_configured(ctx.app_working_dir).await {
         return AgentResult::failure(
             "Connect an enabled Mistral provider in Core before starting Mistral Vibe",

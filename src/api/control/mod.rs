@@ -30260,6 +30260,60 @@ async fn run_single_control_turn(
             return result;
         }
     }
+    // Vibe uses the same native prompt/session and transferred-workspace path
+    // as parallel mission turns. The generic control dispatcher below has no
+    // Vibe runner and frames resumed prompts differently.
+    if backend_id.as_deref() == Some("vibe") {
+        let mid = match require_mission_id(mission_id, "Mistral Vibe", &events_tx) {
+            Ok(id) => id,
+            Err(result) => return result,
+        };
+        let mission = match mission_store.get_mission(mid).await {
+            Ok(Some(mission)) => mission,
+            Ok(None) => return crate::agents::AgentResult::failure("Vibe mission not found", 0),
+            Err(error) => return crate::agents::AgentResult::failure(error, 0),
+        };
+        // Control history already includes this delivery; mission turns take
+        // prior history and the current request separately.
+        let mut history = history;
+        if history
+            .last()
+            .is_some_and(|(role, content)| role == "user" && content == &user_message)
+        {
+            history.pop();
+        }
+        return Box::pin(super::mission_runner::run_mission_turn(
+            Some(mission_store),
+            config,
+            _root_agent,
+            mcp,
+            workspaces,
+            library,
+            events_tx,
+            tool_hub,
+            status,
+            cancel,
+            history,
+            user_message,
+            mission_control,
+            tree_snapshot,
+            progress_snapshot,
+            mid,
+            workspace_id,
+            "vibe".into(),
+            agent_override,
+            model_override,
+            model_effort,
+            fast_mode,
+            None,
+            session_id,
+            mission_config_profile,
+            mission.working_directory,
+            boss_user_id,
+            pr_readonly,
+        ))
+        .await;
+    }
     let is_claudecode = backend_id.as_deref() == Some("claudecode");
     let is_codex = backend_id.as_deref() == Some("codex");
     // Get config profile: mission's config_profile takes priority over workspace's
