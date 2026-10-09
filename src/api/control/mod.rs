@@ -30273,12 +30273,15 @@ async fn run_single_control_turn(
             Ok(None) => return crate::agents::AgentResult::failure("Vibe mission not found", 0),
             Err(error) => return crate::agents::AgentResult::failure(error, 0),
         };
-        // Control history already includes this delivery; mission turns take
-        // prior history and the current request separately.
+        // New/queued control turns append this delivery before dispatch;
+        // explicit resume passes only prior history. Keep an identical prior
+        // request on resume and strip scheduler metadata when matching a
+        // newly appended delivery.
         let mut history = history;
-        if history
-            .last()
-            .is_some_and(|(role, content)| role == "user" && content == &user_message)
+        if !force_session_resume
+            && history.last().is_some_and(|(role, content)| {
+                role == "user" && deferred_messages::strip(content) == user_message
+            })
         {
             history.pop();
         }

@@ -11928,6 +11928,7 @@ async fn captured_vibe_control_turn(
     session_id: Option<&str>,
     agent: &str,
     model: Option<&str>,
+    force_session_resume: bool,
 ) -> Value {
     let mission = h
         .control
@@ -11975,7 +11976,7 @@ async fn captured_vibe_control_turn(
         false,
         Some(agent.into()),
         session_id.map(str::to_owned),
-        session_id.is_some(),
+        force_session_resume,
         None,
         Some(h.user.clone()),
         false,
@@ -11998,6 +11999,7 @@ async fn vibe_control_dispatch_fresh_preserves_plan_and_avoids_duplicate_current
         None,
         "build",
         None,
+        false,
     )
     .await;
     assert_eq!(captured["current_message"], message);
@@ -12025,6 +12027,7 @@ async fn vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_hi
         Some("native-vibe-session"),
         "plan",
         Some("mistral/devstral-latest"),
+        true,
     )
     .await;
     assert_eq!(captured["message"], "Continue the plan");
@@ -12053,6 +12056,7 @@ async fn vibe_control_dispatch_resume_uses_current_request_for_plan_mode() {
             Some("native-vibe-session"),
             "build",
             None,
+            false,
         )
         .await;
         assert_eq!(captured["message"], message);
@@ -12061,4 +12065,29 @@ async fn vibe_control_dispatch_resume_uses_current_request_for_plan_mode() {
         assert_eq!(captured["is_continuation"], true);
         assert_eq!(captured["plan"], expected_plan);
     }
+}
+
+#[tokio::test]
+async fn vibe_control_dispatch_explicit_resume_keeps_identical_prior_request() {
+    let h = Harness::new().await;
+    let message = "VIBE_CONTROL_REPEAT";
+    let captured = captured_vibe_control_turn(
+        &h,
+        vec![("user".into(), message.into())],
+        message,
+        None,
+        "build",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(captured["current_message"], message);
+    assert_eq!(
+        captured["message"]
+            .as_str()
+            .unwrap()
+            .matches(message)
+            .count(),
+        2
+    );
 }
