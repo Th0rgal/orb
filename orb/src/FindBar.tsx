@@ -1,3 +1,4 @@
+import { hasOverlay } from "./overlayLayer";
 import {transcriptSearch,type SearchHit} from "./VirtualTurns";
 import {createSignal, createEffect, onMount, onCleanup, Show} from 'solid-js';
 import {CloseIcon, SearchIcon} from './icons';
@@ -53,6 +54,7 @@ export function FindBar() {
   });
   const step=(delta:number)=>{if(matches().length)setIndex(i=>(i+delta+matches().length)%matches().length);};
   function keys(e:KeyboardEvent){
+    if(e.defaultPrevented || e.isComposing || hasOverlay())return;
     if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&e.key.toLowerCase()==='f'){
       const target=last??document.activeElement as HTMLElement;
       scope=target?.closest<HTMLElement>('.file-preview,.btw-thread,.scroll,[data-find-conversation]')??target?.closest('.file-panel')?.querySelector<HTMLElement>('.file-preview')??document.querySelector<HTMLElement>('.scroll')??undefined;
@@ -65,7 +67,7 @@ export function FindBar() {
   onMount(()=>{window.addEventListener('orb:transcript-change',changed);window.addEventListener('resize',positionBar);window.addEventListener('keydown',keys,true);window.addEventListener('pointerdown',track,true);window.addEventListener('focusin',track,true);});
   onCleanup(()=>{window.removeEventListener('orb:transcript-change',changed);searchAbort?.abort();clear();observer?.disconnect();clearTimeout(timer);window.removeEventListener('resize',positionBar);window.removeEventListener('keydown',keys,true);window.removeEventListener('pointerdown',track,true);window.removeEventListener('focusin',track,true);});
   return <Show when={open()}><div ref={bar} class="find-bar" style={position()} role="search" aria-label={`Find in ${label()}`}>
-    <SearchIcon size={15}/><input ref={input} aria-label={`Find in ${label()}`} placeholder="Find…" title={`Find in ${label()}`} value={query()} onInput={e=>setQuery(e.currentTarget.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();step(e.shiftKey?-1:1);}}}/>
+    <SearchIcon size={15}/><input ref={input} aria-label={`Find in ${label()}`} placeholder="Find…" title={`Find in ${label()}`} value={query()} onInput={e=>setQuery(e.currentTarget.value)} onKeyDown={e=>{if(!e.isComposing && e.key==='Enter'){e.preventDefault();step(e.shiftKey?-1:1);}}}/>
     <button title="Match case" aria-pressed={sensitive()} onClick={()=>setSensitive(v=>!v)}>Aa</button>
     <button class="find-whole" title="Whole word" aria-pressed={whole()} onClick={()=>setWhole(v=>!v)}>ab</button>
     <span class="find-count" aria-live="polite">{failure()|| (loading()?'Searching history…':query()?matches().length?`${index()+1} / ${matches().length}`:'No results':'')}</span>

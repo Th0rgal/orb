@@ -26,7 +26,7 @@ test('cloud menu is available at project and folder level without launching on a
  await expect(page.locator('main .composer')).toHaveCount(1);
  await expect(page.getByPlaceholder('Describe a task, / for commands, @ for context')).toHaveCount(0);
  await dialog.getByLabel('Service').click();
- await dialog.getByRole('menuitemradio',{name:'Grok Bot'}).click();
+ await page.getByRole('option',{name:'Grok Bot'}).click();
  await expect(dialog.getByLabel('Experimental connector')).toBeVisible();
  await expect(dialog.getByText('Protocol compatibility not validated')).toBeVisible();
  await expect(dialog.getByRole('button',{name:'Create cloud agent'})).toBeDisabled();
@@ -39,14 +39,14 @@ test('cloud menu is available at project and folder level without launching on a
  await page.getByRole('menuitem',{name:'Cloud agent',exact:true}).click();
  await expect(dialog.getByText('/ notes',{exact:true})).toBeVisible();
  await dialog.getByLabel('Service').click();
- await dialog.getByRole('menuitemradio',{name:'Grok Bot'}).click();
+ await page.getByRole('option',{name:'Grok Bot'}).click();
  await expect(dialog.getByText('Protocol compatibility not validated')).toBeVisible();
  await page.reload();
  await expect(page.getByRole('region',{name:'Cloud agent'})).toBeVisible();
  await expect(page.getByRole('dialog')).toHaveCount(0);
  expect(posts).toEqual([]);
  await dialog.getByLabel('Service').click();
- await dialog.getByRole('menuitemradio',{name:'Grok Bot'}).click();
+ await page.getByRole('option',{name:'Grok Bot'}).click();
  await page.screenshot({path:'screenshots/cloud-agent-page.png',fullPage:true});
 });
 
@@ -122,10 +122,10 @@ test('section shortcuts and real model variants use the shared menus',async({pag
  await expect(form.getByText('GPT-6 Pro',{exact:true})).toBeVisible();
  await expect(form.getByText('Experimental',{exact:true})).toHaveCount(0);
  await form.getByLabel('Model',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'GPT-6 High'}).click();
+ await page.getByRole('option',{name:'GPT-6 High'}).click();
  await expect(form.getByText('GPT-6 High',{exact:true})).toBeVisible();
  await form.getByLabel('Service',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'Cursor Cloud'}).click();
+ await page.getByRole('option',{name:'Cursor Cloud'}).click();
  await expect(form.getByText('Grok 4.6 · High',{exact:true})).toBeVisible();
  await form.getByLabel('Prompt',{exact:true}).fill('Variant test');
  await form.getByRole('button',{name:'Create cloud agent'}).click();
@@ -159,7 +159,7 @@ test('Hermes uses Paloma and profile default, preserves a failed draft and reque
  await page.getByRole('button',{name:'Cloud agent',exact:true}).click();
  const form=page.getByRole('region',{name:'Cloud agent'});
  await form.getByLabel('Service',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'Hermes',exact:true}).click();
+ await page.getByRole('option',{name:'Hermes',exact:true}).click();
  await expect(form.getByLabel('Profile',{exact:true})).toContainText('Paloma');
  await expect(form.getByLabel('Model',{exact:true})).toContainText('Profile default');
  await expect(form.locator('img[src="/hermes.png"]').first()).toBeVisible();
@@ -184,6 +184,7 @@ test('Hermes approvals, turn-only stop and reload retain the same conversation',
   const request=route.request(),path=new URL(request.url()).pathname;
   if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
   if(request.method()==='POST'){
+   if(path.endsWith('/opened'))return route.fulfill({json:{}});
    actions.push({path,body:request.postData()?request.postDataJSON():null});
    if(path.endsWith('/approval'))phase='running';
    if(path.endsWith('/cancel'))phase='cancelled';
@@ -223,7 +224,7 @@ test('Hermes approvals, turn-only stop and reload retain the same conversation',
  await expect(page.getByText('Marker retained.',{exact:true})).toBeVisible();
  await expect(page.getByRole('button',{name:'Harmless delegated check'})).toBeVisible();
  await page.getByLabel('Model',{exact:true}).click();
- await page.getByRole('menuitemradio',{name:'Profile default'}).click();
+ await page.getByRole('option',{name:'Profile default'}).click();
  await page.getByPlaceholder('Continue this conversation…').fill('Recall the marker');
  await page.getByRole('button',{name:'Send',exact:true}).click();
  await expect.poll(()=>actions.length).toBe(3);
@@ -274,9 +275,9 @@ test('Hermes cloud agent supports custom router model selection and image attach
  await page.getByRole('button',{name:'Cloud agent',exact:true}).click();
  const form=page.getByRole('region',{name:'Cloud agent'});
  await form.getByLabel('Service',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'Hermes',exact:true}).click();
+ await page.getByRole('option',{name:'Hermes',exact:true}).click();
  await form.getByLabel('Model',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'Private · builtin/private'}).click();
+ await page.getByRole('option',{name:'Private · builtin/private'}).click();
  await expect(form.getByLabel('Model',{exact:true})).toContainText('Private · builtin/private');
  await form.getByLabel('Choose images').setInputFiles({name:'pixel.png',mimeType:'image/png',buffer:png});
  await expect(form.locator('.composer-image img')).toBeVisible();
@@ -438,11 +439,11 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
  await page.getByRole('button',{name:'Cloud agent',exact:true}).click();
  const form=page.getByRole('region',{name:'Cloud agent'});
  await form.getByLabel('Service',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'Hermes',exact:true}).click();
+ await page.getByRole('option',{name:'Hermes',exact:true}).click();
  await form.getByLabel('Model',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'Private · builtin/private'}).click();
+ await page.getByRole('option',{name:'Private · builtin/private'}).click();
  await form.getByLabel('Effort',{exact:true}).click();
- await form.getByRole('menuitemradio',{name:'High',exact:true}).click();
+ await page.getByRole('option',{name:'High',exact:true}).click();
  await form.getByLabel('Choose images').setInputFiles({name:'notes.txt',mimeType:'text/plain',buffer:Buffer.from('Important project notes')});
  await expect(form.getByText('notes.txt')).toBeVisible();
  await form.getByLabel('Prompt',{exact:true}).fill('Analyze this file');
@@ -464,9 +465,9 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
 
  // 3. Switch model to direct router catalog model and effort to Max mid-mission without forking
  await page.getByLabel('Model',{exact:true}).click();
- await page.getByRole('menuitemradio',{name:'Claude Opus 4.6 (Anthropic) · anthropic/claude-opus-4-6'}).click();
+ await page.getByRole('option',{name:'Claude Opus 4.6 (Anthropic) · anthropic/claude-opus-4-6'}).click();
  await page.getByLabel('Effort',{exact:true}).click();
- await page.getByRole('menuitemradio',{name:'Max',exact:true}).click();
+ await page.getByRole('option',{name:'Max',exact:true}).click();
  await page.getByPlaceholder('Continue this conversation…').fill('Deep dive with Opus Max');
  await page.getByRole('button',{name:'Send',exact:true}).click();
  await expect.poll(()=>followups.length).toBe(1);
@@ -481,7 +482,8 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
  await expect(page.getByText('Digest delivered.')).toBeVisible();
  await page.getByRole('button',{name:'Delete',exact:true}).click();
  await expect.poll(()=>deletedCrons.length).toBe(1);
- await expect(page.getByText('This cron was removed from Hermes.')).toBeVisible();
+ await expect(page.locator('button.row.agent.cron').filter({hasText:'Daily Hermes Digest'})).toHaveCount(0);
+ await expect(page.getByRole('dialog')).toHaveCount(0);
 
  // 5. Open Hermes Settings page and save updated configuration
  await page.getByRole('button',{name:'Settings',exact:true}).click();

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { LiveProjectsSection } from "../src/ProjectFiles";
 import { SidebarTree } from "../src/Tree";
@@ -101,7 +101,7 @@ it("shift selection exposes Archive and archives each selected idle conversation
  const view=render(()=><LiveProjectsSection currentMission={mission} selected={()=>"m:restored"} harnessChoices={[]} onFork={()=>{}} open={()=>{}} onNewAgent={()=>{}} onNewProject={()=>{}}/>);
  const first=await view.findByRole("button",{name:"Open plan",exact:true}),other=await view.findByRole("button",{name:"Other plan",exact:true});
  fireEvent.click(first);fireEvent.click(other,{shiftKey:true});fireEvent.contextMenu(other,{clientX:20,clientY:30});
- fireEvent.click(await view.findByRole("menuitem",{name:"Archive 2 conversations",exact:true}));
+ fireEvent.click(await screen.findByRole("menuitem",{name:"Archive 2 conversations",exact:true}));
  await waitFor(()=>expect(listed.every(m=>m.status==="acknowledged")).toBe(true));
  expect(vi.mocked(fetch).mock.calls.filter(([url,init])=>String(url).endsWith("/status")&&init?.method==="POST")).toHaveLength(2);
 });

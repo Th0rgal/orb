@@ -30,7 +30,7 @@ export function trapFocus(root: HTMLElement, onEscape: () => void, options: { pa
   const top = () => scopes.at(-1) === scope;
   const first = () => focusable(root)[0] ?? root;
   const key = (event: KeyboardEvent) => {
-    if (!top() || event.defaultPrevented) return;
+    if (!top() || event.defaultPrevented || event.isComposing) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
@@ -41,21 +41,26 @@ export function trapFocus(root: HTMLElement, onEscape: () => void, options: { pa
       if (!items.length || index < 0 || (event.shiftKey ? index === 0 : index === items.length - 1)) {
         event.preventDefault();
         event.stopPropagation();
-        (event.shiftKey ? items.at(-1) ?? root : items[0] ?? root).focus();
+        (event.shiftKey ? items.at(-1) ?? root : items[0] ?? root).focus({preventScroll: true});
       }
     }
   };
   const keepFocus = (event: FocusEvent) => {
-    if (top() && !root.contains(event.target as Node)) first().focus();
+    if (top() && !root.contains(event.target as Node)) first().focus({preventScroll: true});
   };
   root.addEventListener('keydown', key);
   document.addEventListener('focusin', keepFocus);
-  if (top()) {
+  const focusInitial = () => {
+    if (!top()) return;
     const items = focusable(root);
     const requested = options.initialFocus?.();
     (requested && (requested === root || items.includes(requested))
-      ? requested : items.find(el => el.hasAttribute('autofocus')) ?? first()).focus();
-  }
+      ? requested : items.find(el => el.hasAttribute('autofocus')) ?? first()).focus({preventScroll: true});
+  };
+  focusInitial();
+  // A dynamically created Solid Portal may connect after its child onMount.
+  // Retry after that insertion; otherwise browsers silently drop initial focus.
+  queueMicrotask(() => {if (top() && !root.contains(document.activeElement)) focusInitial();});
   return () => {
     const wasTop = top();
     scopes.splice(scopes.indexOf(scope), 1);
@@ -73,7 +78,7 @@ export function trapFocus(root: HTMLElement, onEscape: () => void, options: { pa
         const parent = parentScope?.root;
         const target = scope.previous;
         if (target?.isConnected && (!parent || parent.contains(target))) target.focus({ preventScroll: true });
-        else if (parent) (focusable(parent)[0] ?? parent).focus();
+        else if (parent) (focusable(parent)[0] ?? parent).focus({preventScroll: true});
       };
       // Solid flushes the parent's inert binding after the child's cleanup.
       if (parentScope?.root.inert) queueMicrotask(restore);

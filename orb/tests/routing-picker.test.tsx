@@ -24,10 +24,10 @@ it("filters suggestions, selects with the keyboard, and preserves custom IDs", (
   expect(screen.queryByRole("listbox")).toBeNull();
   fireEvent.input(input, { target: { value: "custom/model" } });
   expect(changed).toHaveBeenLastCalledWith("custom/model");
-  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(screen.getByText("No results")).toBeTruthy();
   fireEvent.input(input, { target: { value: "" } });
   fireEvent.keyDown(input, { key: "ArrowUp" });
-  expect(screen.getAllByRole("option")[2].getAttribute("aria-selected")).toBe("true");
+  expect(screen.getAllByRole("option")[2].getAttribute("data-active")).toBe("true");
   fireEvent.keyDown(input, { key: "Escape" });
   expect(screen.queryByRole("listbox")).toBeNull();
 });

@@ -23,14 +23,14 @@ test("actual App project chooser searches, selects and creates with keyboard and
  await page.locator("#orb-sidebar").screenshot({path:"test-results/orb-sidebar-compact.png"});
  const trigger=page.getByRole("button",{name:"Choose project",exact:true});await trigger.click();
  const search=page.getByRole("combobox",{name:"Search projects"});await expect(search).toBeFocused();
- await expect(search).toHaveCSS("outline-style","none");
- await expect(search).toHaveCSS("border-radius","0px");
+ await expect(search).toHaveCSS("outline-style","solid");
+ await expect(search).toHaveCSS("border-radius","6px");
  await expect(page.getByRole("option").first()).toContainText("Default");
- await expect(page.getByRole("option",{name:"Default Current project"})).toHaveAttribute("aria-selected","true");
+ await expect(page.getByRole("option",{name:"Default"})).toHaveAttribute("aria-selected","true");
  // Names sit next to their folder icon, not pushed to the right edge.
- const option=await page.getByRole("option").nth(1).boundingBox(),name=await page.locator(".project-option-name").nth(1).boundingBox();
+ const option=await page.getByRole("option").nth(1).boundingBox(),name=await page.locator(".picker-row-copy").nth(1).boundingBox();
  expect(name!.x-option!.x).toBeLessThan(40);
- expect(await page.locator(".project-options").evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
+ expect(await page.locator(".picker-list").evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
  await page.screenshot({path:"test-results/orb-project-picker.png"});
  await page.evaluate(()=>document.documentElement.dataset.theme="light");
  await page.screenshot({path:"test-results/orb-project-picker-light.png"});
@@ -40,7 +40,7 @@ test("actual App project chooser searches, selects and creates with keyboard and
  await trigger.click();await page.locator(".titlebar").click({position:{x:500,y:15}});await expect(page.getByRole("dialog",{name:"Choose project"})).toHaveCount(0);
  await trigger.click();await search.press("ArrowDown");await search.press("Enter");await expect(trigger).toContainText("Verity");
  await trigger.click();await page.getByRole("button",{name:"New project…",exact:true}).click();
- const dialog=page.getByRole("dialog",{name:"New project",exact:true});await expect(dialog).toBeVisible();await expect(page.getByLabel("Project name",{exact:true})).toBeFocused();
+ const dialog=page.getByRole("dialog",{name:"Create project",exact:true});await expect(dialog).toBeVisible();await expect(page.getByLabel("Project name",{exact:true})).toBeFocused();
  await expect(page.getByRole("button",{name:"Create project",exact:true})).toBeDisabled();
  await page.getByLabel("Project name",{exact:true}).fill("Project 1");await page.getByRole("button",{name:"Create project",exact:true}).click();await expect(page.getByRole("alert")).toContainText("already exists");expect(writes).toHaveLength(0);
  await page.getByLabel("Project name",{exact:true}).fill("Fresh notes");await page.getByRole("button",{name:"Create project",exact:true}).click();await expect(page.getByRole("alert")).toContainText("Project service unavailable");
@@ -97,6 +97,6 @@ test("Default is created on first use; failed creation retains the draft and ret
   expect(projectWrites).toBe(2);
   await page.reload();
   await page.getByRole("button",{name:"Choose project",exact:true}).click();
-  await expect(page.getByRole("option",{name:"Default Current project"})).toHaveCount(1);
+  await expect(page.getByRole("option",{name:"Default"})).toHaveCount(1);
   expect(projectWrites).toBe(2);
 });

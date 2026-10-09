@@ -13,6 +13,7 @@ const [pendingList,setPendingList]=createSignal<{id:ReturnType<typeof crypto.ran
 const cancelledPending=new Set<string>();
 let sendingIds:ReturnType<typeof crypto.randomUUID>[]=[];
 let sendChain:Promise<void>=Promise.resolve();
+Object.assign(window,{queueSettled:()=>sendChain});
 render(()=>{
  // Same wiring as the conversation view in App.tsx.
  const edit=createQueuedEdit({setRevision,onError:message=>console.error(message)});

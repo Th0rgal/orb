@@ -1,4 +1,4 @@
-import { render, fireEvent, waitFor } from "@solidjs/testing-library";
+import { render, fireEvent, waitFor, screen } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import { ForkMission } from "../src/ForkMission";
 import { forkContext } from "../src/forkContext";
@@ -16,10 +16,10 @@ it("forks into a new mission without changing or stopping the running source", a
   const stop = vi.spyOn(api, "cancelMission");
   const opened = vi.fn();
   const ui = render(() => <ForkMission mission={mission} choices={choices} destination="DGX Spark" onClose={() => {}} onFork={opened} />);
-  fireEvent.click(ui.getByRole("menuitem", { name: "Codex" }));
-  fireEvent.click(ui.getByRole("menuitem", { name: /GPT-6 Astra/ }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Codex" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /GPT-6 Astra/ }));
   expect(fork).not.toHaveBeenCalled();
-  fireEvent.click(ui.getByRole("menuitem", { name: "Default" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Default" }));
   await waitFor(() => expect(opened).toHaveBeenCalledWith(expect.objectContaining({ id: "fork" })));
   expect(fork).toHaveBeenCalledWith("source", expect.objectContaining({ backend: "codex", model_override: "gpt-6-astra" }));
   expect(update).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled();
@@ -37,8 +37,8 @@ it("only folds complete structured history and preserves literal message content
 });
 it("dismisses a positioned sidebar fork when clicking outside its portal", () => {
   const closed = vi.fn();
-  const ui = render(() => <ForkMission mission={mission} choices={choices} destination="Core" position={{ x: 200, y: 100 }} onClose={closed} onFork={() => {}} />);
-  fireEvent.pointerDown(ui.getByRole("menuitem", { name: "Codex" }));
+  const ui = render(() => <ForkMission mission={mission} choices={choices} destination="Core" anchor={document.createElement("button")} onClose={closed} onFork={() => {}} />);
+  fireEvent.pointerDown(screen.getByRole("menuitem", { name: "Codex" }));
   expect(closed).not.toHaveBeenCalled();
   fireEvent.pointerDown(document.body);
   expect(closed).toHaveBeenCalledOnce();

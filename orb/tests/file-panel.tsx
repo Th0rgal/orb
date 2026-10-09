@@ -1,3 +1,5 @@
+import {createSignal, Show} from "solid-js";
+import {NameDialog} from "../src/Dialog";
 import {FindBar} from "../src/FindBar";
 import { render } from "solid-js/web";
 import { FilePanelProvider, FilePanelButton } from "../src/FilePanel";
@@ -7,6 +9,8 @@ localStorage.setItem("orb.apiUrl", location.origin);
 localStorage.setItem("orb.jwt", "test");
 document.documentElement.dataset.theme =
   new URLSearchParams(location.search).get("theme") ?? "dark";
+const [overlayOpen,setOverlayOpen]=createSignal(false);
+Object.assign(window,{openOverlayTest:()=>setOverlayOpen(true)});
 render(
   () => (
     <div class="app" style={{ "--sb-w": "220px" }}>
@@ -45,6 +49,7 @@ render(
         </main>
       </FilePanelProvider>
       <FindBar/>
+      <Show when={overlayOpen()}><NameDialog title="Rename example" value="Example" onInput={()=>{}} action="Rename" onAction={()=>{}} onClose={()=>setOverlayOpen(false)}/></Show>
     </div>
   ),
   document.getElementById("root")!,

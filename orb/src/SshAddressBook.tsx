@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { ApiError, connectionVersion, getApiUrl } from "./api";
-import { Dialog, DialogButton, Field } from "./Dialog";
+import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { deleteSshHost, isSshHost, legacyAddresses, listSshHosts, sameAddress, saveSshHost, validAddress, type SshAddress, type SshHost } from "./sshHosts";
 
@@ -12,6 +12,7 @@ export function SshAddressBook(p: { onUnsupported: (value: boolean) => void }) {
   const [draft, setDraft] = createSignal<SshAddress>();
   const [editing, setEditing] = createSignal<SshHost>();
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const [original, setOriginal] = createSignal("");
   const [importing, setImporting] = createSignal(false);
   const [legacy, setLegacy] = createSignal<SshAddress[]>([]);
   let disposed = false;
@@ -24,6 +25,17 @@ export function SshAddressBook(p: { onUnsupported: (value: boolean) => void }) {
     try {
       const rows = await listSshHosts(controller.signal);
       if (disposed || version !== connectionVersion()) return;
+      // A conflict refresh updates untouched fields, but never replaces the user's edits.
+      const previous = editing(), current = draft();
+      const latest = !ready() && previous && rows.find(row => row.id === previous.id);
+      if (latest && current) {
+        const base = JSON.parse(original()) as SshAddress;
+        const merged = {...latest};
+        for (const key of ["name", "host", "user", "port", "note"] as const) {
+          if (current[key] !== base[key]) Object.assign(merged, {[key]: current[key]});
+        }
+        setDraft(merged); setEditing(latest); setOriginal(JSON.stringify(latest));
+      }
       setHosts(rows); setReady(true); setError(""); p.onUnsupported(false);
       try { localStorage.setItem(cacheKey(), JSON.stringify(rows)); } catch { /* optional cache */ }
     } catch (e) {
@@ -50,10 +62,11 @@ export function SshAddressBook(p: { onUnsupported: (value: boolean) => void }) {
       await action();
       if (disposed || version !== connectionVersion()) return;
       setDraft(undefined); setImporting(false); await refresh();
-    } catch (e) { if (!disposed && version === connectionVersion()) { setError(String(e)); if (e instanceof ApiError && [404,409].includes(e.status)) { setReady(false); setDraft(undefined); setEditing(undefined); setConfirmDelete(false); } } }
+    } catch (e) { if (!disposed && version === connectionVersion()) { setError(String(e)); if (e instanceof ApiError && [404,409].includes(e.status)) { setReady(false); } } }
     finally { if (!disposed && version === connectionVersion()) setBusy(false); }
   }
-  const start = (host?: SshHost) => { setConfirmDelete(false); setEditing(host); setDraft(host ? {...host} : {name:"",host:"",user:"ubuntu",port:22,note:""}); };
+  const start = (host?: SshHost) => {setConfirmDelete(false); setEditing(host); const value = host ? {...host} : {name:"",host:"",user:"ubuntu",port:22,note:""}; setDraft(value); setOriginal(JSON.stringify(value));};
+  const dirty = () => JSON.stringify(draft()) !== original();
   const patch = (value: Partial<SshAddress>) => setDraft(d => d ? {...d,...value} : d);
   const importRows = async () => {
     const version = connectionVersion();
@@ -75,12 +88,13 @@ export function SshAddressBook(p: { onUnsupported: (value: boolean) => void }) {
     <Show when={ready() && legacy().length}><button class="s-btn" onClick={() => setImporting(true)}>Import {legacy().length} local addresses…</button></Show>
     <div class="s-card"><For each={hosts()}>{host => <div class="s-row"><div class="s-row-text"><div class="s-row-title">{host.name}</div><div class="s-row-desc">{host.user}@{host.host}:{host.port}{host.note ? ` · ${host.note}` : ""}</div></div><button class="s-btn" disabled={!ready() || busy()} onClick={() => start(host)}>Edit</button></div>}</For>
     <Show when={ready() && !hosts().length}><p class="ssh-address-empty">No SSH addresses yet.</p></Show></div>
-    <Show when={draft()}>{d => <Dialog title={editing() ? "Edit SSH address" : "Add SSH address"} busy={busy()} onClose={() => setDraft(undefined)} footer={<>
-      <Show when={editing()}><DialogButton disabled={busy() || !ready()} onClick={() => { if (confirmDelete()) void mutate(() => deleteSshHost(editing()!)); else setConfirmDelete(true); }}>{confirmDelete() ? "Confirm removal" : "Remove"}</DialogButton></Show>
-      <DialogButton disabled={busy()} onClick={() => setDraft(undefined)}>Cancel</DialogButton>
+    <Show when={draft()}>{d => <Dialog title={editing() ? "Edit SSH address" : "Add SSH address"} busy={busy()} dirty={dirty()} onClose={() => setDraft(undefined)} footer={close => <>
+      <Show when={editing()}><DialogButton disabled={busy() || !ready()} onClick={() => setConfirmDelete(true)}>Remove…</DialogButton></Show>
+      <Show when={!ready()}><DialogButton disabled={busy()} onClick={() => void refresh()}>Reload addresses</DialogButton></Show>
+      <DialogButton disabled={busy()} onClick={close}>Cancel</DialogButton>
       <DialogButton variant="primary" disabled={busy() || !ready() || !validAddress(d())} onClick={() => void mutate(() => saveSshHost(d(), editing()))}>Save</DialogButton>
     </>}>
-      <Show when={confirmDelete()}><p role="alert">This removes the address from every device connected to this backend. The machine itself is unchanged.</p></Show>
+      <Show when={confirmDelete()}><ConfirmDialog title="Remove SSH address?" description="This removes the saved address from every device connected to this backend. The machine itself is unchanged." action="Remove address" destructive busy={busy()} error={error()} onConfirm={() => void mutate(() => deleteSshHost(editing()!))} onClose={() => setConfirmDelete(false)}/></Show>
       <For each={["name","host","user","note"] as const}>{key => <Field label={{name:"Name",host:"Host",user:"User",note:"Note"}[key]}><input class="s-input" value={d()[key]} onInput={e => patch({[key]:e.currentTarget.value})} /></Field>}</For>
       <Field label="Port"><input class="s-input" type="number" min="1" max="65535" value={d().port} onInput={e => patch({port:Number(e.currentTarget.value)})} /></Field>
       <Show when={error()}><ErrorNotice error={error()} /></Show>

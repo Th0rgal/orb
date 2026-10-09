@@ -1,3 +1,4 @@
+import { Popover } from "./Popover";
 import {createEffect,createSignal,createUniqueId,onCleanup,Show} from 'solid-js';
 import {subscribeProjectContext,contextConflicts} from './projectContext';
 import {getApiUrl,getJwt,connectionVersion} from './api';
@@ -49,16 +50,16 @@ export function ContextBadge(p:{slug:string}){
   document.addEventListener('visibilitychange',visibility);
   onCleanup(()=>{disposed=true;stop();window.removeEventListener('online',wake);window.removeEventListener('focus',wake);document.removeEventListener('visibilitychange',visibility);});
  });
- return <Show when={label()}><div class="context-sync-state" data-state={conflicts().length||error()?'warning':'syncing'} onKeyDown={event=>{if(event.key==='Escape'){setExpanded(false);event.stopPropagation();}}}>
+ return <Show when={label()}><div class="context-sync-state" data-state={conflicts().length||error()?'warning':'syncing'} >
   <button class="context-sync-trigger" aria-expanded={expanded()} aria-controls={id} onClick={event=>{event.stopPropagation();setExpanded(!expanded());}}>
    <span class="context-sync-dot" aria-hidden="true"/><span>{label()}</span>
   </button>
-  <Show when={expanded()}><div id={id} class="context-sync-detail" role="region" aria-label="Context synchronization" onClick={event=>event.stopPropagation()}>
+  <Show when={expanded()}><Popover id={id} class="context-sync-detail" label="Context synchronization" onClose={() => setExpanded(false)}>
    <strong>{conflicts().length?'Changes need review':authError()?'Reconnect to sync context':error()?'Sync interrupted':'Synchronizing context'}</strong>
    <p>{conflicts().length?'Open file history to compare and resolve conflicting versions.':pending()?`${pending()} local change${pending()===1?'':'s'} waiting to sync.`:error()?'No queued changes. The latest server version could not be checked.':'Checking the latest changes.'}</p>
    <Show when={conflicts().length}><p>{conflicts().join('\n')}</p></Show>
    <Show when={error()}><p class="context-sync-error">{authError()?'Check your backend connection in Settings.':error()}</p></Show>
    <Show when={nativeInvoke()}><button class="s-btn" disabled={retrying()} onClick={()=>void retry()}>{retrying()?'Syncing…':'Retry sync'}</button></Show>
-  </div></Show>
+  </Popover></Show>
  </div></Show>;
 }

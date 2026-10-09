@@ -26,6 +26,8 @@ it("keeps the login modal open during callback submission and exposes a rejected
   fireEvent.click(screen.getByRole("menuitem", { name: "Re-authenticate", exact: true }));
   const input = await screen.findByLabelText("Redirect URL (http://localhost:…)");
   fireEvent.input(input, { target: { value: "http://localhost:54545/callback?code=test" } });
+  fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+  expect(submissions).toBe(0);
   fireEvent.keyDown(input, { key: "Enter" });
   fireEvent.keyDown(input, { key: "Enter" });
   fireEvent.keyDown(input, { key: "Escape" });
@@ -34,6 +36,9 @@ it("keeps the login modal open during callback submission and exposes a rejected
   expect((screen.getByRole("button", { name: "Cancel", exact: true }) as HTMLButtonElement).disabled).toBe(true);
   finish(new Response(JSON.stringify({ status: "failed", message: "Callback rejected" })));
   await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toContain("Callback rejected"));
-  fireEvent.click(screen.getByRole("button", { name: "Close", exact: true }));
+  expect((input as HTMLInputElement).value).toBe("http://localhost:54545/callback?code=test");
+  fireEvent.click(screen.getAllByRole("button", { name: "Close", exact: true })[0]);
+  expect(screen.getByRole("button", {name:"Keep editing"})).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name:"Discard changes"}));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });

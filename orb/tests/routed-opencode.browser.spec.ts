@@ -18,9 +18,9 @@ test('installed OpenCode is selectable with backend routing profiles only',async
  });
  await page.goto('/');
  await page.getByRole('button',{name:'Claude Code',exact:true}).click();
- await expect(page.getByRole('button',{name:/OpenCode/})).toBeVisible();
- await page.getByRole('button',{name:/OpenCode/}).click();
+ await expect(page.getByRole('option',{name:/OpenCode/})).toBeVisible();
+ await page.getByRole('option',{name:/OpenCode/}).click();
  await page.getByRole('button',{name:/Smart \(Default\)/}).click();
- await expect(page.getByRole('button',{name:'Reviewer',exact:true})).toBeVisible();
+ await expect(page.getByRole('option',{name:'Reviewer',exact:true})).toBeVisible();
  await expect(page.getByText('Gemini',{exact:true})).toHaveCount(0);
 });

@@ -52,8 +52,8 @@ for (const theme of ["light", "dark"]) {
     await page.getByRole("menuitem", { name: "New cron" }).click();
     await page.getByLabel("Name", { exact: true }).fill("Project notes");
     await page.keyboard.press("Escape");
-    await expect(action).toBeFocused();
-    await action.click(); await page.getByRole("menuitem", { name: "New cron" }).click();
+    await expect(page.getByRole("button", {name:"Keep editing"})).toBeFocused();
+    await page.getByRole("button", {name:"Keep editing"}).click();
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("Project notes");
     await page.getByLabel("Instruction", { exact: true }).fill(fixtures.hourly.prompt);
     const schedule = page.getByRole("button", { name: "Schedule", exact: true });
@@ -99,7 +99,7 @@ for (const theme of ["light", "dark"]) {
     await expect(page.getByRole("link")).toHaveCSS("cursor", "pointer");
     await expect(page.getByLabel("Disabled field")).toHaveCSS("cursor", "default");
     await page.getByText("Advanced", { exact: true }).click();
-    await expect(page.getByRole("combobox")).toHaveCSS("cursor", "pointer");
+    await expect(page.getByRole("combobox", {name:"Reasoning"})).toHaveCSS("cursor", "pointer");
     expect(errors).toEqual([]);
   });
 }

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { createSignal, Show } from "solid-js";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
-import { ConfirmDialog, Dialog, PromptSheet } from "../src/Dialog";
+import { ConfirmDialog, Dialog, NameDialog } from "../src/Dialog";
 import { SchedulePicker } from "../src/SchedulePicker";
 import { hasFocusScope } from "../src/focusScope";
+import { useTooltip } from "../src/Tooltip";
 
 function NestedSchedule() {
   const [open, setOpen] = createSignal(false);
@@ -110,7 +111,7 @@ describe("shared modal behavior", () => {
     const [busy, setBusy] = createSignal(false);
     const [error, setError] = createSignal<string | null>(null);
     const [value, setValue] = createSignal("Notes");
-    render(() => <PromptSheet title="Rename" value={value()} onInput={setValue} action="Save"
+    render(() => <NameDialog title="Rename" value={value()} onInput={setValue} action="Save"
       busy={busy()} error={error()} onAction={action} onClose={() => {}} />);
     const input = screen.getByRole("textbox");
     expect(document.activeElement).toBe(input);
@@ -151,4 +152,59 @@ describe("shared modal behavior", () => {
     expect(document.body.style.overflow).toBe("auto");
     document.body.style.overflow = originalOverflow;
   });
+});
+
+it("associates field errors and prevents IME submission", () => {
+  const action = vi.fn();
+  render(() => <NameDialog title="Rename agent" label="Agent name" value="Notes" error="Choose another name" onInput={() => {}} action="Rename" onAction={action} onClose={() => {}}/>);
+  const input = screen.getByLabelText("Agent name");
+  expect(input.getAttribute("aria-invalid")).toBe("true");
+  expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toContain("Choose another name");
+  fireEvent.compositionStart(input); fireEvent.keyDown(input, {key:"Escape", isComposing:true}); fireEvent.submit(input.closest("form")!);
+  expect(action).not.toHaveBeenCalled();
+  fireEvent.compositionEnd(input); fireEvent.submit(input.closest("form")!);
+  expect(action).toHaveBeenCalledOnce();
+});
+
+it("preserves the body's existing scroll style when a non-modal layer closes", () => {
+  document.body.style.overflow = "auto";
+  render(() => <SchedulePicker value="every 1h" onChange={() => {}}/>);
+  fireEvent.click(screen.getByRole("button", {name:"Schedule"}));
+  fireEvent.keyDown(screen.getByLabelText("Schedule type"), {key:"Escape"});
+  expect(document.body.style.overflow).toBe("auto");
+  document.body.style.overflow = "";
+});
+
+it("restores the pointer opener when WebKit leaves focus on an earlier field", () => {
+  const [open,setOpen]=createSignal(false);
+  render(()=><><input aria-label="Earlier field"/><button onClick={()=>setOpen(true)}>Preview</button><Show when={open()}><Dialog title="Image preview" onClose={()=>setOpen(false)}><button>Inside</button></Dialog></Show></>);
+  const opener=screen.getByRole("button",{name:"Preview"});
+  screen.getByLabelText("Earlier field").focus();
+  fireEvent.pointerDown(opener);fireEvent.click(opener);
+  fireEvent.keyDown(screen.getByRole("dialog"),{key:"Escape"});
+  expect(document.activeElement).toBe(opener);
+});
+
+it("keeps the pointer opener when WebKit focuses its containing region", () => {
+  const [open,setOpen]=createSignal(false);
+  render(()=><><div tabindex="-1" aria-label="Project region"><button onClick={()=>setOpen(true)}>Rename row</button></div><Show when={open()}><Dialog title="Rename agent" onClose={()=>setOpen(false)}><input aria-label="Name"/></Dialog></Show></>);
+  const opener=screen.getByRole("button",{name:"Rename row"});
+  fireEvent.pointerDown(opener);
+  screen.getByLabelText("Project region").focus();
+  fireEvent.click(opener);
+  fireEvent.keyDown(screen.getByRole("dialog"),{key:"Escape"});
+  expect(document.activeElement).toBe(opener);
+});
+
+it("does not let an inert opener's pending tooltip consume modal Escape", () => {
+  render(() => {
+    const tip=useTooltip<string>("opener-tip",value=>value);
+    const [open,setOpen]=createSignal(false);
+    return <><button {...tip.bind("Details")} onClick={()=>setOpen(true)}>Open details</button>{tip.surface}<Show when={open()}><Dialog title="Details" onClose={()=>setOpen(false)}>Content</Dialog></Show></>;
+  });
+  const opener=screen.getByRole("button",{name:"Open details"});
+  fireEvent.pointerEnter(opener);
+  fireEvent.click(opener);
+  fireEvent.keyDown(screen.getByRole("dialog"),{key:"Escape"});
+  expect(screen.queryByRole("dialog")).toBeNull();
 });

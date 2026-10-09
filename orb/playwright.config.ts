@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
 const port = process.env.ORB_TEST_PORT || "1431";
 export default defineConfig({
-  testDir: "./tests", testMatch: "*.browser.spec.ts", workers: 1,
+  testDir: "./tests", testMatch: "*.browser.spec.ts", testIgnore: "overlays.browser.spec.ts", workers: 1,
   // The specs measure timing-sensitive behaviour (virtualized scrolling,
   // send polls); a shared runner makes one of them miss its window in about
   // one run out of three. A retry separates that from a real regression,

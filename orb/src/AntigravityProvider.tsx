@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
 import { ProviderLogo } from "./ProviderLogo";
@@ -56,9 +57,9 @@ export function AntigravityProvider(p: { embedded?: boolean } = {}) {
         </div><span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span>
       </button>
       <Show when={open()}><div class="p-acc-body">
-        <label class="s-row-desc">Machine <select class="s-input" aria-label="Antigravity machine" value={machine()} onChange={event => setMachine(event.currentTarget.value)}>
+        <label class="s-row-desc">Machine <Select class="s-input" aria-label="Antigravity machine" value={machine()} onChange={event => setMachine(event.currentTarget.value)}>
           <option value="core">Core</option><For each={nodes()}>{node => <option value={node}>{node}</option>}</For>
-        </select></label>
+        </Select></label>
         <p class="s-row-desc">The subscription above connects the model router. Native Antigravity execution uses the Google sign-in on each machine; its credentials are separate.</p>
         <Show when={phase() === "ready" && models().length}><ul aria-label="Antigravity models"><For each={models()}>{model => <li>{model[1]}</li>}</For></ul></Show>
         <Show when={phase() === "error"}><p class="s-row-desc" role="status">Check this machine’s connection and Antigravity sign-in, then refresh.</p></Show>

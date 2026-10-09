@@ -35,7 +35,7 @@ import {
   type FileRef,
   type FileSource,
 } from "./fileResources";
-import { hasFocusScope } from "./focusScope";
+import { hasOverlay } from "./overlayLayer";
 import * as Ic from "./icons";
 import {
   imagePrompt,
@@ -973,7 +973,7 @@ export function InboxPage(p: {
 
   onMount(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.isComposing || hasFocusScope()) return;
+      if (e.defaultPrevented || e.isComposing || hasOverlay()) return;
       const target = e.target as HTMLElement | null;
       if (target && target.matches("input, textarea, select, [contenteditable]")) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;

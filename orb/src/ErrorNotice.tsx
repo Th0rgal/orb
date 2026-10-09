@@ -80,7 +80,7 @@ export function ErrorDialog(p: { error: string; title?: string; onClose: () => v
   const copy = () => void copyText(p.error).then(() => setCopied(true)).catch(() => setCopied(false));
   return <Dialog size="compact" title={info().title} onClose={p.onClose} footer={<>
     <DialogButton onClick={copy}>{copied() ? "Copied" : "Copy error"}</DialogButton>
-    <DialogButton variant="primary" onClick={p.onClose}>OK</DialogButton>
+    <DialogButton variant="primary" onClick={p.onClose}>Close</DialogButton>
   </>}>
     <div class="error-dialog" role="alert"><p>{info().message}</p>
       <Show when={info().message !== raw()}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>

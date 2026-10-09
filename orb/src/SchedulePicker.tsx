@@ -1,7 +1,7 @@
 import { Select } from "./Select";
 import { For, Match, Show, Switch, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
-import { trapFocus } from "./focusScope";
+import { Popover } from "./Popover";
 
 /** What Hermes' schedule grammar can express, as structured state. */
 type Parsed =
@@ -105,36 +105,16 @@ const MODES: { id: Parsed["mode"]; label: string }[] = [
   { id: "custom", label: "Custom" },
 ];
 
-function SchedulePopover(p: { onEscape: () => void; position: (el: HTMLDivElement) => void; children: JSX.Element }) {
-  let root!: HTMLDivElement;
-  onMount(() => {
-    p.position(root);
-    onCleanup(trapFocus(root, p.onEscape));
-  });
-  return <div ref={root} class="sp-panel" role="dialog" aria-label="Schedule editor" tabIndex={-1}>{p.children}</div>;
-}
-
 /** Structured editor for a Hermes cron schedule; emits the schedule string.
  * A summary opens the full editor in a compact popover. */
 export function SchedulePicker(p: { value: string; onChange: (v: string) => void }) {
   const [open, setOpen] = createSignal(false);
   let root!: HTMLDivElement;
   let trigger!: HTMLButtonElement;
+  let panel!: HTMLDivElement;
   const close = (restore = false) => {
     setOpen(false);
     if (restore) trigger.focus();
-  };
-  onMount(() => {
-    const outside = (e: PointerEvent) => {
-      if (open() && !root.contains(e.target as Node)) close();
-    };
-    window.addEventListener("pointerdown", outside, true);
-    onCleanup(() => window.removeEventListener("pointerdown", outside, true));
-  });
-  const position = (panel: HTMLDivElement) => {
-    const box = trigger.getBoundingClientRect();
-    panel.style.left = `${Math.max(8, Math.min(box.right - 240, window.innerWidth - 248))}px`;
-    panel.style.top = `${Math.max(8, Math.min(box.bottom + 6, window.innerHeight - panel.offsetHeight - 8))}px`;
   };
   const parsed = createMemo(() => parseSchedule(p.value));
   // The mode the user picked wins over what the string happens to parse as,
@@ -171,7 +151,7 @@ export function SchedulePicker(p: { value: string; onChange: (v: string) => void
         <span>{describeSchedule(parsed())}</span><span aria-hidden="true">⌄</span>
       </button>
       <Show when={open()}>
-      <SchedulePopover position={position} onEscape={() => close(true)}>
+      <Popover ref={el => {panel=el;}} initialFocus={() => panel.querySelector("select") ?? undefined} class="sp-panel" label="Schedule editor" anchor={trigger} placement="bottom-end" width={240} onClose={() => close(true)}>
       <label class="sp-mode">Schedule
         <Select class="s-input" aria-label="Schedule type" value={mode()} onChange={(e) => switchTo(e.currentTarget.value as Parsed["mode"])}>
           <For each={MODES}>{(m) => <option value={m.id}>{m.label}</option>}</For>
@@ -237,7 +217,7 @@ export function SchedulePicker(p: { value: string; onChange: (v: string) => void
       </Switch>
       </div>
       <div class="sp-foot"><span>Hermes timezone</span><button class="s-btn sm" onClick={() => close(true)}>Done</button></div>
-      </SchedulePopover>
+      </Popover>
       </Show>
     </div>
   );

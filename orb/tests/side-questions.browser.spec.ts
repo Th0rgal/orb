@@ -121,10 +121,12 @@ test('editing a long side question preserves text geometry and contains its tool
  await expect(editor).toHaveValue(question.trim());
  const after=await bubble.evaluate(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el.querySelector('textarea')!);return {height:r.height,width:r.width,font:s.fontSize,line:s.lineHeight,padding:getComputedStyle(el).paddingRight};});
  const toolbar=await bubble.locator('.prompt-editor-actions').evaluate(el=>({height:el.getBoundingClientRect().height,margin:parseFloat(getComputedStyle(el).marginTop),bottom:el.getBoundingClientRect().bottom}));
- expect(Math.abs(after.height-before.height-toolbar.height-toolbar.margin)).toBeLessThanOrEqual(2);
+ // The compact editor adds 16px vertical padding; the saved text height prevents a collapse.
+ expect(after.height-before.height-toolbar.height-toolbar.margin).toBeGreaterThanOrEqual(0);
+ expect(after.height-before.height-toolbar.height-toolbar.margin).toBeLessThanOrEqual(18);
  const bounds=(await bubble.boundingBox())!;
  expect(toolbar.bottom).toBeLessThanOrEqual(bounds.y+bounds.height);
- expect(after.width).toBe(before.width);expect(after.font).toBe(before.font);expect(after.line).toBe(before.line);expect(after.padding).toBe(before.padding);
+ expect(after.width).toBe(before.width);expect(after.font).toBe(before.font);expect(after.line).toBe(before.line);expect(after.padding).toBe("16px");
  await editor.press('Escape');
  expect(Math.abs((await bubble.boundingBox())!.height-before.height)).toBeLessThanOrEqual(2);
 });

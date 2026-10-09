@@ -1,3 +1,6 @@
+import { Picker } from "./Picker";
+import { Menu } from "./Menu";
+import { Popover } from "./Popover";
 import { missionParent } from "./missionTree";
 import { destinationHarnessChoices } from "./harness-models";
 import { RemoteQueue, type RemoteQueueHandle } from "./RemoteQueue";
@@ -39,7 +42,7 @@ import { goalDraft, goalObjective, goalPrompt, missionTitle, displayTitle, GoalT
 import { atQuery, browseAttachItems, chipToAttachment, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
-import { hasFocusScope } from "./focusScope";
+import { hasOverlay } from "./overlayLayer";
 import { Lightbox } from "./Lightbox";
 import { For, Show, Switch, Match, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch } from "solid-js";
 import { createStore, produce } from "solid-js/store";
@@ -709,7 +712,7 @@ export function Composer(p: {
     if (atQuery(text(), caret()).open) setAtOff(true);
   };
   const onEsc = (e: KeyboardEvent) => {
-    if (e.defaultPrevented || hasFocusScope()) return;
+    if (e.defaultPrevented || e.isComposing || hasOverlay()) return;
     // Dismiss a pending mention query too: its file catalog can arrive
     // after Escape and must not reopen the picker over the next Enter.
     if (e.key === "Escape" && (menu() || ctx() || which() || slash() || atQuery(text(), caret()).open)) {
@@ -724,11 +727,9 @@ export function Composer(p: {
     }
   };
   onMount(() => {
-    window.addEventListener("pointerdown", close);
     window.addEventListener("keydown", onEsc, true);
   });
   onCleanup(() => {
-    window.removeEventListener("pointerdown", close);
     window.removeEventListener("keydown", onEsc, true);
   });
   const plusItems = createMemo(() => {
@@ -744,7 +745,7 @@ export function Composer(p: {
         <Ic.PlusIcon size={14} />
       </button>
       <Show when={ctx() && !p.imagesOnly && !p.directFileUpload}>
-        <div class="menu plus-menu slash-menu">
+        <Menu label="Add context" class="plus-menu slash-menu" width={340} onClose={() => setCtx(false)}>
           <Show when={ctxFolder()} fallback={<button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span><span class="slash-item-label">Upload file or image…</span></button>}>
             <div class="slash-folder-bar">
               <button type="button" class="menu-item slash-back" onClick={() => { const cur = ctxFolder(); const slashIdx = cur.lastIndexOf("/"); setCtxFolder(slashIdx >= 0 ? cur.slice(0, slashIdx) : ""); }}>
@@ -794,7 +795,7 @@ export function Composer(p: {
               }}
             </For>
           </Show>
-        </div>
+        </Menu>
       </Show>
     </div>
   );
@@ -816,21 +817,8 @@ export function Composer(p: {
                 {model()} <Ic.ChevronDown size={12} />
               </button>
               <Show when={menu()}>
-                <div class="menu">
-                  <For each={MODELS}>
-                    {(m) => (
-                      <button
-                        class={`menu-item ${m === model() ? "on" : ""}`}
-                        onClick={() => {
-                          setModel(m);
-                          setMenu(false);
-                        }}
-                      >
-                        {m}
-                      </button>
-                    )}
-                  </For>
-                </div>
+                <Picker label="Models" searchable={false} selected={model()} items={MODELS.map(m => ({id:m,label:m}))}
+                  onClose={() => setMenu(false)} onSelect={m => {setModel(m);setMenu(false);}}/>
               </Show>
             </div>
           }
@@ -846,29 +834,17 @@ export function Composer(p: {
               {choice()?.backend.name ?? "Harness"} <Ic.ChevronDown size={12} />
             </button>
             <Show when={which() === "harness"}>
-              <div class="menu">
-                <For each={harnessChoices(p.uploadTarget).filter((c) => !p.harnessIds || p.harnessIds.includes(c.backend.id))}>
-                  {(c) => (
-                    <button
-                      class={`menu-item ${c.backend.id === pick()?.backend ? "on" : ""}`}
-                      onClick={() => {
-                        // Switching harness resets the model, and with it the
-                        // effort: the new harness may not accept any, or may
-                        // not accept the level that was selected.
-                        if (c.backend.id !== pick()?.backend) {
-                          const effort = normalizeEffort(pick()?.effort, c.backend.id);
-                          setHarnessPick({ backend: c.backend.id, model: c.models[0].value, ...(effort ? { effort } : {}) });
-                        }
-                        setWhich(null);
-                      }}
-                    >
-                      <span class="pick-name">{c.backend.name}</span>
-                      <span class={`pick-meta ${p.remoteSupport?.(c.backend.id).state ?? ""}`}>{p.remoteSupport?.(c.backend.id).note || c.models.length}</span>
-                      <span class="pick-check">{c.backend.id === pick()?.backend ? "✓" : ""}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
+              <Picker label="Harness" searchable={false} selected={pick()?.backend}
+                items={harnessChoices(p.uploadTarget).filter(c => !p.harnessIds || p.harnessIds.includes(c.backend.id)).map(c => ({id:c.backend.id,label:c.backend.name,description:p.remoteSupport?.(c.backend.id).note || `${c.models.length} model${c.models.length === 1 ? "" : "s"}`}))}
+                onClose={() => setWhich(null)} onSelect={id => {
+                  const c = harnessChoices(p.uploadTarget).find(c => c.backend.id === id);
+                  if (c && id !== pick()?.backend) {
+                    const effort = normalizeEffort(pick()?.effort, id);
+                    setHarnessPick({backend:id,model:c.models[0].value,...(effort ? {effort} : {})});
+                  }
+                  setWhich(null);
+                }}/>
+
             </Show>
           </div>
           <span class="picks-sep">·</span>
@@ -877,33 +853,14 @@ export function Composer(p: {
               {modelLabel()} <Ic.ChevronDown size={12} />
             </button>
             <Show when={which() === "model"}>
-              <div
-                class="menu model-menu"
-                ref={(el) => {
-                  // Fresh element each open: start at the top, then keep the
-                  // current model in view without jumping past the first rows.
-                  el.scrollTop = 0;
-                  requestAnimationFrame(() => el.querySelector(".menu-item.on")?.scrollIntoView({ block: "nearest" }));
-                }}
-              >
-                <For each={choice()?.models ?? []}>
-                  {(m) => (
-                    <button
-                      class={`menu-item ${m.value === pick()?.model ? "on" : ""}`}
-                      title={m.value}
-                      onClick={() => {
-                        const backend = choice()!.backend.id;
-                        const effort = normalizeEffort(pick()?.effort, backend);
-                        setHarnessPick({ backend, model: m.value, ...(effort ? { effort } : {}) });
-                        setWhich(null);
-                      }}
-                    >
-                      <span class="pick-name">{shortModelLabel(m.label)}</span>
-                      <span class="pick-check">{m.value === pick()?.model ? "✓" : ""}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
+              <Picker label="Models" searchLabel="Search models" selected={pick()?.model}
+                items={(choice()?.models ?? []).map(m => ({id:m.value,label:shortModelLabel(m.label)}))}
+                onClose={() => setWhich(null)} onSelect={value => {
+                  const backend = choice()!.backend.id;
+                  const effort = normalizeEffort(pick()?.effort, backend);
+                  setHarnessPick({backend,model:value,...(effort ? {effort} : {})});setWhich(null);
+                }}/>
+
             </Show>
           </div>
           {/* Effort, after harness and model. Only rendered for a harness the
@@ -921,35 +878,13 @@ export function Composer(p: {
                 {effortLabel(pick()?.effort,pick()?.backend,pick()?.model)} <Ic.ChevronDown size={12} />
               </button>
               <Show when={which() === "effort"}>
-                <div class="menu">
-                  <button
-                    class={`menu-item ${!pick()?.effort ? "on" : ""}`}
-                    title={pick()?.backend === "antigravity" && pick()?.model === "agy-demo" ? "Use High, the default for agy-demo" : "Let the harness choose"}
-                    onClick={() => {
-                      const cur = pick()!;
-                      setHarnessPick({ backend: cur.backend, model: cur.model });
-                      setWhich(null);
-                    }}
-                  >
-                    <span class="pick-name">{defaultEffortLabel(pick()?.backend,pick()?.model)}</span>
-                    <span class="pick-check">{!pick()?.effort ? "✓" : ""}</span>
-                  </button>
-                  <For each={supportedEfforts(pick()?.backend)}>
-                    {(e) => (
-                      <button
-                        class={`menu-item ${e === pick()?.effort ? "on" : ""}`}
-                        onClick={() => {
-                          const cur = pick()!;
-                          setHarnessPick({ backend: cur.backend, model: cur.model, effort: e });
-                          setWhich(null);
-                        }}
-                      >
-                        <span class="pick-name">{effortLabel(e)}</span>
-                        <span class="pick-check">{e === pick()?.effort ? "✓" : ""}</span>
-                      </button>
-                    )}
-                  </For>
-                </div>
+                <Picker label="Reasoning effort" searchable={false} selected={pick()?.effort ?? ""}
+                  items={[{id:"",label:defaultEffortLabel(pick()?.backend,pick()?.model)},...supportedEfforts(pick()?.backend).map(e => ({id:e,label:effortLabel(e)}))]}
+                  onClose={() => setWhich(null)} onSelect={value => {
+                    const cur = pick()!; const effort = normalizeEffort(value, cur.backend);
+                    setHarnessPick({backend:cur.backend,model:cur.model,...(effort ? {effort} : {})});setWhich(null);
+                  }}/>
+
               </Show>
             </div>
           </Show>
@@ -983,11 +918,11 @@ export function Composer(p: {
       </div>
     </Show>
   );
-  const atMenu=<Show when={at()}>{s=><MentionPicker items={s().items} index={atHi()} highlight={setAtHi} pick={pickAttach} folder={s().folder || undefined} onBack={()=>{const cur=s().folder;const idx=cur.lastIndexOf("/");setAtFolder(idx>=0?cur.slice(0,idx):"");}} onOpenFolder={setAtFolder}/>}</Show>;
+  const atMenu=<Show when={at()}>{s=><MentionPicker anchor={ta} onClose={() => setAtOff(true)} items={s().items} index={atHi()} highlight={setAtHi} pick={pickAttach} folder={s().folder || undefined} onBack={()=>{const cur=s().folder;const idx=cur.lastIndexOf("/");setAtFolder(idx>=0?cur.slice(0,idx):"");}} onOpenFolder={setAtFolder}/>}</Show>;
   const slashMenu = (
     <Show when={slash()}>
       {(s) => (
-        <div class="menu slash-menu" role="listbox" aria-label="Commands" onPointerDown={(e) => e.stopPropagation()}>
+        <Popover role="listbox" label="Commands" class="slash-menu" anchor={ta} placement="top-start" width={340} trap={false} onClose={() => setSlashOff(true)}>
           <div class="slash-head">Modes</div>
           <For each={s().items}>
             {(it, i) => (
@@ -1005,7 +940,7 @@ export function Composer(p: {
               </button>
             )}
           </For>
-        </div>
+        </Popover>
       )}
     </Show>
   );
@@ -1111,19 +1046,6 @@ export function Composer(p: {
       {sendBtn}
     </div>
   </>);
-}
-
-// Keep the machine picker inside the viewport when its trigger is near an edge.
-function fitMachineMenu(el: HTMLDivElement) {
-  const update = () => {
-    const anchor = el.offsetParent?.getBoundingClientRect().left ?? 0;
-    const left = Math.max(12, Math.min(anchor, window.innerWidth - el.offsetWidth - 12));
-    el.style.left = `${left - anchor}px`;
-  };
-  const observer = new ResizeObserver(update);
-  queueMicrotask(() => { update(); observer.observe(el); });
-  window.addEventListener("resize", update);
-  onCleanup(() => { observer.disconnect(); window.removeEventListener("resize", update); });
 }
 
 // Keep the last message reachable while the transparent dock floats over the transcript.
@@ -1761,14 +1683,14 @@ export default function App() {
   };
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.defaultPrevented) return;
+    if (e.defaultPrevented || e.isComposing) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r" && !e.altKey) {
       e.preventDefault();
       window.dispatchEvent(new Event("orb:refresh"));
       void refreshMissions();
       return;
     }
-    if (hasFocusScope()) return;
+    if (hasOverlay()) return;
     const destination = navigationShortcut(e);
     if (destination) {
       e.preventDefault();
@@ -1815,10 +1737,6 @@ export default function App() {
   };
   onMount(() => {
     window.addEventListener("keydown", onKey);
-    const closePlus = () => {
-      setPlusFor(null);
-      setEnvOpen(null);
-    };
     const onOpenPage = (ev: Event) => {
       const target = (ev as CustomEvent<string>).detail;
       if (target) open(target);
@@ -1837,8 +1755,6 @@ export default function App() {
       window.removeEventListener("orb:open-page", onOpenPage);
       window.removeEventListener("orb:debug-cron", onDebugCron);
     });
-    window.addEventListener("pointerdown", closePlus);
-    onCleanup(() => window.removeEventListener("pointerdown", closePlus));
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000);
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000);
     onCleanup(() => {
@@ -2108,7 +2024,7 @@ export default function App() {
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "machine"}>
-                      <div class="menu na-menu machine-menu" ref={fitMachineMenu}>
+                      <Menu class="na-menu machine-menu" label="Choose machine" width={340} onClose={() => setEnvOpen(null)}>
                         <div class="na-menu-list">
                         <Show
                           when={isConnected()}
@@ -2227,7 +2143,7 @@ export default function App() {
                             Manage machines
                           </button>
                         </div>
-                      </div>
+                      </Menu>
                     </Show>
                   </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
                 </div>
@@ -2510,13 +2426,6 @@ function MissionDock(p: {
   // Effort can change during a turn: a running Claude session applies it at
   // once, any other mission from its next turn.
   const canChangeEffort = () => !!p.mission && efforts().length > 0 && !saving();
-  const close = (e: PointerEvent) => {
-    if (!(e.target instanceof Node)) return;
-    const el = e.target as HTMLElement;
-    if (!el.closest?.(".ctx-wrap")) setOpen(false);
-    if (!el.closest?.(".under-model-wrap")) setModelOpen(false);
-    if (!el.closest?.(".under-effort-wrap")) setEffortOpen(false);
-  };
   const pickModel = async (value: string) => {
     const m = p.mission;
     if (!m || value === modelId() || saving()) { setModelOpen(false); return; }
@@ -2541,8 +2450,6 @@ function MissionDock(p: {
       p.onError?.(e instanceof Error && e.message.includes("409") ? "Stop the current turn before switching effort." : launchError(e));
     } finally { setSaving(false); }
   };
-  onMount(() => window.addEventListener("pointerdown", close));
-  onCleanup(() => window.removeEventListener("pointerdown", close));
   // Warm the machine list once the conversation is idle so the menu opens filled.
   createEffect(on(() => p.mission?.id, id => {
     if (!id) return;
@@ -2581,19 +2488,10 @@ function MissionDock(p: {
               {modelLabel()} <Ic.ChevronDown size={10} />
             </button>
             <Show when={modelOpen()}>
-              <div class="menu under-model-menu">
-                <For each={models()}>
-                  {(m) => (
-                    <button
-                      class={`menu-item ${m.value === modelId() ? "on" : ""}`}
-                      onClick={() => pickModel(m.value)}
-                    >
-                      <span class="pick-name">{shortModelLabel(m.label)}</span>
-                      <span class="pick-check">{m.value === modelId() ? "✓" : ""}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
+              <Picker label="Models" searchLabel="Search models" placement="top-start" selected={modelId()}
+                items={models().map(m => ({id:m.value,label:shortModelLabel(m.label)}))}
+                onClose={() => setModelOpen(false)} onSelect={value => void pickModel(value)}/>
+
             </Show>
           </Show>
         </div>
@@ -2617,20 +2515,10 @@ function MissionDock(p: {
                 {effortLabel(effort(),p.mission?.backend,p.mission?.model_override)} <Ic.ChevronDown size={10} />
               </button>
               <Show when={effortOpen()}>
-                <div class="menu under-model-menu">
-                  <button class={`menu-item ${!effort() ? "on" : ""}`} onClick={() => void pickEffort("")}>
-                    <span class="pick-name">{defaultEffortLabel(p.mission?.backend,p.mission?.model_override)}</span>
-                    <span class="pick-check">{!effort() ? "✓" : ""}</span>
-                  </button>
-                  <For each={efforts()}>
-                    {(e) => (
-                      <button class={`menu-item ${e === effort() ? "on" : ""}`} onClick={() => void pickEffort(e)}>
-                        <span class="pick-name">{effortLabel(e)}</span>
-                        <span class="pick-check">{e === effort() ? "✓" : ""}</span>
-                      </button>
-                    )}
-                  </For>
-                </div>
+                <Picker label="Reasoning effort" searchable={false} placement="top-start" selected={effort() ?? ""}
+                  items={[{id:"",label:defaultEffortLabel(p.mission?.backend,p.mission?.model_override)},...efforts().map(e => ({id:e,label:effortLabel(e)}))]}
+                  onClose={() => setEffortOpen(false)} onSelect={value => void pickEffort(value)}/>
+
               </Show>
             </Show>
           </div>
@@ -2642,7 +2530,7 @@ function MissionDock(p: {
           <Ic.ContextRing pct={pct()} /> {pct()}%
         </button>
         <Show when={open()}>
-          <div class="ctx-panel" role="dialog" aria-label="Context">
+          <Popover class="ctx-panel" label="Context" placement="top-end" onClose={() => setOpen(false)}>
             <div class="ctx-panel-h">
               <span>Context</span>
               <span class="ctx-panel-meta">{pct()}% · ~{formatTokens(used())} / {formatTokens(windowSize())}</span>
@@ -2654,7 +2542,7 @@ function MissionDock(p: {
               <span>Conversation</span>
               <span>{formatTokens(used())}</span>
             </div>
-          </div>
+          </Popover>
         </Show>
       </div>
     </div>

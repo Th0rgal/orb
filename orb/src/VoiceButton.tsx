@@ -1,3 +1,4 @@
+import { Menu } from "./Menu";
 /**
  * Dictation button for the composer: idle → recording → transcribing → text
  * handed back to the composer (never sent). Only rendered where native voice
@@ -6,7 +7,7 @@
  */
 import { For, Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
-import { hasFocusScope } from "./focusScope";
+import { hasOverlay } from "./overlayLayer";
 import {
   VOICE_LANGUAGES,
   VOICE_MAX_SECONDS,
@@ -280,7 +281,7 @@ export function VoiceButton(p: {
   };
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key !== "Escape" || e.defaultPrevented || hasFocusScope()) return;
+    if (e.key !== "Escape" || e.defaultPrevented || e.isComposing || hasOverlay()) return;
     if (langOpen()) {
       e.stopPropagation();
       setLangOpen(false);
@@ -291,15 +292,12 @@ export function VoiceButton(p: {
       cancel();
     }
   };
-  const onPointerDownOutside = () => setLangOpen(false);
   onMount(() => {
     window.addEventListener("keydown", onKey, true);
-    window.addEventListener("pointerdown", onPointerDownOutside);
   });
   onCleanup(() => {
     disposed = true;
     window.removeEventListener("keydown", onKey, true);
-    window.removeEventListener("pointerdown", onPointerDownOutside);
     clearTimeout(errTimer);
     clearInterval(waveTimer);
     if (status() === "transcribing") void bridge()?.cancel().catch(() => {});
@@ -336,7 +334,7 @@ export function VoiceButton(p: {
             {voiceLanguage().toUpperCase()}
           </button>
           <Show when={langOpen()}>
-            <div class="menu voice-menu" role="menu" aria-label="Dictation language">
+            <Menu label="Dictation language" class="voice-menu" onClose={() => setLangOpen(false)}>
               <For each={VOICE_LANGUAGES}>
                 {(l) => (
                   <button
@@ -355,7 +353,7 @@ export function VoiceButton(p: {
                   </button>
                 )}
               </For>
-            </div>
+            </Menu>
           </Show>
         </span>
         <button

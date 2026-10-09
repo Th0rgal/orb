@@ -34,7 +34,8 @@ test('editing grows below the text without moving a pinned conversation',async({
  await page.waitForTimeout(100);
  const after=await bubble.evaluate(el=>{const r=el.getBoundingClientRect();return {top:r.top,width:r.width,bottom:r.bottom,textTop:el.querySelector('textarea')!.getBoundingClientRect().top,scroll:el.closest('.scroll')!.scrollTop};});
  expect(Math.abs(after.top-before.top)).toBeLessThan(2);
- expect(Math.abs(after.textTop-before.textTop)).toBeLessThan(2);
+ // Editing adds the shared 16px content inset; the bubble and scroll anchor stay fixed.
+ expect(after.textTop-after.top).toBeCloseTo(17,0);
  expect(Math.abs(after.width-before.width)).toBeLessThan(2);
  expect(Math.abs(after.scroll-before.scroll)).toBeLessThan(2);
  expect(after.bottom).toBeGreaterThan(before.bottom);

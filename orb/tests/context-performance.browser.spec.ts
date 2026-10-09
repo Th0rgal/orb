@@ -5,7 +5,7 @@ test('context counter preserves results without reserializing historical tools',
  try {
   const page=await browser.newPage();
   await page.route('**/perf.html',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><title>Orb performance</title>'}));
-  await page.goto('http://127.0.0.1:1431/perf.html');
+  await page.goto(new URL('/perf.html', testInfo.project.use.baseURL).href);
   const result=await page.evaluate(async()=>{
    const url='/src/missionContext.ts';
    const {estimateTokens}=await import(/* @vite-ignore */ url);

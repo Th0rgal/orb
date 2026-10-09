@@ -21,6 +21,7 @@ test("the machine picker lists the least busy machine first and counts running a
         node("sepolia", 120 * GiB, { status: "offline" }),
       ] } });
     }
+    if (path === "/api/control/missions" && url.searchParams.has("status")) return route.fulfill({json:[]});
     if (path === "/api/control/missions" && !url.searchParams.has("project")) {
       missionReads++;
       return route.fulfill({ json: [
