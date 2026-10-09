@@ -1386,6 +1386,7 @@ export default function App() {
         (id) => peekReadyTranscript(id)?.items,
         pendingMissionInteraction,
         currentMissionId(),
+        inboxConfig(),
       ).slice(0, 10);
       const cfg = inboxConfig();
       topUnread.forEach((item, idx) => {
@@ -1465,6 +1466,7 @@ export default function App() {
           (id) => peekReadyTranscript(id)?.items,
           pendingMissionInteraction,
           currentMissionId(),
+          inboxConfig(),
         )
       : 0;
   });

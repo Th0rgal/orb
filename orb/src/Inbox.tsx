@@ -351,6 +351,8 @@ export function InboxPage(p: {
       (id) => (peekReadyTranscript(id) ?? peekTranscript(id))?.items,
       (id) => pendingMissionInteraction(id),
       nowMs(),
+      undefined,
+      inboxConfig(),
     );
   });
 

@@ -3152,7 +3152,7 @@ select.orb-select-native:disabled { cursor: default; }
 }
 .inbox-row {
   position: relative;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   background: var(--bg-elev);
   border: 1px solid var(--stroke-soft);
   padding: 12px 16px;
@@ -3171,6 +3171,7 @@ select.orb-select-native:disabled { cursor: default; }
   border-color: var(--stroke-strong);
   background: color-mix(in srgb, var(--bg-active) 48%, var(--bg-elev));
 }
+.inbox-row:focus-visible { border-radius: var(--radius-xl); }
 .inbox-row.busy { opacity: .6; pointer-events: none; }
 
 .inbox-row-body {
@@ -3482,6 +3483,7 @@ select.orb-select-native:disabled { cursor: default; }
 .inbox-peek-transcript .user {
   margin: 12px 0 8px;
   padding: 8px 12px;
+  border-radius: var(--radius-lg);
   background: var(--bg-elev);
   content-visibility: visible;
   contain-intrinsic-size: none;

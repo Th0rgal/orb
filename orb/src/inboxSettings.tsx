@@ -7,11 +7,13 @@ import { sideQuestionKey } from "./sideQuestionStorage";
 
 export type InboxConfig = {
   aiSummary: boolean;
+  includeAutonomous: boolean;
   model: string;
 };
 
 const DEFAULT_INBOX_CONFIG: InboxConfig = {
   aiSummary: true,
+  includeAutonomous: false,
   model: "builtin/smart",
 };
 
@@ -25,6 +27,7 @@ export function inboxConfig(): InboxConfig {
     if (!raw) return { ...DEFAULT_INBOX_CONFIG };
     const parsed = JSON.parse(raw) as Partial<InboxConfig>;
     return {
+      includeAutonomous: parsed.includeAutonomous === true,
       aiSummary: typeof parsed.aiSummary === "boolean" ? parsed.aiSummary : DEFAULT_INBOX_CONFIG.aiSummary,
       model: typeof parsed.model === "string" && parsed.model.trim() ? parsed.model.trim() : DEFAULT_INBOX_CONFIG.model,
     };
@@ -33,10 +36,11 @@ export function inboxConfig(): InboxConfig {
   }
 }
 
-export function saveInboxConfig(next: InboxConfig): boolean {
+export function saveInboxConfig(next: Omit<InboxConfig, "includeAutonomous"> & Partial<Pick<InboxConfig, "includeAutonomous">>): boolean {
   try {
     const normalized: InboxConfig = {
       aiSummary: Boolean(next.aiSummary),
+      includeAutonomous: next.includeAutonomous ?? inboxConfig().includeAutonomous,
       model: next.model.trim() || DEFAULT_INBOX_CONFIG.model,
     };
     localStorage.setItem(sideQuestionKey("settings:inbox"), JSON.stringify(normalized));
@@ -104,7 +108,7 @@ export function InboxSettings() {
 
   const save = (next = config()) => {
     if (saveInboxConfig(next)) {
-      setMessage("Saved. Inbox digests will use this configuration.");
+      setMessage("Saved. Inbox will use this configuration.");
     } else {
       setMessage("Could not save Inbox settings.");
     }
@@ -114,6 +118,36 @@ export function InboxSettings() {
     <div class="s-body settings-body">
       <div class="s-inner">
         <h2>Inbox</h2>
+        <section class="s-sec">
+          <h3>Notifications</h3>
+          <div class="s-card">
+            <div class="s-row">
+              <div class="s-row-text">
+                <div class="s-row-title">Include autonomous agents</div>
+                <div class="s-row-desc">
+                  Show updates from sub-agents and missions launched by Hermes in your Inbox and unread count.
+                  Off by default: only agents you started directly appear.
+                </div>
+              </div>
+              <div class="s-row-ctrl">
+                <button
+                  type="button"
+                  class={`toggle ${config().includeAutonomous ? "on" : ""}`}
+                  role="switch"
+                  aria-label="Include autonomous agents"
+                  aria-checked={config().includeAutonomous}
+                  onClick={() => {
+                    const next = { ...config(), includeAutonomous: !config().includeAutonomous };
+                    if (saveInboxConfig(next)) {
+                      setConfig(next);
+                      setMessage("Saved. Inbox will use this configuration.");
+                    } else setMessage("Could not save Inbox settings.");
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </section>
         <section class="s-sec">
           <h3>AI Overview &amp; Turn Digest</h3>
           <div class="s-card">

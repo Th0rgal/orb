@@ -320,11 +320,13 @@ describe("classifyInboxMission & buildInboxSections", () => {
       () => undefined,
       () => undefined,
       Date.parse("2026-10-07T14:30:00Z"),
+      undefined,
+      { includeAutonomous: true },
     );
 
-    // Child missions themselves are hidden from top-level rows, but grouped onto parentPareto
-    expect(sections.ready.map((i) => i.id)).toEqual([parentPareto.id]);
-    const parentItem = sections.ready[0];
+    // Opting in exposes child missions and their aggregate attention on the parent.
+    expect(sections.ready.map((i) => i.id)).toEqual([childOk.id, parentPareto.id]);
+    const parentItem = sections.ready.find((i) => i.id === parentPareto.id)!;
     expect(parentItem.childSummary).toBeDefined();
     expect(parentItem.childSummary?.total).toBe(2);
     expect(parentItem.childSummary?.completed).toBe(1);
@@ -334,8 +336,8 @@ describe("classifyInboxMission & buildInboxSections", () => {
     // Parent surfaces in Unread and Attention because a child track failed unread
     expect(parentItem.unread).toBe(true);
     expect(parentItem.attention).toBe(true);
-    expect(sections.unreadCount).toBe(1);
-    expect(sections.attentionCount).toBe(1);
+    expect(sections.unreadCount).toBe(2);
+    expect(sections.attentionCount).toBe(2);
     expect(parentItem.peekTurns.map((t) => `${t.role}:${t.text}`)).toEqual([
       "user:Launch the 3 verification tracks.",
       "assistant:Dispatched Track INV-1, Track G-2, and Track G-4.",

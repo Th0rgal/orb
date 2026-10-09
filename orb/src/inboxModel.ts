@@ -441,16 +441,30 @@ export function isSubagentMission(
   return false;
 }
 
+export type InboxScope = { includeAutonomous?: boolean };
+
+/** Creation provenance, not the source of the latest message (which may be a watchdog). */
+export function isAutonomousInboxMission(mission: Mission): boolean {
+  return isSubagentMission(mission) || mission.origin === "hermes" ||
+    Boolean(mission.tags?.some((tag) => tag === "origin:hermes" || tag === "origin:hermes-assistant"));
+}
+
+function isInInboxScope(mission: Mission, scope: InboxScope): boolean {
+  // Superseded attempts stay hidden even when showing autonomous agents.
+  if (mission.tags?.some((tag) => tag === "superseded" || tag.startsWith("superseded-by:"))) return false;
+  return Boolean(scope.includeAutonomous) || !isAutonomousInboxMission(mission);
+}
+
 export function classifyInboxMission(
   mission: Mission,
   interaction?: InboxInteraction,
+  scope: InboxScope = {},
 ): InboxCategory {
-  if (isBtwMission(mission)) return "hidden";
+  if (isBtwMission(mission) || !isInInboxScope(mission, scope)) return "hidden";
   const status = mission.status || "";
   if (HIDDEN_STATUSES.has(status)) return "hidden";
   // An active mission with a live pending interaction immediately surfaces in Needs You
   if (interaction) return "needs_you";
-  if (isSubagentMission(mission)) return "hidden";
   if (WORKING_STATUSES.has(status)) return "working";
   if (
     status === "blocked" ||
@@ -1345,9 +1359,10 @@ export function buildInboxItem(
   nowMs = Date.now(),
   selectedMissionId?: string | null,
   childSummary?: InboxChildSummary,
+  scope: InboxScope = {},
 ): InboxItem | null {
   const interaction = extractInboxInteraction(mission, items, observed);
-  const category = classifyInboxMission(mission, interaction);
+  const category = classifyInboxMission(mission, interaction, scope);
   if (category === "hidden") return null;
 
   const projectSlug = mission.project || DEFAULT_PROJECT.slug;
@@ -1482,9 +1497,9 @@ export function buildInboxItem(
   const cachedBase = base;
   const unread =
     isMissionUnread(mission, selectedMissionId, Boolean(interaction)) ||
-    Boolean(childSummary?.hasUnreadFailure);
+    Boolean(scope.includeAutonomous && childSummary?.hasUnreadFailure);
   const attention =
-    cachedBase.baseAttention || Boolean(childSummary && childSummary.failed > 0);
+    cachedBase.baseAttention || Boolean(scope.includeAutonomous && childSummary && childSummary.failed > 0);
 
   return {
     id: cachedBase.id,
@@ -1579,6 +1594,7 @@ export function listUnreadInboxCandidates(
   getTranscript?: (id: string) => StreamItem[] | undefined,
   getInteraction?: (id: string) => PendingInteraction | undefined,
   selectedMissionId?: string | null,
+  scope: InboxScope = {},
 ): UnreadInboxCandidate[] {
   const liveSlugs =
     projects.length > 0
@@ -1587,6 +1603,7 @@ export function listUnreadInboxCandidates(
 
   const unreadFailureByParent = new Set<string>();
   for (const m of missions) {
+    if (!scope.includeAutonomous) break;
     if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
     if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded-by:"))) continue;
     const parentId = m.parent_mission_id || m.callback_parent_mission_id;
@@ -1601,6 +1618,7 @@ export function listUnreadInboxCandidates(
 
   const out: UnreadInboxCandidate[] = [];
   for (const mission of missions) {
+    if (!isInInboxScope(mission, scope)) continue;
     const rawSlug = mission.project?.trim();
     const observed = getInteraction?.(mission.id);
     if (liveSlugs) {
@@ -1623,7 +1641,7 @@ export function listUnreadInboxCandidates(
     let category: "needs_you" | "ready" | null = null;
     if (hasInteraction) {
       category = "needs_you";
-    } else if (!isSubagentMission(mission) && !WORKING_STATUSES.has(status)) {
+    } else if (!WORKING_STATUSES.has(status)) {
       if (
         status === "blocked" ||
         status === "failed" ||
@@ -1671,6 +1689,7 @@ export function countUnreadInboxMissions(
   getTranscript?: (id: string) => StreamItem[] | undefined,
   getInteraction?: (id: string) => PendingInteraction | undefined,
   selectedMissionId?: string | null,
+  scope: InboxScope = {},
 ): number {
   return listUnreadInboxCandidates(
     missions,
@@ -1678,6 +1697,7 @@ export function countUnreadInboxMissions(
     getTranscript,
     getInteraction,
     selectedMissionId,
+    scope,
   ).length;
 }
 
@@ -1712,6 +1732,7 @@ export function buildInboxSections(
   getInteraction?: (id: string) => PendingInteraction | undefined,
   nowMs = Date.now(),
   selectedMissionId?: string | null,
+  scope: InboxScope = {},
 ): InboxSections {
   const needsYou: InboxItem[] = [];
   const ready: InboxItem[] = [];
@@ -1757,6 +1778,7 @@ export function buildInboxSections(
   }
 
   for (const mission of missions) {
+    if (!isInInboxScope(mission, scope)) continue;
     const rawSlug = mission.project?.trim();
     const observed = getInteraction?.(mission.id);
     if (liveSlugs) {
@@ -1775,6 +1797,7 @@ export function buildInboxSections(
       nowMs,
       selectedMissionId,
       childrenByParent.get(mission.id),
+      scope,
     );
     if (!item) continue;
     if (item.category === "needs_you") needsYou.push(item);
