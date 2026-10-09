@@ -6673,6 +6673,7 @@ WORKING_DIR = "/workspaces/mission-old"
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn vibe_mission_preparation_installs_configured_library_skills() {
         let temp = tempfile::tempdir().unwrap();
