@@ -4,12 +4,36 @@ const mocks=vi.hoisted(()=>({store:new Map<string,unknown>(),active:true,effort:
 vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,reopenMission:mocks.reopen,getMission:async()=>({status:mocks.acknowledged?'acknowledged':mocks.active?'active':'awaiting_user',tags:['placement:client'],model_effort:mocks.effort}),appendClientTranscript:mocks.append,setClientMissionStatus:mocks.status}));
 vi.mock('../src/sideQuestionStorage',()=>({sideQuestionKey:()=>`account:${mocks.version}`}));
 vi.mock('../src/composerDrafts',()=>({readSideThread:async(k:string)=>structuredClone(mocks.store.get(k)),saveSideThread:async(k:string,v:unknown)=>{mocks.save();mocks.store.set(k,structuredClone(v));}}));
-vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest'}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
+vi.mock('../src/localAgents',()=>({recoverLocalLaunch:mocks.recover,recordLocalFailure:mocks.failure,restoreLocalBindings:async()=>{},localBinding:()=>({cwd:'/work',sessionId:'latest',planMode:false}),pollLocal:mocks.poll,reconcileLocalRun:async()=>{},startLocal:mocks.launch,followLocal:mocks.follow,stopLocal:mocks.stopNative}));
 import {enqueueLocalMessage,queuedLocalMessages,startLocalQueueWorker,removeQueuedMessage,takeQueuedMessage,sendQueuedNow,retryQueuedMessage,resumedPrompt,holdQueuedMessage,releaseQueuedMessage,prioritizeQueuedMessage,cancelQueuedWakeups,captureWakeupFences,confirmWakeupStops,cutByConnection} from '../src/localMessageQueue';
 const request={id:'mission',harness:'claudecode',bin:'claude',cwd:'/work',prompt:'first'};
 let stop:(()=>void)|undefined;
 beforeEach(()=>{mocks.effort=undefined;vi.useFakeTimers();mocks.poll.mockReset().mockImplementation(async()=>({done:!mocks.active}));mocks.stopNative.mockReset().mockImplementation(async()=>{mocks.active=false;});mocks.acknowledged=false;mocks.reopen.mockReset().mockResolvedValue(undefined);mocks.store.clear();mocks.recover.mockReset().mockResolvedValue(undefined);mocks.failure.mockReset();mocks.version=1;mocks.active=true;mocks.launch.mockReset().mockResolvedValue({run_id:'r',generation:1});mocks.follow.mockReset().mockResolvedValue({done:true,text:'Done',exit_code:0});mocks.save.mockReset();mocks.status.mockReset();mocks.append.mockReset().mockResolvedValue(undefined);Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,options:unknown,fn?: (lock:unknown)=>unknown)=>fn?fn({name:_key}):(options as ()=>unknown)()}});});
 afterEach(()=>{stop?.();vi.useRealTimers();});
+it('retains a Vibe plan command when a build-mode mission automatically resumes its interrupted followup',async()=>{
+ mocks.active=false;
+ mocks.follow.mockResolvedValueOnce({done:true,text:'Partial plan',exit_code:1,error:'ECONNRESET',retryable:true,resumed:true});
+ const prompt='/plan Inspect the repository';
+ stop=startLocalQueueWorker();
+ await enqueueLocalMessage({...request,harness:'vibe',bin:'vibe-acp',prompt},prompt);
+ await vi.advanceTimersByTimeAsync(100);
+ expect(queuedLocalMessages('mission')[0]).toMatchObject({state:'queued',autoResumed:true,cut:'connection'});
+ await vi.advanceTimersByTimeAsync(1000);
+ const launches=mocks.launch.mock.calls.map(call=>call[0]);
+ expect(launches).toHaveLength(2);
+ expect(launches[0].prompt).toBe(prompt);
+ expect(launches[1]).toMatchObject({harness:'vibe',sessionId:'latest'});
+ // Native Vibe reads the command only at the start of the current prompt;
+ // this mission's persisted binding is still in build mode.
+ expect((await import('../src/localAgents')).localBinding('mission')?.planMode).toBe(false);
+ expect(launches[1].prompt).toMatch(/^\/plan Inspect the repository\n\nThe connection was lost/);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});
+it('preserves goal commands during recovery without treating /planet as a mode',()=>{
+ expect(resumedPrompt('  /goal Finish the audit')).toMatch(/^\/goal Finish the audit\n\nOrb restarted/);
+ expect(resumedPrompt('/planet Inspect the repository')).toMatch(/^Orb restarted/);
+ expect(resumedPrompt('/planet Inspect the repository')).toMatch(/\n\n\/planet Inspect the repository$/);
+});
 it('persists active-run followups and drains them in order using the latest session',async()=>{
  await enqueueLocalMessage(request,'first');await enqueueLocalMessage({...request,prompt:'second'},'second');
  stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1000);expect(mocks.launch).not.toHaveBeenCalled();

@@ -2044,12 +2044,13 @@ async fn continue_inner(
         RESUME_SOURCE.to_string()
     };
     let plan = if mission.backend == "vibe" {
-        RemoteHarnessPlan::Vibe {
-            plan: crate::vibe::plan_mode(mission.agent.as_deref(), &prompt),
-            model: mission.model_override.clone(),
-            prompt: prompt.clone(),
-            resume_session_id: session_id.clone(),
-        }
+        vibe_continuation_plan(
+            mission.agent.as_deref(),
+            mission.model_override.clone(),
+            &history_prompt,
+            prompt.clone(),
+            session_id.clone(),
+        )
     } else if mission.backend == "antigravity" {
         RemoteHarnessPlan::Antigravity {
             effort: mission.model_effort.clone(),
@@ -2168,9 +2169,57 @@ fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
+fn vibe_continuation_plan(
+    agent: Option<&str>,
+    model: Option<String>,
+    raw_prompt: &str,
+    prompt: String,
+    session: Option<String>,
+) -> RemoteHarnessPlan {
+    RemoteHarnessPlan::Vibe {
+        plan: crate::vibe::plan_mode(agent, raw_prompt),
+        model,
+        prompt,
+        resume_session_id: session,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vibe_transfer_turn_keeps_raw_plan_intent_and_portable_history() {
+        let wrapped = "Transferred history\n\n/plan Inspect only".to_string();
+        let RemoteHarnessPlan::Vibe {
+            plan,
+            prompt,
+            resume_session_id,
+            ..
+        } = vibe_continuation_plan(
+            Some("build"),
+            None,
+            "/plan Inspect only",
+            wrapped.clone(),
+            None,
+        )
+        else {
+            panic!("Vibe plan expected")
+        };
+        assert!(plan);
+        assert_eq!(prompt, wrapped);
+        assert_eq!(resume_session_id, None);
+        let RemoteHarnessPlan::Vibe { plan, .. } = vibe_continuation_plan(
+            Some("build"),
+            None,
+            "Implement",
+            "/plan old history".into(),
+            Some("native".into()),
+        ) else {
+            panic!("Vibe plan expected")
+        };
+        assert!(!plan);
+    }
 
     #[test]
     fn antigravity_remote_thoughts_require_matching_native_identity() {

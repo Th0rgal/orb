@@ -27,7 +27,7 @@ export const resumedPrompt=(prompt:string,cut:'restart'|'connection'|'background
   ?'Your previous headless turn ended while a background task was still running, before its completion could wake the CLI. Check what is already done (and inspect any task logs or re-run foreground commands if needed), then continue from there. Do not redo finished work.'
   :`${cut==='connection'?'The connection was lost':'Orb restarted'} while you were working on the request below, so your previous turn was cut short. Check what is already done, then continue from there. Do not redo finished work.`;
  const trimmed=prompt.trimStart();
- if(/^\/goal(?:\s|$)/.test(trimmed))return `${trimmed}\n\n${note}`;
+ if(/^\/(?:goal|plan)(?:\s|$)/.test(trimmed))return `${trimmed}\n\n${note}`;
  return `${note}\n\n${prompt}`;
 };
 /** What Resume sends when no message is waiting: the agent keeps its session and picks its work up. */

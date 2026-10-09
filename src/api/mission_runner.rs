@@ -3910,6 +3910,9 @@ async fn run_mission_turn(
     {
         return result;
     }
+    // Preserve command intent before operator notes, attachments or transferred
+    // history can be prepended to the text delivered to the harness.
+    let vibe_user_message = (backend_id == "vibe").then(|| user_message.clone());
     let mut has_machine_transfer = false;
     let mission_working_directory = if let Some(store) = mission_store.as_ref() {
         match super::control::machine_transfer::committed(store, mission_id).await {
@@ -4594,7 +4597,7 @@ async fn run_mission_turn(
                 }
             } else if backend_id == "vibe" {
                 super::runners::TurnExtras::Vibe {
-                    current_message: &user_message,
+                    current_message: vibe_user_message.as_deref().unwrap_or(&user_message),
                 }
             } else if backend_id == "antigravity" {
                 super::runners::TurnExtras::Antigravity {

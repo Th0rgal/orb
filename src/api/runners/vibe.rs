@@ -3,6 +3,14 @@ use crate::agents::{AgentResult, TerminalReason};
 use crate::api::control::AgentEvent;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+fn plan_for_turn(agent: Option<&str>, message: &str, extras: &super::TurnExtras<'_>) -> bool {
+    let current_message = match extras {
+        super::TurnExtras::Vibe { current_message } => *current_message,
+        _ => message,
+    };
+    crate::vibe::plan_mode(agent, current_message)
+}
+
 pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     if !crate::backend::vibe::core_auth_configured(ctx.app_working_dir).await {
         return AgentResult::failure(
@@ -28,11 +36,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         |bound| release_unbound_claim(store.as_ref(), ctx.mission_id, run.as_ref(), claim, bound);
     let cli = crate::api::mission_runner::get_backend_string_setting("vibe", "cli_path")
         .unwrap_or_else(|| "vibe-acp".into());
-    let current_message = match ctx.extras {
-        super::TurnExtras::Vibe { current_message } => current_message,
-        _ => ctx.message,
-    };
-    let plan = crate::vibe::plan_mode(ctx.agent, current_message);
+    let plan = plan_for_turn(ctx.agent, ctx.message, &ctx.extras);
     let model = ctx.model.unwrap_or("mistral/mistral-vibe-cli-latest");
     let args = crate::vibe::args(
         &cli,
@@ -263,6 +267,24 @@ fn finish_thinking(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vibe_turn_mode_uses_raw_command_before_transfer_history() {
+        let history = "Transferred conversation: old work\n\n/plan Inspect only";
+        let extras = super::super::TurnExtras::Vibe {
+            current_message: "/plan Inspect only",
+        };
+        assert!(super::plan_for_turn(Some("build"), history, &extras));
+        let build = super::super::TurnExtras::Vibe {
+            current_message: "Implement it",
+        };
+        assert!(!super::plan_for_turn(
+            Some("build"),
+            "/plan from an old turn",
+            &build
+        ));
+        assert!(super::plan_for_turn(Some("plan"), history, &build));
+    }
+
     use super::*;
 
     #[tokio::test]
