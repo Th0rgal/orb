@@ -233,6 +233,7 @@ pub(crate) enum StreamUpdate {
 #[derive(Debug, Default)]
 pub(crate) struct GrokStream {
     antigravity: Option<crate::antigravity::Stream>,
+    vibe: Option<crate::vibe::Stream>,
     claude: bool,
     claude_message_streamed: bool,
     claude_boundary: bool,
@@ -336,6 +337,34 @@ impl GrokStream {
             self.diagnostics.push_back(diagnostic);
             return;
         };
+        if let Some(stream) = self.vibe.as_mut() {
+            let tools = stream.feed(&value);
+            if stream.session != self.session_id {
+                self.session_id = stream.session.clone();
+                if let Some(id) = &self.session_id {
+                    updates.push(StreamUpdate::SessionId(id.clone()));
+                }
+            }
+            if self.text != stream.text {
+                self.text = stream.text.clone();
+                updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
+            }
+            if self.thinking != stream.thinking {
+                self.thinking = stream.thinking.clone();
+                updates.push(StreamUpdate::ThinkingSnapshot(self.thinking.clone()));
+            }
+            self.progress = true;
+            self.ended = stream.success;
+            self.stop_reason = stream.success.then(|| "end_turn".into());
+            self.error = stream.error.clone();
+            for tool in tools {
+                updates.push(StreamUpdate::Tool {
+                    completed: tool["type"] == "tool_call_update",
+                    update: tool,
+                });
+            }
+            return;
+        }
         if let Some(stream) = self.antigravity.as_mut() {
             if value["event"] == "thought_update" {
                 if value["conversation_id"].as_str() != stream.session.as_deref() {
@@ -764,7 +793,7 @@ impl NativeGrokObserver {
             Ok(Some(mission))
                 if matches!(
                     mission.backend.as_str(),
-                    GROK_BACKEND | "opencode" | "codex" | "antigravity"
+                    GROK_BACKEND | "opencode" | "codex" | "antigravity" | "vibe"
                 ) || (mission.backend == "claudecode" && mission.session_id.is_some()) =>
             {
                 mission
@@ -778,6 +807,10 @@ impl NativeGrokObserver {
             session_persisted: mission.session_id.clone(),
             stream: GrokStream {
                 claude: mission.backend == "claudecode",
+                vibe: (mission.backend == "vibe").then(|| crate::vibe::Stream {
+                    session: mission.session_id.clone(),
+                    ..Default::default()
+                }),
                 antigravity: (mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = mission.session_id.clone();
@@ -924,6 +957,10 @@ impl NativeGrokObserver {
             self.log_len = chunk.log_len;
             self.stream = GrokStream {
                 claude: self.mission.backend == "claudecode",
+                vibe: (self.mission.backend == "vibe").then(|| crate::vibe::Stream {
+                    session: self.session_persisted.clone(),
+                    ..Default::default()
+                }),
                 antigravity: (self.mission.backend == "antigravity").then(|| {
                     let mut stream = crate::antigravity::Stream::default();
                     stream.expected_session = self.session_persisted.clone();
@@ -1226,6 +1263,14 @@ impl NativeGrokObserver {
                 self.stream.error = Some(err);
             }
         }
+        if let Some(stream) = &self.stream.vibe {
+            if self.stream.error.is_none() {
+                self.stream.error = stream.finish().err();
+            }
+            if self.session_persisted != stream.session {
+                self.stream.error = Some("Vibe identity was not durably persisted".into());
+            }
+        }
         let success = succeeded
             && self
                 .stream
@@ -1500,7 +1545,7 @@ pub(crate) async fn reject_local_followup(
 pub(crate) fn local_resume_refusal(mission: &Mission, placement: &RemotePlacement) -> String {
     if matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "claudecode"
+        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "vibe" | "claudecode"
     ) {
         format!(
             "{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {} runs natively on remote node '{}'; \
@@ -1836,7 +1881,7 @@ async fn continue_inner(
     };
     if !matches!(
         mission.backend.as_str(),
-        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "claudecode"
+        GROK_BACKEND | "opencode" | "codex" | "antigravity" | "vibe" | "claudecode"
     ) {
         return Err((
             StatusCode::CONFLICT,
@@ -1958,7 +2003,13 @@ async fn continue_inner(
     } else {
         RESUME_SOURCE.to_string()
     };
-    let plan = if mission.backend == "antigravity" {
+    let plan = if mission.backend == "vibe" {
+        RemoteHarnessPlan::Vibe {
+            model: mission.model_override.clone(),
+            prompt: prompt.clone(),
+            resume_session_id: session_id.clone(),
+        }
+    } else if mission.backend == "antigravity" {
         RemoteHarnessPlan::Antigravity {
             effort: mission.model_effort.clone(),
             model: mission.model_override.clone(),

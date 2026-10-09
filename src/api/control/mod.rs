@@ -9065,7 +9065,7 @@ fn native_backend_prefix(raw_model: &str) -> Option<&str> {
         return None;
     }
     match prefix {
-        "codex" | "claudecode" | "grok" | "antigravity" => Some(prefix),
+        "codex" | "claudecode" | "grok" | "antigravity" | "vibe" => Some(prefix),
         _ => None,
     }
 }
@@ -9075,6 +9075,7 @@ fn native_backend_agent(raw_agent: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "claudecode" => Some("claudecode"),
         "antigravity" => Some("antigravity"),
+        "vibe" => Some("vibe"),
         "grok" => Some("grok"),
         _ => None,
     }
@@ -11814,7 +11815,7 @@ pub(super) async fn create_mission_inner(
         let backend_id = backend.as_deref();
         let skip_validation = matches!(
             backend_id,
-            Some("claudecode" | "codex" | "grok" | "antigravity" | "chatgpt_ui")
+            Some("claudecode" | "codex" | "grok" | "antigravity" | "vibe" | "chatgpt_ui")
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -11919,23 +11920,27 @@ pub(super) async fn create_mission_inner(
     }
     if let (true, Some(ws_id), Some(backend_id)) = (runs_locally, workspace_id, backend.as_deref())
     {
-        if matches!(backend_id, "codex" | "claudecode" | "grok" | "antigravity") {
+        if matches!(
+            backend_id,
+            "codex" | "claudecode" | "grok" | "antigravity" | "vibe"
+        ) {
             if let Some(workspace) = state.workspaces.get(ws_id).await {
-                let cli_path = if matches!(backend_id, "claudecode" | "codex" | "antigravity") {
-                    state
-                        .backend_configs
-                        .get(backend_id)
-                        .await
-                        .and_then(|config| {
-                            config
-                                .settings
-                                .get("cli_path")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string)
-                        })
-                } else {
-                    None
-                };
+                let cli_path =
+                    if matches!(backend_id, "claudecode" | "codex" | "antigravity" | "vibe") {
+                        state
+                            .backend_configs
+                            .get(backend_id)
+                            .await
+                            .and_then(|config| {
+                                config
+                                    .settings
+                                    .get("cli_path")
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_string)
+                            })
+                    } else {
+                        None
+                    };
                 let preflight = super::mission_runner::check_backend_prerequisites(
                     &workspace,
                     backend_id,
@@ -12941,8 +12946,14 @@ impl RemoteMissionOwner {
 /// Harnesses a remote node can run for a typed launch. Nodes ship the
 /// `claude`, `opencode`, and native `grok` CLIs. Other harnesses are rejected
 /// before the mission exists instead of being silently swapped.
-pub(crate) const REMOTE_NODE_HARNESSES: &[&str] =
-    &["claudecode", "opencode", "grok", "codex", "antigravity"];
+pub(crate) const REMOTE_NODE_HARNESSES: &[&str] = &[
+    "claudecode",
+    "opencode",
+    "grok",
+    "codex",
+    "antigravity",
+    "vibe",
+];
 
 /// Stable prefixes of the plain-text `400` bodies a typed remote launch can
 /// return before any mission exists. Clients match on the prefix, not the
@@ -12957,7 +12968,12 @@ pub(crate) const REMOTE_MODEL_REQUIRED: &str = "REMOTE_MODEL_REQUIRED";
 pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCapabilities {
     crate::remote_node::RemoteLaunchCapabilities {
         typed: true,
-        requires_proxy_harnesses: vec!["claudecode".into(), "opencode".into(), "codex".into()],
+        requires_proxy_harnesses: vec![
+            "claudecode".into(),
+            "opencode".into(),
+            "codex".into(),
+            "vibe".into(),
+        ],
         harnesses: REMOTE_NODE_HARNESSES
             .iter()
             .map(|h| h.to_string())
@@ -12978,6 +12994,11 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
 /// from the client's selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteHarnessPlan {
+    Vibe {
+        model: Option<String>,
+        prompt: String,
+        resume_session_id: Option<String>,
+    },
     Antigravity {
         effort: Option<String>,
         model: Option<String>,
@@ -13019,6 +13040,7 @@ impl RemoteHarnessPlan {
         matches!(
             self,
             RemoteHarnessPlan::ClaudeCode { .. }
+                | RemoteHarnessPlan::Vibe { .. }
                 | RemoteHarnessPlan::OpenCode { .. }
                 | RemoteHarnessPlan::Codex { .. }
         )
@@ -13031,6 +13053,12 @@ impl RemoteHarnessPlan {
                 model.as_deref().unwrap_or("account default")
             ),
             RemoteHarnessPlan::Codex { model, .. } => format!("codex/{model}"),
+            RemoteHarnessPlan::Vibe { model, .. } => format!(
+                "vibe/{}",
+                model
+                    .as_deref()
+                    .unwrap_or("mistral/mistral-vibe-cli-latest")
+            ),
             RemoteHarnessPlan::Raw { .. } => "raw command".to_string(),
             RemoteHarnessPlan::Grok { model, .. } => {
                 format!("grok/{}", model.as_deref().unwrap_or("node default model"))
@@ -13075,6 +13103,7 @@ pub(crate) fn plan_remote_harness(
         .filter(|m| !m.is_empty())
         .map(str::to_string);
     match backend {
+        "vibe" => Ok(RemoteHarnessPlan::Vibe { model, prompt, resume_session_id: None }),
         "codex" => Ok(RemoteHarnessPlan::Codex {
             effort: None,
             fast_mode: false,
@@ -13265,6 +13294,44 @@ pub(crate) fn remote_execution_for_plan(
 ) -> RemoteExecution {
     let label = plan.label();
     match plan {
+        RemoteHarnessPlan::Vibe {
+            model,
+            prompt,
+            resume_session_id,
+        } => {
+            let args = crate::vibe::args(
+                "vibe-acp",
+                "runtime",
+                Some(
+                    model
+                        .as_deref()
+                        .unwrap_or("mistral/mistral-vibe-cli-latest"),
+                ),
+                resume_session_id.as_deref(),
+                prompt,
+                false,
+                false,
+            );
+            RemoteExecution {
+                managed_auth: Vec::new(),
+                command: format!(
+                    "exec python3 {}",
+                    args.iter()
+                        .map(|arg| shell_single_quote(arg))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                env: Some(HashMap::from([
+                    (
+                        "SANDBOXED_VIBE_PROXY_URL".into(),
+                        format!("{}/v1", api_base_url.trim_end_matches('/')),
+                    ),
+                    ("SANDBOXED_VIBE_PROXY_KEY".into(), proxy_key.into()),
+                ])),
+                label,
+            }
+        }
+
         RemoteHarnessPlan::Codex {
             effort,
             fast_mode,
@@ -13439,6 +13506,29 @@ pub(crate) fn remote_execution_for_plan(
 /// mission so a re-attached observer or a boot sweep can retire it by name.
 pub(crate) fn remote_launch_key_name(mission_id: Uuid) -> String {
     format!("remote-launch:{mission_id}")
+}
+
+#[cfg(test)]
+mod vibe_plan_tests {
+    use super::*;
+    #[test]
+    fn vibe_remote_plan_uses_proxy_without_exposing_the_key_in_argv() {
+        let plan = plan_remote_harness(
+            None,
+            "vibe",
+            Some("mistral/mistral-vibe-cli-latest"),
+            Some("hello"),
+        )
+        .unwrap();
+        assert!(plan.uses_core_proxy());
+        let execution = remote_execution_for_plan(&plan, "https://core.test", "private-test-key");
+        assert!(execution.command.starts_with("exec python3 "));
+        assert!(!execution.command.contains("private-test-key"));
+        let env = execution.env.unwrap();
+        assert_eq!(env["SANDBOXED_VIBE_PROXY_URL"], "https://core.test/v1");
+        assert_eq!(env["SANDBOXED_VIBE_PROXY_KEY"], "private-test-key");
+        assert!(execution.managed_auth.is_empty());
+    }
 }
 
 /// Delete every proxy key minted for `mission_id`'s remote launches.
@@ -14501,6 +14591,7 @@ async fn submit_leased_remote_job(
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
         | RemoteHarnessPlan::Antigravity { prompt, .. }
+        | RemoteHarnessPlan::Vibe { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => Some(prompt),
         RemoteHarnessPlan::Raw { .. } => None,
     };
@@ -14549,6 +14640,7 @@ async fn submit_leased_remote_job(
         | RemoteHarnessPlan::Grok { prompt, .. }
         | RemoteHarnessPlan::ClaudeCode { prompt, .. }
         | RemoteHarnessPlan::Antigravity { prompt, .. }
+        | RemoteHarnessPlan::Vibe { prompt, .. }
         | RemoteHarnessPlan::OpenCode { prompt, .. } => prompt.as_str(),
         _ => "",
     };
@@ -14727,6 +14819,7 @@ async fn submit_leased_remote_job(
             RemoteHarnessPlan::OpenCode { .. } => "opencode",
             RemoteHarnessPlan::Grok { .. } => "grok",
             RemoteHarnessPlan::Antigravity { .. } => "antigravity",
+            RemoteHarnessPlan::Vibe { .. } => "vibe",
             RemoteHarnessPlan::Raw { .. } => unreachable!(),
         };
         let env = execution.env.get_or_insert_with(HashMap::new);
@@ -14845,6 +14938,9 @@ async fn submit_leased_remote_job(
         RemoteHarnessPlan::Antigravity {
             resume_session_id: None,
             ..
+        } | RemoteHarnessPlan::Vibe {
+            resume_session_id: None,
+            ..
         }
     ) {
         let claim = async {
@@ -14852,7 +14948,7 @@ async fn submit_leased_remote_job(
                 .filter(|run| run.owner_actor_id == remote_job_lease_owner(job_id))
                 .ok_or("Antigravity launch lost its run lease")?;
             let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
-            if !control.mission_store.claim_native_prompt(mission.id, "antigravity", None, Some(&fence), job_id).await? {
+            if !control.mission_store.claim_native_prompt(mission.id, &mission.backend, None, Some(&fence), job_id).await? {
                 return Err("Prior Antigravity launch has no recorded conversation identity; reconcile it before retrying".to_string());
             }
             Ok::<_, String>(fence)
@@ -14895,7 +14991,12 @@ async fn submit_leased_remote_job(
             if let Some(fence) = &antigravity_claim {
                 if let Err(error) = control
                     .mission_store
-                    .release_native_prompt_no_launch(mission.id, "antigravity", Some(fence), job_id)
+                    .release_native_prompt_no_launch(
+                        mission.id,
+                        &mission.backend,
+                        Some(fence),
+                        job_id,
+                    )
                     .await
                 {
                     tracing::error!(mission_id = %mission.id, %error, "Could not release rejected Antigravity launch claim");
@@ -16741,7 +16842,7 @@ pub async fn update_mission_settings(
     if let Some(ref agent_name) = effective_agent {
         let skip_validation = matches!(
             effective_backend.as_str(),
-            "claudecode" | "codex" | "grok" | "antigravity" | "chatgpt_ui"
+            "claudecode" | "codex" | "grok" | "antigravity" | "vibe" | "chatgpt_ui"
         );
         if !skip_validation {
             super::library::validate_agent_exists(
@@ -30080,7 +30181,7 @@ async fn run_single_control_turn(
     } else if (backend_id.as_deref() == Some("opencode")
         && effective_config_profile.is_some()
         && requested_model.is_none())
-        || (matches!(backend_id.as_deref(), Some("grok" | "antigravity"))
+        || (matches!(backend_id.as_deref(), Some("grok" | "antigravity" | "vibe"))
             && requested_model.is_none())
     {
         config.default_model = None;

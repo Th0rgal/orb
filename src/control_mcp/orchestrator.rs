@@ -458,7 +458,7 @@ impl OrchestratorMcp {
                     "properties": {
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "chatgpt_ui"],
+                            "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "vibe", "chatgpt_ui"],
                             "description": "Optional single backend to inspect. If omitted, returns all common backends."
                         }
                     }
@@ -613,7 +613,7 @@ impl OrchestratorMcp {
             },
             ToolDefinition {
                 name: "create_worker_mission".to_string(),
-                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). The worker will start executing immediately and inherits the parent's actual machine and working directory by default (including Orb local sessions). Pass working_directory to use a prepared folder or Git worktree. No Git repository is required and none is created automatically. Use a stable idempotency_key for retries. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, antigravity, grok, opencode). If omitted, inherits the parent harness.".to_string(),
+                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). The worker will start executing immediately and inherits the parent's actual machine and working directory by default (including Orb local sessions). Pass working_directory to use a prepared folder or Git worktree. No Git repository is required and none is created automatically. Use a stable idempotency_key for retries. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, antigravity, grok, opencode, vibe). If omitted, inherits the parent harness.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
@@ -627,12 +627,12 @@ impl OrchestratorMcp {
                         },
                         "backend": {
                             "type": "string",
-                            "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "chatgpt_ui"],
-                            "description": "Backend/harness to use. MUST match the model: claudecode for Claude models, codex for OpenAI/GPT models, antigravity for account-supported Google models, grok for Grok models, opencode for provider routing, or chatgpt_ui with an exact visible web model label."
+                            "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "vibe", "chatgpt_ui"],
+                            "description": "Backend/harness to use. MUST match the model: claudecode for Claude models, codex for OpenAI/GPT models, antigravity for account-supported Google models, grok for Grok models, vibe for native Mistral Vibe, opencode for provider routing, or chatgpt_ui with an exact visible web model label."
                         },
                         "model_override": {
                             "type": "string",
-                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-5.6-terra', recommended with medium effort) for codex, Google models for antigravity, Grok models for grok, 'provider/model' format for opencode. Never invent variants such as 'gpt-5.5-sol'."
+                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-5.6-terra', recommended with medium effort) for codex, Google models for antigravity, Grok models for grok, 'provider/model' format for opencode and 'mistral/model' for vibe. Never invent variants such as 'gpt-5.5-sol'."
                         },
                         "model_effort": {
                             "type": "string",
@@ -683,7 +683,7 @@ impl OrchestratorMcp {
                                 "required": ["title", "prompt"],
                                 "properties": {
                                     "title": { "type": "string" },
-                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "chatgpt_ui"] },
+                                    "backend": { "type": "string", "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "vibe", "chatgpt_ui"] },
                                     "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-5.6-terra with medium effort; gpt-5.5-sol is unsupported." },
                                     "model_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
                                     "agent": { "type": "string" },
@@ -1575,6 +1575,7 @@ impl OrchestratorMcp {
                     "opencode".to_string(),
                     "grok".to_string(),
                     "antigravity".to_string(),
+                    "vibe".to_string(),
                 ]
             });
 
@@ -1626,6 +1627,7 @@ impl OrchestratorMcp {
                     "ready": true,
                     "reason": "OpenCode routes through configured providers; inspect provider selection separately.",
                 }),
+                "vibe" => json!({"backend":"vibe", "ready":null,"provider":"Mistral", "reason":"Core and nodes use the connected Mistral provider; local Orb uses the Vibe native login. An authenticated turn verifies access."}),
                 "antigravity" => json!({
                     "backend": "antigravity", "ready": null, "auth_status": "unknown", "provider": "Google",
                     "reason": "Antigravity uses the execution machine's native Google login. Run agy models or an authenticated turn on that machine to verify entitlement.",

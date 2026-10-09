@@ -8,7 +8,8 @@ export function RoutingPicker(p: { label: string; value: string; options: { id: 
   const show = () => setOpen(true);
   const [open, setOpen] = createSignal(false);
   const [active, setActive] = createSignal(-1);
-  const matches = createMemo(() => p.options.filter(o => `${o.name} ${o.id}`.toLowerCase().includes(p.value.toLowerCase())).slice(0, 30));
+  const uniqueOptions = createMemo(() => [...new Map(p.options.map(o => [o.id, o])).values()]);
+  const matches = createMemo(() => uniqueOptions().filter(o => `${o.name} ${o.id}`.toLowerCase().includes(p.value.toLowerCase())).slice(0, 30));
   const choose = (value: string) => { p.onInput(value); setOpen(false); setActive(-1); };
   return <div class="routing-picker" ref={host}>
     <input class="s-input" role="combobox" aria-label={p.label} aria-autocomplete="list" aria-expanded={open()} aria-controls={id}
@@ -26,7 +27,7 @@ export function RoutingPicker(p: { label: string; value: string; options: { id: 
       <Popover anchor={host} trap={false} width="anchor" onClose={() => setOpen(false)} class="routing-picker-list orb-options" role="listbox" id={id} label={`${p.label} suggestions`}>
         <For each={matches()}>{(o, i) => <div role="option" id={`${id}-${i()}`} aria-selected={p.value === o.id} data-active={active() === i()} class="routing-picker-option"
           onPointerDown={e => { e.preventDefault(); choose(o.id); }}>
-          <span title={o.id}>{o.name || o.id}</span><Show when={o.detail}><small>{o.detail}</small></Show>
+          <span title={o.id}>{o.name || o.id}</span><Show when={o.detail || (o.name && o.name !== o.id)}><small>{o.name && o.name !== o.id ? `${o.id}${o.detail ? " · " : ""}` : ""}{o.detail}</small></Show>
         </div>}</For>
       <Show when={!matches().length}><p class="picker-state" role="status">{p.options.length ? "No results" : "No options available"}</p></Show></Popover>
     </Show>

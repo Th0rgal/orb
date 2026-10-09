@@ -7,6 +7,8 @@ mod antigravity;
 pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
+#[path = "../../../shared/vibe.rs"]
+mod vibe;
 
 mod connection_store;
 #[cfg(test)]

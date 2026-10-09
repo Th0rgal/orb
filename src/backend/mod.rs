@@ -8,6 +8,7 @@ pub mod native_loops;
 pub mod opencode;
 pub mod registry;
 pub mod shared;
+pub mod vibe;
 
 use std::path::Path;
 

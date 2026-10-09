@@ -91,6 +91,7 @@ const HARNESS_META: Record<
     projectRel: ".agents/skills",
     mechanism: "Scans .agents/skills from cwd to repo root plus ~/.codex/skills",
   },
+  vibe: { name: "Mistral Vibe", globalRel: "~/.vibe/skills", projectRel: ".vibe/skills", mechanism: "Native Vibe skill discovery" },
   antigravity: {
     name: "Antigravity",
     globalRel: "~/.agents/skills",
@@ -129,13 +130,14 @@ const HARNESS_ORDER = [
   "claudecode",
   "codex",
   "antigravity",
+  "vibe",
   "opencode",
   "grok",
   "hermes",
   "chatgpt_ui",
 ] as const;
 
-const LOCAL_SYNC_HARNESS_IDS = ["claudecode", "codex", "antigravity", "opencode", "grok"] as const;
+const LOCAL_SYNC_HARNESS_IDS = ["claudecode", "codex", "antigravity", "opencode", "grok", "vibe"] as const;
 
 let cachedSkillNames: string[] = [
   "controllers-policy",
@@ -917,7 +919,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                           </div>
                           <div class="skills-item-desc">{skill.description}</div>
                         </div>
-                        <div class="skills-coverage" title={`Installed in ${coverageCount()}/5 local harnesses`}>
+                        <div class="skills-coverage" title={`Installed in ${coverageCount()}/${LOCAL_SYNC_HARNESS_IDS.length} local harnesses`}>
                           <For each={LOCAL_SYNC_HARNESS_IDS}>
                             {(hid) => (
                               <span
@@ -934,7 +936,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                                       ? "AG"
                                       : hid === "opencode"
                                         ? "OC"
-                                        : "GK"}
+                                        : hid === "vibe" ? "VB" : "GK"}
                               </span>
                             )}
                           </For>

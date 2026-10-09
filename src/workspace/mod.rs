@@ -4057,7 +4057,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
 
     let unified_mcp = if matches!(
         backend_id,
-        "codex" | "claudecode" | "opencode" | "grok" | "antigravity"
+        "codex" | "claudecode" | "opencode" | "grok" | "antigravity" | "vibe"
     ) {
         if let Some(user) = boss_user_id {
             let (url, token) = crate::control_mcp::launch::bootstrap(mission_id, user)

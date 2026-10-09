@@ -17,6 +17,7 @@ import shlex
 
 NATIVE = {
     "antigravity": ".agents/skills",
+    "vibe": ".vibe/skills",
     "codex": ".agents/skills",
     "claudecode": ".claude/skills",
     "opencode": ".opencode/skills",
@@ -24,6 +25,7 @@ NATIVE = {
 }
 ALIASES = {
     "antigravity": (".agents/skills",),
+    "vibe": (".vibe/skills",),
     "codex": (".agents/skills", ".codex/skills"),
     "claudecode": (".claude/skills",),
     "opencode": (".opencode/skills", ".opencode/skill", ".claude/skills", ".agents/skills"),

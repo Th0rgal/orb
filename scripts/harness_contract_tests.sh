@@ -18,6 +18,10 @@ cargo test --locked --workspace --lib test_parse_stream_event_delta
 cargo test --locked --workspace --lib test_parse_assistant_event
 cargo test --locked --workspace --lib test_parse_result_event
 
+echo "== Harness contract tests: native Vibe ACP =="
+cargo test --locked --workspace --lib vibe::tests
+python3 -m unittest discover -s tests -p test_vibe_bridge.py
+
 echo "== Harness contract tests: ChatGPT UI protocol and smoke wrapper =="
 bash -n scripts/chatgpt_ui_smoke.sh
 python3 -m unittest \

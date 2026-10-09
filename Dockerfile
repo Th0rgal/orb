@@ -104,6 +104,14 @@ RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
 RUN curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash \
     && echo "[docker] Grok Build CLI installed: $(grok --version 2>/dev/null || echo 'unknown')" \
     || echo "[docker] WARNING: Grok Build CLI install failed (will be installed on first mission)"
+# Isolate Python dependencies from the system interpreter. This version is
+# exercised by the native ACP session/tool/resume contract tests.
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/mistral-vibe \
+    && /opt/mistral-vibe/bin/pip install --no-cache-dir mistral-vibe==2.19.1 \
+    && ln -s /opt/mistral-vibe/bin/vibe /usr/local/bin/vibe \
+    && ln -s /opt/mistral-vibe/bin/vibe-acp /usr/local/bin/vibe-acp
 
 # -- Caddy config + entrypoint -----------------------------------------------
 COPY docker/Caddyfile /etc/caddy/Caddyfile

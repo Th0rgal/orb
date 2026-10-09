@@ -377,6 +377,7 @@ fn native_backend_from_agent(agent: Option<&str>) -> Option<String> {
         "claudecode" => Some("claudecode".to_string()),
         "grok" => Some("grok".to_string()),
         "antigravity" => Some("antigravity".to_string()),
+        "vibe" => Some("vibe".to_string()),
         _ => None,
     }
 }
@@ -1539,7 +1540,7 @@ impl AssistantMcp {
                         "prompt": {"type": "string", "description": "Codex native /goal objective: maximum 4000 Unicode characters, including automatic writer promotion. Put supporting detail in referenced artifacts; never rely on truncation."},
                         "cloud": {"type":"object","description":"Hosted execution. Discover availability with list_cloud_accounts. Requires idempotency_key; never pass credentials, machine paths or attachments.","required":["provider","account"],"properties":{"provider":{"type":"string","enum":["chatgpt","grok_bot","cursor_cloud","hermes"]},"account":{"type":"string"},"repository":{"type":"string"},"git_ref":{"type":"string"},"model":{"type":"string"},"model_params":{"type":"array","items":{"type":"object","required":["id","value"],"properties":{"id":{"type":"string"},"value":{"type":"string"}}}}},"additionalProperties":false},
                         "workspace_id": {"type": "string"},
-                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "chatgpt_ui"]},
+                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "vibe", "chatgpt_ui"]},
                         "model_override": {"type": "string", "description": "Exact account-supported model ID. For ChatGPT UI Pro use the canonical ID gpt-5.6-pro; the harness verifies the visible Pro picker option. For Codex Terra use gpt-5.6-terra with medium effort. Never invent variants such as gpt-5.5-sol."},
                         "model_effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                         "fast_mode": {"type": "boolean", "description": "Enable Codex fast mode (service tier fast). Requires backend=codex and an explicit GPT-5.6, GPT-5.5, or GPT-5.4 model_override. Uses ChatGPT credits faster."},
@@ -2144,7 +2145,7 @@ impl AssistantMcp {
                     "required": ["mission_id"],
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "chatgpt_ui"]},
+                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "vibe", "chatgpt_ui"]},
                         "model_override": {"type": "string", "description": "Model id. Empty string clears it. When backend changes this is reset unless set explicitly."},
                         "model_effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                         "fast_mode": {"type": "boolean", "description": "Enable or disable Codex fast mode for future turns. Only backend=codex with GPT-5.6/5.5/5.4."},

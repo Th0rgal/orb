@@ -134,7 +134,7 @@ pub(super) async fn enqueue(
         .ok_or((StatusCode::NOT_FOUND, "mission not found".into()))?;
     if !matches!(
         mission.backend.as_str(),
-        "grok" | "codex" | "claudecode" | "opencode" | "antigravity"
+        "grok" | "codex" | "claudecode" | "opencode" | "antigravity" | "vibe"
     ) {
         return Err((
             StatusCode::CONFLICT,

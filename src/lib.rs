@@ -68,6 +68,8 @@ pub mod task;
 pub mod tools;
 pub mod uploads;
 pub mod util;
+#[path = "../shared/vibe.rs"]
+pub mod vibe;
 pub mod watchdog;
 pub mod workspace;
 pub mod workspace_exec;

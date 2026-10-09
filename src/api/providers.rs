@@ -2234,6 +2234,12 @@ pub async fn list_backend_model_options(
     push_options("opencode", None, true, None);
     let grok_filter: &dyn Fn(&str) -> bool = &|id: &str| is_grok_backend_model_id(id);
     push_options("grok", Some(&["xai"]), false, Some(grok_filter));
+    let vibe_filter: &dyn Fn(&str) -> bool = &|id| {
+        !["embed", "ocr", "moderation", "voxtral"]
+            .iter()
+            .any(|part| id.contains(part))
+    };
+    push_options("vibe", Some(&["mistral"]), true, Some(vibe_filter));
 
     let codex_candidates: Vec<String> = backends
         .get("codex")

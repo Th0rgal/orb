@@ -1,0 +1,197 @@
+use super::{persist_and_publish_native_session, TurnContext};
+use crate::agents::{AgentResult, TerminalReason};
+use crate::api::control::AgentEvent;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
+    let Some(store) = ctx.mission_store.as_ref() else {
+        return AgentResult::failure("Vibe requires durable session storage", 0);
+    };
+    let claim = uuid::Uuid::new_v4();
+    let run = super::session_update_run();
+    match store.claim_native_prompt(ctx.mission_id, "vibe", ctx.session_id, run.as_ref(), claim).await {
+        Ok(true) => {},
+        _ => return AgentResult::failure("Vibe has an unresolved or superseded launch; recover its native session before retrying", 0).with_terminal_reason(TerminalReason::NativeContinuityRequired),
+    }
+    let cli = crate::api::mission_runner::get_backend_string_setting("vibe", "cli_path")
+        .unwrap_or_else(|| "vibe-acp".into());
+    let current_message = match ctx.extras {
+        super::TurnExtras::Vibe { current_message } => current_message,
+        _ => ctx.message,
+    };
+    let plan = ctx.agent == Some("plan")
+        || current_message
+            .trim()
+            .strip_prefix("/plan")
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace));
+    let model = ctx.model.unwrap_or("mistral/mistral-vibe-cli-latest");
+    let args = crate::vibe::args(
+        &cli,
+        &ctx.mission_id.to_string(),
+        Some(model),
+        ctx.session_id,
+        ctx.message,
+        plan,
+        true,
+    );
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let env = std::collections::HashMap::from([
+        (
+            "SANDBOXED_VIBE_PROXY_URL".into(),
+            format!(
+                "http://{}:{port}/v1",
+                ctx.workspace.host_ip_from_workspace()
+            ),
+        ),
+        (
+            "SANDBOXED_VIBE_PROXY_KEY".into(),
+            std::env::var("SANDBOXED_PROXY_SECRET").unwrap_or_default(),
+        ),
+    ]);
+    let exec = crate::workspace_exec::WorkspaceExec::new(ctx.workspace.clone());
+    let cwd = crate::workspace::configured_project_dir(ctx.workspace, ctx.work_dir);
+    let mut child = match exec.spawn_streaming(&cwd, "python3", &args, env).await {
+        Ok(child) => child,
+        Err(error) => {
+            if error
+                .downcast_ref::<crate::workspace_exec::ConfirmedNoLaunch>()
+                .is_some()
+            {
+                let _ = store
+                    .release_native_prompt_no_launch(ctx.mission_id, "vibe", run.as_ref(), claim)
+                    .await;
+            }
+            return AgentResult::failure(format!("Cannot start Vibe: {error}"), 0);
+        }
+    };
+    let mut stdin = child.stdin.take();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let stderr = child.stderr.take().unwrap();
+    let drain = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+    });
+    let mut stream = crate::vibe::Stream::default();
+    stream.session = ctx.session_id.map(str::to_string);
+    let mut bound = false;
+    loop {
+        let line = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                stop(&mut child).await; drain.abort();
+                return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
+            },
+            line = lines.next_line() => line,
+        };
+        let line = match line {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(_) => {
+                stream.error = Some("Cannot read Vibe output".into());
+                break;
+            }
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let old_text = stream.text.len();
+        let old_thinking = stream.thinking.len();
+        let tools = stream.feed(&event);
+        if stream.error.is_some() {
+            stop(&mut child).await;
+            break;
+        }
+        if !bound && event["type"] == "session" {
+            if let Some(id) = &stream.session {
+                if let Err(result) = persist_and_publish_native_session(
+                    Some(store),
+                    ctx.mission_id,
+                    "vibe",
+                    id,
+                    &ctx.events_tx,
+                )
+                .await
+                {
+                    stop(&mut child).await;
+                    drain.abort();
+                    return *result;
+                }
+                if let Some(mut input) = stdin.take() {
+                    if input.write_all(b"{\"continue\":true}\n").await.is_err() {
+                        stream.error = Some("Vibe identity acknowledgement failed".into());
+                        stop(&mut child).await;
+                        break;
+                    }
+                }
+                bound = true;
+            }
+        }
+        if stream.text.len() != old_text {
+            let _ = ctx.events_tx.send(AgentEvent::TextDelta {
+                content: stream.text.clone(),
+                mission_id: Some(ctx.mission_id),
+            });
+        }
+        if stream.thinking.len() != old_thinking {
+            let _ = ctx.events_tx.send(AgentEvent::Thinking {
+                content: stream.thinking[old_thinking..].into(),
+                done: false,
+                mission_id: Some(ctx.mission_id),
+            });
+        }
+        for tool in tools {
+            let id = tool["toolCallId"].as_str().unwrap_or_default().to_string();
+            let name = tool["name"].as_str().unwrap_or("Vibe tool").to_string();
+            let event = if tool["type"] == "tool_call" {
+                AgentEvent::ToolCall {
+                    tool_call_id: id,
+                    name,
+                    args: tool["rawInput"].clone(),
+                    mission_id: Some(ctx.mission_id),
+                }
+            } else {
+                AgentEvent::ToolResult {
+                    tool_call_id: id,
+                    name,
+                    result: tool,
+                    mission_id: Some(ctx.mission_id),
+                }
+            };
+            let _ = ctx.events_tx.send(event);
+        }
+    }
+    let status = tokio::select! {
+        _ = ctx.cancel.cancelled() => {
+            stop(&mut child).await; drain.abort();
+            return AgentResult::failure(stream.text, 0).with_terminal_reason(TerminalReason::Cancelled);
+        },
+        status = child.wait() => status,
+    };
+    drain.abort();
+    match stream.finish() {
+        Ok(()) if status.is_ok_and(|status| status.success()) => {
+            AgentResult::success(stream.text, 0)
+                .with_model(model)
+                .with_terminal_reason(TerminalReason::TurnComplete)
+        }
+        result => AgentResult::failure(
+            result.err().unwrap_or_else(|| "Vibe process failed".into()),
+            0,
+        )
+        .with_terminal_reason(TerminalReason::NativeContinuityRequired),
+    }
+}
+
+async fn stop(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(7), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.kill().await;
+    }
+}

@@ -12,7 +12,7 @@ pub fn require_runtime_owner(
 ) -> Result<(), String> {
     if matches!(
         harness,
-        "codex" | "claudecode" | "opencode" | "grok" | "antigravity"
+        "codex" | "claudecode" | "opencode" | "grok" | "antigravity" | "vibe"
     ) && user.is_none_or(|user| user.id.trim().is_empty())
     {
         return Err("Cannot launch native mission without its authenticated MCP owner".into());
@@ -95,6 +95,23 @@ pub fn overlays(
             config["mcp"]["sandboxed"] =
                 json!({"type":"local","command":command,"enabled":true,"timeout":60000});
             env.insert("OPENCODE_CONFIG_CONTENT".into(), config.to_string());
+        }
+        "vibe" => {
+            let mut servers: Vec<Value> = existing
+                .get("VIBE_MCP_SERVERS")
+                .map(|value| serde_json::from_str(value))
+                .transpose()
+                .map_err(|_| "Invalid Vibe MCP configuration")?
+                .unwrap_or_default();
+            servers.retain(|server| server["name"] != "sandboxed");
+            servers.push(
+                json!({"name":"sandboxed", "transport":"stdio", "command":[binary], "args":args}),
+            );
+            env.insert(
+                "VIBE_MCP_SERVERS".into(),
+                serde_json::to_string(&servers)
+                    .map_err(|_| "Cannot encode Vibe MCP configuration")?,
+            );
         }
         "grok" => {
             // Grok 1.x intentionally excludes MCP definitions from GROK_CONFIG's
@@ -447,6 +464,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vibe_scoped_mcp_preserves_other_servers_without_storing_credentials() {
+        let existing = HashMap::from([(
+            "VIBE_MCP_SERVERS".into(),
+            json!([{"name":"other","transport":"stdio","command":"other-mcp"}]).to_string(),
+        )]);
+        let (args, env, file) = overlays(
+            "vibe",
+            "/bin/sandboxed-mcp",
+            "https://core.test",
+            "/private/credential",
+            "mission",
+            &existing,
+            "/private/settings",
+        )
+        .unwrap();
+        assert!(args.is_empty());
+        assert!(file.is_none());
+        let servers: Value = serde_json::from_str(&env["VIBE_MCP_SERVERS"]).unwrap();
+        assert_eq!(servers[0]["name"], "other");
+        assert_eq!(servers[1]["name"], "sandboxed");
+        assert_eq!(servers[1]["command"], json!(["/bin/sandboxed-mcp"]));
+        assert!(servers[1]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("/private/credential")));
+    }
+
+    #[test]
     fn grok_headless_profile_extends_native_prompt_with_scoped_server() {
         let server = json!({"name":"sandboxed","command":"/mcp","args":["--token-file","/private/credential"],"env":[]});
         let profile = grok_headless_profile(&server);
@@ -463,7 +508,14 @@ mod tests {
 
     #[test]
     fn native_runtime_requires_owner_without_inventing_a_default_identity() {
-        for harness in ["codex", "claudecode", "opencode", "grok", "antigravity"] {
+        for harness in [
+            "codex",
+            "claudecode",
+            "opencode",
+            "grok",
+            "antigravity",
+            "vibe",
+        ] {
             assert!(require_runtime_owner(harness, None).is_err());
             for id in ["", "  "] {
                 let user = crate::api::auth::AuthUser {

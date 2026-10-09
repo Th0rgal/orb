@@ -25,6 +25,7 @@ const HARNESSES: &[(&str, &str)] = &[
     ("grok", "grok"),
     ("opencode", "opencode"),
     ("antigravity", "agy"),
+    ("vibe", "vibe-acp"),
 ];
 
 #[tauri::command]
@@ -911,6 +912,7 @@ fn spawn_harness(
 ) -> Result<Child, String> {
     match request.harness.as_str() {
         "antigravity" => spawn_antigravity(request, text, session_id, error, env),
+        "vibe" => spawn_vibe(request, text, session_id, error, env),
         "claudecode" => spawn_claude(request, text, session_id, error, env),
         "codex" => spawn_codex(request, text, session_id, error, done, env),
         "grok" => spawn_piped(
@@ -1127,6 +1129,89 @@ fn spawn_antigravity(
             if let Ok(mut error) = error.lock() {
                 *error = Some(message);
             }
+        }
+    });
+    Ok(child)
+}
+
+fn spawn_vibe(
+    request: &StartRequest,
+    output: &Arc<Output>,
+    slot: &Arc<Mutex<Option<String>>>,
+    error: &Arc<Mutex<Option<String>>>,
+    env: &[(String, String)],
+) -> Result<Child, String> {
+    use std::io::Write;
+    let plan = request
+        .prompt
+        .trim()
+        .strip_prefix("/plan")
+        .filter(|s| s.is_empty() || s.starts_with(char::is_whitespace));
+    let prompt = plan.map(str::trim).unwrap_or(&request.prompt);
+    let mut command = harness_command("python3");
+    command
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&request.cwd)
+        .args(crate::vibe::args(
+            &request.bin,
+            &request.id,
+            request.model.as_deref(),
+            request.session_id.as_deref(),
+            prompt,
+            plan.is_some(),
+            true,
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Cannot start Vibe: {e}"))?;
+    let stdout = child.stdout.take().ok_or("Vibe stdout unavailable")?;
+    let mut stdin = child.stdin.take().ok_or("Vibe stdin unavailable")?;
+    let output = output.clone();
+    let slot = slot.clone();
+    let error = error.clone();
+    let expected = request.session_id.clone();
+    let pid = child.id();
+    let guard = output.reader();
+    thread::spawn(move || {
+        let _guard = guard;
+        let mut stream = crate::vibe::Stream::default();
+        stream.session = expected;
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let previous_thinking = stream.thinking.len();
+            for tool in stream.feed(&event) {
+                output.native_activity(&tool);
+            }
+            if stream.thinking.len() != previous_thinking {
+                output.native_activity(&serde_json::json!({"type":"reasoning","part":{"id":"vibe","text":stream.thinking}}));
+            }
+            if stream.error.is_none() && event["type"] == "session" {
+                *slot.lock().unwrap() = stream.session.clone();
+                // The bridge fsyncs its native-session journal before this acknowledgement.
+                if stdin.write_all(b"{\"continue\":true}\n").is_err() {
+                    stream.error = Some("Vibe acknowledgement failed".into());
+                }
+            }
+            output.replace(stream.text.clone());
+            output.publish_activities();
+            if stream.error.is_some() {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                break;
+            }
+        }
+        if let Err(message) = stream.finish() {
+            *error.lock().unwrap() = Some(message);
         }
     });
     Ok(child)
@@ -2672,6 +2757,7 @@ fn native_plan_supported(id: &str, version: &str) -> bool {
     let minimum = match id {
         "codex" => (0, 155, 0),
         "claudecode" => (2, 1, 278),
+        "vibe" => (2, 19, 1),
         _ => return false,
     };
     version
