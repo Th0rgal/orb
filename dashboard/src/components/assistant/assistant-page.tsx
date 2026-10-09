@@ -81,6 +81,7 @@ const BACKEND_LABELS: Record<string, string> = {
   codex: 'Codex',
   grok: 'Grok Build',
   antigravity: 'Antigravity CLI',
+  vibe: 'Mistral Vibe',
   chatgpt_ui: 'ChatGPT UI (experimental)',
 };
 
@@ -338,7 +339,8 @@ export default function AssistantPage() {
     const allowlist =
       backend === 'claudecode' ? new Set(['anthropic']) :
       backend === 'codex' ? new Set(['openai']) :
-      backend === 'grok' ? new Set(['xai']) : null;
+      backend === 'grok' ? new Set(['xai']) :
+      backend === 'vibe' ? new Set(['mistral']) : null;
 
     const backendOpts = backendModelOptions?.backends?.[backend];
     if (backendOpts && backendOpts.length > 0) {
@@ -349,7 +351,7 @@ export default function AssistantPage() {
     for (const provider of providers) {
       if (allowlist && !allowlist.has(provider.id)) continue;
       for (const model of provider.models) {
-        const value = backend === 'opencode' ? `${provider.id}/${model.id}` : model.id;
+        const value = (backend === 'opencode' || backend === 'vibe') ? `${provider.id}/${model.id}` : model.id;
         options.push({ value, label: `${provider.name} · ${model.name}`, description: model.description });
       }
     }
@@ -1696,7 +1698,7 @@ export default function AssistantPage() {
                           {BACKEND_LABELS[b.id] || b.name || b.id}
                         </option>
                       ))
-                    : ['claudecode', 'opencode', 'codex', 'grok', 'antigravity', 'chatgpt_ui'].map((id) => (
+                    : ['claudecode', 'opencode', 'codex', 'grok', 'antigravity', 'vibe', 'chatgpt_ui'].map((id) => (
                         <option key={id} value={id}>
                           {BACKEND_LABELS[id] || id}
                         </option>
@@ -1893,7 +1895,7 @@ export default function AssistantPage() {
                           {BACKEND_LABELS[b.id] || b.name || b.id}
                         </option>
                       ))
-                    : ['claudecode', 'opencode', 'codex', 'grok', 'antigravity', 'chatgpt_ui'].map((id) => (
+                    : ['claudecode', 'opencode', 'codex', 'grok', 'antigravity', 'vibe', 'chatgpt_ui'].map((id) => (
                         <option key={id} value={id}>
                           {BACKEND_LABELS[id] || id}
                         </option>

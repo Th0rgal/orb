@@ -82,6 +82,24 @@ describe('NewMissionDialog', () => {
     vi.restoreAllMocks();
   });
 
+  it('creates native Vibe missions without stripping the Mistral provider prefix', async () => {
+    vi.mocked(listBackends).mockResolvedValue([{id: 'vibe', name: 'Mistral Vibe'}]);
+    vi.mocked(listBackendModelOptions).mockResolvedValue({backends: {
+      vibe: [{value: 'mistral/devstral-latest', label: 'Mistral — Devstral'}],
+    }});
+    const onCreate = vi.fn().mockResolvedValue({id: 'vibe-mission'});
+    renderDialog(onCreate);
+    fireEvent.click(screen.getByRole('button', {name: /new mission/i}));
+    const native = await screen.findByRole('option', {name: 'Mistral Vibe default'});
+    fireEvent.change(native.closest('select')!, {target: {value: 'vibe:'}});
+    const model = await screen.findByRole('option', {name: 'Devstral'});
+    fireEvent.change(model.closest('select')!, {target: {value: 'mistral/devstral-latest'}});
+    fireEvent.click(screen.getByRole('button', {name: 'Create here'}));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      backend: 'vibe', modelOverride: 'mistral/devstral-latest', agent: undefined,
+    })));
+  });
+
   it.each([true, false])('creates Antigravity missions with workspace models when host CLI availability is %s', async hostAvailable => {
     vi.mocked(getBackendConfig).mockImplementation(async id => ({
       id, name: id, enabled: true, settings: {},
