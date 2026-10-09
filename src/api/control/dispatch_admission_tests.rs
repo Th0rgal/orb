@@ -85,6 +85,13 @@ impl Harness {
         config.automations_enabled = enabled;
         config.max_parallel_missions = max_parallel;
         config.auth.jwt_secret = Some("mcp-fixture-signing-key".into());
+        if std::env::var_os(VIBE_CONTROL_FIXTURE_CHILD).is_some() {
+            // Only these subprocess-isolated dispatch tests exercise Core's
+            // real loopback MCP bootstrap. Its env and AppState must agree.
+            config.dev_mode = false;
+            config.auth.dashboard_password = Some("unused-fixture-password".into());
+            std::env::set_var("PORT", config.port.to_string());
+        }
         config.remote_nodes.enabled = !nodes.is_empty();
         config.remote_nodes.nodes = nodes;
         let root_agent: AgentRef = Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
@@ -221,10 +228,21 @@ impl Harness {
             )
             .layer(Extension(user.clone()))
             .with_state(state.clone());
+        let mcp_bootstrap = axum::Router::new()
+            .route(
+                "/api/mcp/session",
+                axum::routing::post(crate::control_mcp::gateway::session),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::api::auth::require_auth,
+            ))
+            .with_state(state.clone());
         let app = axum::Router::new()
             .route("/api/health", axum::routing::get(|| async { "ready" }))
             .nest("/api/control", app.clone())
-            .merge(app);
+            .merge(app)
+            .merge(mcp_bootstrap);
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -11879,6 +11897,38 @@ async fn send_queued_now_delivers_live_midturn_without_disturbing_other_queued_m
     );
 }
 
+const VIBE_CONTROL_FIXTURE_CHILD: &str = "VIBE_CONTROL_DISPATCH_TEST_CHILD";
+
+fn isolated_vibe_control_test(test_name: &str) -> bool {
+    if std::env::var(VIBE_CONTROL_FIXTURE_CHILD).ok().as_deref() == Some(test_name) {
+        return false;
+    }
+    // bootstrap() reads JWT_SECRET and PORT from the process environment.
+    // Run exactly one test per child so each fixture can use its own listener
+    // without changing credentials or ports beneath parallel test tasks.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("api::control::dispatch_admission_tests::{test_name}"),
+            "--nocapture",
+        ])
+        .env(VIBE_CONTROL_FIXTURE_CHILD, test_name)
+        .env("JWT_SECRET", "mcp-fixture-signing-key")
+        .env_remove("PORT")
+        .env_remove("SANDBOXED_PUBLIC_URL")
+        .env_remove("PUBLIC_BASE_URL")
+        .env_remove("HERMES_PROJECTS_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated Vibe control regression failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 // Capture only after the production control dispatcher, workspace preparation,
 // model selection and native prompt framing have reached the Vibe runner.
 // Mission-scoped registration keeps unrelated concurrent tests on the real path.
@@ -11983,6 +12033,22 @@ async fn captured_vibe_control_turn(
     ))
     .await;
     assert!(result.success, "Vibe control dispatch failed: {result:?}");
+    let grants: i64 = h
+        .state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM mcp_sessions_v1 WHERE mission_id=?1 AND owner=?2",
+            rusqlite::params![mission.id.to_string(), h.user.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        grants > 0,
+        "workspace preparation must obtain a real scoped MCP grant"
+    );
     let captures = capture.lock().unwrap();
     assert_eq!(captures.len(), 1);
     captures[0].clone()
@@ -11990,6 +12056,11 @@ async fn captured_vibe_control_turn(
 
 #[tokio::test]
 async fn vibe_control_dispatch_fresh_preserves_plan_and_avoids_duplicate_current_request() {
+    if isolated_vibe_control_test(
+        "vibe_control_dispatch_fresh_preserves_plan_and_avoids_duplicate_current_request",
+    ) {
+        return;
+    }
     let h = Harness::new().await;
     let message = "/plan VIBE_CONTROL_FRESH";
     let captured = captured_vibe_control_turn(
@@ -12019,6 +12090,11 @@ async fn vibe_control_dispatch_fresh_preserves_plan_and_avoids_duplicate_current
 
 #[tokio::test]
 async fn vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_history() {
+    if isolated_vibe_control_test(
+        "vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_history",
+    ) {
+        return;
+    }
     let h = Harness::new().await;
     let captured = captured_vibe_control_turn(
         &h,
@@ -12040,6 +12116,10 @@ async fn vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_hi
 
 #[tokio::test]
 async fn vibe_control_dispatch_resume_uses_current_request_for_plan_mode() {
+    if isolated_vibe_control_test("vibe_control_dispatch_resume_uses_current_request_for_plan_mode")
+    {
+        return;
+    }
     let h = Harness::new().await;
     for (message, expected_plan) in [
         ("/planet VIBE_CONTROL_BUILD", false),
@@ -12069,6 +12149,11 @@ async fn vibe_control_dispatch_resume_uses_current_request_for_plan_mode() {
 
 #[tokio::test]
 async fn vibe_control_dispatch_explicit_resume_keeps_identical_prior_request() {
+    if isolated_vibe_control_test(
+        "vibe_control_dispatch_explicit_resume_keeps_identical_prior_request",
+    ) {
+        return;
+    }
     let h = Harness::new().await;
     let message = "VIBE_CONTROL_REPEAT";
     let captured = captured_vibe_control_turn(
