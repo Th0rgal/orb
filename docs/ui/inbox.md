@@ -37,7 +37,8 @@ shared layer manager.
 
 The active row title is the list's single Tab entry; its actions follow it.
 Down/Up or J/K move actual focus between rows, Home/End reach the first/last
-row, Space previews, R replies and Enter opens the thread. Down from a filter
+row, Space previews, T focuses the follow-up in an open preview, R replies and
+Enter opens the thread. In the follow-up, Enter sends and Shift+Enter adds a line. Down from a filter
 enters the first row. Closing Peek returns focus to the row without scrolling;
 marking it done advances focus. Leave native disclosure keys, text selection,
 textarea movement, IME and child overlays alone.

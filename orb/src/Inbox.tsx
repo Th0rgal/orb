@@ -1021,6 +1021,11 @@ export function InboxPage(p: {
         togglePeek(currentItem);
         return;
       }
+      if (e.key.toLowerCase() === "t" && !e.shiftKey && currentItem && peekedIds().has(currentItem.id)) {
+        e.preventDefault();
+        openUnifiedDrawer(currentItem, { focusInput: true, toggle: false });
+        return;
+      }
       if (e.key.toLowerCase() === "r" && currentItem && e.shiftKey && currentItem.canRetry) {
         e.preventDefault();
         void retryMission(currentItem);
@@ -1305,7 +1310,7 @@ export function InboxPage(p: {
                       type="button"
                       class="inbox-row-title-btn"
                       tabIndex={isFocused() ? 0 : -1}
-                      aria-keyshortcuts="ArrowDown ArrowUp Home End Space r"
+                      aria-keyshortcuts="ArrowDown ArrowUp Home End Space r t"
                       title={currentItem().mission.title || effectiveHeadline()}
                       onClick={() => {
                         const it = currentItem();

@@ -4,6 +4,7 @@ import {connectionVersion,getMission,reopenMission,appendClientTranscript,setCli
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
 import {sideQuestionKey} from './sideQuestionStorage';
+import {normalizeEffort} from './effort';
 import {providerLimit} from './usageLimit';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
 
@@ -486,7 +487,12 @@ export function startLocalQueueWorker(){
      const launch=await locked(key,async()=>{
       const stored=(await read(key)).find(r=>r.id===row.id);
       if(!stored||stored.state!=='dispatching'||!valid()||stopping.has(runKey))return;
-      return {pending:startLocal({...row.request,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId})};
+      // Read effort at dispatch, not enqueue: changes made while a turn is
+      // running apply to its next follow-up, including a cleared override.
+      const effort = row.request.harness === 'antigravity'
+       ? normalizeEffort(mission.model_effort, row.request.harness) ?? undefined
+       : row.request.effort;
+      return {pending:startLocal({...row.request,effort,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId})};
      });
      if(!launch)continue;
      const receipt=await launch.pending;

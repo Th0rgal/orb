@@ -112,3 +112,81 @@ test("a confirmation above a popover owns the only dim backdrop",async({page})=>
  await page.keyboard.press('Escape');
  await expect(page.getByRole('textbox',{name:'Project name'})).toHaveValue('Draft project');
 });
+
+test('effort picker keeps one active row through refresh and commits the keyboard choice',async({page})=>{
+ await page.goto('/tests/overlays.html');
+ await page.getByRole('button',{name:'Reasoning effort: low',exact:true}).click();
+ const low=page.getByRole('option',{name:'Low',exact:true}), high=page.getByRole('option',{name:'High',exact:true});
+ await expect(low).toBeFocused();
+ await high.hover();
+ await expect(page.locator('.picker-row[data-active="true"]')).toHaveCount(1);
+ await expect(high).toHaveAttribute('data-active','true');
+ expect(await low.evaluate(el=>getComputedStyle(el).backgroundColor)).not.toBe(await high.evaluate(el=>getComputedStyle(el).backgroundColor));
+ await low.focus();
+ await page.keyboard.press('ArrowDown');
+ await expect(high).toBeFocused();
+ await expect(low).toHaveAttribute('aria-selected','true');
+ // The gallery refreshes option objects every 250 ms, like mission polling.
+ await page.waitForTimeout(600);
+ await expect(high).toBeFocused();
+ await expect(high).toHaveAttribute('data-active','true');
+ await page.keyboard.press('Space');
+ await expect(page.getByRole('dialog')).toHaveCount(0);
+ const trigger=page.getByRole('button',{name:'Reasoning effort: high',exact:true});
+ await expect(trigger).toBeFocused();
+ await trigger.click();
+ await expect(high).toHaveAttribute('aria-selected','true');
+ await expect(high).toBeFocused();
+ await page.keyboard.press('Home');
+ await page.keyboard.press('Enter');
+ await expect(page.getByRole('button',{name:'Reasoning effort: Default',exact:true})).toBeFocused();
+});
+
+test('Antigravity effort saves, survives reopening and retains the previous value on failure',async({page})=>{
+ const mission={id:'antigravity-effort',title:'Antigravity effort check',project:'test',status:'active',backend:'antigravity',model_override:'agy-demo',model_effort:'low' as string|null,history:[],created_at:'',updated_at:''};
+ const patches:unknown[]=[];let fail=false;
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','fixture');localStorage.setItem('orb-theme','dark');});
+ await page.route('**/api/**',async route=>{
+  const request=route.request(), path=new URL(request.url()).pathname;
+  if(path.endsWith('/settings') && request.method()==='PATCH'){
+   patches.push(request.postDataJSON());
+   if(fail)return route.fulfill({status:503,body:'Temporarily unavailable'});
+   mission.model_effort=request.postDataJSON().model_effort || null;
+   return route.fulfill({json:mission});
+  }
+  if(path.endsWith('/events'))return route.fulfill({headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false'},json:[]});
+  if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
+  const json=path==='/api/projects'?{projects:[{slug:'test',title:'Test'}]}
+   :path==='/api/backends'?[{id:'antigravity',name:'Antigravity'}]
+   :path==='/api/providers/antigravity-models'?{models:[{value:'agy-demo',label:'Argon'}]}
+   :path==='/api/control/missions'?[mission]
+   :path===`/api/control/missions/${mission.id}`?mission
+   :path.endsWith('/queue')?[]
+   :path.endsWith('/history')?[]
+   :path.endsWith('/files')?{entries:[]}
+   :path.endsWith('/crons')?{jobs:[]}
+   :{};
+  return route.fulfill({json});
+ });
+ await page.goto('/');
+ await page.getByRole('button',{name:'Test',exact:true}).click();
+ await page.getByRole('button',{name:/Antigravity effort check/}).click();
+ const trigger=()=>page.getByRole('button',{name:/^Reasoning effort:/});
+ await expect(trigger()).toHaveAccessibleName('Reasoning effort: Low');
+ await trigger().click();
+ await expect(page.getByRole('option',{name:'Low',exact:true})).toBeFocused();
+ await page.keyboard.press('End');await page.keyboard.press('Enter');
+ await expect(trigger()).toHaveAccessibleName('Reasoning effort: High');
+ expect(patches).toEqual([{model_effort:'high'}]);
+ await trigger().click();
+ await expect(page.getByRole('option',{name:'High',exact:true})).toHaveAttribute('aria-selected','true');
+ await page.keyboard.press('Escape');
+ fail=true;
+ await trigger().click();await page.getByRole('option',{name:'Low',exact:true}).click();
+ await expect(page.getByRole('alert').first()).toBeVisible();
+ await expect(trigger()).toHaveAccessibleName('Reasoning effort: High');
+ fail=false;
+ await trigger().click();await page.getByRole('option',{name:'Default (High)',exact:true}).click();
+ await expect(trigger()).toHaveAccessibleName('Reasoning effort: Default (High)');
+ expect(patches.at(-1)).toEqual({model_effort:''});
+});

@@ -96,7 +96,10 @@ the actionable explanation remains visible.
 A modal traps focus and makes the underlying application inert. Closing restores
 focus with `preventScroll`. A child receives Escape first; closing it leaves its
 parent open. Submenus support arrows, Home/End, activation, Escape and ArrowLeft.
-Pickers focus search initially. For a modal draft, pass `dirty` and route Cancel
+Pickers focus search initially, or the selected enabled option when search is
+disabled. Only one option is active; arrows move it without committing, and
+Enter or Space commits it (Space remains text in search). Refreshing options
+preserves the active ID. For a modal draft, pass `dirty` and route Cancel
 through the footer's `requestClose`; X, Escape and outside clicks use the same path.
 Reusable form actions use `DialogActions` to stay in the fixed modal footer, or
 render inline when the form is embedded in a page. `CronForm` registers its persisted-draft guard through `DialogCloseContext`, so

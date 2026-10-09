@@ -45,7 +45,7 @@
 .picker-search { width: 100%; height: 32px; border: 1px solid var(--overlay-border); border-radius: 6px; background: var(--overlay-field); color: var(--fg); padding: 0 8px; font: 13px var(--sans); margin-bottom: 4px; }
 .picker-list { max-height: min(320px, 50vh); overflow: auto; }
 .picker-row { display:flex; align-items:center; width:100%; min-height:28px; padding:5px 8px; gap:8px; text-align:left; border-radius:4px; color:var(--fg); }
-.picker-row[data-active="true"], .picker-row:hover:not(:disabled) { background: var(--overlay-hover); }
+.picker-row[data-active="true"] { background: var(--overlay-hover); }
 .picker-row-copy { display:flex; flex-direction:column; min-width:0; flex:1; overflow-wrap:anywhere; }
 .picker-row small, .picker-state, .picker-group { color:var(--fg-2); font-size:12px; }
 .picker-state, .picker-group { padding:8px; }

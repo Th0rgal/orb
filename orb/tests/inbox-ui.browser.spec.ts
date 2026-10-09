@@ -156,3 +156,32 @@ test("Inbox rows have one keyboard entry and restore focus after replying", asyn
   await page.keyboard.press("Enter");
   await expect(draft).toHaveValue("A reply\nwith two lines");
 });
+
+test("T focuses an open Peek follow-up and Enter sends it once", async ({page})=>{
+ await openInbox(page);
+ const sent:unknown[]=[];
+ await page.route('**/api/control/message',async route=>{
+  sent.push(route.request().postDataJSON());
+  await route.fulfill({json:{id:'reply',queued:false,message_accepted:true}});
+ });
+ const row=page.locator('[data-inbox-id="design"]'), title=row.locator('.inbox-row-title-btn');
+ await title.focus();
+ await page.keyboard.press('t');
+ await expect(row.locator('.inbox-peek-drawer')).toHaveCount(0);
+ await page.keyboard.press('Space');
+ await expect(row.locator('.inbox-peek-drawer')).toBeVisible();
+ await expect(title).toBeFocused();
+ await page.keyboard.press('t');
+ const input=row.locator('textarea');
+ await expect(input).toBeFocused();
+ await page.keyboard.type('Test follow-up');
+ await page.keyboard.press('Shift+Enter');
+ await page.keyboard.type('second line');
+ await input.dispatchEvent('keydown',{key:'Enter',isComposing:true});
+ expect(sent).toHaveLength(0);
+ await expect(input).toHaveValue('Test follow-up\nsecond line');
+ await page.keyboard.press('Enter');
+ await expect.poll(()=>sent.length).toBe(1);
+ expect(sent[0]).toMatchObject({mission_id:'design',content:'Test follow-up\nsecond line'});
+ await expect(input).toHaveValue('');
+});

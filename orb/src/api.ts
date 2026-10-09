@@ -750,7 +750,7 @@ export function isBtwMission(mission: Pick<Mission, "tags">): boolean {
 export async function listProjectMissions(slug: string): Promise<Mission[]> {
   const origins=await import("./localOrigins"),observedAt=origins.observe();
   const local=(await origins.localOrigins()).filter(m=>m.project===slug && !isBtwMission(m));
-  try{const remote=await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=100&all=true`);await origins.rememberCoreState(local,remote,observedAt);const pending=local.filter(origins.localPending);return [...pending,...remote.filter(m=>!isBtwMission(m) && !pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return local;throw error;}
+  try{const remote=await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=100&all=true`);await origins.rememberCoreState(local,remote,observedAt);const pending=local.filter(origins.localPending).map(row=>origins.withCoreEffort(row,remote.find(m=>m.id===row.id)));return [...pending,...remote.filter(m=>!isBtwMission(m) && !pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return local;throw error;}
 }
 
 export async function listProjectFiles(slug: string, path: string): Promise<ProjectFileEntry[]> {
@@ -796,7 +796,7 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
 export async function listMissions(limit = 200): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = (await origins.localOrigins()).filter(m=>!isBtwMission(m));
-  try { const remote = await api<Mission[]>(`/api/control/missions?limit=${limit}`, {signal:AbortSignal.timeout(3000)}); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`,{signal:AbortSignal.timeout(3000)}))],observedAt); const pending=local.filter(origins.localPending); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
+  try { const remote = await api<Mission[]>(`/api/control/missions?limit=${limit}`, {signal:AbortSignal.timeout(3000)}); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`,{signal:AbortSignal.timeout(3000)}))],observedAt); const pending=local.filter(origins.localPending).map(row=>origins.withCoreEffort(row,remote.find(m=>m.id===row.id))); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
   catch(error){if(local.length)return local;throw error;}
 }
 
@@ -814,8 +814,12 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[]> {
 export async function getMission(id: string): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = (await origins.localOrigins(id)).find(row=>row.id===id);
-  if(local && origins.localPending(local))return local;
-  try{const remote=await api<Mission>(`/api/control/missions/${id}`);if(local)await origins.rememberCoreState([local],[remote],observedAt);return remote;}catch(error){if(local)return local;throw error;}
+  try{
+    const remote=await api<Mission>(`/api/control/missions/${id}`,local?{signal:AbortSignal.timeout(3000)}:undefined);
+    if(local && origins.localPending(local))return origins.withCoreEffort(local,remote);
+    if(local)await origins.rememberCoreState([local],[remote],observedAt);
+    return remote;
+  }catch(error){if(local)return local;throw error;}
 }
 
 export async function createMission(body: CreateMissionBody): Promise<Mission> {
@@ -1050,7 +1054,7 @@ export async function markMissionOpened(id: string): Promise<void> {
   await api(`/api/control/missions/${encodeURIComponent(id)}/opened`, { method: "POST" });
 }
 
-/** Next-turn settings. The mission must be idle; a running turn returns 409.
+/** Next-turn settings. A running turn keeps its current settings; its successor uses these.
  * `model_effort: ""` clears the override back to the backend default — the
  * core's `normalize_string_patch` trims an empty string to a clear, while an
  * omitted field leaves the stored effort untouched. */

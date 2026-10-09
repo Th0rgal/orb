@@ -1,5 +1,5 @@
 import {FindBar} from "../src/FindBar";
-import { createSignal, Show } from "solid-js";
+import { createSignal, Show, onMount, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
 import { Dialog, DialogButton, ConfirmDialog, Field, NameDialog } from "../src/Dialog";
 import { ErrorDialog } from "../src/ErrorNotice";
@@ -18,6 +18,8 @@ document.documentElement.dataset.theme = new URLSearchParams(location.search).ge
 const longTitle = "Connect a provider for a project with a long descriptive name";
 function Gallery() {
   const [open,setOpen] = createSignal("");
+  const [effort,setEffort] = createSignal("low"), [revision,setRevision] = createSignal(0);
+  onMount(()=>{const timer=setInterval(()=>setRevision(n=>n+1),250);onCleanup(()=>clearInterval(timer));});
   const [pickerState,setPickerState] = createSignal(new URLSearchParams(location.search).get("picker-state") ?? "ready");
   const [name,setName] = createSignal("Research notes");
   const [busy,setBusy] = createSignal(false), [error,setError] = createSignal<string|null>(null), [attempts,setAttempts] = createSignal(0);
@@ -40,6 +42,7 @@ function Gallery() {
       <DialogButton onClick={e=>show("form",e.currentTarget)}>Provider form</DialogButton>
       <DialogButton onClick={e=>show("picker",e.currentTarget)}>Choose model</DialogButton>
       <DialogButton onClick={e=>show("menu",e.currentTarget)}>Actions</DialogButton>
+      <DialogButton onClick={e=>show("effort",e.currentTarget)}>Reasoning effort: {effort() || "Default"}</DialogButton>
       <DialogButton onClick={e=>show("project",e.currentTarget)}>New project</DialogButton>
       <DialogButton onClick={e=>show("error",e.currentTarget)}>Error details</DialogButton>
       <DialogButton onClick={e=>show("image",e.currentTarget)}>Image preview</DialogButton>
@@ -59,6 +62,9 @@ function Gallery() {
       <Show when={searchOpen()}><Picker label="Models" items={Array.from({length:80},(_,i)=>({id:`model-${i}`,label:`Model ${i}`,group:i<4?"Recent":"All models",disabled:i===1}))} selected={selected()} onSelect={id=>{setSelected(id);setSearchOpen(false);}} onClose={()=>setSearchOpen(false)}/></Show>
     </Dialog></Show>
     <Show when={open()==="picker"}><Picker label="Models" searchLabel="Search models" anchor={anchor()} selected={selected()} loading={pickerState()==="loading"} error={pickerState()==="error" ? "Models could not load. Try again." : undefined} onRetry={()=>setPickerState("ready")} items={pickerState()==="empty" ? [] : [{id:"one",label:"Standard",group:"Available"},{id:"disabled",label:"Unavailable model",disabled:true,group:"Available"},{id:"two",label:"Advanced",description:"Additional reasoning",group:"Available"},...Array.from({length:40},(_,i)=>({id:`option-${i}`,label:`Model ${i}`,group:"Other models"}))]} onSelect={id=>{setSelected(id);close();}} onClose={close}/></Show>
+    <Show when={open()==="effort"}><Picker label="Reasoning effort" searchable={false} anchor={anchor()} selected={effort()}
+      items={(()=>{revision();return [{id:"",label:"Default (High)"},{id:"low",label:"Low"},{id:"medium",label:"Medium",disabled:true},{id:"high",label:"High"}];})()}
+      onSelect={id=>{setEffort(id);close();}} onClose={close}/></Show>
     <Show when={open()==="menu"}><Menu label="Project actions" anchor={anchor()} onClose={close}>
       <MenuList items={[{kind:"item",label:"Rename…",onClick:()=>setOpen("name")},{kind:"item",label:"Unavailable action",disabled:true,onClick:()=>{}},{kind:"item",label:"More actions",openOnHover:true,onClick:el=>setSub(el)}]}/>
       <Show when={sub()}>{button=><Menu label="More actions" anchor={button()} placement="right-start" onClose={()=>setSub(undefined)}><MenuList items={[{kind:"item",label:"Copy path",onClick:()=>setSub(undefined)},{kind:"item",label:"Delete folder…",danger:true,onClick:()=>{setSub(undefined);setOpen("confirm");}}]}/></Menu>}</Show>

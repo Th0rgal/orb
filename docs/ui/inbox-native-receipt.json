@@ -1,28 +1,30 @@
 {
-  "created_at": "2026-10-09T12:46:15.208929+00:00",
-  "base_commit": "6625810e81059940c0d0715b406d92bec3a9468f",
+  "created_at": "2026-10-09T12:52:35.436339+00:00",
+  "base_commit": "4884bc636b31537ff52a2da76f2fbbcff226a85b",
   "branch": "feat/orb-overlay-system",
   "source_path": "/Users/thomas/work/paloma/sandboxed_sh-overlay-system",
-  "frontend_source_sha256": "ef0f99bd6847a4de6756ddc250d35e0af621a18ef1689969a9069eac31d47d8e",
-  "dist_index_sha256": "801877bcd1b365102966152f33478adb8cab32cc132bc06aa5e6e316506fbd1e",
-  "raw_build_sha256": "b7aec6d121879b235cde0cd1af29762185888295eb46a5d99296c90db193f859",
+  "frontend_source_sha256": "8e50081c6f4ad0007dbe86df9177a4328a6057002bbbc49d94746cbf3ae55d58",
+  "dist_index_sha256": "5c89ae2481917b4fec2a34673f8cc441ab7265fae1493f8b864034008d11dab1",
+  "raw_build_sha256": "716553216bfc1c29398957a1a51e8e38a990a20dc66ea6ca728bf04c610a5ca5",
   "copy_verified_before_signing": true,
   "installed_app": "/Applications/Orb Overlays.app",
   "bundle_identifier": "md.thomas.orb.overlays",
-  "signed_executable_sha256": "9cb158ee94441446b5d9e8bfeee2ba0618afdc604a14afb75b6231c8b9b2d04b",
+  "signed_executable_sha256": "8b159f7c304e9563b6c47edef7388ec5bf4bbc3416fc628da148974750410183",
   "sidecar_sha256": "d0608e79b347f296f27be9130f8a97f6b8aae9b2f8232b3939c7e72579cba03b",
   "main_app_unchanged_sha256": "bcfa350c02f64c6f5093923777e76d370f3fc9d628cfa0c6f44c736cb7b64a14",
   "signature": "ad-hoc; codesign --verify --deep --strict passed",
-  "backup_path": "/tmp/Orb Overlays-before-square-focus.app",
+  "backup_path": "/tmp/Orb Overlays-before-effort-fix.app",
   "preserved_worker_pids": [
     42889,
-    87815
+    87815,
+    90095,
+    90115
   ],
   "verification": {
     "build": "passed",
-    "new_focus_checks": "4 passed, Chromium/WebKit and light/dark",
-    "inbox_suite": "19 passed, 2 skipped, 1 Chromium preview-scroll timeout",
-    "preview_scroll_retry": "passed in isolation",
-    "native_keyboard_focus": "Verified in installed Orb Overlays: keyboard-selected row has a thin square border; no rounded title ring."
+    "unit_tests": "72 passed",
+    "overlays": "20 passed in Chromium and WebKit",
+    "inbox": "21 passed, 2 live-production checks skipped; one WebKit transcript-update failure passed on isolated retry",
+    "native": "Verified Space then T focuses Send follow-up in installed Orb Overlays. No message sent. Native selector inspection stopped when the app changed to a subscription dialog; selector activation, save, default and failure paths passed in Chromium and WebKit."
   }
 }
