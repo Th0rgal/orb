@@ -643,13 +643,18 @@ export function Composer(p: {
     if (!composer) return;
     // Canvas metrics decide most single-line drafts without touching layout.
     const value = text();
-    if (!multiline() && !p.tall && !images().length && !value.includes("\n") && fitsOneLine(value)) return;
+    if (!multiline() && !p.tall && !images().length && !value.includes("\n") && fitsOneLine(value)) {
+      ta.style.height = "";
+      return;
+    }
     const val = ta.value;
     // Fast path for empty or short single-line compact inputs that cannot wrap:
     // skip collapsing and re-measuring the DOM box on every keystroke.
-    if (!multiline() && !val.includes("\n") && val.length <= 32 && ta.scrollHeight <= 44) {
+    const style = getComputedStyle(ta);
+    const singleLineHeight = parseFloat(style.lineHeight) + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    if (!multiline() && !val.includes("\n") && val.length <= 32 && ta.scrollHeight <= singleLineHeight + 1) {
       composer.classList.toggle("tall", Boolean(p.tall || images().length));
-      if (!val) ta.style.height = "";
+      ta.style.height = "";
       return;
     }
     // Measuring collapses the textarea: hold the composer's box so the
@@ -663,10 +668,12 @@ export function Composer(p: {
     composer.classList.remove("tall");
     ta.style.height = "0px";
     ta.style.minHeight = "0";
-    const wrapped = val.includes("\n") || ta.scrollHeight > 44;
+    const wrapped = val.includes("\n") || ta.scrollHeight > singleLineHeight + 1;
     setMultiline(wrapped);
     composer.classList.toggle("tall", Boolean(p.tall || images().length || wrapped));
-    ta.style.height = Math.min(ta.scrollHeight, 220) + "px";
+    // Compact drafts return to their intrinsic single-line height, including
+    // after a soft wrap; retaining a measured height leaves the controls below the text.
+    ta.style.height = wrapped ? Math.min(ta.scrollHeight, 220) + "px" : "";
     ta.style.minHeight = "";
     composer.style.minHeight = "";
     ta.scrollTop = follow ? ta.scrollHeight : top;

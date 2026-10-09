@@ -1,0 +1,20 @@
+import {test, expect} from '@playwright/test';
+test('composer expands for a soft wrap and shrinks back to one row', async ({page}, testInfo) => {
+ await page.goto('/tests/form-feedback.html?voice');
+ const input=page.locator('.composer textarea');
+ const plus=page.locator('.composer .plus');
+ await expect(page.locator('.voice-slot')).toBeVisible();
+ const field=await input.boundingBox();
+ const button=await plus.boundingBox();
+ expect(Math.abs(field!.y+field!.height/2-button!.y-button!.height/2)).toBeLessThan(4);
+ await input.fill('A short reply with enough words to wrap softly over two lines without an explicit newline.');
+ await expect(page.locator('.composer')).toHaveClass(/tall/);
+ await input.fill('A longer reply that needs two lines even after the input expands to its full width. '.repeat(2));
+ expect(await input.evaluate(el => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1);
+ await page.screenshot({path:testInfo.outputPath('two-lines.png')});
+ await input.fill('Short');
+ expect((await input.boundingBox())!.height).toBeLessThanOrEqual(24);
+ await input.fill('');
+ expect((await input.boundingBox())!.height).toBeLessThanOrEqual(24);
+ await page.screenshot({path:testInfo.outputPath('empty.png')});
+});
