@@ -2169,10 +2169,28 @@ button.fork-trigger:hover { color: var(--fg); }
 .settings-body .routing-heading h2 { font-size: 16px; }
 .settings-body .routing-page > .s-lead { margin: 12px 8px 18px; font-size: 12px; color: var(--fg-3); }
 .routing-server { display: block; margin-top: 4px; font-size: 11px; overflow-wrap: anywhere; }
-.routing-tabs { display: flex; gap: 18px; margin: 20px 8px 0; border-bottom: 1px solid var(--stroke-soft); }
+.routing-tabs { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 20px 8px 0; border-bottom: 1px solid var(--stroke-soft); }
 .routing-tabs button { padding: 0 0 10px; font-size: 12px; color: var(--fg-3); border-bottom: 1px solid transparent; }
 .routing-tabs button[aria-current] { color: var(--fg); border-color: var(--fg-2); }
 .routing-tabs button:hover { color: var(--fg); }
+.proxy-keys > .routing-heading { flex-wrap: wrap; }
+.proxy-key-endpoint, .proxy-key-secret, .proxy-key-row, .proxy-keys .proxy-key-candidate { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.proxy-key-endpoint > div, .proxy-key-secret > code, .proxy-key-info { flex: 1; min-width: 0; }
+.proxy-key-endpoint span, .proxy-key-info > span { display: block; color: var(--fg-3); font-size: 11px; line-height: 1.6; }
+.proxy-keys code { font-size: 11px; overflow-wrap: anywhere; }
+.proxy-key-endpoint code { display: block; margin-top: 4px; }
+.proxy-keys .proxy-key-panel { padding: 14px; margin: 10px 0; }
+.proxy-key-panel .routing-muted { margin: 8px 0 12px; }
+.proxy-key-secret { padding: 0; }
+.proxy-key-footer { justify-content: flex-end; margin-top: 14px; }
+.proxy-keys .proxy-key-days { flex-direction: row; flex-wrap: wrap; align-items: center; }
+.proxy-keys .proxy-key-days .s-input { width: 70px; }
+.proxy-key-list { margin-top: 10px; }
+.proxy-key-row + .proxy-key-row, .proxy-key-candidate + .proxy-key-candidate { border-top: 1px solid var(--stroke-soft); }
+.proxy-key-info strong { display: block; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.proxy-key-row > code, .proxy-key-candidate > code { max-width: 30%; color: var(--fg-3); }
+.proxy-keys .proxy-key-candidate { flex-direction: row; cursor: pointer; }
+.proxy-key-candidate > input { flex-shrink: 0; accent-color: var(--fg-2); }
 .routing-page .routing-chain { margin-top: 10px; }
 .routing-chain-summary { padding: 10px 14px; gap: 5px 8px; font-size: 12px; }
 .routing-chain-summary strong { font-weight: 500; }
