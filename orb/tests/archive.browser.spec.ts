@@ -165,8 +165,24 @@ test('right-click in archives selects and deletes everything, older than 1 day, 
  await expect(archiveTree.getByRole('button',{name:'Two days one',exact:true})).toHaveCount(0);
  await expect(archiveTree.getByRole('button',{name:'Fresh one',exact:true})).toBeVisible();
 
- // Right-clicking an archived row also exposes the bulk delete actions across all archives.
- await archiveTree.getByRole('button',{name:'Fresh one',exact:true}).click({button:'right'});
+ // A single archived session only exposes actions for that session.
+ const freshOne=archiveTree.getByRole('button',{name:'Fresh one',exact:true});
+ await freshOne.click({button:'right'});
+ await expect(page.getByRole('menuitem',{name:'Delete agent…',exact:true})).toBeVisible();
+ await expect(page.getByRole('menuitem',{name:'Delete all…',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('menuitem',{name:'Delete older than 1 day…',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('menuitem',{name:'Delete older than 1 week…',exact:true})).toHaveCount(0);
+ await page.keyboard.press('Escape');
+
+ // Bulk archive actions remain available when multiple sessions are selected.
+ const shortcut=process.platform==='darwin'?'Meta':'Control';
+ const secondProject=archiveTree.getByRole('button',{name:'Second project',exact:true});
+ if(await secondProject.getAttribute('aria-expanded')==='false')await secondProject.click();
+ await archiveTree.getByRole('button',{name:'Three days two',exact:true}).click({modifiers:[shortcut]});
+ await freshOne.click({button:'right'});
+ await expect(page.getByRole('menuitem',{name:'Delete 2 agents…',exact:true})).toBeVisible();
+ await expect(page.getByRole('menuitem',{name:'Delete older than 1 day…',exact:true})).toBeVisible();
+ await expect(page.getByRole('menuitem',{name:'Delete older than 1 week…',exact:true})).toBeVisible();
  await page.getByRole('menuitem',{name:'Delete all…',exact:true}).click();
  await expect(page.locator('#sidebar-archives [aria-selected="true"]')).toHaveCount(3);
  await expect(page.getByRole('dialog')).toContainText('Delete 3 agents?');

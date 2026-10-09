@@ -1592,7 +1592,6 @@ export function LiveProjectsSection(p: {
     ...(["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled"].includes(mission.status)
       ? [{ kind: "item" as const, label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void archiveConversation(mission) }]
       : []),
-    ...(isArchived(mission) ? [{ kind: "sep" as const }, ...archiveDeleteMenuItems()] : []),
   ];
   /** Right-click handler shared by every agent row. Suppresses the native menu
    * and the sidebar-wide one without opening a different conversation. */
