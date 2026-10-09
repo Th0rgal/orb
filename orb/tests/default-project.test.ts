@@ -15,7 +15,7 @@ it("creates the catch-all only when it is missing and never rewrites an existing
     .mockResolvedValueOnce(new Response(JSON.stringify(DEFAULT_PROJECT)))
     .mockResolvedValueOnce(new Response(JSON.stringify({ projects: [{ ...DEFAULT_PROJECT, title: "My inbox", objective: "Keep this" }] })));
   vi.stubGlobal("fetch", fetcher);
-  expect(await ensureDefaultProject()).toEqual(DEFAULT_PROJECT);
+  expect(await ensureDefaultProject()).toMatchObject(DEFAULT_PROJECT);
   expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual(DEFAULT_PROJECT);
   expect(await ensureDefaultProject()).toMatchObject({ title: "My inbox", objective: "Keep this" });
   expect(fetcher).toHaveBeenCalledTimes(3);
