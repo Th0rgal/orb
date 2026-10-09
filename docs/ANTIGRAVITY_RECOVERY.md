@@ -2,9 +2,11 @@
 
 A remote node process may exit zero while Antigravity's final result reports a
 stream interruption or HTTP 503. The native result, not the process exit code,
-decides whether the turn finished. An intentional pause remains a pause. Recoverable native result errors no longer
-trigger immediate process cancellation while the CLI may still retry. A later
-SUCCESS clears the previous attempt's error. Authentication/identity failures
+decides whether the turn finished. An intentional pause remains a pause. Both
+local Orb and remote Core observers share the transient-error classifier.
+Recoverable native result errors no longer trigger immediate process
+cancellation while the CLI may still retry. A later SUCCESS clears the previous
+attempt's error. Authentication/identity failures
 and the no-progress startup timeout retain their cancellation safeguards.
 
 A response exceeding the provider output-token limit uses the same bounded

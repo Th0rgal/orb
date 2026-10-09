@@ -1117,7 +1117,9 @@ fn spawn_antigravity(
                 }
             }
             output.replace(stream.text.clone());
-            if stream.error.is_some() {
+            // Transient result errors may be followed by the CLI's own retry.
+            // Keep reading until its terminal result instead of cancelling it.
+            if stream.error.is_some() && !stream.is_retryable() {
                 #[cfg(unix)]
                 unsafe {
                     libc::kill(pid as i32, libc::SIGTERM);

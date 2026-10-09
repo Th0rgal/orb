@@ -563,25 +563,7 @@ pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'stat
         Some("Antigravity interrupted turn")
     } else if failure.contains("Antigravity ended its headless turn while background task(s)") {
         Some("Antigravity background task handoff")
-    } else if failure.contains("INTERNAL (code 500)")
-        || failure.contains("Internal error encountered")
-        || failure.contains("UNAVAILABLE (code 503)")
-        || failure.contains("DEADLINE_EXCEEDED (code 504)")
-        || failure.contains("The stream was interrupted")
-        || failure.contains("There was a network issue connecting to the server")
-        || [
-            "resource_exhausted",
-            "too many requests",
-            "no route to host",
-            "connection reset by peer",
-            "connection refused",
-            "i/o timeout",
-            "tls handshake timeout",
-            "unexpected eof",
-        ]
-        .iter()
-        .any(|s| lower.contains(s))
-    {
+    } else if crate::antigravity::is_transient_error(failure) {
         Some("Antigravity transient upstream error")
     } else {
         None

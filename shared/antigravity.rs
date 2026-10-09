@@ -57,6 +57,46 @@ pub fn args_with_effort(
     args
 }
 
+/// Provider failures that can be continued in the same native conversation.
+/// Kept here so local and remote observers do not kill the CLI's own retries.
+pub fn is_transient_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if [
+        "unauthenticated",
+        "permission_denied",
+        "invalid_grant",
+        "sign in",
+        "log in",
+        "oauth",
+        "cancelled by",
+        "canceled by",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
+    {
+        return false;
+    }
+    [
+        "unavailable (code 503)",
+        "internal (code 500)",
+        "internal error encountered",
+        "deadline_exceeded (code 504)",
+        "the stream was interrupted",
+        "there was a network issue connecting to the server",
+        "previous response was cut off because it exceeded the output token limit",
+        "resource_exhausted",
+        "too many requests",
+        "no route to host",
+        "connection reset by peer",
+        "connection refused",
+        "i/o timeout",
+        "tls handshake timeout",
+        "unexpected eof",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ErrorMarker {
     pub short_error: Option<String>,
@@ -963,9 +1003,11 @@ impl Stream {
         if self.success {
             return !self.unfinished_background_tasks().is_empty();
         }
-        self.error_marker
-            .as_ref()
-            .is_some_and(|marker| marker.retryable)
+        self.error.as_deref().is_some_and(is_transient_error)
+            || self
+                .error_marker
+                .as_ref()
+                .is_some_and(|marker| marker.retryable)
     }
 
     /// The terminal receipt repeats only the last response, not every update.
@@ -1946,6 +1988,24 @@ mod tests {
         assert!(stream.success);
         assert!(stream.error.is_none());
         assert!(stream.finish().is_ok());
+    }
+
+    #[test]
+    fn truncated_response_remains_retryable_and_a_later_success_clears_it() {
+        let mut stream = Stream::default();
+        stream.feed(&json!({"event":"init","conversation_id":"same-session"}));
+        stream.feed(&json!({"event":"result","result":{"conversation_id":"same-session","status":"ERROR","error":"Your previous response was cut off because it exceeded the output token limit\nPlease continue from where you left off, keeping your response shorter\nRetries remaining: 3"}}));
+        assert!(stream.is_retryable());
+        assert!(stream.finish().is_err());
+        stream.feed(&json!({"event":"result","result":{"conversation_id":"same-session","status":"SUCCESS","response":"Continued with a short response."}}));
+        assert!(stream.finish().is_ok());
+        assert!(stream.error.is_none());
+        assert!(!is_transient_error(
+            "UNAUTHENTICATED: UNAVAILABLE (code 503)"
+        ));
+        assert!(!is_transient_error(
+            "cancelled by user: The stream was interrupted"
+        ));
     }
 
     #[test]
