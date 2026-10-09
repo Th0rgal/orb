@@ -88,6 +88,12 @@ export class ApiError extends Error {
   constructor(public status: number, public detail: string) { super(`${status} ${detail}`.trim()); }
 }
 
+class InvalidApiResponseError extends Error {
+  constructor(path: string, options?: ErrorOptions) {
+    super(`Couldn’t read the server response for ${path}. Please retry; your draft is kept.`, options);
+  }
+}
+
 export function api<T>(path: string, init?: RequestInit): Promise<T> {
   // Explicit signals/options retain independent cancellation semantics.
   if (!init) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
@@ -121,9 +127,22 @@ async function sendRequest<T>(path: string, init?: RequestInit): Promise<T> {
     const text = (await res.text().catch(() => "")).trim();
     throw new ApiError(res.status, text);
   }
-  const result = await res.json().catch(() => undefined as unknown as T);
+  let body: string;
+  try {
+    body = await res.text();
+  } catch (cause) {
+    if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+    throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${path}`, { cause });
+  }
   if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
-  return result;
+  // Empty mutation receipts are valid for endpoints returning only a status.
+  // A failed/invalid JSON read is not a successful response with no value.
+  if (!body.trim() && init?.method && init.method.toUpperCase() !== "GET") return undefined as T;
+  try {
+    return JSON.parse(body) as T;
+  } catch (cause) {
+    throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${path}`, { cause });
+  }
 }
 
 export interface RemoteNodeView {
@@ -846,7 +865,19 @@ export async function getMission(id: string): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = (await origins.localOrigins(id)).find(row=>row.id===id);
   try{
-    const remote=await api<Mission>(`/api/control/missions/${id}`,local?{signal:AbortSignal.timeout(3000)}:undefined);
+    const path = `/api/control/missions/${id}`;
+    const read = async () => {
+      const value = await api<Mission>(path, local ? { signal: AbortSignal.timeout(3000) } : undefined);
+      if (!value || typeof value !== "object" || value.id !== id) throw new InvalidApiResponseError(`GET ${path}`);
+      return value;
+    };
+    let remote: Mission;
+    try { remote = await read(); }
+    catch (error) {
+      if (!(error instanceof InvalidApiResponseError)) throw error;
+      // Retry only this read. Retrying a POST could duplicate a sent message.
+      remote = await read();
+    }
     if(local && origins.localPending(local))return origins.withCoreEffort(local,remote);
     if(local)await origins.rememberCoreState([local],[remote],observedAt);
     return remote;
@@ -947,7 +978,7 @@ export async function sendMissionMessage(
     if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
     const replacement = await createMission(body);
     if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
-    if (!replacement.id || replacement.id === id) throw new Error("Invalid replacement receipt. Your draft is kept.");
+    if (!replacement?.id || replacement.id === id) throw new Error("Invalid replacement receipt. Your draft is kept.");
     return { id: clientMessageId, queued: false, message_accepted: true, replacement };
   };
   const retry = remoteReplacements.get(replacementKey);
@@ -980,8 +1011,8 @@ export async function sendMissionMessage(
     remoteReplacements.set(replacementKey, body);
     return createReplacement(body);
   }
-  if (receipt.message_accepted === false) throw new MessageRejectedError("Message was not accepted. Your draft is kept.");
-  if (typeof receipt.id !== "string" || !receipt.id || typeof receipt.queued !== "boolean") throw new Error("Invalid message receipt. Your draft is kept.");
+  if (receipt?.message_accepted === false) throw new MessageRejectedError("Message was not accepted. Your draft is kept.");
+  if (!receipt || typeof receipt.id !== "string" || !receipt.id || typeof receipt.queued !== "boolean") throw new Error("Invalid message receipt. Your draft is kept.");
   return receipt;
 }
 

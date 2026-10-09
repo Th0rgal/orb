@@ -19,7 +19,7 @@ it.each([
   { status: "active" },
   { status: "completed", execution: { state: "running" } },
 ])("refuses to reopen a live mission: %j", async mission => {
-  const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(mission)));
+  const fetcher = vi.fn().mockImplementation(async () => Response.json({ id: "mission", ...mission }));
   vi.stubGlobal("fetch", fetcher);
   await expect(reopenMission("mission")).rejects.toThrow(/no longer finished/);
   expect(fetcher).toHaveBeenCalledTimes(1);

@@ -41,7 +41,7 @@ it('prioritizes running descendants over scheduled descendants',()=>{
 });
 
 it('sends wake-up actions as JSON accepted by the API extractor',async()=>{
- const fetch=vi.fn().mockResolvedValue({ok:true,status:200,json:async()=>({ok:true})});
+ const fetch=vi.fn().mockImplementation(async()=>Response.json({ok:true}));
  vi.stubGlobal('fetch',fetch);
  try {
   await actOnContinuation('wake-1','cancel');

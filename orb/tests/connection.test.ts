@@ -73,12 +73,72 @@ it("preserves the selected local harness and model in the supported create contr
 
 
 it("a rejected receipt preserves the follow-up draft and attachments", async () => {
-  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ id: "m1", queued: false, message_accepted: false })));
+  const fetcher = vi.fn(async (_url: string, init?: RequestInit) => Response.json(init?.method === "POST"
+    ? { id: "m1", queued: false, message_accepted: false } : { id: "mission" }));
   vi.stubGlobal("fetch", fetcher);
   const attachments = [{kind: "file" as const, path: "notes/test.md"}];
   await expect(sendMissionMessage("mission", "same text", attachments)).rejects.toThrow("not accepted");
   expect(JSON.parse(fetcher.mock.calls[1][1]!.body as string)).toEqual({mission_id: "mission", content: "same text", queue_followup: true, attachments, client_message_id: expect.any(String)});
   expect(attachments).toHaveLength(1);
+});
+
+it("recovers a failed mission response read before sending exactly once", async () => {
+  let reads = 0;
+  const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Response.json({ id: "retry-read", queued: false });
+    if (++reads === 1) return new Response("{\"id\":");
+    return Response.json({ id: "mission", track: "mission-track" });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  await expect(sendMissionMessage("mission", "Keep this exact message", undefined, "retry-read"))
+    .resolves.toMatchObject({ id: "retry-read" });
+  expect(reads).toBe(2);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it.each(["", "null", "{}", '{"id":"another-mission"}'])
+  ("rejects an unusable mission response %s without posting the draft", async body => {
+    const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => new Response(body));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(sendMissionMessage("mission", "Keep my draft", undefined, "not-sent"))
+      .rejects.toThrow(/server response.*draft is kept/i);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.every(([, init]) => (init?.method ?? "GET") === "GET")).toBe(true);
+  });
+
+it("does not hide a body read failure behind an undefined mission", async () => {
+  const fetcher = vi.fn(async () => ({
+    ok: true, status: 200, text: async () => { throw new TypeError("Load failed"); },
+  }));
+  vi.stubGlobal("fetch", fetcher);
+  await expect(sendMissionMessage("mission", "Keep my draft"))
+    .rejects.toThrow(/server response.*draft is kept/i);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it("does not retry a failed response against a newly selected backend", async () => {
+  setConnection("http://old.test", "old-token");
+  const fetcher = vi.fn(async () => ({ ok: true, status: 200, text: async () => {
+    setConnection("http://new.test", "new-token");
+    throw new TypeError("Load failed");
+  } }));
+  vi.stubGlobal("fetch", fetcher);
+  await expect(sendMissionMessage("mission", "Keep my draft")).rejects.toThrow("The backend changed");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it("keeps empty successful mutation responses valid", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+  await expect(api("/delete", { method: "DELETE" })).resolves.toBeUndefined();
+});
+
+it("rejects a missing message receipt without automatically resending", async () => {
+  const fetcher = vi.fn(async (_url: string, init?: RequestInit) => init?.method === "POST"
+    ? new Response(null, { status: 204 }) : Response.json({ id: "mission" }));
+  vi.stubGlobal("fetch", fetcher);
+  await expect(sendMissionMessage("mission", "Keep my draft", undefined, "uncertain-receipt"))
+    .rejects.toThrow("Invalid message receipt. Your draft is kept.");
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
 
@@ -183,7 +243,7 @@ it("rejects an invalid project catalog without caching it and recovers on retry"
   const fetcher = vi.fn().mockResolvedValueOnce(new Response("<html>unavailable</html>"))
     .mockResolvedValueOnce(new Response(JSON.stringify({projects:[{slug:"verity",title:"Verity"}]})));
   vi.stubGlobal("fetch", fetcher);
-  await expect(listProjects()).rejects.toThrow("Couldn’t load projects");
+  await expect(listProjects()).rejects.toThrow("Couldn’t read the server response for GET /api/projects");
   await expect(listProjects()).resolves.toEqual([{slug:"verity",title:"Verity"}]);
 });
 it('never creates an ordinary replacement for a refused btw continuation',async()=>{

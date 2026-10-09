@@ -125,7 +125,7 @@ describe("project and backend-wide limits are written as distinct payloads", () 
   const connect = (grant: Record<string, unknown> = {}) => {
     setConnection("https://core.test", "jwt");
     fetchMock.mockReset();
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ slug: "notes", grant }) });
+    fetchMock.mockImplementation(async () => Response.json({ slug: "notes", grant }));
     vi.stubGlobal("fetch", fetchMock);
   };
   afterEach(() => vi.unstubAllGlobals());
@@ -173,7 +173,7 @@ describe("project and backend-wide limits are written as distinct payloads", () 
 
   it("sends the backend-wide limit under its own name, to its own endpoint", async () => {
     connect();
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ max_parallel_missions: 3 }) });
+    fetchMock.mockImplementation(async () => Response.json({ max_parallel_missions: 3 }));
     await updateGlobalSettings({ max_parallel_missions: 3 });
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("https://core.test/api/settings");

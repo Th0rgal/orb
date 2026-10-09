@@ -2650,7 +2650,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [error, setError] = createSignal<string | null>(null);
   const [queueError, setQueueError] = createSignal<string | null>(cached?.queueError ?? null);
   const [sendError, setSendError] = createSignal<string | null>(null);
-  const [optimisticList, setOptimisticList] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;retry?:()=>void}[]>([]);
+  const [optimisticList, setOptimisticList] = createSignal<{id:ReturnType<typeof crypto.randomUUID>;text:string; images:DraftImage[];waiting:boolean;failed?:boolean;retry?:()=>void}[]>([]);
   const optimistic = () => optimisticList()[0] ?? null;
   let sendingIds:ReturnType<typeof crypto.randomUUID>[]=[];
   let sendChain: Promise<void> = Promise.resolve();
@@ -2663,7 +2663,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     setSendError(null);
     let addedWaiting = true;
     setOptimisticList(prev => {
-      const hasEarlierInFlight = prev.some(item => item.id !== nextId);
+      const hasEarlierInFlight = prev.some(item => item.id !== nextId && !item.failed);
       const waiting = busy() || hasEarlierInFlight;
       addedWaiting = waiting;
       if (prev.some(item => item.id === nextId)) {
@@ -2969,7 +2969,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if(!p.id)return !p.launchError;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
     const phase = missionPhase(mission(), activity());
-    return (optimisticList().some(item => !item.waiting) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
+    return (optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
   const phaseLabel = () => mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
@@ -2980,7 +2980,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const drafts=optimisticList();
     const projected:StreamItem[]=[];
     for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
-    for(const draft of drafts){if((!draft.waiting||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
+    for(const draft of drafts){if((!draft.waiting||draft.failed||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
     const list = [...canonical,...projected];
     const nativeTools = clientPlaced() ? localActivitiesToStreamItems(localActivities(p.id)) : [];
     const lastUserIdx = list.reduce((last, item, idx) => item.kind === "user" && !item.queued ? idx : last, -1);
@@ -3097,7 +3097,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   };
   const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     const attemptId = explicitId ?? sendingIds.shift() ?? crypto.randomUUID();
-    const run = sendChain.then(() => sendMsgOnce(text, images, chips, attemptId, explicitId, replace));
+    const run = sendChain.then(async () => {
+      setOptimisticList(prev => prev.map(item => item.id === attemptId ? { ...item, failed: false } : item));
+      const accepted = await sendMsgOnce(text, images, chips, attemptId, explicitId, replace);
+      if (!accepted) setOptimisticList(prev => prev.map(item => item.id === attemptId ? { ...item, failed: true } : item));
+      return accepted;
+    });
     sendChain = run.then(() => undefined, () => undefined);
     return run;
   };
@@ -3305,13 +3310,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             editing={editingQueued()}
             onEdit={row => void queuedEdit.start(row)}
             onSendImmediate={sendRemoteImmediate}
-            pending={!clientPlaced() && !sendError() ? optimisticList().filter(item => item.waiting).map(item => ({id:item.id,content:item.text})) : undefined}
+            pending={!clientPlaced() && !sendError() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,content:item.text})) : undefined}
             confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
             onRows={reconcileRemoteQueue} onCancel={id=>{
             setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||item.messageId!==id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>
-          <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => setOptimisticList(prev => prev.filter(item => item.id !== id))} onEdit={row=>void queuedEdit.start(row)}/>
+          <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => setOptimisticList(prev => prev.filter(item => item.id !== id))} onEdit={row=>void queuedEdit.start(row)}/>
           <Composer
             allowConcurrentSend
             revision={sideRevision()}

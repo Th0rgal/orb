@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { getApiUrl, isConnected, markMissionOpened, type Mission } from "./api";
+import { connectionVersion, getApiUrl, isConnected, markMissionOpened, type Mission } from "./api";
 
 const [unreadVersion, setUnreadVersion] = createSignal(0);
 export { unreadVersion };
@@ -23,6 +23,26 @@ const UNREAD_RESPONSE_STATUSES = new Set([
 
 let cachedKey = "";
 let seenCache: Record<string, number> = {};
+let openedVersion = -1;
+const openedTurns = new Map<string, number>();
+
+function syncOpened(id: string, turn: number): void {
+  if (!isConnected()) return;
+  const version = connectionVersion();
+  if (openedVersion !== version) {
+    openedVersion = version;
+    openedTurns.clear();
+  }
+  // Core broadcasts a status event after an opened receipt. Reposting that
+  // receipt on every refreshed snapshot creates an SSE/read/write loop.
+  if (openedTurns.get(id) === turn) return;
+  openedTurns.set(id, turn);
+  void markMissionOpened(id).catch(() => {
+    // A failed receipt can retry on the next observation, without forgetting a
+    // newer turn or a different connection that completed in the meantime.
+    if (openedVersion === version && openedTurns.get(id) === turn) openedTurns.delete(id);
+  });
+}
 
 function storageKey(): string {
   return `orb.missionSeenV2:${getApiUrl() || "default"}`;
@@ -140,7 +160,7 @@ export function markMissionRead(
     typeof missionOrId === "string" ? 0 : missionResponseTimestampMs(missionOrId);
   const stamp = Math.max(Date.now(), updatedMs);
   const map = ensureSeenCache();
-  if (map[id] === undefined || map[id] < stamp) {
+  if (map[id] === undefined || map[id] < 0 || map[id] < updatedMs) {
     map[id] = stamp;
     persistSeenCache();
     setUnreadVersion((v) => v + 1);
@@ -150,7 +170,7 @@ export function markMissionRead(
     isConnected() &&
     (!status || UNREAD_RESPONSE_STATUSES.has(status))
   ) {
-    void markMissionOpened(id).catch(() => {});
+    syncOpened(id, updatedMs);
   }
 }
 
@@ -177,13 +197,14 @@ export function markMissionsRead(
   let changed = false;
   for (const m of missions) {
     if (!m.id) continue;
-    const stamp = Math.max(now, missionResponseTimestampMs(m));
-    if (map[m.id] === undefined || map[m.id] < stamp) {
+    const turn = missionResponseTimestampMs(m);
+    const stamp = Math.max(now, turn);
+    if (map[m.id] === undefined || map[m.id] < 0 || map[m.id] < turn) {
       map[m.id] = stamp;
       changed = true;
     }
     if (syncBackend && isConnected()) {
-      void markMissionOpened(m.id).catch(() => {});
+      syncOpened(m.id, turn);
     }
   }
   if (changed) {

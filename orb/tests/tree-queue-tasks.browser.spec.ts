@@ -109,7 +109,9 @@ test("combined queue and checklist survives failure, identical sends, reload and
   await expect(page.locator('.st-work-body')).toHaveCount(0);
   await expect(page.locator('.st-work-head')).toContainText("Read 1 file · 1 other tool");
   await page.locator('.st-work-head').click();await expect(page.locator('.st-tool')).toHaveCount(2);await page.locator('.st-work-head').click();
-  await page.getByRole("button",{name:"Tasks",exact:true}).click();await expect(page.locator('.mission-tasks')).toBeFocused();
+  const taskToggle=page.getByRole("button",{name:/^Tasks 1\/3 completed/});
+  await taskToggle.click();await expect(taskToggle).toHaveAttribute("aria-expanded","false");
+  await taskToggle.click();await expect(taskToggle).toHaveAttribute("aria-expanded","true");
   await expect(page.getByRole("button",{name:"Plan",exact:true})).toHaveCount(0);
   await field.fill("@README");await page.getByRole("option",{name:"README.md",exact:true}).click();
   state.setReject(true);await field.fill("retry this @README.md");await field.press("Escape");await field.press("Enter");
