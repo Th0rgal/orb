@@ -228,6 +228,7 @@ export interface RemoteJob {
 }
 
 export interface Mission {
+  recovery?: { kind: "transient" | "background" | "quota" | "output_limit"; reason: string; resume_at: string; attempt: number; max_attempts: number } | null;
   scheduling?: { owner: "sandboxed"; durable: boolean; native_schedule_wakeup: boolean; native_cron: boolean; transport: "mcp" | "acp_mcp" | "local_command" | "unavailable" };
   continuation?: import("./continuations").ContinuationSummary | null;
   /** The mission that launched this one through the MCP, if any. */

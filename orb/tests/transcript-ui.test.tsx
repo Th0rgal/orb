@@ -145,3 +145,19 @@ it("renders diff badges, argument badges, and bash output formatting inside tool
   expect(container.querySelector(".st-bash-cmd")?.textContent).toBe("$ pnpm test");
   expect(container.querySelector(".st-tool-bash")?.textContent).toContain("All tests passed");
 });
+
+describe('automatic provider recovery',()=>{
+ it.each(['[Automatic recovery]','[Automatic resume after a usage limit]'])('collapses %s and keeps the exact prompt available',marker=>{
+  const prompt=`${marker} Antigravity transient upstream error stopped your previous turn. Check existing work.`;
+  const {container}=render(()=><Transcript items={buildTranscript([ev('user_message',{id:'recovery',content:prompt})])}/>);
+  expect(container.querySelector('.user')).toBeNull();
+  const disclosure=container.querySelector('details')!;
+  expect(disclosure.open).toBe(false);
+  expect(disclosure.textContent).toContain('Agent resumed automatically');
+  expect(disclosure.textContent).toContain(prompt);
+ });
+ it('keeps a deliberate user Resume request as an ordinary message',()=>{
+  const {container}=render(()=><Transcript items={buildTranscript([ev('user_message',{id:'user',content:'Your previous turn was interrupted. Please resume.'})])}/>);
+  expect(container.querySelector('.user')).not.toBeNull();
+ });
+});

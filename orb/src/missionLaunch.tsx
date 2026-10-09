@@ -203,9 +203,23 @@ export function launchError(error: unknown): string {
  */
 const QUIET_PHASES = new Set(["Starting", "Running", "Resuming"]);
 
+export function isRecoveryScheduled(mission: Mission | null | undefined): boolean {
+  return mission?.status === "interrupted" && mission.terminal_reason === "usage_limit_wait" && !!mission.recovery;
+}
+
 export function missionPhase(mission: Mission | null, activity: boolean) {
   const status = mission?.status;
   if (!status) return { label: "Loading mission", moving: true, detail: "Checking the accepted mission status." };
+  const recovery = mission?.recovery;
+  if (isRecoveryScheduled(mission) && recovery) {
+    const at = new Date(recovery.resume_at);
+    const time = Number.isFinite(at.getTime()) ? at.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "the scheduled time";
+    const cause = recovery.kind === "quota" ? "Waiting for the provider limit to reset."
+      : recovery.kind === "output_limit" ? "The provider truncated its response. The agent will continue with shorter responses."
+      : recovery.kind === "background" ? "The agent is checking its background tasks."
+      : "The provider connection was interrupted.";
+    return { label: "Recovery scheduled", moving: false, detail: `${cause} Resumes automatically at ${time} (attempt ${recovery.attempt}/${recovery.max_attempts}).` };
+  }
   if (["failed","interrupted","cancelled","canceled","not_feasible"].includes(status)) {
     const reason = mission?.terminal_reason ?? mission?.remote_job?.terminal_reason ?? mission?.execution?.terminal_reason;
     return { label: status === "interrupted" ? "Interrupted" : status.startsWith("cancel") ? "Cancelled" : "Failed", moving: false, failed: true,
@@ -260,12 +274,16 @@ export function phaseIsQuiet(phase: { label: string; failed?: boolean; moving?: 
  * assistive technology, and anything actionable or failed still draws a
  * compact banner here.
  */
-export function LaunchStatus(p: { destination: string; mission?: Mission | null; activity?: boolean; submitting?: boolean; goal?: string | null; failureInTranscript?: boolean }) {
+export function LaunchStatus(p: { destination: string; mission?: Mission | null; activity?: boolean; submitting?: boolean; goal?: string | null; failureInTranscript?: boolean; onResume?: () => void; onCancelRecovery?: () => void; recoveryPending?: boolean }) {
   const phase = () => p.submitting ? {label:"Starting",moving:true,detail:"Submitting your request…",failed:false} : missionPhase(p.mission ?? null, !!p.activity);
   return <Show when={!phase().failed && !(phase().label === "Queued" && !p.mission?.remote_job && !p.mission?.remote_node_id) && (!phaseIsQuiet(phase()) || (!p.activity && !p.submitting && phase().label === "Starting")) && !(p.activity && phase().label === "Remote job accepted")}>
     <div class={`launch-status ${phase().failed ? "failed" : ""}`} role="status" aria-live="polite">
       <div><Show when={phase().moving}><span class="launch-pulse" aria-hidden="true" /></Show><Show when={p.goal}><GoalTag class="small" /></Show><span>{phase().label} on {p.destination}</span></div>
       <Show when={phase().detail}><p>{phase().detail}</p></Show>
+      <Show when={phase().label === "Recovery scheduled"}><div class="recovery-actions">
+        <Show when={p.onResume}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onResume?.()}>Resume now</button></Show>
+        <Show when={p.onCancelRecovery}><button type="button" tabIndex={0} disabled={p.recoveryPending} onClick={() => p.onCancelRecovery?.()}>Cancel recovery</button></Show>
+      </div></Show>
     </div>
   </Show>;
 }

@@ -658,3 +658,14 @@ it("preserves the conversation title and follows explicit renames without rewrit
   const renamed = { ...mission, title: "The name I chose", updated_at: "2026-10-09T12:00:00Z" };
   expect(buildInboxSections([renamed], sampleProjects).ready[0].headline).toBe("The name I chose");
 });
+
+it('keeps an automatic recovery in Working instead of review or retry',()=>{
+ const mission=makeMission({status:'interrupted',terminal_reason:'usage_limit_wait',recovery:{kind:'transient',reason:'Antigravity transient upstream error',resume_at:'2026-10-09T18:00:00Z',attempt:2,max_attempts:12}});
+ expect(classifyInboxMission(mission)).toBe('working');
+ const sections=buildInboxSections([mission],sampleProjects);
+ const serialized=JSON.stringify(sections);
+ expect(serialized).toContain('Recovering');
+ expect(serialized).toContain('"canRetry":false');
+ expect(sections.attentionCount).toBe(0);
+ expect(classifyInboxMission({...mission,status:'paused'})).toBe('ready');
+});

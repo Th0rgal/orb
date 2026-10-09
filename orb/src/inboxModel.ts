@@ -5,7 +5,7 @@ import { displayTitle } from "./goal";
 import { messageImages } from "./messageImages";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
 import type { PendingInteraction } from "./missionAttention";
-import { nodeLabel } from "./missionLaunch";
+import { nodeLabel, isRecoveryScheduled } from "./missionLaunch";
 import { isMissionUnread, missionResponseTimestampMs } from "./missionUnread";
 import { remoteLog as parseRemoteLog } from "./remoteLog";
 import type { StreamEvent } from "./stream";
@@ -465,7 +465,7 @@ export function classifyInboxMission(
   if (HIDDEN_STATUSES.has(status)) return "hidden";
   // An active mission with a live pending interaction immediately surfaces in Needs You
   if (interaction) return "needs_you";
-  if (WORKING_STATUSES.has(status)) return "working";
+  if (WORKING_STATUSES.has(status) || isRecoveryScheduled(mission)) return "working";
   if (
     status === "blocked" ||
     status === "failed" ||
@@ -611,6 +611,7 @@ function resolveBadgeAndTone(
     if (interaction.kind === "plan") return { badge: "Plan review", tone: "amber" };
     return { badge: "Question", tone: "amber" };
   }
+  if (isRecoveryScheduled(mission)) return { badge: "Recovering", tone: "muted" };
   switch (mission.status) {
     case "blocked":
       return { badge: "Blocked", tone: "amber" };
@@ -672,7 +673,7 @@ export function isSyntheticUserMessage(raw: string): boolean {
   if (!pres) return true;
   if (parseBackgroundWake(pres)) return true;
   return (
-    /^\[automatic resume\b/i.test(pres) ||
+    /^\[automatic (?:resume|recovery)\b/i.test(pres) ||
     /^antigravity background task handoff\b/i.test(pres) ||
     /^background task\s+`[^`]+`\s+.*finished\b/i.test(pres) ||
     /^continue from where you left off\.?$/i.test(pres) ||
@@ -1390,6 +1391,7 @@ export function buildInboxItem(
     base.missionLastOutputAt !== mission.last_output_at ||
     base.missionStatusMsg !== mission.status_message ||
     base.missionTerminalReason !== mission.terminal_reason ||
+    base.missionRef.recovery?.resume_at !== mission.recovery?.resume_at ||
     base.missionRemoteErr !== mission.remote_job?.error ||
     base.historyLen !== historyLen ||
     base.lastHistoryContent !== lastHistoryContent ||
@@ -1442,7 +1444,7 @@ export function buildInboxItem(
       mission.status === "blocked" ||
       mission.status === "failed" ||
       mission.status === "not_feasible";
-    const canRetry = RETRYABLE_STATUSES.has(mission.status);
+    const canRetry = RETRYABLE_STATUSES.has(mission.status) && !isRecoveryScheduled(mission);
 
     base = {
       id: mission.id,
@@ -1631,7 +1633,7 @@ export function listUnreadInboxCandidates(
     let category: "needs_you" | "ready" | null = null;
     if (hasInteraction) {
       category = "needs_you";
-    } else if (!WORKING_STATUSES.has(status)) {
+    } else if (!WORKING_STATUSES.has(status) && !isRecoveryScheduled(mission)) {
       if (
         status === "blocked" ||
         status === "failed" ||

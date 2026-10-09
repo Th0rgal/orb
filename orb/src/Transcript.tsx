@@ -18,7 +18,7 @@ import { markdownText, MdView } from "./Markdown";
 import { createStore, reconcile } from "solid-js/store";
 import { goalDraft, planObjective } from "./goal";
 
-import { messagePresentation } from "./messagePresentation";
+import { messagePresentation, isAutomaticRecovery } from "./messagePresentation";
 import { computeDiffStats, latestChecklist, parseChecklist, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
 export { buildTranscript, applyStreamEvent } from "./transcriptModel";
@@ -281,6 +281,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
     });
   };
   return (
+    <Show when={isAutomaticRecovery(p.text)} fallback={
     <div ref={bubble} onDblClick={() => { if (!editing()) edit(); }} class={`user ${editing() ? "editing" : ""} ${goal().kind === "goal" ? "goal" : ""} ${plan() !== null ? "plan" : ""} ${p.pending ? "pending" : ""}`}>
       <Show when={thumbnails().length}><div class="message-images"><For each={thumbnails()}>{(image,i)=><MessageImage path={image.path} index={image.reference} onUrl={url=>setImageUrls(prev=>({...prev,[image.path]:url}))} onOpen={()=>setViewing(i())}/>}</For></div></Show>
       <Show when={viewing()!==null}><Lightbox items={thumbnails().map(image=>({src:imageUrls()[image.path]??null,label:`Image #${image.reference}`}))} index={viewing()!} onClose={()=>setViewing(null)}/></Show>
@@ -306,6 +307,10 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
         <Show when={sendError()}><ErrorNotice error={sendError()} /></Show>
       </Show>
     </div>
+    }><details class="background-wake">
+      <summary><Ic.CmdIcon size={12}/><span>Agent resumed automatically</span></summary>
+      <div class="background-wake-body"><p>{p.text}</p></div>
+    </details></Show>
   );
 }
 

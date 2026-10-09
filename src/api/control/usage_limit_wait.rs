@@ -23,6 +23,7 @@ pub(crate) const USAGE_LIMIT_WAIT_REASON: &str = "usage_limit_wait";
 /// Opens every automatic resume prompt, so a second wait in a row reuses the
 /// prompt instead of wrapping it again.
 const RESUME_PROMPT_MARKER: &str = "[Automatic resume after a usage limit]";
+const RECOVERY_PROMPT_MARKER: &str = "[Automatic recovery]";
 
 /// The resume is scheduled this long after the announced reset, so a clock a
 /// few seconds ahead of the provider does not resume into the same limit.
@@ -359,6 +360,9 @@ pub(crate) struct RemoteWait {
     /// Failed attempts to start the pending replay.
     #[serde(default)]
     pub retries: u32,
+    /// Fence duplicate terminal observations, including after a Core restart.
+    #[serde(default)]
+    pub failed_job_id: Option<Uuid>,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -424,6 +428,37 @@ pub(crate) async fn remote_wait(
 ) -> Option<RemoteWait> {
     let _guard = REMOTE_WAITS_LOCK.lock().await;
     read_remote_waits(working_dir).waits.remove(&mission_id)
+}
+
+/// Read the ledger once for a mission-list response, not once per row.
+pub(crate) async fn remote_recoveries(
+    working_dir: &std::path::Path,
+) -> std::collections::HashMap<Uuid, RemoteWait> {
+    let _guard = REMOTE_WAITS_LOCK.lock().await;
+    read_remote_waits(working_dir).waits
+}
+
+pub(crate) fn attach_recovery(value: &mut serde_json::Value, wait: Option<&RemoteWait>) {
+    // A stale ledger entry must never advertise a retry after Stop or Resume.
+    if value["status"] != "interrupted" || value["terminal_reason"] != USAGE_LIMIT_WAIT_REASON {
+        return;
+    }
+    let Some(wait) = wait.filter(|wait| wait.resume_at.is_some()) else {
+        return;
+    };
+    let kind = if wait.limit == "Antigravity response truncated" {
+        "output_limit"
+    } else if wait.limit == "Antigravity background task handoff" {
+        "background"
+    } else if wait.limit.starts_with("Antigravity ") && !wait.limit.ends_with("limit") {
+        "transient"
+    } else {
+        "quota"
+    };
+    value["recovery"] = serde_json::json!({
+        "kind": kind, "reason": wait.limit, "resume_at": wait.resume_at,
+        "attempt": wait.replays + 1, "max_attempts": MAX_REMOTE_REPLAYS,
+    });
 }
 
 /// The waits whose replay is due at `now`.
@@ -505,7 +540,26 @@ pub(crate) fn provider_has_available_account(
 /// Classify a resumable Antigravity remote interruption or transient upstream
 /// error on a mission that already has a persisted native conversation ID.
 pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'static str> {
-    if failure.contains("Antigravity ended without a SUCCESS result") {
+    let lower = failure.to_ascii_lowercase();
+    if account_limits::is_usage_limit_message(failure)
+        || [
+            "unauthenticated",
+            "permission_denied",
+            "invalid_grant",
+            "sign in",
+            "log in",
+            "oauth",
+            "cancelled by",
+            "canceled by",
+        ]
+        .iter()
+        .any(|s| lower.contains(s))
+    {
+        return None;
+    }
+    if lower.contains("previous response was cut off because it exceeded the output token limit") {
+        Some("Antigravity response truncated")
+    } else if failure.contains("Antigravity ended without a SUCCESS result") {
         Some("Antigravity interrupted turn")
     } else if failure.contains("Antigravity ended its headless turn while background task(s)") {
         Some("Antigravity background task handoff")
@@ -515,6 +569,18 @@ pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'stat
         || failure.contains("DEADLINE_EXCEEDED (code 504)")
         || failure.contains("The stream was interrupted")
         || failure.contains("There was a network issue connecting to the server")
+        || [
+            "resource_exhausted",
+            "too many requests",
+            "no route to host",
+            "connection reset by peer",
+            "connection refused",
+            "i/o timeout",
+            "tls handshake timeout",
+            "unexpected eof",
+        ]
+        .iter()
+        .any(|s| lower.contains(s))
     {
         Some("Antigravity transient upstream error")
     } else {
@@ -522,20 +588,24 @@ pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'stat
     }
 }
 
-/// Reset the consecutive replay counter when a replayed remote job made
-/// substantial progress before being interrupted again later.
-pub(crate) async fn reset_remote_replays_after_progress(
-    working_dir: &std::path::Path,
-    mission_id: Uuid,
-) {
-    update_remote_wait(working_dir, mission_id, |previous| {
-        previous.map(|mut wait| {
-            wait.replays = 0;
-            wait.retries = 0;
-            wait
-        })
-    })
-    .await;
+/// Require a sustained run, not a token threshold that a single response can
+/// cross while the provider is still flapping. Never infer progress from the
+/// native result's lifetime-cumulative usage counters.
+pub(crate) fn sustained_recovery_progress(
+    started_at: Option<&str>,
+    now: DateTime<Utc>,
+    output_tokens: u64,
+) -> bool {
+    output_tokens > 1000
+        && started_at
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .is_some_and(|at| now.signed_duration_since(at) >= Duration::minutes(10))
+}
+
+fn recovery_delay_secs(replays: u32, mission_id: Uuid) -> i64 {
+    // Deterministic jitter survives restarts and spreads a fleet-wide outage.
+    let base = (60_i64 * (1_i64 << replays.min(4))).min(600);
+    base + (mission_id.as_u128() % (base as u128 / 5 + 1)) as i64
 }
 
 /// Decide whether a failed remote job waits for a usage limit, and record
@@ -548,16 +618,37 @@ pub(crate) async fn plan_remote(
     mission_id: Uuid,
     success: bool,
     failure: &str,
+    job_id: Uuid,
+    sustained_progress: bool,
 ) -> Option<UsageLimitWait> {
+    let previous = remote_wait(working_dir, mission_id).await;
+    if let Some(wait) = previous
+        .as_ref()
+        .filter(|wait| wait.failed_job_id == Some(job_id))
+    {
+        return wait.resume_at.map(|resume_at| UsageLimitWait {
+            limit: wait.limit.clone(),
+            resume_at,
+            announced: false,
+        });
+    }
     let planned = async {
         if success {
             return None;
         }
         let mission = mission_store.get_mission(mission_id).await.ok()??;
+        if !matches!(
+            mission.status,
+            MissionStatus::Active | MissionStatus::Pending
+        ) {
+            return None;
+        }
         let (provider, _) = accounts_of_backend(&mission.backend)?;
-        let replays = remote_wait(working_dir, mission_id)
-            .await
-            .map_or(0, |wait| wait.replays);
+        let replays = if sustained_progress {
+            0
+        } else {
+            previous.as_ref().map_or(0, |wait| wait.replays)
+        };
         let now = Utc::now();
         if mission.backend == "antigravity"
             && mission
@@ -567,7 +658,7 @@ pub(crate) async fn plan_remote(
             && replays < MAX_REMOTE_REPLAYS
         {
             if let Some(interruption) = antigravity_resumable_interruption(failure) {
-                let delay = (IMMEDIATE_REPLAY_SECS * (1_i64 << replays.min(4))).min(300);
+                let delay = recovery_delay_secs(replays, mission_id);
                 return Some(UsageLimitWait {
                     limit: interruption.to_string(),
                     resume_at: now + Duration::seconds(delay),
@@ -588,11 +679,28 @@ pub(crate) async fn plan_remote(
     }
     .await;
     update_remote_wait(working_dir, mission_id, |previous| {
+        if planned.is_none() && !success && !sustained_progress {
+            if let Some(mut exhausted) = previous
+                .clone()
+                .filter(|wait| wait.replays >= MAX_REMOTE_REPLAYS)
+            {
+                // Keep the exhausted budget while finalization is retried; deleting
+                // it here would let a repeated observation start again at attempt one.
+                exhausted.resume_at = None;
+                exhausted.failed_job_id = Some(job_id);
+                return Some(exhausted);
+            }
+        }
         planned.as_ref().map(|wait| RemoteWait {
             resume_at: Some(wait.resume_at),
             limit: wait.limit.clone(),
-            replays: previous.map_or(0, |previous| previous.replays),
+            replays: if sustained_progress {
+                0
+            } else {
+                previous.map_or(0, |previous| previous.replays)
+            },
             retries: 0,
+            failed_job_id: Some(job_id),
         })
     })
     .await;
@@ -622,11 +730,19 @@ pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> Str
 /// The prompt a remote mission is continued with. Its native session on the
 /// node already holds the message it was handling.
 pub(crate) fn remote_resume_prompt(limit: &str) -> String {
+    if limit == "Antigravity response truncated" {
+        return format!(
+            "{RECOVERY_PROMPT_MARKER} Your previous response exceeded the provider output token limit. \
+             Check existing work and background tasks, then continue from where you stopped. \
+             Keep responses short, write large outputs to workspace files, and split remaining work \
+             into smaller steps. Do not restart completed work or duplicate running tasks."
+        );
+    }
     if limit.starts_with("Antigravity ") && !limit.ends_with("limit") {
         return format!(
-            "{RESUME_PROMPT_MARKER} {limit} stopped your previous turn. Resume your work where \
+            "{RECOVERY_PROMPT_MARKER} {limit} stopped your previous turn. Resume your work where \
              it stopped, and check the state of anything you had started (including any \
-             background tasks or systemd units) before continuing."
+             background tasks or systemd units) before continuing. Do not redo finished work."
         );
     }
     format!(
@@ -1087,6 +1203,7 @@ mod tests {
             limit: "Codex usage limit".to_string(),
             replays,
             retries: 0,
+            failed_job_id: None,
         };
         update_remote_wait(dir.path(), mission_id, |_| Some(record(Some(due_at), 0))).await;
         update_remote_wait(dir.path(), other, |_| {
@@ -1125,9 +1242,17 @@ mod tests {
         let mission = active_mission(&store, "codex").await;
         let failure = "You've hit your usage limit. try again in 4 hours.";
 
-        let wait = plan_remote(dir.path(), &store, mission.id, false, failure)
-            .await
-            .expect("classified as a usage limit");
+        let wait = plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            failure,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .expect("classified as a usage limit");
         assert!(wait.resume_at > Utc::now() + Duration::minutes(235));
         let recorded = remote_wait(dir.path(), mission.id).await.unwrap();
         assert_eq!(recorded.resume_at, Some(wait.resume_at));
@@ -1137,22 +1262,46 @@ mod tests {
         assert!(text.contains("replayed on the node automatically at"));
 
         // Planning again (a retried finalization) keeps a single record.
-        plan_remote(dir.path(), &store, mission.id, false, failure)
-            .await
-            .unwrap();
+        plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            failure,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             remote_wait(dir.path(), mission.id).await.unwrap().replays,
             0
         );
 
         // A later plain failure, or a success, is not a wait and clears it.
-        assert!(plan_remote(dir.path(), &store, mission.id, false, "exit 1")
-            .await
-            .is_none());
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            "exit 1",
+            Uuid::new_v4(),
+            false
+        )
+        .await
+        .is_none());
         assert_eq!(remote_wait(dir.path(), mission.id).await, None);
-        assert!(plan_remote(dir.path(), &store, mission.id, true, failure)
-            .await
-            .is_none());
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            true,
+            failure,
+            Uuid::new_v4(),
+            false
+        )
+        .await
+        .is_none());
     }
 
     #[test]
@@ -1212,6 +1361,7 @@ mod tests {
             limit: "Codex usage limit".to_string(),
             replays: 0,
             retries: 0,
+            failed_job_id: None,
         };
         let still_running = format!(
             "{}: mission still owns job",
@@ -1243,9 +1393,17 @@ mod tests {
         let failure = "Antigravity ended without a SUCCESS result; resume this conversation before retrying work";
 
         // Without a persisted native session ID, automatic replay is refused.
-        assert!(plan_remote(dir.path(), &store, mission.id, false, failure)
-            .await
-            .is_none());
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            failure,
+            Uuid::new_v4(),
+            false
+        )
+        .await
+        .is_none());
 
         store
             .update_mission_session_id(
@@ -1256,16 +1414,187 @@ mod tests {
             )
             .await
             .unwrap();
-        let wait = plan_remote(dir.path(), &store, mission.id, false, failure)
-            .await
-            .expect("resumable Antigravity interruption schedules automatic replay");
+        let wait = plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            failure,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .expect("resumable Antigravity interruption schedules automatic replay");
         assert_eq!(wait.limit, "Antigravity interrupted turn");
-        assert!(wait.resume_at <= Utc::now() + Duration::seconds(35));
+        assert!(wait.resume_at <= Utc::now() + Duration::seconds(73));
         let text = annotate_remote_output("Remote antigravity job failed", &wait);
         assert!(text.contains("Antigravity interrupted turn detected"));
         assert!(text.contains("conversation will be resumed on the node automatically"));
         let prompt = remote_resume_prompt(&wait.limit);
         assert!(prompt.contains("Antigravity interrupted turn stopped your previous turn"));
         assert!(prompt.contains("background tasks or systemd units"));
+    }
+    #[test]
+    fn transient_errors_are_distinct_from_quota_auth_and_operator_stops() {
+        let prompt = remote_resume_prompt("Antigravity response truncated");
+        assert!(prompt.contains("Keep responses short"));
+        assert!(prompt.contains("duplicate running tasks"));
+        let mut value =
+            serde_json::json!({"status":"interrupted","terminal_reason":USAGE_LIMIT_WAIT_REASON});
+        attach_recovery(
+            &mut value,
+            Some(&RemoteWait {
+                resume_at: Some(Utc::now()),
+                limit: "Antigravity response truncated".into(),
+                replays: 0,
+                retries: 0,
+                failed_job_id: None,
+            }),
+        );
+        assert_eq!(value["recovery"]["kind"], "output_limit");
+        for failure in [
+            "Your previous response was cut off because it exceeded the output token limit",
+            "UNAVAILABLE (code 503)",
+            "RESOURCE_EXHAUSTED: too many requests",
+            "read: no route to host",
+            "The stream was interrupted. Please continue the task you were working on.",
+        ] {
+            assert!(
+                antigravity_resumable_interruption(failure).is_some(),
+                "{failure}"
+            );
+        }
+        for failure in [
+            "interrupted",
+            "cancelled",
+            "UNAUTHENTICATED: The stream was interrupted",
+            "PERMISSION_DENIED: UNAVAILABLE (code 503)",
+            "You've hit your usage limit. UNAVAILABLE (code 503)",
+        ] {
+            assert!(
+                antigravity_resumable_interruption(failure).is_none(),
+                "{failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_grows_with_bounded_jitter_and_requires_sustained_progress() {
+        let id = Uuid::nil();
+        assert_eq!(
+            (0..7)
+                .map(|n| recovery_delay_secs(n, id))
+                .collect::<Vec<_>>(),
+            vec![60, 120, 240, 480, 600, 600, 600]
+        );
+        for n in 0..20 {
+            let delay = recovery_delay_secs(n, Uuid::new_v4());
+            assert!((60..=720).contains(&delay));
+        }
+        let now = utc("2026-10-09T12:00:00Z");
+        assert!(!sustained_recovery_progress(
+            Some("2026-10-09T11:59:00Z"),
+            now,
+            1_000_000
+        ));
+        assert!(!sustained_recovery_progress(None, now, 1_000_000));
+        assert!(!sustained_recovery_progress(
+            Some("2026-10-09T11:30:00Z"),
+            now,
+            0
+        ));
+        assert!(sustained_recovery_progress(
+            Some("2026-10-09T11:30:00Z"),
+            now,
+            1500
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_plan_is_fenced_by_job_and_stops_after_the_budget_or_operator_pause() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "antigravity").await;
+        store
+            .update_mission_session_id(mission.id, "native-session", "antigravity", None)
+            .await
+            .unwrap();
+        let error = "The stream was interrupted";
+        let job = Uuid::new_v4();
+        let first = plan_remote(dir.path(), &store, mission.id, false, error, job, false)
+            .await
+            .unwrap();
+        let again = plan_remote(dir.path(), &store, mission.id, false, error, job, true)
+            .await
+            .unwrap();
+        assert_eq!(first, again);
+        update_remote_wait(dir.path(), mission.id, |prior| {
+            prior.map(|mut wait| {
+                wait.replays = 2;
+                wait.resume_at = None;
+                wait
+            })
+        })
+        .await;
+        let next = plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            error,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(next.resume_at > first.resume_at + Duration::seconds(150));
+        let mut value =
+            serde_json::json!({"status":"interrupted","terminal_reason":USAGE_LIMIT_WAIT_REASON});
+        let recorded = remote_wait(dir.path(), mission.id).await.unwrap();
+        attach_recovery(&mut value, Some(&recorded));
+        assert_eq!(value["recovery"]["kind"], "transient");
+        assert_eq!(value["recovery"]["attempt"], 3);
+        let mut stopped =
+            serde_json::json!({"status":"paused","terminal_reason":USAGE_LIMIT_WAIT_REASON});
+        attach_recovery(&mut stopped, Some(&recorded));
+        assert!(stopped.get("recovery").is_none());
+        update_remote_wait(dir.path(), mission.id, |prior| {
+            prior.map(|mut wait| {
+                wait.replays = MAX_REMOTE_REPLAYS;
+                wait
+            })
+        })
+        .await;
+        let exhausted_job = Uuid::new_v4();
+        for _ in 0..2 {
+            assert!(plan_remote(
+                dir.path(),
+                &store,
+                mission.id,
+                false,
+                error,
+                exhausted_job,
+                false
+            )
+            .await
+            .is_none());
+            let exhausted = remote_wait(dir.path(), mission.id).await.unwrap();
+            assert_eq!(exhausted.replays, MAX_REMOTE_REPLAYS);
+            assert!(exhausted.resume_at.is_none());
+        }
+        store
+            .update_mission_status(mission.id, MissionStatus::Paused)
+            .await
+            .unwrap();
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            error,
+            Uuid::new_v4(),
+            true
+        )
+        .await
+        .is_none());
     }
 }

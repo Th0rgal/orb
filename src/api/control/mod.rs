@@ -7097,6 +7097,7 @@ pub async fn list_missions(
     let continuation_summaries = continuations::summaries(&control.mission_store)
         .await
         .map_err(internal_error)?;
+    let recoveries = usage_limit_wait::remote_recoveries(&state.config.working_dir).await;
     let mut values: Vec<serde_json::Value> = missions
         .into_iter()
         .map(|mission| {
@@ -7132,6 +7133,7 @@ pub async fn list_missions(
         .map_err(internal_error)?;
     for value in &mut values {
         if let Some(id) = value["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            usage_limit_wait::attach_recovery(value, recoveries.get(&id));
             if let Some(parent) = callback_parents.get(&id) {
                 value["callback_parent_mission_id"] = serde_json::json!(parent);
             }
@@ -8168,6 +8170,8 @@ pub async fn get_mission(
                 active_run.as_ref(),
                 wait_started_at.as_deref(),
             );
+            let recovery = usage_limit_wait::remote_wait(&state.config.working_dir, id).await;
+            usage_limit_wait::attach_recovery(&mut value, recovery.as_ref());
             if let Some(parent) = callback_parents.get(&id) {
                 value["callback_parent_mission_id"] = serde_json::json!(parent);
             }
@@ -14549,7 +14553,7 @@ async fn finalize_remote_mission(
         mission_id,
         status,
         summary: Some(if waiting {
-            format!("Remote node '{node_id}' job stopped on a usage limit; waiting to replay it")
+            format!("Remote node '{node_id}' paused; automatic recovery is scheduled")
         } else {
             format!("Remote node '{node_id}' finished")
         }),
@@ -15580,7 +15584,7 @@ async fn replay_remote_mission_after_usage_limit(
             tracing::warn!(%mission_id, %message, "usage-limit replay impossible; failing the mission");
             usage_limit_wait::update_remote_wait(&working_dir, mission_id, |_| None).await;
             let summary = format!(
-                "The {} has reset, but the mission could not be continued on its node: {message}",
+                "Automatic recovery from {} could not continue on its node: {message}",
                 wait.limit
             );
             let note = AgentEvent::Error {
@@ -16172,16 +16176,13 @@ async fn poll_remote_job(
                     if should_finalize_remote_job(inactive_status)
                         && matches!(status_reason, "remote_node_job" | "native_goal_stopped")
                     {
-                        if grok
-                            .as_ref()
-                            .and_then(remote_grok::NativeGrokObserver::usage)
-                            .is_some_and(|usage| usage.output_tokens > 1000)
-                        {
-                            usage_limit_wait::reset_remote_replays_after_progress(
-                                ledger_dir, mission_id,
-                            )
-                            .await;
-                        }
+                        let sustained_progress = usage_limit_wait::sustained_recovery_progress(
+                            status.started_at.as_deref(),
+                            chrono::Utc::now(),
+                            grok.as_ref()
+                                .and_then(remote_grok::NativeGrokObserver::usage)
+                                .map_or(0, |usage| usage.output_tokens),
+                        );
                         let failure = cli_error.as_deref().unwrap_or(content.as_str());
                         if let Some(wait) = usage_limit_wait::plan_remote(
                             ledger_dir,
@@ -16189,6 +16190,8 @@ async fn poll_remote_job(
                             mission_id,
                             success,
                             failure,
+                            job_id,
+                            sustained_progress,
                         )
                         .await
                         {

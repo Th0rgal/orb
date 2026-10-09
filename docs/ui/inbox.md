@@ -119,3 +119,5 @@ also do not make a read parent unread or urgent by themselves. Settings → Inbo
 Include autonomous agents opts into those updates, with the same scope applied to
 the list, unread count and background digest prefetch. Existing settings without
 the preference default to off. Child details remain available from their parent.
+
+Server-scheduled provider recovery stays in Working with a neutral `Recovering` badge. It is not ready for review and does not expose an extra Retry action while a retry is already scheduled. A live permission question still takes priority.

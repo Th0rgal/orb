@@ -2720,8 +2720,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   };
   // Waiting messages go first: they are what the user asked for next. With none, the agent continues its work.
   const resume = () => {
-    if (queuedLocalMessages(p.id).length) void sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
-    else void sendMsg(resumePrompt, [], []);
+    if (queuedLocalMessages(p.id).length) return sendQueuedNow(p.id).catch(e => setSendError(e instanceof Error ? e.message : String(e)));
+    return sendMsg(resumePrompt, [], []);
   };
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
   let scroller: HTMLDivElement | undefined;
@@ -3153,6 +3153,17 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       .then(() => refresh());
   };
 
+  const [recoveryPending, setRecoveryPending] = createSignal(false);
+  const actOnRecovery = async (action: "resume" | "cancel") => {
+    if (recoveryPending()) return;
+    setRecoveryPending(true);
+    try {
+      if (action === "resume") await resume();
+      else { await cancelMission(p.id); await refresh(); }
+    } catch (error) { setSendError(launchError(error)); }
+    finally { setRecoveryPending(false); }
+  };
+
   const sendRemoteImmediate = async (
     ordered: { id: string; content: string; attached?: boolean }[],
     liveInjected?: { id: string; content: string; attached?: boolean }[],
@@ -3284,7 +3295,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           >
 
             <Show when={mission() && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
-              <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} />
+              <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
             <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">

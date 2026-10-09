@@ -6,3 +6,8 @@ export function messagePresentation(content: string): { text: string; attached: 
   const match = trailer.exec(content);
   return match ? { text: content.slice(0, match.index), attached: true } : { text: content, attached: false };
 }
+
+/** Exact coordinator markers; a user's normal request to resume stays a user turn. */
+export function isAutomaticRecovery(content: string): boolean {
+  return /^\[Automatic (?:recovery|resume after a usage limit)\]/i.test(content.trimStart());
+}

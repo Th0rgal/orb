@@ -491,7 +491,11 @@ impl Stream {
                 }
             }
             self.success = body["status"] == "SUCCESS";
-            if !self.success {
+            if self.success {
+                // A native retry may succeed after an earlier ERROR result.
+                self.error = None;
+                self.error_marker = None;
+            } else {
                 self.error = Some(
                     body["error"]
                         .as_str()

@@ -321,6 +321,19 @@ impl GrokStream {
         }
     }
 
+    fn requires_error_cancellation(&self) -> bool {
+        // A recoverable result can precede the CLI's own next attempt. Killing
+        // the process here used to turn response-length errors into cancellation.
+        self.auth_required
+            || self.antigravity.as_ref().is_some_and(|native| {
+                self.error.as_deref().is_some_and(|error| {
+                    !native.is_retryable()
+                        && super::usage_limit_wait::antigravity_resumable_interruption(error)
+                            .is_none()
+                })
+            })
+    }
+
     fn feed_line(&mut self, raw: &str, updates: &mut Vec<StreamUpdate>) {
         let line = raw.trim_end_matches('\r');
         if line.trim().is_empty() {
@@ -990,12 +1003,9 @@ impl NativeGrokObserver {
         self.log_offset = chunk.next_offset;
         let updates = self.stream.feed(&chunk.data);
         self.broadcast(updates).await;
-        if (self.stream.auth_required
-            || (self.stream.antigravity.is_some() && self.stream.error.is_some()))
-            && !self.auth_cancel_requested
-        {
-            // The CLI is blocked on a browser callback that never comes;
-            // cancel instead of burning the job timeout.
+        if self.stream.requires_error_cancellation() && !self.auth_cancel_requested {
+            // Stop interactive login or a non-retryable native failure instead
+            // of burning the job timeout. Recoverable results keep the CLI alive.
             if let Err(error) = client.cancel_job(node, shared_token, self.job_id).await {
                 tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, ?error, "remote grok job cancellation after interactive login prompt failed; poll loop will retry");
             } else {
@@ -2278,6 +2288,31 @@ mod tests {
         resumed.feed("{\"event\":\"init\",\"conversation_id\":\"wrong\"}\n");
         assert!(resumed.error.is_some());
         assert_ne!(resumed.session_id.as_deref(), Some("wrong"));
+    }
+
+    #[test]
+    fn antigravity_recoverable_result_does_not_cancel_native_retries() {
+        let mut stream = GrokStream {
+            antigravity: Some(Default::default()),
+            ..Default::default()
+        };
+        stream.feed("{\"event\":\"init\",\"conversation_id\":\"same-session\"}\n");
+        for error in [
+            "Your previous response was cut off because it exceeded the output token limit",
+            "UNAVAILABLE (code 503)",
+            "The stream was interrupted",
+        ] {
+            stream.feed(&format!("{}\n", serde_json::json!({"event":"result","result":{"conversation_id":"same-session","status":"ERROR","error":error}})));
+            assert!(!stream.requires_error_cancellation(), "{error}");
+        }
+        stream.feed("{\"event\":\"result\",\"result\":{\"conversation_id\":\"same-session\",\"status\":\"SUCCESS\"}}\n");
+        assert!(stream.error.is_none());
+        assert!(stream.ended);
+        stream.auth_required = true;
+        assert!(stream.requires_error_cancellation());
+        stream.auth_required = false;
+        stream.feed("{\"event\":\"init\",\"conversation_id\":\"wrong-session\"}\n");
+        assert!(stream.requires_error_cancellation());
     }
 
     #[tokio::test]

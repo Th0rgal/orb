@@ -83,3 +83,33 @@ it("describes a Core restart as an interruption, not a failed native task", () =
   setMission({ ...mission(), status: "completed", terminal_reason: "client_runner" });
   expect(container.querySelector(".error-notice")).toBeNull();
 });
+
+it('shows a scheduled recovery as waiting, offers actions, and clears it on Stop or Resume', async () => {
+ const {vi}=await import('vitest');
+ const resume=vi.fn(), cancel=vi.fn();
+ const waiting={id:'retry',status:'interrupted',terminal_reason:'usage_limit_wait',recovery:{kind:'transient',reason:'Antigravity transient upstream error',resume_at:'2026-10-09T19:00:00Z',attempt:3,max_attempts:12}} as Mission;
+ const [mission,setMission]=createSignal(waiting);
+ const [pending,setPending]=createSignal(false);
+ const {container,getByRole}=render(()=><><LaunchStatus destination="old-agent" mission={mission()} activity onResume={resume} onCancelRecovery={cancel} recoveryPending={pending()}/><MissionFailure mission={mission()}/></>);
+ expect(container.textContent).toContain('Recovery scheduled');
+ expect(container.textContent).toContain('attempt 3/12');
+ expect(container.querySelector('.error-notice')).toBeNull();
+ getByRole('button',{name:'Resume now'}).click();expect(resume).toHaveBeenCalledTimes(1);
+ getByRole('button',{name:'Cancel recovery'}).click();expect(cancel).toHaveBeenCalledTimes(1);
+ setPending(true);
+ getByRole('button',{name:'Resume now'}).click();
+ getByRole('button',{name:'Cancel recovery'}).click();
+ expect(resume).toHaveBeenCalledTimes(1);expect(cancel).toHaveBeenCalledTimes(1);
+ setMission({...waiting,status:'paused'});
+ expect(container.textContent).not.toContain('Recovery scheduled');
+ setMission({...waiting,status:'active',remote_job:{node_state:'running'}} as Mission);
+ expect(container.querySelector('.launch-status')).toBeNull();
+});
+
+it('explains a provider response length limit without calling it a quota or connection failure', () => {
+ const mission={id:'length',status:'interrupted',terminal_reason:'usage_limit_wait',recovery:{kind:'output_limit',resume_at:'2026-10-09T19:00:00Z',attempt:1,max_attempts:12}} as Mission;
+ const phase=missionPhase(mission,false);
+ expect(phase.label).toBe('Recovery scheduled');
+ expect(phase.detail).toContain('shorter responses');
+ expect(phase.detail).not.toContain('connection');
+});

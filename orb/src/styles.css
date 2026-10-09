@@ -3248,3 +3248,7 @@ select.orb-select-native:disabled { cursor: default; }
 
 
 /* Geometry, stacking and surface tokens belong to the overlay primitives. */
+
+.launch-status .recovery-actions { margin-top: 8px; gap: 12px; }
+.recovery-actions button { padding: 0; border: 0; background: none; color: var(--fg-2); font-size: 12px; cursor: pointer; }
+.recovery-actions button:hover { color: var(--fg); }
