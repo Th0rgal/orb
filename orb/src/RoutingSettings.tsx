@@ -1,5 +1,6 @@
 import { Select } from "./Select";
 import { RoutingPicker } from "./RoutingPicker";
+import { ProxyApiKeys } from "./ProxyApiKeys";
 import {
   For,
   Index,
@@ -44,7 +45,7 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     connectionVersion();
     return getApiUrl();
   });
-  const [tab, setTab] = createSignal<"chains" | "health" | "events">("chains");
+  const [tab, setTab] = createSignal<"chains" | "health" | "events" | "keys">("chains");
   const [catalogLoading, setCatalogLoading] = createSignal(false);
   const [copiedId, setCopiedId] = createSignal("");
   let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -176,10 +177,10 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     if (connected) untrack(() => void refresh(true));
   });
   const poll = setInterval(() => {
-    if (document.visibilityState !== "hidden" && tab() !== "chains") void refresh();
+    if (document.visibilityState !== "hidden" && (tab() === "health" || tab() === "events")) void refresh();
   }, 10000);
   const onVisibility = () => {
-    if (document.visibilityState !== "hidden" && tab() !== "chains") void refresh();
+    if (document.visibilityState !== "hidden" && (tab() === "health" || tab() === "events")) void refresh();
   };
   const beforeUnload = (e: BeforeUnloadEvent) => {
     if (dirty()) {
@@ -197,11 +198,11 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     setDirty(false);
     setLeaveRequest(null);
   });
-  function selectTab(next: "chains" | "health" | "events") {
+  function selectTab(next: "chains" | "health" | "events" | "keys") {
     if (!confirmLeaveRouting(() => selectTab(next))) return;
     setEditing(null);
     setTab(next);
-    void refresh(true);
+    if (next !== "keys") void refresh(true);
   }
   const [discovery, setDiscovery] = createSignal<R.ModelDiscovery>();
   async function loadCatalog(force = false) {
@@ -576,6 +577,7 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
       <div class="s-inner routing-page">
         <div class="routing-heading">
           <h2>Routing</h2>
+          <Show when={tab() !== "keys"}>
           <button
             class="s-btn"
             disabled={loading() || !isConnected()}
@@ -583,6 +585,7 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
           >
             {loading() ? "Refreshing…" : "Refresh"}
           </button>
+          </Show>
         </div>
         <p class="s-lead">
           Choose the order models are tried when a provider is unavailable.
@@ -603,7 +606,9 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
             <button aria-current={tab() === "chains" ? "page" : undefined} onClick={() => selectTab("chains")}>Fallback Chains</button>
             <button aria-current={tab() === "health" ? "page" : undefined} onClick={() => selectTab("health")}>Provider Health</button>
             <button aria-current={tab() === "events" ? "page" : undefined} onClick={() => selectTab("events")}>Recent Fallback Events</button>
+            <button aria-current={tab() === "keys" ? "page" : undefined} onClick={() => selectTab("keys")}>Proxy API Keys</button>
           </nav>
+          <Show when={tab() === "keys"}><ProxyApiKeys /></Show>
           <For each={Object.entries(errors())}>
             {([key, error]) => <ErrorNotice error={`${key}: ${error}`} />}
           </For>
@@ -894,7 +899,9 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
             </Show>
           </section>
           </Show>
-          <p class="routing-updated" role="status">{loading() ? "Refreshing…" : updated() ? `Updated ${time(updated()!)}` : "Loading routing…"}</p>
+          <Show when={tab() !== "keys"}>
+            <p class="routing-updated" role="status">{loading() ? "Refreshing…" : updated() ? `Updated ${time(updated()!)}` : "Loading routing…"}</p>
+          </Show>
         </Show>
         <Show when={leaveRequest()}>
           {(callback) => (
