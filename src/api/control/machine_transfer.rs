@@ -511,9 +511,20 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
     let mut rows = vec![
         json!({"machine":{"kind":"core"},"label":"Core","available":true,"harnesses":harnesses}),
     ];
+    let vibe_auth = crate::backend::vibe::core_auth_configured(&state.config.working_dir).await;
     let answers = listed_node_capabilities(state).await;
     for (node, result) in state.config.remote_nodes.nodes.iter().zip(answers) {
-        rows.push(match result {Ok(v)=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":v["harnesses"]}),Err((_,e))=>json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":e})});
+        rows.push(match result {
+            Ok(mut capabilities) => {
+                if !vibe_auth {
+                    if let Some(harnesses) = capabilities["harnesses"].as_array_mut() {
+                        harnesses.retain(|harness| harness.as_str() != Some("vibe"));
+                    }
+                }
+                json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":state.config.remote_nodes.enabled && !state.fleet.is_cordoned(&node.id),"reason":if state.fleet.is_cordoned(&node.id){Some("Machine is cordoned")}else{None},"harnesses":capabilities["harnesses"]})
+            }
+            Err((_, error)) => json!({"machine":{"kind":"node","id":node.id},"label":node.id,"available":false,"reason":error}),
+        });
     }
     rows
 }
@@ -628,6 +639,14 @@ async fn validate_destination(
     backend: &str,
     model: Option<&str>,
 ) -> Result<(), Error> {
+    if backend == "vibe"
+        && !matches!(dest, Machine::Client { .. })
+        && !crate::backend::vibe::core_auth_configured(&state.config.working_dir).await
+    {
+        return Err(conflict(
+            "Connect an enabled Mistral provider in Core before transferring a Vibe mission",
+        ));
+    }
     match dest {
         Machine::Node { id } => {
             if state.fleet.is_cordoned(id) {

@@ -21,9 +21,11 @@ describe('native plan interactions',()=>{
   for(const harness of ['codex','claudecode','opencode','grok','gemini','chatgpt']) {
    expect(composerModes(harness).some(m=>m.id==='plan')).toBe(false);
   }
-  for (const harness of ['codex', 'claudecode']) {
+  for (const harness of ['codex', 'claudecode', 'vibe']) {
    expect(composerModes(harness,true).some(m=>m.id==='plan')).toBe(true);
   }
+  expect(composerModes('vibe',true).map(mode=>mode.id)).toEqual(['plan']);
+  expect(composerModes('vibe',false)).toEqual([]);
   expect(modePrompt('plan','Build it')).toBe('/plan Build it');
  });
  it('recovers a pending question and sends its native request identity only once',async()=>{

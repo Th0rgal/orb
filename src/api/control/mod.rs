@@ -12082,6 +12082,11 @@ pub(super) async fn create_mission_inner(
         ),
         None => None,
     };
+    if let Some(plan) = remote_plan.as_ref() {
+        validate_remote_vibe_auth(&state.config.working_dir, plan)
+            .await
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    }
     if let Some(RemoteHarnessPlan::Codex {
         effort, fast_mode, ..
     }) = remote_plan.as_mut()
@@ -13079,6 +13084,21 @@ impl RemoteHarnessPlan {
     }
 }
 
+async fn validate_remote_vibe_auth(
+    working_dir: &std::path::Path,
+    plan: &RemoteHarnessPlan,
+) -> Result<(), String> {
+    if matches!(plan, RemoteHarnessPlan::Vibe { .. })
+        && !crate::backend::vibe::core_auth_configured(working_dir).await
+    {
+        return Err(
+            "Connect an enabled Mistral provider in Core before starting remote Mistral Vibe"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Decide the node execution for a remote launch. An explicit raw command
 /// wins (compatibility with scripted callers). Otherwise the selected
 /// backend must be one nodes can run and the prompt must be present; a
@@ -13527,6 +13547,37 @@ pub(crate) fn remote_launch_key_name(mission_id: Uuid) -> String {
 #[cfg(test)]
 mod vibe_plan_tests {
     use super::*;
+    #[tokio::test]
+    async fn remote_vibe_requires_current_core_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = plan_remote_harness(None, "vibe", None, Some("inspect")).unwrap();
+        assert!(validate_remote_vibe_auth(directory.path(), &plan)
+            .await
+            .is_err());
+        let path = directory.path().join(crate::util::AI_PROVIDERS_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut provider = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::Mistral,
+            "Mistral".into(),
+        );
+        provider.api_key = Some("fixture-key".into());
+        std::fs::write(&path, serde_json::to_vec(&[&provider]).unwrap()).unwrap();
+        assert!(validate_remote_vibe_auth(directory.path(), &plan)
+            .await
+            .is_ok());
+        provider.enabled = false;
+        std::fs::write(&path, serde_json::to_vec(&[&provider]).unwrap()).unwrap();
+        assert!(validate_remote_vibe_auth(directory.path(), &plan)
+            .await
+            .is_err());
+        let raw = RemoteHarnessPlan::Raw {
+            command: "true".into(),
+        };
+        assert!(validate_remote_vibe_auth(directory.path(), &raw)
+            .await
+            .is_ok());
+    }
+
     #[test]
     fn vibe_model_keeps_its_proxy_provider_prefix() {
         assert_eq!(
@@ -14627,6 +14678,7 @@ async fn submit_leased_remote_job(
     job_id: Uuid,
     plan: &RemoteHarnessPlan,
 ) -> Result<Mission, String> {
+    validate_remote_vibe_auth(&state.config.working_dir, plan).await?;
     let mut resolved_plan = plan.clone();
     if let RemoteHarnessPlan::Vibe { plan, prompt, .. } = &mut resolved_plan {
         *plan = *plan || crate::vibe::plan_mode(mission.agent.as_deref(), prompt);

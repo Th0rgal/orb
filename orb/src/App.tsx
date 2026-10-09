@@ -554,7 +554,7 @@ export function Composer(p: {
     if (p.uploadTarget === "local") void refreshLocalAgents(false);
     else if (p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
   });
-  const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : p.uploadTarget === "core" && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : (p.uploadTarget === "core" || (!!p.uploadTarget && backend() === "vibe")) && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
     if (mode() || voiceActive() || slashOff()) return null;
     const q = slashQuery(text());
