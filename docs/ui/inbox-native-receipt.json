@@ -1,32 +1,18 @@
 {
-  "created_at": "2026-10-09T09:43:48.306412+00:00",
-  "base_commit": "7eecdf6353526721e019cd51e55be7395e951a2d",
+  "created_at": "2026-10-09T11:14:36.793115+00:00",
+  "base_commit": "4e1c483d455137b63869b8fe73dad7caf400b7a9",
   "branch": "feat/orb-overlay-system",
   "source_path": "/Users/thomas/work/paloma/sandboxed_sh-overlay-system",
-  "frontend_source_sha256": "f34e16339bb44ec6181004fda08ee6fec7c01b030144f3639201040b6f4dc6a4",
-  "dist_index_sha256": "b4bbf3b7504e8e2e7c511a9304dc3b2127ca1f1a92a5c4c0e414723c03808444",
-  "raw_build_sha256": "326acf17077afa002d39261eb2435d517b04a9cbacf1ce2d87750a1e7407893a",
+  "frontend_source_sha256": "3889e8128f776a63727d0c7deec2f27463a2cb4efc837ce84029aaf818e6cd1a",
+  "dist_index_sha256": "933d1a97a1877e0c4c8414ba49816608ef0a46c44e3e050aae277b5608d6dd46",
+  "raw_build_sha256": "638abccd33d96ccffd9047ba7917774d37ee8dd7934928945e1baf4ee5e3a20b",
   "copy_verified_before_signing": true,
   "installed_app": "/Applications/Orb Overlays.app",
   "bundle_identifier": "md.thomas.orb.overlays",
-  "signed_executable_sha256": "f9426e7acfe7580fbfcb7aa3accbc81deaa2cb3f55eb1f7ff54ff3bd12c60462",
+  "signed_executable_sha256": "a3c61e65d53a8c5aee8cd4d4fa7492810d72ce8bcca459200c9447178686cea5",
   "sidecar_sha256": "d0608e79b347f296f27be9130f8a97f6b8aae9b2f8232b3939c7e72579cba03b",
   "main_app_unchanged_sha256": "bcfa350c02f64c6f5093923777e76d370f3fc9d628cfa0c6f44c736cb7b64a14",
   "signature": "ad-hoc; codesign --verify --deep --strict passed",
   "backup_path": "/tmp/Orb Overlays-before-inbox.app",
-  "previous_candidate_backup": "/tmp/Orb Overlays-before-inbox-refinement.app",
-  "native_verification": {
-    "verified_at": "2026-10-09T09:44:55.769505+00:00",
-    "foreground_pid": 65720,
-    "checks": [
-      "Compact Inbox rendered with live data",
-      "Down from filter focused the row title",
-      "Space opened the collapsed-context preview",
-      "R focused the reply composer (visible caret)",
-      "Escape returned focus to the row title",
-      "No messages sent or drafts edited; preview left closed"
-    ],
-    "evidence_limit": "One live actionable row; cross-row movement verified in Chromium and WebKit fixtures.",
-    "preserved_context_worker_pid": 42889
-  }
+  "previous_candidate_backup": "/tmp/Orb Overlays-before-square-rows.app"
 }

@@ -7,6 +7,10 @@ and reuses the surface, control radius, focus and theme tokens from the
 and a quiet filled background for the current project. Status colors describe
 agent state; routine actions remain neutral.
 
+Row hover, selection and preview backgrounds have square corners so their
+edges meet the list separators continuously. Individual controls retain the
+shared control radius.
+
 Keep the collapsed list to the title and result. The goal, original request and
 reply shortcuts belong in the native `Reply context` disclosure inside Peek.
 Avoid duplicate total counts, goal badges, permanent shortcut labels and nested

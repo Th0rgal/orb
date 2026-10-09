@@ -63,7 +63,7 @@
 .inbox-clear-btn { margin-left: auto; }
 .inbox-list { display: flex; flex-direction: column; border-top: 1px solid var(--stroke-soft); background: transparent; }
 .inbox-row {
-  position: relative; padding: 10px 12px; background: transparent; border-radius: 4px;
+  position: relative; padding: 10px 12px; background: transparent; border-radius: 0;
   border-bottom: 1px solid var(--stroke-soft);
   transition: background-color var(--t) var(--ease);
 }

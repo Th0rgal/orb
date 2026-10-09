@@ -10,11 +10,21 @@ keeps the list to title and result; and puts optional request/goal context behin
 a native disclosure. Rows now have roving Tab entry, actual focus movement with
 arrows/J/K and Home/End, and focus restoration after closing Peek.
 
+The follow-up removes the row corner radius so hover, focus and inline-preview
+surfaces meet the straight list separators. Control radii remain unchanged.
+TypeScript/Vite and the Inbox browser suite were rerun for this CSS change;
+the unit results below are from the preceding refinement.
+
 ## Automated checks
 
 - TypeScript (`tsc --noEmit`) and Vite production build: passed.
-- Inbox Playwright suite, Chromium and WebKit: 16 passed, 2 intentionally skipped
-  opt-in production tests. Covers triage, preview, archive/undo, reply, scrolling,
+- Inbox Playwright suite for the square-row follow-up, Chromium and WebKit:
+  15 passed, 1 failed, 2 intentionally skipped opt-in production tests. The
+  Chromium triage test timed out waiting for the sidebar count to reach 4
+  (observed 3; its final error snapshot showed 4). Two isolated traced repeats
+  passed. No application or test logic was changed in response; the transient
+  failure remains unexplained. The preceding refinement passed all 16 tests.
+  Coverage includes triage, preview, archive/undo, reply, scrolling,
   keyboard filters, project filters, row focus, native disclosure keys, draft restoration, long content,
   light/dark themes and 390px layouts.
 - Targeted Vitest (Inbox model, mission cache and composer drafts): 26 passed.
@@ -68,3 +78,9 @@ The preceding installed build also verified the project filter and draft
 restoration after Escape/reopening, then cleared the verification text. The
 latest app was left on Unread with no open preview, and the existing background
 context worker was retained.
+
+The square-row follow-up was installed in the same candidate app and visibly
+checked on live Inbox rows. Down from the filter focused the title, and the
+selected row's outer edges aligned with its straight separators. The refreshed
+bundle passed deep/strict signature verification; its hashes and separate
+backup are recorded in the receipt. No messages or triage mutations were sent.
