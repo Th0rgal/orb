@@ -989,3 +989,19 @@ Core prevents a second live side session for the same parent, even when
 another device has lost its local session pointer. Retrying the same dispatch
 key recovers its existing mission; a new key receives a conflict identifying
 the existing side mission rather than silently accepting another job.
+
+### Native job memory containment
+
+On Linux with systemd, each job scope sets `MemoryMax` and `MemoryHigh`
+(90% of the ceiling), with swap disabled for the job. By default the ceiling
+is 80% of host RAM divided between `SANDBOXED_NODE_CAPACITY` foreground slots
+and the additional side-question slot. This reserves memory for the node API,
+OS, and other host services; native subagents share their parent job budget.
+Set `SANDBOXED_NODE_JOB_MEMORY_BYTES` to a positive integer byte count to
+override the per-job ceiling on a dedicated build node. Size overrides against
+all simultaneously admitted jobs and existing host services. An invalid
+override rejects launch rather than running without a limit.
+
+A memory ceiling protects the host; it does not guarantee that an oversized
+benchmark finishes. Reconcile saved artifacts before resuming after OOM and
+reduce or offload the offending workload.

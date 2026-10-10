@@ -722,6 +722,54 @@ fn select_user_systemd_runtime_dir(
     }))
 }
 
+/// Reserve host memory and budget the foreground slots plus the side-question lane.
+/// Operators may increase the per-job ceiling for a node dedicated to large builds.
+#[cfg(target_os = "linux")]
+fn job_memory_limit() -> std::io::Result<u64> {
+    if let Ok(value) = std::env::var("SANDBOXED_NODE_JOB_MEMORY_BYTES") {
+        return value
+            .parse::<u64>()
+            .ok()
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "SANDBOXED_NODE_JOB_MEMORY_BYTES must be a positive integer",
+                )
+            });
+    }
+    let info = std::fs::read_to_string("/proc/meminfo")?;
+    let total = info
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("MemTotal:")
+                .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+        })
+        .ok_or_else(|| std::io::Error::other("MemTotal unavailable"))?
+        * 1024;
+    let capacity = std::env::var("SANDBOXED_NODE_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2);
+    Ok(default_job_memory_limit(total, capacity))
+}
+
+#[cfg(target_os = "linux")]
+fn default_job_memory_limit(total: u64, capacity: u64) -> u64 {
+    total / 5 * 4 / capacity.saturating_add(1)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn memory_budget_reserves_host_and_side_question_capacity() {
+    let total = 64 * 1024_u64.pow(3);
+    let limit = default_job_memory_limit(total, 2);
+    assert!(limit * 3 <= total / 5 * 4);
+    assert!(limit > 16 * 1024_u64.pow(3));
+    assert!(default_job_memory_limit(total, 4) < limit);
+}
+
 #[cfg(target_os = "linux")]
 fn systemd_scope_command(
     cmd: tokio::process::Command,
@@ -747,12 +795,16 @@ fn systemd_scope_command(
             );
         }
     }
+    let memory_limit = job_memory_limit()?;
     scoped
         .arg("--scope")
         .arg("--quiet")
         .arg("--collect")
         .arg(format!("--unit={}", scope.unit))
         .arg("--property=KillMode=control-group")
+        .arg(format!("--property=MemoryMax={}", memory_limit))
+        .arg(format!("--property=MemoryHigh={}", memory_limit / 10 * 9))
+        .arg("--property=MemorySwapMax=0")
         .arg("--");
     if environment == CommandEnvironment::Clear {
         // With --scope, systemd-run executes the payload itself, so the
@@ -1509,6 +1561,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(argv.iter().any(|arg| arg == "--user"));
+        assert!(argv
+            .iter()
+            .any(|arg| arg.starts_with("--property=MemoryMax=")));
+        assert!(argv
+            .iter()
+            .any(|arg| arg.starts_with("--property=MemoryHigh=")));
+        assert!(argv.iter().any(|arg| arg == "--property=MemorySwapMax=0"));
         assert!(argv.iter().any(|arg| arg == "/bin/sh"));
         assert!(argv.iter().any(|arg| arg == "printf ok"));
         assert!(!argv.iter().any(|arg| arg.contains("not-in-argv")));
