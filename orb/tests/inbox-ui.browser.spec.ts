@@ -209,6 +209,20 @@ test("Space returns from the sidebar to the selected Inbox row without opening i
   await expect(row.locator(".inbox-peek-drawer")).toBeVisible();
 });
 
+test("Space closes the narrow-screen sidebar before returning to Inbox", async ({ page }) => {
+  await openInbox(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const title = page.locator('[data-inbox-id="done"] .inbox-row-title-btn');
+  await title.focus();
+  await page.keyboard.press("Meta+5");
+  await expect(page.locator("#orb-sidebar")).toBeVisible();
+  await expect(page.locator("[data-project-navigation] button.row-main").first()).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.locator("#orb-sidebar")).toBeHidden();
+  await expect(title).toBeFocused();
+  await expect(page.locator(".inbox-peek-drawer")).toHaveCount(0);
+});
+
 test("Space from the sidebar enters an empty Inbox and leaves other destinations usable", async ({ page }) => {
   await openInbox(page, "dark", true);
   await page.keyboard.press("Meta+b");

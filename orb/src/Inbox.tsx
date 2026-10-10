@@ -303,6 +303,7 @@ export function InboxPage(p: {
   onOpenMission: (id: string) => void;
   onOpenSettings: () => void;
   onOpenInboxSettings?: () => void;
+  onFocusContent?: () => void;
   onNewAgent: () => void;
   onDeleteMission?: (id: string) => void;
   onRefresh: () => Promise<void> | void;
@@ -1009,6 +1010,7 @@ export function InboxPage(p: {
       if (e.key === " " && !e.shiftKey && target?.closest("#orb-sidebar")) {
         e.preventDefault();
         if (!e.repeat) {
+          p.onFocusContent?.();
           if (currentItem) focusRow(currentItem.id);
           else (listContainerRef?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? listContainerRef)?.focus();
         }

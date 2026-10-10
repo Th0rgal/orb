@@ -2287,6 +2287,7 @@ export default function App() {
         <Switch>
             <Match when={selected() === "inbox"}>
               <InboxPage
+                onFocusContent={() => { if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false); }}
                 onDeleteMission={setDeleteMissionRequest}
                 missions={inboxMissions()}
                 projects={liveProjects()}
