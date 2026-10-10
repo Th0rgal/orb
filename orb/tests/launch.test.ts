@@ -165,7 +165,7 @@ it('optimistically seeds multi-turn mission.history while awaiting the event log
 it("preserves the remote job while reconnecting and exposes actionable failures", () => {
  const reconnecting = mission({status:"active",remote_job:{job_id:"same-job",node_id:"ashur",phase:"reconnecting",node_state:"running"}});
  expect(missionPhase(reconnecting,true)).toMatchObject({label:"Reconnecting",moving:true});
- for(const [terminal_reason,label] of [["remote_auth_required","Reconnect required"],["remote_provider_policy","Blocked by provider"],["remote_configuration","Setup required"]]) {
+ for(const [terminal_reason,label] of [["remote_auth_required","Reconnect required"],["remote_grok_auth_required","Reconnect required"],["remote_provider_policy","Blocked by provider"],["remote_configuration","Setup required"]]) {
   expect(missionPhase(mission({status:"failed",terminal_reason}),false)).toMatchObject({label,failed:true,moving:false});
  }
  const retry = mission({status:"interrupted",terminal_reason:"usage_limit_wait",recovery:{kind:"transient",reason:"Inference connection interrupted",resume_at:"2026-10-10T12:01:00Z",attempt:1,max_attempts:12}});

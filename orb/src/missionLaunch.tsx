@@ -223,6 +223,7 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
   if (["failed","interrupted","cancelled","canceled","not_feasible"].includes(status)) {
     const reason = mission?.terminal_reason ?? mission?.remote_job?.terminal_reason ?? mission?.execution?.terminal_reason;
     const classified: Record<string, {label: string; detail: string}> = {
+      remote_grok_auth_required: {label: "Reconnect required", detail: "Reconnect the provider account or repair the node's Core credentials, then resume."},
       remote_auth_required: {label: "Reconnect required", detail: "Reconnect the provider account or repair the node's Core credentials, then resume."},
       remote_provider_policy: {label: "Blocked by provider", detail: "The provider blocked this response. Review the request before resuming."},
       remote_configuration: {label: "Setup required", detail: "Check the node's CLI, selected model, and workspace before resuming."},

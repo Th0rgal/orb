@@ -78,6 +78,9 @@ pub(crate) fn classify(raw: &str) -> Failure {
         FailureKind::Authentication
     } else if [
         "no such file or directory",
+        "cli is not installed",
+        "cli not installed",
+        "command not found",
         "argument list too long",
         "unknown model",
         "model is not available",

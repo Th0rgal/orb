@@ -1365,8 +1365,20 @@ impl NativeGrokObserver {
                 self.stream.error = Some("Vibe identity was not durably persisted".into());
             }
         }
-        let failure =
-            super::remote_failure::classify(self.stream.error.as_deref().unwrap_or_default());
+        // Before the native protocol starts, the CLI can only report setup
+        // failures through stderr and the node's terminal process status.
+        let startup_evidence = if !succeeded && self.stream.json_events == 0 {
+            format!(
+                "{}\n{}",
+                status.error.as_deref().unwrap_or_default(),
+                self.stream.diagnostics_text()
+            )
+        } else {
+            String::new()
+        };
+        let failure = super::remote_failure::classify(
+            self.stream.error.as_deref().unwrap_or(&startup_evidence),
+        );
         let success = succeeded
             && self
                 .stream
@@ -2528,6 +2540,40 @@ mod tests {
         assert!(!verdict.success);
         assert_eq!(verdict.status_reason, "remote_job_cancelled");
         assert!(verdict.cli_error.unwrap().contains("startup_watchdog"));
+    }
+
+    #[tokio::test]
+    async fn missing_cli_before_native_protocol_is_a_setup_failure() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "startup")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(Some("test"), None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job)
+            .await
+            .unwrap();
+        observer
+            .stream
+            .feed("OpenCode CLI is not installed on this node\n");
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id":job,"mission_id":mission.id,"state":"failed","exit_code":127,
+            "error":"command exited with Some(127)","created_at":"2026-10-10T00:00:00Z"
+        }))
+        .unwrap();
+        let verdict = observer.verdict(&status, "node").await;
+        assert!(!verdict.success);
+        assert_eq!(verdict.status_reason, "remote_configuration");
     }
 
     #[test]
