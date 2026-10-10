@@ -1182,8 +1182,17 @@ pub(crate) fn cyber_entry_supported(
             ProviderType::OpenAI,
             entry.base_url.as_deref(),
         )
-        .as_deref()
-            == Some("https://api.openai.com/v1/responses")
+        .and_then(|endpoint| url::Url::parse(&endpoint).ok())
+        .is_some_and(|endpoint| {
+            endpoint.scheme() == "https"
+                && endpoint.host_str() == Some("api.openai.com")
+                && endpoint.port_or_known_default() == Some(443)
+                && endpoint.path() == "/v1/responses"
+                && endpoint.username().is_empty()
+                && endpoint.password().is_none()
+                && endpoint.query().is_none()
+                && endpoint.fragment().is_none()
+        })
         && entry.model_id == model.rsplit('/').next().unwrap_or(model)
         && (entry
             .api_key
@@ -9522,6 +9531,8 @@ mod cyber_admission_tests {
         entry.base_url = Some("https://untrusted.example/v1".into());
         assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", false));
         entry.base_url = Some("https://api.openai.com/v1/".into());
+        assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        entry.base_url = Some("https://API.OPENAI.COM:443/v1".into());
         assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
         entry.base_url = Some("https://api.openai.com/v1/responses".into());
         assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
