@@ -1,7 +1,7 @@
 import { writeInboxState, type SharedInboxState } from "./inboxState";
 import { sideQuestionKey } from "./sideQuestionStorage";
 import { createSignal } from "solid-js";
-import { connectionVersion, isConnected, markMissionOpened, type Mission } from "./api";
+import { connectionVersion, getApiUrl, isConnected, markMissionOpened, type Mission } from "./api";
 
 const [unreadVersion, setUnreadVersion] = createSignal(0);
 export { unreadVersion };
@@ -56,7 +56,21 @@ function ensureSeenCache(): Record<string, number> {
   cachedKey = key;
   seenCache = {};
   try {
-    const raw = localStorage.getItem(key);
+    let raw = localStorage.getItem(key);
+    if (raw === null) {
+      const legacyKey = `orb.missionSeenV2:${getApiUrl() || "default"}`;
+      const ownerKey = `${legacyKey}:migrated-owner`;
+      const owner = localStorage.getItem(ownerKey);
+      if (owner === null || owner === key) {
+        raw = localStorage.getItem(legacyKey);
+        if (raw !== null) {
+          // Claim the endpoint-only legacy cache once, so it cannot be copied
+          // into another user's account on the same machine.
+          localStorage.setItem(key, raw);
+          localStorage.setItem(ownerKey, key);
+        }
+      }
+    }
     if (raw) {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       if (parsed && typeof parsed === "object") {

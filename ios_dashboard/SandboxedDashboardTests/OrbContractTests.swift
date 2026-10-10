@@ -2,6 +2,18 @@ import XCTest
 @testable import sandboxed_sh
 
 final class OrbContractTests: XCTestCase {
+    func testInboxAccountSurvivesTokenRenewalAndSeparatesUsers() {
+        func token(_ subject: String, _ expiry: Int) -> String {
+            let data = Data("{\"sub\":\"\(subject)\",\"exp\":\(expiry)}".utf8)
+            return "header." + data.base64EncodedString().replacingOccurrences(of: "=", with: "") + ".signature"
+        }
+        let a = OrbInboxAccount.scope(endpoint: "https://core.test/", token: token("alice", 1))
+        XCTAssertEqual(a, OrbInboxAccount.scope(endpoint: "https://core.test", token: token("alice", 2)))
+        XCTAssertNotEqual(a, OrbInboxAccount.scope(endpoint: "https://core.test", token: token("bob", 2)))
+        XCTAssertNotEqual(a, OrbInboxAccount.scope(endpoint: "https://other.test", token: token("alice", 2)))
+        XCTAssertNotEqual(OrbInboxAccount.scope(endpoint: "https://core.test", token: "opaque-a"), OrbInboxAccount.scope(endpoint: "https://core.test", token: "opaque-b"))
+    }
+
     @MainActor func testManualUnreadReceiptIsVisibleImmediatelyWithoutNetwork() {
         let id = UUID().uuidString
         let row = OrbRow(.object(["id": .string(id), "status": .string("completed"), "updated_at": .string("2026-10-09T10:00:00Z")]))

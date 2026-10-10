@@ -96,7 +96,7 @@ object OrbSharedInboxState {
     private val outbox = mutableMapOf<String, Any>()
     private val seen = mutableMapOf<String, Long>()
     var applying = false
-    private fun account() = OrbCore.shared.baseURL + ":" + OrbCore.shared.token
+    private fun account() = inboxAccountScope(OrbCore.shared.baseURL, OrbCore.shared.token)
     fun write(path: String, body: Any) {
         if (applying) return
         val core = OrbCore.shared
@@ -234,7 +234,7 @@ object OrbInboxDigestStore {
         }
     }
 
-    private fun accountScope(): String = java.security.MessageDigest.getInstance("SHA-256").digest("${OrbCore.shared.baseURL}:${OrbCore.shared.token ?: ""}".toByteArray()).joinToString("") { "%02x".format(it) }
+    private fun accountScope(): String = java.security.MessageDigest.getInstance("SHA-256").digest(inboxAccountScope(OrbCore.shared.baseURL, OrbCore.shared.token).toByteArray()).joinToString("") { "%02x".format(it) }
     private fun cacheKey(missionId: String, updatedAt: String, model: String): String =
         "${accountScope()}|$missionId|$updatedAt|$model"
 
@@ -262,18 +262,19 @@ object OrbInboxDigestStore {
         if (lastFail != null && System.currentTimeMillis() - lastFail < 45_000L) return
 
         val endpoint = core.baseURL
-        val account = core.token
+        val account = inboxAccountScope(core.baseURL, core.token)
 
         inFlight.add(key)
         revision += 1
         core.scope.launch {
             enqueue(priority) {
                 try {
-                    if (core.baseURL != endpoint || core.token != account) return@enqueue
+                    if (core.baseURL != endpoint || inboxAccountScope(core.baseURL, core.token) != account) return@enqueue
                     val answer = fetchShared(core, mission.id, model)
-                    if (core.baseURL != endpoint || core.token != account) return@enqueue
+                    if (core.baseURL != endpoint || inboxAccountScope(core.baseURL, core.token) != account) return@enqueue
                     val parsed = parseDigest(answer, updated, model)
                     if (parsed != null) {
+                        failedAtMs.remove(key)
                         cache[key] = parsed
                         revision += 1
                         val persisted = OrbJSON.dict(OrbJSON.parse(answer))?.toMutableMap() ?: mutableMapOf()
@@ -2375,7 +2376,7 @@ private fun OrbInboxCard(
             Text("AI summary · ${digest.model}", color = OrbStyle.textMuted, fontSize = 11.sp)
             val current = digest.updatedAt == item.updatedAt && runCatching { Instant.parse(digest.sourceUpdatedAt).toEpochMilli() + 2000 >= Instant.parse(item.updatedAt).toEpochMilli() }.getOrDefault(false)
             if (!current) Text("Summary is out of date", color = OrbStyle.textMuted, fontSize = 11.sp)
-            if (isPeeked) {
+            if (isPeeked && current) {
                 Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(OrbStyle.controlRadius)).background(OrbStyle.elevated).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     listOf("Context" to digest.context, "Scope" to digest.contextDetails, "Unresolved" to digest.unresolved, "To decide" to digest.decision).filter { it.second.isNotBlank() }.forEach { (label, value) ->
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

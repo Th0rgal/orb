@@ -427,6 +427,7 @@ export function requestInboxDigest(
         if (connectionVersion() !== requestVersion) return;
         const parsed = await fetchSharedDigest(mission.id, cfg.model, updatedMs);
         if (parsed?.schemaVersion === 7) {
+          failedKeys.delete(scopeKey);
           storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
         } else {
           failedKeys.set(scopeKey, Date.now());

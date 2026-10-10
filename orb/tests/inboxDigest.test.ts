@@ -154,4 +154,21 @@ describe("structured inbox digests", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("clears the unavailable state when a later retry succeeds", async () => {
+    const { requestInboxDigest, getCurrentInboxDigest, inboxSummaryState } = await import("../src/inboxDigest");
+    const updatedMs = Date.parse("2026-10-09T10:05:00Z");
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 })).mockResolvedValue(new Response(JSON.stringify({ ...JSON.parse(response()), sourceRevision: "fresh", sourceUpdatedAt: new Date(updatedMs).toISOString() })));
+    vi.stubGlobal("fetch", fetchMock);
+    const mission: Mission = { id: "retry-success", status: "completed", created_at: "2026-10-09", updated_at: new Date(updatedMs).toISOString() };
+    try {
+      requestInboxDigest(mission, undefined, updatedMs);
+      await vi.waitFor(() => expect(inboxSummaryState(mission.id, updatedMs)).toBe("Summary unavailable"));
+      now += 61_000;
+      requestInboxDigest(mission, undefined, updatedMs);
+      await vi.waitFor(() => expect(getCurrentInboxDigest(mission.id, updatedMs)).toBeDefined());
+      expect(inboxSummaryState(mission.id, updatedMs)).toBeUndefined();
+    } finally { vi.restoreAllMocks(); }
+  });
+
 });

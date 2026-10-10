@@ -258,8 +258,8 @@ private actor OrbDiskWriter {
 @MainActor
 enum OrbDisk {
     private static var urlCache: [String: URL] = [:]
-    static func url(_ key: String) -> URL {
-        let scope = OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "") + ":" + key
+    static func url(_ key: String, accountScope: String? = nil) -> URL {
+        let scope = (accountScope ?? (OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? ""))) + ":" + key
         if let cached = urlCache[scope] { return cached }
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -269,8 +269,8 @@ enum OrbDisk {
         urlCache[scope] = result
         return result
     }
-    static func read<T: Decodable>(_ key: String, as type: T.Type) -> T? {
-        guard let data = try? Data(contentsOf: url(key)) else { return nil }
+    static func read<T: Decodable>(_ key: String, as type: T.Type, accountScope: String? = nil) -> T? {
+        guard let data = try? Data(contentsOf: url(key, accountScope: accountScope)) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
     static func readAsync<T: Decodable & Sendable>(_ key: String, as type: T.Type) async -> T? {
@@ -283,8 +283,8 @@ enum OrbDisk {
     static func save<T: Encodable>(_ value: T, key: String) throws {
         try JSONEncoder().encode(value).write(to: url(key), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
-    static func saveAsync<T: Encodable & Sendable>(_ value: T, key: String) {
-        let target = url(key)
+    static func saveAsync<T: Encodable & Sendable>(_ value: T, key: String, accountScope: String? = nil) {
+        let target = url(key, accountScope: accountScope)
         Task.detached(priority: .utility) {
             guard let data = try? JSONEncoder().encode(value) else { return }
             try? await OrbDiskWriter.shared.write(data, to: target)

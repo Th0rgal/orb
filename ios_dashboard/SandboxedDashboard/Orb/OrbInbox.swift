@@ -1,6 +1,25 @@
 import SwiftUI
 import CryptoKit
 
+enum OrbInboxAccount {
+    // Cache identity only; Core still authenticates every request.
+    static func scope(endpoint: String, token: String?) -> String {
+        let token = token ?? ""
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        var identity = token.isEmpty ? "anonymous" : "opaque:" + SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+        if parts.count == 3 {
+            var encoded = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+            if let data = Data(base64Encoded: encoded), let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let subject = (claims["sub"] as? String) ?? (claims["user_id"] as? String), !subject.isEmpty {
+                identity = "subject:" + subject
+            }
+        }
+        return endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + ":" + identity
+    }
+    @MainActor static var current: String { scope(endpoint: OrbCore.shared.endpoint, token: APIService.shared.authToken) }
+}
+
 @MainActor
 final class OrbSharedInboxState {
     static let shared = OrbSharedInboxState()
@@ -11,7 +30,7 @@ final class OrbSharedInboxState {
     private var outbox: [String: OrbJSON] = [:]
     private(set) var seen: [String: Double] = [:]
     var applying = false
-    private var account: String { OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "") }
+    private var account: String { OrbInboxAccount.current }
     func write(_ path: String, _ body: OrbJSON) {
         if applying { return }
         let expected = account
@@ -188,18 +207,31 @@ final class OrbInboxDigestStore {
     private var activeCount = 0
     private var queue: [(priority: Int, work: () async -> Void)] = []
 
-    private init() {
-        if let stored = OrbDisk.read(diskKey, as: [String: OrbInboxDigest].self) {
-            cache = stored
+    private var loadedScope = ""
+    private init() {}
+    private func ensureScope() {
+        let account = OrbInboxAccount.current
+        guard loadedScope != account else { return }
+        loadedScope = account
+        let stored = OrbDisk.read(diskKey, as: [String: OrbInboxDigest].self, accountScope: account)
+            ?? OrbDisk.read(diskKey, as: [String: OrbInboxDigest].self) ?? [:]
+        let legacy = SHA256.hash(data: Data((OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "")).utf8)).map { String(format: "%02x", $0) }.joined() + "|"
+        let current = scope + "|"
+        cache = [:]
+        for (key, digest) in stored {
+            if key.hasPrefix(current) { cache[key] = digest }
+            else if key.hasPrefix(legacy) { cache[current + String(key.dropFirst(legacy.count))] = digest }
         }
+        OrbDisk.saveAsync(cache, key: diskKey, accountScope: account)
     }
 
-    private var scope: String { SHA256.hash(data: Data((OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "")).utf8)).map { String(format: "%02x", $0) }.joined() }
+    private var scope: String { SHA256.hash(data: Data(OrbInboxAccount.current.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func cacheKey(missionID: String, updatedAt: String, model: String) -> String {
         "\(scope)|\(missionID)|\(updatedAt)|\(model)"
     }
 
     func get(row: OrbRow) -> OrbInboxDigest? {
+        ensureScope()
         _ = version
         let settings = OrbInboxSettings.shared
         guard settings.aiSummary else { return nil }
@@ -210,6 +242,7 @@ final class OrbInboxDigestStore {
     }
 
     func request(row: OrbRow, events: [StoredEvent], priority: Int = 10) {
+        ensureScope()
         let settings = OrbInboxSettings.shared
         guard settings.aiSummary else { return }
         if ["active", "running", "starting", "pending", "queued", "resuming", "waiting_background"].contains(row.state) {
@@ -221,7 +254,7 @@ final class OrbInboxDigestStore {
         if let failDate = failedAt[key], Date().timeIntervalSince(failDate) < 45 { return }
 
         let endpoint = OrbCore.shared.endpoint
-        let account = APIService.shared.authToken
+        let account = OrbInboxAccount.current
 
         inFlight.insert(key)
         version += 1
@@ -229,13 +262,14 @@ final class OrbInboxDigestStore {
             guard let self else { return }
             defer { self.inFlight.remove(key); self.version += 1 }
             do {
-                guard OrbCore.shared.endpoint == endpoint, APIService.shared.authToken == account else { return }
+                guard OrbCore.shared.endpoint == endpoint, OrbInboxAccount.current == account else { return }
                 let answer = try await Self.fetchShared(missionID: row.id, model: model)
-                guard OrbCore.shared.endpoint == endpoint, APIService.shared.authToken == account else { return }
+                guard OrbCore.shared.endpoint == endpoint, OrbInboxAccount.current == account else { return }
                 if let digest = Self.parseDigest(answer, updatedAt: row.updatedAt, model: model) {
+                    self.failedAt.removeValue(forKey: key)
                     self.cache[key] = digest
                     self.version += 1
-                    OrbDisk.saveAsync(self.cache, key: self.diskKey)
+                    OrbDisk.saveAsync(self.cache, key: self.diskKey, accountScope: account)
                 } else {
                     self.failedAt[key] = Date()
                 }
@@ -1833,7 +1867,7 @@ struct OrbInboxView: View {
                 Text("AI summary · \(digest.model)").font(.caption2).foregroundStyle(OrbStyle.textMuted)
                 let current = digest.updatedAt == item.row.updatedAt && (inboxTimestamp(digest.sourceUpdatedAt ?? "") ?? 0) + 2 >= (inboxTimestamp(item.row.updatedAt) ?? .infinity)
                 if !current { Text("Summary is out of date").font(.caption2).foregroundStyle(OrbStyle.textMuted) }
-                if isPeeked {
+                if isPeeked && current {
                     VStack(alignment: .leading, spacing: 10) {
                         summarySection("Context", digest.context)
                         summarySection("Scope", digest.contextDetails)
