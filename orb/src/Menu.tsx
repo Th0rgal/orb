@@ -15,6 +15,10 @@ export function Menu(p: {
   let root!: HTMLDivElement;
   return <Popover {...p} ref={el => {root = el; p.ref?.(el);}} role="menu" class={`menu ${p.class ?? ""}`} width={p.width ?? 220}
     initialFocus={() => p.focus === false ? root : root.querySelector<HTMLElement>('button:not(:disabled)') ?? root}
+    onPointerMove={e => {
+      const item = (e.target as HTMLElement).closest<HTMLButtonElement>("button.menu-item");
+      if (item && !item.disabled && item.getAttribute("aria-disabled") !== "true" && item.closest('[role="menu"]') === root && item !== document.activeElement) item.focus({preventScroll: true});
+    }}
     onKeyDown={e => {
       if (e.defaultPrevented || e.isComposing || (e.target as HTMLElement).closest('[role="menu"]') !== root) return;
       if (e.key === "ArrowLeft") {e.preventDefault(); e.stopPropagation(); (p.onEscape ?? p.onClose)(); return;}

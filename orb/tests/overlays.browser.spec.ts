@@ -208,12 +208,14 @@ for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard n
  await expect(item).toBeFocused();
  await expect(item).toHaveCSS('outline-style','none');
  await expect(item).toHaveCSS('box-shadow','none');
- expect(await item.evaluate(el=>getComputedStyle(el).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+ await expect(item).not.toHaveCSS('background-color','rgba(0, 0, 0, 0)');
+ await item.hover();
  await page.keyboard.press('End');
  const machine=page.getByRole('button',{name:/^Use this machine/,pressed:true});
  await expect(machine).toBeFocused();
  await expect(machine).toHaveCSS('outline-style','none');
  await expect(machine).toHaveCSS('box-shadow','none');
+ await expect(item).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
  const program=page.getByRole('menuitemradio',{name:'Default program',exact:true});
  await expect(program).toHaveAttribute('aria-checked','true');
  await expect(program).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
@@ -224,6 +226,9 @@ for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard n
  await expect(program).toHaveCSS('outline-style','none');
  await expect(program).toHaveCSS('box-shadow','none');
  await expect(program).not.toHaveCSS('background-color','rgba(0, 0, 0, 0)');
+ await item.hover();
+ await expect(item).toBeFocused();
+ await expect(program).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
  await page.keyboard.press('Escape');
  await expect(page.getByRole('button',{name:'Actions',exact:true})).toBeFocused();
  await page.getByRole('button',{name:'Reasoning effort: low',exact:true}).click();
