@@ -12480,6 +12480,22 @@ async fn cyber_admission_checks_cooling_cli_owned_account_fallback() {
 #[tokio::test]
 async fn cyber_node_transfer_refuses_incompatible_route_without_affecting_core_or_client() {
     let h = Harness::new().await;
+    let now = chrono::Utc::now();
+    h.state
+        .chain_store
+        .upsert(crate::provider_health::ModelChain {
+            id: "gpt-6.1-sol".into(),
+            name: "Incompatible transfer fallback".into(),
+            entries: vec![crate::provider_health::ChainEntry {
+                provider_id: "xai".into(),
+                model_id: "grok-4.6".into(),
+            }],
+            is_default: false,
+            strip_thinking: false,
+            created_at: now,
+            updated_at: now,
+        })
+        .await;
     let id = Uuid::new_v4();
     let saved = cyber::write(&h.state.config.working_dir, id, cyber::Mode::Standard).unwrap();
     for destination in [
