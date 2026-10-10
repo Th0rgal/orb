@@ -32,6 +32,21 @@ pub const LOG_TAIL_MAX_BYTES: u64 = 64 * 1024;
 /// Grace period between SIGTERM and SIGKILL when stopping a job.
 const KILL_GRACE: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "linux")]
+static SCOPE_OOM_POLICY_SUPPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+fn scope_oom_policy_supported(version: &str) -> bool {
+    version
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u32>()
+        .is_ok_and(|major| major >= 253)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum SystemdScopeMode {
@@ -794,7 +809,13 @@ fn contain_command(
                 user_runtime_dir,
             };
             return Ok((
-                systemd_scope_command(cmd, environment, &scope, limit_secs)?,
+                systemd_scope_command(
+                    cmd,
+                    environment,
+                    &scope,
+                    limit_secs,
+                    SCOPE_OOM_POLICY_SUPPORTED.load(Ordering::Acquire),
+                )?,
                 Some(scope),
             ));
         }
@@ -913,6 +934,7 @@ fn systemd_scope_command(
     environment: CommandEnvironment,
     scope: &SystemdScope,
     limit_secs: Option<u64>,
+    oom_policy_supported: bool,
 ) -> std::io::Result<tokio::process::Command> {
     let command = cmd.as_std();
     let program = command.get_program().to_os_string();
@@ -941,8 +963,10 @@ fn systemd_scope_command(
         .arg("--property=KillMode=control-group")
         .arg(format!("--property=MemoryMax={}", memory_limit))
         .arg(format!("--property=MemoryHigh={}", memory_limit / 10 * 9))
-        .arg("--property=MemorySwapMax=0")
-        .arg("--property=OOMPolicy=continue");
+        .arg("--property=MemorySwapMax=0");
+    if oom_policy_supported {
+        scoped.arg("--property=OOMPolicy=continue");
+    }
     if let Some(seconds) = limit_secs {
         scoped.arg(format!("--property=RuntimeMaxSec={}", seconds.max(1)));
     }
@@ -1203,17 +1227,32 @@ pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
         let (mode, user_runtime_dir) = systemd_scope_mode().ok_or_else(|| {
             anyhow::anyhow!("cannot reconcile previous job scopes without the systemd manager")
         })?;
-        let mut command = tokio::process::Command::new("systemctl");
-        command.kill_on_drop(true);
-        if mode == SystemdScopeMode::User {
-            command.arg("--user");
-            if let Some(runtime) = &user_runtime_dir {
-                command.env("XDG_RUNTIME_DIR", runtime).env(
-                    "DBUS_SESSION_BUS_ADDRESS",
-                    format!("unix:path={}/bus", runtime.display()),
-                );
+        let manager_command = || {
+            let mut command = tokio::process::Command::new("systemctl");
+            command.kill_on_drop(true);
+            if mode == SystemdScopeMode::User {
+                command.arg("--user");
+                if let Some(runtime) = &user_runtime_dir {
+                    command.env("XDG_RUNTIME_DIR", runtime).env(
+                        "DBUS_SESSION_BUS_ADDRESS",
+                        format!("unix:path={}/bus", runtime.display()),
+                    );
+                }
             }
-        }
+            command
+        };
+        let mut version = manager_command();
+        version.args(["show", "--property=Version", "--value"]);
+        let version = tokio::time::timeout(KILL_GRACE, version.output()).await??;
+        anyhow::ensure!(
+            version.status.success(),
+            "cannot determine systemd manager capabilities"
+        );
+        SCOPE_OOM_POLICY_SUPPORTED.store(
+            scope_oom_policy_supported(&String::from_utf8_lossy(&version.stdout)),
+            Ordering::Release,
+        );
+        let mut command = manager_command();
         command.args([
             "list-units",
             "--all",
@@ -1830,6 +1869,16 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn scope_oom_policy_tracks_manager_version() {
+        assert!(!scope_oom_policy_supported("249.11-0ubuntu3"));
+        assert!(!scope_oom_policy_supported("252.39-1~deb12"));
+        assert!(scope_oom_policy_supported("253"));
+        assert!(scope_oom_policy_supported("255.4-1ubuntu8.16"));
+        assert!(!scope_oom_policy_supported("unknown"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn systemd_scope_wrapper_keeps_environment_out_of_argv() {
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.args(["-c", "printf ok"])
@@ -1845,6 +1894,7 @@ mod tests {
                 user_runtime_dir: Some(PathBuf::from("/run/user/1234")),
             },
             Some(30),
+            true,
         )
         .unwrap();
         let argv = scoped
@@ -1898,6 +1948,7 @@ mod tests {
                 user_runtime_dir: None,
             },
             None,
+            false,
         )
         .unwrap();
         let argv = scoped
@@ -1905,6 +1956,9 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        assert!(!argv
+            .iter()
+            .any(|arg| arg == "--property=OOMPolicy=continue"));
 
         let payload = argv
             .iter()
