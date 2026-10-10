@@ -1177,6 +1177,10 @@ pub(crate) fn cyber_entry_supported(
     cli_owned: bool,
 ) -> bool {
     entry.provider_id == "openai"
+        && entry
+            .base_url
+            .as_deref()
+            .is_none_or(|url| url.trim_end_matches('/') == "https://api.openai.com/v1")
         && entry.model_id == model.rsplit('/').next().unwrap_or(model)
         && (entry
             .api_key
@@ -9512,6 +9516,11 @@ mod cyber_admission_tests {
         assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
         entry.api_key = Some("test-key".into());
         assert!(cyber_entry_supported(&entry, "openai/gpt-6.1-sol", true));
+        entry.base_url = Some("https://untrusted.example/v1".into());
+        assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        entry.base_url = Some("https://api.openai.com/v1/".into());
+        assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        entry.base_url = None;
         assert!(!cyber_entry_supported(&entry, "builtin/smart", false));
         entry.provider_id = "xai".into();
         assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", false));
