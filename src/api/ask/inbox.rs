@@ -145,10 +145,9 @@ fn snapshot(m: &Mission, events: &[StoredEvent]) -> (String, Vec<(String, Option
         .rev()
         .take(3)
         .collect();
-    let history_matches_request = last_user.is_none()
-        || last_history_user
-            .is_some_and(|(_, h)| last_user.is_some_and(|e| h.content.trim() == e.content.trim()));
-    if answers.is_empty() && history_matches_request {
+    // History has no durable event-turn identity. Never attach its response to
+    // an event-selected request, even when a repeated prompt has identical text.
+    if answers.is_empty() && last_user.is_none() {
         if let Some(h) = m
             .history
             .iter()
@@ -274,6 +273,44 @@ fn flight(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     lock
 }
 
+fn conversation_turn_is_syncing(mission: &Mission, events: &[StoredEvent]) -> bool {
+    let Some(user) = events
+        .iter()
+        .rfind(|e| e.event_type == "user_message" && !synthetic(&e.content))
+    else {
+        return false;
+    };
+    let Some(history_user) = mission
+        .history
+        .iter()
+        .rfind(|h| h.role == "user" && !synthetic(&h.content))
+    else {
+        return false;
+    };
+    if history_user.content.trim() != user.content.trim() {
+        return true;
+    }
+    let history_answer = mission
+        .history
+        .iter()
+        .rev()
+        .take_while(|h| h.role != "user")
+        .find(|h| h.role == "assistant")
+        .map(|h| h.content.trim());
+    let event_answer = events
+        .iter()
+        .rev()
+        .find(|e| {
+            e.sequence > user.sequence
+                && matches!(
+                    e.event_type.as_str(),
+                    "assistant_message" | "assistant_message_canonical" | "error"
+                )
+        })
+        .map(|e| e.content.trim());
+    history_answer != event_answer
+}
+
 async fn recorded_snapshot(
     store: &Arc<dyn MissionStore>,
     id: Uuid,
@@ -315,6 +352,12 @@ async fn recorded_snapshot(
             "Could not load conversation".into(),
         )
     })?;
+    if conversation_turn_is_syncing(&mission, &events) {
+        return Err((
+            StatusCode::CONFLICT,
+            "Conversation turn is still syncing".into(),
+        ));
+    }
     let (text, evidence) = snapshot(&mission, &events);
     Ok((mission, text, evidence))
 }
@@ -434,15 +477,30 @@ pub struct Preferences {
     ai_summary: bool,
     include_autonomous: bool,
     model: String,
-    #[serde(default, skip_serializing)]
-    mutation_at: Option<i64>,
+    #[serde(skip_serializing)]
+    client_id: String,
+    #[serde(skip_serializing)]
+    mutation_seq: i64,
+    #[serde(skip_serializing)]
+    expected_version: i64,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Seen {
     stamp: i64,
-    #[serde(default)]
-    mutation_at: Option<i64>,
+    client_id: String,
+    mutation_seq: i64,
+    expected_version: i64,
+}
+
+fn validate_mutation(client: &str, sequence: i64, expected: i64) -> Result<(), Error> {
+    if Uuid::parse_str(client).is_err() || sequence <= 0 || expected < 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid Inbox mutation identity".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn get_state(
@@ -471,6 +529,7 @@ pub async fn save_preferences(
     Extension(user): Extension<AuthUser>,
     Json(mut prefs): Json<Preferences>,
 ) -> Result<StatusCode, Error> {
+    validate_mutation(&prefs.client_id, prefs.mutation_seq, prefs.expected_version)?;
     prefs.model = prefs.model.trim().to_string();
     if prefs.model.is_empty() || prefs.model.len() > 240 {
         return Err((StatusCode::BAD_REQUEST, "Invalid summary model".into()));
@@ -486,9 +545,9 @@ pub async fn save_preferences(
             &user.id.to_string(),
             "preferences",
             &json!(prefs),
-            prefs
-                .mutation_at
-                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+            prefs.expected_version,
+            &prefs.client_id,
+            prefs.mutation_seq,
         )
         .await
         .map_err(|_| {
@@ -505,6 +564,7 @@ pub async fn save_seen(
     Path(id): Path<Uuid>,
     Json(seen): Json<Seen>,
 ) -> Result<StatusCode, Error> {
+    validate_mutation(&seen.client_id, seen.mutation_seq, seen.expected_version)?;
     if seen.stamp == 0 || seen.stamp.unsigned_abs() > 8_640_000_000_000_000 {
         return Err((StatusCode::BAD_REQUEST, "Invalid read receipt".into()));
     }
@@ -534,8 +594,9 @@ pub async fn save_seen(
             &user.id.to_string(),
             &format!("seen:{id}"),
             &json!(seen.stamp),
-            seen.mutation_at
-                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+            seen.expected_version,
+            &seen.client_id,
+            seen.mutation_seq,
         )
         .await
         .map_err(|_| {
@@ -635,6 +696,56 @@ mod tests {
         let unanswered = snapshot(&mission, &[ahead]).0;
         assert!(unanswered.contains("New event request still unanswered."));
         assert!(!unanswered.contains("Fresh history response"));
+        let repeated = StoredEvent {
+            id: 3,
+            mission_id: mission.id,
+            sequence: 3,
+            event_type: "user_message".into(),
+            timestamp: "2026-10-09T10:03:00Z".into(),
+            event_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            content: "Now check the Android behavior.".into(),
+            metadata: json!({}),
+        };
+        assert!(!snapshot(&mission, &[repeated.clone()])
+            .0
+            .contains("Fresh history response"));
+        mission.history.push(MissionHistoryEntry {
+            role: "user".into(),
+            content: repeated.content.clone(),
+        });
+        let older_answer = StoredEvent {
+            event_type: "assistant_message".into(),
+            sequence: 4,
+            content: "Fresh history response to the Android request.".into(),
+            ..repeated.clone()
+        };
+        assert!(conversation_turn_is_syncing(
+            &mission,
+            &[repeated.clone(), older_answer.clone()]
+        ));
+        mission.history.push(MissionHistoryEntry {
+            role: "assistant".into(),
+            content: "The repeated request now has a newer answer.".into(),
+        });
+        assert!(conversation_turn_is_syncing(
+            &mission,
+            &[repeated.clone(), older_answer.clone()]
+        ));
+        let synced_answer = StoredEvent {
+            content: "The repeated request now has a newer answer.".into(),
+            ..older_answer
+        };
+        assert!(!conversation_turn_is_syncing(
+            &mission,
+            &[repeated.clone(), synced_answer]
+        ));
+        let next_repeat = StoredEvent {
+            sequence: 5,
+            ..repeated
+        };
+        assert!(conversation_turn_is_syncing(&mission, &[next_repeat]));
     }
     #[test]
     fn rejects_invented_sources_and_bounds_reply_context() {
@@ -654,7 +765,11 @@ mod tests {
             .unwrap();
         for key in ["preferences", "seen:mission"] {
             store
-                .save_inbox_state_versioned("alice", key, &json!("newer choice"), 200)
+                .save_inbox_state_versioned("alice", key, &json!("device A"), 0, "A", 1)
+                .await
+                .unwrap();
+            store
+                .save_inbox_state_versioned("alice", key, &json!("device B"), 1, "B", 1)
                 .await
                 .unwrap();
         }
@@ -662,20 +777,36 @@ mod tests {
         let store = super::super::store::AskStore::open(path).await.unwrap();
         for key in ["preferences", "seen:mission"] {
             store
-                .save_inbox_state_versioned("alice", key, &json!("older offline choice"), 100)
+                .save_inbox_state_versioned("alice", key, &json!("old offline A"), 1, "A", 2)
                 .await
                 .unwrap();
-            assert_eq!(
-                store.inbox_state("alice").await.unwrap()[key],
-                "newer choice"
-            );
+            assert_eq!(store.inbox_state("alice").await.unwrap()[key], "device B");
             store
-                .save_inbox_state_versioned("alice", key, &json!("latest choice"), 300)
+                .save_inbox_state_versioned("alice", key, &json!("fresh A"), 2, "A", 3)
+                .await
+                .unwrap();
+            store
+                .save_inbox_state_versioned(
+                    "alice",
+                    key,
+                    &json!("next A without a poll"),
+                    2,
+                    "A",
+                    4,
+                )
+                .await
+                .unwrap();
+            store
+                .save_inbox_state_versioned("alice", key, &json!("duplicate older A"), 4, "A", 3)
                 .await
                 .unwrap();
             assert_eq!(
                 store.inbox_state("alice").await.unwrap()[key],
-                "latest choice"
+                "next A without a poll"
+            );
+            assert_eq!(
+                store.inbox_state("alice").await.unwrap()["_versions"][key],
+                4
             );
         }
     }

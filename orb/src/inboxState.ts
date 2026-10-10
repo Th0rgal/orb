@@ -7,11 +7,12 @@ let mutation = 0;
 let pending = 0;
 let writes: Promise<void> = Promise.resolve();
 let loadedKey = "";
+let versions: Record<string, number> = {};
 let outbox: Record<string, { body: unknown; serial: number }> = {};
 function loadOutbox(): string {
   const key = sideQuestionKey("inbox-state:outbox:v1");
   if (key !== loadedKey) {
-    loadedKey = key; outbox = {};
+    loadedKey = key; outbox = {}; versions = {};
     try { const saved = JSON.parse(localStorage.getItem(key) ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) outbox = saved; } catch {}
   }
   return key;
@@ -19,9 +20,21 @@ function loadOutbox(): string {
 function persist(): void { try { localStorage.setItem(loadedKey, JSON.stringify(outbox)); } catch {} }
 
 export function writeInboxState(path: string, input: unknown): void {
-  const body = input && typeof input === "object" && !Array.isArray(input)
-    ? { ...input, mutationAt: (input as { mutationAt?: number }).mutationAt ?? Date.now() } : input;
   const key = loadOutbox(), serial = ++mutation;
+  let body = input;
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    const fields = { ...input } as Record<string, unknown>;
+    delete fields.mutationAt;
+    if (!fields.clientId || !fields.mutationSeq) {
+      const clientId = localStorage.getItem("orb.inbox.client.v1") ?? crypto.randomUUID();
+      const sequence = Number(localStorage.getItem("orb.inbox.sequence.v1") ?? 0) + 1;
+      localStorage.setItem("orb.inbox.client.v1", clientId);
+      localStorage.setItem("orb.inbox.sequence.v1", String(sequence));
+      const entry = path.startsWith("seen/") ? `seen:${decodeURIComponent(path.slice(5))}` : path;
+      Object.assign(fields, { clientId, mutationSeq: sequence, expectedVersion: versions[entry] ?? 0 });
+    }
+    body = fields;
+  }
   outbox[path] = { body, serial }; persist();
   if (!isConnected()) return;
   const version = connectionVersion(), base = getApiUrl(), token = getJwt();
@@ -52,6 +65,8 @@ export async function readInboxState(): Promise<SharedInboxState | undefined> {
     if (!response.ok) return;
     const state = await response.json();
     if (version !== connectionVersion() || serial !== mutation || !state || typeof state !== "object" || Array.isArray(state)) return;
+    const remote = state._versions;
+    if (remote && typeof remote === "object" && !Array.isArray(remote)) versions = Object.fromEntries(Object.entries(remote).filter(([, value]) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) as Record<string, number>;
     return state;
   } catch { return; }
 }

@@ -95,6 +95,7 @@ object OrbSharedInboxState {
     private var scope = ""
     private val outbox = mutableMapOf<String, Any>()
     private val seen = mutableMapOf<String, Long>()
+    private val revisions = mutableMapOf<String, Long>()
     var applying = false
     private fun account() = inboxAccountScope(OrbCore.shared.baseURL, OrbCore.shared.token)
     private var persistence: SharedPreferences? = null
@@ -104,7 +105,7 @@ object OrbSharedInboxState {
     private fun ensureScope() {
         val current = account()
         if (scope == current) return
-        scope = current; seen.clear(); outbox.clear()
+        scope = current; seen.clear(); revisions.clear(); outbox.clear()
         OrbInboxSettings.bindAccount(current)
         OrbJSON.dict(OrbJSON.parse(persistence?.getString(diskKey(), null) ?: "{}"))?.forEach { (path, body) -> if (body != null) outbox[path] = body }
         for ((path, body) in outbox) if (path.startsWith("seen/")) {
@@ -114,10 +115,20 @@ object OrbSharedInboxState {
     }
     fun write(path: String, input: Any) {
         if (applying) return
-        val body = if (input is Map<*, *> && !input.containsKey("mutationAt")) input + ("mutationAt" to System.currentTimeMillis()) else input
         val core = OrbCore.shared
         val expected = account()
         ensureScope()
+        val fields = (input as? Map<*, *>)?.entries?.associate { it.key.toString() to it.value }?.toMutableMap()
+        fields?.remove("mutationAt")
+        if (fields != null && (!fields.containsKey("clientId") || !fields.containsKey("mutationSeq"))) {
+            val disk = checkNotNull(persistence)
+            val client = disk.getString("client_id", null) ?: UUID.randomUUID().toString()
+            val sequence = disk.getLong("mutation_sequence", 0) + 1
+            disk.edit().putString("client_id", client).putLong("mutation_sequence", sequence).commit()
+            val entry = if (path.startsWith("seen/")) "seen:" + java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8") else path
+            fields["clientId"] = client; fields["mutationSeq"] = sequence; fields["expectedVersion"] = revisions[entry] ?: 0L
+        }
+        val body = fields ?: input
         outbox[path] = body
         persistOutbox()
         mutation++; pending++
@@ -157,6 +168,7 @@ object OrbSharedInboxState {
         val expected = account(); val serial = mutation
         val raw = runCatching { OrbCore.shared.request("/api/control/inbox-state") as? Map<*, *> }.getOrNull() ?: return
         if (expected != account() || serial != mutation) return
+        (raw["_versions"] as? Map<*, *>)?.let { values -> revisions.clear(); for ((key, value) in values) if (key is String && value is Number) revisions[key] = value.toLong() }
         val changedAccount = scope != expected
         if (changedAccount) { scope = expected; seen.clear() }
         for ((key, value) in raw) if (key is String && key.startsWith("seen:") && value is Number) seen[key.removePrefix("seen:")] = value.toLong()

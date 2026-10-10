@@ -50,14 +50,41 @@ it("does not let a deleted mission receipt block later shared-state reads", asyn
   expect(fetcher.mock.calls[1][1].method).toBeUndefined();
 });
 
-it("preserves an offline mutation timestamp when retrying after a newer device edit", async () => {
+it("preserves an offline mutation identity and base revision when retrying", async () => {
   const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 })).mockResolvedValue(new Response(null, { status: 204 }));
   vi.stubGlobal("fetch", fetcher);
   const { readInboxState, writeInboxState } = await import("../src/inboxState");
-  writeInboxState("preferences", { aiSummary: false, includeAutonomous: true, model: "builtin/fast", mutationAt: 1234 });
+  writeInboxState("preferences", { aiSummary: false, includeAutonomous: true, model: "builtin/fast", clientId: "persisted-client", mutationSeq: 12, expectedVersion: 3 });
   await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
   await new Promise(resolve => setTimeout(resolve, 0));
   await readInboxState();
   await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
-  expect(JSON.parse(fetcher.mock.calls[1][1].body).mutationAt).toBe(1234);
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toMatchObject({ clientId: "persisted-client", mutationSeq: 12, expectedVersion: 3 });
+});
+
+it("uses Core revisions and keeps a monotonic device identity across module reloads", async () => {
+  const fetcher = vi.fn(async (_url: string, init?: RequestInit) => init?.method
+    ? new Response(null, { status: 204 })
+    : new Response(JSON.stringify({ _versions: { preferences: 9, "seen:mission": 5 } })));
+  vi.stubGlobal("fetch", fetcher);
+  let state = await import("../src/inboxState");
+  await state.readInboxState();
+  state.writeInboxState("preferences", { aiSummary: true, includeAutonomous: false, model: "builtin/smart" });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const first = JSON.parse(fetcher.mock.calls[1][1]!.body as string);
+  expect(first.expectedVersion).toBe(9);
+  state.writeInboxState("seen/mission", { stamp: 123 });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const second = JSON.parse(fetcher.mock.calls[2][1]!.body as string);
+  expect(second.expectedVersion).toBe(5);
+  expect(second.clientId).toBe(first.clientId);
+  expect(second.mutationSeq).toBeGreaterThan(first.mutationSeq);
+  vi.resetModules(); state = await import("../src/inboxState");
+  state.writeInboxState("seen/mission", { stamp: 456 });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4));
+  const restored = JSON.parse(fetcher.mock.calls[3][1]!.body as string);
+  expect(restored.clientId).toBe(first.clientId);
+  expect(restored.mutationSeq).toBeGreaterThan(second.mutationSeq);
 });

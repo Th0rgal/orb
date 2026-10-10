@@ -28,6 +28,7 @@ final class OrbSharedInboxState {
     private var tail: Task<Void, Never>?
     private var scope = ""
     private var outbox: [String: OrbJSON] = [:]
+    private var revisions: [String: Double] = [:]
     private(set) var seen: [String: Double] = [:]
     var applying = false
     private var account: String { OrbInboxAccount.current }
@@ -40,7 +41,7 @@ final class OrbSharedInboxState {
     private func ensureScope() {
         let current = account
         guard scope != current else { return }
-        scope = current; seen = [:]
+        scope = current; seen = [:]; revisions = [:]
         OrbInboxSettings.shared.bindAccount(current)
         outbox = UserDefaults.standard.data(forKey: Self.outboxKey(current)).flatMap { try? JSONDecoder().decode([String: OrbJSON].self, from: $0) } ?? [:]
         for (path, body) in outbox where path.hasPrefix("seen/") {
@@ -49,13 +50,22 @@ final class OrbSharedInboxState {
     }
     func write(_ path: String, _ input: OrbJSON) {
         if applying { return }
-        var body = input
-        if case var .object(fields) = input, fields["mutationAt"] == nil {
-            fields["mutationAt"] = .number((Date().timeIntervalSince1970 * 1000).rounded(.down))
-            body = .object(fields)
-        }
         let expected = account
         ensureScope()
+        var body = input
+        if case var .object(fields) = input {
+            fields.removeValue(forKey: "mutationAt")
+            if fields["clientId"] == nil || fields["mutationSeq"] == nil {
+                let client = UserDefaults.standard.string(forKey: "orb.inbox.client.v1") ?? UUID().uuidString
+                let sequence = UserDefaults.standard.integer(forKey: "orb.inbox.sequence.v1") + 1
+                UserDefaults.standard.set(client, forKey: "orb.inbox.client.v1")
+                UserDefaults.standard.set(sequence, forKey: "orb.inbox.sequence.v1")
+                let entry = path.hasPrefix("seen/") ? "seen:" + (String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))) : path
+                fields["clientId"] = .string(client); fields["mutationSeq"] = .number(Double(sequence))
+                fields["expectedVersion"] = .number(revisions[entry] ?? 0)
+            }
+            body = .object(fields)
+        }
         outbox[path] = body
         persistOutbox()
         mutation += 1; pending += 1
@@ -106,6 +116,7 @@ final class OrbSharedInboxState {
         }
         let expected = account, serial = mutation
         guard let raw = try? await OrbCore.shared.call("/api/control/inbox-state"), expected == account, serial == mutation else { return }
+        if case let .object(values) = raw["_versions"] { revisions = values.compactMapValues { $0.doubleValue } }
         let changedAccount = scope != expected
         if changedAccount { seen = [:]; scope = expected }
         if case let .object(values) = raw {
