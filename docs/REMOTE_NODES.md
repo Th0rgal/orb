@@ -999,7 +999,9 @@ and the additional side-question slot. This reserves memory for the node API,
 OS, and other host services; native subagents share their parent job budget.
 Synchronous `/execute` leases use the same containment and job deadline. Their
 stdout and stderr are drained separately while commands run, retaining at most
-16 MiB per stream and discarding excess output without temporary output files.
+a conservative raw-byte budget fitting 16 MiB of JSON per stream (including
+UTF-8 replacement and control-character escaping), discarding excess output
+without temporary output files.
 This bounds both daemon memory and capture storage.
 Set `SANDBOXED_NODE_JOB_MEMORY_BYTES` to a positive integer byte count to
 override the per-job ceiling on a dedicated build node. Size overrides against

@@ -692,7 +692,9 @@ pub(crate) async fn run_captured_command(
     }
     async fn read_capped(mut stream: tokio::net::UnixStream) -> std::io::Result<String> {
         use tokio::io::AsyncReadExt;
-        const LIMIT: usize = 16 * 1024 * 1024;
+        // JSON escapes a control byte into six bytes; invalid UTF-8 expands
+        // by at most three. Reserve space for the truncation notice as well.
+        const LIMIT: usize = (16 * 1024 * 1024 - 1024) / 6;
         let mut bytes = Vec::new();
         let mut buffer = [0u8; 8192];
         let mut truncated = false;
@@ -708,7 +710,7 @@ pub(crate) async fn run_captured_command(
         }
         let mut text = String::from_utf8_lossy(&bytes).into_owned();
         if truncated {
-            text.push_str("\n[node output truncated at 16 MiB]\n");
+            text.push_str("\n[node output truncated to fit 16 MiB JSON limit]\n");
         }
         Ok(text)
     }

@@ -446,8 +446,8 @@ mod tests {
             .unwrap();
         assert_eq!(code, Some(0));
         assert!(stdout.starts_with('\0'));
-        assert!(stdout.ends_with("[node output truncated at 16 MiB]\n"));
-        assert!(stdout.len() < 16 * 1024 * 1024 + 100);
+        assert!(stdout.ends_with("[node output truncated to fit 16 MiB JSON limit]\n"));
+        assert!(serde_json::to_vec(&stdout).unwrap().len() <= 16 * 1024 * 1024);
         assert_eq!(stderr, "done");
     }
 
