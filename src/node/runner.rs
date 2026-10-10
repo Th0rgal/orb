@@ -654,6 +654,11 @@ async fn run_supervised_command(
                 None => std::future::pending::<()>().await,
             }
         } => {
+            // Signal immediately at the deadline; diagnostic queries must not
+            // extend the payload's execution before cleanup begins.
+            if let Some(pid) = pid {
+                unsafe { libc::kill(-(pid as i32), libc::SIGTERM); }
+            }
             let observed_oom = scope_oom_killed(systemd_scope.as_ref()).await;
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
             RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled"), observed_oom }
@@ -669,26 +674,61 @@ async fn run_supervised_command(
 }
 
 /// Synchronous leases use the same scope, memory budget and cleanup as queued jobs.
-/// Capture to private files so untrusted output cannot grow the node daemon's heap.
+/// Drain bounded streams so untrusted output cannot exhaust node memory or disk.
 pub(crate) async fn run_captured_command(
     cmd: tokio::process::Command,
     limit_secs: u64,
 ) -> anyhow::Result<(Option<i32>, String, String)> {
+    use std::os::fd::OwnedFd;
     let capture = tempfile::tempdir()?;
-    let stdout_path = capture.path().join("stdout");
-    let stderr_path = capture.path().join("stderr");
-    let stdout = Stdio::from(std::fs::File::create(&stdout_path)?);
-    let stderr = Stdio::from(std::fs::File::create(&stderr_path)?);
-    let outcome = run_supervised_command(
-        cmd,
-        CommandEnvironment::Clear,
-        &stdout_path,
-        Some(limit_secs),
-        &CancellationToken::new(),
-        stdout,
-        stderr,
-    )
-    .await?;
+    let log_path = capture.path().join("capture");
+    fn capture_pair() -> std::io::Result<(tokio::net::UnixStream, Stdio)> {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        Ok((
+            tokio::net::UnixStream::from_std(reader)?,
+            Stdio::from(OwnedFd::from(writer)),
+        ))
+    }
+    async fn read_capped(mut stream: tokio::net::UnixStream) -> std::io::Result<String> {
+        use tokio::io::AsyncReadExt;
+        const LIMIT: usize = 16 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let mut truncated = false;
+        loop {
+            let length = stream.read(&mut buffer).await?;
+            if length == 0 {
+                break;
+            }
+            let keep = length.min(LIMIT.saturating_sub(bytes.len()));
+            bytes.extend_from_slice(&buffer[..keep]);
+            truncated |= keep < length;
+            // Continue draining and discard excess output while the job runs.
+        }
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        if truncated {
+            text.push_str("\n[node output truncated at 16 MiB]\n");
+        }
+        Ok(text)
+    }
+    let (stdout_reader, stdout) = capture_pair()?;
+    let (stderr_reader, stderr) = capture_pair()?;
+    let token = CancellationToken::new();
+    let (outcome, stdout, stderr) = tokio::join!(
+        run_supervised_command(
+            cmd,
+            CommandEnvironment::Clear,
+            &log_path,
+            Some(limit_secs),
+            &token,
+            stdout,
+            stderr
+        ),
+        read_capped(stdout_reader),
+        read_capped(stderr_reader),
+    );
+    let outcome = outcome?;
     let (exit_code, notice) = match outcome {
         RunOutcome::Exited(code) => (code, None),
         other => {
@@ -696,21 +736,8 @@ pub(crate) async fn run_captured_command(
             (code, notice)
         }
     };
-    async fn read_capped(path: &Path) -> std::io::Result<String> {
-        use tokio::io::AsyncReadExt;
-        const LIMIT: u64 = 16 * 1024 * 1024;
-        let mut bytes = Vec::new();
-        let file = tokio::fs::File::open(path).await?;
-        let length = file.metadata().await?.len();
-        file.take(LIMIT).read_to_end(&mut bytes).await?;
-        let mut text = String::from_utf8_lossy(&bytes).into_owned();
-        if length > LIMIT {
-            text.push_str("\n[node output truncated at 16 MiB]\n");
-        }
-        Ok(text)
-    }
-    let stdout = read_capped(&stdout_path).await?;
-    let mut stderr = read_capped(&stderr_path).await?;
+    let stdout = stdout?;
+    let mut stderr = stderr?;
     if let Some(notice) = notice {
         stderr.push_str(&format!("\n{notice}\n"));
     }

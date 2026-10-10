@@ -433,6 +433,24 @@ mod tests {
         assert_eq!(result.stderr, "err");
     }
 
+    #[tokio::test]
+    async fn captured_command_discards_excess_output_while_running() {
+        let work_root = tempfile::tempdir().unwrap();
+        let command = raw_command(
+            "head -c 17825792 /dev/zero; printf done >&2",
+            work_root.path(),
+            None,
+        );
+        let (code, stdout, stderr) = crate::node::runner::run_captured_command(command, 10)
+            .await
+            .unwrap();
+        assert_eq!(code, Some(0));
+        assert!(stdout.starts_with('\0'));
+        assert!(stdout.ends_with("[node output truncated at 16 MiB]\n"));
+        assert!(stdout.len() < 16 * 1024 * 1024 + 100);
+        assert_eq!(stderr, "done");
+    }
+
     #[test]
     fn placement_requires_enabled_selected_configured_node() {
         let node = RemoteNodeConfig {

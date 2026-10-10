@@ -998,8 +998,9 @@ is 80% of host RAM divided between `SANDBOXED_NODE_CAPACITY` foreground slots
 and the additional side-question slot. This reserves memory for the node API,
 OS, and other host services; native subagents share their parent job budget.
 Synchronous `/execute` leases use the same containment and job deadline. Their
-stdout and stderr are captured separately, with each response capped at 16 MiB
-to prevent untrusted output from exhausting the node daemon memory.
+stdout and stderr are drained separately while commands run, retaining at most
+16 MiB per stream and discarding excess output without temporary output files.
+This bounds both daemon memory and capture storage.
 Set `SANDBOXED_NODE_JOB_MEMORY_BYTES` to a positive integer byte count to
 override the per-job ceiling on a dedicated build node. Size overrides against
 all simultaneously admitted jobs and existing host services. An invalid
