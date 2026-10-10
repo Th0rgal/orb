@@ -1,6 +1,6 @@
 import {render,screen,fireEvent,cleanup,waitFor} from '@solidjs/testing-library';
 import {afterEach,describe,it,expect,vi} from 'vitest';
-import {CyberPicker,cyberCompatibility,draftCyber,setDraftCyber,requireCyberSupport} from '../src/cyberAccess';
+import {CyberPicker,MissionCyber,cyberCompatibility,draftCyber,setDraftCyber,requireCyberSupport} from '../src/cyberAccess';
 import {describeError} from '../src/ErrorNotice';
 vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
 import {api} from '../src/api';
@@ -33,6 +33,25 @@ describe('cyber selection',()=>{
   expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(true);
   await fireEvent.click(screen.getByRole('menuitemradio',{name:/Daybreak/}));
   expect(selected).toBe('daybreak');
+ });
+ it('retries a failed remote capability check when the menu reopens',async()=>{
+  vi.mocked(api).mockRejectedValue(Error('network'));
+  render(()=><CyberPicker value="standard" model="gpt-6.1-sol" remote onChange={()=>{}}/>);
+  const trigger=screen.getByRole('button',{name:'Cyber program: Standard'});
+  await fireEvent.click(trigger);
+  await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).title).toContain('Reopen'));
+  await fireEvent.click(trigger);
+  vi.mocked(api).mockResolvedValue({version:2,route_supported:true});
+  await fireEvent.click(trigger);
+  await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false));
+ });
+ it('applies route gating when editing an existing remote mission',async()=>{
+  vi.mocked(api).mockImplementation(async path=>String(path).endsWith('/cyber')
+   ?{mode:'standard',status:'requested',revision:'saved'}:{version:2,route_supported:false});
+  render(()=><MissionCyber mission={{id:'remote-mission',status:'paused',title:'Existing',history:[],backend:'codex',model_override:'gpt-6.1-sol',remote_node_id:'ashur'}}/>);
+  await fireEvent.click(await screen.findByRole('button',{name:'Cyber program: Standard'}));
+  await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).title).toContain('cannot guarantee'));
+  expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(true);
  });
  it('starts Standard and never calls a pending selection active',()=>{
   expect(draftCyber()).toBe('standard');

@@ -23,7 +23,7 @@ export const getCyber=async(id:string)=>{await requireCyberSupport();return api<
 export const saveCyber=(id:string,mode:CyberMode)=>api<CyberSelection>(`/api/control/missions/${id}/cyber`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
 export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;remote?:boolean;note?:string;confirmed?:boolean;onChange:(mode:CyberMode)=>void}) {
  const [open,setOpen]=createSignal(false);let root:HTMLDivElement|undefined;
- const [route]=createResource(()=>p.remote?[connectionVersion(),p.model] as const:false,async([,model])=>{
+ const [route,{refetch:refetchRoute}]=createResource(()=>p.remote?[connectionVersion(),p.model] as const:false,async([,model])=>{
   const modes=['standard','daybreak'] as const;
   const supported=await Promise.all(modes.map(async mode=>{
    const value=await api<{route_supported?:boolean}>(`/api/control/cyber-capabilities?model=${encodeURIComponent(model)}&mode=${mode}&remote=true`,{cache:"no-store"});
@@ -31,11 +31,11 @@ export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;re
   }));
   return {standard:supported[0],daybreak:supported[1]};
  });
- const routeRefusal=(mode:CyberMode)=>p.remote&&mode!=='automatic'&&route()?.[mode]!==true
-  ?(route.loading?'Checking the selected Cyber route…':'This remote route cannot guarantee the selected Cyber program. Choose Automatic explicitly or a direct OpenAI route.'):undefined;
+ const routeRefusal=(mode:CyberMode)=>p.remote&&mode!=='automatic'&&(route.error||route()?.[mode]!==true)
+  ?(route.error?'Could not check the Cyber route. Reopen this menu to retry.':route.loading?'Checking the selected Cyber route…':'This remote route cannot guarantee the selected Cyber program. Choose Automatic explicitly or a direct OpenAI route.'):undefined;
 
  return <div class="cyber-picker model-wrap under-model-wrap" ref={root}>
-  <button class={`model under-model cyber-pill ${p.confirmed&&p.value==='daybreak'?'confirmed':''}`} type="button" aria-label={`Cyber program: ${cyberLabels[p.value]}`} aria-haspopup="menu" aria-expanded={open()} title={`Cyber: ${cyberLabels[p.value]}${p.value==='daybreak'?(p.confirmed?' (active)':' (requested)'):''}. ${p.note??'Choose a cyber program.'}`} onClick={()=>setOpen(!open())}>
+  <button class={`model under-model cyber-pill ${p.confirmed&&p.value==='daybreak'?'confirmed':''}`} type="button" aria-label={`Cyber program: ${cyberLabels[p.value]}`} aria-haspopup="menu" aria-expanded={open()} title={`Cyber: ${cyberLabels[p.value]}${p.value==='daybreak'?(p.confirmed?' (active)':' (requested)'):''}. ${p.note??'Choose a cyber program.'}`} onClick={()=>{if(!open()&&p.remote)void refetchRoute();setOpen(!open());}}>
    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3 4 6v6c0 4 5 8 8 9 3-1 8-5 8-9V6z"/></svg>
   </button>
   <Show when={open()}><Menu class="under-model-menu cyber-menu" label="Cyber program" placement="top-start" onClose={() => setOpen(false)}>
@@ -55,7 +55,7 @@ export function MissionCyber(p:{mission:Mission;onError?:(message:string)=>void}
   catch(e){p.onError?.(cyberError(e));}finally{setSaving(false);}
  };
  return <><span class="under-sep">·</span><Show when={!selection.error} fallback={<span class="under-model" title="The connected backend does not expose cyber settings, or the request failed. Update or reconnect before changing this option.">Cyber: unavailable</span>}>
-  <CyberPicker value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()} note="Applies to the next turn." confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
+  <CyberPicker remote={!p.mission.local_run_active&&!!(p.mission.remote_node_id||p.mission.remote_job?.node_id)} value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()} note="Applies to the next turn." confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
  </Show></>;
 }
 

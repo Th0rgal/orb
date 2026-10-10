@@ -1830,12 +1830,11 @@ async fn native_protocol_proxy(
         supported_entries += 1;
         if cyber_program.is_some()
             && (via_cli_proxy
-                || provider_type != ProviderType::OpenAI
-                || entry.model_id
-                    != requested_model
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&requested_model))
+                || !cyber_entry_supported(
+                    entry,
+                    &requested_model,
+                    super::oauth_owner::cli_proxy_owns(ProviderType::OpenAI),
+                ))
         {
             return error_response(StatusCode::BAD_REQUEST, "This route cannot guarantee the selected cyber program and model. Use a direct OpenAI route or choose Automatic explicitly.".into(), "unsupported_access_program");
         }
