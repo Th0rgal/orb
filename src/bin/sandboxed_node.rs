@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     if recovered > 0 {
         warn!("marked {recovered} in-flight job(s) from a previous run as lost");
     }
-    sandboxed_sh::node::runner::reap_synchronous_scopes_on_start().await?;
+    sandboxed_sh::node::runner::reap_previous_scopes_on_start().await?;
     let admission = Arc::new(Semaphore::new(capacity_total as usize));
     // Managed auth: profiles raw jobs may request by name. The path is the
     // node's own configuration; payloads never carry it. Advertised in the

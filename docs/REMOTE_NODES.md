@@ -1004,7 +1004,8 @@ UTF-8 replacement and control-character escaping), discarding excess output
 without temporary output files.
 This bounds both daemon memory and capture storage. Synchronous scopes have
 a dedicated recoverable namespace and a systemd-enforced runtime deadline.
-At startup the node retires all previous synchronous scopes before admitting
+At startup the node retires previous synchronous and queued-job scopes (whose
+durable records become lost across daemon restart) before admitting
 new leases; failed retirement keeps startup closed.
 Set `SANDBOXED_NODE_JOB_MEMORY_BYTES` to a positive integer byte count to
 override the per-job ceiling on a dedicated build node. Size overrides against

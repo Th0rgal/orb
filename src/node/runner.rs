@@ -1165,16 +1165,16 @@ async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
         Ok(Ok(output)) if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "not-found")
 }
 
-/// Retire synchronous scopes from a previous daemon before admitting new work.
+/// Retire scopes from a previous daemon before admitting new work.
 /// Their dedicated namespace is recoverable even when no HTTP response survived.
-pub async fn reap_synchronous_scopes_on_start() -> anyhow::Result<()> {
+pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
         if !Path::new("/run/systemd/system").is_dir() {
             return Ok(());
         }
         let (mode, user_runtime_dir) = systemd_scope_mode().ok_or_else(|| {
-            anyhow::anyhow!("cannot reconcile synchronous scopes without the systemd manager")
+            anyhow::anyhow!("cannot reconcile previous job scopes without the systemd manager")
         })?;
         let mut command = tokio::process::Command::new("systemctl");
         command.kill_on_drop(true);
@@ -1194,11 +1194,12 @@ pub async fn reap_synchronous_scopes_on_start() -> anyhow::Result<()> {
             "--plain",
             "--no-legend",
             "sandboxed-node-sync-*.scope",
+            "sandboxed-node-job-*.scope",
         ]);
         let output = tokio::time::timeout(KILL_GRACE, command.output()).await??;
         anyhow::ensure!(
             output.status.success(),
-            "cannot reconcile previous synchronous scopes"
+            "cannot reconcile previous job scopes"
         );
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let Some(unit) = line.split_whitespace().next() else {
@@ -1206,9 +1207,10 @@ pub async fn reap_synchronous_scopes_on_start() -> anyhow::Result<()> {
             };
             let Some(id) = unit
                 .strip_prefix("sandboxed-node-sync-")
+                .or_else(|| unit.strip_prefix("sandboxed-node-job-"))
                 .and_then(|s| s.strip_suffix(".scope"))
             else {
-                anyhow::bail!("unexpected synchronous scope name");
+                anyhow::bail!("unexpected node scope name");
             };
             Uuid::parse_str(id)?;
             let scope = SystemdScope {
@@ -1217,7 +1219,7 @@ pub async fn reap_synchronous_scopes_on_start() -> anyhow::Result<()> {
                 user_runtime_dir: user_runtime_dir.clone(),
             };
             while !stop_systemd_scope(&scope).await {
-                tracing::warn!(unit, "waiting for previous synchronous scope retirement");
+                tracing::warn!(unit, "waiting for previous node scope retirement");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
