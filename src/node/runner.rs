@@ -520,6 +520,7 @@ pub(crate) fn clamp_timeout(requested: Option<u64>, max_job_secs: u64) -> u64 {
 pub(crate) enum RunOutcome {
     Exited(Option<i32>),
     Cancelled,
+    MemoryExhausted,
     TimedOut { limit_secs: u64 },
 }
 
@@ -546,6 +547,8 @@ impl RunOutcome {
                 Some(format!("command exited with {code:?}")),
             ),
             RunOutcome::Cancelled => (JobState::Cancelled, None, Some("cancelled".to_string())),
+            RunOutcome::MemoryExhausted => (JobState::Failed, None,
+                Some("node_job_memory_exhausted: the kernel killed a process in this job; reduce the workload and reconcile saved files before resuming".into())),
             RunOutcome::TimedOut { limit_secs } => (
                 JobState::Failed,
                 None,
@@ -553,6 +556,14 @@ impl RunOutcome {
             ),
         }
     }
+}
+
+#[test]
+fn memory_exhaustion_is_failure_with_recovery_guidance() {
+    let (state, code, error) = RunOutcome::MemoryExhausted.into_job_result();
+    assert_eq!(state, JobState::Failed);
+    assert_eq!(code, None);
+    assert!(error.unwrap().starts_with("node_job_memory_exhausted:"));
 }
 
 /// Spawn `cmd` in its own process group with combined stdout+stderr appended
@@ -596,8 +607,9 @@ async fn run_logged_command_with_deadline(
 
     let outcome = tokio::select! {
         _ = token.cancelled() => {
+            let oom = scope_oom_killed(systemd_scope.as_ref()).await;
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-            RunOutcome::Cancelled
+            if oom { RunOutcome::MemoryExhausted } else { RunOutcome::Cancelled }
         }
         _ = async {
             match limit_secs {
@@ -609,8 +621,10 @@ async fn run_logged_command_with_deadline(
             RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled") }
         }
         waited = child.wait() => {
+            let oom = scope_oom_killed(systemd_scope.as_ref()).await;
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-            RunOutcome::Exited(waited?.code())
+            let code = waited?.code();
+            if oom { RunOutcome::MemoryExhausted } else { RunOutcome::Exited(code) }
         }
     };
     Ok(outcome)
@@ -880,6 +894,42 @@ pub fn maybe_exec_cleared_scope_payload() -> std::io::Result<bool> {
     }
     #[cfg(not(unix))]
     Ok(true)
+}
+
+/// Read the kernel counter before cleanup removes the transient cgroup.
+async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = _scope {
+        let mut command = tokio::process::Command::new("systemctl");
+        command.kill_on_drop(true);
+        if scope.mode == SystemdScopeMode::User {
+            command.arg("--user");
+            if let Some(runtime) = &scope.user_runtime_dir {
+                command.env("XDG_RUNTIME_DIR", runtime).env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}/bus", runtime.display()),
+                );
+            }
+        }
+        command.args(["show", "--property=ControlGroup", "--value", &scope.unit]);
+        if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(2), command.output()).await
+        {
+            let group = String::from_utf8_lossy(&output.stdout);
+            let group = group.trim();
+            if output.status.success() && group.starts_with('/') && !group.contains("..") {
+                if let Ok(events) =
+                    tokio::fs::read_to_string(format!("/sys/fs/cgroup{group}/memory.events")).await
+                {
+                    return events.lines().any(|line| {
+                        line.strip_prefix("oom_kill ")
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .is_some_and(|n| n > 0)
+                    });
+                }
+            }
+        }
+    }
+    false
 }
 
 async fn kill_contained_process(
