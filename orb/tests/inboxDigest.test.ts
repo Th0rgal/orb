@@ -138,4 +138,20 @@ describe("structured inbox digests", () => {
     requestInboxDigest(mission, undefined, 123);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+  it("backs off a Core summary older than the local response instead of looping or offering stale suggestions", async () => {
+    const { requestInboxDigest, getCurrentInboxDigest, inboxSummaryState } = await import("../src/inboxDigest");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ...JSON.parse(response()), sourceRevision: "old", sourceUpdatedAt: "2026-10-09T10:00:00Z" })));
+    vi.stubGlobal("fetch", fetchMock);
+    const updatedMs = Date.parse("2026-10-09T10:05:00Z");
+    const mission: Mission = { id: "behind-core", status: "completed", created_at: "2026-10-09", updated_at: new Date(updatedMs).toISOString() };
+    requestInboxDigest(mission, undefined, updatedMs);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(getCurrentInboxDigest(mission.id, updatedMs)).toBeUndefined();
+    expect(inboxSummaryState(mission.id, updatedMs)).toBe("Summary unavailable");
+    requestInboxDigest(mission, undefined, updatedMs);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
 });

@@ -392,41 +392,50 @@ async function fetchSharedDigest(missionId: string, model: string, updatedMs: nu
   return { ...digest, task: "", verdict: "waiting", aiGenerated: true, updatedMs };
 }
 
+export function inboxSummaryState(missionId: string, updatedMs: number): string | undefined {
+  inboxDigestVersion();
+  const cfg = inboxConfig();
+  if (!cfg.aiSummary) return;
+  const key = `${currentStorageKey()}:${makeCacheKey(missionId, updatedMs, cfg.model)}`;
+  if (inFlight.has(key)) return "Generating summary…";
+  if (failedKeys.has(key)) return "Summary unavailable";
+}
+
 export function requestInboxDigest(
   mission: Mission,
-  items: StreamItem[] | undefined,
+  _items: StreamItem[] | undefined,
   updatedMs: number,
   priority = 50,
 ): void {
   if (!isConnected()) return;
   const cfg = inboxConfig();
   if (!cfg.aiSummary) return;
-  const hasConversation =
-    (items && items.some((i) => i.kind === "text" || i.kind === "user" || i.kind === "error")) ||
-    (Array.isArray(mission.history) && mission.history.length > 0);
-  if (!hasConversation) return;
-
   const cacheKey = makeCacheKey(mission.id, updatedMs, cfg.model);
   if (getCurrentInboxDigest(mission.id, updatedMs, cfg.model)) return;
-  if (inFlight.has(cacheKey)) return;
-  const lastFail = failedKeys.get(cacheKey);
+  const scopeKey = `${currentStorageKey()}:${cacheKey}`;
+  const requestVersion = connectionVersion();
+  if (inFlight.has(scopeKey)) return;
+  const lastFail = failedKeys.get(scopeKey);
   if (lastFail && Date.now() - lastFail < 60_000) return;
 
-  inFlight.add(cacheKey);
+  inFlight.add(scopeKey);
+  bumpDigestVersion();
   queue.push({
     priority,
     run: async () => {
       try {
+        if (connectionVersion() !== requestVersion) return;
         const parsed = await fetchSharedDigest(mission.id, cfg.model, updatedMs);
         if (parsed?.schemaVersion === 7) {
           storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
         } else {
-          failedKeys.set(cacheKey, Date.now());
+          failedKeys.set(scopeKey, Date.now());
         }
       } catch {
-        failedKeys.set(cacheKey, Date.now());
+        failedKeys.set(scopeKey, Date.now());
       } finally {
-        inFlight.delete(cacheKey);
+        inFlight.delete(scopeKey);
+        bumpDigestVersion();
       }
     },
   });

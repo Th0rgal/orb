@@ -30,10 +30,13 @@ final class OrbSharedInboxState {
             pending -= 1
         }
     }
-    func writeSeen(_ id: String, stamp: Double) {
+    @discardableResult func writeSeen(_ id: String, stamp: Double, syncBackend: Bool = true) -> Bool {
         if scope != account { scope = account; seen = [:]; outbox = [:] }
-        seen[id] = stamp
-        write("seen/" + OrbCore.escape(id), .object(["stamp": .number(stamp.rounded(.down))]))
+        let rounded = stamp.rounded(.down)
+        let changed = seen[id] != rounded
+        seen[id] = rounded
+        if syncBackend { write("seen/" + OrbCore.escape(id), .object(["stamp": .number(rounded)])) }
+        return changed
     }
     func writePreferences() {
         let p = OrbInboxSettings.shared
@@ -422,16 +425,15 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
         let nowIso = ISO8601DateFormatter().string(from: Date())
         let stamp = max(updatedAt ?? "", nowIso)
         manuallyUnreadIDs.remove(id)
-        if seenByMissionID[id] != stamp {
+        let time = inboxTimestamp(stamp) ?? Date().timeIntervalSince1970
+        let sharedChanged = OrbSharedInboxState.shared.writeSeen(id, stamp: time * 1000, syncBackend: syncBackend)
+        if seenByMissionID[id] != stamp || sharedChanged {
             seenByMissionID[id] = stamp
             UserDefaults.standard.set(seenByMissionID, forKey: defaultsKey)
             version += 1
         }
         if syncBackend {
             Task { @MainActor in
-                let date = ISO8601DateFormatter(); date.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                let time = (date.date(from: stamp) ?? ISO8601DateFormatter().date(from: stamp))?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
-                OrbSharedInboxState.shared.writeSeen(id, stamp: time * 1000)
                 _ = try? await OrbCore.shared.call(
                     "/api/control/missions/\(OrbCore.escape(id))/opened",
                     method: "POST"
@@ -440,9 +442,9 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
         }
     }
 
-    func markUnread(id: String) {
+    func markUnread(id: String, syncBackend: Bool = true) {
         guard !id.isEmpty else { return }
-        Task { @MainActor in OrbSharedInboxState.shared.writeSeen(id, stamp: -Date().timeIntervalSince1970 * 1000) }
+        OrbSharedInboxState.shared.writeSeen(id, stamp: -Date().timeIntervalSince1970 * 1000, syncBackend: syncBackend)
         version += 1
     }
 
@@ -461,8 +463,8 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
             manuallyUnreadIDs.remove(row.id)
             seenByMissionID[row.id] = max(row.updatedAt, nowIso)
             let id = row.id
+            OrbSharedInboxState.shared.writeSeen(id, stamp: Date().timeIntervalSince1970 * 1000)
             Task { @MainActor in
-                OrbSharedInboxState.shared.writeSeen(id, stamp: Date().timeIntervalSince1970 * 1000)
                 _ = try? await OrbCore.shared.call(
                     "/api/control/missions/\(OrbCore.escape(id))/opened",
                     method: "POST"

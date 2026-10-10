@@ -2,6 +2,19 @@ import XCTest
 @testable import sandboxed_sh
 
 final class OrbContractTests: XCTestCase {
+    @MainActor func testManualUnreadReceiptIsVisibleImmediatelyWithoutNetwork() {
+        let id = UUID().uuidString
+        let row = OrbRow(.object(["id": .string(id), "status": .string("completed"), "updated_at": .string("2026-10-09T10:00:00Z")]))
+        let store = OrbMissionUnreadStore.shared
+        store.markRead(row, syncBackend: false)
+        XCTAssertFalse(store.isUnread(row: row))
+        let before = store.version
+        store.markUnread(id: id, syncBackend: false)
+        XCTAssertGreaterThan(store.version, before)
+        XCTAssertTrue(store.isUnread(row: row))
+        store.markRead(row, syncBackend: false)
+        XCTAssertFalse(store.isUnread(row: row))
+    }
     func testInboxAutonomousScopeIsOptIn() {
         let child = OrbRow(.object(["id": .string("child"), "status": .string("failed"), "parent_mission_id": .string("parent")]))
         let controller = OrbRow(.object(["id": .string("cron"), "status": .string("completed"), "tags": .array([.string("origin:hermes")])]))

@@ -62,32 +62,56 @@ fn synthetic(s: &str) -> bool {
         "<system",
         "<background",
         "[automatic",
-        "continue.",
-        "resume.",
     ]
     .iter()
     .any(|p| s.starts_with(p))
+        || matches!(
+            s.as_str(),
+            "continue from where you left off" | "continue from where you left off."
+        )
 }
 fn snapshot(m: &Mission, events: &[StoredEvent]) -> (String, Vec<(String, Option<i64>)>) {
     let mut evidence = vec![];
+    let mut messages = vec![];
+    // Preserve both the objective and the end of long results; quotes never
+    // span an invented truncation marker. Roles keep requests distinct from claims.
+    let mut record = |role: &str, text: &str, sequence: Option<i64>, limit: usize| {
+        let mut excerpts = vec![bounded(text, limit)];
+        if text.chars().count() > limit {
+            excerpts[0] = bounded(text, limit / 2);
+            excerpts.push(
+                text.chars()
+                    .rev()
+                    .take(limit / 2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect(),
+            );
+        }
+        for excerpt in excerpts {
+            messages.push(json!({"role":role,"text":excerpt,"eventSequence":sequence}));
+            evidence.push((excerpt, sequence));
+        }
+    };
     let initial = m
         .history
         .iter()
         .find(|h| h.role == "user" && !synthetic(&h.content));
     if let Some(h) = initial {
-        evidence.push((bounded(&h.content, 1800), None));
+        record("user", &h.content, None, 1800);
     }
     let last_user = events
         .iter()
         .rfind(|e| e.event_type == "user_message" && !synthetic(&e.content));
     if let Some(e) = last_user {
-        evidence.push((bounded(&e.content, 1800), Some(e.sequence)));
+        record("user", &e.content, Some(e.sequence), 1800);
     } else if let Some(h) = m
         .history
         .iter()
         .rfind(|h| h.role == "user" && !synthetic(&h.content))
     {
-        evidence.push((bounded(&h.content, 1800), None));
+        record("user", &h.content, None, 1800);
     }
     let turn = last_user.map(|e| e.sequence).unwrap_or(0);
     let answers: Vec<_> = events
@@ -110,14 +134,23 @@ fn snapshot(m: &Mission, events: &[StoredEvent]) -> (String, Vec<(String, Option
             .take_while(|h| h.role != "user")
             .find(|h| h.role == "assistant")
         {
-            evidence.push((bounded(&h.content, 6500), None));
+            record("assistant", &h.content, None, 6500);
         }
     } else {
         for e in answers.into_iter().rev() {
-            evidence.push((bounded(&e.content, 2500), Some(e.sequence)));
+            record(
+                if e.event_type == "error" {
+                    "error"
+                } else {
+                    "assistant"
+                },
+                &e.content,
+                Some(e.sequence),
+                2500,
+            );
         }
     }
-    let text = json!({"title":m.title,"runtimeStatus":m.status,"messages":evidence.iter().map(|(text,seq)|json!({"text":text,"eventSequence":seq})).collect::<Vec<_>>()}).to_string();
+    let text = json!({"title":m.title,"runtimeStatus":m.status,"messages":messages}).to_string();
     (text, evidence)
 }
 fn revision(m: &Mission, text: &str) -> String {
@@ -483,18 +516,36 @@ pub async fn save_seen(
 mod tests {
     use super::*;
     #[test]
+    fn continuation_with_new_instructions_is_human_evidence() {
+        assert!(!synthetic("Continue. Please add the missing tests"));
+        assert!(!synthetic("Resume. Also verify Android."));
+        assert!(synthetic("Continue from where you left off."));
+        assert!(synthetic("[automatic recovery] reconnect"));
+    }
+    #[test]
     fn newer_request_does_not_reuse_a_previous_answer_and_changes_revision() {
         let mut mission: Mission = serde_json::from_value(json!({
             "id": Uuid::new_v4(), "status": "completed", "created_at": "2026-10-09T10:00:00Z", "updated_at": "2026-10-09T10:01:00Z",
             "history": [{"role":"user","content":"Fix the search input safely."}, {"role":"assistant","content":"Old result: the first task is done."}]
         })).unwrap();
         let old = snapshot(&mission, &[]).0;
+        assert!(old.contains("\"role\":\"assistant\""));
+        mission.history[1].content = "Long intermediate detail. ".repeat(500)
+            + "Final limitation: Android remains unchecked.";
+        let long = snapshot(&mission, &[]);
+        assert!(long
+            .0
+            .contains("Final limitation: Android remains unchecked."));
+        assert!(long
+            .1
+            .iter()
+            .any(|(text, _)| text.ends_with("Android remains unchecked.")));
         mission.history.push(MissionHistoryEntry {
             role: "user".into(),
             content: "Now check the Android behavior.".into(),
         });
         let new = snapshot(&mission, &[]).0;
-        assert!(!new.contains("Old result"));
+        assert!(!new.contains("Final limitation"));
         assert!(new.contains("Fix the search input safely."));
         assert!(new.contains("Now check the Android behavior."));
         assert_ne!(revision(&mission, &old), revision(&mission, &new));

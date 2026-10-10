@@ -1472,7 +1472,7 @@ fun OrbInboxView(
         OrbInboxModel.build(projects, missions, answeredCallIds.keys)
     }
 
-    val workingMissions = remember(projects, missions) {
+    val workingMissions = remember(projects, missions, OrbInboxSettings.includeAutonomous) {
         OrbInboxModel.workingMissions(projects, missions)
     }
 

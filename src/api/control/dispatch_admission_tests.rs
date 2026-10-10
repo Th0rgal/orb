@@ -6599,16 +6599,17 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
     assert!(!command.contains(credential));
     assert!(command.contains("sandboxed-mcp launch --harness opencode"));
     assert!(h.state.proxy_api_keys.verify(&key).await);
-    let dispatched = store
-        .get_events(mission_id, Some(&["mission_status_changed"]), None, None)
-        .await
-        .unwrap();
-    assert!(
-        dispatched
+    // Node acceptance precedes asynchronous status-event persistence.
+    // Match the same bounded wait used by the native dispatch tests below.
+    wait_until("typed remote dispatch status persisted", 10, || async {
+        store
+            .get_events(mission_id, Some(&["mission_status_changed"]), None, None)
+            .await
+            .unwrap()
             .iter()
-            .any(|e| e.content.contains("opencode/xai/grok-4.6")),
-        "{dispatched:?}"
-    );
+            .any(|e| e.content.contains("opencode/xai/grok-4.6"))
+    })
+    .await;
 
     // Retry with the same idempotency key coalesces onto the same mission
     // and never submits a second node job.

@@ -51,6 +51,7 @@ import {
   getCachedInboxDigest,
   getCurrentInboxDigest,
   inboxDigestVersion,
+  inboxSummaryState,
   requestInboxDigest,
 } from "./inboxDigest";
 import {
@@ -1450,7 +1451,7 @@ export function InboxPage(p: {
                     aria-label={`${currentItem().unread ? "Unread. " : ""}${currentItem().projectTitle}: ${effectiveHeadline()}. ${currentItem().badge}. ${outcomeLine()}`}
                   >
                     <div class="inbox-row-bottom">
-                      <span class="inbox-summary-origin">{digest()?.aiGenerated ? "AI summary" : "Latest update"}</span>
+                      <span class="inbox-summary-origin">{inboxSummaryState(id, currentItem().updatedMs) || (digest()?.aiGenerated ? "AI summary" : "Latest update")}</span>
                       <p
                         class="inbox-summary"
                         title={
