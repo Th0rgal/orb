@@ -73,5 +73,5 @@
    Pickers own their active row; the checkmark alone marks the committed value. */
 .overlay-popover :is(button, input, textarea, select):focus-visible { outline: 0; box-shadow: none; }
 .overlay-popover :is(input, textarea, select):focus-visible { border-color: var(--fg-3); }
-.overlay-popover .menu-item:is(:hover, :focus, .on) { background: var(--overlay-hover); }
+.overlay-popover .menu-item:is(:hover, :focus) { background: var(--overlay-hover); }
 .overlay-popover button:not(.menu-item):not([role^="menuitem"]):not([role="option"]):focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }

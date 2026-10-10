@@ -214,11 +214,14 @@ for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard n
  await expect(machine).toBeFocused();
  await expect(machine).toHaveCSS('outline-style','none');
  await expect(machine).toHaveCSS('box-shadow','none');
- await page.keyboard.press('ArrowUp');
  const program=page.getByRole('menuitemradio',{name:'Default program',exact:true});
+ await expect(program).toHaveAttribute('aria-checked','true');
+ await expect(program).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
+ await page.keyboard.press('ArrowUp');
  await expect(program).toBeFocused();
  await expect(program).toHaveCSS('outline-style','none');
  await expect(program).toHaveCSS('box-shadow','none');
+ await expect(program).not.toHaveCSS('background-color','rgba(0, 0, 0, 0)');
  await page.keyboard.press('Escape');
  await expect(page.getByRole('button',{name:'Actions',exact:true})).toBeFocused();
  await page.getByRole('button',{name:'Reasoning effort: low',exact:true}).click();
