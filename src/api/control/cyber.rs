@@ -12,6 +12,44 @@ pub fn program_for_model(mode: Mode, model: Option<&str>) -> Result<Option<&'sta
     mode.program(model.unwrap_or(&default_model))
 }
 
+pub async fn validate_remote(
+    state: &AppState,
+    mode: Mode,
+    model: Option<&str>,
+) -> Result<(), String> {
+    if program_for_model(mode, model)?.is_none() {
+        return Ok(());
+    }
+    let default = resolve_codex_default_model();
+    super::super::proxy::validate_remote_cyber_route(state, model.unwrap_or(&default)).await
+}
+
+pub async fn validate_remote_mission(
+    state: &AppState,
+    control: &ControlState,
+    id: Uuid,
+) -> Result<(), String> {
+    if mission_is_client_placed(control, id).await? {
+        return Ok(());
+    }
+    let Some(mission) = control.mission_store.get_mission(id).await? else {
+        return Ok(());
+    };
+    if mission.backend == "codex"
+        && remote_grok::placement(&state.config.working_dir, &control.mission_store, id)
+            .await?
+            .is_some()
+    {
+        validate_remote(
+            state,
+            read(&state.config.working_dir, id)?.mode,
+            mission.model_override.as_deref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Selection {
     pub mode: Mode,
@@ -59,6 +97,42 @@ pub fn promote(root: &FsPath, id: Uuid) -> Result<Selection, String> {
         .map_err(|_| "Cyber selection lock unavailable")?;
     let selected = read(root, id)?;
     write_committed(root, id, selected.mode)
+}
+
+/// Validate before consuming the queued choice. If PATCH changes it while
+/// validation awaits, retry the new choice; the comparison and commit share
+/// the same write lock as PATCH, without holding that lock over an await.
+async fn promote_validated<F, Fut>(
+    root: &FsPath,
+    id: Uuid,
+    mut validate: F,
+) -> Result<Selection, String>
+where
+    F: FnMut(Mode) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    loop {
+        let selected = read(root, id)?;
+        validate(selected.mode).await?;
+        let _guard = SELECTION_WRITE
+            .lock()
+            .map_err(|_| "Cyber selection lock unavailable")?;
+        let latest = read(root, id)?;
+        if latest.revision == selected.revision && latest.mode == selected.mode {
+            return write_committed(root, id, selected.mode);
+        }
+    }
+}
+
+pub async fn promote_remote(
+    state: &AppState,
+    id: Uuid,
+    model: Option<&str>,
+) -> Result<Selection, String> {
+    promote_validated(&state.config.working_dir, id, |mode| {
+        validate_remote(state, mode, model)
+    })
+    .await
 }
 
 fn write_next(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
@@ -165,6 +239,18 @@ pub async fn update(
     }
     program_for_model(change.mode, mission.model_override.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if !mission_is_client_placed(&control, id)
+        .await
+        .map_err(internal_error)?
+        && remote_grok::placement(&state.config.working_dir, &control.mission_store, id)
+            .await
+            .map_err(internal_error)?
+            .is_some()
+    {
+        validate_remote(&state, change.mode, mission.model_override.as_deref())
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     Ok(Json(response(
         write_next(&state.config.working_dir, id, change.mode).map_err(internal_error)?,
     )))
@@ -187,6 +273,44 @@ mod tests {
         );
         assert_eq!(read(dir.path(), id).unwrap().revision, next.revision);
         assert_eq!(promote(dir.path(), id).unwrap().mode, Mode::Daybreak);
+    }
+
+    #[tokio::test]
+    async fn rejected_route_preserves_pending_and_execution_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let running = write(dir.path(), id, Mode::Automatic).unwrap();
+        let pending = write_next(dir.path(), id, Mode::Standard).unwrap();
+        assert!(promote_validated(dir.path(), id, |_| async {
+            Err("unsupported route".into())
+        })
+        .await
+        .is_err());
+        assert_eq!(
+            read_execution(dir.path(), id).unwrap().revision,
+            running.revision
+        );
+        assert_eq!(read(dir.path(), id).unwrap().revision, pending.revision);
+    }
+
+    #[tokio::test]
+    async fn concurrent_selection_is_revalidated_before_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        write(dir.path(), id, Mode::Automatic).unwrap();
+        write_next(dir.path(), id, Mode::Standard).unwrap();
+        let mut validated = Vec::new();
+        let result = promote_validated(dir.path(), id, |mode| {
+            validated.push(mode);
+            if validated.len() == 1 {
+                write_next(dir.path(), id, Mode::Daybreak).unwrap();
+            }
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(validated, vec![Mode::Standard, Mode::Daybreak]);
+        assert_eq!(result.mode, Mode::Daybreak);
     }
 
     #[test]
@@ -387,9 +511,30 @@ pub fn proxy_selection(root: &FsPath, id: Uuid, key: Uuid) -> Option<(Selection,
     (binding.0 == selection.revision && binding.1 == key).then_some((selection, binding.2))
 }
 
-pub async fn capabilities() -> Json<serde_json::Value> {
+#[derive(Default, Deserialize)]
+pub struct CapabilityQuery {
+    pub model: Option<String>,
+    pub mode: Option<Mode>,
+    #[serde(default)]
+    pub remote: bool,
+}
+pub async fn capabilities(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CapabilityQuery>,
+) -> Json<serde_json::Value> {
+    let refusal = if query.remote {
+        validate_remote(
+            &state,
+            query.mode.unwrap_or(Mode::Standard),
+            query.model.as_deref(),
+        )
+        .await
+        .err()
+    } else {
+        None
+    };
     Json(
-        serde_json::json!({"version":2,"request_field":"cyber_access","native_goals_explicit":false}),
+        serde_json::json!({"version":2,"request_field":"cyber_access","native_goals_explicit":false,"route_supported":refusal.is_none(),"refusal":refusal}),
     )
 }
 

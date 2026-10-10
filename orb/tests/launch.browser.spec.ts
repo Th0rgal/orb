@@ -9,7 +9,7 @@ const node={id:"dgx-spark",status:"online",cordoned:false};
 // backend that supports native Grok remote launches says so.
 type Capability={typed?:boolean;harnesses?:string[];raw_command?:boolean;proxy_url_configured?:boolean;requires_proxy_harnesses?:string[]};
 const typedCapability:Capability={typed:true,harnesses:["claudecode","opencode"],raw_command:true,proxy_url_configured:true};
-async function setup(page:Page, options:{reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
+async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
  let attachmentReads:string[]=[];
  let posts:any[]=[], releasePost!:()=>void,releaseHistory!:()=>void;
  const postGate=new Promise<void>(resolve=>releasePost=resolve),historyGate=new Promise<void>(resolve=>releaseHistory=resolve);
@@ -57,7 +57,8 @@ async function setup(page:Page, options:{reject?:boolean;legacy?:boolean;remoteS
    if(options.emptyContext) return route.fulfill({json:path.endsWith("/files")?{entries:[]}:{job:null,runs:[]}});
   }
   const filePath=url.searchParams.get("path")||"";
-  const json=path==="/api/projects"?{projects:[{slug:"test",title:"Test"}]}:path==="/api/backends"?[{id:"grok",name:"Grok"},{id:"codex",name:"Codex"},{id:"opencode",name:"OpenCode"},{id:"claudecode",name:"Claude Code"}]:path==="/api/providers/backend-models"?{backends:{grok:[{value:"grok-4.6",label:"Grok 4.6"}],codex:[{value:"codex-model",label:"Codex model"}],opencode:[{value:"xai/grok-4.6",label:"Grok 4.6"}],claudecode:[{value:"claude-sonnet-4-6",label:"Claude Sonnet 4.6"}]}}:path==="/api/control/missions"?options.failed?[m]:[]:path.endsWith("/files")?{entries:filePath==="notes"?[{name:"foo.md",kind:"file"}]:(options.files??[])}:path.endsWith("/crons")?{jobs:[]}:{job:path.includes("/controller")?{id:"ctrl-1",name:"Test controller",enabled:true,state:"scheduled"}:null,runs:[]};
+  if(path==="/api/control/cyber-capabilities")return route.fulfill({json:{version:2,route_supported:!options.cyberRefusal,refusal:options.cyberRefusal?"unsupported_access_program: Choose Automatic explicitly. No mission was launched.":null}});
+ const json=path==="/api/projects"?{projects:[{slug:"test",title:"Test"}]}:path==="/api/backends"?[{id:"grok",name:"Grok"},{id:"codex",name:"Codex"},{id:"opencode",name:"OpenCode"},{id:"claudecode",name:"Claude Code"}]:path==="/api/providers/backend-models"?{backends:{grok:[{value:"grok-4.6",label:"Grok 4.6"}],codex:[{value:"codex-model",label:"Codex model"}],opencode:[{value:"xai/grok-4.6",label:"Grok 4.6"}],claudecode:[{value:"claude-sonnet-4-6",label:"Claude Sonnet 4.6"}]}}:path==="/api/control/missions"?options.failed?[m]:[]:path.endsWith("/files")?{entries:filePath==="notes"?[{name:"foo.md",kind:"file"}]:(options.files??[])}:path.endsWith("/crons")?{jobs:[]}:{job:path.includes("/controller")?{id:"ctrl-1",name:"Test controller",enabled:true,state:"scheduled"}:null,runs:[]};
   return route.fulfill({json});
  });
  await page.goto("/");
@@ -455,4 +456,18 @@ test('follow-up composer does not alternate layouts while typing wrapped text',a
  const first=shapes.indexOf(true);expect(first).toBeGreaterThan(0);
  expect(shapes.slice(first).every(Boolean)).toBe(true);
  await input.fill('short');await expect(page.locator('.composer.tall')).toHaveCount(0);
+});
+
+test("unsupported Cyber route keeps the draft and never submits a remote mission",async({page})=>{
+ const state=await setup(page,{cyberRefusal:true,capability:{...typedCapability,harnesses:["grok","codex"]}});
+ state.releasePost();state.releaseHistory();await chooseRemote(page);
+ await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:/^Codex/}).click();
+ const input=composerInput(page);await input.fill(objective);await input.press("Enter");
+ await expect(page.getByRole("alert")).toContainText("Choose Automatic explicitly");
+ await expect(input).toHaveValue(objective);expect(state.posts).toHaveLength(0);
+ await page.getByRole("button",{name:"Cyber program: Standard"}).click();
+ await expect(page.getByRole("menuitemradio",{name:/Standard/})).toBeDisabled();
+ await expect(page.getByRole("menuitemradio",{name:/Automatic/})).toBeEnabled();
+ await page.getByRole("menuitemradio",{name:/Automatic/}).click();await input.press("Enter");
+ await expect.poll(()=>state.posts.length).toBe(1);expect(state.posts[0].cyber_access).toBe("automatic");
 });

@@ -5470,6 +5470,12 @@ pub async fn post_message(
     }
     crate::api::mission_payload::validate_user_content(&content)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let admission_control = control_for_user(&state, &user).await;
+    if let Some(id) = req.mission_id {
+        cyber::validate_remote_mission(&state, &admission_control, id)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     let cloud_store = state.control.get_or_spawn(&user).await.mission_store;
     if let Some(response) = super::cloud_agents::http::follow_up(cloud_store, &req).await? {
         return Ok(response);
@@ -12225,6 +12231,11 @@ pub(super) async fn create_mission_inner(
         }
         cyber::program_for_model(mode, model_override.as_deref())
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        if matches!(remote_plan, Some(RemoteHarnessPlan::Codex { .. })) {
+            cyber::validate_remote(&state, mode, model_override.as_deref())
+                .await
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        }
     }
     if let Err(error) = control
         .cmd_tx
@@ -14686,8 +14697,8 @@ async fn submit_leased_remote_job(
     if let RemoteHarnessPlan::Vibe { plan, prompt, .. } = &mut resolved_plan {
         *plan = *plan || crate::vibe::plan_mode(mission.agent.as_deref(), prompt);
     }
-    let cyber_selection = if matches!(plan, RemoteHarnessPlan::Codex { .. }) {
-        cyber::promote(&state.config.working_dir, mission.id)?
+    let cyber_selection = if let RemoteHarnessPlan::Codex { model, .. } = plan {
+        cyber::promote_remote(state, mission.id, Some(model)).await?
     } else {
         cyber::Selection::default()
     };
@@ -19129,6 +19140,9 @@ pub async fn resume_mission(
     machine_transfer::guard(&control.mission_store, mission_id)
         .await
         .map_err(internal_error)?;
+    cyber::validate_remote_mission(&state, &control, mission_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if mission_is_client_placed(&control, mission_id)
         .await
         .map_err(internal_error)?
@@ -26260,10 +26274,19 @@ async fn control_actor_loop(
                                 Some(value) => value.as_deref(),
                                 None => before.model_override.as_deref(),
                             };
-                            let validation = cyber::read(&config.working_dir, id).and_then(|selection| {
-                                cyber::program_for_model(selection.mode, next_model).map(|_| ())
-                                    .map_err(|error| format!("invalid_access_program: {error}"))
-                            });
+                            let validation = async {
+                                let selection = cyber::read(&config.working_dir, id)?;
+                                cyber::program_for_model(selection.mode, next_model)?;
+                                if !client_placement::is_tagged(&before.project.tags)
+                                    && remote_grok::placement(&config.working_dir, &mission_store, id).await?.is_some()
+                                {
+                                    let state = control_hub.admission_state.get()
+                                        .and_then(std::sync::Weak::upgrade)
+                                        .ok_or("Admission state unavailable")?;
+                                    cyber::validate_remote(&state, selection.mode, next_model).await?;
+                                }
+                                Ok::<(), String>(())
+                            }.await.map_err(|error| format!("invalid_access_program: {error}"));
                             if let Err(error) = validation { let _ = respond.send(Err(error)); continue; }
                         }
                         let old_backend = Some(before.backend);

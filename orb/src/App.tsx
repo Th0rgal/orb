@@ -966,7 +966,7 @@ export function Composer(p: {
             </div>
           </Show>
           <Show when={pick()?.backend === "codex"}>
-            <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} onChange={setDraftCyber}/>
+            <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} remote={!!p.uploadTarget&&p.uploadTarget!=="core"&&p.uploadTarget!=="local"} onChange={setDraftCyber}/>
           </Show>
         </Show>
       </div>
@@ -1723,7 +1723,7 @@ export default function App() {
         }
         // `effectivePick` already dropped an effort this harness can't take, so
         // an omitted field means "backend default" rather than a stale level.
-        if(pick.backend === "codex") await requireCyberSupport();
+        if(pick.backend === "codex") await requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"});
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);

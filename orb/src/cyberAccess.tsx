@@ -21,14 +21,26 @@ export function cyberError(error:unknown):string {
 }
 export const getCyber=async(id:string)=>{await requireCyberSupport();return api<CyberSelection>(`/api/control/missions/${id}/cyber`,{cache:"no-store"});};
 export const saveCyber=(id:string,mode:CyberMode)=>api<CyberSelection>(`/api/control/missions/${id}/cyber`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
-export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;note?:string;confirmed?:boolean;onChange:(mode:CyberMode)=>void}) {
+export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;remote?:boolean;note?:string;confirmed?:boolean;onChange:(mode:CyberMode)=>void}) {
  const [open,setOpen]=createSignal(false);let root:HTMLDivElement|undefined;
+ const [route,{refetch:refetchRoute}]=createResource(()=>p.remote?[connectionVersion(),p.model] as const:false,async([,model])=>{
+  const modes=['standard','daybreak'] as const;
+  const supported=await Promise.all(modes.map(async mode=>{
+   const value=await api<{route_supported?:boolean}>(`/api/control/cyber-capabilities?${model.trim()?`model=${encodeURIComponent(model)}&`:""}mode=${mode}&remote=true`,{cache:"no-store"});
+   return value.route_supported===true;
+  }));
+  return {standard:supported[0],daybreak:supported[1]};
+ });
+ const compatibility=(mode:CyberMode)=>p.remote&&!p.model.trim()?undefined:cyberCompatibility(mode,p.model);
+ const routeRefusal=(mode:CyberMode)=>p.remote&&mode!=='automatic'&&(route.error||route()?.[mode]!==true)
+  ?(route.error?'Could not check the Cyber route. Reopen this menu to retry.':route.loading?'Checking the selected Cyber route…':'This remote route cannot guarantee the selected Cyber program. Choose Automatic explicitly or a direct OpenAI route.'):undefined;
+
  return <div class="cyber-picker model-wrap under-model-wrap" ref={root}>
-  <button class={`model under-model cyber-pill ${p.confirmed&&p.value==='daybreak'?'confirmed':''}`} type="button" aria-label={`Cyber program: ${cyberLabels[p.value]}`} aria-haspopup="menu" aria-expanded={open()} title={`Cyber: ${cyberLabels[p.value]}${p.value==='daybreak'?(p.confirmed?' (active)':' (requested)'):''}. ${p.note??'Choose a cyber program.'}`} onClick={()=>setOpen(!open())}>
+  <button class={`model under-model cyber-pill ${p.confirmed&&p.value==='daybreak'?'confirmed':''}`} type="button" aria-label={`Cyber program: ${cyberLabels[p.value]}`} aria-haspopup="menu" aria-expanded={open()} title={`Cyber: ${cyberLabels[p.value]}${p.value==='daybreak'?(p.confirmed?' (active)':' (requested)'):''}. ${p.note??'Choose a cyber program.'}`} onClick={()=>{if(!open()&&p.remote)void refetchRoute();setOpen(!open());}}>
    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3 4 6v6c0 4 5 8 8 9 3-1 8-5 8-9V6z"/></svg>
   </button>
   <Show when={open()}><Menu class="under-model-menu cyber-menu" label="Cyber program" placement="top-start" onClose={() => setOpen(false)}>
-   <For each={['standard','daybreak','automatic'] as CyberMode[]}>{mode=><button role="menuitemradio" aria-checked={p.value===mode} class={`menu-item ${p.value===mode?'on':''}`} disabled={p.disabled||!!cyberCompatibility(mode,p.model)} title={cyberCompatibility(mode,p.model)??({standard:"Standard safeguards",daybreak:"Requires approved account access",automatic:"Use the account’s default access"}[mode])} onClick={()=>{p.onChange(mode);setOpen(false);}}>
+   <For each={['standard','daybreak','automatic'] as CyberMode[]}>{mode=><button role="menuitemradio" aria-checked={p.value===mode} class={`menu-item ${p.value===mode?'on':''}`} disabled={p.disabled||!!compatibility(mode)||!!routeRefusal(mode)} title={routeRefusal(mode)??compatibility(mode)??({standard:"Standard safeguards",daybreak:"Requires approved account access",automatic:"Use the account’s default access"}[mode])} onClick={()=>{p.onChange(mode);setOpen(false);}}>
     <span class="pick-name">{cyberLabels[mode]}</span><span class="pick-check">{p.value===mode?'✓':''}</span>
    </button>}</For>
   </Menu></Show>
@@ -44,11 +56,16 @@ export function MissionCyber(p:{mission:Mission;onError?:(message:string)=>void}
   catch(e){p.onError?.(cyberError(e));}finally{setSaving(false);}
  };
  return <><span class="under-sep">·</span><Show when={!selection.error} fallback={<span class="under-model" title="The connected backend does not expose cyber settings, or the request failed. Update or reconnect before changing this option.">Cyber: unavailable</span>}>
-  <CyberPicker value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()} note="Applies to the next turn." confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
+  <CyberPicker remote={p.mission.machine_transfer?p.mission.machine_transfer.destination.kind==="node":!p.mission.tags?.includes("placement:client")&&!p.mission.local_run_active&&!!(p.mission.remote_node_id||p.mission.remote_job?.node_id)} value={selection()?.mode??'automatic'} model={p.mission.model_override??''} disabled={selection.loading||saving()} note="Applies to the next turn." confirmed={!selection.loading&&selection()?.status==='confirmed'&&!!selection()?.confirmed_program} onChange={update}/>
  </Show></>;
 }
 
-export async function requireCyberSupport(){
- try {const value=await api<{version?:number}>("/api/control/cyber-capabilities",{cache:"no-store"});if(value.version===2)return;}catch{}
- throw Error("Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept; the requested program was not silently omitted.");
+export async function requireCyberSupport(selection?:{model:string;mode:CyberMode;remote:boolean}){
+ const query=selection?`?model=${encodeURIComponent(selection.model)}&mode=${selection.mode}&remote=${selection.remote}`:"";
+ let value:{version?:number;route_supported?:boolean;refusal?:string};
+ try {value=await api("/api/control/cyber-capabilities"+query,{cache:"no-store"});}
+ catch {throw Error("Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept; the requested program was not silently omitted.");}
+ if(value.version!==2)throw Error("Update or reconnect to a backend supporting cyber selection before launching. Your draft is kept.");
+ if(selection?.remote&&selection.mode!=='automatic'&&value.route_supported!==true)
+  throw Error(value.refusal??"This backend cannot confirm the selected Cyber route. Choose Automatic explicitly. Your draft is kept.");
 }
