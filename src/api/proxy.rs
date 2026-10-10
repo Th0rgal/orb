@@ -1251,6 +1251,19 @@ async fn parse_custom_direct_model_entry(
 // Usage accounting
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Preserve the resolved subscription route even when the caller used a chain.
+// The upstream model alone cannot distinguish subscription from paid Meta API.
+fn proxy_usage_model(entry: &crate::provider_health::ResolvedEntry) -> String {
+    if entry.provider_id == "muse-code" {
+        format!(
+            "muse-code/{}",
+            entry.model_id.trim_start_matches("muse-code/")
+        )
+    } else {
+        entry.model_id.clone()
+    }
+}
+
 /// Persist one routed /v1 request's token usage into the single-tenant user's
 /// mission store so the providers usage page counts router traffic alongside
 /// mission usage. Cost is a list-price estimate from the upstream model id.
@@ -1885,7 +1898,7 @@ async fn native_protocol_proxy(
                 entry.account_id,
                 None,
                 entry.subscription_key.clone(),
-                Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                 liveness_mission_id,
             );
             let mut response = (status, Body::from_stream(tracked_stream)).into_response();
@@ -1917,7 +1930,13 @@ async fn native_protocol_proxy(
                     .health_tracker
                     .record_token_usage(entry.account_id, input_tokens, output_tokens)
                     .await;
-                record_proxy_usage(&state, &entry.model_id, input_tokens, output_tokens).await;
+                record_proxy_usage(
+                    &state,
+                    &proxy_usage_model(entry),
+                    input_tokens,
+                    output_tokens,
+                )
+                .await;
             }
         }
         let mut response = (status, Body::from(response_body)).into_response();
@@ -2709,7 +2728,7 @@ pub(crate) async fn chat_completions_inner(
                     account_id,
                     None,
                     entry.subscription_key.clone(),
-                    Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                    Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                     liveness_mission_id,
                 );
 
@@ -2891,7 +2910,7 @@ pub(crate) async fn chat_completions_inner(
                     .health_tracker
                     .record_token_usage(entry.account_id, input, output)
                     .await;
-                record_proxy_usage(&state, &entry.model_id, input, output).await;
+                record_proxy_usage(&state, &proxy_usage_model(entry), input, output).await;
             }
             let success_provider = entry.provider_id.clone();
             for evt in &mut pending_fallback_events {
@@ -2950,7 +2969,7 @@ pub(crate) async fn chat_completions_inner(
                     account_id,
                     None,
                     entry.subscription_key.clone(),
-                    Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                    Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                     liveness_mission_id,
                 );
 
@@ -3145,7 +3164,7 @@ pub(crate) async fn chat_completions_inner(
                     .health_tracker
                     .record_token_usage(entry.account_id, input, output)
                     .await;
-                record_proxy_usage(&state, &entry.model_id, input, output).await;
+                record_proxy_usage(&state, &proxy_usage_model(entry), input, output).await;
             }
             let success_provider = entry.provider_id.clone();
             for evt in &mut pending_fallback_events {
@@ -3567,7 +3586,7 @@ pub(crate) async fn chat_completions_inner(
                 account_id,
                 rate_limit_snapshot,
                 entry.subscription_key.clone(),
-                Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                 liveness_mission_id,
             );
 
@@ -3656,7 +3675,13 @@ pub(crate) async fn chat_completions_inner(
                                     .health_tracker
                                     .record_token_usage(entry.account_id, input, output)
                                     .await;
-                                record_proxy_usage(&state, &entry.model_id, input, output).await;
+                                record_proxy_usage(
+                                    &state,
+                                    &proxy_usage_model(entry),
+                                    input,
+                                    output,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -8700,6 +8725,22 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn muse_subscription_accounting_uses_resolved_route() {
+        let mut entry = crate::provider_health::ResolvedEntry {
+            provider_id: "muse-code".into(),
+            model_id: "muse-spark-1.3".into(),
+            account_id: uuid::Uuid::new_v4(),
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            subscription_key: None,
+        };
+        assert_eq!(proxy_usage_model(&entry), "muse-code/muse-spark-1.3");
+        entry.provider_id = "muse".into();
+        assert_eq!(proxy_usage_model(&entry), "muse-spark-1.3");
     }
 
     #[test]

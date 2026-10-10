@@ -497,6 +497,11 @@ impl TokenUsage {
 /// Normalize model names to canonical form for pricing lookup.
 fn normalize_model(model: &str) -> &str {
     let trimmed = model.trim();
+    // Subscription usage has no per-token API charge and must not merge with
+    // Meta's pay-as-you-go records in the usage ledger.
+    if trimmed.starts_with("muse-code/") {
+        return trimmed;
+    }
     let normalized_for_match = trimmed.to_ascii_lowercase().replace(['_', ' '], "-");
 
     for entry in PRICING_ENTRIES {
@@ -550,6 +555,9 @@ pub fn normalized_model(model: &str) -> String {
 /// - $15/1M output = 15_000 nanodollars per token
 pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
     let normalized = normalize_model(model);
+    if normalized.starts_with("muse-code/") {
+        return Some(pricing(0, 0, None, None));
+    }
     PRICING_ENTRIES
         .iter()
         .find(|entry| entry.canonical == normalized)
@@ -645,6 +653,21 @@ pub fn resolve_cost_cents_and_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn muse_subscription_usage_stays_separate_from_paid_api() {
+        let model = "muse-code/muse-spark-1.3";
+        assert_eq!(normalized_model(model), model);
+        let subscription = pricing_for_model(model).unwrap();
+        assert_eq!(subscription.input_nano_per_token, 0);
+        assert_eq!(subscription.output_nano_per_token, 0);
+        assert!(
+            pricing_for_model("muse/muse-spark-1.3")
+                .unwrap()
+                .input_nano_per_token
+                > 0
+        );
+    }
 
     #[test]
     fn opus_55_pricing_does_not_fall_back_to_opus_5() {
