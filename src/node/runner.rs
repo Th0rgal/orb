@@ -1108,8 +1108,13 @@ async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
         reset
             .args(["reset-failed", &scope.unit])
             .stdout(Stdio::null());
-        let _ = tokio::time::timeout(KILL_GRACE, reset.status()).await;
-        return true;
+        if matches!(tokio::time::timeout(KILL_GRACE, reset.status()).await,
+            Ok(Ok(status)) if status.success())
+        {
+            return true;
+        }
+        // A successful scope may already have been garbage-collected. Otherwise
+        // reset failures must retain the lease and retry retirement.
     }
     // A failed scope launch may never have registered a unit. Verify absence
     // with the manager; a failed connection/query itself is not that proof.
