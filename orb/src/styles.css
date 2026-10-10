@@ -757,7 +757,7 @@ textarea::placeholder { color: var(--placeholder); }
   color: var(--fg); font-size: 13px; line-height: 16px;
 }
 .menu-item:hover, .menu-item.on[role="option"] { background: var(--bg-hover); }
-.menu-item[aria-pressed]::after { content: ""; width: 14px; flex: 0 0 14px; margin-left: auto; color: var(--fg-2); }
+.menu-item[aria-pressed]::after, .menu-attachment-mark { content: ""; width: 14px; flex: 0 0 14px; margin-left: auto; color: var(--fg-2); }
 .menu-item[aria-pressed="true"]::after { content: "✓"; }
 .menu-item:focus:not(:focus-visible) { outline: 0; }
 .menu-item:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: -1px; background: var(--bg-hover); }
