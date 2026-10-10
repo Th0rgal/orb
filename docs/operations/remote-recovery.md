@@ -11,7 +11,8 @@ receipt; do not dispatch a replacement writer to work around an outage.
   `Retry-After` hint for classification. Retryable gateway/network failures use
   the durable remote wait ledger, including after a Core restart. The first
   retry waits at least 60 seconds; later retries back off to 10 minutes plus
-  deterministic jitter. A provider's longer Retry-After is honoured.
+  deterministic jitter. A provider's longer Retry-After is honoured. Delays beyond
+  seven days require manual recovery instead of an early retry or an unbounded wait.
 - Automatic continuation requires a persisted native session. It uses the
   existing node/workspace/session, checks the previous job's termination, and
   is capped at 12 attempts without sustained progress. Duplicate observations
@@ -20,7 +21,8 @@ receipt; do not dispatch a replacement writer to work around an outage.
   provider's account cooldown. Native subscription harnesses retain their
   account-aware reset calculation.
 - Explicit pauses/cancellations and expired structured scheduling deadlines
-  prevent automatic continuation. Natural-language deadlines cannot be inferred
+  prevent automatic continuation; replay-start retries must also fit before the
+  deadline. Natural-language deadlines cannot be inferred
   safely; set `scheduling.deadline` when creating scheduled work.
 - Authentication, provider policy and setup failures require intervention.
   They are not made retryable merely because they contain a transport error.

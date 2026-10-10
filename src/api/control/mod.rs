@@ -15597,6 +15597,12 @@ async fn replay_remote_mission_after_usage_limit(
         status.is_server_error(),
         &message,
         chrono::Utc::now(),
+        mission
+            .scheduling
+            .deadline
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc)),
     ) {
         usage_limit_wait::ReplayFailure::Retry(at) => {
             tracing::warn!(%mission_id, %message, retry_at = %at, "usage-limit replay could not start; will retry");

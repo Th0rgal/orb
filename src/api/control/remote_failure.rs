@@ -24,8 +24,11 @@ pub(crate) struct Failure {
 }
 
 fn retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
-    if let Ok(seconds) = value.trim().parse::<i64>() {
-        return (seconds >= 0).then_some(seconds);
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        // Preserve an oversized delay as a veto, never as a missing header
+        // that would allow the scheduler to fall back to a short retry.
+        return Some(value.parse::<i64>().unwrap_or(i64::MAX));
     }
     let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
     // Round up: truncating a fractional second would retry before the date.

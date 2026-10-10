@@ -682,13 +682,16 @@ pub(crate) async fn plan_remote(
                 .is_some_and(|id| !id.trim().is_empty())
             && replays < MAX_REMOTE_REPLAYS
         {
+            let delay = recovery_delay_secs(replays, mission_id)
+                .max(classified.retry_after_seconds.unwrap_or(0));
+            // Do not shorten a provider's delay or leave a mission parked for
+            // years because a proxy emitted milliseconds or a Unix timestamp.
+            if delay > 7 * 24 * 60 * 60 {
+                return None;
+            }
             return Some(UsageLimitWait {
                 limit: "Inference connection interrupted".into(),
-                resume_at: now
-                    + Duration::seconds(
-                        recovery_delay_secs(replays, mission_id)
-                            .max(classified.retry_after_seconds.unwrap_or(0)),
-                    ),
+                resume_at: now.checked_add_signed(Duration::try_seconds(delay)?)?,
                 announced: false,
             });
         }
@@ -807,10 +810,12 @@ pub(crate) fn after_replay_failure(
     server_error: bool,
     message: &str,
     now: DateTime<Utc>,
+    deadline: Option<DateTime<Utc>>,
 ) -> ReplayFailure {
     let passing = server_error || message.contains(super::remote_grok::REMOTE_JOB_STILL_RUNNING);
-    if passing && wait.retries < MAX_REPLAY_RETRIES {
-        ReplayFailure::Retry(now + Duration::seconds(REPLAY_RETRY_SECS))
+    let at = now + Duration::seconds(REPLAY_RETRY_SECS);
+    if passing && wait.retries < MAX_REPLAY_RETRIES && !deadline.is_some_and(|end| at >= end) {
+        ReplayFailure::Retry(at)
     } else {
         ReplayFailure::GiveUp
     }
@@ -1404,20 +1409,30 @@ mod tests {
             super::super::remote_grok::REMOTE_JOB_STILL_RUNNING
         );
         assert_eq!(
-            after_replay_failure(&wait, false, &still_running, now),
+            after_replay_failure(&wait, false, &still_running, now, None),
             ReplayFailure::Retry(now + Duration::minutes(5))
         );
         assert_eq!(
-            after_replay_failure(&wait, true, "store unavailable", now),
+            after_replay_failure(&wait, true, "store unavailable", now, None),
             ReplayFailure::Retry(now + Duration::minutes(5))
         );
         assert_eq!(
-            after_replay_failure(&wait, false, "no recorded native session", now),
+            after_replay_failure(&wait, false, "no recorded native session", now, None),
+            ReplayFailure::GiveUp
+        );
+        assert_eq!(
+            after_replay_failure(
+                &wait,
+                true,
+                "store unavailable",
+                now,
+                Some(now + Duration::minutes(4))
+            ),
             ReplayFailure::GiveUp
         );
         wait.retries = MAX_REPLAY_RETRIES;
         assert_eq!(
-            after_replay_failure(&wait, false, &still_running, now),
+            after_replay_failure(&wait, false, &still_running, now, None),
             ReplayFailure::GiveUp
         );
     }
@@ -1543,6 +1558,37 @@ mod tests {
         )
         .await
         .is_none());
+        assert!(remote_wait(dir.path(), mission.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn oversized_retry_after_never_panics_or_retries_early() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "opencode").await;
+        store
+            .update_mission_session_id(mission.id, "ses_existing", "opencode", None)
+            .await
+            .unwrap();
+        for delay in [
+            "9223372036854775807",
+            "99999999999999999999999999999",
+            "1791621123",
+        ] {
+            let error = format!(
+                r#"{{"data":{{"statusCode":502,"isRetryable":true,"responseHeaders":{{"retry-after":"{delay}"}}}}}}"#
+            );
+            assert!(plan_remote(
+                dir.path(),
+                &store,
+                mission.id,
+                false,
+                &error,
+                Uuid::new_v4(),
+                false
+            )
+            .await
+            .is_none());
+        }
         assert!(remote_wait(dir.path(), mission.id).await.is_none());
     }
 

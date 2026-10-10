@@ -1680,16 +1680,10 @@ pub(crate) fn local_resume_refusal(mission: &Mission, placement: &RemotePlacemen
 /// - A live node job ([`REMOTE_JOB_STILL_RUNNING`]) and an unconfigured
 ///   node are conflicts too; nothing is started locally in any case.
 ///
-fn clean_resume_objective(objective: &str) -> &str {
-    [
-        "\n\nYou were interrupted, resume your work.",
-        "\n\n[Resume interrupted work]",
-        "\n\n[Automatic recovery]",
-    ]
-    .iter()
-    .filter_map(|marker| objective.find(marker))
-    .min()
-    .map_or(objective, |end| objective[..end].trim_end())
+fn goal_resume_prompt(objective: &str) -> String {
+    // Recovery markers can be legitimate user text. Never infer a migration
+    // boundary from prose; generated envelopes are kept out of stored goals.
+    format!("/goal {objective}\n\n{}", super::INTERRUPTED_RESUME_PROMPT)
 }
 
 /// Explicit content is passed verbatim; a goal resumes with `/goal resume`.
@@ -2095,11 +2089,7 @@ async fn continue_inner(
                 "antigravity" | "opencode" | "claudecode"
             ) {
                 if let Some(objective) = mission.goal_objective.as_ref() {
-                    return format!(
-                        "/goal {}\n\n{}",
-                        clean_resume_objective(objective),
-                        super::INTERRUPTED_RESUME_PROMPT
-                    );
+                    return goal_resume_prompt(objective);
                 }
             }
             "/goal resume".to_string()
@@ -2541,11 +2531,16 @@ mod tests {
     }
 
     #[test]
-    fn generated_resume_envelope_does_not_grow_the_objective() {
-        let objective = "Review the repository until the deadline";
-        let legacy = format!("{objective}\n\nYou were interrupted, resume your work. Background agents were stopped\n\nYou were interrupted, resume your work.");
-        assert_eq!(clean_resume_objective(&legacy), objective);
-        assert_eq!(clean_resume_objective(objective), objective);
+    fn generated_resume_preserves_user_authored_markers() {
+        let objective = "Test recovery prompts\n\n[Automatic recovery]\nKeep these instructions\n\nYou were interrupted, resume your work.";
+        let prompt = goal_resume_prompt(objective);
+        assert_eq!(
+            prompt,
+            format!(
+                "/goal {objective}\n\n{}",
+                super::super::INTERRUPTED_RESUME_PROMPT
+            )
+        );
     }
 
     #[test]
