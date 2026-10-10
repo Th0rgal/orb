@@ -78,7 +78,10 @@ Down/Up or J/K move actual focus between rows, Home/End reach the first/last
 row, Space toggles the selected preview and closes any previous one, T focuses
 the follow-up in an open preview, R replies and
 Enter opens the thread. In the follow-up, Enter sends and Shift+Enter adds a line. Down from a filter
-enters the first row. Closing Peek returns focus to the row without scrolling;
+enters the first row. While Inbox is visible, Space from the sidebar returns to
+the last focused row (or the active filter when empty) without opening its
+preview and dismisses the overlay sidebar on narrow screens; Enter still activates
+the sidebar destination. Closing Peek returns focus to the row without scrolling;
 marking it done advances focus. Opening a different preview, by keyboard or
 mouse, preserves each conversation’s draft and keeps only one preview open.
 Leave native disclosure keys, text selection,

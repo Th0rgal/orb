@@ -843,6 +843,7 @@ export function Composer(p: {
                   <button class={`menu-item ${mentioned().some((c) => c.id === it.id) ? "on" : ""}`} title={it.path ?? it.label} onClick={() => setCtxFolder((it.path ?? it.label).replace(/\/$/, ""))}>
                     <span class="menu-ico"><Ic.FolderIcon size={14} /></span>
                     <span class="slash-item-label">{display()}</span>
+                    <span class="menu-attachment-mark" aria-hidden="true">{mentioned().some((c) => c.id === it.id) ? "✓" : ""}</span>
                     <span class="slash-chevron"><Ic.ChevronRight size={12} /></span>
                   </button>
                 );
@@ -865,6 +866,7 @@ export function Composer(p: {
                   >
                     <span class="menu-ico"><Ic.FileIcon size={14} /></span>
                     <span class="slash-item-label">{display()}</span>
+                    <span class="menu-attachment-mark" aria-hidden="true">{mentioned().some((c) => c.id === item.id) || p.attached?.includes(item.id) ? "✓" : ""}</span>
                   </button>
                 );
               }}
@@ -1877,7 +1879,7 @@ export default function App() {
                   <span class="row-label">New Agent</span>
                   <kbd>⌘N</kbd>
                 </button>
-                <button class={`row ${selected() === "inbox" ? "active" : ""}`} onClick={() => open("inbox")}>
+                <button class={`row ${selected() === "inbox" ? "active" : ""}`} title={selected() === "inbox" ? "Space to return to the Inbox list" : undefined} onClick={() => open("inbox")}>
                   <span class="row-ico"><Ic.InboxIcon /></span>
                   <span class="row-label">Inbox</span>
                   <Show when={inboxCount() > 0}><span class="inbox-sb-badge" aria-label={`${inboxCount()} need attention`}>{inboxCount()}</span></Show>
@@ -2116,6 +2118,7 @@ export default function App() {
                                 {(m) => (
                                   <button
                                     class={`menu-item ${m.id === newMachine() ? "on" : ""}`}
+                                    aria-pressed={m.id === newMachine()}
                                     onClick={() => {
                                       chooseMachine(m.id);
                                       setEnvOpen(null);
@@ -2133,6 +2136,7 @@ export default function App() {
                                 {(m) => (
                                   <button
                                     class={`menu-item ${m.id === newMachine() ? "on" : ""}`}
+                                    aria-pressed={m.id === newMachine()}
                                     onClick={() => {
                                       chooseMachine(m.id);
                                       setEnvOpen(null);
@@ -2154,6 +2158,7 @@ export default function App() {
 
                           <button
                             class={`menu-item ${newMachine() === "local" ? "on" : ""}`}
+                                    aria-pressed={newMachine() === "local"}
                             onClick={() => {
                               chooseMachine("local");
                               setEnvOpen(null);
@@ -2172,6 +2177,7 @@ export default function App() {
                           <div class="machine-section-label">Remote</div>
                           <button
                             class={`menu-item ${newMachine() === "core" ? "on" : ""}`}
+                                    aria-pressed={newMachine() === "core"}
                             onClick={() => {
                               chooseMachine("core");
                               setEnvOpen(null);
@@ -2191,6 +2197,7 @@ export default function App() {
                             {(n) => (
                               <button
                                 class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
+                                    aria-pressed={n.id === newMachine()}
                                 title={isAdministrationNode(n) ? `Administration · Full sudo · Manual selection only. ${nodeLaunchNote() ?? ""}` : nodeLaunchNote()}
                                 onClick={() => {
                                   chooseMachine(n.id);
@@ -2287,6 +2294,7 @@ export default function App() {
         <Switch>
             <Match when={selected() === "inbox"}>
               <InboxPage
+                onFocusContent={() => { if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false); }}
                 onDeleteMission={setDeleteMissionRequest}
                 missions={inboxMissions()}
                 projects={liveProjects()}

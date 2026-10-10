@@ -303,6 +303,7 @@ export function InboxPage(p: {
   onOpenMission: (id: string) => void;
   onOpenSettings: () => void;
   onOpenInboxSettings?: () => void;
+  onFocusContent?: () => void;
   onNewAgent: () => void;
   onDeleteMission?: (id: string) => void;
   onRefresh: () => Promise<void> | void;
@@ -1004,6 +1005,18 @@ export function InboxPage(p: {
       const currentIdx = items.findIndex((i) => i.id === currentId);
       const currentItem = currentIdx >= 0 ? items[currentIdx] : items[0];
 
+      // Space returns from sidebar navigation without activating its button or
+      // opening the preview. Enter still activates the sidebar destination.
+      if (e.key === " " && !e.shiftKey && target?.closest("#orb-sidebar")) {
+        e.preventDefault();
+        if (!e.repeat) {
+          p.onFocusContent?.();
+          if (currentItem) focusRow(currentItem.id);
+          else (listContainerRef?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? listContainerRef)?.focus();
+        }
+        return;
+      }
+
       const inRow = !!target?.closest(".inbox-row");
       const inNavigation = !!target?.closest(".inbox-mode-tabs, .inbox-filters");
       if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "j" || e.key === "k") {
@@ -1030,6 +1043,7 @@ export function InboxPage(p: {
       if (e.key === " " && currentItem) {
         if (target?.closest("button:not(.inbox-row-main):not(.inbox-row-title-btn), summary, a[href]")) return;
         e.preventDefault();
+        if (e.repeat) return;
         togglePeek(currentItem);
         return;
       }
@@ -1715,7 +1729,7 @@ export function InboxPage(p: {
     );
   };
   return (
-    <div class="page inbox-page" ref={listContainerRef}>
+    <div class="page inbox-page" ref={listContainerRef} tabIndex={-1}>
       <div class="page-head inbox-head">
         <div class="inbox-title-group">
           <h2>Inbox</h2>
