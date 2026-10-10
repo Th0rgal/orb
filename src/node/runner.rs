@@ -32,6 +32,37 @@ pub const LOG_TAIL_MAX_BYTES: u64 = 64 * 1024;
 /// Grace period between SIGTERM and SIGKILL when stopping a job.
 const KILL_GRACE: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "linux")]
+static SCOPE_OOM_POLICY_SUPPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+fn scope_oom_policy_supported(version: &str) -> bool {
+    version
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u32>()
+        .is_ok_and(|major| major >= 253)
+}
+
+#[cfg(target_os = "linux")]
+fn scope_prefix_for(node_id: &str, work_root: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{node_id}\0{work_root}"));
+    format!("sandboxed-node-{}", hex::encode(&digest[..16]))
+}
+
+#[cfg(target_os = "linux")]
+fn node_scope_prefix() -> String {
+    scope_prefix_for(
+        &std::env::var("SANDBOXED_NODE_ID").unwrap_or_else(|_| "local-node".into()),
+        &std::env::var("SANDBOXED_NODE_WORK_DIR")
+            .unwrap_or_else(|_| "/var/lib/sandboxed-node/work".into()),
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum SystemdScopeMode {
@@ -336,7 +367,7 @@ impl JobRunner {
                     #[cfg(target_os = "linux")]
                     if let Some((mode, user_runtime_dir)) = systemd_scope_mode() {
                         let scope = SystemdScope {
-                            unit: format!("sandboxed-node-job-{}.scope", job_id.simple()),
+                            unit: format!("{}-job-{}.scope", node_scope_prefix(), job_id.simple()),
                             mode,
                             user_runtime_dir,
                         };
@@ -520,7 +551,8 @@ pub(crate) fn clamp_timeout(requested: Option<u64>, max_job_secs: u64) -> u64 {
 pub(crate) enum RunOutcome {
     Exited(Option<i32>),
     Cancelled,
-    TimedOut { limit_secs: u64 },
+    ExitedAfterChildOom(Option<i32>),
+    TimedOut { limit_secs: u64, observed_oom: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -546,13 +578,41 @@ impl RunOutcome {
                 Some(format!("command exited with {code:?}")),
             ),
             RunOutcome::Cancelled => (JobState::Cancelled, None, Some("cancelled".to_string())),
-            RunOutcome::TimedOut { limit_secs } => (
+            RunOutcome::ExitedAfterChildOom(code) => (JobState::Failed, code,
+                Some(format!("command exited with {code:?}; a child process in this job was also killed by the kernel OOM killer. Reconcile saved files and reduce the workload before resuming"))),
+            RunOutcome::TimedOut { limit_secs, observed_oom } => (
                 JobState::Failed,
                 None,
-                Some(format!("timed out after {limit_secs}s")),
+                Some(if observed_oom {
+                    format!("timed out after {limit_secs}s; a child process also exceeded this job's memory budget. Reconcile saved files and reduce the workload before resuming")
+                } else { format!("timed out after {limit_secs}s") }),
             ),
         }
     }
+}
+
+#[test]
+fn memory_exhaustion_is_failure_with_recovery_guidance() {
+    let (state, code, error) = RunOutcome::ExitedAfterChildOom(None).into_job_result();
+    assert_eq!(state, JobState::Failed);
+    assert_eq!(code, None);
+    assert!(error.unwrap().contains("kernel OOM killer"));
+}
+
+#[test]
+fn memory_timeout_keeps_deadline_reason_and_prior_oom_evidence() {
+    let (state, _, error) = RunOutcome::TimedOut {
+        limit_secs: 5,
+        observed_oom: true,
+    }
+    .into_job_result();
+    assert_eq!(state, JobState::Failed);
+    let error = error.unwrap();
+    assert!(error.starts_with("timed out after 5s"));
+    assert!(error.contains("child process also exceeded"));
+    let (state, _, error) = RunOutcome::Cancelled.into_job_result();
+    assert_eq!(state, JobState::Cancelled);
+    assert_eq!(error.as_deref(), Some("cancelled"));
 }
 
 /// Spawn `cmd` in its own process group with combined stdout+stderr appended
@@ -585,11 +645,31 @@ async fn run_logged_command_with_deadline(
         .append(true)
         .open(log_path)?;
     let stderr_file = stdout_file.try_clone()?;
-    let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path)?;
+    run_supervised_command(
+        cmd,
+        environment,
+        log_path,
+        limit_secs,
+        token,
+        Stdio::from(stdout_file),
+        Stdio::from(stderr_file),
+    )
+    .await
+}
+
+async fn run_supervised_command(
+    cmd: tokio::process::Command,
+    environment: CommandEnvironment,
+    log_path: &Path,
+    limit_secs: Option<u64>,
+    token: &CancellationToken,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> anyhow::Result<RunOutcome> {
+    let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path, limit_secs)?;
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        // New process group so cancel/timeout can kill the whole tree.
+        .stdout(stdout)
+        .stderr(stderr)
         .process_group(0);
     let mut child = cmd.spawn()?;
     let pid = child.id();
@@ -605,15 +685,96 @@ async fn run_logged_command_with_deadline(
                 None => std::future::pending::<()>().await,
             }
         } => {
-            kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-            RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled") }
+            // Signal immediately at the deadline; diagnostic queries must not
+            // extend the payload's execution before cleanup begins.
+            if let Some(pid) = pid {
+                unsafe { libc::kill(-(pid as i32), libc::SIGTERM); }
+            }
+            let observed_oom = cleanup_and_observe_oom(systemd_scope.as_ref(), pid, &mut child).await;
+            RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled"), observed_oom }
         }
         waited = child.wait() => {
-            kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-            RunOutcome::Exited(waited?.code())
+            let oom = cleanup_and_observe_oom(systemd_scope.as_ref(), pid, &mut child).await;
+            let code = waited?.code();
+            if oom && code != Some(0) { RunOutcome::ExitedAfterChildOom(code) } else { RunOutcome::Exited(code) }
         }
     };
     Ok(outcome)
+}
+
+/// Synchronous leases use the same scope, memory budget and cleanup as queued jobs.
+/// Drain bounded streams so untrusted output cannot exhaust node memory or disk.
+pub(crate) async fn run_captured_command(
+    cmd: tokio::process::Command,
+    limit_secs: u64,
+) -> anyhow::Result<(Option<i32>, String, String)> {
+    use std::os::fd::OwnedFd;
+    let capture = tempfile::tempdir()?;
+    let log_path = capture
+        .path()
+        .join(format!("sync-{}", Uuid::new_v4().simple()));
+    fn capture_pair() -> std::io::Result<(tokio::net::UnixStream, Stdio)> {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        Ok((
+            tokio::net::UnixStream::from_std(reader)?,
+            Stdio::from(OwnedFd::from(writer)),
+        ))
+    }
+    async fn read_capped(mut stream: tokio::net::UnixStream) -> std::io::Result<String> {
+        use tokio::io::AsyncReadExt;
+        // JSON escapes a control byte into six bytes; invalid UTF-8 expands
+        // by at most three. Reserve space for the truncation notice as well.
+        const LIMIT: usize = (16 * 1024 * 1024 - 1024) / 6;
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let mut truncated = false;
+        loop {
+            let length = stream.read(&mut buffer).await?;
+            if length == 0 {
+                break;
+            }
+            let keep = length.min(LIMIT.saturating_sub(bytes.len()));
+            bytes.extend_from_slice(&buffer[..keep]);
+            truncated |= keep < length;
+            // Continue draining and discard excess output while the job runs.
+        }
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        if truncated {
+            text.push_str("\n[node output truncated to fit 16 MiB JSON limit]\n");
+        }
+        Ok(text)
+    }
+    let (stdout_reader, stdout) = capture_pair()?;
+    let (stderr_reader, stderr) = capture_pair()?;
+    let token = CancellationToken::new();
+    let (outcome, stdout, stderr) = tokio::join!(
+        run_supervised_command(
+            cmd,
+            CommandEnvironment::Clear,
+            &log_path,
+            Some(limit_secs),
+            &token,
+            stdout,
+            stderr
+        ),
+        read_capped(stdout_reader),
+        read_capped(stderr_reader),
+    );
+    let outcome = outcome?;
+    let (exit_code, notice) = match outcome {
+        RunOutcome::Exited(code) => (code, None),
+        other => {
+            let (_, code, notice) = other.into_job_result();
+            (code, notice)
+        }
+    };
+    let stdout = stdout?;
+    let mut stderr = stderr?;
+    if let Some(notice) = notice {
+        stderr.push_str(&format!("\n{notice}\n"));
+    }
+    Ok((exit_code, stdout, stderr))
 }
 
 /// Put node jobs in a transient systemd scope when the host has a running
@@ -625,8 +786,9 @@ fn contain_command(
     cmd: tokio::process::Command,
     environment: CommandEnvironment,
     log_path: &Path,
+    limit_secs: Option<u64>,
 ) -> std::io::Result<(tokio::process::Command, Option<SystemdScope>)> {
-    let _ = log_path;
+    let _ = (log_path, limit_secs);
     // Cargo's lib and binary test harnesses do not run sandboxed-node's main,
     // so they cannot service the hidden trampoline entrypoint. Construction
     // is covered directly below; execution tests retain the process-group
@@ -647,19 +809,36 @@ fn contain_command(
     #[cfg(target_os = "linux")]
     {
         if let Some((mode, user_runtime_dir)) = systemd_scope_mode() {
-            let scope_id = (environment == CommandEnvironment::Clear)
-                .then(|| log_path.file_stem()?.to_str())
-                .flatten()
+            let stem = log_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let synchronous = stem.strip_prefix("sync-");
+            let scope_id = synchronous
+                .or_else(|| (environment == CommandEnvironment::Clear).then_some(stem))
                 .and_then(|stem| Uuid::parse_str(stem).ok())
                 .unwrap_or_else(Uuid::new_v4);
             let scope = SystemdScope {
-                unit: format!("sandboxed-node-job-{}.scope", scope_id.simple()),
+                unit: format!(
+                    "{}-{}-{}.scope",
+                    node_scope_prefix(),
+                    if synchronous.is_some() { "sync" } else { "job" },
+                    scope_id.simple()
+                ),
                 mode,
                 user_runtime_dir,
             };
             return Ok((
-                systemd_scope_command(cmd, environment, &scope)?,
+                systemd_scope_command(
+                    cmd,
+                    environment,
+                    &scope,
+                    limit_secs,
+                    SCOPE_OOM_POLICY_SUPPORTED.load(Ordering::Acquire),
+                )?,
                 Some(scope),
+            ));
+        }
+        if Path::new("/run/systemd/system").is_dir() {
+            return Err(std::io::Error::other(
+                "systemd job containment is required: expose the runner user bus and enable its lingering user manager",
             ));
         }
     }
@@ -671,7 +850,8 @@ fn systemd_scope_mode() -> Option<(SystemdScopeMode, Option<PathBuf>)> {
     // Merely seeing systemd's runtime directory is insufficient in containers
     // and CI runners. Root can use the system manager. A hardened non-root
     // node uses its lingering user manager, exposed through XDG_RUNTIME_DIR;
-    // without either manager we retain the process-group fallback.
+    // A host with systemd must expose a manager: startup and dispatch reject
+    // missing buses instead of silently dropping job memory containment.
     if !Path::new("/run/systemd/system").is_dir() {
         return None;
     }
@@ -722,11 +902,62 @@ fn select_user_systemd_runtime_dir(
     }))
 }
 
+/// Reserve host memory and budget the foreground slots plus the side-question lane.
+/// Operators may increase the per-job ceiling for a node dedicated to large builds.
+#[cfg(target_os = "linux")]
+fn job_memory_limit() -> std::io::Result<u64> {
+    if let Ok(value) = std::env::var("SANDBOXED_NODE_JOB_MEMORY_BYTES") {
+        return value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "SANDBOXED_NODE_JOB_MEMORY_BYTES must be a positive integer",
+                )
+            });
+    }
+    let info = std::fs::read_to_string("/proc/meminfo")?;
+    let total = info
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("MemTotal:")
+                .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+        })
+        .ok_or_else(|| std::io::Error::other("MemTotal unavailable"))?
+        * 1024;
+    let capacity = std::env::var("SANDBOXED_NODE_CAPACITY")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1);
+    Ok(default_job_memory_limit(total, capacity))
+}
+
+#[cfg(target_os = "linux")]
+fn default_job_memory_limit(total: u64, capacity: u64) -> u64 {
+    total / 5 * 4 / capacity.saturating_add(1)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn memory_budget_reserves_host_and_side_question_capacity() {
+    let total = 64 * 1024_u64.pow(3);
+    let limit = default_job_memory_limit(total, 2);
+    assert!(limit * 3 <= total / 5 * 4);
+    assert!(limit > 16 * 1024_u64.pow(3));
+    assert!(default_job_memory_limit(total, 4) < limit);
+}
+
 #[cfg(target_os = "linux")]
 fn systemd_scope_command(
     cmd: tokio::process::Command,
     environment: CommandEnvironment,
     scope: &SystemdScope,
+    limit_secs: Option<u64>,
+    oom_policy_supported: bool,
 ) -> std::io::Result<tokio::process::Command> {
     let command = cmd.as_std();
     let program = command.get_program().to_os_string();
@@ -747,13 +978,22 @@ fn systemd_scope_command(
             );
         }
     }
+    let memory_limit = job_memory_limit()?;
     scoped
         .arg("--scope")
         .arg("--quiet")
-        .arg("--collect")
         .arg(format!("--unit={}", scope.unit))
         .arg("--property=KillMode=control-group")
-        .arg("--");
+        .arg(format!("--property=MemoryMax={}", memory_limit))
+        .arg(format!("--property=MemoryHigh={}", memory_limit / 10 * 9))
+        .arg("--property=MemorySwapMax=0");
+    if oom_policy_supported {
+        scoped.arg("--property=OOMPolicy=continue");
+    }
+    if let Some(seconds) = limit_secs {
+        scoped.arg(format!("--property=RuntimeMaxSec={}", seconds.max(1)));
+    }
+    scoped.arg("--");
     if environment == CommandEnvironment::Clear {
         // With --scope, systemd-run executes the payload itself, so the
         // payload otherwise inherits the runner service's environment. Keep
@@ -830,6 +1070,53 @@ pub fn maybe_exec_cleared_scope_payload() -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Read the kernel counter before cleanup removes the transient cgroup.
+async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = _scope {
+        let mut command = tokio::process::Command::new("systemctl");
+        command.kill_on_drop(true);
+        if scope.mode == SystemdScopeMode::User {
+            command.arg("--user");
+            if let Some(runtime) = &scope.user_runtime_dir {
+                command.env("XDG_RUNTIME_DIR", runtime).env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}/bus", runtime.display()),
+                );
+            }
+        }
+        command.args([
+            "show",
+            "--property=ControlGroup",
+            "--property=Result",
+            &scope.unit,
+        ]);
+        if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(2), command.output()).await
+        {
+            let properties = String::from_utf8_lossy(&output.stdout);
+            if output.status.success() && properties.lines().any(|line| line == "Result=oom-kill") {
+                return true;
+            }
+            let group = properties
+                .lines()
+                .find_map(|line| line.strip_prefix("ControlGroup="))
+                .unwrap_or("");
+            if output.status.success() && group.starts_with('/') && !group.contains("..") {
+                if let Ok(events) =
+                    tokio::fs::read_to_string(format!("/sys/fs/cgroup{group}/memory.events")).await
+                {
+                    return events.lines().any(|line| {
+                        line.strip_prefix("oom_kill ")
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .is_some_and(|n| n > 0)
+                    });
+                }
+            }
+        }
+    }
+    false
+}
+
 async fn kill_contained_process(
     _systemd_scope: Option<&SystemdScope>,
     pid: Option<u32>,
@@ -841,6 +1128,27 @@ async fn kill_contained_process(
         return;
     }
     retry_process_cleanup(pid, child, || std::future::ready(true)).await;
+}
+
+/// Stop the whole process tree before diagnostics, retaining failed unit
+/// results until inspection. A diagnostic query never prolongs live writers.
+async fn cleanup_and_observe_oom(
+    _scope: Option<&SystemdScope>,
+    pid: Option<u32>,
+    child: &mut tokio::process::Child,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = _scope {
+        retry_process_cleanup(pid, child, || stop_systemd_scope_impl(scope, false)).await;
+        let oom = scope_oom_killed(Some(scope)).await;
+        while !stop_systemd_scope(scope).await {
+            tracing::warn!(unit = %scope.unit, "waiting for inspected scope retirement");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        return oom;
+    }
+    kill_contained_process(_scope, pid, child).await;
+    false
 }
 
 /// The job remains running (and keeps its capacity/ownership) until both the
@@ -880,6 +1188,11 @@ async fn retry_process_cleanup<F, Fut>(
 
 #[cfg(target_os = "linux")]
 async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
+    stop_systemd_scope_impl(scope, true).await
+}
+
+#[cfg(target_os = "linux")]
+async fn stop_systemd_scope_impl(scope: &SystemdScope, retire: bool) -> bool {
     let command = || {
         let mut command = tokio::process::Command::new("systemctl");
         command
@@ -901,7 +1214,22 @@ async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
     stop.arg("stop").arg(&scope.unit).stdout(Stdio::null());
     if matches!(tokio::time::timeout(KILL_GRACE, stop.status()).await, Ok(Ok(status)) if status.success())
     {
-        return true;
+        if !retire {
+            return true;
+        }
+        // Failed transient scopes retain Result until it has been inspected.
+        // Retire only this stopped unit after recording the outcome.
+        let mut reset = command();
+        reset
+            .args(["reset-failed", &scope.unit])
+            .stdout(Stdio::null());
+        if matches!(tokio::time::timeout(KILL_GRACE, reset.status()).await,
+            Ok(Ok(status)) if status.success())
+        {
+            return true;
+        }
+        // A successful scope may already have been garbage-collected. Otherwise
+        // reset failures must retain the lease and retry retirement.
     }
     // A failed scope launch may never have registered a unit. Verify absence
     // with the manager; a failed connection/query itself is not that proof.
@@ -909,6 +1237,89 @@ async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
     show.args(["show", "--property=LoadState", "--value", &scope.unit]);
     matches!(tokio::time::timeout(KILL_GRACE, show.output()).await,
         Ok(Ok(output)) if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "not-found")
+}
+
+/// Retire scopes from a previous daemon before admitting new work.
+/// Their dedicated namespace is recoverable even when no HTTP response survived.
+pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if !Path::new("/run/systemd/system").is_dir() {
+            return Ok(());
+        }
+        let (mode, user_runtime_dir) = systemd_scope_mode().ok_or_else(|| {
+            anyhow::anyhow!(
+                "systemd job containment is required: enable the runner's lingering user manager and expose its user bus before starting sandboxed-node"
+            )
+        })?;
+        let manager_command = || {
+            let mut command = tokio::process::Command::new("systemctl");
+            command.kill_on_drop(true);
+            if mode == SystemdScopeMode::User {
+                command.arg("--user");
+                if let Some(runtime) = &user_runtime_dir {
+                    command.env("XDG_RUNTIME_DIR", runtime).env(
+                        "DBUS_SESSION_BUS_ADDRESS",
+                        format!("unix:path={}/bus", runtime.display()),
+                    );
+                }
+            }
+            command
+        };
+        let mut version = manager_command();
+        version.args(["show", "--property=Version", "--value"]);
+        let version = tokio::time::timeout(KILL_GRACE, version.output()).await??;
+        anyhow::ensure!(
+            version.status.success(),
+            "cannot determine systemd manager capabilities"
+        );
+        SCOPE_OOM_POLICY_SUPPORTED.store(
+            scope_oom_policy_supported(&String::from_utf8_lossy(&version.stdout)),
+            Ordering::Release,
+        );
+        let mut command = manager_command();
+        let prefix = node_scope_prefix();
+        let sync_prefix = format!("{prefix}-sync-");
+        let job_prefix = format!("{prefix}-job-");
+        command.args([
+            "list-units",
+            "--all",
+            "--full",
+            "--type=scope",
+            "--plain",
+            "--no-legend",
+            &format!("{sync_prefix}*.scope"),
+            &format!("{job_prefix}*.scope"),
+        ]);
+        let output = tokio::time::timeout(KILL_GRACE, command.output()).await??;
+        anyhow::ensure!(
+            output.status.success(),
+            "cannot reconcile previous job scopes"
+        );
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some(unit) = line.split_whitespace().next() else {
+                continue;
+            };
+            let Some(id) = unit
+                .strip_prefix(&sync_prefix)
+                .or_else(|| unit.strip_prefix(&job_prefix))
+                .and_then(|s| s.strip_suffix(".scope"))
+            else {
+                anyhow::bail!("unexpected node scope name");
+            };
+            Uuid::parse_str(id)?;
+            let scope = SystemdScope {
+                unit: unit.into(),
+                mode,
+                user_runtime_dir: user_runtime_dir.clone(),
+            };
+            while !stop_systemd_scope(&scope).await {
+                tracing::warn!(unit, "waiting for previous node scope retirement");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// SIGTERM the job's process group, escalating to SIGKILL after a grace
@@ -1486,6 +1897,26 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn scope_namespace_is_stable_and_isolates_node_instances() {
+        let first = scope_prefix_for("ashur", "/var/lib/node-a");
+        assert_eq!(first, scope_prefix_for("ashur", "/var/lib/node-a"));
+        assert_ne!(first, scope_prefix_for("sepolia", "/var/lib/node-a"));
+        assert_ne!(first, scope_prefix_for("ashur", "/var/lib/node-b"));
+        assert_eq!(first.len(), "sandboxed-node-".len() + 32);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scope_oom_policy_tracks_manager_version() {
+        assert!(!scope_oom_policy_supported("249.11-0ubuntu3"));
+        assert!(!scope_oom_policy_supported("252.39-1~deb12"));
+        assert!(scope_oom_policy_supported("253"));
+        assert!(scope_oom_policy_supported("255.4-1ubuntu8.16"));
+        assert!(!scope_oom_policy_supported("unknown"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn systemd_scope_wrapper_keeps_environment_out_of_argv() {
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.args(["-c", "printf ok"])
@@ -1500,6 +1931,8 @@ mod tests {
                 mode: SystemdScopeMode::User,
                 user_runtime_dir: Some(PathBuf::from("/run/user/1234")),
             },
+            Some(30),
+            true,
         )
         .unwrap();
         let argv = scoped
@@ -1509,6 +1942,18 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(argv.iter().any(|arg| arg == "--user"));
+        assert!(!argv.iter().any(|arg| arg == "--collect"));
+        assert!(argv
+            .iter()
+            .any(|arg| arg.starts_with("--property=MemoryMax=")));
+        assert!(argv
+            .iter()
+            .any(|arg| arg.starts_with("--property=MemoryHigh=")));
+        assert!(argv.iter().any(|arg| arg == "--property=MemorySwapMax=0"));
+        assert!(argv
+            .iter()
+            .any(|arg| arg == "--property=OOMPolicy=continue"));
+        assert!(argv.iter().any(|arg| arg == "--property=RuntimeMaxSec=30"));
         assert!(argv.iter().any(|arg| arg == "/bin/sh"));
         assert!(argv.iter().any(|arg| arg == "printf ok"));
         assert!(!argv.iter().any(|arg| arg.contains("not-in-argv")));
@@ -1540,6 +1985,8 @@ mod tests {
                 mode: SystemdScopeMode::User,
                 user_runtime_dir: None,
             },
+            None,
+            false,
         )
         .unwrap();
         let argv = scoped
@@ -1547,6 +1994,9 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        assert!(!argv
+            .iter()
+            .any(|arg| arg == "--property=OOMPolicy=continue"));
 
         let payload = argv
             .iter()

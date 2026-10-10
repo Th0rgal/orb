@@ -215,8 +215,13 @@ unit (`useradd --system --home /var/lib/sandboxed-node sandboxed-node` and
 Enable its user manager once with
 `loginctl enable-linger sandboxed-node`; job commands then run in transient
 user scopes, so even descendants that call `setsid` are reaped when their job
-finishes. If the user bus is unavailable, the runner safely falls back to
-process-group cleanup and logs any failed scope stop.
+finishes. On Linux hosts with systemd, a reachable scope manager is required
+at startup and dispatch. A missing or inaccessible user bus rejects startup
+or the job instead of silently dropping memory containment. Enable lingering
+and expose the effective-UID user bus before starting the service; do not
+work around this requirement by disabling the bus mount. Hosts without
+systemd retain process-group cleanup and do not provide these cgroup memory
+limits.
 
 The runner derives `/run/user/<effective-uid>` itself. Do not put
 `XDG_RUNTIME_DIR=/run/user/%U` in a system unit: `%U` describes the systemd
@@ -989,3 +994,45 @@ Core prevents a second live side session for the same parent, even when
 another device has lost its local session pointer. Retrying the same dispatch
 key recovers its existing mission; a new key receives a conflict identifying
 the existing side mission rather than silently accepting another job.
+
+### Native job memory containment
+
+On Linux with systemd, each job scope sets `MemoryMax` and `MemoryHigh`
+(90% of the ceiling), with swap disabled for the job. By default the ceiling
+is 80% of host RAM divided between `SANDBOXED_NODE_CAPACITY` foreground slots
+and the additional side-question slot. This reserves memory for the node API,
+OS, and other host services; native subagents share their parent job budget.
+Synchronous `/execute` leases use the same containment and job deadline. Their
+stdout and stderr are drained separately while commands run, retaining at most
+a conservative raw-byte budget fitting 16 MiB of JSON per stream (including
+UTF-8 replacement and control-character escaping), discarding excess output
+without temporary output files.
+This bounds both daemon memory and capture storage. Synchronous scopes have
+a dedicated recoverable namespace and a systemd-enforced runtime deadline.
+At startup the node retires previous synchronous and queued-job scopes (whose
+durable records become lost across daemon restart) before admitting
+new leases; failed retirement keeps startup closed.
+Set `SANDBOXED_NODE_JOB_MEMORY_BYTES` to a positive integer byte count to
+override the per-job ceiling on a dedicated build node. Size overrides against
+all simultaneously admitted jobs and existing host services. An invalid
+override rejects launch rather than running without a limit.
+
+A memory ceiling protects the host; it does not guarantee that an oversized
+benchmark finishes. Reconcile saved artifacts before resuming after OOM and
+reduce or offload the offending workload.
+
+Scopes use `OOMPolicy=continue`: an oversized child tool is killed without
+systemd stopping the entire harness and its sibling subagents. If the harness
+recovers and exits successfully, the earlier child OOM does not convert its
+success into a failed mission. Available kernel OOM evidence is appended to a failure or timeout without
+replacing its primary cause; explicit cancellation retains precedence. An
+already-retired successful scope may no longer expose its counters, so this
+diagnostic is best effort.
+
+Scope names include a stable namespace derived from the configured node ID
+and work directory. Startup only reaps that instance's queued and synchronous
+scopes, so instances sharing a user manager do not stop each other's jobs.
+Configure distinct node IDs and state directories for separate instances.
+For the first upgrade from the previous global scope names, drain the old
+instance and confirm its old scopes are empty before replacing its binary;
+legacy global scopes are not blindly stopped by the new startup sweep.
