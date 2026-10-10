@@ -624,7 +624,7 @@ async fn run_logged_command_with_deadline(
             let oom = scope_oom_killed(systemd_scope.as_ref()).await;
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
             let code = waited?.code();
-            if oom { RunOutcome::MemoryExhausted } else { RunOutcome::Exited(code) }
+            if oom && code != Some(0) { RunOutcome::MemoryExhausted } else { RunOutcome::Exited(code) }
         }
     };
     Ok(outcome)
@@ -819,6 +819,7 @@ fn systemd_scope_command(
         .arg(format!("--property=MemoryMax={}", memory_limit))
         .arg(format!("--property=MemoryHigh={}", memory_limit / 10 * 9))
         .arg("--property=MemorySwapMax=0")
+        .arg("--property=OOMPolicy=continue")
         .arg("--");
     if environment == CommandEnvironment::Clear {
         // With --scope, systemd-run executes the payload itself, so the
@@ -1637,6 +1638,9 @@ mod tests {
             .iter()
             .any(|arg| arg.starts_with("--property=MemoryHigh=")));
         assert!(argv.iter().any(|arg| arg == "--property=MemorySwapMax=0"));
+        assert!(argv
+            .iter()
+            .any(|arg| arg == "--property=OOMPolicy=continue"));
         assert!(argv.iter().any(|arg| arg == "/bin/sh"));
         assert!(argv.iter().any(|arg| arg == "printf ok"));
         assert!(!argv.iter().any(|arg| arg.contains("not-in-argv")));

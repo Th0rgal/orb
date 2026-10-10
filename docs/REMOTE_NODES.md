@@ -1005,3 +1005,9 @@ override rejects launch rather than running without a limit.
 A memory ceiling protects the host; it does not guarantee that an oversized
 benchmark finishes. Reconcile saved artifacts before resuming after OOM and
 reduce or offload the offending workload.
+
+Scopes use `OOMPolicy=continue`: an oversized child tool is killed without
+systemd stopping the entire harness and its sibling subagents. If the harness
+recovers and exits successfully, the earlier child OOM does not convert its
+success into a failed mission. Terminal kernel OOM evidence is reported when
+the harness itself fails; explicit operator cancellation retains precedence.
