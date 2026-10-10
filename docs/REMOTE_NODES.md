@@ -215,8 +215,13 @@ unit (`useradd --system --home /var/lib/sandboxed-node sandboxed-node` and
 Enable its user manager once with
 `loginctl enable-linger sandboxed-node`; job commands then run in transient
 user scopes, so even descendants that call `setsid` are reaped when their job
-finishes. If the user bus is unavailable, the runner safely falls back to
-process-group cleanup and logs any failed scope stop.
+finishes. On Linux hosts with systemd, a reachable scope manager is required
+at startup and dispatch. A missing or inaccessible user bus rejects startup
+or the job instead of silently dropping memory containment. Enable lingering
+and expose the effective-UID user bus before starting the service; do not
+work around this requirement by disabling the bus mount. Hosts without
+systemd retain process-group cleanup and do not provide these cgroup memory
+limits.
 
 The runner derives `/run/user/<effective-uid>` itself. Do not put
 `XDG_RUNTIME_DIR=/run/user/%U` in a system unit: `%U` describes the systemd

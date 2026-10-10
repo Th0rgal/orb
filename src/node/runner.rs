@@ -819,6 +819,11 @@ fn contain_command(
                 Some(scope),
             ));
         }
+        if Path::new("/run/systemd/system").is_dir() {
+            return Err(std::io::Error::other(
+                "systemd job containment is required: expose the runner user bus and enable its lingering user manager",
+            ));
+        }
     }
     Ok((cmd, None))
 }
@@ -828,7 +833,8 @@ fn systemd_scope_mode() -> Option<(SystemdScopeMode, Option<PathBuf>)> {
     // Merely seeing systemd's runtime directory is insufficient in containers
     // and CI runners. Root can use the system manager. A hardened non-root
     // node uses its lingering user manager, exposed through XDG_RUNTIME_DIR;
-    // without either manager we retain the process-group fallback.
+    // A host with systemd must expose a manager: startup and dispatch reject
+    // missing buses instead of silently dropping job memory containment.
     if !Path::new("/run/systemd/system").is_dir() {
         return None;
     }
@@ -1225,7 +1231,9 @@ pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
             return Ok(());
         }
         let (mode, user_runtime_dir) = systemd_scope_mode().ok_or_else(|| {
-            anyhow::anyhow!("cannot reconcile previous job scopes without the systemd manager")
+            anyhow::anyhow!(
+                "systemd job containment is required: enable the runner's lingering user manager and expose its user bus before starting sandboxed-node"
+            )
         })?;
         let manager_command = || {
             let mut command = tokio::process::Command::new("systemctl");
