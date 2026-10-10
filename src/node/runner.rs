@@ -742,6 +742,7 @@ fn select_user_systemd_runtime_dir(
 fn job_memory_limit() -> std::io::Result<u64> {
     if let Ok(value) = std::env::var("SANDBOXED_NODE_JOB_MEMORY_BYTES") {
         return value
+            .trim()
             .parse::<u64>()
             .ok()
             .filter(|bytes| *bytes > 0)
@@ -763,9 +764,9 @@ fn job_memory_limit() -> std::io::Result<u64> {
         * 1024;
     let capacity = std::env::var("SANDBOXED_NODE_CAPACITY")
         .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(2);
+        .unwrap_or(1);
     Ok(default_job_memory_limit(total, capacity))
 }
 
