@@ -36,7 +36,7 @@
 .field textarea { min-height: 80px; }
 .field [aria-invalid="true"] { border-color: var(--red); }
 .dlg form { display: flex; flex-direction: column; gap: 12px; }
-.overlay-popover { position: fixed; box-sizing: border-box; width: 280px; max-width: calc(100vw - 32px); min-height: 0; overflow: auto; padding: 8px; border: 1px solid var(--overlay-border); border-radius: var(--overlay-menu-radius); background: var(--overlay-surface); color: var(--fg); box-shadow: var(--shadow-lg); font: 13px/1.5 var(--sans); -webkit-app-region: no-drag; }
+.overlay-popover { position: fixed; box-sizing: border-box; width: 280px; max-width: calc(100vw - 32px); min-height: 0; overflow: auto; padding: var(--menu-inset); border: 1px solid var(--overlay-border); border-radius: var(--overlay-menu-radius); background: var(--overlay-surface); color: var(--fg); box-shadow: var(--shadow-lg); font: 13px/1.5 var(--sans); -webkit-app-region: no-drag; }
 .overlay-popover .menu-item { min-height: 28px; font-size: 13px; }
 .popover-head { display: flex; align-items: center; gap: 8px; padding: 8px; }
 .popover-head h3 { font: 500 15px/22px var(--sans); margin: 0; }
@@ -44,7 +44,7 @@
 .popover-foot { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--overlay-border); padding: 12px 8px 4px; }
 .picker-search { width: 100%; height: 32px; border: 1px solid var(--overlay-border); border-radius: 6px; background: var(--overlay-field); color: var(--fg); padding: 0 8px; font: 13px var(--sans); margin-bottom: 4px; }
 .picker-list { max-height: min(320px, 50vh); overflow: auto; }
-.picker-row { display:flex; align-items:center; width:100%; min-height:28px; padding:5px 8px; gap:8px; text-align:left; border-radius:4px; color:var(--fg); }
+.picker-row { display:flex; align-items:center; width:100%; min-height:28px; padding:5px 8px; gap:8px; text-align:left; border-radius:var(--menu-item-radius); color:var(--fg); }
 .picker-row[data-active="true"] { background: var(--overlay-hover); }
 .picker-row-copy { display:flex; flex-direction:column; min-width:0; flex:1; overflow-wrap:anywhere; }
 .picker-row small, .picker-state, .picker-group { color:var(--fg-2); font-size:12px; }
@@ -69,8 +69,9 @@
 .dlg-foot .cs-save-area { position:static; margin:0; width:100%; }
 .dlg-foot .cs-savebar { position:static; margin:0; padding:0; border:0; background:transparent; box-shadow:none; }
 
-/* Anchored menus use quiet, inset keyboard cues instead of an outer blue ring. */
+/* Menu rows use one full-row highlight for pointer and keyboard navigation.
+   Pickers own their active row; the checkmark alone marks the committed value. */
 .overlay-popover :is(button, input, textarea, select):focus-visible { outline: 0; box-shadow: none; }
 .overlay-popover :is(input, textarea, select):focus-visible { border-color: var(--fg-3); }
-.overlay-popover button:focus-visible { box-shadow: inset 2px 0 var(--fg-3); }
-.overlay-popover button:is([role="menuitem"], [role="option"]):focus { background: var(--overlay-hover); box-shadow: inset 2px 0 var(--fg-3); }
+.overlay-popover .menu-item:is(:hover, :focus, .on) { background: var(--overlay-hover); }
+.overlay-popover button:not([role="menuitem"]):not([role="option"]):focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
