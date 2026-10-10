@@ -635,7 +635,7 @@ async fn run_supervised_command(
     stdout: Stdio,
     stderr: Stdio,
 ) -> anyhow::Result<RunOutcome> {
-    let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path)?;
+    let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path, limit_secs)?;
     cmd.stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
@@ -681,7 +681,9 @@ pub(crate) async fn run_captured_command(
 ) -> anyhow::Result<(Option<i32>, String, String)> {
     use std::os::fd::OwnedFd;
     let capture = tempfile::tempdir()?;
-    let log_path = capture.path().join("capture");
+    let log_path = capture
+        .path()
+        .join(format!("sync-{}", Uuid::new_v4().simple()));
     fn capture_pair() -> std::io::Result<(tokio::net::UnixStream, Stdio)> {
         let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
         reader.set_nonblocking(true)?;
@@ -755,8 +757,9 @@ fn contain_command(
     cmd: tokio::process::Command,
     environment: CommandEnvironment,
     log_path: &Path,
+    limit_secs: Option<u64>,
 ) -> std::io::Result<(tokio::process::Command, Option<SystemdScope>)> {
-    let _ = log_path;
+    let _ = (log_path, limit_secs);
     // Cargo's lib and binary test harnesses do not run sandboxed-node's main,
     // so they cannot service the hidden trampoline entrypoint. Construction
     // is covered directly below; execution tests retain the process-group
@@ -777,18 +780,23 @@ fn contain_command(
     #[cfg(target_os = "linux")]
     {
         if let Some((mode, user_runtime_dir)) = systemd_scope_mode() {
-            let scope_id = (environment == CommandEnvironment::Clear)
-                .then(|| log_path.file_stem()?.to_str())
-                .flatten()
+            let stem = log_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let synchronous = stem.strip_prefix("sync-");
+            let scope_id = synchronous
+                .or_else(|| (environment == CommandEnvironment::Clear).then_some(stem))
                 .and_then(|stem| Uuid::parse_str(stem).ok())
                 .unwrap_or_else(Uuid::new_v4);
             let scope = SystemdScope {
-                unit: format!("sandboxed-node-job-{}.scope", scope_id.simple()),
+                unit: format!(
+                    "sandboxed-node-{}-{}.scope",
+                    if synchronous.is_some() { "sync" } else { "job" },
+                    scope_id.simple()
+                ),
                 mode,
                 user_runtime_dir,
             };
             return Ok((
-                systemd_scope_command(cmd, environment, &scope)?,
+                systemd_scope_command(cmd, environment, &scope, limit_secs)?,
                 Some(scope),
             ));
         }
@@ -906,6 +914,7 @@ fn systemd_scope_command(
     cmd: tokio::process::Command,
     environment: CommandEnvironment,
     scope: &SystemdScope,
+    limit_secs: Option<u64>,
 ) -> std::io::Result<tokio::process::Command> {
     let command = cmd.as_std();
     let program = command.get_program().to_os_string();
@@ -935,8 +944,11 @@ fn systemd_scope_command(
         .arg(format!("--property=MemoryMax={}", memory_limit))
         .arg(format!("--property=MemoryHigh={}", memory_limit / 10 * 9))
         .arg("--property=MemorySwapMax=0")
-        .arg("--property=OOMPolicy=continue")
-        .arg("--");
+        .arg("--property=OOMPolicy=continue");
+    if let Some(seconds) = limit_secs {
+        scoped.arg(format!("--property=RuntimeMaxSec={}", seconds.max(1)));
+    }
+    scoped.arg("--");
     if environment == CommandEnvironment::Clear {
         // With --scope, systemd-run executes the payload itself, so the
         // payload otherwise inherits the runner service's environment. Keep
@@ -1151,6 +1163,66 @@ async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
     show.args(["show", "--property=LoadState", "--value", &scope.unit]);
     matches!(tokio::time::timeout(KILL_GRACE, show.output()).await,
         Ok(Ok(output)) if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "not-found")
+}
+
+/// Retire synchronous scopes from a previous daemon before admitting new work.
+/// Their dedicated namespace is recoverable even when no HTTP response survived.
+pub async fn reap_synchronous_scopes_on_start() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if !Path::new("/run/systemd/system").is_dir() {
+            return Ok(());
+        }
+        let (mode, user_runtime_dir) = systemd_scope_mode().ok_or_else(|| {
+            anyhow::anyhow!("cannot reconcile synchronous scopes without the systemd manager")
+        })?;
+        let mut command = tokio::process::Command::new("systemctl");
+        command.kill_on_drop(true);
+        if mode == SystemdScopeMode::User {
+            command.arg("--user");
+            if let Some(runtime) = &user_runtime_dir {
+                command.env("XDG_RUNTIME_DIR", runtime).env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}/bus", runtime.display()),
+                );
+            }
+        }
+        command.args([
+            "list-units",
+            "--all",
+            "--type=scope",
+            "--plain",
+            "--no-legend",
+            "sandboxed-node-sync-*.scope",
+        ]);
+        let output = tokio::time::timeout(KILL_GRACE, command.output()).await??;
+        anyhow::ensure!(
+            output.status.success(),
+            "cannot reconcile previous synchronous scopes"
+        );
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some(unit) = line.split_whitespace().next() else {
+                continue;
+            };
+            let Some(id) = unit
+                .strip_prefix("sandboxed-node-sync-")
+                .and_then(|s| s.strip_suffix(".scope"))
+            else {
+                anyhow::bail!("unexpected synchronous scope name");
+            };
+            Uuid::parse_str(id)?;
+            let scope = SystemdScope {
+                unit: unit.into(),
+                mode,
+                user_runtime_dir: user_runtime_dir.clone(),
+            };
+            while !stop_systemd_scope(&scope).await {
+                tracing::warn!(unit, "waiting for previous synchronous scope retirement");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// SIGTERM the job's process group, escalating to SIGKILL after a grace
@@ -1742,6 +1814,7 @@ mod tests {
                 mode: SystemdScopeMode::User,
                 user_runtime_dir: Some(PathBuf::from("/run/user/1234")),
             },
+            Some(30),
         )
         .unwrap();
         let argv = scoped
@@ -1762,6 +1835,7 @@ mod tests {
         assert!(argv
             .iter()
             .any(|arg| arg == "--property=OOMPolicy=continue"));
+        assert!(argv.iter().any(|arg| arg == "--property=RuntimeMaxSec=30"));
         assert!(argv.iter().any(|arg| arg == "/bin/sh"));
         assert!(argv.iter().any(|arg| arg == "printf ok"));
         assert!(!argv.iter().any(|arg| arg.contains("not-in-argv")));
@@ -1793,6 +1867,7 @@ mod tests {
                 mode: SystemdScopeMode::User,
                 user_runtime_dir: None,
             },
+            None,
         )
         .unwrap();
         let argv = scoped

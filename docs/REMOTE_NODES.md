@@ -1002,7 +1002,10 @@ stdout and stderr are drained separately while commands run, retaining at most
 a conservative raw-byte budget fitting 16 MiB of JSON per stream (including
 UTF-8 replacement and control-character escaping), discarding excess output
 without temporary output files.
-This bounds both daemon memory and capture storage.
+This bounds both daemon memory and capture storage. Synchronous scopes have
+a dedicated recoverable namespace and a systemd-enforced runtime deadline.
+At startup the node retires all previous synchronous scopes before admitting
+new leases; failed retirement keeps startup closed.
 Set `SANDBOXED_NODE_JOB_MEMORY_BYTES` to a positive integer byte count to
 override the per-job ceiling on a dedicated build node. Size overrides against
 all simultaneously admitted jobs and existing host services. An invalid
