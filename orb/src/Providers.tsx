@@ -44,6 +44,11 @@ type Kind = {
 
 const KINDS: Kind[] = [
   {
+    id: "muse-code",
+    name: "Muse Code",
+    methods: [{ label: "Muse Code subscription", kind: "oauth", desc: "Meta subscription via CLIProxyAPI. Separate from Meta API billing." }],
+  },
+  {
     id: "anthropic",
     name: "Anthropic",
     methods: [
@@ -335,6 +340,7 @@ const SUBSCRIPTION_META: Record<string, { vendor: string; desc: string }> = {
   kimi: { vendor: "Moonshot AI", desc: "OpenCode · Device sign-in via CLIProxyAPI" },
   antigravity: { vendor: "Google", desc: "Antigravity & Gemini models · OAuth via CLIProxyAPI" },
   mistral: { vendor: "Mistral AI", desc: "Le Chat Pro / Team · Browser sign-in" },
+  "muse-code": { vendor: "Meta", desc: "Muse Code subscription · No paid API fallback" },
 };
 
 function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?: boolean; loadError?: string | null }) {
@@ -663,7 +669,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
 const LEGACY_OAUTH_TYPES = new Set(["anthropic", "openai", "google"]);
 const reconnectable = (a: AIProvider) => (a.provider_type === "mistral" && a.uses_oauth) || cliProxyReconnectable(a) || (a.uses_oauth && a.credential_owner === "sandboxed_sh" && LEGACY_OAUTH_TYPES.has(a.provider_type));
 
-const CLIPROXY_LOGIN_TYPES = new Set(["anthropic", "openai", "xai", "kimi", "antigravity"]);
+const CLIPROXY_LOGIN_TYPES = new Set(["anthropic", "openai", "xai", "kimi", "antigravity", "muse-code"]);
 
 /** Reconnect via CLIProxyAPI when the backend says so; fall back to the
  * type allowlist for backends that predate the credential_owner field. */

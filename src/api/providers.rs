@@ -1347,6 +1347,9 @@ pub fn get_api_key_for_provider(
     provider_type: ProviderType,
     ai_providers: &[crate::ai_providers::AIProvider],
 ) -> Option<String> {
+    if provider_type == ProviderType::MuseCode {
+        return None;
+    }
     // 1. Check AIProviderStore entries
     for provider in ai_providers {
         if provider.provider_type == provider_type && provider.enabled {
@@ -1361,7 +1364,10 @@ pub fn get_api_key_for_provider(
             // OpenAI-compatible API.
             if !matches!(
                 provider_type,
-                ProviderType::OpenAI | ProviderType::Xai | ProviderType::Antigravity
+                ProviderType::OpenAI
+                    | ProviderType::Xai
+                    | ProviderType::Antigravity
+                    | ProviderType::MuseCode
             ) {
                 if let Some(ref oauth) = provider.oauth {
                     if !oauth.access_token.is_empty() {
@@ -1806,6 +1812,7 @@ fn apply_cli_proxy_catalog_value(
             ProviderType::Kimi => "moonshot",
             ProviderType::Xai => "xai",
             ProviderType::Antigravity => "antigravity",
+            ProviderType::MuseCode => "meta",
             _ => continue,
         };
         provider.models = rows
@@ -1815,8 +1822,8 @@ fn apply_cli_proxy_catalog_value(
                     return None;
                 }
                 let raw = row.get("id")?.as_str()?;
-                let id = if kind == ProviderType::Antigravity {
-                    raw.strip_prefix("antigravity/")?
+                let id = if matches!(kind, ProviderType::Antigravity | ProviderType::MuseCode) {
+                    raw.strip_prefix(&format!("{}/", kind.id()))?
                 } else if raw.contains('/') {
                     return None;
                 } else if kind == ProviderType::Kimi {
@@ -2728,6 +2735,7 @@ mod tests {
             ProviderType::Kimi,
             ProviderType::Antigravity,
             ProviderType::Anthropic,
+            ProviderType::MuseCode,
         ] {
             let mut account = AIProvider::new(kind, "Account".into());
             account.enabled = true;
@@ -2755,7 +2763,9 @@ mod tests {
                 {"id":"gpt-image-2","owned_by":"openai"},
                 {"id":"kimi-k3","owned_by":"moonshot"},
                 {"id":"antigravity/gemini-3-flash","owned_by":"antigravity"},
-                {"id":"gemini-3-flash","owned_by":"antigravity"}
+                {"id":"gemini-3-flash","owned_by":"antigravity"},
+                {"id":"muse-code/muse-spark-1.3","owned_by":"meta"},
+                {"id":"muse-spark-1.3","owned_by":"meta"}
             ]}),
         );
         let ids = |kind: ProviderType| {
@@ -2772,6 +2782,7 @@ mod tests {
         assert_eq!(ids(ProviderType::Kimi), vec!["k3"]);
         assert_eq!(ids(ProviderType::Antigravity), vec!["gemini-3-flash"]);
         assert_eq!(ids(ProviderType::Anthropic), vec!["stale"]);
+        assert_eq!(ids(ProviderType::MuseCode), vec!["muse-spark-1.3"]);
         apply_cli_proxy_catalog_value(&mut providers, &accounts, &serde_json::json!({"data":[]}));
         assert!(providers
             .iter()

@@ -13,6 +13,7 @@ pub(crate) struct ProxyAccount {
     pub oauth: OAuthCredentials,
     pub disabled: bool,
     pub prefix: Option<String>,
+    pub subscription_active: bool,
 }
 
 pub(crate) fn auth_dir() -> Option<PathBuf> {
@@ -33,14 +34,39 @@ pub(crate) fn parse_account(file: &str, value: &Value) -> Option<ProxyAccount> {
         "xai" => ProviderType::Xai,
         "kimi" => ProviderType::Kimi,
         "antigravity" => ProviderType::Antigravity,
+        "meta" if value.get("auth_kind").and_then(Value::as_str) == Some("oauth") => {
+            ProviderType::MuseCode
+        }
         _ => return None,
     };
     let access_token = value.get("access_token")?.as_str()?.to_string();
-    let refresh_token = value.get("refresh_token")?.as_str()?.to_string();
+    let refresh_token = value
+        .get(if provider == ProviderType::MuseCode {
+            "dca_token"
+        } else {
+            "refresh_token"
+        })?
+        .as_str()?
+        .to_string();
     if access_token.is_empty() || refresh_token.is_empty() {
         return None;
     }
-    let expiry = value.get("expired").or_else(|| value.get("expires_at"))?;
+    let unknown_muse_expiry = Value::from(i64::MAX);
+    // Minted Muse keys have no advertised expiration. Do not invent a refresh
+    // deadline: subscription state and the authoritative DCA receipt gate use.
+    let expiry = if provider == ProviderType::MuseCode {
+        value
+            .get("dca_expires_at")
+            .filter(|v| v.as_i64().is_some_and(|n| n > 0))
+            .or_else(|| {
+                value
+                    .get("dca_expired")
+                    .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            })
+            .unwrap_or(&unknown_muse_expiry)
+    } else {
+        value.get("expired").or_else(|| value.get("expires_at"))?
+    };
     let expires_at = expiry
         .as_i64()
         .map(|n| if n < 100_000_000_000 { n * 1000 } else { n })
@@ -73,6 +99,8 @@ pub(crate) fn parse_account(file: &str, value: &Value) -> Option<ProxyAccount> {
             refresh_token,
             expires_at,
         },
+        subscription_active: provider != ProviderType::MuseCode
+            || value.get("is_subs_active").and_then(Value::as_bool) == Some(true),
         disabled: value
             .get("disabled")
             .and_then(Value::as_bool)
@@ -113,8 +141,12 @@ pub(crate) fn account_for(provider: &AIProvider) -> Option<ProxyAccount> {
 
 fn account_needs_reconnect(a: &ProxyAccount) -> bool {
     a.disabled
+        || !a.subscription_active
+        || (a.provider == ProviderType::MuseCode && a.prefix.as_deref() != Some("muse-code"))
         || (a.provider == ProviderType::Antigravity && a.prefix.as_deref() != Some("antigravity"))
-        || a.oauth.expires_at + chrono::Duration::hours(24).num_milliseconds()
+        || a.oauth
+            .expires_at
+            .saturating_add(chrono::Duration::hours(24).num_milliseconds())
             < chrono::Utc::now().timestamp_millis()
 }
 
@@ -182,7 +214,10 @@ async fn reconcile_from(store: &AIProviderStore, dir: &Path) {
             continue;
         }
         let unusable = a.disabled
-            || a.oauth.expires_at + chrono::Duration::hours(24).num_milliseconds()
+            || !a.subscription_active
+            || a.oauth
+                .expires_at
+                .saturating_add(chrono::Duration::hours(24).num_milliseconds())
                 < chrono::Utc::now().timestamp_millis();
         // Preserve healthy legacy sources until the one-time migration replaces
         // a stale/disabled proxy login. Never erase the import source at startup.
@@ -298,6 +333,28 @@ pub(crate) async fn delete(provider: &AIProvider) -> Result<(), (axum::http::Sta
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn muse_requires_subscription_receipt_and_isolated_route() {
+        let mut value = serde_json::json!({"type":"meta", "auth_kind":"oauth", "access_token":"minted", "dca_token":"device", "is_subs_active":true, "prefix":"muse-code"});
+        let account = parse_account("meta.json", &value).unwrap();
+        assert_eq!(account.provider, ProviderType::MuseCode);
+        assert_eq!(account.oauth.expires_at, i64::MAX);
+        assert!(!account_needs_reconnect(&account));
+        for bad in [serde_json::json!(false), serde_json::Value::Null] {
+            value["is_subs_active"] = bad;
+            assert!(account_needs_reconnect(
+                &parse_account("meta.json", &value).unwrap()
+            ));
+        }
+        value["is_subs_active"] = serde_json::json!(true);
+        value["prefix"] = serde_json::json!("muse");
+        assert!(account_needs_reconnect(
+            &parse_account("meta.json", &value).unwrap()
+        ));
+        value["auth_kind"] = serde_json::json!("api_key");
+        assert!(parse_account("meta.json", &value).is_none());
+    }
+
     #[test]
     fn antigravity_requires_its_own_routing_prefix() {
         let mut value = serde_json::json!({"type":"antigravity","access_token":"a","refresh_token":"r","expired":"2099-01-01T00:00:00Z"});

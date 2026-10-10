@@ -350,8 +350,8 @@ pub(crate) fn default_base_url(provider_type: ProviderType) -> Option<&'static s
         ProviderType::Perplexity => Some("https://api.perplexity.ai"),
         // Kimi Code subscription endpoint (OpenAI Chat Completions compatible).
         ProviderType::Kimi => Some("https://api.kimi.com/coding/v1"),
-        ProviderType::Custom => None,      // uses account's base_url
-        ProviderType::Antigravity => None, // routed only through CLIProxyAPI
+        ProviderType::Custom => None, // uses account's base_url
+        ProviderType::Antigravity | ProviderType::MuseCode => None, // routed only through CLIProxyAPI
         // Non-OpenAI-compatible providers
         ProviderType::Anthropic => None,
         ProviderType::Google => None,
@@ -502,7 +502,9 @@ pub(crate) fn has_routable_proxy_credentials(
                 || (has_oauth && crate::api::ai_providers::xai_cli_proxy_account_available())
         }
         ProviderType::Google => has_api_key || has_oauth,
-        ProviderType::Antigravity => has_oauth && super::oauth_owner::management_enabled(),
+        ProviderType::Antigravity | ProviderType::MuseCode => {
+            has_oauth && super::oauth_owner::management_enabled()
+        }
         // Kimi access tokens live ~300s, so between refresh cycles the stored
         // token is routinely expired and the resolved entry carries no
         // hoisted `api_key`. The proxy refreshes the OAuth token at request
@@ -2223,8 +2225,10 @@ pub(crate) async fn chat_completions_inner(
             && entry.has_oauth
             && entry.api_key.is_none()
             && crate::api::oauth_owner::management_enabled();
-        let use_antigravity_cli_proxy_adapter = provider_type == ProviderType::Antigravity
-            && entry.has_oauth
+        let use_antigravity_cli_proxy_adapter = matches!(
+            provider_type,
+            ProviderType::Antigravity | ProviderType::MuseCode
+        ) && entry.has_oauth
             && super::oauth_owner::management_enabled();
         let use_google_api_adapter = provider_type == ProviderType::Google
             && !entry.has_oauth
@@ -2302,8 +2306,11 @@ pub(crate) async fn chat_completions_inner(
             )
         } else if use_antigravity_cli_proxy_adapter {
             let model = format!(
-                "antigravity/{}",
-                entry.model_id.trim_start_matches("antigravity/")
+                "{}/{}",
+                provider_type.id(),
+                entry
+                    .model_id
+                    .trim_start_matches(&format!("{}/", provider_type.id()))
             );
             let upstream_body = match rewrite_model(&body, &model) {
                 Ok(body) => body,
@@ -8693,6 +8700,24 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn muse_subscription_never_uses_a_platform_api_key() {
+        assert_eq!(default_base_url(ProviderType::MuseCode), None);
+        assert!(!has_routable_proxy_credentials(
+            ProviderType::MuseCode,
+            true,
+            false
+        ));
+        let mut account =
+            crate::ai_providers::AIProvider::new(ProviderType::MuseCode, "Subscription".into());
+        account.api_key = Some("not-a-subscription".into());
+        assert!(crate::api::providers::get_api_key_for_provider(
+            ProviderType::MuseCode,
+            &[account]
+        )
+        .is_none());
     }
 
     #[test]

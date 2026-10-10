@@ -152,6 +152,7 @@ fn provider_for(name: &str) -> Option<ProviderType> {
         "xai" | "grok" => Some(ProviderType::Xai),
         "kimi" => Some(ProviderType::Kimi),
         "antigravity" => Some(ProviderType::Antigravity),
+        "muse-code" => Some(ProviderType::MuseCode),
         _ => None,
     }
 }
@@ -162,11 +163,15 @@ fn login_path(provider: ProviderType) -> &'static str {
         ProviderType::Xai => "/xai-auth-url",
         ProviderType::Kimi => "/kimi-auth-url",
         ProviderType::Antigravity => "/antigravity-auth-url",
+        ProviderType::MuseCode => "/meta-auth-url",
         _ => unreachable!(),
     }
 }
 fn flow_for(provider: ProviderType, auth_url: &str) -> &'static str {
-    if matches!(provider, ProviderType::Kimi | ProviderType::Xai) {
+    if matches!(
+        provider,
+        ProviderType::Kimi | ProviderType::Xai | ProviderType::MuseCode
+    ) {
         return "device";
     }
     let redirect = url::Url::parse(auth_url).ok().and_then(|u| {
@@ -240,7 +245,7 @@ async fn start_login(
             super::cli_proxy_accounts::accounts_in(&dir)
                 .into_iter()
                 .filter(|a| a.provider == provider)
-                .map(|a| (a.file, a.oauth.access_token))
+                .map(|a| (a.file.clone(), login_credential(&a)))
                 .collect()
         })
         .unwrap_or_default();
@@ -325,6 +330,19 @@ fn response(s: &LoginSession) -> Json<StatusResponse> {
         message: s.message.clone(),
     })
 }
+fn login_credential(account: &super::cli_proxy_accounts::ProxyAccount) -> String {
+    // Meta can retain its minted API key while replacing the device credential.
+    // The latter must also identify completion of a reconnect.
+    if account.provider == ProviderType::MuseCode {
+        format!(
+            "{}:{}",
+            account.oauth.access_token, account.oauth.refresh_token
+        )
+    } else {
+        account.oauth.access_token.clone()
+    }
+}
+
 fn select_login_account(
     accounts: Vec<super::cli_proxy_accounts::ProxyAccount>,
     provider: ProviderType,
@@ -336,7 +354,7 @@ fn select_login_account(
             a.provider == provider
                 && !a.disabled
                 && a.oauth.expires_at > chrono::Utc::now().timestamp_millis()
-                && previous.get(&a.file) != Some(&a.oauth.access_token)
+                && previous.get(&a.file) != Some(&login_credential(a))
         })
         .collect();
     let new: Vec<_> = changed
@@ -388,6 +406,18 @@ async fn login_status(
                 );
                 return Ok(response(&s));
             };
+            if s.provider == ProviderType::MuseCode && !account.subscription_active {
+                ManagementClient::configured()?
+                    .request(
+                        reqwest::Method::PATCH,
+                        "/auth-files/status",
+                        Some(json!({"name":account.file,"disabled":true})),
+                    )
+                    .await?;
+                s.status = LoginStatus::Failed;
+                s.message = Some("This Meta account has no active Muse Code subscription. No API billing fallback was enabled.".into());
+                return Ok(response(&s));
+            }
             let rows = state.ai_providers.list().await;
             let target = if let Some(id) = s.target {
                 Some(
@@ -414,14 +444,17 @@ async fn login_status(
                     return Ok(response(&s));
                 }
             }
-            if s.provider == ProviderType::Antigravity {
-                // Reserve an explicit route so Claude models cannot silently use
-                // a Claude subscription when Antigravity was selected.
+            if matches!(
+                s.provider,
+                ProviderType::Antigravity | ProviderType::MuseCode
+            ) {
+                // Reserve a provider-specific route so account rotation cannot cross
+                // into a different subscription or a pay-as-you-go API account.
                 ManagementClient::configured()?
                     .request(
                         reqwest::Method::PATCH,
                         "/auth-files/fields",
-                        Some(json!({"name":account.file,"prefix":"antigravity"})),
+                        Some(json!({"name":account.file,"prefix":s.provider.id()})),
                     )
                     .await?;
             }
@@ -444,7 +477,10 @@ async fn login_status(
                 super::cli_proxy_accounts::set_enabled(&p, p.enabled).await?;
             }
             super::cli_proxy_accounts::reconcile(&state.ai_providers).await;
-            if s.provider == ProviderType::Antigravity {
+            if matches!(
+                s.provider,
+                ProviderType::Antigravity | ProviderType::MuseCode
+            ) {
                 let state = Arc::clone(&state);
                 tokio::spawn(async move {
                     let _ = super::providers::refresh_model_catalog(State(state)).await;
@@ -529,7 +565,10 @@ async fn login_callback(
             "This login session has already finished.".into(),
         ));
     }
-    if matches!(s.provider, ProviderType::Kimi | ProviderType::Xai) {
+    if matches!(
+        s.provider,
+        ProviderType::Kimi | ProviderType::Xai | ProviderType::MuseCode
+    ) {
         return Err((
             StatusCode::BAD_REQUEST,
             "Complete sign-in in your browser; no callback is needed.".into(),
@@ -567,6 +606,17 @@ async fn login_capabilities() -> Json<Value> {
             json!({"id":"kimi", "name":"Kimi Code"}),
             json!({"id":"antigravity", "name":"Google Antigravity"}),
         ]);
+        // Old proxy builds do not implement Meta sign-in. Inspect configuration
+        // support without starting an OAuth flow or exposing its contents.
+        if let Ok(client) = ManagementClient::configured() {
+            if client
+                .request(reqwest::Method::GET, "/config", None)
+                .await
+                .is_ok_and(|config| config.get("meta-api-key").is_some())
+            {
+                providers.push(json!({"id":"muse-code", "name":"Muse Code"}));
+            }
+        }
     }
     Json(json!({"available": true, "providers": providers}))
 }
@@ -596,6 +646,27 @@ mod tests {
             "/antigravity-auth-url"
         );
         assert_eq!(flow_for(ProviderType::Antigravity, "https://accounts.google.com/auth?redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Fcallback"), "redirect");
+    }
+
+    #[test]
+    fn muse_reconnect_detects_a_new_device_credential_even_if_the_key_is_unchanged() {
+        let account = |device| {
+            super::super::cli_proxy_accounts::parse_account(
+                "meta.json",
+                &json!({
+                    "type":"meta", "auth_kind":"oauth", "access_token":"same-key",
+                    "dca_token":device, "is_subs_active":true, "prefix":"muse-code"
+                }),
+            )
+            .unwrap()
+        };
+        let previous = HashMap::from([("meta.json".into(), login_credential(&account("old")))]);
+        assert!(
+            select_login_account(vec![account("new")], ProviderType::MuseCode, &previous).is_some()
+        );
+        assert!(
+            select_login_account(vec![account("old")], ProviderType::MuseCode, &previous).is_none()
+        );
     }
 
     #[test]

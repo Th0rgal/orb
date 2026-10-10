@@ -1822,9 +1822,12 @@ impl ModelChainStore {
                     continue;
                 }
                 // Legacy Antigravity files cannot serve our explicit proxy namespace.
-                if provider_type == crate::ai_providers::ProviderType::Antigravity
-                    && (!crate::api::oauth_owner::management_enabled()
-                        || crate::api::cli_proxy_accounts::needs_reconnect(account))
+                if matches!(
+                    provider_type,
+                    crate::ai_providers::ProviderType::Antigravity
+                        | crate::ai_providers::ProviderType::MuseCode
+                ) && (!crate::api::oauth_owner::management_enabled()
+                    || crate::api::cli_proxy_accounts::needs_reconnect(account))
                 {
                     continue;
                 }
@@ -1883,6 +1886,7 @@ impl ModelChainStore {
                                 provider_type,
                                 crate::ai_providers::ProviderType::Kimi
                                     | crate::ai_providers::ProviderType::Antigravity
+                                    | crate::ai_providers::ProviderType::MuseCode
                             )))
                         && account.api_key.is_none()
                         && account.oauth.is_some()

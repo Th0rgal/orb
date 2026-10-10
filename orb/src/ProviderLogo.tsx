@@ -12,7 +12,7 @@ export function ProviderLogo(p: { type: string; name?: string }) {
     if (/grok/.test(key)) return "grok";
     if (/cursor/.test(key)) return "cursor";
     if (/xai/.test(key)) return "xai";
-    if (/meta|llama/.test(key)) return "meta";
+    if (/meta|muse|llama/.test(key)) return "meta";
     if (/minimax/.test(key)) return "minimax";
     if (/mistral|vibe/.test(key)) return "mistral";
     if (/google|antigravity|gemini/.test(key)) return "google";
