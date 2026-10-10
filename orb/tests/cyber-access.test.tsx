@@ -25,6 +25,15 @@ describe('cyber selection',()=>{
   await fireEvent.click(screen.getByRole('menuitemradio',{name:/Automatic/}));
   expect(selected).toBe('automatic');
  });
+ it('checks Daybreak independently for models requiring that program',async()=>{
+  vi.mocked(api).mockImplementation(async path=>({version:2,route_supported:String(path).includes('mode=daybreak')}));
+  let selected='';render(()=><CyberPicker value="standard" model="gpt-daybreak-blue-latest" remote onChange={v=>selected=v}/>);
+  await fireEvent.click(screen.getByRole('button',{name:'Cyber program: Standard'}));
+  await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(screen.getByRole('menuitemradio',{name:/Daybreak/}));
+  expect(selected).toBe('daybreak');
+ });
  it('starts Standard and never calls a pending selection active',()=>{
   expect(draftCyber()).toBe('standard');
   render(()=><CyberPicker value="daybreak" model="gpt-6.1-sol" onChange={()=>{}}/>);

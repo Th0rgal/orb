@@ -24,10 +24,14 @@ export const saveCyber=(id:string,mode:CyberMode)=>api<CyberSelection>(`/api/con
 export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;remote?:boolean;note?:string;confirmed?:boolean;onChange:(mode:CyberMode)=>void}) {
  const [open,setOpen]=createSignal(false);let root:HTMLDivElement|undefined;
  const [route]=createResource(()=>p.remote?[connectionVersion(),p.model] as const:false,async([,model])=>{
-  const value=await api<{route_supported?:boolean}>(`/api/control/cyber-capabilities?model=${encodeURIComponent(model)}&mode=standard&remote=true`,{cache:"no-store"});
-  return value.route_supported===true;
+  const modes=['standard','daybreak'] as const;
+  const supported=await Promise.all(modes.map(async mode=>{
+   const value=await api<{route_supported?:boolean}>(`/api/control/cyber-capabilities?model=${encodeURIComponent(model)}&mode=${mode}&remote=true`,{cache:"no-store"});
+   return value.route_supported===true;
+  }));
+  return {standard:supported[0],daybreak:supported[1]};
  });
- const routeRefusal=(mode:CyberMode)=>p.remote&&mode!=='automatic'&&route()!==true
+ const routeRefusal=(mode:CyberMode)=>p.remote&&mode!=='automatic'&&route()?.[mode]!==true
   ?(route.loading?'Checking the selected Cyber route…':'This remote route cannot guarantee the selected Cyber program. Choose Automatic explicitly or a direct OpenAI route.'):undefined;
 
  return <div class="cyber-picker model-wrap under-model-wrap" ref={root}>
