@@ -23,6 +23,21 @@ pub(crate) struct Failure {
     pub retry_after_seconds: Option<i64>,
 }
 
+fn retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+    if let Ok(seconds) = value.trim().parse::<i64>() {
+        return (seconds >= 0).then_some(seconds);
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    // Round up: truncating a fractional second would retry before the date.
+    Some(
+        date.signed_duration_since(now)
+            .num_milliseconds()
+            .saturating_add(999)
+            .max(0)
+            / 1000,
+    )
+}
+
 pub(crate) fn classify(raw: &str) -> Failure {
     let lower = raw.to_ascii_lowercase();
     let kind = if [
@@ -83,6 +98,7 @@ pub(crate) fn classify(raw: &str) -> Failure {
         retry_after_seconds: None,
     };
     if failure.kind == FailureKind::Unknown {
+        let mut retry_forbidden = false;
         // Only parse the native error object, never a code sample quoted in a
         // transcript. OpenCode wraps APIError data in name/data on some versions.
         if let Ok(value) = serde_json::from_str::<Value>(raw) {
@@ -91,6 +107,7 @@ pub(crate) fn classify(raw: &str) -> Failure {
                 .or_else(|| value.get("error").and_then(|e| e.get("data")))
                 .unwrap_or(&value);
             let code = data["statusCode"].as_u64();
+            retry_forbidden = data["isRetryable"] == false;
             if matches!(code, Some(401 | 403)) {
                 failure.kind = FailureKind::Authentication;
             } else if data["isRetryable"] != false
@@ -105,11 +122,11 @@ pub(crate) fn classify(raw: &str) -> Failure {
                             .find(|(key, _)| key.eq_ignore_ascii_case("retry-after"))
                     })
                     .and_then(|(_, value)| value.as_str())
-                    .and_then(|value| value.parse::<i64>().ok())
-                    .filter(|seconds| *seconds >= 0);
+                    .and_then(|value| retry_after_seconds(value, chrono::Utc::now()));
             }
         }
-        if failure.kind == FailureKind::Unknown
+        if !retry_forbidden
+            && failure.kind == FailureKind::Unknown
             && [
                 "connection reset",
                 "connection refused",
@@ -145,6 +162,23 @@ pub(crate) fn classify(raw: &str) -> Failure {
 mod tests {
     use super::*;
     #[test]
+    fn retry_after_accepts_http_dates_and_does_not_round_down() {
+        let now = chrono::DateTime::parse_from_rfc3339("2015-10-21T07:27:00.500Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT", now),
+            Some(60)
+        );
+        assert_eq!(
+            retry_after_seconds("Wed, 21 Oct 2015 07:26:00 GMT", now),
+            Some(0)
+        );
+        assert_eq!(retry_after_seconds("60", now), Some(60));
+        assert_eq!(retry_after_seconds("-1", now), None);
+        assert_eq!(retry_after_seconds("invalid", now), None);
+    }
+    #[test]
     fn opencode_gateway_error_preserves_retry_hint_without_html() {
         let failure = classify(
             r#"{"name":"APIError","data":{"isRetryable":true,"statusCode":502,"message":"Bad Gateway","responseHeaders":{"Retry-After":"60"},"responseBody":"<html>Host Error</html>"}}"#,
@@ -177,7 +211,7 @@ mod tests {
             assert_eq!(classify(text).kind, expected, "{text}");
         }
         assert_eq!(
-            classify(r#"{"statusCode":502,"isRetryable":false}"#).kind,
+            classify(r#"{"statusCode":502,"isRetryable":false,"message":"HTTP 502"}"#).kind,
             FailureKind::Unknown
         );
     }
