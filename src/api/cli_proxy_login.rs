@@ -352,7 +352,9 @@ fn select_login_account(
         .into_iter()
         .filter(|a| {
             a.provider == provider
-                && !a.disabled
+                // A refused Muse login disables its proxy file. Meta retains
+                // that flag on reconnect; binding restores the Orb preference.
+                && (!a.disabled || provider == ProviderType::MuseCode)
                 && a.oauth.expires_at > chrono::Utc::now().timestamp_millis()
                 && previous.get(&a.file) != Some(&login_credential(a))
         })
@@ -655,7 +657,8 @@ mod tests {
                 "meta.json",
                 &json!({
                     "type":"meta", "auth_kind":"oauth", "access_token":"same-key",
-                    "dca_token":device, "is_subs_active":true, "prefix":"muse-code"
+                    "dca_token":device, "is_subs_active":true, "prefix":"muse-code",
+                    "disabled":true
                 }),
             )
             .unwrap()
