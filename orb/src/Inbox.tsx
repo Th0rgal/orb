@@ -1,3 +1,6 @@
+import { readInboxState } from "./inboxState";
+import { applySharedInboxSeen } from "./missionUnread";
+import { applySharedInboxPreferences } from "./inboxSettings";
 import {
   For,
   Show,
@@ -48,6 +51,7 @@ import {
   getCachedInboxDigest,
   getCurrentInboxDigest,
   inboxDigestVersion,
+  inboxSummaryState,
   requestInboxDigest,
 } from "./inboxDigest";
 import {
@@ -335,9 +339,16 @@ export function InboxPage(p: {
   const peekedSectionById = new Map<string, "needs_you" | "ready">();
 
   onMount(() => {
+    const refreshSharedState = async () => {
+      const state = await readInboxState();
+      if (state) { applySharedInboxSeen(state); applySharedInboxPreferences(state.preferences); }
+    };
+    void refreshSharedState();
+    const sync = setInterval(() => void refreshSharedState(), 10_000);
     const clock = setInterval(() => setNowMs(Date.now()), 30_000);
     onCleanup(() => {
       clearInterval(clock);
+      clearInterval(sync);
       if (undoTimer) clearTimeout(undoTimer);
     });
   });
@@ -1440,7 +1451,7 @@ export function InboxPage(p: {
                     aria-label={`${currentItem().unread ? "Unread. " : ""}${currentItem().projectTitle}: ${effectiveHeadline()}. ${currentItem().badge}. ${outcomeLine()}`}
                   >
                     <div class="inbox-row-bottom">
-                      <span class="inbox-summary-origin">{digest()?.aiGenerated ? "AI summary" : "Latest update"}</span>
+                      <span class="inbox-summary-origin">{inboxSummaryState(id, currentItem().updatedMs) || (digest()?.aiGenerated ? "AI summary" : "Latest update")}</span>
                       <p
                         class="inbox-summary"
                         title={

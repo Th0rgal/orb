@@ -28,6 +28,10 @@ final class OrbFlowUITests: XCTestCase {
         let peek = app.buttons["inbox.peek.reconnect"]
         XCTAssertGreaterThanOrEqual(peek.frame.height, 44)
         peek.tap()
+        XCTAssertTrue(app.staticTexts["Restore the interrupted conversation safely."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Unresolved"].exists)
+        XCTAssertTrue(app.staticTexts["To decide"].exists)
+        XCTAssertTrue(app.buttons["Sources"].exists || app.staticTexts["Sources"].exists)
         capture(app, "polished-inbox-preview")
         let reply = app.buttons["inbox.reply.reconnect"]
         XCTAssertGreaterThanOrEqual(reply.frame.height, 44)

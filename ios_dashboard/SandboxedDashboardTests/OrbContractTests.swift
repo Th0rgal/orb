@@ -2,6 +2,76 @@ import XCTest
 @testable import sandboxed_sh
 
 final class OrbContractTests: XCTestCase {
+    func testInboxAccountSurvivesTokenRenewalAndSeparatesUsers() {
+        func token(_ subject: String, _ expiry: Int) -> String {
+            let data = Data("{\"sub\":\"\(subject)\",\"exp\":\(expiry)}".utf8)
+            return "header." + data.base64EncodedString().replacingOccurrences(of: "=", with: "") + ".signature"
+        }
+        let a = OrbInboxAccount.scope(endpoint: "https://core.test/", token: token("alice", 1))
+        XCTAssertEqual(a, OrbInboxAccount.scope(endpoint: "https://core.test", token: token("alice", 2)))
+        XCTAssertNotEqual(a, OrbInboxAccount.scope(endpoint: "https://core.test", token: token("bob", 2)))
+        XCTAssertNotEqual(a, OrbInboxAccount.scope(endpoint: "https://other.test", token: token("alice", 2)))
+        XCTAssertNotEqual(OrbInboxAccount.scope(endpoint: "https://core.test", token: "opaque-a"), OrbInboxAccount.scope(endpoint: "https://core.test", token: "opaque-b"))
+    }
+
+    @MainActor func testManualUnreadReceiptIsVisibleImmediatelyWithoutNetwork() {
+        let id = UUID().uuidString
+        let row = OrbRow(.object(["id": .string(id), "status": .string("completed"), "updated_at": .string("2026-10-09T10:00:00Z")]))
+        let store = OrbMissionUnreadStore.shared
+        store.markRead(row, syncBackend: false)
+        XCTAssertFalse(store.isUnread(row: row))
+        let before = store.version
+        store.markUnread(id: id, syncBackend: false)
+        XCTAssertGreaterThan(store.version, before)
+        XCTAssertTrue(store.isUnread(row: row))
+        store.markRead(row, syncBackend: false)
+        XCTAssertFalse(store.isUnread(row: row))
+    }
+    @MainActor func testUnreadReceiptSurvivesRestartAndClockSkew() throws {
+        let id = UUID().uuidString
+        let future = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        let row = OrbRow(.object(["id": .string(id), "status": .string("completed"), "updated_at": .string(future)]))
+        let store = OrbMissionUnreadStore.shared
+        store.markRead(row, syncBackend: false)
+        store.markUnread(id: id, updatedAt: future, syncBackend: false)
+        XCTAssertTrue(store.isUnread(row: row))
+        store.markAllRead([row], syncBackend: false)
+        XCTAssertFalse(store.isUnread(row: row))
+        let key = OrbSharedInboxState.outboxKey(OrbInboxAccount.current)
+        let previous = UserDefaults.standard.data(forKey: key)
+        defer { UserDefaults.standard.set(previous, forKey: key) }
+        let pending = ["seen/" + id: OrbJSON.object(["stamp": .number(-Date().addingTimeInterval(7200).timeIntervalSince1970 * 1000)])]
+        UserDefaults.standard.set(try JSONEncoder().encode(pending), forKey: key)
+        XCTAssertEqual(OrbSharedInboxState().unread(row), true)
+    }
+    @MainActor func testLegacyInboxPreferencesClaimOnlyTheirFirstAccount() {
+        let p = OrbInboxSettings.shared
+        let savedOwner = UserDefaults.standard.string(forKey: OrbInboxSettings.ownerKey)
+        let original = (p.aiSummary, p.includeAutonomous, p.model)
+        let previous = OrbSharedInboxState.shared.applying
+        OrbSharedInboxState.shared.applying = true
+        defer {
+            p.aiSummary = original.0; p.includeAutonomous = original.1; p.model = original.2
+            UserDefaults.standard.set(savedOwner, forKey: OrbInboxSettings.ownerKey)
+            OrbSharedInboxState.shared.applying = previous
+        }
+        UserDefaults.standard.removeObject(forKey: OrbInboxSettings.ownerKey)
+        p.aiSummary = false; p.includeAutonomous = true; p.model = "builtin/fast"
+        p.bindAccount("test:alice")
+        XCTAssertFalse(p.aiSummary); XCTAssertTrue(p.includeAutonomous); XCTAssertEqual(p.model, "builtin/fast")
+        p.bindAccount("test:bob")
+        XCTAssertTrue(p.aiSummary); XCTAssertFalse(p.includeAutonomous); XCTAssertEqual(p.model, OrbInboxSettings.defaultModel)
+    }
+    func testInboxAutonomousScopeIsOptIn() {
+        let child = OrbRow(.object(["id": .string("child"), "status": .string("failed"), "parent_mission_id": .string("parent")]))
+        let controller = OrbRow(.object(["id": .string("cron"), "status": .string("completed"), "tags": .array([.string("origin:hermes")])]))
+        let human = OrbRow(.object(["id": .string("human"), "status": .string("completed")]))
+        XCTAssertTrue(OrbInboxModel.isSubagent(row: child))
+        XCTAssertTrue(OrbInboxModel.isSubagent(row: controller))
+        XCTAssertFalse(OrbInboxModel.isSubagent(row: human))
+        XCTAssertFalse(OrbInboxModel.isSubagent(row: child, includeAutonomous: true))
+        XCTAssertEqual(OrbInboxModel.classify(row: child, interaction: nil), .hidden)
+    }
     @MainActor func testReadCacheCoalescesAndInvalidates() async throws {
         let key = "test-cache:" + UUID().uuidString
         defer { OrbDisk.remove(key) }

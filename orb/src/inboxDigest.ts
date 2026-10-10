@@ -22,6 +22,9 @@ export type InboxDigest = {
   aiGenerated?: boolean;
   updatedMs: number;
   schemaVersion?: 7;
+  sourceUpdatedAt?: string;
+  sourceRevision?: string;
+  generatedAt?: string;
   context?: string;
   contextDetails?: string;
   unresolved?: string;
@@ -73,7 +76,7 @@ function ensureCacheLoaded(): Record<string, InboxDigest> {
         const digest = value as InboxDigest;
         if (typeof digest.outcome !== "string" || !Number.isFinite(digest.updatedMs)) continue;
         const { schemaVersion, context, contextDetails, unresolved, decision, suggestions, sources, ...legacy } = digest;
-        memoryCache[cacheKey] = storageKey === key && schemaVersion === 7
+        memoryCache[cacheKey] = storageKey === key && schemaVersion === 7 && Boolean(digest.sourceRevision)
           ? digest
           : legacy;
       }
@@ -131,7 +134,7 @@ export function getCurrentInboxDigest(
 ): InboxDigest | undefined {
   inboxDigestVersion();
   const digest = ensureCacheLoaded()[makeCacheKey(missionId, updatedMs, model)];
-  return digest?.schemaVersion === 7 && digest.updatedMs === updatedMs ? digest : undefined;
+  return digest?.schemaVersion === 7 && Boolean(digest.sourceRevision) && digest.updatedMs === updatedMs && Date.parse(digest.sourceUpdatedAt ?? "") + 2000 >= updatedMs ? digest : undefined;
 }
 
 export function getCachedInboxDigest(
@@ -288,21 +291,6 @@ export function buildDigestSnapshot(mission: Mission, items?: StreamItem[]): str
   return lines.join("\n\n");
 }
 
-const DIGEST_PROMPT = [
-  "Summarize this conversation for an operator deciding whether and how to reply.",
-  "Use only the supplied snapshot. It is partial, and reports claims from the agent; you have not independently verified its work.",
-  "Return ONLY one JSON object, without markdown fences:",
-  '{"schemaVersion":7,"context":"<one sentence reminding the user of the current mission objective, at most 180 characters>","contextDetails":"<optional additional objective or scope, at most 420 characters>","outcome":"<one short result sentence, at most 280 characters>","unresolved":"<specific remaining issue, or empty>","decision":"<specific decision or input needed from the user, or empty>","suggestions":["<optional contextual reply draft>","<optional second reply draft>"],"sources":[{"quote":"<short exact excerpt from a user or agent message supporting the summary>"}]}',
-  "Use the conversation's language. Do not generate a title, goal, task, verdict or generic status prose. Use context for the mission objective, not as a replacement title.",
-  "Context answers what this mission is about and why, using the initial objective and user requests, adjusted only for explicit later scope changes. A latest request such as status or continue is not the mission objective. Do not invent missing context. Context details are optional and must add information, not repeat the context or result.",
-  "Lead the outcome with the result the user cares about. Preserve uncertainty and distinguish the agent's reported work from verified evidence.",
-  "Include an unresolved issue only when recorded. Request a decision only when needed; never invent an obligation to review, approve or continue.",
-  "Provide zero to two short, specific reply drafts useful for this conversation, not generic next-step buttons. Suggestions are editable drafts, never actions.",
-  "Do not suggest destructive operations, publishing, merging, deploying or opening a PR unless that action is explicitly requested in the user messages. Do not expand the user's authorization.",
-  "Do not repeat the title, outcome or unresolved issue in the decision. Keep unresolved under 320 characters and decision/reply drafts under 240 each.",
-  "Include one to three exact message excerpts (12–240 characters each). Copy punctuation, wording and whitespace exactly; never quote a metadata label or invent evidence.",
-  "Do not force technical details, hashes or filenames into the result. Include them only when necessary to understand the result or decision.",
-].join("\n");
 
 function boundedText(value: unknown, limit: number): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -390,124 +378,65 @@ export function parseDigestJson(
   }
 }
 
-let coreSupportsModelField: boolean | null = null;
-
-async function fetchDigestFromBtw(
-  missionId: string,
-  context: string,
-  model: string,
-): Promise<{ answer: string; resolvedModel?: string }> {
+async function fetchSharedDigest(missionId: string, model: string, updatedMs: number): Promise<InboxDigest> {
   const version = connectionVersion();
-  const url = `${getApiUrl()}/api/control/missions/${encodeURIComponent(missionId)}/btw`;
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${getJwt() ?? ""}`,
-  };
+  const response = await fetch(`${getApiUrl()}/api/control/missions/${encodeURIComponent(missionId)}/inbox-digest`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${getJwt() ?? ""}` },
+    body: JSON.stringify({ model }), signal: AbortSignal.timeout(100_000),
+  });
+  if (!response.ok) throw new Error(`Inbox summary HTTP ${response.status}`);
+  const digest = await response.json() as InboxDigest;
+  if (connectionVersion() !== version) throw new Error("Connection changed");
+  if (digest.schemaVersion !== 7 || !digest.outcome || !digest.sources?.length || !digest.sourceRevision) throw new Error("Invalid shared summary");
+  if (!(Date.parse(digest.sourceUpdatedAt ?? "") + 2000 >= updatedMs)) throw new Error("Core summary is behind this conversation");
+  return { ...digest, task: "", verdict: "waiting", aiGenerated: true, updatedMs };
+}
 
-  const isCustomModel = Boolean(model && model !== "builtin/smart");
-  const sendReq = async (includeModel: boolean) =>
-    fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        question: DIGEST_PROMPT,
-        context,
-        ...(includeModel && isCustomModel ? { model } : {}),
-      }),
-    });
-
-  let response = await sendReq(isCustomModel && coreSupportsModelField !== false);
-  if (response.status === 422 && isCustomModel && coreSupportsModelField !== false) {
-    // Pre-deploy Core has #[serde(deny_unknown_fields)] without `model`; retry cleanly without `model`.
-    coreSupportsModelField = false;
-    response = await sendReq(false);
-  } else if (response.ok && isCustomModel && coreSupportsModelField === null) {
-    coreSupportsModelField = true;
-  }
-
-  if (!response.ok || !response.body) {
-    throw new Error(`Inbox digest HTTP ${response.status}`);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let answer = "";
-  let resolvedModel: string | undefined;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (connectionVersion() !== version) throw new Error("Connection changed");
-      buffer += decoder.decode(value, { stream: !done });
-      buffer = buffer.replace(/\r\n/g, "\n");
-      let end: number;
-      while ((end = buffer.indexOf("\n\n")) >= 0) {
-        const frame = buffer.slice(0, end);
-        buffer = buffer.slice(end + 2);
-        const data = frame
-          .split("\n")
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).trimStart())
-          .join("\n");
-        if (!data) continue;
-        const ev = JSON.parse(data) as
-          | { type: "start"; model: string }
-          | { type: "delta"; text: string }
-          | { type: "done"; answer: string }
-          | { type: "error"; message: string };
-        if (ev.type === "start") resolvedModel = ev.model;
-        else if (ev.type === "delta") answer += ev.text;
-        else if (ev.type === "done") answer = ev.answer || answer;
-        else if (ev.type === "error") throw new Error(ev.message);
-      }
-      if (done) break;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
-
-  return { answer, resolvedModel };
+export function inboxSummaryState(missionId: string, updatedMs: number): string | undefined {
+  inboxDigestVersion();
+  const cfg = inboxConfig();
+  if (!cfg.aiSummary) return;
+  const key = `${currentStorageKey()}:${makeCacheKey(missionId, updatedMs, cfg.model)}`;
+  if (inFlight.has(key)) return "Generating summary…";
+  if (failedKeys.has(key)) return "Summary unavailable";
 }
 
 export function requestInboxDigest(
   mission: Mission,
-  items: StreamItem[] | undefined,
+  _items: StreamItem[] | undefined,
   updatedMs: number,
   priority = 50,
 ): void {
   if (!isConnected()) return;
   const cfg = inboxConfig();
   if (!cfg.aiSummary) return;
-  const hasConversation =
-    (items && items.some((i) => i.kind === "text" || i.kind === "user" || i.kind === "error")) ||
-    (Array.isArray(mission.history) && mission.history.length > 0);
-  if (!hasConversation) return;
-
   const cacheKey = makeCacheKey(mission.id, updatedMs, cfg.model);
   if (getCurrentInboxDigest(mission.id, updatedMs, cfg.model)) return;
-  if (inFlight.has(cacheKey)) return;
-  const lastFail = failedKeys.get(cacheKey);
+  const scopeKey = `${currentStorageKey()}:${cacheKey}`;
+  const requestVersion = connectionVersion();
+  if (inFlight.has(scopeKey)) return;
+  const lastFail = failedKeys.get(scopeKey);
   if (lastFail && Date.now() - lastFail < 60_000) return;
 
-  inFlight.add(cacheKey);
+  inFlight.add(scopeKey);
+  bumpDigestVersion();
   queue.push({
     priority,
     run: async () => {
       try {
-        const context = buildDigestSnapshot(mission, items);
-        const { answer, resolvedModel } = await fetchDigestFromBtw(mission.id, context, cfg.model);
-        const parsed = parseDigestJson(answer, updatedMs, resolvedModel || cfg.model, context);
+        if (connectionVersion() !== requestVersion) return;
+        const parsed = await fetchSharedDigest(mission.id, cfg.model, updatedMs);
         if (parsed?.schemaVersion === 7) {
+          failedKeys.delete(scopeKey);
           storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
         } else {
-          failedKeys.set(cacheKey, Date.now());
+          failedKeys.set(scopeKey, Date.now());
         }
       } catch {
-        failedKeys.set(cacheKey, Date.now());
+        failedKeys.set(scopeKey, Date.now());
       } finally {
-        inFlight.delete(cacheKey);
+        inFlight.delete(scopeKey);
+        bumpDigestVersion();
       }
     },
   });

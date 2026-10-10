@@ -532,7 +532,7 @@ test("Inbox Peek renders shared Transcript with inline images, attached context,
   await expect(row.locator(".inbox-project-name")).toHaveText("Orb");
 
   // Open Peek drawer
-  await row.hover();
+  await row.locator(".inbox-row-title-btn").focus();
   await page.keyboard.press("Space");
   const drawer = row.locator(".inbox-peek-drawer");
   await expect(drawer).toBeVisible();

@@ -15,6 +15,7 @@
 pub mod btw;
 pub mod client;
 pub mod http;
+pub mod inbox;
 pub mod store;
 
 use std::collections::{HashMap, HashSet};

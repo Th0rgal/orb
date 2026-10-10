@@ -1,3 +1,4 @@
+import { writeInboxState } from "./inboxState";
 import { For, Show, createMemo, createSignal, onMount } from "solid-js";
 import { isConnected } from "./api";
 import { listChains, routingCatalog, type ModelChain, type RoutingCatalog } from "./routingApi";
@@ -36,7 +37,7 @@ export function inboxConfig(): InboxConfig {
   }
 }
 
-export function saveInboxConfig(next: Omit<InboxConfig, "includeAutonomous"> & Partial<Pick<InboxConfig, "includeAutonomous">>): boolean {
+export function saveInboxConfig(next: Omit<InboxConfig, "includeAutonomous"> & Partial<Pick<InboxConfig, "includeAutonomous">>, sync = true): boolean {
   try {
     const normalized: InboxConfig = {
       aiSummary: Boolean(next.aiSummary),
@@ -45,6 +46,7 @@ export function saveInboxConfig(next: Omit<InboxConfig, "includeAutonomous"> & P
     };
     localStorage.setItem(sideQuestionKey("settings:inbox"), JSON.stringify(normalized));
     setInboxConfigVersion((v) => v + 1);
+    if (sync) writeInboxState("preferences", normalized);
     return true;
   } catch {
     return false;
@@ -231,4 +233,15 @@ export function InboxSettings() {
       </div>
     </div>
   );
+}
+
+export function applySharedInboxPreferences(prefs: unknown): void {
+  if (prefs === undefined || prefs === null) {
+    writeInboxState("preferences", inboxConfig());
+    return;
+  }
+  if (typeof prefs !== "object") return;
+  const p = prefs as Partial<InboxConfig>;
+  if (typeof p.aiSummary !== "boolean" || typeof p.includeAutonomous !== "boolean" || typeof p.model !== "string" || !p.model.trim()) return;
+  if (JSON.stringify(inboxConfig()) !== JSON.stringify({ includeAutonomous: p.includeAutonomous, aiSummary: p.aiSummary, model: p.model })) saveInboxConfig(p as InboxConfig, false);
 }

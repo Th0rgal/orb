@@ -101,7 +101,7 @@ describe("structured inbox digests", () => {
   it("offers current context only for the same timestamp and selected model", async () => {
     const { parseDigestJson, storeInboxDigest, getCachedInboxDigest, getCurrentInboxDigest } = await import("../src/inboxDigest");
     const digest = parseDigestJson(response(), 123, "resolved/model", snapshot)!;
-    storeInboxDigest("mission", 123, "builtin/smart", digest);
+    storeInboxDigest("mission", 123, "builtin/smart", { ...digest, sourceRevision: "rev1", sourceUpdatedAt: new Date(123).toISOString() });
     expect(getCurrentInboxDigest("mission", 123)?.decision).toContain("Choose a browser");
     expect(getCurrentInboxDigest("mission", 124)).toBeUndefined();
     expect(getCurrentInboxDigest("mission", 123, "different/model")).toBeUndefined();
@@ -121,10 +121,10 @@ describe("structured inbox digests", () => {
     expect(getCachedInboxDigest("old-v5", 123)?.decision).toBeUndefined();
     expect(getCurrentInboxDigest("old-v5", 123)).toBeUndefined();
   });
-  it("refreshes legacy cache through the unchanged endpoint and reuses the current result", async () => {
+  it("refreshes legacy cache through the shared endpoint and reuses the current result", async () => {
     const { parseDigestJson, storeInboxDigest, requestInboxDigest, getCurrentInboxDigest } = await import("../src/inboxDigest");
     storeInboxDigest("mission", 123, "builtin/smart", parseDigestJson('{"outcome":"Old overview"}', 123)!);
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(`data: ${JSON.stringify({ type: "done", answer: response() })}\n\n`));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ...JSON.parse(response()), sourceRevision: "rev1", sourceUpdatedAt: "2026-10-09", model: "builtin/smart" })));
     vi.stubGlobal("fetch", fetchMock);
     const mission: Mission = { id: "mission", title: "Fix search", status: "completed", created_at: "2026-10-09", updated_at: "2026-10-09",
       history: [{ role: "user", content: "Fix the search input, but do not publish it." },
@@ -132,11 +132,43 @@ describe("structured inbox digests", () => {
     };
     requestInboxDigest(mission, undefined, 123);
     await vi.waitFor(() => expect(getCurrentInboxDigest("mission", 123)?.schemaVersion).toBe(7));
-    expect(fetchMock.mock.calls[0][0]).toContain("/api/control/missions/mission/btw");
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/control/missions/mission/inbox-digest");
     const request = JSON.parse(fetchMock.mock.calls[0][1]!.body as string);
-    expect(request.question).toContain("Do not generate a title");
-    expect(request.question).toContain("never actions");
+    expect(request).toEqual({ model: "builtin/smart" });
     requestInboxDigest(mission, undefined, 123);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+  it("backs off a Core summary older than the local response instead of looping or offering stale suggestions", async () => {
+    const { requestInboxDigest, getCurrentInboxDigest, inboxSummaryState } = await import("../src/inboxDigest");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ...JSON.parse(response()), sourceRevision: "old", sourceUpdatedAt: "2026-10-09T10:00:00Z" })));
+    vi.stubGlobal("fetch", fetchMock);
+    const updatedMs = Date.parse("2026-10-09T10:05:00Z");
+    const mission: Mission = { id: "behind-core", status: "completed", created_at: "2026-10-09", updated_at: new Date(updatedMs).toISOString() };
+    requestInboxDigest(mission, undefined, updatedMs);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(getCurrentInboxDigest(mission.id, updatedMs)).toBeUndefined();
+    expect(inboxSummaryState(mission.id, updatedMs)).toBe("Summary unavailable");
+    requestInboxDigest(mission, undefined, updatedMs);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the unavailable state when a later retry succeeds", async () => {
+    const { requestInboxDigest, getCurrentInboxDigest, inboxSummaryState } = await import("../src/inboxDigest");
+    const updatedMs = Date.parse("2026-10-09T10:05:00Z");
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 })).mockResolvedValue(new Response(JSON.stringify({ ...JSON.parse(response()), sourceRevision: "fresh", sourceUpdatedAt: new Date(updatedMs).toISOString() })));
+    vi.stubGlobal("fetch", fetchMock);
+    const mission: Mission = { id: "retry-success", status: "completed", created_at: "2026-10-09", updated_at: new Date(updatedMs).toISOString() };
+    try {
+      requestInboxDigest(mission, undefined, updatedMs);
+      await vi.waitFor(() => expect(inboxSummaryState(mission.id, updatedMs)).toBe("Summary unavailable"));
+      now += 61_000;
+      requestInboxDigest(mission, undefined, updatedMs);
+      await vi.waitFor(() => expect(getCurrentInboxDigest(mission.id, updatedMs)).toBeDefined());
+      expect(inboxSummaryState(mission.id, updatedMs)).toBeUndefined();
+    } finally { vi.restoreAllMocks(); }
+  });
+
 });

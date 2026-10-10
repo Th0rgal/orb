@@ -1059,6 +1059,22 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::start_mission_parallel),
         )
         .route(
+            "/api/control/inbox-state",
+            get(crate::api::ask::inbox::get_state),
+        )
+        .route(
+            "/api/control/inbox-state/preferences",
+            axum::routing::put(crate::api::ask::inbox::save_preferences),
+        )
+        .route(
+            "/api/control/inbox-state/seen/:id",
+            axum::routing::put(crate::api::ask::inbox::save_seen),
+        )
+        .route(
+            "/api/control/missions/:id/inbox-digest",
+            post(crate::api::ask::inbox::generate),
+        )
+        .route(
             "/api/control/missions/:id/btw",
             post(crate::api::ask::btw::send).layer(DefaultBodyLimit::max(26 * 1024 * 1024)),
         )
