@@ -47,6 +47,22 @@ fn scope_oom_policy_supported(version: &str) -> bool {
         .is_ok_and(|major| major >= 253)
 }
 
+#[cfg(target_os = "linux")]
+fn scope_prefix_for(node_id: &str, work_root: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{node_id}\0{work_root}"));
+    format!("sandboxed-node-{}", hex::encode(&digest[..16]))
+}
+
+#[cfg(target_os = "linux")]
+fn node_scope_prefix() -> String {
+    scope_prefix_for(
+        &std::env::var("SANDBOXED_NODE_ID").unwrap_or_else(|_| "local-node".into()),
+        &std::env::var("SANDBOXED_NODE_WORK_DIR")
+            .unwrap_or_else(|_| "/var/lib/sandboxed-node/work".into()),
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum SystemdScopeMode {
@@ -351,7 +367,7 @@ impl JobRunner {
                     #[cfg(target_os = "linux")]
                     if let Some((mode, user_runtime_dir)) = systemd_scope_mode() {
                         let scope = SystemdScope {
-                            unit: format!("sandboxed-node-job-{}.scope", job_id.simple()),
+                            unit: format!("{}-job-{}.scope", node_scope_prefix(), job_id.simple()),
                             mode,
                             user_runtime_dir,
                         };
@@ -801,7 +817,8 @@ fn contain_command(
                 .unwrap_or_else(Uuid::new_v4);
             let scope = SystemdScope {
                 unit: format!(
-                    "sandboxed-node-{}-{}.scope",
+                    "{}-{}-{}.scope",
+                    node_scope_prefix(),
                     if synchronous.is_some() { "sync" } else { "job" },
                     scope_id.simple()
                 ),
@@ -1261,6 +1278,9 @@ pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
             Ordering::Release,
         );
         let mut command = manager_command();
+        let prefix = node_scope_prefix();
+        let sync_prefix = format!("{prefix}-sync-");
+        let job_prefix = format!("{prefix}-job-");
         command.args([
             "list-units",
             "--all",
@@ -1268,8 +1288,8 @@ pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
             "--type=scope",
             "--plain",
             "--no-legend",
-            "sandboxed-node-sync-*.scope",
-            "sandboxed-node-job-*.scope",
+            &format!("{sync_prefix}*.scope"),
+            &format!("{job_prefix}*.scope"),
         ]);
         let output = tokio::time::timeout(KILL_GRACE, command.output()).await??;
         anyhow::ensure!(
@@ -1281,8 +1301,8 @@ pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
                 continue;
             };
             let Some(id) = unit
-                .strip_prefix("sandboxed-node-sync-")
-                .or_else(|| unit.strip_prefix("sandboxed-node-job-"))
+                .strip_prefix(&sync_prefix)
+                .or_else(|| unit.strip_prefix(&job_prefix))
                 .and_then(|s| s.strip_suffix(".scope"))
             else {
                 anyhow::bail!("unexpected node scope name");
@@ -1873,6 +1893,16 @@ mod tests {
             !marker.exists(),
             "background descendant survived the terminal job"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scope_namespace_is_stable_and_isolates_node_instances() {
+        let first = scope_prefix_for("ashur", "/var/lib/node-a");
+        assert_eq!(first, scope_prefix_for("ashur", "/var/lib/node-a"));
+        assert_ne!(first, scope_prefix_for("sepolia", "/var/lib/node-a"));
+        assert_ne!(first, scope_prefix_for("ashur", "/var/lib/node-b"));
+        assert_eq!(first.len(), "sandboxed-node-".len() + 32);
     }
 
     #[cfg(target_os = "linux")]

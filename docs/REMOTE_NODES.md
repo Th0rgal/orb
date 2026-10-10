@@ -1028,3 +1028,11 @@ success into a failed mission. Available kernel OOM evidence is appended to a fa
 replacing its primary cause; explicit cancellation retains precedence. An
 already-retired successful scope may no longer expose its counters, so this
 diagnostic is best effort.
+
+Scope names include a stable namespace derived from the configured node ID
+and work directory. Startup only reaps that instance's queued and synchronous
+scopes, so instances sharing a user manager do not stop each other's jobs.
+Configure distinct node IDs and state directories for separate instances.
+For the first upgrade from the previous global scope names, drain the old
+instance and confirm its old scopes are empty before replacing its binary;
+legacy global scopes are not blindly stopped by the new startup sweep.
