@@ -53,6 +53,14 @@ describe('cyber selection',()=>{
   await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).title).toContain('cannot guarantee'));
   expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(true);
  });
+ it('keeps client-owned sessions editable despite historical remote placement',async()=>{
+  vi.mocked(api).mockImplementation(async path=>String(path).endsWith('/cyber')
+   ?{mode:'standard',status:'requested',revision:'saved'}:{version:2,route_supported:false});
+  render(()=><MissionCyber mission={{id:'client-mission',status:'paused',title:'Client',history:[],tags:['placement:client'],backend:'codex',model_override:'gpt-6.1-sol',remote_node_id:'ashur'}}/>);
+  await fireEvent.click(await screen.findByRole('button',{name:'Cyber program: Standard'}));
+  expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false);
+  expect(vi.mocked(api).mock.calls.some(([path])=>String(path).includes('remote=true'))).toBe(false);
+ });
  it('starts Standard and never calls a pending selection active',()=>{
   expect(draftCyber()).toBe('standard');
   render(()=><CyberPicker value="daybreak" model="gpt-6.1-sol" onChange={()=>{}}/>);
