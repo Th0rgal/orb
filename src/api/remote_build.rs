@@ -1642,6 +1642,7 @@ fn remote_build_status_from_receipt(
         receipt.state.clone()
     };
     let status = NodeJobStatus {
+        cancellation: None,
         job_id: receipt.job_id,
         mission_id: response_mission_id,
         state: receipt.state,
@@ -1852,6 +1853,7 @@ mod tests {
 
     fn node_job_status(state: &str) -> NodeJobStatus {
         NodeJobStatus {
+            cancellation: None,
             job_id: Uuid::new_v4(),
             mission_id: Uuid::new_v4(),
             state: state.to_string(),

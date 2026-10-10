@@ -207,7 +207,7 @@ export function isRecoveryScheduled(mission: Mission | null | undefined): boolea
   return mission?.status === "interrupted" && mission.terminal_reason === "usage_limit_wait" && !!mission.recovery;
 }
 
-export function missionPhase(mission: Mission | null, activity: boolean) {
+export function missionPhase(mission: Mission | null, activity: boolean): {label: string; moving: boolean; detail: string; failed?: boolean} {
   const status = mission?.status;
   if (!status) return { label: "Loading mission", moving: true, detail: "Checking the accepted mission status." };
   const recovery = mission?.recovery;
@@ -222,6 +222,15 @@ export function missionPhase(mission: Mission | null, activity: boolean) {
   }
   if (["failed","interrupted","cancelled","canceled","not_feasible"].includes(status)) {
     const reason = mission?.terminal_reason ?? mission?.remote_job?.terminal_reason ?? mission?.execution?.terminal_reason;
+    const classified: Record<string, {label: string; detail: string}> = {
+      remote_grok_auth_required: {label: "Reconnect required", detail: "Reconnect the provider account or repair the node's Core credentials, then resume."},
+      remote_auth_required: {label: "Reconnect required", detail: "Reconnect the provider account or repair the node's Core credentials, then resume."},
+      remote_provider_policy: {label: "Blocked by provider", detail: "The provider blocked this response. Review the request before resuming."},
+      remote_configuration: {label: "Setup required", detail: "Check the node's CLI, selected model, and workspace before resuming."},
+      remote_transport_error: {label: "Connection failed", detail: "Automatic recovery could not continue. Check the connection, then resume."},
+      remote_quota: {label: "Usage limit reached", detail: "The provider limit was reached. Check its reset time before resuming."},
+    };
+    if (reason && classified[reason]) return {...classified[reason], moving: false, failed: true};
     return { label: status === "interrupted" ? "Interrupted" : status.startsWith("cancel") ? "Cancelled" : "Failed", moving: false, failed: true,
       detail: status === "interrupted" && ["service_restart", "server_shutdown"].includes(reason ?? "")
         ? mission?.tags?.includes("placement:client")
@@ -236,6 +245,7 @@ export function missionPhase(mission: Mission | null, activity: boolean) {
   if (["paused","blocked"].includes(status)) return {label:status==="paused"?"Paused":"Waiting for input",moving:false,detail:"The mission is not currently running."};
   const job = mission?.remote_job;
   if (job || mission?.execution?.state === "waiting_remote_job") {
+    if (job?.phase === "reconnecting" || job?.node_state === "reconnecting") return {label:"Reconnecting",moving:true,detail:"The node is temporarily unreachable. The existing job is preserved; no replacement will start until its outcome is known."};
     // Active means durable acceptance, not that the selected harness is running.
     if (["failed", "lost", "cancelled", "canceled"].includes(job?.node_state ?? "") || (job?.exit_code != null && job.exit_code !== 0)) return {label:"Remote job stopped",moving:false,failed:true,detail:job?.error ?? job?.terminal_reason ?? `Remote job ${job?.node_state ?? "exited"}${job?.exit_code != null ? ` (exit ${job.exit_code})` : ""}.`};
     if (job?.phase === "finished" || job?.finished_at) return {label:"Remote job finished",moving:false,detail:"Waiting for the backend to finalize the mission."};
@@ -295,7 +305,7 @@ export function MissionFailure(p: { mission?: Mission | null; error?: string; ac
     ? "The local run could not be completed. Retry on the computer that started it."
     : phase().detail || "The mission stopped before completion.");
   const resumable = () => !!p.onResume && phase().label !== "Cancelled";
-  return <Show when={!p.active && !p.failureInTranscript && (p.error || phase().failed)}><ErrorNotice title={phase().label === "Cancelled" ? "Mission cancelled" : phase().label === "Interrupted" && !p.error ? "Mission interrupted" : "Mission failed"} error={message()}>
+  return <Show when={!p.active && !p.failureInTranscript && (p.error || phase().failed)}><ErrorNotice title={phase().failed && !["Failed", "Interrupted", "Cancelled"].includes(phase().label) ? phase().label : phase().label === "Cancelled" ? "Mission cancelled" : phase().label === "Interrupted" && !p.error ? "Mission interrupted" : "Mission failed"} error={message()}>
     <Show when={resumable()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
   </ErrorNotice></Show>;
 }

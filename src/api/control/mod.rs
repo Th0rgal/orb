@@ -19,6 +19,7 @@ pub(crate) mod dispatch_admission_tests;
 pub(crate) mod execution_ownership;
 pub mod fork;
 pub(crate) mod machine_transfer;
+mod remote_failure;
 pub(crate) mod remote_grok;
 mod remote_queue;
 pub(crate) mod usage_limit_wait;
@@ -88,9 +89,7 @@ use super::routes::AppState;
 
 pub(crate) const SERVER_SHUTDOWN_AUTO_RESUME_MAX_AGE_HOURS: u64 = 48;
 const INTERRUPTED_RESUME_PROMPT: &str =
-    "You were interrupted, resume your work. Background agents \
-and background commands you had started were stopped with you: check their state and restart the \
-ones you still need.";
+    "[Resume interrupted work] Continue the existing task from its current state. Check the workspace and any background jobs before taking action. Do not redo completed work or duplicate running jobs; preserve the original objective, deadline, and any later user instructions.";
 
 /// The 15-minute registered-liveness interrupt is a second idle gate beside
 /// the stuck-mission watchdog. #840 taught the watchdog to skip Hermes-tagged
@@ -13869,7 +13868,7 @@ fn remote_job_projection(
             {
                 "observed"
             } else {
-                "unobserved"
+                "reconnecting"
             }
         }
         None => match lease {
@@ -15344,7 +15343,16 @@ async fn observe_untracked_remote_job_cancellation(
     let mut consecutive_missing: u8 = 0;
     loop {
         if terminal.is_none() {
-            if let Err(error) = client.cancel_job(&node, &shared_token, job_id).await {
+            if let Err(error) = client
+                .cancel_job_with_reason(
+                    &node,
+                    &shared_token,
+                    job_id,
+                    "core",
+                    "Mission left Active; preserve its requested stop",
+                )
+                .await
+            {
                 tracing::warn!(%mission_id, %job_id, node_id = %node.id, ?error,
                     "untracked remote job cancellation failed; retaining fence and retrying");
             }
@@ -15523,6 +15531,27 @@ async fn replay_remote_mission_after_usage_limit(
         usage_limit_wait::update_remote_wait(&working_dir, mission_id, |_| None).await;
         return;
     }
+    if mission
+        .scheduling
+        .deadline
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|deadline| deadline <= chrono::Utc::now())
+    {
+        if control
+            .mission_store
+            .update_mission_status_with_reason(
+                mission_id,
+                MissionStatus::Failed,
+                Some("deadline_exceeded"),
+            )
+            .await
+            .is_ok()
+        {
+            usage_limit_wait::update_remote_wait(&working_dir, mission_id, |_| None).await;
+        }
+        return;
+    }
     let started =
         match remote_grok::placement(&working_dir, &control.mission_store, mission_id).await {
             Ok(Some(placement)) => {
@@ -15568,6 +15597,12 @@ async fn replay_remote_mission_after_usage_limit(
         status.is_server_error(),
         &message,
         chrono::Utc::now(),
+        mission
+            .scheduling
+            .deadline
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc)),
     ) {
         usage_limit_wait::ReplayFailure::Retry(at) => {
             tracing::warn!(%mission_id, %message, retry_at = %at, "usage-limit replay could not start; will retry");
@@ -15948,9 +15983,17 @@ async fn poll_recovered_remote_build(
     }
 }
 
+fn remote_poll_delay(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(if failures < 5 {
+        3
+    } else {
+        (3_u64 << (failures - 5).min(5)).min(60)
+    })
+}
+
 /// Background poll loop for one async remote job. Emits sparse progress
-/// events (job state changes only), fails the mission after 5 consecutive
-/// unreachable polls (`remote_node_lost`), honors external mission
+/// events (job state changes only), retains ownership while reconnecting,
+/// honors external mission
 /// cancellation by cancelling the node job, and finalizes the mission through
 /// the same path as the synchronous dispatch.
 #[allow(clippy::too_many_arguments)]
@@ -16000,9 +16043,12 @@ async fn poll_remote_job(
             Ok(Some(current)) if current.status != MissionStatus::Active => Some(current.status),
             _ => None,
         };
-        if inactive_status.is_none()
-            && last_status_check.is_some_and(|at| at.elapsed() < POLL_INTERVAL)
-        {
+        let poll_delay = if inactive_status.is_some() {
+            POLL_INTERVAL
+        } else {
+            remote_poll_delay(failures)
+        };
+        if last_status_check.is_some_and(|at| at.elapsed() < poll_delay) {
             if failures == 0 && terminal_observation.is_none() {
                 if let Some(observer) = grok.as_mut() {
                     observer.pump(&client, &node, &shared_token).await;
@@ -16018,7 +16064,16 @@ async fn poll_remote_job(
         // until the node confirms a terminal state. A transient cancel outage
         // must not orphan a still-running remote job.
         if let Some(status) = inactive_status {
-            if let Err(err) = client.cancel_job(&node, &shared_token, job_id).await {
+            if let Err(err) = client
+                .cancel_job_with_reason(
+                    &node,
+                    &shared_token,
+                    job_id,
+                    "core",
+                    &format!("Mission status changed to {status}; preserve its requested stop"),
+                )
+                .await
+            {
                 tracing::warn!(
                     mission_id = %mission_id,
                     job_id = %job_id,
@@ -16042,7 +16097,7 @@ async fn poll_remote_job(
         };
         match observation {
             Err(err) => {
-                failures += 1;
+                failures = failures.saturating_add(1);
                 if failures >= MAX_CONSECUTIVE_FAILURES {
                     if inactive_status.is_some() {
                         tracing::warn!(
@@ -16056,41 +16111,54 @@ async fn poll_remote_job(
                         failures = 0;
                         continue;
                     }
-                    let content = format!(
-                        "Remote node '{}' became unreachable while running job {} \
-                         ({failures} consecutive poll failures; last error: {err}). \
-                         Marking the mission failed.",
-                        node.id, job_id
-                    );
-                    let _ = finalize_remote_mission(
-                        &owner,
+                    // A failed observation says nothing about the remote
+                    // process. Keep its lease/fence until a terminal receipt;
+                    // finalizing here used to cancel healthy jobs on reconnect.
+                    if failures == MAX_CONSECUTIVE_FAILURES {
+                        owner
+                            .publish_native(AgentEvent::MissionStatusChanged {
+                                completion: None,
+                                execution: owner
+                                    .mission_store
+                                    .get_latest_mission_run(mission_id)
+                                    .await
+                                    .ok()
+                                    .flatten(),
+                                mission_id,
+                                status: MissionStatus::Active,
+                                summary: Some(format!(
+                                    "Reconnecting to node '{}'; preserving the existing job",
+                                    node.id
+                                )),
+                            })
+                            .await;
+                    }
+                    let _ = ensure_remote_job_lease(
+                        owner.mission_store.as_ref(),
                         mission_id,
-                        Some(job_id),
+                        job_id,
                         &node.id,
-                        false,
-                        content,
-                        "remote_node_lost",
-                        grok.is_some(),
-                        grok.as_ref()
-                            .and_then(remote_grok::NativeGrokObserver::usage),
-                        Some(ledger_dir),
                     )
                     .await;
                     fleet.record_outcome(outcome(
-                        "unreachable",
+                        "reconnecting",
                         None,
-                        Some(err.to_string()),
+                        Some("Node temporarily unreachable; existing job retained".into()),
                         false,
                     ));
-                    // Finalization moves the mission out of Active. Keep the
-                    // durable handle and continue: the next iteration enters
-                    // the cancellation-aware path. This loop retires the ledger
-                    // entry only after confirmed termination and durable cleanup.
-                    failures = 0;
                     continue;
                 }
             }
             Ok(mut status) => {
+                if failures >= MAX_CONSECUTIVE_FAILURES {
+                    last_state.clear();
+                    fleet.record_outcome(outcome(
+                        &status.state,
+                        status.exit_code,
+                        status.error.clone(),
+                        false,
+                    ));
+                }
                 failures = 0;
                 if let Some(observer) = grok.as_mut() {
                     observer.pump(&client, &node, &shared_token).await;
@@ -16174,7 +16242,13 @@ async fn poll_remote_job(
                     // an account is available. A timeout or a missing node
                     // login keeps its own reason.
                     if should_finalize_remote_job(inactive_status)
-                        && matches!(status_reason, "remote_node_job" | "native_goal_stopped")
+                        && matches!(
+                            status_reason,
+                            "remote_node_job"
+                                | "native_goal_stopped"
+                                | "remote_transport_error"
+                                | "remote_quota"
+                        )
                     {
                         let sustained_progress = usage_limit_wait::sustained_recovery_progress(
                             status.started_at.as_deref(),

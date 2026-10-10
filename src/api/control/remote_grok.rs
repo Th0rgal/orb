@@ -268,6 +268,7 @@ pub(crate) struct GrokStream {
     codex_ordinary_turn: bool,
     pub(crate) auth_required: bool,
     pub(crate) error: Option<String>,
+    native_activity: bool,
     pub(crate) json_events: u64,
     progress: bool,
     pub(crate) diagnostics: VecDeque<String>,
@@ -365,6 +366,7 @@ impl GrokStream {
             self.diagnostics.push_back(diagnostic);
             return;
         };
+        self.native_activity |= value["type"].is_string() || value["event"].is_string();
         if let Some(stream) = self.vibe.as_mut() {
             let tools = stream.feed(&value);
             if stream.session != self.session_id {
@@ -774,6 +776,7 @@ pub(crate) struct NativeGrokObserver {
     session_persisted: Option<String>,
     auth_cancel_requested: bool,
     running_since: Option<std::time::Instant>,
+    startup_failure: Option<String>,
     /// The latest `pump` itself read the log to its current end.
     pumped_to_end: bool,
 }
@@ -855,6 +858,7 @@ impl NativeGrokObserver {
             thinking_snapshot: String::new(),
             auth_cancel_requested: false,
             running_since: None,
+            startup_failure: None,
             pumped_to_end: false,
         })
     }
@@ -910,17 +914,25 @@ impl NativeGrokObserver {
         node: &RemoteNodeConfig,
         token: &str,
     ) {
-        if status.state != "running" || self.stream.progress {
+        if status.state != "running" || self.stream.progress || self.stream.native_activity {
             return;
         }
         let since = self
             .running_since
             .get_or_insert_with(std::time::Instant::now);
-        if since.elapsed() >= std::time::Duration::from_secs(120) {
-            self.stream.error = Some("Remote harness produced no model/tool progress within 120 seconds; check the node's managed login and CLI connectivity before resuming.".to_string());
+        if since.elapsed() >= std::time::Duration::from_secs(300) {
+            self.startup_failure = Some("Cancelled by startup watchdog: no native protocol activity within 300 seconds of running. Check the node's CLI, working directory, and connectivity before resuming.".into());
             if !self.auth_cancel_requested {
-                self.auth_cancel_requested =
-                    client.cancel_job(node, token, self.job_id).await.is_ok();
+                self.auth_cancel_requested = client
+                    .cancel_job_with_reason(
+                        node,
+                        token,
+                        self.job_id,
+                        "startup_watchdog",
+                        "No native protocol activity within 300 seconds",
+                    )
+                    .await
+                    .is_ok();
             }
         }
     }
@@ -1006,7 +1018,16 @@ impl NativeGrokObserver {
         if self.stream.requires_error_cancellation() && !self.auth_cancel_requested {
             // Stop interactive login or a non-retryable native failure instead
             // of burning the job timeout. Recoverable results keep the CLI alive.
-            if let Err(error) = client.cancel_job(node, shared_token, self.job_id).await {
+            if let Err(error) = client
+                .cancel_job_with_reason(
+                    node,
+                    shared_token,
+                    self.job_id,
+                    "provider_error",
+                    "Native CLI reported a non-retryable failure",
+                )
+                .await
+            {
                 tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, ?error, "remote grok job cancellation after interactive login prompt failed; poll loop will retry");
             } else {
                 self.auth_cancel_requested = true;
@@ -1293,6 +1314,17 @@ impl NativeGrokObserver {
             }
         }
 
+        // Stop provenance outranks the generic "interrupted" emitted when the
+        // process receives SIGTERM. It survives observer/Core restarts on new nodes.
+        if let Some(cause) = self.startup_failure.clone().or_else(|| {
+            status
+                .cancellation
+                .as_ref()
+                .filter(|cause| cause.actor != "provider_error")
+                .map(|cause| format!("Cancelled by {}: {}", cause.actor, cause.reason))
+        }) {
+            self.stream.error = Some(cause);
+        }
         let exit = status.exit_code;
         let succeeded = status.state == "succeeded" && exit.unwrap_or(0) == 0;
         let auth_required = self.stream.auth_required || exit == Some(MISSING_MANAGED_AUTH_EXIT);
@@ -1333,6 +1365,20 @@ impl NativeGrokObserver {
                 self.stream.error = Some("Vibe identity was not durably persisted".into());
             }
         }
+        // Before the native protocol starts, the CLI can only report setup
+        // failures through stderr and the node's terminal process status.
+        let startup_evidence = if !succeeded && self.stream.json_events == 0 {
+            format!(
+                "{}\n{}",
+                status.error.as_deref().unwrap_or_default(),
+                self.stream.diagnostics_text()
+            )
+        } else {
+            String::new()
+        };
+        let failure = super::remote_failure::classify(
+            self.stream.error.as_deref().unwrap_or(&startup_evidence),
+        );
         let success = succeeded
             && self
                 .stream
@@ -1379,6 +1425,16 @@ impl NativeGrokObserver {
             "native_goal_stopped"
         } else if auth_required {
             "remote_grok_auth_required"
+        } else if !success {
+            match failure.kind {
+                super::remote_failure::FailureKind::Transport => "remote_transport_error",
+                super::remote_failure::FailureKind::Authentication => "remote_auth_required",
+                super::remote_failure::FailureKind::ProviderPolicy => "remote_provider_policy",
+                super::remote_failure::FailureKind::Configuration => "remote_configuration",
+                super::remote_failure::FailureKind::Quota => "remote_quota",
+                super::remote_failure::FailureKind::Cancelled => "remote_job_cancelled",
+                super::remote_failure::FailureKind::Unknown => "remote_node_job",
+            }
         } else {
             "remote_node_job"
         };
@@ -1391,9 +1447,7 @@ impl NativeGrokObserver {
                 ));
             } else if auth_required {
                 report.push_str(
-                    "The grok CLI on the node could not authenticate non-interactively: managed auth is not usable there. \
-                     On the node, set SANDBOXED_NODE_GROK_HOME for the sandboxed-node service and run \
-                     `GROK_HOME=<that dir> grok login --device-auth` as the service account, then resume this mission.",
+                    "The selected CLI could not authenticate on the node. Reconnect its account in Providers or repair the node's managed credentials, then resume this mission.",
                 );
             } else {
                 report.push_str(&format!(
@@ -1410,7 +1464,11 @@ impl NativeGrokObserver {
                         .unwrap_or_default()
                 ));
                 if let Some(error) = &self.stream.error {
-                    report.push_str(&format!("\nCLI error: {error}"));
+                    if failure.kind == super::remote_failure::FailureKind::Transport {
+                        report.push_str(&format!("\n{}", failure.summary));
+                    } else {
+                        report.push_str(&format!("\nCLI error: {error}"));
+                    }
                 }
             }
             let diagnostics = self.stream.diagnostics_text();
@@ -1634,6 +1692,12 @@ pub(crate) fn local_resume_refusal(mission: &Mission, placement: &RemotePlacemen
 /// - A live node job ([`REMOTE_JOB_STILL_RUNNING`]) and an unconfigured
 ///   node are conflicts too; nothing is started locally in any case.
 ///
+fn goal_resume_prompt(objective: &str) -> String {
+    // Recovery markers can be legitimate user text. Never infer a migration
+    // boundary from prose; generated envelopes are kept out of stored goals.
+    format!("/goal {objective}\n\n{}", super::INTERRUPTED_RESUME_PROMPT)
+}
+
 /// Explicit content is passed verbatim; a goal resumes with `/goal resume`.
 pub(crate) async fn continue_on_node(
     state: &Arc<AppState>,
@@ -2037,7 +2101,7 @@ async fn continue_inner(
                 "antigravity" | "opencode" | "claudecode"
             ) {
                 if let Some(objective) = mission.goal_objective.as_ref() {
-                    return format!("/goal {objective}\n\n{}", super::INTERRUPTED_RESUME_PROMPT);
+                    return goal_resume_prompt(objective);
                 }
             }
             "/goal resume".to_string()
@@ -2050,7 +2114,9 @@ async fn continue_inner(
         super::machine_transfer::context(&store, mission_id, prompt, session_id.as_deref())
             .await
             .map_err(internal)?;
-    if let Some(objective) = super::parse_goal_objective(&history_prompt) {
+    // Generated resumes are transport instructions, not a new user objective.
+    // Parsing them used to append the entire resume envelope on every retry.
+    if let Some(objective) = content.as_deref().and_then(super::parse_goal_objective) {
         if objective == "clear" {
             store
                 .update_mission_goal(mission.id, false, None)
@@ -2434,6 +2500,93 @@ mod tests {
                 release
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_provenance_outranks_native_interrupted() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "cancel-cause")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("test"),
+                None,
+                None,
+                None,
+                None,
+                Some("antigravity"),
+                None,
+            )
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job)
+            .await
+            .unwrap();
+        observer.stream.error = Some("interrupted".into());
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id":job,"mission_id":mission.id,"state":"cancelled","created_at":"2026-10-10T00:00:00Z",
+            "cancellation":{"actor":"startup_watchdog","reason":"No native activity","requested_at":"2026-10-10T00:05:00Z"}
+        })).unwrap();
+        let verdict = observer.verdict(&status, "node").await;
+        assert!(!verdict.success);
+        assert_eq!(verdict.status_reason, "remote_job_cancelled");
+        assert!(verdict.cli_error.unwrap().contains("startup_watchdog"));
+    }
+
+    #[tokio::test]
+    async fn missing_cli_before_native_protocol_is_a_setup_failure() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "startup")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(Some("test"), None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "node", mission.id, job)
+            .await
+            .unwrap();
+        observer
+            .stream
+            .feed("OpenCode CLI is not installed on this node\n");
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id":job,"mission_id":mission.id,"state":"failed","exit_code":127,
+            "error":"command exited with Some(127)","created_at":"2026-10-10T00:00:00Z"
+        }))
+        .unwrap();
+        let verdict = observer.verdict(&status, "node").await;
+        assert!(!verdict.success);
+        assert_eq!(verdict.status_reason, "remote_configuration");
+    }
+
+    #[test]
+    fn generated_resume_preserves_user_authored_markers() {
+        let objective = "Test recovery prompts\n\n[Automatic recovery]\nKeep these instructions\n\nYou were interrupted, resume your work.";
+        let prompt = goal_resume_prompt(objective);
+        assert_eq!(
+            prompt,
+            format!(
+                "/goal {objective}\n\n{}",
+                super::super::INTERRUPTED_RESUME_PROMPT
+            )
+        );
     }
 
     #[test]

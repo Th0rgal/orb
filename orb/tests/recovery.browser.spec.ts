@@ -21,3 +21,12 @@ for(const theme of ['dark','light'])test(`recovery is clear and keyboard accessi
  await page.getByText('Agent resumed automatically',{exact:true}).click();
  await expect(page.locator('details')).toHaveAttribute('open','');
 });
+
+for(const [scenario,label] of [['reconnecting','Reconnecting'],['policy','Blocked by provider']])test(`${scenario} explains the next step without a false retry`,async({page})=>{
+ await page.setViewportSize({width:390,height:700});
+ await page.goto(`/tests/recovery.html?scenario=${scenario}`);
+ await expect(page.getByText(label,{exact:false}).first()).toBeVisible();
+ await expect(page.getByRole('button',{name:'Cancel recovery'})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Resume now'})).toHaveCount(0);
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});

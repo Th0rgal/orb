@@ -23,7 +23,8 @@ test("actual App project chooser searches, selects and creates with keyboard and
  await page.locator("#orb-sidebar").screenshot({path:"test-results/orb-sidebar-compact.png"});
  const trigger=page.getByRole("button",{name:"Choose project",exact:true});await trigger.click();
  const search=page.getByRole("combobox",{name:"Search projects"});await expect(search).toBeFocused();
- await expect(search).toHaveCSS("outline-style","solid");
+ await expect(search).toHaveCSS("outline-style","none");
+ await expect(search).toHaveCSS("box-shadow","none");
  await expect(search).toHaveCSS("border-radius","6px");
  await expect(page.getByRole("option").first()).toContainText("Default");
  await expect(page.getByRole("option",{name:"Default"})).toHaveAttribute("aria-selected","true");

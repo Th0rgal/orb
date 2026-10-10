@@ -307,6 +307,23 @@ impl JobRunner {
     /// Request cancellation of a queued or running job. Returns whether a
     /// live or lost job received the request.
     pub async fn cancel(&self, job_id: Uuid) -> anyhow::Result<bool> {
+        self.cancel_with_reason(
+            job_id,
+            "unknown",
+            "Cancellation requested without actor information",
+        )
+        .await
+    }
+
+    pub async fn cancel_with_reason(
+        &self,
+        job_id: Uuid,
+        actor: &str,
+        reason: &str,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .record_cancellation(job_id, actor, reason)
+            .await?;
         let token = self
             .cancels
             .lock()

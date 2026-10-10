@@ -230,12 +230,32 @@ impl RemoteNodeClient {
         shared_token: &str,
         job_id: Uuid,
     ) -> Result<CancelJobResponse, RemoteNodeError> {
+        self.cancel_job_with_reason(
+            node,
+            shared_token,
+            job_id,
+            "core",
+            "Core requested cancellation",
+        )
+        .await
+    }
+
+    pub async fn cancel_job_with_reason(
+        &self,
+        node: &RemoteNodeConfig,
+        shared_token: &str,
+        job_id: Uuid,
+        actor: &str,
+        reason: &str,
+    ) -> Result<CancelJobResponse, RemoteNodeError> {
         let url = format!("{}/jobs/{}/cancel", node.base_url, job_id);
         let response = self
             .http
             .post(url)
             .timeout(JOB_STATUS_TIMEOUT)
             .bearer_auth(shared_token)
+            .header("x-sandboxed-cancel-actor", actor)
+            .header("x-sandboxed-cancel-reason", reason)
             .send()
             .await
             .map_err(transport_error)?;

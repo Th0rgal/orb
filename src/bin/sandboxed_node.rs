@@ -394,6 +394,7 @@ async fn execute(
 
 fn job_status_from_record(record: &JobRecord, log_tail: Option<String>) -> NodeJobStatus {
     NodeJobStatus {
+        cancellation: record.cancellation.clone(),
         job_id: record.id,
         mission_id: record.mission_id,
         state: record.state.as_str().to_string(),
@@ -578,7 +579,25 @@ async fn cancel_job(
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<CancelJobResponse>, (StatusCode, String)> {
     check_auth(&headers, &state)?;
-    let cancel_requested = state.runner.cancel(id).await.map_err(internal_error)?;
+    let actor = headers
+        .get("x-sandboxed-cancel-actor")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            matches!(
+                *v,
+                "core" | "operator" | "startup_watchdog" | "provider_error"
+            )
+        })
+        .unwrap_or("unknown");
+    let reason = headers
+        .get("x-sandboxed-cancel-reason")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("Cancellation requested without reason");
+    let cancel_requested = state
+        .runner
+        .cancel_with_reason(id, actor, reason)
+        .await
+        .map_err(internal_error)?;
     let record = state
         .jobs
         .get(id)

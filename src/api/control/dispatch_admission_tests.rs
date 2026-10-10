@@ -3048,6 +3048,7 @@ async fn remote_poll_loss_and_cancel_ack_retain_ownership_until_terminal_cleanup
         .await
         .unwrap();
     let phase = Arc::new(AtomicUsize::new(0));
+    let failed_observations = Arc::new(AtomicUsize::new(0));
     let failed_cancels = Arc::new(AtomicUsize::new(0));
     let acknowledged_cancels = Arc::new(AtomicUsize::new(0));
     let observed_phase = Arc::new(AtomicUsize::new(0));
@@ -3057,12 +3058,15 @@ async fn remote_poll_loss_and_cancel_ack_retain_ownership_until_terminal_cleanup
             axum::routing::get({
                 let phase = phase.clone();
                 let observed_phase = observed_phase.clone();
+                let failed_observations = failed_observations.clone();
                 move || {
                     let phase = phase.clone();
                     let observed_phase = observed_phase.clone();
+                    let failed_observations = failed_observations.clone();
                     async move {
                         let current = phase.load(Ordering::SeqCst);
                         if current == 0 {
+                            failed_observations.fetch_add(1, Ordering::SeqCst);
                             return (
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 Json(json!({"error":"observation unavailable"})),
@@ -3206,12 +3210,12 @@ async fn remote_poll_loss_and_cancel_ack_retain_ownership_until_terminal_cleanup
         .unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(40), async {
-        while failed_cancels.load(Ordering::SeqCst) == 0 {
+        while failed_observations.load(Ordering::SeqCst) < 5 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("five failed observations must lead to cancellation retry");
+    .expect("five failed observations must preserve the existing job");
     let failed = h
         .control
         .mission_store
@@ -3219,8 +3223,36 @@ async fn remote_poll_loss_and_cancel_ack_retain_ownership_until_terminal_cleanup
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(failed.status, MissionStatus::Failed);
-    assert_eq!(failed.terminal_reason.as_deref(), Some("remote_node_lost"));
+    assert_eq!(failed.status, MissionStatus::Active);
+    assert_eq!(failed_cancels.load(Ordering::SeqCst), 0);
+    // Recover contact with the same running job, without cancelling it.
+    phase.store(1, Ordering::SeqCst);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while observed_phase.load(Ordering::SeqCst) != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(acknowledged_cancels.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(owner.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+    // A subsequent explicit stop must still cancel and preserve ownership
+    // until confirmed terminal cleanup.
+    h.control
+        .mission_store
+        .update_mission_status(owner.id, MissionStatus::Interrupted)
+        .await
+        .unwrap();
+    phase.store(0, Ordering::SeqCst);
 
     for next_phase in 0..=3 {
         if next_phase > 0 {

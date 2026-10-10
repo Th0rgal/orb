@@ -359,9 +359,19 @@ pub struct SubmitJobResponse {
     pub state: String,
 }
 
+/// Durable cause recorded before a stop signal is delivered. Old nodes omit it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobCancellation {
+    pub actor: String,
+    pub reason: String,
+    pub requested_at: String,
+}
+
 /// Job status as returned by `GET /jobs/:id` and `GET /jobs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeJobStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<JobCancellation>,
     pub job_id: Uuid,
     pub mission_id: Uuid,
     /// queued | running | succeeded | failed | cancelled | lost
@@ -864,6 +874,7 @@ pub fn job_state_confirms_termination(state: &str) -> bool {
 /// The process is already gone; looping on cancel would never terminate.
 pub fn missing_job_cancelled(mission_id: Uuid, job_id: Uuid) -> NodeJobStatus {
     NodeJobStatus {
+        cancellation: None,
         job_id,
         mission_id,
         state: "cancelled".to_string(),

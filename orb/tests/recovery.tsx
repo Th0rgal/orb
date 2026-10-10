@@ -5,7 +5,12 @@ import {UserTurn} from '../src/Transcript';
 import type {Mission} from '../src/api';
 import '../src/styles.css';
 document.documentElement.dataset.theme=new URLSearchParams(location.search).get('theme') ?? 'dark';
-const initial={id:'recovery',status:'interrupted',terminal_reason:'usage_limit_wait',recovery:{kind:'transient',reason:'Antigravity transient upstream error',resume_at:new Date(Date.now()+300_000).toISOString(),attempt:3,max_attempts:12}} as Mission;
+const scenario=new URLSearchParams(location.search).get('scenario');
+const initial=(scenario==='reconnecting'
+ ? {id:'recovery',status:'active',remote_job:{node_id:'ashur',job_id:'existing',phase:'reconnecting',node_state:'running'}}
+ : scenario==='policy'
+ ? {id:'recovery',status:'failed',terminal_reason:'remote_provider_policy'}
+ : {id:'recovery',status:'interrupted',terminal_reason:'usage_limit_wait',recovery:{kind:'transient',reason:'Inference connection interrupted',resume_at:new Date(Date.now()+300_000).toISOString(),attempt:3,max_attempts:12}}) as Mission;
 function Preview(){
  const [mission,setMission]=createSignal(initial);
  return <main style={{padding:'16px','max-width':'800px',margin:'60px auto'}}>

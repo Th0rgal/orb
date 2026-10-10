@@ -162,22 +162,34 @@ impl Client {
         Ok(token)
     }
     async fn request(&self, path: &str, body: Option<&Value>) -> Result<Value, String> {
-        let token = self.token().await?;
-        let request = if let Some(body) = body {
-            self.http.post(format!("{}{path}", self.api_url)).json(body)
-        } else {
-            self.http.get(format!("{}{path}", self.api_url))
-        };
-        let response = request.bearer_auth(token).send().await.map_err(|_| {
-            "Core connection failed; acceptance is unknown for a submitted mutation"
-        })?;
-        if !response.status().is_success() {
-            return Err(format!("Core rejected request ({})", response.status()));
+        for attempt in 0..2 {
+            let token = self.token().await?;
+            let request = if let Some(body) = body {
+                self.http.post(format!("{}{path}", self.api_url)).json(body)
+            } else {
+                self.http.get(format!("{}{path}", self.api_url))
+            };
+            let response = request.bearer_auth(token).send().await.map_err(|_| {
+                "Core connection failed; acceptance is unknown for a submitted mutation"
+            })?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                // Auth middleware rejected this request before tool execution.
+                // Renew once using the same scoped credential/mission; never
+                // retry ambiguous transport failures or escalate to owner auth.
+                if let Some((_, expiry)) = self.session.lock().await.as_mut() {
+                    *expiry = 0;
+                }
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(format!("Core rejected request ({})", response.status()));
+            }
+            return response
+                .json()
+                .await
+                .map_err(|_| "Invalid Core response".into());
         }
-        response
-            .json()
-            .await
-            .map_err(|_| "Invalid Core response".into())
+        Err("Core rejected the renewed scoped session; check mission authorization".into())
     }
     pub async fn preflight(&self) -> Result<Value, String> {
         let v = self.request("/api/mcp/capabilities", None).await?;
@@ -338,6 +350,46 @@ pub async fn run() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn rejected_cached_session_renews_once_without_replaying_an_accepted_mutation() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/api/mcp/renew", post({ let renewals = renewals.clone(); move |headers: axum::http::HeaderMap| { let renewals = renewals.clone(); async move {
+                assert_eq!(headers["authorization"], "Bearer mcp1.stale");
+                renewals.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"token":"mcp1.fresh","expires_at":chrono::Utc::now().timestamp()+3600}))
+            }}}))
+            .route("/api/mcp/call", post({ let calls = calls.clone(); move |headers: axum::http::HeaderMap| { let calls = calls.clone(); async move {
+                if headers["authorization"] != "Bearer mcp1.fresh" {
+                    return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({})));
+                }
+                calls.fetch_add(1, Ordering::SeqCst);
+                (axum::http::StatusCode::OK, Json(json!({"ok":true})))
+            }}}));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(url, "mcp1.stale".into(), None, Role::Executor, None).unwrap();
+        *client.session.lock().await =
+            Some(("mcp1.stale".into(), chrono::Utc::now().timestamp() + 3600));
+        assert_eq!(
+            client
+                .request("/api/mcp/call", Some(&json!({"name":"test"})))
+                .await
+                .unwrap()["ok"],
+            true
+        );
+        assert_eq!(renewals.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
     #[test]
     fn renewal_is_private_atomic_and_available_after_client_restart() {
         let dir = tempfile::tempdir().unwrap();
