@@ -521,7 +521,7 @@ pub(crate) enum RunOutcome {
     Exited(Option<i32>),
     Cancelled,
     MemoryExhausted,
-    TimedOut { limit_secs: u64 },
+    TimedOut { limit_secs: u64, observed_oom: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -549,10 +549,12 @@ impl RunOutcome {
             RunOutcome::Cancelled => (JobState::Cancelled, None, Some("cancelled".to_string())),
             RunOutcome::MemoryExhausted => (JobState::Failed, None,
                 Some("node_job_memory_exhausted: the kernel killed a process in this job; reduce the workload and reconcile saved files before resuming".into())),
-            RunOutcome::TimedOut { limit_secs } => (
+            RunOutcome::TimedOut { limit_secs, observed_oom } => (
                 JobState::Failed,
                 None,
-                Some(format!("timed out after {limit_secs}s")),
+                Some(if observed_oom {
+                    format!("timed out after {limit_secs}s; a child process also exceeded this job's memory budget. Reconcile saved files and reduce the workload before resuming")
+                } else { format!("timed out after {limit_secs}s") }),
             ),
         }
     }
@@ -564,6 +566,22 @@ fn memory_exhaustion_is_failure_with_recovery_guidance() {
     assert_eq!(state, JobState::Failed);
     assert_eq!(code, None);
     assert!(error.unwrap().starts_with("node_job_memory_exhausted:"));
+}
+
+#[test]
+fn memory_timeout_keeps_deadline_reason_and_prior_oom_evidence() {
+    let (state, _, error) = RunOutcome::TimedOut {
+        limit_secs: 5,
+        observed_oom: true,
+    }
+    .into_job_result();
+    assert_eq!(state, JobState::Failed);
+    let error = error.unwrap();
+    assert!(error.starts_with("timed out after 5s"));
+    assert!(error.contains("child process also exceeded"));
+    let (state, _, error) = RunOutcome::Cancelled.into_job_result();
+    assert_eq!(state, JobState::Cancelled);
+    assert_eq!(error.as_deref(), Some("cancelled"));
 }
 
 /// Spawn `cmd` in its own process group with combined stdout+stderr appended
@@ -607,9 +625,8 @@ async fn run_logged_command_with_deadline(
 
     let outcome = tokio::select! {
         _ = token.cancelled() => {
-            let oom = scope_oom_killed(systemd_scope.as_ref()).await;
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-            if oom { RunOutcome::MemoryExhausted } else { RunOutcome::Cancelled }
+            RunOutcome::Cancelled
         }
         _ = async {
             match limit_secs {
@@ -617,8 +634,9 @@ async fn run_logged_command_with_deadline(
                 None => std::future::pending::<()>().await,
             }
         } => {
+            let observed_oom = scope_oom_killed(systemd_scope.as_ref()).await;
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
-            RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled") }
+            RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled"), observed_oom }
         }
         waited = child.wait() => {
             let oom = scope_oom_killed(systemd_scope.as_ref()).await;
