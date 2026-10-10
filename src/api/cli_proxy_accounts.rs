@@ -55,15 +55,7 @@ pub(crate) fn parse_account(file: &str, value: &Value) -> Option<ProxyAccount> {
     // Minted Muse keys have no advertised expiration. Do not invent a refresh
     // deadline: subscription state and the authoritative DCA receipt gate use.
     let expiry = if provider == ProviderType::MuseCode {
-        value
-            .get("dca_expires_at")
-            .filter(|v| v.as_i64().is_some_and(|n| n > 0))
-            .or_else(|| {
-                value
-                    .get("dca_expired")
-                    .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-            })
-            .unwrap_or(&unknown_muse_expiry)
+        &unknown_muse_expiry
     } else {
         value.get("expired").or_else(|| value.get("expires_at"))?
     };
@@ -340,6 +332,12 @@ mod tests {
         assert_eq!(account.provider, ProviderType::MuseCode);
         assert_eq!(account.oauth.expires_at, i64::MAX);
         assert!(!account_needs_reconnect(&account));
+        // The device-code deadline is not the minted API key's expiry.
+        value["dca_expires_at"] = serde_json::json!(1);
+        value["dca_expired"] = serde_json::json!("2000-01-01T00:00:00Z");
+        let expired_device = parse_account("meta.json", &value).unwrap();
+        assert_eq!(expired_device.oauth.expires_at, i64::MAX);
+        assert!(!account_needs_reconnect(&expired_device));
         for bad in [serde_json::json!(false), serde_json::Value::Null] {
             value["is_subs_active"] = bad;
             assert!(account_needs_reconnect(
