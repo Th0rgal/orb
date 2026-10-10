@@ -1325,15 +1325,6 @@ impl NativeGrokObserver {
         }) {
             self.stream.error = Some(cause);
         }
-        if let Some(error) = status.error.as_ref().filter(|error| {
-            error.starts_with("node_job_memory_exhausted:")
-                && status
-                    .cancellation
-                    .as_ref()
-                    .is_none_or(|cause| cause.actor == "provider_error")
-        }) {
-            self.stream.error = Some(error.clone());
-        }
         let exit = status.exit_code;
         let succeeded = status.state == "succeeded" && exit.unwrap_or(0) == 0;
         let auth_required = self.stream.auth_required || exit == Some(MISSING_MANAGED_AUTH_EXIT);

@@ -520,7 +520,7 @@ pub(crate) fn clamp_timeout(requested: Option<u64>, max_job_secs: u64) -> u64 {
 pub(crate) enum RunOutcome {
     Exited(Option<i32>),
     Cancelled,
-    MemoryExhausted,
+    ExitedAfterChildOom(Option<i32>),
     TimedOut { limit_secs: u64, observed_oom: bool },
 }
 
@@ -547,8 +547,8 @@ impl RunOutcome {
                 Some(format!("command exited with {code:?}")),
             ),
             RunOutcome::Cancelled => (JobState::Cancelled, None, Some("cancelled".to_string())),
-            RunOutcome::MemoryExhausted => (JobState::Failed, None,
-                Some("node_job_memory_exhausted: the kernel killed a process in this job; reduce the workload and reconcile saved files before resuming".into())),
+            RunOutcome::ExitedAfterChildOom(code) => (JobState::Failed, code,
+                Some(format!("command exited with {code:?}; a child process in this job was also killed by the kernel OOM killer. Reconcile saved files and reduce the workload before resuming"))),
             RunOutcome::TimedOut { limit_secs, observed_oom } => (
                 JobState::Failed,
                 None,
@@ -562,10 +562,10 @@ impl RunOutcome {
 
 #[test]
 fn memory_exhaustion_is_failure_with_recovery_guidance() {
-    let (state, code, error) = RunOutcome::MemoryExhausted.into_job_result();
+    let (state, code, error) = RunOutcome::ExitedAfterChildOom(None).into_job_result();
     assert_eq!(state, JobState::Failed);
     assert_eq!(code, None);
-    assert!(error.unwrap().starts_with("node_job_memory_exhausted:"));
+    assert!(error.unwrap().contains("kernel OOM killer"));
 }
 
 #[test]
@@ -642,7 +642,7 @@ async fn run_logged_command_with_deadline(
             let oom = scope_oom_killed(systemd_scope.as_ref()).await;
             kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
             let code = waited?.code();
-            if oom && code != Some(0) { RunOutcome::MemoryExhausted } else { RunOutcome::Exited(code) }
+            if oom && code != Some(0) { RunOutcome::ExitedAfterChildOom(code) } else { RunOutcome::Exited(code) }
         }
     };
     Ok(outcome)

@@ -1009,5 +1009,7 @@ reduce or offload the offending workload.
 Scopes use `OOMPolicy=continue`: an oversized child tool is killed without
 systemd stopping the entire harness and its sibling subagents. If the harness
 recovers and exits successfully, the earlier child OOM does not convert its
-success into a failed mission. Terminal kernel OOM evidence is reported when
-the harness itself fails; explicit operator cancellation retains precedence.
+success into a failed mission. Available kernel OOM evidence is appended to a failure or timeout without
+replacing its primary cause; explicit cancellation retains precedence. An
+already-retired successful scope may no longer expose its counters, so this
+diagnostic is best effort.
