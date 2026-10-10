@@ -47,8 +47,13 @@ final class OrbSharedInboxState {
             if let stamp = body["stamp"].doubleValue { seen[String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))] = stamp }
         }
     }
-    func write(_ path: String, _ body: OrbJSON) {
+    func write(_ path: String, _ input: OrbJSON) {
         if applying { return }
+        var body = input
+        if case var .object(fields) = input, fields["mutationAt"] == nil {
+            fields["mutationAt"] = .number((Date().timeIntervalSince1970 * 1000).rounded(.down))
+            body = .object(fields)
+        }
         let expected = account
         ensureScope()
         outbox[path] = body

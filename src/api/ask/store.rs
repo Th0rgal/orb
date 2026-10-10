@@ -106,12 +106,27 @@ impl AskStore {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), String> {
+        self.save_inbox_state_versioned(user, key, value, Utc::now().timestamp_millis())
+            .await
+    }
+    pub async fn save_inbox_state_versioned(
+        &self,
+        user: &str,
+        key: &str,
+        value: &serde_json::Value,
+        mutation_at: i64,
+    ) -> Result<(), String> {
         let conn = self.conn.clone();
         let (user, key, raw) = (user.to_string(), key.to_string(), value.to_string());
         tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.execute("INSERT INTO inbox_state (user_id, entry_key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, entry_key) DO UPDATE SET value_json = excluded.value_json", params![user, key, raw])
-                .map(|_| ()).map_err(|e| e.to_string())
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let previous: Option<i64> = tx.query_row("SELECT mutation_ms FROM inbox_state_versions WHERE user_id = ?1 AND entry_key = ?2", params![user, key], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+            if previous.is_none_or(|version| mutation_at >= version) {
+                tx.execute("INSERT INTO inbox_state (user_id, entry_key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, entry_key) DO UPDATE SET value_json = excluded.value_json", params![user, key, raw]).map_err(|e| e.to_string())?;
+                tx.execute("INSERT INTO inbox_state_versions (user_id, entry_key, mutation_ms) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, entry_key) DO UPDATE SET mutation_ms = excluded.mutation_ms", params![user, key, mutation_at]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
         }).await.map_err(|e| e.to_string())?
     }
 
@@ -475,6 +490,7 @@ fn row_to_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorNote> {
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS inbox_state (user_id TEXT NOT NULL, entry_key TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(user_id, entry_key));
+CREATE TABLE IF NOT EXISTS inbox_state_versions (user_id TEXT NOT NULL, entry_key TEXT NOT NULL, mutation_ms INTEGER NOT NULL, PRIMARY KEY(user_id, entry_key));
 CREATE TABLE IF NOT EXISTS inbox_digests (cache_key TEXT PRIMARY KEY, source_revision TEXT NOT NULL, digest_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ask_threads (
     id          TEXT PRIMARY KEY,

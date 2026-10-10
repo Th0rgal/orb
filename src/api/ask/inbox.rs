@@ -145,7 +145,10 @@ fn snapshot(m: &Mission, events: &[StoredEvent]) -> (String, Vec<(String, Option
         .rev()
         .take(3)
         .collect();
-    if answers.is_empty() {
+    let history_matches_request = last_user.is_none()
+        || last_history_user
+            .is_some_and(|(_, h)| last_user.is_some_and(|e| h.content.trim() == e.content.trim()));
+    if answers.is_empty() && history_matches_request {
         if let Some(h) = m
             .history
             .iter()
@@ -431,11 +434,15 @@ pub struct Preferences {
     ai_summary: bool,
     include_autonomous: bool,
     model: String,
+    #[serde(default, skip_serializing)]
+    mutation_at: Option<i64>,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Seen {
     stamp: i64,
+    #[serde(default)]
+    mutation_at: Option<i64>,
 }
 
 pub async fn get_state(
@@ -475,7 +482,14 @@ pub async fn save_preferences(
         )
     })?;
     store
-        .save_inbox_state(&user.id.to_string(), "preferences", &json!(prefs))
+        .save_inbox_state_versioned(
+            &user.id.to_string(),
+            "preferences",
+            &json!(prefs),
+            prefs
+                .mutation_at
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+        )
         .await
         .map_err(|_| {
             (
@@ -516,10 +530,12 @@ pub async fn save_seen(
         )
     })?;
     store
-        .save_inbox_state(
+        .save_inbox_state_versioned(
             &user.id.to_string(),
             &format!("seen:{id}"),
             &json!(seen.stamp),
+            seen.mutation_at
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
         )
         .await
         .map_err(|_| {
@@ -604,6 +620,21 @@ mod tests {
         let latest = snapshot(&mission, &[stale_event]).0;
         assert!(latest.contains("Fresh history response"));
         assert!(!latest.contains("Old event result"));
+        let ahead = StoredEvent {
+            id: 2,
+            mission_id: mission.id,
+            sequence: 2,
+            event_type: "user_message".into(),
+            timestamp: "2026-10-09T10:02:00Z".into(),
+            event_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            content: "New event request still unanswered.".into(),
+            metadata: json!({}),
+        };
+        let unanswered = snapshot(&mission, &[ahead]).0;
+        assert!(unanswered.contains("New event request still unanswered."));
+        assert!(!unanswered.contains("Fresh history response"));
     }
     #[test]
     fn rejects_invented_sources_and_bounds_reply_context() {
@@ -613,6 +644,40 @@ mod tests {
         assert_eq!(s.sources[0].event_sequence, Some(17));
         assert_eq!(s.suggestions.len(), 1);
         assert!(s.decision.is_empty());
+    }
+    #[tokio::test]
+    async fn older_offline_replay_cannot_overwrite_newer_shared_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ask.db");
+        let store = super::super::store::AskStore::open(path.clone())
+            .await
+            .unwrap();
+        for key in ["preferences", "seen:mission"] {
+            store
+                .save_inbox_state_versioned("alice", key, &json!("newer choice"), 200)
+                .await
+                .unwrap();
+        }
+        drop(store);
+        let store = super::super::store::AskStore::open(path).await.unwrap();
+        for key in ["preferences", "seen:mission"] {
+            store
+                .save_inbox_state_versioned("alice", key, &json!("older offline choice"), 100)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.inbox_state("alice").await.unwrap()[key],
+                "newer choice"
+            );
+            store
+                .save_inbox_state_versioned("alice", key, &json!("latest choice"), 300)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.inbox_state("alice").await.unwrap()[key],
+                "latest choice"
+            );
+        }
     }
     #[tokio::test]
     async fn presentation_state_is_user_scoped_and_persistent() {

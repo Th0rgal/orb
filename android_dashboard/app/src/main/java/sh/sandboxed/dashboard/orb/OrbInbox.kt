@@ -112,8 +112,9 @@ object OrbSharedInboxState {
             if (stamp != null) seen[java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8")] = stamp.toLong()
         }
     }
-    fun write(path: String, body: Any) {
+    fun write(path: String, input: Any) {
         if (applying) return
+        val body = if (input is Map<*, *> && !input.containsKey("mutationAt")) input + ("mutationAt" to System.currentTimeMillis()) else input
         val core = OrbCore.shared
         val expected = account()
         ensureScope()

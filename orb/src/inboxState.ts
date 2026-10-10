@@ -18,7 +18,9 @@ function loadOutbox(): string {
 }
 function persist(): void { try { localStorage.setItem(loadedKey, JSON.stringify(outbox)); } catch {} }
 
-export function writeInboxState(path: string, body: unknown): void {
+export function writeInboxState(path: string, input: unknown): void {
+  const body = input && typeof input === "object" && !Array.isArray(input)
+    ? { ...input, mutationAt: (input as { mutationAt?: number }).mutationAt ?? Date.now() } : input;
   const key = loadOutbox(), serial = ++mutation;
   outbox[path] = { body, serial }; persist();
   if (!isConnected()) return;

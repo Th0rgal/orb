@@ -49,3 +49,15 @@ it("does not let a deleted mission receipt block later shared-state reads", asyn
   expect((await readInboxState())?.preferences?.model).toBe("builtin/fast");
   expect(fetcher.mock.calls[1][1].method).toBeUndefined();
 });
+
+it("preserves an offline mutation timestamp when retrying after a newer device edit", async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 })).mockResolvedValue(new Response(null, { status: 204 }));
+  vi.stubGlobal("fetch", fetcher);
+  const { readInboxState, writeInboxState } = await import("../src/inboxState");
+  writeInboxState("preferences", { aiSummary: false, includeAutonomous: true, model: "builtin/fast", mutationAt: 1234 });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await readInboxState();
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(fetcher.mock.calls[1][1].body).mutationAt).toBe(1234);
+});
