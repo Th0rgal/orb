@@ -108,6 +108,8 @@ pub enum ProviderType {
     Kimi,
     /// Meta's Muse model family (api.meta.ai, OpenAI-compatible).
     Muse,
+    /// Muse Code subscription, isolated from the paid Meta API provider.
+    MuseCode,
     Custom,
 }
 
@@ -132,7 +134,8 @@ impl ProviderType {
             Self::GithubCopilot => "GitHub Copilot",
             Self::Zai => "Z.AI",
             Self::Minimax => "Minimax",
-            Self::Muse => "Meta Muse",
+            Self::Muse => "Meta Muse API",
+            Self::MuseCode => "Muse Code",
             Self::Kimi => "Kimi",
             Self::Custom => "Custom",
         }
@@ -159,6 +162,7 @@ impl ProviderType {
             Self::Zai => "zai",
             Self::Minimax => "minimax",
             Self::Muse => "muse",
+            Self::MuseCode => "muse-code",
             Self::Kimi => "kimi",
             Self::Custom => "custom",
         }
@@ -186,6 +190,7 @@ impl ProviderType {
             "zai" => Some(Self::Zai),
             "minimax" => Some(Self::Minimax),
             "muse" | "meta" => Some(Self::Muse),
+            "muse-code" => Some(Self::MuseCode),
             "kimi" => Some(Self::Kimi),
             "custom" => Some(Self::Custom),
             _ => None,
@@ -213,6 +218,7 @@ impl ProviderType {
             Self::Zai => Some("ZHIPU_API_KEY"),
             Self::Minimax => Some("MINIMAX_API_KEY"),
             Self::Muse => Some("META_MODEL_API_KEY"),
+            Self::MuseCode => None,
             Self::Kimi => None, // OAuth-only (Kimi Code subscription)
             Self::Custom => None,
         }
@@ -229,6 +235,7 @@ impl ProviderType {
                 | Self::Xai
                 | Self::Kimi
                 | Self::Antigravity
+                | Self::MuseCode
         )
     }
 
@@ -270,6 +277,11 @@ impl ProviderType {
                     description: Some("Enter an existing Anthropic API key".to_string()),
                 },
             ],
+            Self::MuseCode => vec![AuthMethod {
+                label: "Muse Code subscription".into(),
+                method_type: AuthMethodType::Oauth,
+                description: Some("Connect your Meta subscription through CLIProxyAPI. No paid API fallback.".into()),
+            }],
             Self::Antigravity => vec![AuthMethod {
                 label: "Google Antigravity".into(),
                 method_type: AuthMethodType::Oauth,

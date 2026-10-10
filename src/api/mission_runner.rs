@@ -6197,14 +6197,16 @@ fn cli_proxy_opencode_provider_definition(
 /// CLIProxyAPI: OpenCode authenticates to the proxy with its key instead.
 fn cli_proxy_opencode_auth_overlay() -> Option<serde_json::Value> {
     let mut map = serde_json::Map::new();
-    // Antigravity is proxy-only. Mask any legacy host/workspace OAuth entry
-    // even when management is unavailable; a missing proxy key fails closed.
-    map.insert(
-        "antigravity".into(),
-        serde_json::json!({
-            "type": "api", "key": std::env::var("SANDBOXED_PROXY_SECRET").unwrap_or_default()
-        }),
-    );
+    // These subscriptions must go through Core's explicit provider namespace.
+    // Never hand their device/OAuth credentials to a native harness refresher.
+    for provider in ["antigravity", "muse-code"] {
+        map.insert(
+            provider.into(),
+            serde_json::json!({
+                "type": "api", "key": std::env::var("SANDBOXED_PROXY_SECRET").unwrap_or_default()
+            }),
+        );
+    }
     for (provider, keys) in [
         (
             crate::ai_providers::ProviderType::Anthropic,
@@ -6430,7 +6432,7 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 model_id: model_entry.clone()
             }
         })),
-        "builtin" | "antigravity" => {
+        "builtin" | "antigravity" | "muse-code" => {
             // Point at the local OpenAI-compatible proxy that handles model
             // chain resolution and failover.  The proxy runs on the same host
             // and is accessible from shared-network workspaces.
@@ -6452,12 +6454,12 @@ pub(crate) fn ensure_opencode_provider_for_model(
                 });
             }
             let mut model = serde_json::json!({"name": model_id});
-            if provider_id == "antigravity" {
-                model["id"] = serde_json::json!(format!("antigravity/{model_id}"));
+            if provider_id != "builtin" {
+                model["id"] = serde_json::json!(format!("{provider_id}/{model_id}"));
             }
             Some(serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
-                "name": if provider_id == "antigravity" { "Antigravity subscription" } else { "Builtin" },
+                "name": match provider_id { "antigravity" => "Antigravity subscription", "muse-code" => "Muse Code", _ => "Builtin" },
                 "models": {
                     model_id: model
                 },
@@ -6603,7 +6605,7 @@ pub(crate) fn ensure_opencode_provider_for_model(
             || (provider_id == "xai" && super::oauth_owner::management_enabled());
     if provider_id == "builtin"
         || provider_id == "kimi"
-        || provider_id == "antigravity"
+        || matches!(provider_id, "antigravity" | "muse-code")
         || matches!(provider_id, "google" | "gemini")
         || cli_proxy_owned_provider
     {
@@ -6857,7 +6859,11 @@ fn build_opencode_auth_from_ai_providers(
     let mut map = serde_json::Map::new();
     for provider in providers {
         if !provider.enabled
-            || provider.provider_type == crate::ai_providers::ProviderType::Antigravity
+            || matches!(
+                provider.provider_type,
+                crate::ai_providers::ProviderType::Antigravity
+                    | crate::ai_providers::ProviderType::MuseCode
+            )
         {
             continue;
         }
@@ -7096,6 +7102,7 @@ pub(crate) fn sync_opencode_auth_to_workspace(
             ("minimax", "Minimax"),
             ("cerebras", "Cerebras"),
             ("antigravity", "Antigravity"),
+            ("muse-code", "Muse Code"),
         ];
         for (key, label) in provider_entries {
             let entry = if key == "openai" {
@@ -12446,6 +12453,50 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("http://10.88.0.1:"));
+    }
+
+    #[test]
+    fn muse_subscription_uses_core_namespace_without_exporting_device_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("ws");
+        let app_dir = temp.path().join("app");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(app_dir.join(".sandboxed-sh")).unwrap();
+        let mut account = crate::ai_providers::AIProvider::new(
+            crate::ai_providers::ProviderType::MuseCode,
+            "Muse Code".into(),
+        );
+        account.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: "must-stay-on-core".into(),
+            refresh_token: "private-device-credential".into(),
+            expires_at: i64::MAX,
+        });
+        fs::write(
+            app_dir.join(".sandboxed-sh/ai_providers.json"),
+            serde_json::to_string(&vec![account]).unwrap(),
+        )
+        .unwrap();
+        assert!(build_opencode_auth_from_ai_providers(&app_dir).is_none());
+        ensure_opencode_provider_for_model(
+            &config_dir,
+            &app_dir,
+            "muse-code/muse-spark-1.3",
+            "10.88.0.1",
+            None,
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join("opencode.json")).unwrap())
+                .unwrap();
+        let provider = &config["provider"]["muse-code"];
+        assert_eq!(
+            provider["models"]["muse-spark-1.3"]["id"],
+            "muse-code/muse-spark-1.3"
+        );
+        assert!(provider["options"]["baseURL"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://10.88.0.1:"));
+        assert!(!config.to_string().contains("private-device-credential"));
     }
 
     #[test]

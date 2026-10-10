@@ -7887,9 +7887,15 @@ async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
         },
         ProviderTypeInfo {
             id: "muse".to_string(),
-            name: "Meta Muse".to_string(),
+            name: "Meta Muse API".to_string(),
             uses_oauth: false,
             env_var: Some("META_MODEL_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "muse-code".to_string(),
+            name: "Muse Code".to_string(),
+            uses_oauth: true,
+            env_var: None,
         },
         ProviderTypeInfo {
             id: "deep-infra".to_string(),
@@ -9812,6 +9818,23 @@ async fn get_provider_usage(
             }
             info
         }
+        ProviderType::MuseCode => {
+            let account = if let Some(id) = provider_uuid {
+                state.ai_providers.get(id).await
+            } else {
+                None
+            };
+            let connected = account
+                .as_ref()
+                .is_some_and(|p| !super::cli_proxy_accounts::needs_reconnect(p));
+            serde_json::json!({
+                "provider_type": "muse-code",
+                "provider_name": provider_name,
+                "account_email": account_email,
+                "status": if connected { "connected" } else { "needs_reauth" },
+                "usage_note": "Muse Code subscription via CLIProxyAPI. Remaining quota is not reported by this connection. No fallback to the Meta API account.",
+            })
+        }
         ProviderType::Muse => serde_json::json!({
             "provider_type": "muse",
             "provider_name": provider_name,
@@ -10030,6 +10053,13 @@ async fn create_provider(
     }
 
     let provider_type = req.provider_type;
+    if provider_type == ProviderType::MuseCode {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Connect Muse Code with Add subscription account; API keys belong to Meta Muse API."
+                .into(),
+        ));
+    }
 
     // All providers are now stored in AIProviderStore (ai_providers.json).
     // Standard providers are additionally synced to opencode.json + auth.json
@@ -10145,6 +10175,12 @@ async fn update_provider(
     }
     .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
 
+    if existing.provider_type == ProviderType::MuseCode
+        && (req.api_key.is_some() || req.base_url.is_some())
+    {
+        return Err((StatusCode::BAD_REQUEST,
+            "Muse Code credentials and endpoint are managed by CLIProxyAPI. Reconnect the subscription instead.".into()));
+    }
     let refresh_kimi_catalog = existing.provider_type == ProviderType::Kimi
         && (req.priority.is_some() || req.enabled.is_some() || req.base_url.is_some());
     let uuid = existing.id;

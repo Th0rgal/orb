@@ -56,6 +56,7 @@ pub(crate) fn provider_is_cli_proxy_capable(provider: ProviderType) -> bool {
             | ProviderType::Xai
             | ProviderType::Kimi
             | ProviderType::Antigravity
+            | ProviderType::MuseCode
     )
 }
 

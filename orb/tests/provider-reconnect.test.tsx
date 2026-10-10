@@ -188,3 +188,30 @@ it("includes Mistral Vibe in subscription options even if the backend capability
   fireEvent.click(add);
   expect(screen.getByRole("radio", { name: /Mistral Vibe/ })).toBeTruthy();
 });
+
+it("connects Muse Code through device login and reports an inactive subscription without API fallback", async () => {
+  setConnection("http://core.test", "test-token");
+  vi.spyOn(window, "open").mockReturnValue(null);
+  const calls: { url: string; options?: RequestInit }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    calls.push({url, options});
+    const body = url.endsWith("/cli-proxy-login")
+      ? options?.method === "POST"
+        ? {session_id:"muse-login",auth_url:"https://auth.meta.com/oauth/device/",flow:"device",instructions:"Approve code TEST in your browser."}
+        : {available:true,providers:[{id:"muse-code",name:"Muse Code"}]}
+      : url.endsWith("/cli-proxy-login/muse-login")
+        ? {status:"failed",message:"This Meta account has no active Muse Code subscription."}
+        : url.endsWith("/providers") || url.endsWith("/cloud/accounts") ? [] : {};
+    return new Response(JSON.stringify(body));
+  }));
+  render(() => <Providers />);
+  const add = await screen.findByRole("button", {name:"Add subscription account"});
+  await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(add);
+  fireEvent.click(screen.getByRole("radio", {name:/Muse Code/}));
+  fireEvent.click(screen.getByRole("button", {name:"Continue in browser"}));
+  expect(await screen.findByText("Approve code TEST in your browser.")).toBeTruthy();
+  await screen.findByText("This Meta account has no active Muse Code subscription.", {}, {timeout:5000});
+  expect(calls.filter(c => c.options?.method === "POST" && c.url.endsWith("/providers"))).toHaveLength(0);
+  expect(JSON.parse(calls.find(c => c.options?.method === "POST" && c.url.endsWith("/cli-proxy-login"))!.options!.body as string)).toEqual({provider:"muse-code"});
+}, 10000);

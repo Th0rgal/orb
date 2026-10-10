@@ -2019,7 +2019,9 @@ pub struct HourlyUsageResponse {
 /// Map a normalized model identifier to a provider type id.
 fn infer_provider_for_model(model: &str) -> Option<String> {
     let m = model.to_lowercase();
-    if m.contains("claude") {
+    if m.starts_with("muse-code/") {
+        Some("muse-code".to_string())
+    } else if m.contains("claude") {
         Some("anthropic".to_string())
     } else if m.contains("gpt")
         || m.starts_with("o3")
@@ -3408,6 +3410,18 @@ async fn oauth_token_refresher_loop(
 #[cfg(test)]
 mod tests {
     use super::truncate_utf8;
+
+    #[test]
+    fn muse_subscription_usage_infers_separate_provider() {
+        assert_eq!(
+            super::infer_provider_for_model("muse-code/muse-spark-1.3").as_deref(),
+            Some("muse-code")
+        );
+        assert_eq!(
+            super::infer_provider_for_model("muse-spark-1.3").as_deref(),
+            Some("muse")
+        );
+    }
 
     #[tokio::test]
     async fn workspace_only_antigravity_defaults_on_but_preserves_explicit_disable() {

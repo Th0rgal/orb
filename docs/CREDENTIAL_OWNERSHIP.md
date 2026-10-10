@@ -10,7 +10,7 @@ the user logs in again. This can cause recurring "login expired" states for Clau
 `src/api/oauth_owner.rs` decides who owns a provider's OAuth credential.
 
 - With server-only `CLI_PROXY_MANAGEMENT_KEY` configured and ownership set to
-  `cli-proxy`, **CLIProxyAPI owns Anthropic, OpenAI, xAI, Kimi and Antigravity subscriptions**,
+  `cli-proxy`, **CLIProxyAPI owns Anthropic, OpenAI, xAI, Kimi, Antigravity and Muse Code subscriptions**,
   including missing/expired logins. sandboxed.sh never resumes token renewal
   when a proxy login fails: the user reconnects through the UI instead.
 - `CLI_PROXY_AUTH_DIR` is the authoritative account store. sandboxed.sh projects
@@ -115,3 +115,6 @@ After rollout, reconnect any account marked as needing authentication. A
 rejected refresh token requires fresh browser consent; importing it again
 cannot repair it. Account disable and removal act on the connected backend's
 proxy store. Cancellation and retry are available in the login dialog.
+
+Muse Code uses a separate `muse-code/` namespace and requires an active subscription
+receipt. See [Muse Code setup and billing boundaries](MUSE_CODE.md).

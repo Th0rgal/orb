@@ -20,14 +20,17 @@ pub struct Route {
 }
 
 pub fn route(p: &AIProvider) -> Route {
-    if p.provider_type == ProviderType::Antigravity {
+    if matches!(
+        p.provider_type,
+        ProviderType::Antigravity | ProviderType::MuseCode
+    ) {
         return Route {
             base: crate::api::oauth_owner::cli_proxy_endpoint()
                 .map(|e| e.openai_v1_url())
                 .unwrap_or_default(),
             profile: "oauth".into(),
             exportable: false,
-            adapter: "antigravity_proxy",
+            adapter: "subscription_proxy",
         };
     }
     let oauth = p.api_key.as_ref().is_none_or(|s| s.is_empty()) && p.oauth.is_some();
@@ -204,8 +207,8 @@ fn is_text_model(provider: ProviderType, id: &str, entry: &Value) -> bool {
 }
 
 async fn discover(p: &AIProvider, r: &Route) -> Result<(Vec<ProviderModel>, Completeness), String> {
-    if r.adapter == "antigravity_proxy" {
-        return discover_antigravity(p).await;
+    if r.adapter == "subscription_proxy" {
+        return discover_proxy_subscription(p).await;
     }
     if r.adapter.starts_with("unsupported") {
         return Err(r.adapter.into());
@@ -501,7 +504,7 @@ mod tests {
     }
 }
 
-async fn discover_antigravity(
+async fn discover_proxy_subscription(
     p: &AIProvider,
 ) -> Result<(Vec<ProviderModel>, Completeness), String> {
     if !crate::api::oauth_owner::management_enabled() {
@@ -527,11 +530,11 @@ async fn discover_antigravity(
         )
         .await
         .map_err(|_| "proxy_catalog_unavailable")?;
-    let models = antigravity_models(&value)?;
+    let models = proxy_subscription_models(&value, p.provider_type.id())?;
     Ok((models, Completeness::Complete))
 }
 
-fn antigravity_models(value: &Value) -> Result<Vec<ProviderModel>, String> {
+fn proxy_subscription_models(value: &Value, prefix: &str) -> Result<Vec<ProviderModel>, String> {
     let mut seen = std::collections::HashSet::new();
     let models = value
         .get("models")
@@ -543,7 +546,7 @@ fn antigravity_models(value: &Value) -> Result<Vec<ProviderModel>, String> {
             // versions may return raw IDs or namespaced aliases; inference
             // always restores the explicit routing namespace.
             let raw = m.get("id")?.as_str()?.trim();
-            let id = raw.strip_prefix("antigravity/").unwrap_or(raw);
+            let id = raw.strip_prefix(&format!("{prefix}/")).unwrap_or(raw);
             if id.is_empty() || !seen.insert(id.to_string()) {
                 return None;
             }
@@ -566,18 +569,33 @@ mod antigravity_tests {
     use super::*;
     #[test]
     fn account_catalog_accepts_raw_and_prefixed_models_without_duplicates() {
-        let models = antigravity_models(&serde_json::json!({"models":[{"id":"claude-sonnet","display_name":"Claude on Google"},{"id":"antigravity/claude-sonnet"},{"id":"gemini-pro"},{"id":""}]})).unwrap();
+        let models = proxy_subscription_models(&serde_json::json!({"models":[{"id":"claude-sonnet","display_name":"Claude on Google"},{"id":"antigravity/claude-sonnet"},{"id":"gemini-pro"},{"id":""}]}), "antigravity").unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "claude-sonnet");
         assert_eq!(models[0].name, "Claude on Google");
         assert_eq!(models[1].id, "gemini-pro");
-        assert!(antigravity_models(&serde_json::json!({})).is_err());
+        assert!(proxy_subscription_models(&serde_json::json!({}), "antigravity").is_err());
+    }
+    #[test]
+    fn muse_subscription_catalog_has_its_own_namespace() {
+        let p = AIProvider::new(ProviderType::MuseCode, "Meta account".into());
+        assert_eq!(route(&p).adapter, "subscription_proxy");
+        assert!(!route(&p).exportable);
+        let models = proxy_subscription_models(
+            &serde_json::json!({"models":[
+                {"id":"muse-code/muse-spark-1.3"}, {"id":"muse-spark-1.3"}
+            ]}),
+            "muse-code",
+        )
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "muse-spark-1.3");
     }
     #[test]
     fn subscription_uses_proxy_discovery_not_native_machine_login() {
         let p = AIProvider::new(ProviderType::Antigravity, "Google account".into());
         let r = route(&p);
-        assert_eq!(r.adapter, "antigravity_proxy");
+        assert_eq!(r.adapter, "subscription_proxy");
         assert!(!r.exportable);
     }
 }

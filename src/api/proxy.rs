@@ -350,8 +350,8 @@ pub(crate) fn default_base_url(provider_type: ProviderType) -> Option<&'static s
         ProviderType::Perplexity => Some("https://api.perplexity.ai"),
         // Kimi Code subscription endpoint (OpenAI Chat Completions compatible).
         ProviderType::Kimi => Some("https://api.kimi.com/coding/v1"),
-        ProviderType::Custom => None,      // uses account's base_url
-        ProviderType::Antigravity => None, // routed only through CLIProxyAPI
+        ProviderType::Custom => None, // uses account's base_url
+        ProviderType::Antigravity | ProviderType::MuseCode => None, // routed only through CLIProxyAPI
         // Non-OpenAI-compatible providers
         ProviderType::Anthropic => None,
         ProviderType::Google => None,
@@ -502,7 +502,9 @@ pub(crate) fn has_routable_proxy_credentials(
                 || (has_oauth && crate::api::ai_providers::xai_cli_proxy_account_available())
         }
         ProviderType::Google => has_api_key || has_oauth,
-        ProviderType::Antigravity => has_oauth && super::oauth_owner::management_enabled(),
+        ProviderType::Antigravity | ProviderType::MuseCode => {
+            has_oauth && super::oauth_owner::management_enabled()
+        }
         // Kimi access tokens live ~300s, so between refresh cycles the stored
         // token is routinely expired and the resolved entry carries no
         // hoisted `api_key`. The proxy refreshes the OAuth token at request
@@ -1249,6 +1251,19 @@ async fn parse_custom_direct_model_entry(
 // Usage accounting
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Preserve the resolved subscription route even when the caller used a chain.
+// The upstream model alone cannot distinguish subscription from paid Meta API.
+fn proxy_usage_model(entry: &crate::provider_health::ResolvedEntry) -> String {
+    if entry.provider_id == "muse-code" {
+        format!(
+            "muse-code/{}",
+            entry.model_id.trim_start_matches("muse-code/")
+        )
+    } else {
+        entry.model_id.clone()
+    }
+}
+
 /// Persist one routed /v1 request's token usage into the single-tenant user's
 /// mission store so the providers usage page counts router traffic alongside
 /// mission usage. Cost is a list-price estimate from the upstream model id.
@@ -1883,7 +1898,7 @@ async fn native_protocol_proxy(
                 entry.account_id,
                 None,
                 entry.subscription_key.clone(),
-                Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                 liveness_mission_id,
             );
             let mut response = (status, Body::from_stream(tracked_stream)).into_response();
@@ -1915,7 +1930,13 @@ async fn native_protocol_proxy(
                     .health_tracker
                     .record_token_usage(entry.account_id, input_tokens, output_tokens)
                     .await;
-                record_proxy_usage(&state, &entry.model_id, input_tokens, output_tokens).await;
+                record_proxy_usage(
+                    &state,
+                    &proxy_usage_model(entry),
+                    input_tokens,
+                    output_tokens,
+                )
+                .await;
             }
         }
         let mut response = (status, Body::from(response_body)).into_response();
@@ -2223,8 +2244,10 @@ pub(crate) async fn chat_completions_inner(
             && entry.has_oauth
             && entry.api_key.is_none()
             && crate::api::oauth_owner::management_enabled();
-        let use_antigravity_cli_proxy_adapter = provider_type == ProviderType::Antigravity
-            && entry.has_oauth
+        let use_antigravity_cli_proxy_adapter = matches!(
+            provider_type,
+            ProviderType::Antigravity | ProviderType::MuseCode
+        ) && entry.has_oauth
             && super::oauth_owner::management_enabled();
         let use_google_api_adapter = provider_type == ProviderType::Google
             && !entry.has_oauth
@@ -2302,8 +2325,11 @@ pub(crate) async fn chat_completions_inner(
             )
         } else if use_antigravity_cli_proxy_adapter {
             let model = format!(
-                "antigravity/{}",
-                entry.model_id.trim_start_matches("antigravity/")
+                "{}/{}",
+                provider_type.id(),
+                entry
+                    .model_id
+                    .trim_start_matches(&format!("{}/", provider_type.id()))
             );
             let upstream_body = match rewrite_model(&body, &model) {
                 Ok(body) => body,
@@ -2702,7 +2728,7 @@ pub(crate) async fn chat_completions_inner(
                     account_id,
                     None,
                     entry.subscription_key.clone(),
-                    Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                    Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                     liveness_mission_id,
                 );
 
@@ -2884,7 +2910,7 @@ pub(crate) async fn chat_completions_inner(
                     .health_tracker
                     .record_token_usage(entry.account_id, input, output)
                     .await;
-                record_proxy_usage(&state, &entry.model_id, input, output).await;
+                record_proxy_usage(&state, &proxy_usage_model(entry), input, output).await;
             }
             let success_provider = entry.provider_id.clone();
             for evt in &mut pending_fallback_events {
@@ -2943,7 +2969,7 @@ pub(crate) async fn chat_completions_inner(
                     account_id,
                     None,
                     entry.subscription_key.clone(),
-                    Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                    Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                     liveness_mission_id,
                 );
 
@@ -3138,7 +3164,7 @@ pub(crate) async fn chat_completions_inner(
                     .health_tracker
                     .record_token_usage(entry.account_id, input, output)
                     .await;
-                record_proxy_usage(&state, &entry.model_id, input, output).await;
+                record_proxy_usage(&state, &proxy_usage_model(entry), input, output).await;
             }
             let success_provider = entry.provider_id.clone();
             for evt in &mut pending_fallback_events {
@@ -3560,7 +3586,7 @@ pub(crate) async fn chat_completions_inner(
                 account_id,
                 rate_limit_snapshot,
                 entry.subscription_key.clone(),
-                Some(proxy_usage_sink(state.clone(), entry.model_id.clone())),
+                Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
                 liveness_mission_id,
             );
 
@@ -3649,7 +3675,13 @@ pub(crate) async fn chat_completions_inner(
                                     .health_tracker
                                     .record_token_usage(entry.account_id, input, output)
                                     .await;
-                                record_proxy_usage(&state, &entry.model_id, input, output).await;
+                                record_proxy_usage(
+                                    &state,
+                                    &proxy_usage_model(entry),
+                                    input,
+                                    output,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -8693,6 +8725,40 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn muse_subscription_accounting_uses_resolved_route() {
+        let mut entry = crate::provider_health::ResolvedEntry {
+            provider_id: "muse-code".into(),
+            model_id: "muse-spark-1.3".into(),
+            account_id: uuid::Uuid::new_v4(),
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            subscription_key: None,
+        };
+        assert_eq!(proxy_usage_model(&entry), "muse-code/muse-spark-1.3");
+        entry.provider_id = "muse".into();
+        assert_eq!(proxy_usage_model(&entry), "muse-spark-1.3");
+    }
+
+    #[test]
+    fn muse_subscription_never_uses_a_platform_api_key() {
+        assert_eq!(default_base_url(ProviderType::MuseCode), None);
+        assert!(!has_routable_proxy_credentials(
+            ProviderType::MuseCode,
+            true,
+            false
+        ));
+        let mut account =
+            crate::ai_providers::AIProvider::new(ProviderType::MuseCode, "Subscription".into());
+        account.api_key = Some("not-a-subscription".into());
+        assert!(crate::api::providers::get_api_key_for_provider(
+            ProviderType::MuseCode,
+            &[account]
+        )
+        .is_none());
     }
 
     #[test]

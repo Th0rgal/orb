@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test';
 const port = process.env.ORB_TEST_PORT || '1433';
 export default defineConfig({
   testDir: './tests',
-  testMatch: 'antigravity-provider.browser.spec.ts',
+  testMatch: ['antigravity-provider.browser.spec.ts', 'muse-provider.browser.spec.ts'],
   workers: 1,
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },
