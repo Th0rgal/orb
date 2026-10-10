@@ -207,7 +207,7 @@ async fn reconcile_from(store: &AIProviderStore, dir: &Path) {
         // Identityless device files need a UI session or migration row ID to
         // establish their binding, rather than creating a duplicate mid-login.
         if old.is_none()
-            && a.provider == ProviderType::Kimi
+            && matches!(a.provider, ProviderType::Kimi | ProviderType::MuseCode)
             && a.identity == a.file
             && a.original_id.is_none()
         {
@@ -400,6 +400,29 @@ mod tests {
         assert_eq!(p.cli_proxy_auth_file.as_deref(), Some("claude-ben.json"));
         assert!(p.rejected_oauth_refresh_fingerprint.is_none());
     }
+    #[tokio::test]
+    async fn identityless_muse_login_is_bound_once_before_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AIProviderStore::new(dir.path().join("providers.json")).await;
+        let receipt = serde_json::json!({
+            "type":"meta", "auth_kind":"oauth", "access_token":"minted",
+            "dca_token":"device", "is_subs_active":true, "prefix":"muse-code"
+        });
+        std::fs::write(dir.path().join("meta.json"), receipt.to_string()).unwrap();
+        reconcile_from(&store, dir.path()).await;
+        assert!(store.list().await.is_empty());
+        let id = bind_login(&store, None, parse_account("meta.json", &receipt).unwrap())
+            .await
+            .unwrap();
+        reconcile_from(&store, dir.path()).await;
+        reconcile_from(&store, dir.path()).await;
+        assert_eq!(store.list().await.len(), 1);
+        assert_eq!(
+            store.get(id).await.unwrap().cli_proxy_auth_file.as_deref(),
+            Some("meta.json")
+        );
+    }
+
     #[tokio::test]
     async fn identityless_import_keeps_original_uuid_and_concurrent_scans_do_not_duplicate() {
         let dir = tempfile::tempdir().unwrap();
