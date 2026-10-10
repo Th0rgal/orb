@@ -12,7 +12,7 @@ test('cyber menu saves per mission, preserves failures, and separates requested 
    if(r.method()==='PATCH'){patches++;if(fail)return route.fulfill({status:403,body:'access_program_not_enabled'});mode=r.postDataJSON().mode;}
    return route.fulfill({json:{mode,status:'requested',revision:'fixture'}});
   }
-  if(path.endsWith('/cyber-capabilities'))return route.fulfill({json:{version:2}});
+  if(path.endsWith('/cyber-capabilities'))return route.fulfill({json:{version:2,route_supported:true}});
   const json=path==='/api/projects'?{projects:[{slug:'test',title:'Test'}]}
    :path==='/api/backends'?[{id:'codex',name:'Codex'}]
    :path==='/api/providers/backend-models'?{backends:{codex:[{value:'gpt-6.1-sol',label:'GPT-6.1 Sol'}]}}
