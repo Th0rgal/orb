@@ -12530,3 +12530,75 @@ async fn cyber_node_transfer_refuses_incompatible_route_without_affecting_core_o
         saved.revision
     );
 }
+
+#[tokio::test]
+async fn cyber_settings_refuse_incompatible_remote_model_before_persistence() {
+    let h = Harness::new().await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::codex::CodexBackend::new()));
+    let m = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Remote Cyber settings"),
+            None,
+            None,
+            Some("gpt-6-sol"),
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_mission_requires_local_disk(m.id, false)
+        .await
+        .unwrap();
+    cyber::write(&h.state.config.working_dir, m.id, cyber::Mode::Standard).unwrap();
+    let now = chrono::Utc::now();
+    h.state
+        .chain_store
+        .upsert(crate::provider_health::ModelChain {
+            id: "gpt-6.1-sol".into(),
+            name: "Incompatible settings fallback".into(),
+            entries: vec![crate::provider_health::ChainEntry {
+                provider_id: "xai".into(),
+                model_id: "grok-4.6".into(),
+            }],
+            is_default: false,
+            strip_thinking: false,
+            created_at: now,
+            updated_at: now,
+        })
+        .await;
+    let error = update_mission_settings(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(m.id),
+        Json(
+            serde_json::from_value(json!({"model_override":"gpt-6.1-sol", "resume":false}))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert!(
+        error.1.contains("unsupported_access_program"),
+        "{}",
+        error.1
+    );
+    let stored = h
+        .control
+        .mission_store
+        .get_mission(m.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.model_override.as_deref(), Some("gpt-6-sol"));
+    assert_eq!(stored.session_id, m.session_id);
+}

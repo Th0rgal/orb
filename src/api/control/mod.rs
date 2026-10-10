@@ -26274,10 +26274,19 @@ async fn control_actor_loop(
                                 Some(value) => value.as_deref(),
                                 None => before.model_override.as_deref(),
                             };
-                            let validation = cyber::read(&config.working_dir, id).and_then(|selection| {
-                                cyber::program_for_model(selection.mode, next_model).map(|_| ())
-                                    .map_err(|error| format!("invalid_access_program: {error}"))
-                            });
+                            let validation = async {
+                                let selection = cyber::read(&config.working_dir, id)?;
+                                cyber::program_for_model(selection.mode, next_model)?;
+                                if !client_placement::is_tagged(&before.project.tags)
+                                    && remote_grok::placement(&config.working_dir, &mission_store, id).await?.is_some()
+                                {
+                                    let state = control_hub.admission_state.get()
+                                        .and_then(std::sync::Weak::upgrade)
+                                        .ok_or("Admission state unavailable")?;
+                                    cyber::validate_remote(&state, selection.mode, next_model).await?;
+                                }
+                                Ok::<(), String>(())
+                            }.await.map_err(|error| format!("invalid_access_program: {error}"));
                             if let Err(error) = validation { let _ = respond.send(Err(error)); continue; }
                         }
                         let old_backend = Some(before.backend);
