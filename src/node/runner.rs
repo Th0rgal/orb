@@ -1190,6 +1190,7 @@ pub async fn reap_previous_scopes_on_start() -> anyhow::Result<()> {
         command.args([
             "list-units",
             "--all",
+            "--full",
             "--type=scope",
             "--plain",
             "--no-legend",
