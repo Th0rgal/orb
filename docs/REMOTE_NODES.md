@@ -997,6 +997,9 @@ On Linux with systemd, each job scope sets `MemoryMax` and `MemoryHigh`
 is 80% of host RAM divided between `SANDBOXED_NODE_CAPACITY` foreground slots
 and the additional side-question slot. This reserves memory for the node API,
 OS, and other host services; native subagents share their parent job budget.
+Synchronous `/execute` leases use the same containment and job deadline. Their
+stdout and stderr are captured separately, with each response capped at 16 MiB
+to prevent untrusted output from exhausting the node daemon memory.
 Set `SANDBOXED_NODE_JOB_MEMORY_BYTES` to a positive integer byte count to
 override the per-job ceiling on a dedicated build node. Size overrides against
 all simultaneously admitted jobs and existing host services. An invalid

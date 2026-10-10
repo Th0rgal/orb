@@ -278,15 +278,22 @@ pub async fn run_lease_command(
     tokio::fs::create_dir_all(&mission_dir)
         .await
         .map_err(|e| RemoteNodeError::Request(e.to_string()))?;
-    let output = raw_command(&request.command, &mission_dir, None)
-        .output()
-        .await
-        .map_err(|e| RemoteNodeError::Request(e.to_string()))?;
+    let max_secs = std::env::var("SANDBOXED_NODE_MAX_JOB_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(crate::node::runner::DEFAULT_MAX_JOB_SECS)
+        .max(1);
+    let (exit_code, stdout, stderr) = crate::node::runner::run_captured_command(
+        raw_command(&request.command, &mission_dir, None),
+        max_secs,
+    )
+    .await
+    .map_err(|e| RemoteNodeError::Request(e.to_string()))?;
     Ok(ExecuteResponse {
         accepted: true,
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code,
+        stdout,
+        stderr,
     })
 }
 
@@ -393,6 +400,37 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, RemoteNodeError::InvalidLease(_)));
+    }
+
+    #[tokio::test]
+    async fn run_lease_command_preserves_separate_output_and_exit_code() {
+        let mission_id = Uuid::new_v4();
+        let claims = LeaseClaims {
+            mission_id,
+            node_id: "babylon".into(),
+            scope: SCOPE_MISSION_EXECUTE.into(),
+            expires_at: chrono::Utc::now().timestamp() + 60,
+            job_id: None,
+        };
+        let token = create_lease_token(&claims, "node-secret").unwrap();
+        let work_root = tempfile::tempdir().unwrap();
+        let result = run_lease_command(
+            "babylon",
+            "node-secret",
+            work_root.path().to_path_buf(),
+            LeaseRequest {
+                mission_id,
+                node_id: "babylon".into(),
+                lease_token: token,
+                command: "printf out; printf err >&2; exit 7".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.accepted);
+        assert_eq!(result.exit_code, Some(7));
+        assert_eq!(result.stdout, "out");
+        assert_eq!(result.stderr, "err");
     }
 
     #[test]

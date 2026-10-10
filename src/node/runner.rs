@@ -614,11 +614,31 @@ async fn run_logged_command_with_deadline(
         .append(true)
         .open(log_path)?;
     let stderr_file = stdout_file.try_clone()?;
+    run_supervised_command(
+        cmd,
+        environment,
+        log_path,
+        limit_secs,
+        token,
+        Stdio::from(stdout_file),
+        Stdio::from(stderr_file),
+    )
+    .await
+}
+
+async fn run_supervised_command(
+    cmd: tokio::process::Command,
+    environment: CommandEnvironment,
+    log_path: &Path,
+    limit_secs: Option<u64>,
+    token: &CancellationToken,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> anyhow::Result<RunOutcome> {
     let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path)?;
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        // New process group so cancel/timeout can kill the whole tree.
+        .stdout(stdout)
+        .stderr(stderr)
         .process_group(0);
     let mut child = cmd.spawn()?;
     let pid = child.id();
@@ -646,6 +666,55 @@ async fn run_logged_command_with_deadline(
         }
     };
     Ok(outcome)
+}
+
+/// Synchronous leases use the same scope, memory budget and cleanup as queued jobs.
+/// Capture to private files so untrusted output cannot grow the node daemon's heap.
+pub(crate) async fn run_captured_command(
+    cmd: tokio::process::Command,
+    limit_secs: u64,
+) -> anyhow::Result<(Option<i32>, String, String)> {
+    let capture = tempfile::tempdir()?;
+    let stdout_path = capture.path().join("stdout");
+    let stderr_path = capture.path().join("stderr");
+    let stdout = Stdio::from(std::fs::File::create(&stdout_path)?);
+    let stderr = Stdio::from(std::fs::File::create(&stderr_path)?);
+    let outcome = run_supervised_command(
+        cmd,
+        CommandEnvironment::Clear,
+        &stdout_path,
+        Some(limit_secs),
+        &CancellationToken::new(),
+        stdout,
+        stderr,
+    )
+    .await?;
+    let (exit_code, notice) = match outcome {
+        RunOutcome::Exited(code) => (code, None),
+        other => {
+            let (_, code, notice) = other.into_job_result();
+            (code, notice)
+        }
+    };
+    async fn read_capped(path: &Path) -> std::io::Result<String> {
+        use tokio::io::AsyncReadExt;
+        const LIMIT: u64 = 16 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        let file = tokio::fs::File::open(path).await?;
+        let length = file.metadata().await?.len();
+        file.take(LIMIT).read_to_end(&mut bytes).await?;
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        if length > LIMIT {
+            text.push_str("\n[node output truncated at 16 MiB]\n");
+        }
+        Ok(text)
+    }
+    let stdout = read_capped(&stdout_path).await?;
+    let mut stderr = read_capped(&stderr_path).await?;
+    if let Some(notice) = notice {
+        stderr.push_str(&format!("\n{notice}\n"));
+    }
+    Ok((exit_code, stdout, stderr))
 }
 
 /// Put node jobs in a transient systemd scope when the host has a running
