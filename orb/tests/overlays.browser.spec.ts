@@ -210,7 +210,7 @@ for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard n
  await expect(item).toHaveCSS('box-shadow','none');
  expect(await item.evaluate(el=>getComputedStyle(el).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
  await page.keyboard.press('End');
- const machine=page.getByRole('button',{name:'Use this machine',exact:true});
+ const machine=page.getByRole('button',{name:/^Use this machine/,pressed:true});
  await expect(machine).toBeFocused();
  await expect(machine).toHaveCSS('outline-style','none');
  await expect(machine).toHaveCSS('box-shadow','none');
@@ -219,6 +219,8 @@ for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard n
  await expect(program).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
  await page.keyboard.press('ArrowUp');
  await expect(program).toBeFocused();
+ await expect(machine).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
+ expect(await machine.evaluate(el=>getComputedStyle(el,'::after').content)).toBe('"✓"');
  await expect(program).toHaveCSS('outline-style','none');
  await expect(program).toHaveCSS('box-shadow','none');
  await expect(program).not.toHaveCSS('background-color','rgba(0, 0, 0, 0)');

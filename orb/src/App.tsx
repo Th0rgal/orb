@@ -840,7 +840,7 @@ export function Composer(p: {
               {(it) => {
                 const display = () => ctxFolder() && it.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? it.label.slice(ctxFolder().length + 1) : it.label;
                 return (
-                  <button class={`menu-item ${mentioned().some((c) => c.id === it.id) ? "on" : ""}`} title={it.path ?? it.label} onClick={() => setCtxFolder((it.path ?? it.label).replace(/\/$/, ""))}>
+                  <button class={`menu-item ${mentioned().some((c) => c.id === it.id) ? "on" : ""}`} aria-pressed={mentioned().some((c) => c.id === it.id)} title={it.path ?? it.label} onClick={() => setCtxFolder((it.path ?? it.label).replace(/\/$/, ""))}>
                     <span class="menu-ico"><Ic.FolderIcon size={14} /></span>
                     <span class="slash-item-label">{display()}</span>
                     <span class="slash-chevron"><Ic.ChevronRight size={12} /></span>
@@ -857,6 +857,7 @@ export function Composer(p: {
                 return (
                   <button
                     class={`menu-item ${mentioned().some((c) => c.id === item.id) || p.attached?.includes(item.id) ? "on" : ""}`}
+                    aria-pressed={mentioned().some((c) => c.id === item.id) || Boolean(p.attached?.includes(item.id))}
                     title={item.path ?? item.label}
                     onClick={() => {
                       if (p.onAttachments) pickAttach(item);

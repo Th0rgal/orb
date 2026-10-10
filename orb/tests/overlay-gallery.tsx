@@ -69,7 +69,7 @@ function Gallery() {
       <MenuList items={[{kind:"item",label:"Rename…",onClick:()=>setOpen("name")},{kind:"item",label:"Unavailable action",disabled:true,onClick:()=>{}},{kind:"item",label:"More actions",openOnHover:true,onClick:el=>setSub(el)}]}/>
       <Show when={new URLSearchParams(location.search).has("menu-variants")}>
         <button type="button" class="menu-item on" role="menuitemradio" aria-checked="true">Default program</button>
-        <button type="button" class="menu-item">Use this machine</button>
+        <button type="button" class="menu-item on" aria-pressed="true">Use this machine</button>
       </Show>
       <Show when={sub()}>{button=><Menu label="More actions" anchor={button()} placement="right-start" onClose={()=>setSub(undefined)}><MenuList items={[{kind:"item",label:"Copy path",onClick:()=>setSub(undefined)},{kind:"item",label:"Delete folder…",danger:true,onClick:()=>{setSub(undefined);setOpen("confirm");}}]}/></Menu>}</Show>
     </Menu></Show>
