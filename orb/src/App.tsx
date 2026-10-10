@@ -1877,7 +1877,7 @@ export default function App() {
                   <span class="row-label">New Agent</span>
                   <kbd>⌘N</kbd>
                 </button>
-                <button class={`row ${selected() === "inbox" ? "active" : ""}`} onClick={() => open("inbox")}>
+                <button class={`row ${selected() === "inbox" ? "active" : ""}`} title={selected() === "inbox" ? "Space to return to the Inbox list" : undefined} onClick={() => open("inbox")}>
                   <span class="row-ico"><Ic.InboxIcon /></span>
                   <span class="row-label">Inbox</span>
                   <Show when={inboxCount() > 0}><span class="inbox-sb-badge" aria-label={`${inboxCount()} need attention`}>{inboxCount()}</span></Show>

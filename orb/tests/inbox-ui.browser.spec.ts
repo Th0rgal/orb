@@ -184,6 +184,49 @@ test("Inbox rows have one keyboard entry and restore focus after replying", asyn
   await expect(draft).toHaveValue("A reply\nwith two lines");
 });
 
+test("Space returns from the sidebar to the selected Inbox row without opening it", async ({ page }) => {
+  await openInbox(page);
+  await page.keyboard.press("Meta+b");
+  const title = page.locator('[data-inbox-id="done"] .inbox-row-title-btn');
+  await title.focus();
+  await page.keyboard.press("Meta+5");
+  await expect(page.locator("[data-project-navigation] button.row-main").first()).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(title).toBeFocused();
+  await title.dispatchEvent("keydown", { key: " ", repeat: true });
+  await expect(page.locator(".inbox-peek-drawer")).toHaveCount(0);
+  await page.keyboard.press("Space");
+  const row = page.locator('[data-inbox-id="done"]');
+  await expect(row.locator(".inbox-peek-drawer")).toBeVisible();
+  await page.keyboard.press("t");
+  await page.keyboard.type("Keep my draft");
+  await page.keyboard.press("Space");
+  await expect(row.locator("textarea")).toHaveValue("Keep my draft ");
+  await page.locator("#orb-sidebar").getByRole("button", { name: /^Inbox/ }).focus();
+  await page.keyboard.press("Space");
+  await expect(title).toBeFocused();
+  await expect(row.locator("textarea")).toHaveValue("Keep my draft ");
+  await expect(row.locator(".inbox-peek-drawer")).toBeVisible();
+});
+
+test("Space from the sidebar enters an empty Inbox and leaves other destinations usable", async ({ page }) => {
+  await openInbox(page, "dark", true);
+  await page.keyboard.press("Meta+b");
+  const nav = page.locator("#orb-sidebar").getByRole("button", { name: /^Inbox/ });
+  await nav.focus();
+  await page.keyboard.press("Shift+Space");
+  await expect(nav).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.getByRole("tab", { name: /^Unread/ })).toBeFocused();
+  const machines = page.locator("#orb-sidebar").getByRole("button", { name: /^Machines/ });
+  await machines.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".inbox-page")).toHaveCount(0);
+  await nav.focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator(".inbox-page")).toBeVisible();
+});
+
 test("T focuses an open Peek follow-up and Enter sends it once", async ({page})=>{
  await openInbox(page);
  const sent:unknown[]=[];
