@@ -814,7 +814,6 @@ fn systemd_scope_command(
     scoped
         .arg("--scope")
         .arg("--quiet")
-        .arg("--collect")
         .arg(format!("--unit={}", scope.unit))
         .arg("--property=KillMode=control-group")
         .arg(format!("--property=MemoryMax={}", memory_limit))
@@ -912,11 +911,22 @@ async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
                 );
             }
         }
-        command.args(["show", "--property=ControlGroup", "--value", &scope.unit]);
+        command.args([
+            "show",
+            "--property=ControlGroup",
+            "--property=Result",
+            &scope.unit,
+        ]);
         if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(2), command.output()).await
         {
-            let group = String::from_utf8_lossy(&output.stdout);
-            let group = group.trim();
+            let properties = String::from_utf8_lossy(&output.stdout);
+            if output.status.success() && properties.lines().any(|line| line == "Result=oom-kill") {
+                return true;
+            }
+            let group = properties
+                .lines()
+                .find_map(|line| line.strip_prefix("ControlGroup="))
+                .unwrap_or("");
             if output.status.success() && group.starts_with('/') && !group.contains("..") {
                 if let Ok(events) =
                     tokio::fs::read_to_string(format!("/sys/fs/cgroup{group}/memory.events")).await
@@ -1004,6 +1014,13 @@ async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
     stop.arg("stop").arg(&scope.unit).stdout(Stdio::null());
     if matches!(tokio::time::timeout(KILL_GRACE, stop.status()).await, Ok(Ok(status)) if status.success())
     {
+        // Failed transient scopes retain Result until it has been inspected.
+        // Retire only this stopped unit after recording the outcome.
+        let mut reset = command();
+        reset
+            .args(["reset-failed", &scope.unit])
+            .stdout(Stdio::null());
+        let _ = tokio::time::timeout(KILL_GRACE, reset.status()).await;
         return true;
     }
     // A failed scope launch may never have registered a unit. Verify absence
@@ -1612,6 +1629,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(argv.iter().any(|arg| arg == "--user"));
+        assert!(!argv.iter().any(|arg| arg == "--collect"));
         assert!(argv
             .iter()
             .any(|arg| arg.starts_with("--property=MemoryMax=")));
