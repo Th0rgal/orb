@@ -2116,6 +2116,7 @@ export default function App() {
                                 {(m) => (
                                   <button
                                     class={`menu-item ${m.id === newMachine() ? "on" : ""}`}
+                                    aria-pressed={m.id === newMachine()}
                                     onClick={() => {
                                       chooseMachine(m.id);
                                       setEnvOpen(null);
@@ -2133,6 +2134,7 @@ export default function App() {
                                 {(m) => (
                                   <button
                                     class={`menu-item ${m.id === newMachine() ? "on" : ""}`}
+                                    aria-pressed={m.id === newMachine()}
                                     onClick={() => {
                                       chooseMachine(m.id);
                                       setEnvOpen(null);
@@ -2154,6 +2156,7 @@ export default function App() {
 
                           <button
                             class={`menu-item ${newMachine() === "local" ? "on" : ""}`}
+                                    aria-pressed={newMachine() === "local"}
                             onClick={() => {
                               chooseMachine("local");
                               setEnvOpen(null);
@@ -2172,6 +2175,7 @@ export default function App() {
                           <div class="machine-section-label">Remote</div>
                           <button
                             class={`menu-item ${newMachine() === "core" ? "on" : ""}`}
+                                    aria-pressed={newMachine() === "core"}
                             onClick={() => {
                               chooseMachine("core");
                               setEnvOpen(null);
@@ -2191,6 +2195,7 @@ export default function App() {
                             {(n) => (
                               <button
                                 class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
+                                    aria-pressed={n.id === newMachine()}
                                 title={isAdministrationNode(n) ? `Administration · Full sudo · Manual selection only. ${nodeLaunchNote() ?? ""}` : nodeLaunchNote()}
                                 onClick={() => {
                                   chooseMachine(n.id);

@@ -80,6 +80,13 @@ test("machine picker: two-line entries never overlap, and the footer stays reach
   const menu = page.locator(".na-menu");
   await expect(menu).toBeVisible();
 
+  const committed = menu.locator('[aria-pressed="true"]');
+  await expect(committed).toHaveCount(1);
+  await page.keyboard.press("End");
+  await expect(page.getByRole("button", { name: "Manage machines" })).toBeFocused();
+  await expect(committed).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  expect(await committed.evaluate(el => getComputedStyle(el, "::after").content)).toBe('"✓"');
+
   await expectNoOverlap(page);
   await expect(menu.locator(".machine-node-option .menu-title", {hasText:/^dgx-spark$/})).toHaveCount(0);
 
