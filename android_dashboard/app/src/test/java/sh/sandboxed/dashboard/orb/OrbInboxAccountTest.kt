@@ -13,4 +13,19 @@ class OrbInboxAccountTest {
         assertNotEquals(alice, inboxAccountScope("https://other.test", token("alice", 2)))
         assertNotEquals(inboxAccountScope("https://core.test", "opaque-a"), inboxAccountScope("https://core.test", "opaque-b"))
     }
+    @Test fun legacyPreferencesBelongOnlyToTheirFirstAccount() {
+        OrbSharedInboxState.applying = true
+        try {
+            OrbInboxSettings.update(newAiSummary = false, newIncludeAutonomous = true, newModel = "builtin/fast")
+            OrbInboxSettings.bindAccount("test:alice")
+            assertFalse(OrbInboxSettings.aiSummary)
+            assertTrue(OrbInboxSettings.includeAutonomous)
+            assertEquals("builtin/fast", OrbInboxSettings.model)
+            OrbInboxSettings.bindAccount("test:bob")
+            assertTrue(OrbInboxSettings.aiSummary)
+            assertFalse(OrbInboxSettings.includeAutonomous)
+            assertEquals(OrbInboxSettings.DEFAULT_MODEL, OrbInboxSettings.model)
+        } finally { OrbSharedInboxState.applying = false }
+    }
+
 }

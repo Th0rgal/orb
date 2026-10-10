@@ -101,16 +101,34 @@ fn snapshot(m: &Mission, events: &[StoredEvent]) -> (String, Vec<(String, Option
     if let Some(h) = initial {
         record("user", &h.content, None, 1800);
     }
-    let last_user = events
+    let last_event_user = events
         .iter()
         .rfind(|e| e.event_type == "user_message" && !synthetic(&e.content));
-    if let Some(e) = last_user {
-        record("user", &e.content, Some(e.sequence), 1800);
-    } else if let Some(h) = m
+    let last_history_user = m
         .history
         .iter()
-        .rfind(|h| h.role == "user" && !synthetic(&h.content))
-    {
+        .enumerate()
+        .rfind(|(_, h)| h.role == "user" && !synthetic(&h.content));
+    // A matching older history request establishes that the event turn precedes
+    // the trailing history request. Otherwise events may be ahead of history.
+    let history_is_newer = match (last_event_user, last_history_user) {
+        (Some(event), Some((latest, _))) => m
+            .history
+            .iter()
+            .enumerate()
+            .rfind(|(_, h)| h.role == "user" && h.content.trim() == event.content.trim())
+            .is_some_and(|(matched, _)| matched < latest),
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let last_user = if history_is_newer {
+        None
+    } else {
+        last_event_user
+    };
+    if let Some(e) = last_user {
+        record("user", &e.content, Some(e.sequence), 1800);
+    } else if let Some((_, h)) = last_history_user {
         record("user", &h.content, None, 1800);
     }
     let turn = last_user.map(|e| e.sequence).unwrap_or(0);
@@ -559,6 +577,22 @@ mod tests {
         };
         let new = snapshot(&mission, &[stale_event.clone()]).0;
         assert!(!new.contains("Old event result"));
+        let stale_user = StoredEvent {
+            event_type: "user_message".into(),
+            sequence: 0,
+            content: "Fix the search input safely.".into(),
+            ..stale_event.clone()
+        };
+        let stale_turn = snapshot(&mission, &[stale_user.clone(), stale_event.clone()]).0;
+        assert!(stale_turn.contains("Now check the Android behavior."));
+        assert!(!stale_turn.contains("Old event result"));
+        let ahead_event = StoredEvent {
+            content: "Newer event request beyond the history projection.".into(),
+            ..stale_user
+        };
+        let ahead = snapshot(&mission, &[ahead_event]).0;
+        assert!(ahead.contains("Newer event request beyond the history projection."));
+
         assert!(!new.contains("Final limitation"));
         assert!(new.contains("Fix the search input safely."));
         assert!(new.contains("Now check the Android behavior."));

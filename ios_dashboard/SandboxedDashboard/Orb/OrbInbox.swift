@@ -41,6 +41,7 @@ final class OrbSharedInboxState {
         let current = account
         guard scope != current else { return }
         scope = current; seen = [:]
+        OrbInboxSettings.shared.bindAccount(current)
         outbox = UserDefaults.standard.data(forKey: Self.outboxKey(current)).flatMap { try? JSONDecoder().decode([String: OrbJSON].self, from: $0) } ?? [:]
         for (path, body) in outbox where path.hasPrefix("seen/") {
             if let stamp = body["stamp"].doubleValue { seen[String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))] = stamp }
@@ -80,6 +81,7 @@ final class OrbSharedInboxState {
     }
     func writePreferences() {
         let p = OrbInboxSettings.shared
+        p.bindAccount(account)
         write("preferences", .object(["aiSummary": .bool(p.aiSummary), "includeAutonomous": .bool(p.includeAutonomous), "model": .string(p.model)]))
     }
     func unread(_ row: OrbRow) -> Bool? {
@@ -104,6 +106,7 @@ final class OrbSharedInboxState {
         if case let .object(values) = raw {
             for (key, value) in values where key.hasPrefix("seen:") { if let n = value.doubleValue { seen[String(key.dropFirst(5))] = n } }
         }
+        OrbInboxSettings.shared.bindAccount(expected)
         applying = true
         let prefs = raw["preferences"]
         if !prefs["model"].text.isEmpty {
@@ -158,6 +161,16 @@ final class OrbInboxSettings: @unchecked Sendable {
     private let aiSummaryKey = "orb.inbox.aiSummary.v1"
     private let modelKey = "orb.inbox.model.v1"
 
+    static let ownerKey = "orb.inbox.preferences.owner.v1"
+    func bindAccount(_ account: String) {
+        let owner = UserDefaults.standard.string(forKey: Self.ownerKey)
+        guard owner != account else { return }
+        let previous = OrbSharedInboxState.shared.applying
+        OrbSharedInboxState.shared.applying = true
+        if owner != nil { aiSummary = true; includeAutonomous = false; model = Self.defaultModel }
+        UserDefaults.standard.set(account, forKey: Self.ownerKey)
+        OrbSharedInboxState.shared.applying = previous
+    }
     private(set) var version = 0
     var aiSummary: Bool {
         didSet {
@@ -478,10 +491,9 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
         if let status, !status.isEmpty, !hasInteraction, !Self.unreadResponseStates.contains(status) {
             return
         }
-        let nowIso = ISO8601DateFormatter().string(from: Date())
-        let stamp = max(updatedAt ?? "", nowIso)
+        let time = max(Date().timeIntervalSince1970, inboxTimestamp(updatedAt ?? "") ?? 0)
+        let stamp = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: time))
         manuallyUnreadIDs.remove(id)
-        let time = inboxTimestamp(stamp) ?? Date().timeIntervalSince1970
         let sharedChanged = OrbSharedInboxState.shared.writeSeen(id, stamp: time * 1000, syncBackend: syncBackend)
         if seenByMissionID[id] != stamp || sharedChanged {
             seenByMissionID[id] = stamp
@@ -512,24 +524,11 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
         }
     }
 
-    func markAllRead(_ rows: [OrbRow]) {
+    func markAllRead(_ rows: [OrbRow], syncBackend: Bool = true) {
         guard !rows.isEmpty else { return }
-        let nowIso = ISO8601DateFormatter().string(from: Date())
-        for row in rows {
-            manuallyUnreadIDs.remove(row.id)
-            seenByMissionID[row.id] = max(row.updatedAt, nowIso)
-            let id = row.id
-            OrbSharedInboxState.shared.writeSeen(id, stamp: Date().timeIntervalSince1970 * 1000)
-            Task { @MainActor in
-                _ = try? await OrbCore.shared.call(
-                    "/api/control/missions/\(OrbCore.escape(id))/opened",
-                    method: "POST"
-                )
-            }
-        }
-        UserDefaults.standard.set(seenByMissionID, forKey: defaultsKey)
-        version += 1
+        for row in rows { markRead(id: row.id, updatedAt: row.updatedAt, syncBackend: syncBackend) }
     }
+
 }
 
 enum OrbInboxTone: String, Equatable, Sendable {

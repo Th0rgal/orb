@@ -105,6 +105,7 @@ object OrbSharedInboxState {
         val current = account()
         if (scope == current) return
         scope = current; seen.clear(); outbox.clear()
+        OrbInboxSettings.bindAccount(current)
         OrbJSON.dict(OrbJSON.parse(persistence?.getString(diskKey(), null) ?: "{}"))?.forEach { (path, body) -> if (body != null) outbox[path] = body }
         for ((path, body) in outbox) if (path.startsWith("seen/")) {
             val stamp = (body as? Map<*, *>)?.get("stamp") as? Number
@@ -136,7 +137,11 @@ object OrbSharedInboxState {
         seen[id] = stamp
         write("seen/" + OrbCore.shared.encodeComponent(id), mapOf("stamp" to stamp))
     }
-    fun writePreferences() = write("preferences", mapOf("aiSummary" to OrbInboxSettings.aiSummary, "includeAutonomous" to OrbInboxSettings.includeAutonomous, "model" to OrbInboxSettings.model))
+    fun writePreferences() {
+        if (applying) return
+        OrbInboxSettings.bindAccount(account())
+        write("preferences", mapOf("aiSummary" to OrbInboxSettings.aiSummary, "includeAutonomous" to OrbInboxSettings.includeAutonomous, "model" to OrbInboxSettings.model))
+    }
     fun unread(mission: OrbRow): Boolean? {
         ensureScope()
         if (scope != account()) return null
@@ -155,6 +160,7 @@ object OrbSharedInboxState {
         if (changedAccount) { scope = expected; seen.clear() }
         for ((key, value) in raw) if (key is String && key.startsWith("seen:") && value is Number) seen[key.removePrefix("seen:")] = value.toLong()
         val prefs = raw["preferences"] as? Map<*, *>
+        OrbInboxSettings.bindAccount(expected)
         applying = true
         if (prefs != null && prefs["model"] is String) OrbInboxSettings.update(newAiSummary = prefs["aiSummary"] == true, newIncludeAutonomous = prefs["includeAutonomous"] == true, newModel = prefs["model"] as String)
         applying = false
@@ -180,6 +186,16 @@ object OrbInboxSettings {
     )
 
     private var prefs: SharedPreferences? = null
+    private var owner: String? = null
+    fun bindAccount(account: String) {
+        if (owner == account) return
+        val previous = OrbSharedInboxState.applying
+        OrbSharedInboxState.applying = true
+        if (owner != null) update(newAiSummary = true, newIncludeAutonomous = false, newModel = DEFAULT_MODEL)
+        owner = account
+        prefs?.edit()?.putString("preferences_owner", account)?.commit()
+        OrbSharedInboxState.applying = previous
+    }
     var aiSummary by mutableStateOf(true)
         private set
     var model by mutableStateOf(DEFAULT_MODEL)
@@ -191,6 +207,7 @@ object OrbInboxSettings {
         if (prefs == null) {
             val p = context.applicationContext.getSharedPreferences(PREFS_KEY, Context.MODE_PRIVATE)
             prefs = p
+            owner = p.getString("preferences_owner", null)
             aiSummary = p.getBoolean(KEY_AI_SUMMARY, true)
             includeAutonomous = p.getBoolean("include_autonomous", false)
             model = p.getString(KEY_MODEL, DEFAULT_MODEL)?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_MODEL

@@ -35,12 +35,32 @@ final class OrbContractTests: XCTestCase {
         store.markRead(row, syncBackend: false)
         store.markUnread(id: id, updatedAt: future, syncBackend: false)
         XCTAssertTrue(store.isUnread(row: row))
+        store.markAllRead([row], syncBackend: false)
+        XCTAssertFalse(store.isUnread(row: row))
         let key = OrbSharedInboxState.outboxKey(OrbInboxAccount.current)
         let previous = UserDefaults.standard.data(forKey: key)
         defer { UserDefaults.standard.set(previous, forKey: key) }
         let pending = ["seen/" + id: OrbJSON.object(["stamp": .number(-Date().addingTimeInterval(7200).timeIntervalSince1970 * 1000)])]
         UserDefaults.standard.set(try JSONEncoder().encode(pending), forKey: key)
         XCTAssertEqual(OrbSharedInboxState().unread(row), true)
+    }
+    @MainActor func testLegacyInboxPreferencesClaimOnlyTheirFirstAccount() {
+        let p = OrbInboxSettings.shared
+        let savedOwner = UserDefaults.standard.string(forKey: OrbInboxSettings.ownerKey)
+        let original = (p.aiSummary, p.includeAutonomous, p.model)
+        let previous = OrbSharedInboxState.shared.applying
+        OrbSharedInboxState.shared.applying = true
+        defer {
+            p.aiSummary = original.0; p.includeAutonomous = original.1; p.model = original.2
+            UserDefaults.standard.set(savedOwner, forKey: OrbInboxSettings.ownerKey)
+            OrbSharedInboxState.shared.applying = previous
+        }
+        UserDefaults.standard.removeObject(forKey: OrbInboxSettings.ownerKey)
+        p.aiSummary = false; p.includeAutonomous = true; p.model = "builtin/fast"
+        p.bindAccount("test:alice")
+        XCTAssertFalse(p.aiSummary); XCTAssertTrue(p.includeAutonomous); XCTAssertEqual(p.model, "builtin/fast")
+        p.bindAccount("test:bob")
+        XCTAssertTrue(p.aiSummary); XCTAssertFalse(p.includeAutonomous); XCTAssertEqual(p.model, OrbInboxSettings.defaultModel)
     }
     func testInboxAutonomousScopeIsOptIn() {
         let child = OrbRow(.object(["id": .string("child"), "status": .string("failed"), "parent_mission_id": .string("parent")]))
