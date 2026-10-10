@@ -1176,29 +1176,35 @@ pub(crate) fn cyber_entry_supported(
     model: &str,
     cli_owned: bool,
 ) -> bool {
+    let has_api_key = entry
+        .api_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty());
+    let trusted_api_endpoint = protocol_url(
+        NativeProtocol::Responses,
+        ProviderType::OpenAI,
+        entry.base_url.as_deref(),
+    )
+    .and_then(|endpoint| url::Url::parse(&endpoint).ok())
+    .is_some_and(|endpoint| {
+        endpoint.scheme() == "https"
+            && endpoint.host_str() == Some("api.openai.com")
+            && endpoint.port_or_known_default() == Some(443)
+            && endpoint.path() == "/v1/responses"
+            && endpoint.username().is_empty()
+            && endpoint.password().is_none()
+            && endpoint.query().is_none()
+            && endpoint.fragment().is_none()
+    });
     ProviderType::from_id(&entry.provider_id) == Some(ProviderType::OpenAI)
-        && protocol_url(
-            NativeProtocol::Responses,
-            ProviderType::OpenAI,
-            entry.base_url.as_deref(),
-        )
-        .and_then(|endpoint| url::Url::parse(&endpoint).ok())
-        .is_some_and(|endpoint| {
-            endpoint.scheme() == "https"
-                && endpoint.host_str() == Some("api.openai.com")
-                && endpoint.port_or_known_default() == Some(443)
-                && endpoint.path() == "/v1/responses"
-                && endpoint.username().is_empty()
-                && endpoint.password().is_none()
-                && endpoint.query().is_none()
-                && endpoint.fragment().is_none()
-        })
         && entry.model_id == model.rsplit('/').next().unwrap_or(model)
-        && (entry
-            .api_key
-            .as_deref()
-            .is_some_and(|key| !key.trim().is_empty())
-            || (entry.has_oauth && !cli_owned))
+        && if has_api_key {
+            trusted_api_endpoint
+        } else {
+            // Direct Codex OAuth uses a hardcoded official ChatGPT endpoint;
+            // the stored API base URL is unused on that execution path.
+            entry.has_oauth && !cli_owned
+        }
 }
 
 /// Admission must use the same account/model expansion as the Responses proxy.
@@ -9526,6 +9532,10 @@ mod cyber_admission_tests {
         };
         assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", true));
         assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        entry.base_url = Some("https://unused.example/v1".into());
+        assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", true));
+        entry.base_url = None;
         entry.api_key = Some("test-key".into());
         assert!(cyber_entry_supported(&entry, "openai/gpt-6.1-sol", true));
         entry.base_url = Some("https://untrusted.example/v1".into());
