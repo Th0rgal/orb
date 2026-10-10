@@ -138,9 +138,10 @@ object OrbSharedInboxState {
         for ((key, value) in raw) if (key is String && key.startsWith("seen:") && value is Number) seen[key.removePrefix("seen:")] = value.toLong()
         val prefs = raw["preferences"] as? Map<*, *>
         applying = true
-        if (changedAccount && prefs == null) OrbInboxSettings.update(newAiSummary = true, newIncludeAutonomous = false, newModel = OrbInboxSettings.DEFAULT_MODEL)
         if (prefs != null && prefs["model"] is String) OrbInboxSettings.update(newAiSummary = prefs["aiSummary"] == true, newIncludeAutonomous = prefs["includeAutonomous"] == true, newModel = prefs["model"] as String)
         applying = false
+        // Missing Core preferences seed from the existing device settings.
+        if (prefs?.get("model") !is String) writePreferences()
         OrbMissionUnreadStore.sharedStateChanged()
     }
 }

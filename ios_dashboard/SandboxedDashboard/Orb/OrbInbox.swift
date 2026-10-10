@@ -84,9 +84,6 @@ final class OrbSharedInboxState {
         }
         applying = true
         let prefs = raw["preferences"]
-        if changedAccount && prefs["model"].text.isEmpty {
-            let p = OrbInboxSettings.shared; p.aiSummary = true; p.includeAutonomous = false; p.model = OrbInboxSettings.defaultModel
-        }
         if !prefs["model"].text.isEmpty {
             let p = OrbInboxSettings.shared
             p.aiSummary = prefs["aiSummary"].flag
@@ -94,6 +91,9 @@ final class OrbSharedInboxState {
             p.model = prefs["model"].text
         }
         applying = false
+        // An empty Core entry is an upgrade/migration, not an instruction to
+        // discard the device's existing choices. Seed Core from those choices.
+        if prefs["model"].text.isEmpty { writePreferences() }
         OrbMissionUnreadStore.shared.sharedStateChanged()
     }
 }
