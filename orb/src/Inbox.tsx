@@ -1662,19 +1662,21 @@ export function InboxPage(p: {
                   </Show>
                     <div class="inbox-suggestions" role="group" aria-label="Suggested actions">
                       <span class="inbox-digest-label">Suggested actions</span>
-                      <For each={currentDigest()?.suggestions}>{(suggestion, index) =>
-                        <button type="button" class="inbox-context-chip" data-inbox-shortcut={!currentItem().interaction && index() < 9 ? index() + 1 : undefined} disabled={isBusy()} title="Insert this suggestion into your draft" onClick={() => appendToReplyDraft(suggestion)}>
-                          <Show when={!currentItem().interaction && index() < 9}><kbd class="inbox-action-key" aria-hidden="true">{index() + 1}</kbd></Show>{suggestion}
+                      <div class="inbox-suggestions-list">
+                        <For each={currentDigest()?.suggestions}>{(suggestion, index) =>
+                          <button type="button" class="inbox-context-chip" data-inbox-shortcut={!currentItem().interaction && index() < 9 ? index() + 1 : undefined} disabled={isBusy()} title="Insert this suggestion into your draft" onClick={() => appendToReplyDraft(suggestion)}>
+                            <Show when={!currentItem().interaction && index() < 9}><kbd class="inbox-action-key" aria-hidden="true">{index() + 1}</kbd></Show><span class="inbox-suggestion-text">{suggestion}</span>
+                          </button>
+                        }</For>
+                        <button type="button" class="inbox-context-chip inbox-state-action" data-inbox-shortcut={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 9 ? (currentDigest()?.suggestions?.length ?? 0) + 1 : undefined} disabled={isBusy() || isMissionRunning() || currentItem().mission.execution?.state === "running"} onClick={() => void markDone(currentItem())}>
+                          <Show when={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 9}><kbd class="inbox-action-key" aria-hidden="true">{(currentDigest()?.suggestions?.length ?? 0) + 1}</kbd></Show><Ic.ArchiveIcon size={12} /><span class="inbox-suggestion-text">Mark done &amp; archive</span>
                         </button>
-                      }</For>
-                      <button type="button" class="inbox-context-chip inbox-state-action" data-inbox-shortcut={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 9 ? (currentDigest()?.suggestions?.length ?? 0) + 1 : undefined} disabled={isBusy() || isMissionRunning() || currentItem().mission.execution?.state === "running"} onClick={() => void markDone(currentItem())}>
-                        <Show when={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 9}><kbd class="inbox-action-key" aria-hidden="true">{(currentDigest()?.suggestions?.length ?? 0) + 1}</kbd></Show><Ic.ArchiveIcon size={12} /> Mark done &amp; archive
-                      </button>
-                      <Show when={p.onDeleteMission}>
-                        <button type="button" class="inbox-context-chip inbox-delete-action" data-inbox-shortcut={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 8 ? (currentDigest()?.suggestions?.length ?? 0) + 2 : undefined} disabled={isBusy() || isMissionRunning() || currentItem().mission.execution?.state === "running"} onClick={() => p.onDeleteMission?.(id)}>
-                          <Show when={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 8}><kbd class="inbox-action-key" aria-hidden="true">{(currentDigest()?.suggestions?.length ?? 0) + 2}</kbd></Show><Ic.TrashIcon size={12} /> Delete…
-                        </button>
-                      </Show>
+                        <Show when={p.onDeleteMission}>
+                          <button type="button" class="inbox-context-chip inbox-delete-action" data-inbox-shortcut={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 8 ? (currentDigest()?.suggestions?.length ?? 0) + 2 : undefined} disabled={isBusy() || isMissionRunning() || currentItem().mission.execution?.state === "running"} onClick={() => p.onDeleteMission?.(id)}>
+                            <Show when={!currentItem().interaction && (currentDigest()?.suggestions?.length ?? 0) < 8}><kbd class="inbox-action-key" aria-hidden="true">{(currentDigest()?.suggestions?.length ?? 0) + 2}</kbd></Show><Ic.TrashIcon size={12} /><span class="inbox-suggestion-text">Delete…</span>
+                          </button>
+                        </Show>
+                      </div>
                     </div>
                   <div
                     class="inbox-peek-composer"

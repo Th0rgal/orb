@@ -2440,9 +2440,38 @@ private fun OrbInboxCard(
                     }
                 }
             }
-            if (isReplying && current && item.pendingInteraction == null) digest.suggestions.forEach { suggestion ->
-                Text(suggestion, fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(OrbStyle.controlRadius)).background(OrbStyle.elevated)
-                    .orbPressClickable(enabled = !isSending && replyDraft.isBlank()) { onReplyDraftChange(suggestion) }.padding(12.dp))
+            if ((isPeeked || isReplying) && current && item.pendingInteraction == null && digest.suggestions.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Suggested actions", fontSize = 11.sp, color = OrbStyle.textMuted, fontWeight = FontWeight.Medium)
+                    digest.suggestions.forEachIndexed { idx, suggestion ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                .background(OrbStyle.elevated.copy(alpha = 0.75f))
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(OrbStyle.controlRadius))
+                                .orbPressClickable(enabled = !isSending) {
+                                    onReplyDraftChange(suggestion)
+                                    if (!isReplying) onToggleReply()
+                                }
+                                .padding(horizontal = 9.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 1.dp)
+                                    .size(width = 16.dp, height = 16.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color.White.copy(alpha = 0.08f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("${idx + 1}", fontSize = 10.5.sp, color = OrbStyle.textMuted, fontWeight = FontWeight.Medium)
+                            }
+                            Text(suggestion, fontSize = 12.sp, color = OrbStyle.textPrimary, lineHeight = 16.sp, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
             }
         }
 

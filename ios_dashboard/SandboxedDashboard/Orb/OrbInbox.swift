@@ -1921,12 +1921,43 @@ struct OrbInboxView: View {
                         }
                     }.padding(12).background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
                 }
-                if isReplying, current, item.interaction == nil, let suggestions = digest.suggestions {
-                    ForEach(suggestions, id: \.self) { suggestion in
-                        Button { replyDraft = suggestion; replyFocused = true } label: {
-                            Text(suggestion).font(.caption).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(10)
-                        }.buttonStyle(.plain).background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
-                        .disabled(isBusy || !replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if (isPeeked || isReplying), current, item.interaction == nil, let suggestions = digest.suggestions, !suggestions.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Suggested actions")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(OrbStyle.textMuted)
+                        ForEach(Array(suggestions.enumerated()), id: \.offset) { idx, suggestion in
+                            Button {
+                                OrbHaptics.selection()
+                                replyingMissionID = item.id
+                                replyDraft = suggestion
+                                replyFocused = true
+                            } label: {
+                                HStack(alignment: .top, spacing: 7) {
+                                    Text("\(idx + 1)")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                        .foregroundStyle(OrbStyle.textMuted)
+                                        .frame(minWidth: 16, minHeight: 16)
+                                        .padding(.horizontal, 3)
+                                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                        .padding(.top, 1)
+                                    Text(suggestion)
+                                        .font(.caption)
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 7)
+                                .background(OrbStyle.elevated.opacity(0.75), in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous)
+                                        .stroke(OrbStyle.border, lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isBusy)
+                        }
                     }
                 }
             }

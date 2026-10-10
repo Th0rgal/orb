@@ -146,16 +146,28 @@
 .inbox-peek-status-label svg { width: 12px; height: 12px; transition: transform var(--t); }
 .inbox-sources[open] > summary svg { transform: rotate(180deg); }
 .inbox-peek-status-label:focus-visible { outline: 2px solid var(--overlay-focus); outline-offset: 2px; }
-.inbox-context-chip { color: var(--fg-2); font-size: 12px; text-align: left; white-space: normal; }
+.inbox-context-chip { color: var(--fg-2); font-size: 12px; line-height: 18px; text-align: left; white-space: normal; justify-content: flex-start; }
 .inbox-summary-origin { display: block; margin-bottom: 3px; color: var(--inbox-muted); font-size: 10px; }
 .inbox-row.peeked .inbox-summary { display: block; overflow: visible; }
 .inbox-unresolved { display: block; margin-top: 4px; color: var(--fg-2); }
 .inbox-decision { color: var(--fg-2); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
-.inbox-suggestions { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
-.inbox-suggestions .inbox-context-chip { padding: 4px 6px; border-color: var(--stroke-soft); }
-.inbox-suggestions .inbox-state-action { color: var(--fg-3); }
-.inbox-suggestions .inbox-delete-action { color: var(--red); border-color: color-mix(in srgb, var(--red) 18%, transparent); background: color-mix(in srgb, var(--red) 4%, transparent); }
-.inbox-suggestions .inbox-delete-action:hover:not(:disabled) { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, transparent); background: color-mix(in srgb, var(--red) 9%, transparent); }
+.inbox-suggestions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 2px; }
+.inbox-suggestions > .inbox-digest-label { line-height: 16px; }
+.inbox-suggestions-list { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; width: 100%; }
+.inbox-suggestions .inbox-context-chip {
+  align-items: flex-start; gap: 6px; min-height: 28px; padding: 4px 9px 4px 6px;
+  border-color: var(--stroke-soft); background: color-mix(in srgb, var(--overlay-field) 55%, transparent);
+  color: var(--fg); transition: background-color var(--t) var(--ease), border-color var(--t) var(--ease), color var(--t) var(--ease);
+}
+.inbox-suggestions .inbox-context-chip:hover:not(:disabled) {
+  background: var(--bg-active); border-color: var(--stroke); color: var(--fg-strong);
+}
+.inbox-suggestions .inbox-context-chip > svg { flex: none; margin-top: 3px; opacity: .82; }
+.inbox-suggestion-text { min-width: 0; overflow-wrap: anywhere; }
+.inbox-suggestions .inbox-state-action { color: var(--fg-2); background: transparent; }
+.inbox-suggestions .inbox-delete-action { color: var(--red); border-color: color-mix(in srgb, var(--red) 18%, transparent); background: transparent; }
+.inbox-suggestions .inbox-delete-action:hover:not(:disabled) { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, transparent); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.inbox-suggestions .inbox-delete-action .inbox-action-key { color: color-mix(in srgb, var(--red) 78%, var(--fg-3)); background: color-mix(in srgb, var(--red) 10%, transparent); }
 .inbox-source { display: block; width: 100%; padding: 4px 0; text-align: left; color: var(--fg-3); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 .inbox-source:hover { color: var(--fg); }
 .inbox-source-notice { margin: 4px 0; color: var(--fg-3); font-size: 12px; }
@@ -239,7 +251,10 @@
 
 .inbox-action-key {
   display: inline-grid; place-items: center; flex: none;
-  min-width: 16px; height: 17px; padding: 0 3px;
-  border: 1px solid var(--stroke); border-radius: var(--radius-xs);
-  color: var(--fg-3); font: 10px/1 var(--mono);
+  min-width: 16px; height: 16px; margin-top: 1px; padding: 0 4px;
+  border-radius: var(--radius-xs); background: var(--bg-active);
+  color: var(--fg-3); font: 500 10.5px/1 var(--sans);
+}
+.inbox-suggestions .inbox-context-chip:hover:not(:disabled) .inbox-action-key {
+  background: var(--hover-2); color: var(--fg-2);
 }
