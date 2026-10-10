@@ -77,7 +77,7 @@ pub(crate) fn normalize_opencode_model_id(model: &str) -> Cow<'_, str> {
 fn opencode_uses_host_proxy(provider: Option<&str>) -> bool {
     matches!(
         provider,
-        Some("builtin" | "antigravity" | "kimi" | "google" | "gemini")
+        Some("builtin" | "antigravity" | "muse-code" | "kimi" | "google" | "gemini")
     )
 }
 
@@ -2393,7 +2393,14 @@ mod path_tests {
     #[test]
     fn host_proxy_probe_covers_google_and_other_proxy_adapters() {
         let temp = tempfile::tempdir().unwrap();
-        for provider in ["google", "gemini", "builtin", "antigravity", "kimi"] {
+        for provider in [
+            "google",
+            "gemini",
+            "builtin",
+            "antigravity",
+            "muse-code",
+            "kimi",
+        ] {
             let directory = temp.path().join(provider);
             std::fs::create_dir_all(&directory).unwrap();
             crate::api::mission_runner::ensure_opencode_provider_for_model(
