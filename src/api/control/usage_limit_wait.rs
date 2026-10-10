@@ -622,11 +622,12 @@ pub(crate) async fn plan_remote(
             announced: false,
         });
     }
+    let mission = mission_store.get_mission(mission_id).await.ok().flatten();
     let planned = async {
         if success {
             return None;
         }
-        let mission = mission_store.get_mission(mission_id).await.ok()??;
+        let mission = mission.as_ref()?;
         if !matches!(
             mission.status,
             MissionStatus::Active | MissionStatus::Pending
@@ -703,7 +704,16 @@ pub(crate) async fn plan_remote(
             Zone::system(),
         )
     }
-    .await;
+    .await
+    .filter(|wait| {
+        // A recovery must fit inside the mission deadline, including provider
+        // Retry-After delays; otherwise the UI would promise an invalid replay.
+        !mission
+            .as_ref()
+            .and_then(|mission| mission.scheduling.deadline.as_deref())
+            .and_then(|deadline| DateTime::parse_from_rfc3339(deadline).ok())
+            .is_some_and(|deadline| deadline <= wait.resume_at)
+    });
     update_remote_wait(working_dir, mission_id, |previous| {
         if planned.is_none() && !success && !sustained_progress {
             if let Some(mut exhausted) = previous
@@ -1505,6 +1515,35 @@ mod tests {
         )
         .await
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_retry_after_must_fit_before_the_deadline() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "opencode").await;
+        store
+            .update_mission_session_id(mission.id, "ses_existing", "opencode", None)
+            .await
+            .unwrap();
+        let mut scheduling = mission.scheduling.clone();
+        scheduling.deadline = Some((Utc::now() + Duration::minutes(5)).to_rfc3339());
+        store
+            .set_mission_scheduling(mission.id, &scheduling)
+            .await
+            .unwrap();
+        let error = r#"{"data":{"statusCode":502,"isRetryable":true,"responseHeaders":{"retry-after":"3600"}}}"#;
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            error,
+            Uuid::new_v4(),
+            false
+        )
+        .await
+        .is_none());
+        assert!(remote_wait(dir.path(), mission.id).await.is_none());
     }
 
     #[test]
