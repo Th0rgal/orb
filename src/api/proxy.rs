@@ -1206,20 +1206,29 @@ pub(crate) async fn validate_remote_cyber_route(
             });
         }
     }
+    // Cooldowns and quotas cannot make an incompatible configured fallback safe.
+    // Check static model/provider choices, then expand accounts without transient health filtering.
+    let unfiltered_health = crate::provider_health::ProviderHealthTracker::new();
     let entries = if let Some(id) = resolve_stored_chain_id(&state.chain_store, model).await {
+        let configured = state
+            .chain_store
+            .get(&id)
+            .await
+            .ok_or("Cyber chain disappeared during admission")?;
+        if configured.entries.iter().any(|entry| {
+            entry.provider_id != "openai"
+                || entry.model_id != model.rsplit('/').next().unwrap_or(model)
+        }) {
+            return Err("unsupported_access_program: a configured fallback cannot preserve the selected Cyber program and model. Choose Automatic explicitly or a direct OpenAI route. No mission was launched.".into());
+        }
         state
             .chain_store
-            .resolve_chain(&id, &state.ai_providers, &accounts, &state.health_tracker)
+            .resolve_chain(&id, &state.ai_providers, &accounts, &unfiltered_health)
             .await
     } else if let Some(entry) = parse_native_model_entry(model, NativeProtocol::Responses) {
         state
             .chain_store
-            .resolve_entries(
-                &[entry],
-                &state.ai_providers,
-                &accounts,
-                &state.health_tracker,
-            )
+            .resolve_entries(&[entry], &state.ai_providers, &accounts, &unfiltered_health)
             .await
     } else {
         vec![]

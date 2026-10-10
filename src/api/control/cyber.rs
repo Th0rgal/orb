@@ -29,6 +29,9 @@ pub async fn validate_remote_mission(
     control: &ControlState,
     id: Uuid,
 ) -> Result<(), String> {
+    if mission_is_client_placed(control, id).await? {
+        return Ok(());
+    }
     let Some(mission) = control.mission_store.get_mission(id).await? else {
         return Ok(());
     };
@@ -200,10 +203,13 @@ pub async fn update(
     }
     program_for_model(change.mode, mission.model_override.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    if remote_grok::placement(&state.config.working_dir, &control.mission_store, id)
+    if !mission_is_client_placed(&control, id)
         .await
         .map_err(internal_error)?
-        .is_some()
+        && remote_grok::placement(&state.config.working_dir, &control.mission_store, id)
+            .await
+            .map_err(internal_error)?
+            .is_some()
     {
         validate_remote(&state, change.mode, mission.model_override.as_deref())
             .await

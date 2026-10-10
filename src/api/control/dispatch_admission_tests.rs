@@ -12299,3 +12299,155 @@ async fn cyber_remote_admission_rejects_before_persisting_mission() {
     .await;
     assert_eq!(caps["route_supported"], false);
 }
+
+#[tokio::test]
+async fn cyber_admission_preserves_client_owned_execution() {
+    let h = Harness::new().await;
+    let mission = h
+        .control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            Some("gpt-6.1-sol"),
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            mission.id,
+            MissionProjectPatch {
+                tags: Some(vec![client_placement::TAG.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    cyber::write(
+        &h.state.config.working_dir,
+        mission.id,
+        cyber::Mode::Standard,
+    )
+    .unwrap();
+    assert!(
+        cyber::validate_remote_mission(&h.state, &h.control, mission.id)
+            .await
+            .is_ok()
+    );
+    let Json(selection) = cyber::update(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Json(cyber::Change {
+            mode: cyber::Mode::Daybreak,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selection["mode"], "daybreak");
+}
+
+#[tokio::test]
+async fn cyber_admission_checks_configured_fallbacks_even_when_unresolved_or_cooling() {
+    let h = Harness::new().await;
+    let now = chrono::Utc::now();
+    h.state
+        .chain_store
+        .upsert(crate::provider_health::ModelChain {
+            id: "gpt-6.1-sol".into(),
+            name: "Cyber test".into(),
+            entries: vec![
+                crate::provider_health::ChainEntry {
+                    provider_id: "openai".into(),
+                    model_id: "gpt-6.1-sol".into(),
+                },
+                crate::provider_health::ChainEntry {
+                    provider_id: "xai".into(),
+                    model_id: "grok-4.6".into(),
+                },
+            ],
+            is_default: false,
+            strip_thinking: false,
+            created_at: now,
+            updated_at: now,
+        })
+        .await;
+    let error = cyber::validate_remote(&h.state, cyber::Mode::Standard, Some("gpt-6.1-sol"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("configured fallback"));
+    assert!(
+        cyber::validate_remote(&h.state, cyber::Mode::Automatic, Some("gpt-6.1-sol"))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn cyber_admission_checks_cooling_cli_owned_account_fallback() {
+    const CHILD: &str = "CYBER_COOLING_ADMISSION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","api::control::dispatch_admission_tests::cyber_admission_checks_cooling_cli_owned_account_fallback","--nocapture"])
+            .env(CHILD,"1").env("HOME",home.path()).env("SANDBOXED_OAUTH_OWNER","cli-proxy").env("CLI_PROXY_MANAGEMENT_KEY","fixture-management").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let h = Harness::new().await;
+    let mut direct = crate::ai_providers::AIProvider::new(
+        crate::ai_providers::ProviderType::OpenAI,
+        "Direct test account".into(),
+    );
+    direct.api_key = Some("fixture-direct-key".into());
+    let direct_id = h.state.ai_providers.add(direct).await;
+    let mut cli = crate::ai_providers::AIProvider::new(
+        crate::ai_providers::ProviderType::OpenAI,
+        "CLI test account".into(),
+    );
+    cli.priority = 1;
+    cli.oauth = Some(crate::ai_providers::OAuthCredentials {
+        access_token: "fixture-access".into(),
+        refresh_token: "fixture-refresh".into(),
+        expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+    });
+    let cli_id = h.state.ai_providers.add(cli).await;
+    h.state
+        .health_tracker
+        .record_failure(
+            cli_id,
+            crate::provider_health::CooldownReason::RateLimit,
+            None,
+        )
+        .await;
+    let entry = crate::provider_health::ChainEntry {
+        provider_id: "openai".into(),
+        model_id: "gpt-6.1-sol".into(),
+    };
+    let filtered = h
+        .state
+        .chain_store
+        .resolve_entries(
+            &[entry],
+            &h.state.ai_providers,
+            &[],
+            &h.state.health_tracker,
+        )
+        .await;
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].account_id, direct_id);
+    let error = cyber::validate_remote(&h.state, cyber::Mode::Standard, Some("gpt-6.1-sol"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("unsupported_access_program"));
+}
