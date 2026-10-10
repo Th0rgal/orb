@@ -302,10 +302,9 @@ fn conversation_turn_is_syncing(mission: &Mission, events: &[StoredEvent]) -> bo
         .rev()
         .find(|e| {
             e.sequence > user.sequence
-                && matches!(
-                    e.event_type.as_str(),
-                    "assistant_message" | "assistant_message_canonical" | "error"
-                )
+                // History projects legacy assistant events only; canonical corrections
+                // and errors remain authoritative evidence in snapshot below.
+                && e.event_type == "assistant_message"
         })
         .map(|e| e.content.trim());
     history_answer != event_answer
@@ -739,8 +738,21 @@ mod tests {
         };
         assert!(!conversation_turn_is_syncing(
             &mission,
-            &[repeated.clone(), synced_answer]
+            &[repeated.clone(), synced_answer.clone()]
         ));
+        for event_type in ["assistant_message_canonical", "error"] {
+            let correction = StoredEvent {
+                event_type: event_type.into(),
+                sequence: 5,
+                content: "Corrected answer or terminal failure.".into(),
+                ..synced_answer.clone()
+            };
+            let events = [repeated.clone(), synced_answer.clone(), correction];
+            assert!(!conversation_turn_is_syncing(&mission, &events));
+            assert!(snapshot(&mission, &events)
+                .0
+                .contains("Corrected answer or terminal failure."));
+        }
         let next_repeat = StoredEvent {
             sequence: 5,
             ..repeated
