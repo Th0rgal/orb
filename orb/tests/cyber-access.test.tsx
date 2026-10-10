@@ -61,6 +61,23 @@ describe('cyber selection',()=>{
   expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false);
   expect(vi.mocked(api).mock.calls.some(([path])=>String(path).includes('remote=true'))).toBe(false);
  });
+ it.each(['node','core'] as const)('uses a committed %s transfer as authoritative placement',async kind=>{
+  vi.mocked(api).mockImplementation(async path=>String(path).endsWith('/cyber')
+   ?{mode:'standard',status:'requested',revision:'saved'}:{version:2,route_supported:false});
+  render(()=><MissionCyber mission={{id:'transferred',status:'paused',title:'Transferred',history:[],backend:'codex',model_override:'gpt-6.1-sol',remote_node_id:kind==='core'?'old-node':undefined,machine_transfer:{id:'transfer',mission_id:'transferred',phase:'committed',source:{kind:'core'},destination:kind==='node'?{kind:'node',id:'ashur'}:{kind:'core'},backend:'codex',created_at:'2026-10-10T00:00:00Z'}}}/>);
+  await fireEvent.click(await screen.findByRole('button',{name:'Cyber program: Standard'}));
+  if(kind==='node')await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).title).toContain('cannot guarantee'));
+  expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(kind==='node');
+ });
+ it('omits a blank model so remote capability checks use the Codex default',async()=>{
+  vi.mocked(api).mockImplementation(async path=>String(path).endsWith('/cyber')
+   ?{mode:'standard',status:'requested',revision:'saved'}:{version:2,route_supported:!String(path).includes('model=')});
+  render(()=><MissionCyber mission={{id:'default-model',status:'paused',title:'Default',history:[],backend:'codex',remote_node_id:'ashur'}}/>);
+  await fireEvent.click(await screen.findByRole('button',{name:'Cyber program: Standard'}));
+  await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false);
+  expect(vi.mocked(api).mock.calls.some(([path])=>String(path).includes('remote=true')&&!String(path).includes('model='))).toBe(true);
+ });
  it('starts Standard and never calls a pending selection active',()=>{
   expect(draftCyber()).toBe('standard');
   render(()=><CyberPicker value="daybreak" model="gpt-6.1-sol" onChange={()=>{}}/>);
