@@ -14697,14 +14697,11 @@ async fn submit_leased_remote_job(
     if let RemoteHarnessPlan::Vibe { plan, prompt, .. } = &mut resolved_plan {
         *plan = *plan || crate::vibe::plan_mode(mission.agent.as_deref(), prompt);
     }
-    let cyber_selection = if matches!(plan, RemoteHarnessPlan::Codex { .. }) {
-        cyber::promote(&state.config.working_dir, mission.id)?
+    let cyber_selection = if let RemoteHarnessPlan::Codex { model, .. } = plan {
+        cyber::promote_remote(state, mission.id, Some(model)).await?
     } else {
         cyber::Selection::default()
     };
-    if let RemoteHarnessPlan::Codex { model, .. } = plan {
-        cyber::validate_remote(state, cyber_selection.mode, Some(model)).await?;
-    }
     let mut project_skill_source = String::new();
     let prompt = match &mut resolved_plan {
         RemoteHarnessPlan::Codex { prompt, .. }

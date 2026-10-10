@@ -99,6 +99,42 @@ pub fn promote(root: &FsPath, id: Uuid) -> Result<Selection, String> {
     write_committed(root, id, selected.mode)
 }
 
+/// Validate before consuming the queued choice. If PATCH changes it while
+/// validation awaits, retry the new choice; the comparison and commit share
+/// the same write lock as PATCH, without holding that lock over an await.
+async fn promote_validated<F, Fut>(
+    root: &FsPath,
+    id: Uuid,
+    mut validate: F,
+) -> Result<Selection, String>
+where
+    F: FnMut(Mode) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    loop {
+        let selected = read(root, id)?;
+        validate(selected.mode).await?;
+        let _guard = SELECTION_WRITE
+            .lock()
+            .map_err(|_| "Cyber selection lock unavailable")?;
+        let latest = read(root, id)?;
+        if latest.revision == selected.revision && latest.mode == selected.mode {
+            return write_committed(root, id, selected.mode);
+        }
+    }
+}
+
+pub async fn promote_remote(
+    state: &AppState,
+    id: Uuid,
+    model: Option<&str>,
+) -> Result<Selection, String> {
+    promote_validated(&state.config.working_dir, id, |mode| {
+        validate_remote(state, mode, model)
+    })
+    .await
+}
+
 fn write_next(root: &FsPath, id: Uuid, mode: Mode) -> Result<Selection, String> {
     let _guard = SELECTION_WRITE
         .lock()
@@ -237,6 +273,44 @@ mod tests {
         );
         assert_eq!(read(dir.path(), id).unwrap().revision, next.revision);
         assert_eq!(promote(dir.path(), id).unwrap().mode, Mode::Daybreak);
+    }
+
+    #[tokio::test]
+    async fn rejected_route_preserves_pending_and_execution_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let running = write(dir.path(), id, Mode::Automatic).unwrap();
+        let pending = write_next(dir.path(), id, Mode::Standard).unwrap();
+        assert!(promote_validated(dir.path(), id, |_| async {
+            Err("unsupported route".into())
+        })
+        .await
+        .is_err());
+        assert_eq!(
+            read_execution(dir.path(), id).unwrap().revision,
+            running.revision
+        );
+        assert_eq!(read(dir.path(), id).unwrap().revision, pending.revision);
+    }
+
+    #[tokio::test]
+    async fn concurrent_selection_is_revalidated_before_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        write(dir.path(), id, Mode::Automatic).unwrap();
+        write_next(dir.path(), id, Mode::Standard).unwrap();
+        let mut validated = Vec::new();
+        let result = promote_validated(dir.path(), id, |mode| {
+            validated.push(mode);
+            if validated.len() == 1 {
+                write_next(dir.path(), id, Mode::Daybreak).unwrap();
+            }
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(validated, vec![Mode::Standard, Mode::Daybreak]);
+        assert_eq!(result.mode, Mode::Daybreak);
     }
 
     #[test]

@@ -12476,3 +12476,41 @@ async fn cyber_admission_checks_cooling_cli_owned_account_fallback() {
         .unwrap_err();
     assert!(error.contains("standard accounts"), "{error}");
 }
+
+#[tokio::test]
+async fn cyber_node_transfer_refuses_incompatible_route_without_affecting_core_or_client() {
+    let h = Harness::new().await;
+    let id = Uuid::new_v4();
+    let saved = cyber::write(&h.state.config.working_dir, id, cyber::Mode::Standard).unwrap();
+    for destination in [
+        crate::api::mission_store::transfer::Machine::Core,
+        crate::api::mission_store::transfer::Machine::Client {
+            id: Uuid::new_v4().to_string(),
+        },
+    ] {
+        machine_transfer::validate_cyber_model(
+            &h.state,
+            id,
+            "codex",
+            Some("gpt-6.1-sol"),
+            &destination,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(machine_transfer::validate_cyber_model(
+        &h.state,
+        id,
+        "codex",
+        Some("gpt-6.1-sol"),
+        &crate::api::mission_store::transfer::Machine::Node { id: "ashur".into() },
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        cyber::read_execution(&h.state.config.working_dir, id)
+            .unwrap()
+            .revision,
+        saved.revision
+    );
+}

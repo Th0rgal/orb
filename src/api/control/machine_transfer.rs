@@ -693,15 +693,21 @@ async fn validate_destination(
     }
     Ok(())
 }
-fn validate_cyber_model(
+pub(super) async fn validate_cyber_model(
     state: &AppState,
     id: Uuid,
     backend: &str,
     model: Option<&str>,
+    destination: &Machine,
 ) -> Result<(), Error> {
     if backend == "codex" {
         let selection = cyber::read(&state.config.working_dir, id).map_err(internal_error)?;
         cyber::program_for_model(selection.mode, model).map_err(conflict)?;
+        if matches!(destination, Machine::Node { .. }) {
+            cyber::validate_remote(state, selection.mode, model)
+                .await
+                .map_err(conflict)?;
+        }
     }
     Ok(())
 }
@@ -762,7 +768,7 @@ pub async fn operate(
         }
         let backend = backend.unwrap_or(m.backend.clone());
         let model = model.or(m.model_override.clone());
-        validate_cyber_model(&state, id, &backend, model.as_deref())?;
+        validate_cyber_model(&state, id, &backend, model.as_deref(), &destination).await?;
         validate_destination(&state, &destination, &backend, model.as_deref()).await?;
         let (source, mut source_root) = source(&state, &control, &m, client_id).await?;
         if matches!(source, Machine::Client { .. }) && source_root.is_none() {
@@ -1013,7 +1019,7 @@ pub async fn operate(
     // and launch admission; copying files must not hold this global lock.
     let _admission = if a.phase == "activated" {
         let guard = DISPATCH_ADMISSION.lock().await;
-        validate_cyber_model(&state, id, &a.backend, a.model.as_deref())?;
+        validate_cyber_model(&state, id, &a.backend, a.model.as_deref(), &a.destination).await?;
         Some(guard)
     } else {
         None
