@@ -1176,11 +1176,14 @@ pub(crate) fn cyber_entry_supported(
     model: &str,
     cli_owned: bool,
 ) -> bool {
-    entry.provider_id == "openai"
-        && entry
-            .base_url
-            .as_deref()
-            .is_none_or(|url| url.trim_end_matches('/') == "https://api.openai.com/v1")
+    ProviderType::from_id(&entry.provider_id) == Some(ProviderType::OpenAI)
+        && protocol_url(
+            NativeProtocol::Responses,
+            ProviderType::OpenAI,
+            entry.base_url.as_deref(),
+        )
+        .as_deref()
+            == Some("https://api.openai.com/v1/responses")
         && entry.model_id == model.rsplit('/').next().unwrap_or(model)
         && (entry
             .api_key
@@ -1220,7 +1223,7 @@ pub(crate) async fn validate_remote_cyber_route(
             .await
             .ok_or("Cyber chain disappeared during admission")?;
         if configured.entries.iter().any(|entry| {
-            entry.provider_id != "openai"
+            ProviderType::from_id(&entry.provider_id) != Some(ProviderType::OpenAI)
                 || entry.model_id != model.rsplit('/').next().unwrap_or(model)
         }) {
             return Err("unsupported_access_program: a configured fallback cannot preserve the selected Cyber program and model. Choose Automatic explicitly or a direct OpenAI route. No mission was launched.".into());
@@ -9519,6 +9522,10 @@ mod cyber_admission_tests {
         entry.base_url = Some("https://untrusted.example/v1".into());
         assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", false));
         entry.base_url = Some("https://api.openai.com/v1/".into());
+        assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        entry.base_url = Some("https://api.openai.com/v1/responses".into());
+        assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        entry.provider_id = "codex".into();
         assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
         entry.base_url = None;
         assert!(!cyber_entry_supported(&entry, "builtin/smart", false));
