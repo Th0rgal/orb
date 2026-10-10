@@ -12221,3 +12221,81 @@ async fn vibe_control_dispatch_explicit_resume_keeps_identical_prior_request() {
         2
     );
 }
+
+#[tokio::test]
+async fn cyber_remote_admission_rejects_before_persisting_mission() {
+    // Account discovery reads HOME-backed native auth. Isolate this fixture
+    // from both the developer account and other tests' global env changes.
+    const CHILD: &str = "CYBER_REMOTE_ADMISSION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "api::control::dispatch_admission_tests::cyber_remote_admission_rejects_before_persisting_mission", "--nocapture"])
+            .env(CHILD, "1").env("HOME", home.path()).env("SANDBOXED_OAUTH_OWNER", "cli-proxy")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let node = crate::remote_node::RemoteNodeConfig {
+        id: "cyber-test".into(),
+        base_url: "http://127.0.0.1:9".into(),
+        token_env: "CYBER_TEST_UNUSED".into(),
+        labels: None,
+    };
+    let h = Harness::with_nodes(vec![node]).await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::codex::CodexBackend::new()));
+    let before = h
+        .control
+        .mission_store
+        .list_missions(100, 0)
+        .await
+        .unwrap()
+        .len();
+    let request: CreateMissionRequest = serde_json::from_value(json!({"title":"Cyber route refusal", "backend":"codex", "model_override":"gpt-6.1-sol", "prompt":"inspect", "remote_node_id":"cyber-test", "cyber_access":"standard"})).unwrap();
+    let error = super::create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::BAD_REQUEST, "{}", error.1);
+    assert!(
+        error.1.contains("unsupported_access_program"),
+        "{}",
+        error.1
+    );
+    assert_eq!(
+        h.control
+            .mission_store
+            .list_missions(100, 0)
+            .await
+            .unwrap()
+            .len(),
+        before
+    );
+    assert!(
+        cyber::validate_remote(&h.state, cyber::Mode::Automatic, Some("gpt-6.1-sol"))
+            .await
+            .is_ok()
+    );
+    let Json(caps) = cyber::capabilities(
+        State(h.state.clone()),
+        Query(cyber::CapabilityQuery {
+            model: Some("gpt-6.1-sol".into()),
+            mode: Some(cyber::Mode::Standard),
+            remote: true,
+        }),
+    )
+    .await;
+    assert_eq!(caps["route_supported"], false);
+}

@@ -1,9 +1,30 @@
-import {render,screen,fireEvent,cleanup} from '@solidjs/testing-library';
-import {afterEach,describe,it,expect} from 'vitest';
-import {CyberPicker,cyberCompatibility,draftCyber,setDraftCyber} from '../src/cyberAccess';
+import {render,screen,fireEvent,cleanup,waitFor} from '@solidjs/testing-library';
+import {afterEach,describe,it,expect,vi} from 'vitest';
+import {CyberPicker,cyberCompatibility,draftCyber,setDraftCyber,requireCyberSupport} from '../src/cyberAccess';
 import {describeError} from '../src/ErrorNotice';
-afterEach(()=>{cleanup();setDraftCyber('standard');});
+vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
+import {api} from '../src/api';
+afterEach(()=>{vi.mocked(api).mockReset();cleanup();setDraftCyber('standard');});
 describe('cyber selection',()=>{
+ it('refuses unsupported remote selections before creating a mission without changing the requested mode',async()=>{
+  vi.mocked(api).mockResolvedValue({version:2,route_supported:false,refusal:'unsupported_access_program: Choose Automatic explicitly.'});
+  await expect(requireCyberSupport({model:'gpt-6.1-sol',mode:'standard',remote:true})).rejects.toThrow('Choose Automatic');
+  expect(draftCyber()).toBe('standard');
+  expect(vi.mocked(api).mock.calls[0][0]).toContain('remote=true');
+  await expect(requireCyberSupport({model:'gpt-6.1-sol',mode:'automatic',remote:true})).resolves.toBeUndefined();
+  vi.mocked(api).mockResolvedValue({version:2});
+  await expect(requireCyberSupport({model:'gpt-6.1-sol',mode:'standard',remote:true})).rejects.toThrow('cannot confirm');
+ });
+ it('disables unsupported remote programs while keeping Automatic an explicit choice',async()=>{
+  vi.mocked(api).mockResolvedValue({version:2,route_supported:false});
+  let selected='';render(()=><CyberPicker value="standard" model="gpt-6.1-sol" remote onChange={v=>selected=v}/>);
+  await fireEvent.click(screen.getByRole('button',{name:'Cyber program: Standard'}));
+  await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).title).toContain('cannot guarantee'));
+  expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(screen.getByRole('menuitemradio',{name:/Automatic/}));
+  expect(selected).toBe('automatic');
+ });
  it('starts Standard and never calls a pending selection active',()=>{
   expect(draftCyber()).toBe('standard');
   render(()=><CyberPicker value="daybreak" model="gpt-6.1-sol" onChange={()=>{}}/>);

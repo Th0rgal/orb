@@ -5470,6 +5470,12 @@ pub async fn post_message(
     }
     crate::api::mission_payload::validate_user_content(&content)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let admission_control = control_for_user(&state, &user).await;
+    if let Some(id) = req.mission_id {
+        cyber::validate_remote_mission(&state, &admission_control, id)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     let cloud_store = state.control.get_or_spawn(&user).await.mission_store;
     if let Some(response) = super::cloud_agents::http::follow_up(cloud_store, &req).await? {
         return Ok(response);
@@ -12225,6 +12231,11 @@ pub(super) async fn create_mission_inner(
         }
         cyber::program_for_model(mode, model_override.as_deref())
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        if matches!(remote_plan, Some(RemoteHarnessPlan::Codex { .. })) {
+            cyber::validate_remote(&state, mode, model_override.as_deref())
+                .await
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        }
     }
     if let Err(error) = control
         .cmd_tx
@@ -14691,6 +14702,9 @@ async fn submit_leased_remote_job(
     } else {
         cyber::Selection::default()
     };
+    if let RemoteHarnessPlan::Codex { model, .. } = plan {
+        cyber::validate_remote(state, cyber_selection.mode, Some(model)).await?;
+    }
     let mut project_skill_source = String::new();
     let prompt = match &mut resolved_plan {
         RemoteHarnessPlan::Codex { prompt, .. }
@@ -19129,6 +19143,9 @@ pub async fn resume_mission(
     machine_transfer::guard(&control.mission_store, mission_id)
         .await
         .map_err(internal_error)?;
+    cyber::validate_remote_mission(&state, &control, mission_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if mission_is_client_placed(&control, mission_id)
         .await
         .map_err(internal_error)?

@@ -1171,6 +1171,73 @@ fn parse_direct_model_entry(model: &str) -> Option<crate::provider_health::Chain
 
 /// Native harnesses send bare model IDs. Configured chains are resolved first;
 /// these protocol-specific fallbacks preserve the exact requested model.
+pub(crate) fn cyber_entry_supported(
+    entry: &crate::provider_health::ResolvedEntry,
+    model: &str,
+    cli_owned: bool,
+) -> bool {
+    entry.provider_id == "openai"
+        && entry.model_id == model.rsplit('/').next().unwrap_or(model)
+        && (entry
+            .api_key
+            .as_deref()
+            .is_some_and(|key| !key.trim().is_empty())
+            || (entry.has_oauth && !cli_owned))
+}
+
+/// Admission must use the same account/model expansion as the Responses proxy.
+/// Every fallback must preserve the explicit selection; never silently downgrade it.
+pub(crate) async fn validate_remote_cyber_route(
+    state: &super::routes::AppState,
+    model: &str,
+) -> Result<(), String> {
+    let mut accounts = super::ai_providers::read_standard_accounts(&state.config.working_dir);
+    if let Some(account) =
+        super::ai_providers::read_legacy_native_codex_account(&state.config.working_dir)
+    {
+        if !accounts.iter().any(|a| a.account_id == account.provider_id) {
+            accounts.push(crate::provider_health::StandardAccount {
+                account_id: account.provider_id,
+                provider_type: ProviderType::OpenAI,
+                api_key: None,
+                has_oauth: true,
+                base_url: None,
+                oauth_expires_at: Some(account.expires_at),
+            });
+        }
+    }
+    let entries = if let Some(id) = resolve_stored_chain_id(&state.chain_store, model).await {
+        state
+            .chain_store
+            .resolve_chain(&id, &state.ai_providers, &accounts, &state.health_tracker)
+            .await
+    } else if let Some(entry) = parse_native_model_entry(model, NativeProtocol::Responses) {
+        state
+            .chain_store
+            .resolve_entries(
+                &[entry],
+                &state.ai_providers,
+                &accounts,
+                &state.health_tracker,
+            )
+            .await
+    } else {
+        vec![]
+    };
+    if entries.is_empty()
+        || entries.iter().any(|entry| {
+            !cyber_entry_supported(
+                entry,
+                model,
+                super::oauth_owner::cli_proxy_owns(ProviderType::OpenAI),
+            )
+        })
+    {
+        return Err("unsupported_access_program: this remote Codex route cannot guarantee the selected Cyber program and model. Choose Automatic explicitly, or use a direct OpenAI route. No mission was launched.".into());
+    }
+    Ok(())
+}
+
 fn parse_native_model_entry(
     model: &str,
     protocol: NativeProtocol,
@@ -9415,5 +9482,29 @@ mod tests {
                 .as_deref(),
             Some("builtin/smart")
         );
+    }
+}
+
+#[cfg(test)]
+mod cyber_admission_tests {
+    use super::*;
+    #[test]
+    fn cyber_routes_reject_cli_proxy_and_fallback_model_changes() {
+        let mut entry = crate::provider_health::ResolvedEntry {
+            provider_id: "openai".into(),
+            model_id: "gpt-6.1-sol".into(),
+            account_id: uuid::Uuid::new_v4(),
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            subscription_key: None,
+        };
+        assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", true));
+        assert!(cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+        entry.api_key = Some("test-key".into());
+        assert!(cyber_entry_supported(&entry, "openai/gpt-6.1-sol", true));
+        assert!(!cyber_entry_supported(&entry, "builtin/smart", false));
+        entry.provider_id = "xai".into();
+        assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", false));
     }
 }
