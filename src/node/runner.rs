@@ -659,13 +659,11 @@ async fn run_supervised_command(
             if let Some(pid) = pid {
                 unsafe { libc::kill(-(pid as i32), libc::SIGTERM); }
             }
-            let observed_oom = scope_oom_killed(systemd_scope.as_ref()).await;
-            kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
+            let observed_oom = cleanup_and_observe_oom(systemd_scope.as_ref(), pid, &mut child).await;
             RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled"), observed_oom }
         }
         waited = child.wait() => {
-            let oom = scope_oom_killed(systemd_scope.as_ref()).await;
-            kill_contained_process(systemd_scope.as_ref(), pid, &mut child).await;
+            let oom = cleanup_and_observe_oom(systemd_scope.as_ref(), pid, &mut child).await;
             let code = waited?.code();
             if oom && code != Some(0) { RunOutcome::ExitedAfterChildOom(code) } else { RunOutcome::Exited(code) }
         }
@@ -1085,6 +1083,27 @@ async fn kill_contained_process(
     retry_process_cleanup(pid, child, || std::future::ready(true)).await;
 }
 
+/// Stop the whole process tree before diagnostics, retaining failed unit
+/// results until inspection. A diagnostic query never prolongs live writers.
+async fn cleanup_and_observe_oom(
+    _scope: Option<&SystemdScope>,
+    pid: Option<u32>,
+    child: &mut tokio::process::Child,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = _scope {
+        retry_process_cleanup(pid, child, || stop_systemd_scope_impl(scope, false)).await;
+        let oom = scope_oom_killed(Some(scope)).await;
+        while !stop_systemd_scope(scope).await {
+            tracing::warn!(unit = %scope.unit, "waiting for inspected scope retirement");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        return oom;
+    }
+    kill_contained_process(_scope, pid, child).await;
+    false
+}
+
 /// The job remains running (and keeps its capacity/ownership) until both the
 /// process group and containment scope have confirmed cleanup. Do not turn a
 /// failed stop request into a terminal execution response.
@@ -1122,6 +1141,11 @@ async fn retry_process_cleanup<F, Fut>(
 
 #[cfg(target_os = "linux")]
 async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
+    stop_systemd_scope_impl(scope, true).await
+}
+
+#[cfg(target_os = "linux")]
+async fn stop_systemd_scope_impl(scope: &SystemdScope, retire: bool) -> bool {
     let command = || {
         let mut command = tokio::process::Command::new("systemctl");
         command
@@ -1143,6 +1167,9 @@ async fn stop_systemd_scope(scope: &SystemdScope) -> bool {
     stop.arg("stop").arg(&scope.unit).stdout(Stdio::null());
     if matches!(tokio::time::timeout(KILL_GRACE, stop.status()).await, Ok(Ok(status)) if status.success())
     {
+        if !retire {
+            return true;
+        }
         // Failed transient scopes retain Result until it has been inspected.
         // Retire only this stopped unit after recording the outcome.
         let mut reset = command();
