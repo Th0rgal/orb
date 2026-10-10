@@ -71,6 +71,7 @@ pub struct JobRecord {
     /// JSON-encoded `Vec<ArtifactEntry>` recorded after a successful build
     /// job; `None` for raw commands and unfinished/failed jobs.
     pub artifacts_json: Option<String>,
+    pub cancellation: Option<crate::remote_node::JobCancellation>,
 }
 
 fn now_rfc3339() -> String {
@@ -108,6 +109,7 @@ impl JobStore {
             // Migration for jobs.db files created before artifacts shipped.
             // "duplicate column name" on already-migrated DBs is expected.
             let _ = conn.execute("ALTER TABLE jobs ADD COLUMN artifacts_json TEXT", []);
+            let _ = conn.execute("ALTER TABLE jobs ADD COLUMN cancellation_json TEXT", []);
             Ok(Self {
                 conn: Arc::new(Mutex::new(conn)),
             })
@@ -194,6 +196,25 @@ impl JobStore {
         .await
     }
 
+    /// First cause wins; repeated cancellation polls must not replace the
+    /// original actor/reason with the downstream generic "interrupted".
+    pub async fn record_cancellation(
+        &self,
+        id: Uuid,
+        actor: &str,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let value = serde_json::to_string(&crate::remote_node::JobCancellation {
+            actor: actor.into(),
+            reason: reason.chars().take(256).collect(),
+            requested_at: now_rfc3339(),
+        })?;
+        self.with_conn(move |conn| conn.execute(
+            "UPDATE jobs SET cancellation_json = ?2 WHERE id = ?1 AND cancellation_json IS NULL AND state IN ('queued','running','lost')",
+            params![id.to_string(), value],
+        ).map(|_| ())).await
+    }
+
     /// Atomically cancel a job only while it is queued. Running jobs are
     /// stopped by their cancellation token and finish through the runner.
     pub async fn cancel_if_queued(&self, id: Uuid) -> anyhow::Result<bool> {
@@ -268,7 +289,7 @@ impl JobStore {
         self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT id, mission_id, payload_json, state, exit_code, created_at,
-                        started_at, finished_at, log_path, error, artifacts_json
+                        started_at, finished_at, log_path, error, artifacts_json, cancellation_json
                  FROM jobs WHERE id = ?1",
                 params![id.to_string()],
                 row_to_record,
@@ -289,7 +310,7 @@ impl JobStore {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, mission_id, payload_json, state, exit_code, created_at,
-                        started_at, finished_at, log_path, error, artifacts_json
+                        started_at, finished_at, log_path, error, artifacts_json, cancellation_json
                  FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?1",
             )?;
             let rows = stmt.query_map(params![limit as i64], row_to_record)?;
@@ -319,12 +340,49 @@ fn row_to_record(row: &Row<'_>) -> rusqlite::Result<JobRecord> {
         log_path: row.get(8)?,
         error: row.get(9)?,
         artifacts_json: row.get(10)?,
+        cancellation: row
+            .get::<_, Option<String>>(11)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_cause_survives_finish_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        store
+            .create(id, Uuid::new_v4(), "{}".into(), "log".into())
+            .await
+            .unwrap();
+        store
+            .record_cancellation(id, "startup_watchdog", "No native activity")
+            .await
+            .unwrap();
+        store
+            .record_cancellation(id, "core", "interrupted")
+            .await
+            .unwrap();
+        store
+            .finish(id, JobState::Cancelled, None, Some("interrupted".into()))
+            .await
+            .unwrap();
+        drop(store);
+        let reopened = JobStore::open(dir.path()).await.unwrap();
+        let cause = reopened
+            .get(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cancellation
+            .unwrap();
+        assert_eq!(cause.actor, "startup_watchdog");
+        assert_eq!(cause.reason, "No native activity");
+    }
 
     #[tokio::test]
     async fn job_state_machine_create_run_succeed() {

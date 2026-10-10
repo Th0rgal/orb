@@ -51,6 +51,9 @@ fn accounts_of_backend(backend: &str) -> Option<(&'static str, &'static str)> {
         "claudecode" => Some(("anthropic", "Claude")),
         "codex" => Some(("openai", "Codex")),
         "antigravity" => Some(("google", "Antigravity")),
+        // OpenCode may route through multiple providers. Do not borrow an
+        // unrelated subscription account cooldown; use the reported reset.
+        "opencode" => Some(("opencode", "Provider")),
         _ => None,
     }
 }
@@ -450,7 +453,7 @@ pub(crate) fn attach_recovery(value: &mut serde_json::Value, wait: Option<&Remot
         "output_limit"
     } else if wait.limit == "Antigravity background task handoff" {
         "background"
-    } else if wait.limit.starts_with("Antigravity ") && !wait.limit.ends_with("limit") {
+    } else if is_transient_wait(&wait.limit) {
         "transient"
     } else {
         "quota"
@@ -584,6 +587,11 @@ pub(crate) fn sustained_recovery_progress(
             .is_some_and(|at| now.signed_duration_since(at) >= Duration::minutes(10))
 }
 
+fn is_transient_wait(limit: &str) -> bool {
+    limit == "Inference connection interrupted"
+        || (limit.starts_with("Antigravity ") && !limit.ends_with("limit"))
+}
+
 fn recovery_delay_secs(replays: u32, mission_id: Uuid) -> i64 {
     // Deterministic jitter survives restarts and spreads a fleet-wide outage.
     let base = (60_i64 * (1_i64 << replays.min(4))).min(600);
@@ -625,13 +633,31 @@ pub(crate) async fn plan_remote(
         ) {
             return None;
         }
-        let (provider, _) = accounts_of_backend(&mission.backend)?;
+        if mission
+            .scheduling
+            .deadline
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|deadline| deadline <= Utc::now())
+        {
+            return None;
+        }
         let replays = if sustained_progress {
             0
         } else {
             previous.as_ref().map_or(0, |wait| wait.replays)
         };
         let now = Utc::now();
+        let classified = super::remote_failure::classify(failure);
+        if matches!(
+            classified.kind,
+            super::remote_failure::FailureKind::Authentication
+                | super::remote_failure::FailureKind::ProviderPolicy
+                | super::remote_failure::FailureKind::Configuration
+                | super::remote_failure::FailureKind::Cancelled
+        ) {
+            return None;
+        }
         if mission.backend == "antigravity"
             && mission
                 .session_id
@@ -648,6 +674,24 @@ pub(crate) async fn plan_remote(
                 });
             }
         }
+        if classified.kind == super::remote_failure::FailureKind::Transport
+            && mission
+                .session_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+            && replays < MAX_REMOTE_REPLAYS
+        {
+            return Some(UsageLimitWait {
+                limit: "Inference connection interrupted".into(),
+                resume_at: now
+                    + Duration::seconds(
+                        recovery_delay_secs(replays, mission_id)
+                            .max(classified.retry_after_seconds.unwrap_or(0)),
+                    ),
+                announced: false,
+            });
+        }
+        let (provider, _) = accounts_of_backend(&mission.backend)?;
         let limits = account_limits::shared();
         remote_wait_for_failure(
             &mission.backend,
@@ -691,7 +735,7 @@ pub(crate) async fn plan_remote(
 
 /// What the operator reads under the failed remote job.
 pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> String {
-    if wait.limit.starts_with("Antigravity ") && !wait.limit.ends_with("limit") {
+    if is_transient_wait(&wait.limit) {
         return format!(
             "{}\n\n{} detected. This mission is waiting and its conversation will be resumed \
              on the node automatically at {}.",
@@ -720,7 +764,7 @@ pub(crate) fn remote_resume_prompt(limit: &str) -> String {
              into smaller steps. Do not restart completed work or duplicate running tasks."
         );
     }
-    if limit.starts_with("Antigravity ") && !limit.ends_with("limit") {
+    if is_transient_wait(limit) {
         return format!(
             "{RECOVERY_PROMPT_MARKER} {limit} stopped your previous turn. Resume your work where \
              it stopped, and check the state of anything you had started (including any \
@@ -871,7 +915,7 @@ mod tests {
         assert!(waits("claudecode", &limited(usage_limit)));
         assert!(waits("codex", &limited(usage_limit)));
         // Other backends keep failing.
-        assert!(!waits("opencode", &limited(usage_limit)));
+        assert!(waits("opencode", &limited(usage_limit)));
         assert!(!waits("gemini", &limited(usage_limit)));
         // Transient rate limits and overloads keep failing.
         assert!(!waits("claudecode", &limited("overloaded_error")));
@@ -1045,7 +1089,7 @@ mod tests {
             .await
             .is_none());
         // A backend that does not rotate accounts.
-        let other = active_mission(&store, "opencode").await;
+        let other = active_mission(&store, "grok").await;
         assert!(plan(&store, other.id, &usage_limit).await.is_none());
         // Already settled by something else.
         store
@@ -1416,6 +1460,53 @@ mod tests {
         assert!(prompt.contains("Antigravity interrupted turn stopped your previous turn"));
         assert!(prompt.contains("background tasks or systemd units"));
     }
+    #[tokio::test]
+    async fn opencode_gateway_retry_is_durable_fenced_and_respects_stops() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "opencode").await;
+        store
+            .update_mission_session_id(mission.id, "ses_existing", "opencode", None)
+            .await
+            .unwrap();
+        let error = r#"{"data":{"statusCode":502,"isRetryable":true,"responseHeaders":{"retry-after":"60"}}}"#;
+        let job = Uuid::new_v4();
+        let before = Utc::now();
+        let wait = plan_remote(dir.path(), &store, mission.id, false, error, job, false)
+            .await
+            .unwrap();
+        assert!(wait.resume_at >= before + Duration::seconds(60));
+        assert_eq!(wait.limit, "Inference connection interrupted");
+        assert_eq!(
+            plan_remote(dir.path(), &store, mission.id, false, error, job, false).await,
+            Some(wait.clone())
+        );
+        assert_eq!(
+            remote_wait(dir.path(), mission.id)
+                .await
+                .unwrap()
+                .failed_job_id,
+            Some(job)
+        );
+        let prompt = remote_resume_prompt(&wait.limit);
+        assert!(prompt.starts_with(RECOVERY_PROMPT_MARKER));
+        assert!(!prompt.contains("has now reset"));
+        store
+            .update_mission_status(mission.id, MissionStatus::Paused)
+            .await
+            .unwrap();
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            error,
+            Uuid::new_v4(),
+            false
+        )
+        .await
+        .is_none());
+    }
+
     #[test]
     fn transient_errors_are_distinct_from_quota_auth_and_operator_stops() {
         let prompt = remote_resume_prompt("Antigravity response truncated");
