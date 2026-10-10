@@ -66,6 +66,7 @@ pub(crate) fn classify(raw: &str) -> Failure {
         "unsupported model",
         "identity was not durably persisted",
         "invalid agent",
+        "requires --effort",
     ]
     .iter()
     .any(|s| lower.contains(s))

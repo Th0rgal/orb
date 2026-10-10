@@ -1325,8 +1325,6 @@ impl NativeGrokObserver {
         }) {
             self.stream.error = Some(cause);
         }
-        let failure =
-            super::remote_failure::classify(self.stream.error.as_deref().unwrap_or_default());
         let exit = status.exit_code;
         let succeeded = status.state == "succeeded" && exit.unwrap_or(0) == 0;
         let auth_required = self.stream.auth_required || exit == Some(MISSING_MANAGED_AUTH_EXIT);
@@ -1367,6 +1365,8 @@ impl NativeGrokObserver {
                 self.stream.error = Some("Vibe identity was not durably persisted".into());
             }
         }
+        let failure =
+            super::remote_failure::classify(self.stream.error.as_deref().unwrap_or_default());
         let success = succeeded
             && self
                 .stream

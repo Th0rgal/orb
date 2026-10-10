@@ -3245,11 +3245,11 @@ async fn remote_poll_loss_and_cancel_ack_retain_ownership_until_terminal_cleanup
             .status,
         MissionStatus::Active
     );
-    // A subsequent explicit pause must still cancel and preserve ownership
+    // A subsequent explicit stop must still cancel and preserve ownership
     // until confirmed terminal cleanup.
     h.control
         .mission_store
-        .update_mission_status(owner.id, MissionStatus::Paused)
+        .update_mission_status(owner.id, MissionStatus::Interrupted)
         .await
         .unwrap();
     phase.store(0, Ordering::SeqCst);
