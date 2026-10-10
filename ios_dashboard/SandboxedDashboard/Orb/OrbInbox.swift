@@ -2352,7 +2352,6 @@ struct OrbInboxView: View {
     }
 
     private func load(force: Bool) async {
-        await OrbSharedInboxState.shared.refresh()
         defer { loading = false }
         if missions.isEmpty, let cached = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
             OrbReadCache.seedFromGlobalMissions(cached.items)
@@ -2360,6 +2359,8 @@ struct OrbInboxView: View {
             seedCachedEvents(for: missions)
             actionableCount = unreadCount
         }
+        // Cached rows paint immediately even when shared Core state is offline.
+        await OrbSharedInboxState.shared.refresh()
         do {
             let raw = try await api.call("/api/control/missions?limit=100&all=true")
             OrbReadCache.seedFromGlobalMissions(raw.items)

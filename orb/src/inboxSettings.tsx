@@ -236,7 +236,11 @@ export function InboxSettings() {
 }
 
 export function applySharedInboxPreferences(prefs: unknown): void {
-  if (!prefs || typeof prefs !== "object") return;
+  if (prefs === undefined || prefs === null) {
+    writeInboxState("preferences", inboxConfig());
+    return;
+  }
+  if (typeof prefs !== "object") return;
   const p = prefs as Partial<InboxConfig>;
   if (typeof p.aiSummary !== "boolean" || typeof p.includeAutonomous !== "boolean" || typeof p.model !== "string" || !p.model.trim()) return;
   if (JSON.stringify(inboxConfig()) !== JSON.stringify({ includeAutonomous: p.includeAutonomous, aiSummary: p.aiSummary, model: p.model })) saveInboxConfig(p as InboxConfig, false);
