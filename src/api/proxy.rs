@@ -1228,6 +1228,29 @@ pub(crate) async fn validate_remote_cyber_route(
             });
         }
     }
+    // A healthy store account hides standard accounts until cooldown. Validate
+    // those possible fallbacks independently of one resolver snapshot.
+    if accounts
+        .iter()
+        .filter(|account| account.provider_type == ProviderType::OpenAI)
+        .any(|account| {
+            !cyber_entry_supported(
+                &crate::provider_health::ResolvedEntry {
+                    provider_id: "openai".into(),
+                    model_id: model.rsplit('/').next().unwrap_or(model).into(),
+                    account_id: account.account_id,
+                    api_key: account.api_key.clone(),
+                    has_oauth: account.has_oauth,
+                    base_url: account.base_url.clone(),
+                    subscription_key: None,
+                },
+                model,
+                super::oauth_owner::cli_proxy_owns(ProviderType::OpenAI),
+            )
+        })
+    {
+        return Err("unsupported_access_program: a configured fallback from standard accounts cannot preserve the selected Cyber program. Choose Automatic explicitly or a direct OpenAI route. No mission was launched.".into());
+    }
     // Cooldowns and quotas cannot make an incompatible configured fallback safe.
     // Check static model/provider choices, then expand accounts without transient health filtering.
     let unfiltered_health = crate::provider_health::ProviderHealthTracker::new();

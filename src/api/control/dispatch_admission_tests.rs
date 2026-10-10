@@ -12450,4 +12450,29 @@ async fn cyber_admission_checks_cooling_cli_owned_account_fallback() {
         .await
         .unwrap_err();
     assert!(error.contains("unsupported_access_program"));
+    assert!(h.state.ai_providers.delete(cli_id).await);
+    let standards = crate::api::ai_providers::read_standard_accounts(&h.state.config.working_dir);
+    let expanded = h
+        .state
+        .chain_store
+        .resolve_entries(
+            &[crate::provider_health::ChainEntry {
+                provider_id: "openai".into(),
+                model_id: "gpt-6.1-sol".into(),
+            }],
+            &h.state.ai_providers,
+            &standards,
+            &crate::provider_health::ProviderHealthTracker::new(),
+        )
+        .await;
+    assert_eq!(
+        expanded.len(),
+        1,
+        "healthy store account hides standard fallbacks"
+    );
+    assert_eq!(expanded[0].account_id, direct_id);
+    let error = cyber::validate_remote(&h.state, cyber::Mode::Standard, Some("gpt-6.1-sol"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("standard accounts"), "{error}");
 }
