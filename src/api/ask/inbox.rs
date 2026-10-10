@@ -117,7 +117,8 @@ fn snapshot(m: &Mission, events: &[StoredEvent]) -> (String, Vec<(String, Option
     let answers: Vec<_> = events
         .iter()
         .filter(|e| {
-            e.sequence > turn
+            last_user.is_some()
+                && e.sequence > turn
                 && matches!(
                     e.event_type.as_str(),
                     "assistant_message" | "assistant_message_canonical" | "error"
@@ -544,11 +545,31 @@ mod tests {
             role: "user".into(),
             content: "Now check the Android behavior.".into(),
         });
-        let new = snapshot(&mission, &[]).0;
+        let stale_event = StoredEvent {
+            id: 1,
+            mission_id: mission.id,
+            sequence: 1,
+            event_type: "assistant_message".into(),
+            timestamp: "2026-10-09T10:01:00Z".into(),
+            event_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            content: "Old event result from the preceding turn.".into(),
+            metadata: json!({}),
+        };
+        let new = snapshot(&mission, &[stale_event.clone()]).0;
+        assert!(!new.contains("Old event result"));
         assert!(!new.contains("Final limitation"));
         assert!(new.contains("Fix the search input safely."));
         assert!(new.contains("Now check the Android behavior."));
         assert_ne!(revision(&mission, &old), revision(&mission, &new));
+        mission.history.push(MissionHistoryEntry {
+            role: "assistant".into(),
+            content: "Fresh history response to the Android request.".into(),
+        });
+        let latest = snapshot(&mission, &[stale_event]).0;
+        assert!(latest.contains("Fresh history response"));
+        assert!(!latest.contains("Old event result"));
     }
     #[test]
     fn rejects_invented_sources_and_bounds_reply_context() {

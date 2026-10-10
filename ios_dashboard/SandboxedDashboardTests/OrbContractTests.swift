@@ -27,6 +27,21 @@ final class OrbContractTests: XCTestCase {
         store.markRead(row, syncBackend: false)
         XCTAssertFalse(store.isUnread(row: row))
     }
+    @MainActor func testUnreadReceiptSurvivesRestartAndClockSkew() throws {
+        let id = UUID().uuidString
+        let future = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        let row = OrbRow(.object(["id": .string(id), "status": .string("completed"), "updated_at": .string(future)]))
+        let store = OrbMissionUnreadStore.shared
+        store.markRead(row, syncBackend: false)
+        store.markUnread(id: id, updatedAt: future, syncBackend: false)
+        XCTAssertTrue(store.isUnread(row: row))
+        let key = OrbSharedInboxState.outboxKey(OrbInboxAccount.current)
+        let previous = UserDefaults.standard.data(forKey: key)
+        defer { UserDefaults.standard.set(previous, forKey: key) }
+        let pending = ["seen/" + id: OrbJSON.object(["stamp": .number(-Date().addingTimeInterval(7200).timeIntervalSince1970 * 1000)])]
+        UserDefaults.standard.set(try JSONEncoder().encode(pending), forKey: key)
+        XCTAssertEqual(OrbSharedInboxState().unread(row), true)
+    }
     func testInboxAutonomousScopeIsOptIn() {
         let child = OrbRow(.object(["id": .string("child"), "status": .string("failed"), "parent_mission_id": .string("parent")]))
         let controller = OrbRow(.object(["id": .string("cron"), "status": .string("completed"), "tags": .array([.string("origin:hermes")])]))

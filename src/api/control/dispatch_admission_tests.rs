@@ -10903,6 +10903,18 @@ async fn host_followup_queue_persists_fifo_deduplicates_and_cancels_under_pr_con
     )
     .await
     .unwrap();
+    wait_until("cancelled queue entry persistence", 10, || async {
+        let snapshot: Vec<QueuedMessage> = serde_json::from_str(
+            &h.control
+                .mission_store
+                .load_control_queue(&h.user.id)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        !snapshot.iter().any(|m| m.id == first)
+    })
+    .await;
     let snapshot: Vec<QueuedMessage> = serde_json::from_str(
         &h.control
             .mission_store

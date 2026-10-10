@@ -38,3 +38,14 @@ it("retries an unsent local receipt before importing older server state", async 
   await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
   expect(fetcher.mock.calls[1][1].method).toBe("PUT");
 });
+
+it("does not let a deleted mission receipt block later shared-state reads", async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 404 })).mockResolvedValue(new Response(JSON.stringify({ preferences: { aiSummary: false, includeAutonomous: true, model: "builtin/fast" } })));
+  vi.stubGlobal("fetch", fetcher);
+  const { readInboxState, writeInboxState } = await import("../src/inboxState");
+  writeInboxState("seen/deleted-mission", { stamp: 123 });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect((await readInboxState())?.preferences?.model).toBe("builtin/fast");
+  expect(fetcher.mock.calls[1][1].method).toBeUndefined();
+});

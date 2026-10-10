@@ -31,11 +31,27 @@ final class OrbSharedInboxState {
     private(set) var seen: [String: Double] = [:]
     var applying = false
     private var account: String { OrbInboxAccount.current }
+    static func outboxKey(_ account: String) -> String {
+        "orb.inbox.outbox.v1:" + SHA256.hash(data: Data(account.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    private func persistOutbox() {
+        if let data = try? JSONEncoder().encode(outbox) { UserDefaults.standard.set(data, forKey: Self.outboxKey(scope)) }
+    }
+    private func ensureScope() {
+        let current = account
+        guard scope != current else { return }
+        scope = current; seen = [:]
+        outbox = UserDefaults.standard.data(forKey: Self.outboxKey(current)).flatMap { try? JSONDecoder().decode([String: OrbJSON].self, from: $0) } ?? [:]
+        for (path, body) in outbox where path.hasPrefix("seen/") {
+            if let stamp = body["stamp"].doubleValue { seen[String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))] = stamp }
+        }
+    }
     func write(_ path: String, _ body: OrbJSON) {
         if applying { return }
         let expected = account
-        if scope != expected { scope = expected; seen = [:]; outbox = [:] }
+        ensureScope()
         outbox[path] = body
+        persistOutbox()
         mutation += 1; pending += 1
         let previous = tail
         tail = Task {
@@ -43,14 +59,19 @@ final class OrbSharedInboxState {
             if expected == account {
                 do {
                     _ = try await OrbCore.shared.call("/api/control/inbox-state/" + path, method: "PUT", body: body)
-                    if expected == account && outbox[path] == body { outbox.removeValue(forKey: path) }
-                } catch { /* Retry before the next shared-state read. */ }
+                    if expected == account && outbox[path] == body { outbox.removeValue(forKey: path); persistOutbox() }
+                } catch {
+                    if let http = error as? OrbHTTPError, http.status == 404, path.hasPrefix("seen/"), expected == account, outbox[path] == body {
+                        outbox.removeValue(forKey: path); persistOutbox()
+                    }
+                    // Other failures retry before the next shared-state read.
+                }
             }
             pending -= 1
         }
     }
     @discardableResult func writeSeen(_ id: String, stamp: Double, syncBackend: Bool = true) -> Bool {
-        if scope != account { scope = account; seen = [:]; outbox = [:] }
+        ensureScope()
         let rounded = stamp.rounded(.down)
         let changed = seen[id] != rounded
         seen[id] = rounded
@@ -62,6 +83,7 @@ final class OrbSharedInboxState {
         write("preferences", .object(["aiSummary": .bool(p.aiSummary), "includeAutonomous": .bool(p.includeAutonomous), "model": .string(p.model)]))
     }
     func unread(_ row: OrbRow) -> Bool? {
+        ensureScope()
         guard scope == account, let stamp = seen[row.id] else { return nil }
         let date = ISO8601DateFormatter(); date.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let turn = (date.date(from: row.updatedAt) ?? ISO8601DateFormatter().date(from: row.updatedAt))?.timeIntervalSince1970 ?? 0
@@ -70,7 +92,7 @@ final class OrbSharedInboxState {
     }
     func refresh() async {
         if pending > 0 { return }
-        if scope != account { outbox = [:] }
+        ensureScope()
         if !outbox.isEmpty {
             for (path, body) in outbox { write(path, body) }
             return
@@ -476,9 +498,9 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
         }
     }
 
-    func markUnread(id: String, syncBackend: Bool = true) {
+    func markUnread(id: String, updatedAt: String? = nil, syncBackend: Bool = true) {
         guard !id.isEmpty else { return }
-        OrbSharedInboxState.shared.writeSeen(id, stamp: -Date().timeIntervalSince1970 * 1000, syncBackend: syncBackend)
+        OrbSharedInboxState.shared.writeSeen(id, stamp: -max(Date().timeIntervalSince1970, inboxTimestamp(updatedAt ?? "") ?? 0) * 1000, syncBackend: syncBackend)
         version += 1
     }
 
@@ -486,7 +508,7 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
         if isUnread(row: row) {
             markRead(row)
         } else {
-            markUnread(id: row.id)
+            markUnread(id: row.id, updatedAt: row.updatedAt)
         }
     }
 
@@ -2470,7 +2492,7 @@ struct OrbInboxView: View {
         withAnimation(.snappy(duration: 0.22)) {
             undoItem = nil
             dismissedIDs.remove(last.id)
-            unreadStore.markUnread(id: last.id)
+            unreadStore.markUnread(id: last.id, updatedAt: missions.first(where: { $0.id == last.id })?.updatedAt)
         }
         actionableCount = unreadCount
         do {

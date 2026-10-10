@@ -97,30 +97,48 @@ object OrbSharedInboxState {
     private val seen = mutableMapOf<String, Long>()
     var applying = false
     private fun account() = inboxAccountScope(OrbCore.shared.baseURL, OrbCore.shared.token)
+    private var persistence: SharedPreferences? = null
+    fun init(context: Context) { persistence = context.applicationContext.getSharedPreferences("orb_inbox_outbox", Context.MODE_PRIVATE) }
+    private fun diskKey() = java.security.MessageDigest.getInstance("SHA-256").digest(scope.toByteArray()).joinToString("") { "%02x".format(it) }
+    private fun persistOutbox() { persistence?.edit()?.putString(diskKey(), OrbJSON.stringify(outbox))?.commit() }
+    private fun ensureScope() {
+        val current = account()
+        if (scope == current) return
+        scope = current; seen.clear(); outbox.clear()
+        OrbJSON.dict(OrbJSON.parse(persistence?.getString(diskKey(), null) ?: "{}"))?.forEach { (path, body) -> if (body != null) outbox[path] = body }
+        for ((path, body) in outbox) if (path.startsWith("seen/")) {
+            val stamp = (body as? Map<*, *>)?.get("stamp") as? Number
+            if (stamp != null) seen[java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8")] = stamp.toLong()
+        }
+    }
     fun write(path: String, body: Any) {
         if (applying) return
         val core = OrbCore.shared
         val expected = account()
-        if (scope != expected) { scope = expected; seen.clear(); outbox.clear() }
+        ensureScope()
         outbox[path] = body
+        persistOutbox()
         mutation++; pending++
         val previous = tail
         tail = core.scope.launch {
             previous?.join()
             if (expected == account()) runCatching {
                 core.request("/api/control/inbox-state/$path", method = "PUT", body = body)
-                if (expected == account() && outbox[path] == body) outbox.remove(path)
+                if (expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
+            }.onFailure { error ->
+                if ((error as? OrbError)?.status == 404 && path.startsWith("seen/") && expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
             }
             pending--
         }
     }
     fun writeSeen(id: String, stamp: Long) {
-        if (scope != account()) { scope = account(); seen.clear(); outbox.clear() }
+        ensureScope()
         seen[id] = stamp
         write("seen/" + OrbCore.shared.encodeComponent(id), mapOf("stamp" to stamp))
     }
     fun writePreferences() = write("preferences", mapOf("aiSummary" to OrbInboxSettings.aiSummary, "includeAutonomous" to OrbInboxSettings.includeAutonomous, "model" to OrbInboxSettings.model))
     fun unread(mission: OrbRow): Boolean? {
+        ensureScope()
         if (scope != account()) return null
         val stamp = seen[mission.id] ?: return null
         val turn = runCatching { Instant.parse(mission.str("updated_at", "created_at") ?: "").toEpochMilli() }.getOrDefault(0)
@@ -128,7 +146,7 @@ object OrbSharedInboxState {
     }
     suspend fun refresh() {
         if (pending > 0) return
-        if (scope != account()) outbox.clear()
+        ensureScope()
         if (outbox.isNotEmpty()) { for ((path, body) in outbox.toMap()) write(path, body); return }
         val expected = account(); val serial = mutation
         val raw = runCatching { OrbCore.shared.request("/api/control/inbox-state") as? Map<*, *> }.getOrNull() ?: return

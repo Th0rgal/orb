@@ -30,7 +30,9 @@ export function writeInboxState(path: string, body: unknown): void {
       method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify(body), signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) throw new Error("Inbox state write failed");
+    // Deleted or no-longer-accessible missions cannot receive a read receipt.
+    // Drop only that terminal receipt; retain preferences and transient failures.
+    if (!response.ok && !(response.status === 404 && path.startsWith("seen/"))) throw new Error("Inbox state write failed");
     if (loadOutbox() === key && outbox[path]?.serial === serial) { delete outbox[path]; persist(); }
   }).catch(() => {}).finally(() => { pending--; });
 }

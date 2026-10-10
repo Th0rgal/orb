@@ -548,7 +548,7 @@ object OrbReadCache {
     }
 }
 
-class OrbError(override val message: String) : Exception(message)
+class OrbError(override val message: String, val status: Int? = null) : Exception(message)
 
 object OrbKeychain {
     private const val PREFS_NAME = "orb_secure_store"
@@ -699,6 +699,7 @@ class OrbCore private constructor(context: Context) {
 
     init {
         OrbDisk.init(context)
+        OrbSharedInboxState.init(context)
         OrbKeychain.init(context)
         val savedBase = prefs.getString(BASE_URL_KEY, null) ?: ""
         val cleanBase = savedBase.trim().trimEnd('/')
@@ -1087,7 +1088,7 @@ class OrbCore private constructor(context: Context) {
             val message = OrbJSON.str(parsed, "error", "message", "detail")
                 ?: if (raw.isEmpty()) "HTTP $code" else raw.take(240)
             _lastErrorLog.value = "$method $path -> HTTP $code\n$raw"
-            throw OrbError(message)
+            throw OrbError(message, status = code)
         }
         if (bytes.isEmpty()) return@withContext emptyMap<String, Any?>()
         OrbJSON.parse(bytes) ?: emptyMap<String, Any?>()
