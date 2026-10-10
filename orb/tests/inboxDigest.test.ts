@@ -101,7 +101,7 @@ describe("structured inbox digests", () => {
   it("offers current context only for the same timestamp and selected model", async () => {
     const { parseDigestJson, storeInboxDigest, getCachedInboxDigest, getCurrentInboxDigest } = await import("../src/inboxDigest");
     const digest = parseDigestJson(response(), 123, "resolved/model", snapshot)!;
-    storeInboxDigest("mission", 123, "builtin/smart", digest);
+    storeInboxDigest("mission", 123, "builtin/smart", { ...digest, sourceRevision: "rev1", sourceUpdatedAt: new Date(123).toISOString() });
     expect(getCurrentInboxDigest("mission", 123)?.decision).toContain("Choose a browser");
     expect(getCurrentInboxDigest("mission", 124)).toBeUndefined();
     expect(getCurrentInboxDigest("mission", 123, "different/model")).toBeUndefined();
@@ -121,10 +121,10 @@ describe("structured inbox digests", () => {
     expect(getCachedInboxDigest("old-v5", 123)?.decision).toBeUndefined();
     expect(getCurrentInboxDigest("old-v5", 123)).toBeUndefined();
   });
-  it("refreshes legacy cache through the unchanged endpoint and reuses the current result", async () => {
+  it("refreshes legacy cache through the shared endpoint and reuses the current result", async () => {
     const { parseDigestJson, storeInboxDigest, requestInboxDigest, getCurrentInboxDigest } = await import("../src/inboxDigest");
     storeInboxDigest("mission", 123, "builtin/smart", parseDigestJson('{"outcome":"Old overview"}', 123)!);
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(`data: ${JSON.stringify({ type: "done", answer: response() })}\n\n`));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ...JSON.parse(response()), sourceRevision: "rev1", sourceUpdatedAt: "2026-10-09", model: "builtin/smart" })));
     vi.stubGlobal("fetch", fetchMock);
     const mission: Mission = { id: "mission", title: "Fix search", status: "completed", created_at: "2026-10-09", updated_at: "2026-10-09",
       history: [{ role: "user", content: "Fix the search input, but do not publish it." },
@@ -132,10 +132,9 @@ describe("structured inbox digests", () => {
     };
     requestInboxDigest(mission, undefined, 123);
     await vi.waitFor(() => expect(getCurrentInboxDigest("mission", 123)?.schemaVersion).toBe(7));
-    expect(fetchMock.mock.calls[0][0]).toContain("/api/control/missions/mission/btw");
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/control/missions/mission/inbox-digest");
     const request = JSON.parse(fetchMock.mock.calls[0][1]!.body as string);
-    expect(request.question).toContain("Do not generate a title");
-    expect(request.question).toContain("never actions");
+    expect(request).toEqual({ model: "builtin/smart" });
     requestInboxDigest(mission, undefined, 123);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

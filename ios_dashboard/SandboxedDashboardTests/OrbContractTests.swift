@@ -2,6 +2,16 @@ import XCTest
 @testable import sandboxed_sh
 
 final class OrbContractTests: XCTestCase {
+    func testInboxAutonomousScopeIsOptIn() {
+        let child = OrbRow(.object(["id": .string("child"), "status": .string("failed"), "parent_mission_id": .string("parent")]))
+        let controller = OrbRow(.object(["id": .string("cron"), "status": .string("completed"), "tags": .array([.string("origin:hermes")])]))
+        let human = OrbRow(.object(["id": .string("human"), "status": .string("completed")]))
+        XCTAssertTrue(OrbInboxModel.isSubagent(row: child))
+        XCTAssertTrue(OrbInboxModel.isSubagent(row: controller))
+        XCTAssertFalse(OrbInboxModel.isSubagent(row: human))
+        XCTAssertFalse(OrbInboxModel.isSubagent(row: child, includeAutonomous: true))
+        XCTAssertEqual(OrbInboxModel.classify(row: child, interaction: nil), .hidden)
+    }
     @MainActor func testReadCacheCoalescesAndInvalidates() async throws {
         let key = "test-cache:" + UUID().uuidString
         defer { OrbDisk.remove(key) }

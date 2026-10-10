@@ -1,4 +1,85 @@
 import SwiftUI
+import CryptoKit
+
+@MainActor
+final class OrbSharedInboxState {
+    static let shared = OrbSharedInboxState()
+    private var mutation = 0
+    private var pending = 0
+    private var tail: Task<Void, Never>?
+    private var scope = ""
+    private var outbox: [String: OrbJSON] = [:]
+    private(set) var seen: [String: Double] = [:]
+    var applying = false
+    private var account: String { OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "") }
+    func write(_ path: String, _ body: OrbJSON) {
+        if applying { return }
+        let expected = account
+        if scope != expected { scope = expected; seen = [:]; outbox = [:] }
+        outbox[path] = body
+        mutation += 1; pending += 1
+        let previous = tail
+        tail = Task {
+            await previous?.value
+            if expected == account {
+                do {
+                    _ = try await OrbCore.shared.call("/api/control/inbox-state/" + path, method: "PUT", body: body)
+                    if expected == account && outbox[path] == body { outbox.removeValue(forKey: path) }
+                } catch { /* Retry before the next shared-state read. */ }
+            }
+            pending -= 1
+        }
+    }
+    func writeSeen(_ id: String, stamp: Double) {
+        if scope != account { scope = account; seen = [:]; outbox = [:] }
+        seen[id] = stamp
+        write("seen/" + OrbCore.escape(id), .object(["stamp": .number(stamp.rounded(.down))]))
+    }
+    func writePreferences() {
+        let p = OrbInboxSettings.shared
+        write("preferences", .object(["aiSummary": .bool(p.aiSummary), "includeAutonomous": .bool(p.includeAutonomous), "model": .string(p.model)]))
+    }
+    func unread(_ row: OrbRow) -> Bool? {
+        guard scope == account, let stamp = seen[row.id] else { return nil }
+        let date = ISO8601DateFormatter(); date.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let turn = (date.date(from: row.updatedAt) ?? ISO8601DateFormatter().date(from: row.updatedAt))?.timeIntervalSince1970 ?? 0
+        if stamp < 0 { return turn * 1000 <= abs(stamp) + 2000 ? true : nil }
+        return turn * 1000 <= stamp + 2000 ? false : nil
+    }
+    func refresh() async {
+        if pending > 0 { return }
+        if scope != account { outbox = [:] }
+        if !outbox.isEmpty {
+            for (path, body) in outbox { write(path, body) }
+            return
+        }
+        let expected = account, serial = mutation
+        guard let raw = try? await OrbCore.shared.call("/api/control/inbox-state"), expected == account, serial == mutation else { return }
+        let changedAccount = scope != expected
+        if changedAccount { seen = [:]; scope = expected }
+        if case let .object(values) = raw {
+            for (key, value) in values where key.hasPrefix("seen:") { if let n = value.doubleValue { seen[String(key.dropFirst(5))] = n } }
+        }
+        applying = true
+        let prefs = raw["preferences"]
+        if changedAccount && prefs["model"].text.isEmpty {
+            let p = OrbInboxSettings.shared; p.aiSummary = true; p.includeAutonomous = false; p.model = OrbInboxSettings.defaultModel
+        }
+        if !prefs["model"].text.isEmpty {
+            let p = OrbInboxSettings.shared
+            p.aiSummary = prefs["aiSummary"].flag
+            p.includeAutonomous = prefs["includeAutonomous"].flag
+            p.model = prefs["model"].text
+        }
+        applying = false
+        OrbMissionUnreadStore.shared.sharedStateChanged()
+    }
+}
+
+private func inboxTimestamp(_ text: String) -> Double? {
+    let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return (fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text))?.timeIntervalSince1970
+}
 
 struct OrbInboxModelPreset: Identifiable, Equatable, Sendable {
     let id: String
@@ -6,6 +87,7 @@ struct OrbInboxModelPreset: Identifiable, Equatable, Sendable {
     let subtitle: String
 }
 
+@MainActor
 @Observable
 final class OrbInboxSettings: @unchecked Sendable {
     static let shared = OrbInboxSettings()
@@ -37,7 +119,11 @@ final class OrbInboxSettings: @unchecked Sendable {
         didSet {
             UserDefaults.standard.set(aiSummary, forKey: aiSummaryKey)
             version += 1
+            if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
         }
+    }
+    var includeAutonomous: Bool = UserDefaults.standard.bool(forKey: "orb.inbox.includeAutonomous") {
+        didSet { UserDefaults.standard.set(includeAutonomous, forKey: "orb.inbox.includeAutonomous"); version += 1; if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } } }
     }
     var model: String {
         didSet {
@@ -49,6 +135,7 @@ final class OrbInboxSettings: @unchecked Sendable {
             }
             UserDefaults.standard.set(resolved, forKey: modelKey)
             version += 1
+            if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
         }
     }
 
@@ -69,6 +156,19 @@ struct OrbInboxDigest: Codable, Equatable, Sendable {
     let verdict: String
     let model: String
     let updatedAt: String
+    var schemaVersion: Int? = nil
+    var context: String? = nil
+    var contextDetails: String? = nil
+    var unresolved: String? = nil
+    var decision: String? = nil
+    var suggestions: [String]? = nil
+    var sources: [OrbInboxSource]? = nil
+    var sourceUpdatedAt: String? = nil
+    var sourceRevision: String? = nil
+}
+struct OrbInboxSource: Codable, Equatable, Sendable {
+    let quote: String
+    var eventSequence: Int? = nil
 }
 
 @MainActor
@@ -76,7 +176,7 @@ struct OrbInboxDigest: Codable, Equatable, Sendable {
 final class OrbInboxDigestStore {
     static let shared = OrbInboxDigestStore()
 
-    private let diskKey = "inbox:digests:v4"
+    private let diskKey = "inbox:digests:v7"
     private let maxConcurrent = 3
     private(set) var version = 0
     private var cache: [String: OrbInboxDigest] = [:]
@@ -85,26 +185,15 @@ final class OrbInboxDigestStore {
     private var activeCount = 0
     private var queue: [(priority: Int, work: () async -> Void)] = []
 
-    private static let digestPrompt = [
-        "Generate a Google AI Overview-style summary of this coding agent conversation turn for the operator's Inbox.",
-        "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
-        #"{"task":"<concise 4-10 word summary of the user's latest follow-up request, or empty string if there was no follow-up or it repeats the mission title>","outcome":"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>","verdict":"succeeded|failed|waiting|needs_input"}"#,
-        "Rules:",
-        "- Write in the same language as the conversation.",
-        #"- If there is no follow-up request different from the mission title, or if the prompt was an automatic system resume, set "task" to "". Never write generic filler like "Execute the mission goal"."#,
-        #"- Write "outcome" like an executive AI Overview (2-3 clear sentences, 30-65 words): state what was accomplished or investigated, cite concrete details (commit hashes, PR numbers, files edited, test counts, root cause), and state the final status or specific blocker."#,
-        #"- Never write vague boilerplate like "Mission stopped and is currently blocked" or "Finished the task"."#,
-        "- Verdict must be one of: succeeded, failed, waiting, needs_input.",
-    ].joined(separator: "\n")
-
     private init() {
         if let stored = OrbDisk.read(diskKey, as: [String: OrbInboxDigest].self) {
             cache = stored
         }
     }
 
+    private var scope: String { SHA256.hash(data: Data((OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "")).utf8)).map { String(format: "%02x", $0) }.joined() }
     private func cacheKey(missionID: String, updatedAt: String, model: String) -> String {
-        "\(missionID)|\(updatedAt)|\(model)"
+        "\(scope)|\(missionID)|\(updatedAt)|\(model)"
     }
 
     func get(row: OrbRow) -> OrbInboxDigest? {
@@ -113,8 +202,8 @@ final class OrbInboxDigestStore {
         guard settings.aiSummary else { return nil }
         let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: settings.model)
         if let exact = cache[key] { return exact }
-        let prefix = "\(row.id)|\(row.updatedAt)|"
-        return cache.first(where: { $0.key.hasPrefix(prefix) })?.value
+        let prefix = "\(scope)|\(row.id)|"
+        return cache.filter { $0.key.hasPrefix(prefix) && $0.key.hasSuffix("|\(settings.model)") }.values.max { $0.updatedAt < $1.updatedAt }
     }
 
     func request(row: OrbRow, events: [StoredEvent], priority: Int = 10) {
@@ -128,15 +217,18 @@ final class OrbInboxDigestStore {
         if cache[key] != nil || inFlight.contains(key) { return }
         if let failDate = failedAt[key], Date().timeIntervalSince(failDate) < 45 { return }
 
-        let snapshot = Self.buildSnapshot(row: row, events: events)
-        guard snapshot.count >= 24 else { return }
+        let endpoint = OrbCore.shared.endpoint
+        let account = APIService.shared.authToken
 
         inFlight.insert(key)
+        version += 1
         queue.append((priority: priority, work: { [weak self] in
             guard let self else { return }
-            defer { self.inFlight.remove(key) }
+            defer { self.inFlight.remove(key); self.version += 1 }
             do {
-                let answer = try await Self.fetchBtw(missionID: row.id, context: snapshot, model: model)
+                guard OrbCore.shared.endpoint == endpoint, APIService.shared.authToken == account else { return }
+                let answer = try await Self.fetchShared(missionID: row.id, model: model)
+                guard OrbCore.shared.endpoint == endpoint, APIService.shared.authToken == account else { return }
                 if let digest = Self.parseDigest(answer, updatedAt: row.updatedAt, model: model) {
                     self.cache[key] = digest
                     self.version += 1
@@ -164,116 +256,25 @@ final class OrbInboxDigestStore {
         }
     }
 
-    private static func buildSnapshot(row: OrbRow, events: [StoredEvent]) -> String {
-        var lines: [String] = []
-        lines.append("Mission title: \(row.name)")
-        lines.append("Mission status: \(row.state)")
-        let term = row.raw["terminal_reason"].text
-        if !term.isEmpty { lines.append("Terminal reason: \(term)") }
-        let statusMsg = row.raw["status_message"].text
-        if !statusMsg.isEmpty { lines.append("Status message: \(statusMsg)") }
-        let remoteErr = row.raw["remote_job"]["error"].text
-        if !remoteErr.isEmpty { lines.append("Remote error: \(remoteErr)") }
-
-        var lastUser = ""
-        var assistantBlocks: [String] = []
-        var lastError = ""
-
-        for event in events {
-            if event.eventType == "user_message" {
-                let text = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty && !OrbInboxModel.isSyntheticUserMessage(text) {
-                    lastUser = text
-                }
-            } else if event.eventType == "assistant_message" || event.eventType == "assistant_message_canonical" {
-                let clean = OrbInboxModel.humanizeStatusText(event.content)
-                if !clean.isEmpty { assistantBlocks.append(clean) }
-            } else if event.eventType == "error" {
-                let clean = OrbInboxModel.humanizeStatusText(event.content)
-                if clean.count >= 220 { assistantBlocks.append(clean) }
-                else if !clean.isEmpty { lastError = clean }
-            }
-        }
-
-        for entry in row.raw["history"].items.reversed() {
-            let role = entry["role"].text
-            let content = entry["content"].text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if lastUser.isEmpty, role == "user", !content.isEmpty, !OrbInboxModel.isSyntheticUserMessage(content) {
-                lastUser = content
-            }
-            if role == "assistant", !content.isEmpty {
-                let clean = OrbInboxModel.humanizeStatusText(content)
-                if !clean.isEmpty && !assistantBlocks.contains(clean) {
-                    assistantBlocks.append(clean)
-                    break
-                }
-            }
-        }
-
-        if !lastUser.isEmpty { lines.append("Latest user request:\n\(String(lastUser.prefix(700)))") }
-        if let receipt = OrbInboxModel.extractWorkReceipt(events: events) {
-            lines.append("Tools executed: \(receipt)")
-        }
-        if !lastError.isEmpty { lines.append("Recorded error:\n\(String(lastError.prefix(500)))") }
-        if !assistantBlocks.isEmpty {
-            let joined = assistantBlocks.suffix(3).joined(separator: "\n\n")
-            lines.append("Latest agent response:\n\(String(joined.suffix(2400)))")
-        }
-        return lines.joined(separator: "\n\n")
+    func summaryState(row: OrbRow) -> String? {
+        guard OrbInboxSettings.shared.aiSummary else { return nil }
+        let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: OrbInboxSettings.shared.model)
+        if inFlight.contains(key) { return "Generating summary…" }
+        if failedAt[key] != nil { return "Summary unavailable" }
+        return nil
     }
 
-    private static func fetchBtw(missionID: String, context: String, model: String) async throws -> String {
-        let endpoint = OrbCore.shared.endpoint
-        guard let url = URL(string: "\(endpoint)/api/control/missions/\(OrbCore.escape(missionID))/btw") else {
-            throw URLError(.badURL)
-        }
-        var bodyObj: [String: OrbJSON] = [
-            "question": .string(digestPrompt),
-            "context": .string(context),
-        ]
-        if !model.isEmpty && model != OrbInboxSettings.defaultModel {
-            bodyObj["model"] = .string(model)
-        }
+    private static func fetchShared(missionID: String, model: String) async throws -> String {
+        guard let url = URL(string: "\(OrbCore.shared.endpoint)/api/control/missions/\(OrbCore.escape(missionID))/inbox-digest") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 35
+        request.timeoutInterval = 100
         request.setValue("Bearer \(APIService.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
-        request.httpBody = try JSONEncoder().encode(OrbJSON.object(bodyObj))
-
+        request.httpBody = try JSONEncoder().encode(OrbJSON.object(["model": .string(model)]))
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        if http.statusCode == 422 && bodyObj["model"] != nil {
-            bodyObj.removeValue(forKey: "model")
-            request.httpBody = try JSONEncoder().encode(OrbJSON.object(bodyObj))
-            let (retryData, retryResp) = try await URLSession.shared.data(for: request)
-            guard let retryHttp = retryResp as? HTTPURLResponse, (200..<300).contains(retryHttp.statusCode) else {
-                throw URLError(.badServerResponse)
-            }
-            return extractBtwAnswer(String(data: retryData, encoding: .utf8) ?? "")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            throw OrbHTTPError(status: http.statusCode, detail: "BTW failed")
-        }
-        return extractBtwAnswer(String(data: data, encoding: .utf8) ?? "")
-    }
-
-    private static func extractBtwAnswer(_ raw: String) -> String {
-        var deltaText = ""
-        for line in raw.split(separator: "\n", omittingEmptySubsequences: true) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.hasPrefix("data:") else { continue }
-            let payload = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-            guard !payload.isEmpty, payload != "[DONE]",
-                  let data = payload.data(using: .utf8),
-                  let json = try? JSONDecoder().decode(OrbJSON.self, from: data) else { continue }
-            let d = json["delta"].text
-            let a = json["answer"].text
-            if !d.isEmpty { deltaText += d }
-            else if !a.isEmpty && deltaText.isEmpty { deltaText = a }
-        }
-        return deltaText.isEmpty ? raw : deltaText
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { throw URLError(.badServerResponse) }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     private static func parseDigest(_ raw: String, updatedAt: String, model: String) -> OrbInboxDigest? {
@@ -284,13 +285,15 @@ final class OrbInboxDigestStore {
         let slice = String(trimmed[start...end])
         guard let data = slice.data(using: .utf8),
               let json = try? JSONDecoder().decode(OrbJSON.self, from: data) else { return nil }
-        let task = json["task"].text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let outcomeRaw = !json["outcome"].text.isEmpty ? json["outcome"].text : json["overview"].text
-        let outcome = outcomeRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !task.isEmpty || !outcome.isEmpty else { return nil }
-        let rawVerdict = json["verdict"].text.lowercased()
-        let verdict = ["succeeded", "failed", "waiting", "needs_input"].contains(rawVerdict) ? rawVerdict : "succeeded"
-        return OrbInboxDigest(task: task, outcome: outcome, verdict: verdict, model: model, updatedAt: updatedAt)
+        guard json["schemaVersion"].doubleValue == 7, !json["outcome"].text.isEmpty, !json["sourceRevision"].text.isEmpty else { return nil }
+        let sources = json["sources"].items.compactMap { source -> OrbInboxSource? in
+            guard !source["quote"].text.isEmpty else { return nil }
+            return OrbInboxSource(quote: source["quote"].text, eventSequence: source["eventSequence"].doubleValue.map { Int($0) })
+        }
+        guard !sources.isEmpty, let sourceTime = inboxTimestamp(json["sourceUpdatedAt"].text), sourceTime + 2 >= (inboxTimestamp(updatedAt) ?? 0) else { return nil }
+        return OrbInboxDigest(task: "", outcome: json["outcome"].text, verdict: "waiting", model: json["model"].text.isEmpty ? model : json["model"].text, updatedAt: updatedAt,
+            schemaVersion: 7, context: json["context"].text, contextDetails: json["contextDetails"].text, unresolved: json["unresolved"].text, decision: json["decision"].text,
+            suggestions: json["suggestions"].items.map(\.text), sources: sources, sourceUpdatedAt: json["sourceUpdatedAt"].text, sourceRevision: json["sourceRevision"].text)
     }
 }
 
@@ -305,6 +308,8 @@ struct OrbInboxSettingsView: View {
     var body: some View {
         List {
             Section {
+                Toggle("Include autonomous agents", isOn: $settings.includeAutonomous)
+                    .accessibilityIdentifier("settings.inbox.includeAutonomous")
                 Toggle("AI Overview summaries", isOn: $settings.aiSummary)
                     .accessibilityIdentifier("settings.inbox.aiSummary")
             } footer: {
@@ -358,6 +363,7 @@ struct OrbInboxSettingsView: View {
     }
 }
 
+@MainActor
 @Observable
 final class OrbMissionUnreadStore: @unchecked Sendable {
     static let shared = OrbMissionUnreadStore()
@@ -378,11 +384,14 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
         }
     }
 
-    func isUnread(row: OrbRow, hasInteraction: Bool = false) -> Bool {
+    @MainActor func sharedStateChanged() { version += 1 }
+
+    @MainActor func isUnread(row: OrbRow, hasInteraction: Bool = false) -> Bool {
         _ = version
         guard hasInteraction || Self.unreadResponseStates.contains(row.state) else {
             return false
         }
+        if let shared = OrbSharedInboxState.shared.unread(row) { return shared }
         if manuallyUnreadIDs.contains(row.id) {
             return true
         }
@@ -419,7 +428,10 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
             version += 1
         }
         if syncBackend {
-            Task {
+            Task { @MainActor in
+                let date = ISO8601DateFormatter(); date.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let time = (date.date(from: stamp) ?? ISO8601DateFormatter().date(from: stamp))?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
+                OrbSharedInboxState.shared.writeSeen(id, stamp: time * 1000)
                 _ = try? await OrbCore.shared.call(
                     "/api/control/missions/\(OrbCore.escape(id))/opened",
                     method: "POST"
@@ -430,16 +442,15 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
 
     func markUnread(id: String) {
         guard !id.isEmpty else { return }
-        manuallyUnreadIDs.insert(id)
+        Task { @MainActor in OrbSharedInboxState.shared.writeSeen(id, stamp: -Date().timeIntervalSince1970 * 1000) }
         version += 1
     }
 
-    func toggleUnread(_ row: OrbRow) {
+    @MainActor func toggleUnread(_ row: OrbRow) {
         if isUnread(row: row) {
             markRead(row)
         } else {
-            manuallyUnreadIDs.insert(row.id)
-            version += 1
+            markUnread(id: row.id)
         }
     }
 
@@ -450,7 +461,8 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
             manuallyUnreadIDs.remove(row.id)
             seenByMissionID[row.id] = max(row.updatedAt, nowIso)
             let id = row.id
-            Task {
+            Task { @MainActor in
+                OrbSharedInboxState.shared.writeSeen(id, stamp: Date().timeIntervalSince1970 * 1000)
                 _ = try? await OrbCore.shared.call(
                     "/api/control/missions/\(OrbCore.escape(id))/opened",
                     method: "POST"
@@ -544,6 +556,7 @@ struct OrbInboxItem: Identifiable, Equatable {
     let summary: String
     let lastRequest: String?
     let workReceipt: String?
+    var aiOverview: OrbInboxDigest? = nil
     let badge: String
     let tone: OrbInboxTone
     let category: OrbInboxCategory
@@ -853,10 +866,12 @@ enum OrbInboxModel {
         )
     }
 
-    static func isSubagent(row: OrbRow) -> Bool {
-        if !row.raw["parent_mission_id"].text.isEmpty || !row.raw["callback_parent_mission_id"].text.isEmpty {
-            return true
-        }
+    static func isSubagent(row: OrbRow, includeAutonomous: Bool = false) -> Bool {
+        if !includeAutonomous && (!row.raw["parent_mission_id"].text.isEmpty || !row.raw["callback_parent_mission_id"].text.isEmpty) { return true }
+        let tags = row.raw["tags"].items.map(\.text)
+        if tags.contains("superseded") || tags.contains(where: { $0.hasPrefix("superseded-by:") }) { return true }
+        if includeAutonomous { return false }
+        if row.raw["origin"].text == "hermes" || tags.contains("origin:hermes") || tags.contains("origin:hermes-assistant") { return true }
         if row.raw["tags"].items.contains(where: {
             $0.text.hasPrefix("worker-dispatch:") || $0.text == "superseded" || $0.text.hasPrefix("superseded-by:")
         }) {
@@ -869,12 +884,12 @@ enum OrbInboxModel {
         return false
     }
 
-    static func classify(row: OrbRow, interaction: OrbInboxInteraction?) -> OrbInboxCategory {
+    static func classify(row: OrbRow, interaction: OrbInboxInteraction?, includeAutonomous: Bool = false) -> OrbInboxCategory {
         guard row.mobile else { return .hidden }
         let status = row.state
         if hiddenStatuses.contains(status) { return .hidden }
+        if isSubagent(row: row, includeAutonomous: includeAutonomous) { return .hidden }
         if interaction != nil { return .needsYou }
-        if isSubagent(row: row) { return .hidden }
         if workingStatuses.contains(status) { return .working }
         if ["blocked", "failed", "not_feasible", "awaiting_user", "waiting_user"].contains(status) {
             return .needsYou
@@ -1080,7 +1095,7 @@ enum OrbInboxModel {
         answered: Set<String> = []
     ) -> OrbInboxItem? {
         let interaction = extractInteraction(row: row, events: events, answered: answered)
-        let category = classify(row: row, interaction: interaction)
+        let category = classify(row: row, interaction: interaction, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
         guard category != .hidden else { return nil }
 
         let slug = row.raw["project"].text.isEmpty ? "default" : row.raw["project"].text
@@ -1119,6 +1134,7 @@ enum OrbInboxModel {
             summary: summary,
             lastRequest: lastRequest,
             workReceipt: workReceipt,
+            aiOverview: digest,
             badge: badge,
             tone: tone,
             category: category,
@@ -1409,7 +1425,7 @@ struct OrbInboxView: View {
                     } else {
                         if !filteredNeedsYou.isEmpty {
                             sectionHeader(title: "Needs you", count: filteredNeedsYou.count)
-                            VStack(spacing: 0) {
+                            VStack(spacing: 8) {
                                 ForEach(filteredNeedsYou) { item in
                                     inboxCard(item)
                                 }
@@ -1431,7 +1447,7 @@ struct OrbInboxView: View {
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("inbox.markAllDone")
                             }
-                            VStack(spacing: 0) {
+                            VStack(spacing: 8) {
                                 ForEach(filteredReady) { item in
                                     inboxCard(item)
                                 }
@@ -1714,6 +1730,15 @@ struct OrbInboxView: View {
         .padding(.top, 2)
     }
 
+    @ViewBuilder private func summarySection(_ label: String, _ value: String?) -> some View {
+        if let value, !value.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label).font(.caption2.weight(.medium)).foregroundStyle(OrbStyle.textMuted)
+                Text(value).font(.footnote).foregroundStyle(OrbStyle.textSecondary).textSelection(.enabled)
+            }
+        }
+    }
+
     private func inboxCard(_ item: OrbInboxItem) -> some View {
         let isReplying = replyingMissionID == item.id
         let isPeeked = peekedIDs.contains(item.id)
@@ -1723,8 +1748,7 @@ struct OrbInboxView: View {
         return VStack(alignment: .leading, spacing: 8) {
             Button {
                 OrbHaptics.selection()
-                markItemAndChildrenRead(item)
-                onOpenMission(item.row)
+                togglePeek(item)
             } label: {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
@@ -1774,7 +1798,7 @@ struct OrbInboxView: View {
                     Text(item.summary)
                         .font(.footnote)
                         .foregroundStyle(OrbStyle.textSecondary)
-                        .lineLimit(3)
+                        .lineLimit(isPeeked ? nil : 3)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1799,6 +1823,40 @@ struct OrbInboxView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            if let state = digestStore.summaryState(row: item.row) {
+                Text(state).font(.caption2).foregroundStyle(OrbStyle.textMuted)
+            }
+            if let digest = item.aiOverview {
+                Text("AI summary · \(digest.model)").font(.caption2).foregroundStyle(OrbStyle.textMuted)
+                let current = digest.updatedAt == item.row.updatedAt && (inboxTimestamp(digest.sourceUpdatedAt ?? "") ?? 0) + 2 >= (inboxTimestamp(item.row.updatedAt) ?? .infinity)
+                if !current { Text("Summary is out of date").font(.caption2).foregroundStyle(OrbStyle.textMuted) }
+                if isPeeked {
+                    VStack(alignment: .leading, spacing: 10) {
+                        summarySection("Context", digest.context)
+                        summarySection("Scope", digest.contextDetails)
+                        summarySection("Unresolved", digest.unresolved)
+                        summarySection("To decide", digest.decision)
+                        if let sources = digest.sources, !sources.isEmpty {
+                            DisclosureGroup("Sources") {
+                                ForEach(sources.indices, id: \.self) { index in
+                                    Button { markItemAndChildrenRead(item); onOpenMission(item.row) } label: {
+                                        Text(sources[index].quote).font(.caption).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
+                                    }.buttonStyle(.plain)
+                                }
+                            }.font(.caption).foregroundStyle(OrbStyle.textSecondary)
+                        }
+                    }.padding(12).background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
+                }
+                if isReplying, current, item.interaction == nil, let suggestions = digest.suggestions {
+                    ForEach(suggestions, id: \.self) { suggestion in
+                        Button { replyDraft = suggestion; replyFocused = true } label: {
+                            Text(suggestion).font(.caption).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                        }.buttonStyle(.plain).background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
+                        .disabled(isBusy || !replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
 
             // Actionable child tracks only (failed or running)
             if let cs = item.childSummary, (!cs.failedChildren.isEmpty || cs.running > 0) {
@@ -2089,11 +2147,9 @@ struct OrbInboxView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(isReplying || isPeeked ? OrbStyle.surface : Color.clear)
-        // Row surfaces meet the continuous separators without rounded card edges.
-        .overlay(alignment: .top) { Rectangle().fill(OrbStyle.border).frame(height: 1) }
+        .padding(14)
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.border, lineWidth: 1) }
         .opacity(isBusy ? 0.6 : 1.0)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inbox.row.\(item.id)")
@@ -2260,6 +2316,7 @@ struct OrbInboxView: View {
     }
 
     private func load(force: Bool) async {
+        await OrbSharedInboxState.shared.refresh()
         defer { loading = false }
         if missions.isEmpty, let cached = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
             OrbReadCache.seedFromGlobalMissions(cached.items)
@@ -2299,7 +2356,7 @@ struct OrbInboxView: View {
             [
                 "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
                 "completed", "succeeded", "paused", "interrupted",
-            ].contains($0.state)
+            ].contains($0.state) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
         }
         .sorted { $0.updatedAt > $1.updatedAt }
         .prefix(16)

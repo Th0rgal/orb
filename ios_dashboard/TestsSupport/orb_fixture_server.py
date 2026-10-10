@@ -14,13 +14,14 @@ RECEIPTS = {}
 SSH_HOSTS = {}
 PROVIDERS = {}
 CORDONED = False
+INBOX_STATE = {}
 PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
 PROMPT = "Please test the new interface"
 def reset():
     global CORDONED
     CORDONED = False
-    MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); SSH_HOSTS.clear(); PROVIDERS.clear()
+    MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); SSH_HOSTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
     SSH_HOSTS['fixture-host'] = dict(id='fixture-host', revision=1, name='Fixture SSH', host='fixture.test', user='ubuntu', port=22, note='Shared address')
     PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
@@ -30,6 +31,8 @@ def reset():
     MISSIONS['rich-chatgpt']=dict(id='rich-chatgpt',title='ChatGPT rich response',status='awaiting_user',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test','model':'test-cloud-model'},'turns':[{'key':'rich-turn','prompt':'Montre le calcul, un tableau et les fichiers.','phase':'response_complete','result':rich,'artifacts':[{'path':'/mnt/data/chart.png'},{'path':'/mnt/data/result.csv'}]}]})
     MISSIONS['rich-growth']=dict(id='rich-growth',title='Growing rich response',status='active',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'growth-turn','prompt':'Write a long response.','phase':'running','result':'Starting the response…','artifacts':[]}]})
     MISSIONS['reconnect']=dict(id='reconnect',title='Reconnect ChatGPT',status='blocked',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'blocked-turn','prompt':'Continue the analysis.','phase':'reconnect_required','detail':'Reconnect your ChatGPT account in Orb on your Mac.','result':'','artifacts':[]}]})
+    for mission in MISSIONS.values():
+        mission.update(created_at='2026-10-09T10:00:00Z', updated_at='2026-10-09T10:01:00Z')
 reset()
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
@@ -44,6 +47,7 @@ class Handler(BaseHTTPRequestHandler):
         if (REQUIRE_AUTH or EXPIRE_SESSION) and self.headers.get('Authorization') != 'Bearer '+VALID_TOKEN:
             REQUIRE_AUTH = True
             return self.send({'error':'invalid or expired token'},401)
+        if p=='/api/control/inbox-state': return self.send(INBOX_STATE)
         if p=='/api/settings/ssh-hosts': return self.send(list(SSH_HOSTS.values()))
         if p=='/api/ai/providers': return self.send(list(PROVIDERS.values()))
         if p=='/api/ai/providers/usage': return self.send({'entries': {'fixture-provider': {'provider_type':'openai', 'codex_primary_used_percent':25}}})
@@ -93,6 +97,13 @@ class Handler(BaseHTTPRequestHandler):
             if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
             return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})
+        if p=='/api/control/inbox-state/preferences':
+            INBOX_STATE['preferences'] = body; return self.send({})
+        if p.startswith('/api/control/inbox-state/seen/'):
+            INBOX_STATE['seen:' + p.split('/')[-1]] = body['stamp']; return self.send({})
+        if p.endswith('/inbox-digest'):
+            mid=p.split('/')[4]; mission=MISSIONS[mid]
+            return self.send(dict(schemaVersion=7, context='Restore the interrupted conversation safely.', contextDetails='Keep the original conversation and unsent drafts.', outcome='The account must be reconnected before continuing.', unresolved='Account reconnection is still required.', decision='Reconnect the account, then resume.', suggestions=['The account is reconnected; continue checking.'], sources=[dict(quote='Reconnect your ChatGPT account in Orb on your Mac.',eventSequence=None)], model=body.get('model','builtin/smart'), sourceRevision='fixture-shared-v7', sourceUpdatedAt=mission['updated_at'], generatedAt='2026-10-09T10:02:00Z'))
         if p.startswith('/api/settings/ssh-hosts'):
             if self.command == 'POST':
                 for existing in SSH_HOSTS.values():

@@ -1,5 +1,7 @@
+import { writeInboxState, type SharedInboxState } from "./inboxState";
+import { sideQuestionKey } from "./sideQuestionStorage";
 import { createSignal } from "solid-js";
-import { connectionVersion, getApiUrl, isConnected, markMissionOpened, type Mission } from "./api";
+import { connectionVersion, isConnected, markMissionOpened, type Mission } from "./api";
 
 const [unreadVersion, setUnreadVersion] = createSignal(0);
 export { unreadVersion };
@@ -45,7 +47,7 @@ function syncOpened(id: string, turn: number): void {
 }
 
 function storageKey(): string {
-  return `orb.missionSeenV2:${getApiUrl() || "default"}`;
+  return sideQuestionKey("mission-seen:shared-v1");
 }
 
 function ensureSeenCache(): Record<string, number> {
@@ -162,6 +164,7 @@ export function markMissionRead(
   const map = ensureSeenCache();
   if (map[id] === undefined || map[id] < 0 || map[id] < updatedMs) {
     map[id] = stamp;
+    if (syncBackend) writeInboxState(`seen/${encodeURIComponent(id)}`, { stamp });
     persistSeenCache();
     setUnreadVersion((v) => v + 1);
   }
@@ -181,6 +184,7 @@ export function markMissionUnread(
   const map = ensureSeenCache();
   const updatedMs = Math.max(1, missionResponseTimestampMs(mission) || Date.now());
   map[mission.id] = -updatedMs;
+  writeInboxState(`seen/${encodeURIComponent(mission.id)}`, { stamp: -updatedMs });
   persistSeenCache();
   setUnreadVersion((v) => v + 1);
 }
@@ -201,6 +205,7 @@ export function markMissionsRead(
     const stamp = Math.max(now, turn);
     if (map[m.id] === undefined || map[m.id] < 0 || map[m.id] < turn) {
       map[m.id] = stamp;
+      if (syncBackend) writeInboxState(`seen/${encodeURIComponent(m.id)}`, { stamp });
       changed = true;
     }
     if (syncBackend && isConnected()) {
@@ -211,4 +216,15 @@ export function markMissionsRead(
     persistSeenCache();
     setUnreadVersion((v) => v + 1);
   }
+}
+
+export function applySharedInboxSeen(state: SharedInboxState): void {
+  const map = ensureSeenCache();
+  let changed = false;
+  for (const [key, value] of Object.entries(state)) {
+    if (!key.startsWith("seen:") || typeof value !== "number" || !Number.isFinite(value)) continue;
+    const id = key.slice(5);
+    if (map[id] !== value) { map[id] = value; changed = true; }
+  }
+  if (changed) { persistSeenCache(); setUnreadVersion(v => v + 1); }
 }

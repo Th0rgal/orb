@@ -88,10 +88,69 @@ data class OrbInboxModelPreset(
     val subtitle: String
 )
 
+object OrbSharedInboxState {
+    private var mutation = 0
+    private var pending = 0
+    private var tail: kotlinx.coroutines.Job? = null
+    private var scope = ""
+    private val outbox = mutableMapOf<String, Any>()
+    private val seen = mutableMapOf<String, Long>()
+    var applying = false
+    private fun account() = OrbCore.shared.baseURL + ":" + OrbCore.shared.token
+    fun write(path: String, body: Any) {
+        if (applying) return
+        val core = OrbCore.shared
+        val expected = account()
+        if (scope != expected) { scope = expected; seen.clear(); outbox.clear() }
+        outbox[path] = body
+        mutation++; pending++
+        val previous = tail
+        tail = core.scope.launch {
+            previous?.join()
+            if (expected == account()) runCatching {
+                core.request("/api/control/inbox-state/$path", method = "PUT", body = body)
+                if (expected == account() && outbox[path] == body) outbox.remove(path)
+            }
+            pending--
+        }
+    }
+    fun writeSeen(id: String, stamp: Long) {
+        if (scope != account()) { scope = account(); seen.clear(); outbox.clear() }
+        seen[id] = stamp
+        write("seen/" + OrbCore.shared.encodeComponent(id), mapOf("stamp" to stamp))
+    }
+    fun writePreferences() = write("preferences", mapOf("aiSummary" to OrbInboxSettings.aiSummary, "includeAutonomous" to OrbInboxSettings.includeAutonomous, "model" to OrbInboxSettings.model))
+    fun unread(mission: OrbRow): Boolean? {
+        if (scope != account()) return null
+        val stamp = seen[mission.id] ?: return null
+        val turn = runCatching { Instant.parse(mission.str("updated_at", "created_at") ?: "").toEpochMilli() }.getOrDefault(0)
+        return if (stamp < 0) { if (turn <= kotlin.math.abs(stamp) + 2000) true else null } else { if (turn <= stamp + 2000) false else null }
+    }
+    suspend fun refresh() {
+        if (pending > 0) return
+        if (scope != account()) outbox.clear()
+        if (outbox.isNotEmpty()) { for ((path, body) in outbox.toMap()) write(path, body); return }
+        val expected = account(); val serial = mutation
+        val raw = runCatching { OrbCore.shared.request("/api/control/inbox-state") as? Map<*, *> }.getOrNull() ?: return
+        if (expected != account() || serial != mutation) return
+        val changedAccount = scope != expected
+        if (changedAccount) { scope = expected; seen.clear() }
+        for ((key, value) in raw) if (key is String && key.startsWith("seen:") && value is Number) seen[key.removePrefix("seen:")] = value.toLong()
+        val prefs = raw["preferences"] as? Map<*, *>
+        applying = true
+        if (changedAccount && prefs == null) OrbInboxSettings.update(newAiSummary = true, newIncludeAutonomous = false, newModel = OrbInboxSettings.DEFAULT_MODEL)
+        if (prefs != null && prefs["model"] is String) OrbInboxSettings.update(newAiSummary = prefs["aiSummary"] == true, newIncludeAutonomous = prefs["includeAutonomous"] == true, newModel = prefs["model"] as String)
+        applying = false
+        OrbMissionUnreadStore.sharedStateChanged()
+    }
+}
+
 object OrbInboxSettings {
     private const val PREFS_KEY = "orb.inbox.settings.v1"
     private const val KEY_AI_SUMMARY = "ai_summary"
     private const val KEY_MODEL = "model"
+    var includeAutonomous by mutableStateOf(false)
+        private set
 
     const val DEFAULT_MODEL = "builtin/smart"
 
@@ -114,17 +173,21 @@ object OrbInboxSettings {
             val p = context.applicationContext.getSharedPreferences(PREFS_KEY, Context.MODE_PRIVATE)
             prefs = p
             aiSummary = p.getBoolean(KEY_AI_SUMMARY, true)
+            includeAutonomous = p.getBoolean("include_autonomous", false)
             model = p.getString(KEY_MODEL, DEFAULT_MODEL)?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_MODEL
         }
     }
 
-    fun update(newAiSummary: Boolean = aiSummary, newModel: String = model) {
+    fun update(newAiSummary: Boolean = aiSummary, newModel: String = model, newIncludeAutonomous: Boolean = includeAutonomous) {
         val cleanModel = newModel.trim().ifEmpty { DEFAULT_MODEL }
         aiSummary = newAiSummary
+        includeAutonomous = newIncludeAutonomous
         model = cleanModel
         revision += 1
+        OrbSharedInboxState.writePreferences()
         prefs?.edit()
             ?.putBoolean(KEY_AI_SUMMARY, newAiSummary)
+            ?.putBoolean("include_autonomous", newIncludeAutonomous)
             ?.putString(KEY_MODEL, cleanModel)
             ?.apply()
     }
@@ -135,11 +198,19 @@ data class OrbInboxDigest(
     val outcome: String,
     val verdict: String,
     val model: String,
-    val updatedAt: String
+    val updatedAt: String,
+    val context: String = "",
+    val contextDetails: String = "",
+    val unresolved: String = "",
+    val decision: String = "",
+    val suggestions: List<String> = emptyList(),
+    val sources: List<String> = emptyList(),
+    val sourceUpdatedAt: String = "",
+    val sourceRevision: String = ""
 )
 
 object OrbInboxDigestStore {
-    private const val PREFS_KEY = "orb.inbox.digests.v4"
+    private const val PREFS_KEY = "orb.inbox.digests.v7"
     private const val MAX_CONCURRENT = 3
     private var prefs: SharedPreferences? = null
     private val cache = mutableStateMapOf<String, OrbInboxDigest>()
@@ -151,18 +222,6 @@ object OrbInboxDigestStore {
     var revision by mutableIntStateOf(0)
         private set
 
-    private val DIGEST_PROMPT = listOf(
-        "Generate a Google AI Overview-style summary of this coding agent conversation turn for the operator's Inbox.",
-        "Return ONLY a single-line JSON object with no markdown fences and no extra commentary:",
-        "{\"task\":\"<concise 4-10 word summary of the user's latest follow-up request, or empty string if there was no follow-up or it repeats the mission title>\",\"outcome\":\"<2-3 sentences (30-65 words) summarizing what the agent did, concrete technical findings/files/PRs/tests, and the final result or exact blocker>\",\"verdict\":\"succeeded|failed|waiting|needs_input\"}",
-        "Rules:",
-        "- Write in the same language as the conversation.",
-        "- If there is no follow-up request different from the mission title, or if the prompt was an automatic system resume, set \"task\" to \"\". Never write generic filler like \"Execute the mission goal\".",
-        "- Write \"outcome\" like an executive AI Overview (2-3 clear sentences, 30-65 words): state what was accomplished or investigated, cite concrete details (commit hashes, PR numbers, files edited, test counts, root cause), and state the final status or specific blocker.",
-        "- Never write vague boilerplate like \"Mission stopped and is currently blocked\" or \"Finished the task\".",
-        "- Verdict must be one of: succeeded, failed, waiting, needs_input."
-    ).joinToString("\n")
-
     fun init(context: Context) {
         if (prefs == null) {
             val p = context.applicationContext.getSharedPreferences(PREFS_KEY, Context.MODE_PRIVATE)
@@ -170,22 +229,14 @@ object OrbInboxDigestStore {
             for ((k, v) in p.all) {
                 val raw = v as? String ?: continue
                 val dict = OrbJSON.dict(OrbJSON.parse(raw)) ?: continue
-                val task = OrbJSON.str(dict, "task") ?: ""
-                val outcome = OrbJSON.str(dict, "outcome") ?: ""
-                if (task.isEmpty() && outcome.isEmpty()) continue
-                cache[k] = OrbInboxDigest(
-                    task = task,
-                    outcome = outcome,
-                    verdict = OrbJSON.str(dict, "verdict") ?: "succeeded",
-                    model = OrbJSON.str(dict, "model") ?: OrbInboxSettings.DEFAULT_MODEL,
-                    updatedAt = OrbJSON.str(dict, "updatedAt") ?: ""
-                )
+                parseDigest(raw, OrbJSON.str(dict, "updatedAt") ?: "", OrbJSON.str(dict, "model") ?: OrbInboxSettings.DEFAULT_MODEL)?.let { cache[k] = it }
             }
         }
     }
 
+    private fun accountScope(): String = java.security.MessageDigest.getInstance("SHA-256").digest("${OrbCore.shared.baseURL}:${OrbCore.shared.token ?: ""}".toByteArray()).joinToString("") { "%02x".format(it) }
     private fun cacheKey(missionId: String, updatedAt: String, model: String): String =
-        "$missionId|$updatedAt|$model"
+        "${accountScope()}|$missionId|$updatedAt|$model"
 
     fun get(mission: OrbRow): OrbInboxDigest? {
         val _rev = revision
@@ -193,8 +244,8 @@ object OrbInboxDigestStore {
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
         val model = OrbInboxSettings.model
         cache[cacheKey(mission.id, updated, model)]?.let { return it }
-        val prefix = "${mission.id}|$updated|"
-        return cache.entries.firstOrNull { it.key.startsWith(prefix) }?.value
+        val prefix = "${accountScope()}|${mission.id}|"
+        return cache.entries.filter { it.key.startsWith(prefix) && it.key.endsWith("|$model") }.maxByOrNull { it.value.updatedAt }?.value
     }
 
     fun request(core: OrbCore, mission: OrbRow, events: List<OrbRow>, priority: Int = 10) {
@@ -210,30 +261,24 @@ object OrbInboxDigestStore {
         val lastFail = failedAtMs[key]
         if (lastFail != null && System.currentTimeMillis() - lastFail < 45_000L) return
 
-        val snapshot = buildSnapshot(mission, events)
-        if (snapshot.length < 24) return
+        val endpoint = core.baseURL
+        val account = core.token
 
         inFlight.add(key)
+        revision += 1
         core.scope.launch {
             enqueue(priority) {
                 try {
-                    val answer = fetchFromBtw(core, mission.id, snapshot, model)
+                    if (core.baseURL != endpoint || core.token != account) return@enqueue
+                    val answer = fetchShared(core, mission.id, model)
+                    if (core.baseURL != endpoint || core.token != account) return@enqueue
                     val parsed = parseDigest(answer, updated, model)
                     if (parsed != null) {
                         cache[key] = parsed
                         revision += 1
-                        prefs?.edit()?.putString(
-                            key,
-                            OrbJSON.stringify(
-                                mapOf(
-                                    "task" to parsed.task,
-                                    "outcome" to parsed.outcome,
-                                    "verdict" to parsed.verdict,
-                                    "model" to parsed.model,
-                                    "updatedAt" to parsed.updatedAt
-                                )
-                            )
-                        )?.apply()
+                        val persisted = OrbJSON.dict(OrbJSON.parse(answer))?.toMutableMap() ?: mutableMapOf()
+                        persisted["updatedAt"] = updated
+                        prefs?.edit()?.putString(key, OrbJSON.stringify(persisted))?.apply()
                     } else {
                         failedAtMs[key] = System.currentTimeMillis()
                     }
@@ -241,6 +286,7 @@ object OrbInboxDigestStore {
                     failedAtMs[key] = System.currentTimeMillis()
                 } finally {
                     inFlight.remove(key)
+                    revision += 1
                 }
             }
         }
@@ -276,119 +322,21 @@ object OrbInboxDigestStore {
         }
     }
 
-    private fun buildSnapshot(mission: OrbRow, events: List<OrbRow>): String {
-        val lines = mutableListOf<String>()
-        lines.add("Mission title: ${mission.str("title", "name") ?: "Untitled"}")
-        lines.add("Mission status: ${mission.str("status", "state") ?: "unknown"}")
-        mission.str("terminal_reason")?.let { lines.add("Terminal reason: $it") }
-        mission.str("status_message")?.let { lines.add("Status message: $it") }
-        OrbJSON.str(mission.dict("remote_job"), "error")?.let { lines.add("Remote error: $it") }
-
-        var lastUser = ""
-        val assistantBlocks = mutableListOf<String>()
-        var lastError = ""
-
-        if (events.isNotEmpty()) {
-            for (ev in events) {
-                val evType = (ev.str("event_type", "type") ?: "").lowercase()
-                val text = ev.str("content", "text", "message", "error") ?: ""
-                when (evType) {
-                    "user_message" -> {
-                        if (text.isNotEmpty() && !OrbInboxModel.isSyntheticUserMessage(text)) {
-                            lastUser = text.trim()
-                        }
-                    }
-                    "assistant_message", "assistant_message_canonical" -> {
-                        val clean = OrbInboxModel.humanizeStatusText(text)
-                        if (clean.isNotEmpty()) assistantBlocks.add(clean)
-                    }
-                    "error" -> {
-                        val clean = OrbInboxModel.humanizeStatusText(text)
-                        if (clean.length >= 220) assistantBlocks.add(clean)
-                        else if (clean.isNotEmpty()) lastError = clean
-                    }
-                }
-            }
-        }
-
-        val history = OrbJSON.dictList(mission.raw["history"])
-        for (entry in history.asReversed()) {
-            val role = OrbJSON.str(entry, "role") ?: ""
-            val content = OrbJSON.str(entry, "content") ?: ""
-            if (lastUser.isEmpty() && role == "user" && content.isNotEmpty() && !OrbInboxModel.isSyntheticUserMessage(content)) {
-                lastUser = content.trim()
-            }
-            if (role == "assistant" && content.isNotEmpty()) {
-                val clean = OrbInboxModel.humanizeStatusText(content)
-                if (clean.isNotEmpty() && !assistantBlocks.contains(clean)) {
-                    assistantBlocks.add(clean)
-                    break
-                }
-            }
-        }
-
-        if (lastUser.isNotEmpty()) lines.add("Latest user request:\n${lastUser.take(700)}")
-        OrbInboxModel.extractWorkReceipt(events)?.let { lines.add("Tools executed: $it") }
-        if (lastError.isNotEmpty()) lines.add("Recorded error:\n${lastError.take(500)}")
-        if (assistantBlocks.isNotEmpty()) {
-            lines.add("Latest agent response:\n${assistantBlocks.takeLast(3).joinToString("\n\n").takeLast(2400)}")
-        }
-        return lines.joinToString("\n\n")
+    fun summaryState(mission: OrbRow): String? {
+        if (!OrbInboxSettings.aiSummary) return null
+        val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
+        val key = cacheKey(mission.id, updated, OrbInboxSettings.model)
+        return when { inFlight.contains(key) -> "Generating summary…"; failedAtMs.containsKey(key) -> "Summary unavailable"; else -> null }
     }
 
-    private suspend fun fetchFromBtw(
-        core: OrbCore,
-        missionId: String,
-        context: String,
-        model: String
-    ): String = withContext(Dispatchers.IO) {
-        val url = core.makeURL("/api/control/missions/${core.encodeComponent(missionId)}/btw")
-        val bodyMap = mutableMapOf<String, Any?>(
-            "question" to DIGEST_PROMPT,
-            "context" to context
-        )
-        if (model.isNotEmpty() && model != OrbInboxSettings.DEFAULT_MODEL) {
-            bodyMap["model"] = model
+    private suspend fun fetchShared(core: OrbCore, missionId: String, model: String): String = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(core.makeURL("/api/control/missions/${core.encodeComponent(missionId)}/inbox-digest"))
+            .post(OrbJSON.stringify(mapOf("model" to model)).toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .header("Authorization", "Bearer ${core.token ?: ""}").build()
+        core.httpClient.newBuilder().callTimeout(100, java.util.concurrent.TimeUnit.SECONDS).readTimeout(100, java.util.concurrent.TimeUnit.SECONDS).build().newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw java.io.IOException("Inbox summary HTTP ${response.code}")
+            response.body?.string() ?: throw java.io.IOException("Empty Inbox summary")
         }
-        val reqBuilder = Request.Builder()
-            .url(url)
-            .post(OrbJSON.stringify(bodyMap).toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .header("Accept", "text/event-stream, application/json")
-        core.token?.trim()?.takeIf { it.isNotEmpty() }?.let { t ->
-            reqBuilder.header("Authorization", "Bearer $t")
-        }
-        val resp = core.httpClient.newCall(reqBuilder.build()).execute()
-        val code = resp.code
-        val raw = resp.body?.string() ?: ""
-        resp.close()
-        if (code == 422 && bodyMap.containsKey("model")) {
-            bodyMap.remove("model")
-            val retryReq = reqBuilder.post(
-                OrbJSON.stringify(bodyMap).toRequestBody("application/json; charset=utf-8".toMediaType())
-            ).build()
-            val retryResp = core.httpClient.newCall(retryReq).execute()
-            val retryRaw = retryResp.body?.string() ?: ""
-            retryResp.close()
-            return@withContext extractBtwAnswer(retryRaw)
-        }
-        if (code !in 200..299) throw OrbError("HTTP $code")
-        extractBtwAnswer(raw)
-    }
-
-    private fun extractBtwAnswer(raw: String): String {
-        val sb = StringBuilder()
-        for (line in raw.lineSequence()) {
-            val trimmed = line.trim()
-            if (!trimmed.startsWith("data:")) continue
-            val payload = trimmed.removePrefix("data:").trim()
-            if (payload.isEmpty() || payload == "[DONE]") continue
-            val dict = OrbJSON.dict(OrbJSON.parse(payload)) ?: continue
-            val delta = OrbJSON.rawStr(dict, "delta")
-            val answer = OrbJSON.rawStr(dict, "answer")
-            if (!delta.isNullOrEmpty()) sb.append(delta)
-            else if (!answer.isNullOrEmpty() && sb.isEmpty()) sb.append(answer)
-        }
-        return if (sb.isNotEmpty()) sb.toString() else raw
     }
 
     private fun parseDigest(raw: String, updatedAt: String, model: String): OrbInboxDigest? {
@@ -397,17 +345,19 @@ object OrbInboxDigestStore {
         val end = trimmed.lastIndexOf('}')
         if (start < 0 || end <= start) return null
         val dict = OrbJSON.dict(OrbJSON.parse(trimmed.substring(start, end + 1))) ?: return null
-        val task = (OrbJSON.str(dict, "task") ?: "").trim()
-        val outcome = (OrbJSON.str(dict, "outcome", "overview") ?: "").trim()
-        if (task.isEmpty() && outcome.isEmpty()) return null
-        val verdict = (OrbJSON.str(dict, "verdict") ?: "succeeded").lowercase()
-        return OrbInboxDigest(
-            task = task,
-            outcome = outcome,
-            verdict = if (verdict in setOf("succeeded", "failed", "waiting", "needs_input")) verdict else "succeeded",
-            model = model,
-            updatedAt = updatedAt
-        )
+        if ((dict["schemaVersion"] as? Number)?.toInt() != 7) return null
+        val outcome = OrbJSON.str(dict, "outcome") ?: return null
+        val sources = (dict["sources"] as? List<*>)?.mapNotNull { OrbJSON.dict(it)?.let { source -> OrbJSON.str(source, "quote") } } ?: emptyList()
+        val sourceRevision = OrbJSON.str(dict, "sourceRevision") ?: ""
+        if (outcome.isEmpty() || sources.isEmpty() || sourceRevision.isEmpty()) return null
+        val sourceTime = runCatching { Instant.parse(OrbJSON.str(dict, "sourceUpdatedAt") ?: "").toEpochMilli() }.getOrNull() ?: return null
+        val clientTime = runCatching { Instant.parse(updatedAt).toEpochMilli() }.getOrDefault(0)
+        if (sourceTime + 2000 < clientTime) return null
+        return OrbInboxDigest(task = "", outcome = outcome, verdict = "waiting", model = OrbJSON.str(dict, "model") ?: model, updatedAt = updatedAt,
+            context = OrbJSON.str(dict, "context") ?: "", contextDetails = OrbJSON.str(dict, "contextDetails") ?: "",
+            unresolved = OrbJSON.str(dict, "unresolved") ?: "", decision = OrbJSON.str(dict, "decision") ?: "",
+            suggestions = OrbJSON.strList(dict, "suggestions"), sources = sources, sourceUpdatedAt = OrbJSON.str(dict, "sourceUpdatedAt") ?: "", sourceRevision = sourceRevision)
+
     }
 }
 
@@ -436,10 +386,13 @@ object OrbMissionUnreadStore {
         }
     }
 
+    fun sharedStateChanged() { revision += 1 }
+
     fun isUnread(mission: OrbRow, hasInteraction: Boolean = false): Boolean {
         val _rev = revision
         val state = (mission.str("status", "state") ?: "").lowercase()
         if (!hasInteraction && state !in unreadResponseStates) return false
+        OrbSharedInboxState.unread(mission)?.let { return it }
         if (manuallyUnreadIds.contains(mission.id)) return true
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
         val firstViewed = mission.str("first_viewed_at") ?: ""
@@ -464,6 +417,7 @@ object OrbMissionUnreadStore {
             prefs?.edit()?.putString(mission.id, stamp)?.apply()
         }
         if (syncBackend) {
+            OrbSharedInboxState.writeSeen(mission.id, maxOf(System.currentTimeMillis(), runCatching { Instant.parse(updated).toEpochMilli() }.getOrDefault(0)))
             runCatching {
                 val core = OrbCore.shared
                 core.scope.launch {
@@ -484,7 +438,7 @@ object OrbMissionUnreadStore {
         if (isUnread(mission)) {
             markSeen(mission)
         } else {
-            manuallyUnreadIds.add(mission.id)
+            OrbSharedInboxState.writeSeen(mission.id, -maxOf(System.currentTimeMillis(), runCatching { Instant.parse(mission.str("updated_at") ?: "").toEpochMilli() }.getOrDefault(0)))
             revision += 1
         }
     }
@@ -504,6 +458,7 @@ object OrbMissionUnreadStore {
                 changed = true
             }
             if (core != null) {
+                OrbSharedInboxState.writeSeen(m.id, maxOf(System.currentTimeMillis(), runCatching { Instant.parse(updated).toEpochMilli() }.getOrDefault(0)))
                 val id = m.id
                 core.scope.launch {
                     runCatching {
@@ -735,17 +690,13 @@ object OrbInboxModel {
         return cleaned
     }
 
-    private fun isSubagent(mission: OrbRow): Boolean {
-        if (!mission.str("parent_mission_id", "callback_parent_mission_id").isNullOrEmpty()) return true
+    fun isSubagent(mission: OrbRow): Boolean {
         val tags = OrbJSON.strList(mission.raw, "tags")
-        if (tags.any { it.startsWith("worker-dispatch:") || it == "superseded" || it.startsWith("superseded-by:") }) {
-            return true
-        }
-        val title = (mission.str("title", "name") ?: "").trim()
-        if (Regex("^you are a sub-?agent\\b", RegexOption.IGNORE_CASE).containsMatchIn(title)) {
-            return true
-        }
-        return false
+        if (tags.any { it == "superseded" || it.startsWith("superseded-by:") }) return true
+        if (OrbInboxSettings.includeAutonomous) return false
+        if (!mission.str("parent_mission_id").isNullOrEmpty() || !mission.str("callback_parent_mission_id").isNullOrEmpty()) return true
+        if (mission.str("origin") == "hermes" || tags.any { it.startsWith("worker-dispatch:") || it == "origin:hermes" || it == "origin:hermes-assistant" }) return true
+        return Regex("^you are a sub-?agent\\b", RegexOption.IGNORE_CASE).containsMatchIn((mission.str("title", "name") ?: "").trim())
     }
 
     private fun isMobile(mission: OrbRow): Boolean {
@@ -1475,13 +1426,16 @@ fun OrbInboxView(
     val answeredCallIds = remember { mutableStateMapOf<String, Boolean>() }
 
     var eventsVersion by remember { mutableIntStateOf(0) }
-    LaunchedEffect(missions, filterMode, OrbInboxSettings.aiSummary, OrbInboxSettings.model) {
+    LaunchedEffect(core.baseURL, core.token) {
+        while (true) { OrbSharedInboxState.refresh(); delay(10_000L) }
+    }
+    LaunchedEffect(missions, filterMode, OrbInboxSettings.aiSummary, OrbInboxSettings.model, OrbInboxSettings.includeAutonomous) {
         val candidates = missions.filter { m ->
             val st = (m.str("status", "state") ?: "").lowercase()
             st in setOf(
                 "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
                 "completed", "succeeded", "paused", "interrupted"
-            )
+            ) && !OrbInboxModel.isSubagent(m)
         }.sortedByDescending { it.str("updated_at", "completed_at", "started_at", "created_at") ?: "" }
             .take(18)
 
@@ -1670,10 +1624,14 @@ fun OrbInboxView(
                     top = 8.dp,
                     bottom = if (lastDismissedItem != null) 76.dp else 28.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(0.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 item(key = "header") {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Include autonomous agents", fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.weight(1f))
+                            androidx.compose.material3.Switch(checked = OrbInboxSettings.includeAutonomous, onCheckedChange = { OrbInboxSettings.update(newIncludeAutonomous = it) }, modifier = Modifier.testTag("inbox.includeAutonomous"))
+                        }
                         // Minimalist filter bar + inline working pill + Read all
                         Row(
                             modifier = Modifier
@@ -2308,21 +2266,22 @@ private fun OrbInboxCard(
         modifier = modifier
             .testTag("inbox.row.${item.id}")
             .fillMaxWidth()
-            .background(if (isReplying || isPeeked) OrbStyle.surface else Color.Transparent)
-            .drawBehind { drawLine(OrbStyle.border, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
+            .clip(RoundedCornerShape(OrbStyle.panelRadius))
+            .background(OrbStyle.surface)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(OrbStyle.panelRadius))
             .semantics {
                 stateDescription = if (item.isUnread) "Unread" else "Read"
                 customActions = listOf(CustomAccessibilityAction(if (item.isUnread) "Mark read" else "Mark unread") {
                     onToggleRead(); true
                 })
             }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .orbPressClickable { onSelectMission() },
+                .orbPressClickable { onTogglePeek() },
             verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             Row(
@@ -2375,7 +2334,7 @@ private fun OrbInboxCard(
                     color = OrbStyle.textSecondary,
                     fontSize = 13.sp,
                     lineHeight = 18.sp,
-                    maxLines = 3,
+                    maxLines = if (isPeeked) Int.MAX_VALUE else 3,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -2406,6 +2365,34 @@ private fun OrbInboxCard(
                         .background(Color.Black.copy(alpha = 0.28f))
                         .padding(horizontal = 8.dp, vertical = 5.dp)
                 )
+            }
+        }
+
+        OrbInboxDigestStore.summaryState(item.mission)?.let { state ->
+            Text(state, color = OrbStyle.textMuted, fontSize = 11.sp)
+        }
+        item.aiOverview?.let { digest ->
+            Text("AI summary · ${digest.model}", color = OrbStyle.textMuted, fontSize = 11.sp)
+            val current = digest.updatedAt == item.updatedAt && runCatching { Instant.parse(digest.sourceUpdatedAt).toEpochMilli() + 2000 >= Instant.parse(item.updatedAt).toEpochMilli() }.getOrDefault(false)
+            if (!current) Text("Summary is out of date", color = OrbStyle.textMuted, fontSize = 11.sp)
+            if (isPeeked) {
+                Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(OrbStyle.controlRadius)).background(OrbStyle.elevated).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    listOf("Context" to digest.context, "Scope" to digest.contextDetails, "Unresolved" to digest.unresolved, "To decide" to digest.decision).filter { it.second.isNotBlank() }.forEach { (label, value) ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(label, fontSize = 11.sp, color = OrbStyle.textMuted, fontWeight = FontWeight.Medium)
+                            androidx.compose.foundation.text.selection.SelectionContainer { Text(value, fontSize = 13.sp, color = OrbStyle.textSecondary, lineHeight = 18.sp) }
+                        }
+                    }
+                    var sourcesOpen by remember(item.id) { mutableStateOf(false) }
+                    Text(if (sourcesOpen) "Sources ▴" else "Sources ▾", fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.fillMaxWidth().orbPressClickable { sourcesOpen = !sourcesOpen }.padding(vertical = 12.dp))
+                    if (sourcesOpen) digest.sources.forEach { quote ->
+                        Text(quote, fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.fillMaxWidth().orbPressClickable { onSelectMission() }.padding(vertical = 8.dp))
+                    }
+                }
+            }
+            if (isReplying && current && item.pendingInteraction == null) digest.suggestions.forEach { suggestion ->
+                Text(suggestion, fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(OrbStyle.controlRadius)).background(OrbStyle.elevated)
+                    .orbPressClickable(enabled = !isSending && replyDraft.isBlank()) { onReplyDraftChange(suggestion) }.padding(12.dp))
             }
         }
 

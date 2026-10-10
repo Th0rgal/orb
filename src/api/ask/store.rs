@@ -76,6 +76,45 @@ fn now() -> String {
 }
 
 impl AskStore {
+    pub async fn inbox_state(&self, user: &str) -> Result<serde_json::Value, String> {
+        let conn = self.conn.clone();
+        let user = user.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut q = conn
+                .prepare("SELECT entry_key, value_json FROM inbox_state WHERE user_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows = q
+                .query_map([user], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut state = serde_json::Map::new();
+            for row in rows {
+                let (key, raw) = row.map_err(|e| e.to_string())?;
+                state.insert(key, serde_json::from_str(&raw).map_err(|e| e.to_string())?);
+            }
+            Ok(serde_json::Value::Object(state))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub async fn save_inbox_state(
+        &self,
+        user: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        let (user, key, raw) = (user.to_string(), key.to_string(), value.to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute("INSERT INTO inbox_state (user_id, entry_key, value_json) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, entry_key) DO UPDATE SET value_json = excluded.value_json", params![user, key, raw])
+                .map(|_| ()).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?
+    }
+
     /// Open (and create/migrate) the Ask database at `db_path`.
     pub async fn open(db_path: PathBuf) -> Result<Self, String> {
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection, String> {
@@ -93,6 +132,27 @@ impl AskStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    pub async fn inbox_digest(&self, key: &str, revision: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.clone();
+        let key = key.to_string();
+        let revision = revision.to_string();
+        tokio::task::spawn_blocking(move || conn.blocking_lock().query_row(
+            "SELECT digest_json FROM inbox_digests WHERE cache_key=?1 AND source_revision=?2",params![key,revision],|row|row.get(0)).optional().map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
+    }
+    pub async fn save_inbox_digest(
+        &self,
+        key: &str,
+        revision: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        let key = key.to_string();
+        let revision = revision.to_string();
+        let value = value.to_string();
+        tokio::task::spawn_blocking(move || conn.blocking_lock().execute(
+            "INSERT INTO inbox_digests(cache_key,source_revision,digest_json) VALUES(?1,?2,?3) ON CONFLICT(cache_key) DO UPDATE SET source_revision=excluded.source_revision,digest_json=excluded.digest_json",params![key,revision,value]).map(|_|()).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
     }
 
     // ── Threads ──────────────────────────────────────────────────────────────
@@ -414,6 +474,8 @@ fn row_to_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorNote> {
 }
 
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS inbox_state (user_id TEXT NOT NULL, entry_key TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(user_id, entry_key));
+CREATE TABLE IF NOT EXISTS inbox_digests (cache_key TEXT PRIMARY KEY, source_revision TEXT NOT NULL, digest_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ask_threads (
     id          TEXT PRIMARY KEY,
     mission_id  TEXT NOT NULL,

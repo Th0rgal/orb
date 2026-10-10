@@ -12,7 +12,7 @@ async function openInbox(page: Page, theme = "dark", empty = false, aiSummary = 
       const updatedMs = Date.parse("2026-10-09T11:40:00Z");
       localStorage.setItem(`orb.btw:v1:${JSON.stringify([location.origin, "authenticated", "orb:inbox-digest:v7"])}`, JSON.stringify({
         [`done:${updatedMs}:builtin/smart`]: {
-          schemaVersion: 7, context: "Keep unfinished follow-ups safe when navigating between conversations.", contextDetails: "Preserve each conversation’s draft across closing, reopening and switching projects.", goal: "An unrelated AI-generated title", task: "", verdict: "waiting", aiGenerated: true, model: "builtin/smart", updatedMs,
+          schemaVersion: 7, sourceRevision: "fixture-shared-v7", sourceUpdatedAt: new Date(updatedMs).toISOString(), context: "Keep unfinished follow-ups safe when navigating between conversations.", contextDetails: "Preserve each conversation’s draft across closing, reopening and switching projects.", goal: "An unrelated AI-generated title", task: "", verdict: "waiting", aiGenerated: true, model: "builtin/smart", updatedMs,
           outcome: "The agent reports that drafts now survive closing the preview.",
           unresolved: "The Android behavior still needs a separate check.",
           decision: "Should Android verification be included?",
