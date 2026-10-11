@@ -118,9 +118,18 @@ final class OrbSharedInboxState {
         guard let raw = try? await OrbCore.shared.call("/api/control/inbox-state"), expected == account, serial == mutation else { return }
         if case let .object(values) = raw["_versions"] { revisions = values.compactMapValues { $0.doubleValue } }
         let changedAccount = scope != expected
+        var changedSeen = changedAccount
         if changedAccount { seen = [:]; scope = expected }
         if case let .object(values) = raw {
-            for (key, value) in values where key.hasPrefix("seen:") { if let n = value.doubleValue { seen[String(key.dropFirst(5))] = n } }
+            for (key, value) in values where key.hasPrefix("seen:") {
+                if let n = value.doubleValue {
+                    let id = String(key.dropFirst(5))
+                    if seen[id] != n {
+                        seen[id] = n
+                        changedSeen = true
+                    }
+                }
+            }
         }
         OrbInboxSettings.shared.bindAccount(expected)
         applying = true
@@ -135,7 +144,9 @@ final class OrbSharedInboxState {
         // An empty Core entry is an upgrade/migration, not an instruction to
         // discard the device's existing choices. Seed Core from those choices.
         if prefs["model"].text.isEmpty { writePreferences() }
-        OrbMissionUnreadStore.shared.sharedStateChanged()
+        if changedSeen {
+            OrbMissionUnreadStore.shared.sharedStateChanged()
+        }
     }
 }
 
@@ -197,13 +208,19 @@ final class OrbInboxSettings: @unchecked Sendable {
     private(set) var version = 0
     var aiSummary: Bool {
         didSet {
+            guard aiSummary != oldValue else { return }
             UserDefaults.standard.set(aiSummary, forKey: aiSummaryKey)
             version += 1
             if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
         }
     }
     var includeAutonomous: Bool = UserDefaults.standard.bool(forKey: "orb.inbox.includeAutonomous") {
-        didSet { UserDefaults.standard.set(includeAutonomous, forKey: "orb.inbox.includeAutonomous"); version += 1; if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } } }
+        didSet {
+            guard includeAutonomous != oldValue else { return }
+            UserDefaults.standard.set(includeAutonomous, forKey: "orb.inbox.includeAutonomous")
+            version += 1
+            if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
+        }
     }
     var model: String {
         didSet {
@@ -213,6 +230,7 @@ final class OrbInboxSettings: @unchecked Sendable {
                 model = resolved
                 return
             }
+            guard resolved != oldValue else { return }
             UserDefaults.standard.set(resolved, forKey: modelKey)
             version += 1
             if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
@@ -1439,6 +1457,7 @@ struct OrbInboxView: View {
     @State private var dictation = OrbDictation()
     @Environment(\.scenePhase) private var scenePhase
     @State private var peekedIDs: Set<String> = []
+    @State private var seenUnreadIDs: Set<String> = []
     @FocusState private var replyFocused: Bool
     @State private var undoItem: (id: String, title: String)?
 
@@ -1457,7 +1476,16 @@ struct OrbInboxView: View {
             dismissedIDs: dismissedIDs,
             peekedIDs: peekedIDs
         )
-        cachedSections = built
+        var nextSeen = seenUnreadIDs
+        for item in built.needsYou + built.ready where item.unread {
+            nextSeen.insert(item.id)
+        }
+        if nextSeen != seenUnreadIDs {
+            seenUnreadIDs = nextSeen
+        }
+        if cachedSections.needsYou != built.needsYou || cachedSections.ready != built.ready || cachedSections.working != built.working {
+            cachedSections = built
+        }
         let newUnread = (built.needsYou + built.ready).filter(\.unread).count
         if actionableCount != newUnread {
             actionableCount = newUnread
@@ -1505,7 +1533,7 @@ struct OrbInboxView: View {
 
     private func matchesFilter(_ item: OrbInboxItem, mode: OrbInboxFilterMode? = nil) -> Bool {
         switch mode ?? filterMode {
-        case .unread: return item.unread
+        case .unread: return item.unread || seenUnreadIDs.contains(item.id) || peekedIDs.contains(item.id) || replyingMissionID == item.id
         case .attention: return item.attention
         case .all: return true
         }
@@ -1658,6 +1686,9 @@ struct OrbInboxView: View {
                         let count = mode == .unread ? unreadCount : (mode == .attention ? attentionCount : totalActionableCount)
                         Button {
                             withAnimation(.snappy(duration: 0.2)) {
+                                if filterMode != mode {
+                                    seenUnreadIDs.removeAll()
+                                }
                                 filterMode = mode
                             }
                             OrbHaptics.selection()
@@ -2520,7 +2551,7 @@ struct OrbInboxView: View {
         if missions.isEmpty, let cached = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
             OrbReadCache.seedFromGlobalMissions(cached.items)
             let rows = cached.items.map { OrbRow($0) }.filter(\.mobile)
-            missions = rows
+            if missions != rows { missions = rows }
             seedCachedEvents(for: rows)
             recomputeSections()
         }
@@ -2530,7 +2561,7 @@ struct OrbInboxView: View {
             let raw = try await api.call("/api/control/missions?limit=100&all=true")
             OrbReadCache.seedFromGlobalMissions(raw.items)
             let rows = raw.items.map { OrbRow($0) }.filter(\.mobile)
-            missions = rows
+            if missions != rows { missions = rows }
             OrbDisk.saveAsync(raw, key: "inbox:missions")
             seedCachedEvents(for: rows)
             recomputeSections()
@@ -2597,6 +2628,7 @@ struct OrbInboxView: View {
         defer { busyIDs.remove(item.id) }
         withAnimation(.snappy(duration: 0.22)) {
             _ = dismissedIDs.insert(item.id)
+            seenUnreadIDs.remove(item.id)
             if replyingMissionID == item.id {
                 replyingMissionID = nil
                 replyDraft = ""
@@ -2626,7 +2658,10 @@ struct OrbInboxView: View {
         guard !items.isEmpty else { return }
         let ids = items.map(\.id)
         withAnimation(.snappy(duration: 0.22)) {
-            for id in ids { dismissedIDs.insert(id) }
+            for id in ids {
+                dismissedIDs.insert(id)
+                seenUnreadIDs.remove(id)
+            }
             for item in items { markItemAndChildrenRead(item) }
             recomputeSections()
         }

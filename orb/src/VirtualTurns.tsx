@@ -61,10 +61,13 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    if(!props.segment.item)return;
    const key=props.segment.key;nodes.set(key,element);
    const observer=new ResizeObserver(()=>timed("turn resized",()=>{
-    const height=element.getBoundingClientRect().height;if(height<=0||sizes.get(key)===height)return;
-    const row=layout().find(row=>row.item.key===key),delta=height-(sizes.get(key)??300);
+    const rect=element.getBoundingClientRect(),height=rect.height;if(height<=0||sizes.get(key)===height)return;
+    const prevHeight=sizes.get(key);
     sizes.set(key,height);
-    if(scroller&&row&&row.top+row.height<viewport().top)scroller.scrollTop+=delta;
+    if(scroller&&prevHeight!==undefined){
+     const scrollerTop=scroller.getBoundingClientRect().top;
+     if(rect.bottom<=scrollerTop+1)scroller.scrollTop+=height-prevHeight;
+    }
     setRevision(n=>n+1);schedule();
    }));observer.observe(element);
    onCleanup(()=>{observer.disconnect();nodes.delete(key);});

@@ -530,34 +530,40 @@ struct OrbHome: View {
     private func load() async {
         defer { loading = false }
         if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) {
-            projects = cached["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
+            let nextProjects = cached["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
+            if projects != nextProjects { projects = nextProjects }
         }
         if let cachedMissions = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
             OrbReadCache.seedFromGlobalMissions(cachedMissions.items)
             let rows = cachedMissions.items.map { OrbRow($0) }.filter(\.mobile)
-            workingByProject = Self.countWorkingByProject(rows)
-            inboxCount = OrbInboxModel.unreadCount(missions: rows, projects: projects)
+            let nextWorking = Self.countWorkingByProject(rows)
+            if workingByProject != nextWorking { workingByProject = nextWorking }
+            let nextInbox = OrbInboxModel.unreadCount(missions: rows, projects: projects)
+            if inboxCount != nextInbox { inboxCount = nextInbox }
         }
         do {
             let requested = Date(), endpoint = api.endpoint
             let value = try await api.call("/api/projects")
             // Colors ride on the roster; a color chosen before the server stored any goes up here, once.
             Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
-            projects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
+            let nextProjects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
+            if projects != nextProjects { projects = nextProjects }
             OrbDisk.saveAsync(value, key: "projects"); error = ""
-            let roster = projects
+            let roster = nextProjects
             Task {
                 if let rawMissions = try? await api.call("/api/control/missions?limit=100") {
                     OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
                     OrbReadCache.seedFromGlobalMissions(rawMissions.items)
                     let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
-                    workingByProject = Self.countWorkingByProject(rows)
-                    inboxCount = OrbInboxModel.unreadCount(missions: rows, projects: roster)
+                    let nextWorking = Self.countWorkingByProject(rows)
+                    if workingByProject != nextWorking { workingByProject = nextWorking }
+                    let nextInbox = OrbInboxModel.unreadCount(missions: rows, projects: roster)
+                    if inboxCount != nextInbox { inboxCount = nextInbox }
                     await OrbReadCache.prefetch(rows)
                 }
             }
             // Warm the top projects and the agent picker catalog so opening a project or composer feels instant.
-            let topProjects = Array(projects.prefix(3))
+            let topProjects = Array(nextProjects.prefix(3))
             Task {
                 _ = try? await OrbReadCache.agentCatalog()
                 for proj in topProjects {
@@ -1004,8 +1010,12 @@ struct OrbProjectPage: View {
         }
     }
     private func apply(_ value: OrbJSON) {
-        missions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)
-        if case .object(let entries) = value["manifest"]["entries"] { folders = entries.filter { $0.value["directory"].flag }.map(\.key) }
+        let nextMissions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)
+        if missions != nextMissions { missions = nextMissions }
+        if case .object(let entries) = value["manifest"]["entries"] {
+            let nextFolders = entries.filter { $0.value["directory"].flag }.map(\.key).sorted()
+            if folders != nextFolders { folders = nextFolders }
+        }
     }
     private func load(force: Bool = false) async {
         let includeArchived = filter == "Archived"

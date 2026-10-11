@@ -82,8 +82,9 @@ export function withInitialPrompt(items: StreamItem[], mission: Mission | null, 
     }
     return prompt ? [{kind:"user",key,text:prompt,images:receipt?.images}, ...items] : items;
   }
-  // Keep the optimistic turn mounted when its canonical event arrives.
-  return receipt ? items.map((item,index) => index === first ? {...item,key,...(receipt.replacement && item.kind === "user" ? {text:receipt.prompt} : {})} : item) : items;
+  // Keep the initial user turn mounted when its canonical event arrives so
+  // reconciling turns never tears down the top of the transcript.
+  return (receipt || prompt) ? items.map((item,index) => index === first ? {...item,key,...(receipt?.replacement && item.kind === "user" ? {text:receipt.prompt} : {})} : item) : items;
 }
 export const TYPED_LAUNCH_UNSUPPORTED = "This backend does not support structured remote launches. Update the connected backend to enable them. Your draft and selection are kept; no mission was submitted.";
 export type RemoteSupport = "supported" | "unsupported" | "unknown";

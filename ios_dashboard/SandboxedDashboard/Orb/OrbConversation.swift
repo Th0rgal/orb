@@ -63,17 +63,26 @@ struct OrbConversation: View {
     private var working: Bool { optimisticPrompt != nil || (isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : ["active", "pending", "running", "starting"].contains(mission["status"].text)) }
 
     private func rebuildWorkModel() {
-        workModel = OrbWorkModel.build(from: events, working: working)
+        let next = OrbWorkModel.build(from: events, working: working)
+        if workModel != next {
+            workModel = next
+        }
     }
 
     private func rebuildHistory() {
-        history = Self.computeHistory(
+        let next = Self.computeHistory(
             isCloud: isCloud,
             turns: turns,
             mission: mission,
             events: events,
             optimisticPrompt: optimisticPrompt
         )
+        if !followsLatest && next.count > history.count && history.count >= visibleCount {
+            visibleCount += (next.count - history.count)
+        }
+        if history.count != next.count || zip(history, next).contains(where: { $0.0 != $1.0 || $0.1 != $1.1 || $0.2 != $1.2 }) {
+            history = next
+        }
     }
 
     private static func computeHistory(
@@ -131,6 +140,11 @@ struct OrbConversation: View {
         }
         if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && $0.2 == opt }) {
             rows.append(("optimistic-user", "user", opt))
+        }
+        if !isCloud {
+            rows = rows.enumerated().map { index, row in
+                ("turn-\(index)-\(row.1)", row.1, row.2)
+            }
         }
         return rows
     }
@@ -373,7 +387,11 @@ struct OrbConversation: View {
             return maxScrollableY <= 24 || geometry.visibleRect.maxY >= geometry.contentSize.height - 40
         } action: { _, value in
             atBottom = value
-            if userScrolling { followsLatest = value }
+            if value {
+                followsLatest = true
+            } else if userScrolling || openedAtLatest {
+                followsLatest = false
+            }
         }
         .onScrollGeometryChange(for: CGSize.self) { geometry in
             CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
@@ -439,16 +457,24 @@ struct OrbConversation: View {
         if !workModel.todos.isEmpty {
             OrbMissionTasksCard(todos: workModel.todos)
         }
-        if !workModel.isEmpty || working {
+        if working {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 OrbWorkFold(
                     model: workModel,
-                    working: working,
+                    working: true,
                     headline: workModel.liveHeadline(fallback: baseStepLabel()),
                     elapsed: elapsedClock(at: context.date),
                     accessibilityStatus: progress(at: context.date)
                 )
             }
+        } else if !workModel.isEmpty {
+            OrbWorkFold(
+                model: workModel,
+                working: false,
+                headline: workModel.liveHeadline(fallback: baseStepLabel()),
+                elapsed: "",
+                accessibilityStatus: ""
+            )
         }
         if working && !liveText.isEmpty {
             OrbRichText(source: liveText, onArtifact: { path in
@@ -1464,8 +1490,14 @@ struct OrbConversation: View {
             async let batchTask = knownCloud ? nil : (try? await APIService.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
             async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue")) ?? .null)
 
-            let value = try await valueTask
-            mission = value
+            var value = try await valueTask
+            if value["history"].items.isEmpty && !mission["history"].items.isEmpty, case var .object(dict) = value {
+                dict["history"] = mission["history"]
+                value = .object(dict)
+            }
+            if mission != value {
+                mission = value
+            }
             unavailable = !OrbRow(value).mobile
             guard !unavailable else {
                 rebuildHistory()

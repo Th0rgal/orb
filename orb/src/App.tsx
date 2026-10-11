@@ -2657,7 +2657,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) : undefined;
   const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null);
-  createEffect(()=>{if(p.initial)setMission(p.initial);});
+  createEffect(()=>{
+    const init = p.initial;
+    if (init) setMission(prev => prev && prev.id === init.id ? { ...prev, ...init, history: init.history?.length ? init.history : prev.history } : init);
+  });
   createEffect(() => p.onMission?.(mission()));
   onCleanup(() => p.onMission?.(null));
   const [items, setItems] = createSignal<StreamItem[]>(cached?.items ?? []);
