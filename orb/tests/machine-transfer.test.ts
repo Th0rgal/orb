@@ -44,3 +44,15 @@ it("reports missing transfer capability without calling an export or fork endpoi
   await expect(inspectTransfer("id")).rejects.toThrow("Update the connected backend");
   expect(fetch).toHaveBeenCalledOnce();
 });
+it("writes an empty file on resume even when stage reports 0 received bytes", async () => {
+  const calls: Record<string, any>[] = [];
+  const emptyAction: TransferAction = { ...action, manifest: { bytes: 0, excluded: [], files: [{ path: "empty.txt", bytes: 0, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", executable: false }] } };
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    calls.push(body);
+    return new Response(JSON.stringify(body.operation?.op === "stage" ? { sealed: false, received: { "empty.txt": 0 } } : { ok: true }), { status: 200 });
+  });
+  await copyTransfer(emptyAction, vi.fn());
+  expect(calls.map(c => c.operation.op)).toEqual(["stage", "write"]);
+  expect(calls[1].operation).toEqual({ op: "write", path: "empty.txt", offset: 0, data: "" });
+});

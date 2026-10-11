@@ -485,9 +485,17 @@ fn history(git: &Path) -> u64 {
         .and_then(|objects| Some(weigh_all(&objects, &fs::symlink_metadata(&objects).ok()?)))
         .unwrap_or(0)
 }
+/// Most entries `weigh` inspects under a single left-behind directory, so
+/// enormous build caches (`node_modules`, `target`, `.lake`) do not stall
+/// `Preparing workspace…` for minutes just to display an approximate size.
+const MAX_WEIGH_ENTRIES: usize = 5_000;
 /// Bytes and entries beneath a left-behind path, were it carried, with the
 /// history of the repositories inside.
 fn weigh(path: &Path, m: &fs::Metadata) -> (u64, usize) {
+    let mut budget = MAX_WEIGH_ENTRIES;
+    weigh_bounded(path, m, &mut budget)
+}
+fn weigh_bounded(path: &Path, m: &fs::Metadata, budget: &mut usize) -> (u64, usize) {
     if m.is_file() {
         return (m.len(), 1);
     }
@@ -496,11 +504,15 @@ fn weigh(path: &Path, m: &fs::Metadata) -> (u64, usize) {
     }
     let mut total = (0u64, 0usize);
     for item in fs::read_dir(path).into_iter().flatten().flatten() {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
         let (bytes, files) = match item.file_name().to_str() {
             Some(".git") => (history(&item.path()), 1),
             Some(name) if protected(name) => continue,
             _ => match fs::symlink_metadata(item.path()) {
-                Ok(m) => weigh(&item.path(), &m),
+                Ok(m) => weigh_bounded(&item.path(), &m, budget),
                 Err(_) => continue,
             },
         };
@@ -639,12 +651,20 @@ fn survey(root: &Path) -> Result<serde_json::Value, String> {
     let mut rows: Vec<_> = moved.into_values().chain(left).collect();
     let truncated = rows.len() > MAX_ROWS;
     if truncated {
-        // Keep what weighs most on either limit, so each stays within reach.
+        // Keep what weighs most on either limit, and prefer top-level moved
+        // folders over deep left-behind build folders so the user can always
+        // untick top-level folders to fit within limits.
         let share = |row: &Row| {
             let bytes = row.bytes as f64 / MAX_BYTES as f64;
             bytes.max(row.files as f64 / MAX_FILES as f64)
         };
-        rows.sort_by(|a, b| share(b).total_cmp(&share(a)));
+        let priority =
+            |row: &Row| row.state == State::Moved && row.folder && !row.path.contains('/');
+        rows.sort_by(|a, b| {
+            priority(b)
+                .cmp(&priority(a))
+                .then_with(|| share(b).total_cmp(&share(a)))
+        });
         rows.truncate(MAX_ROWS);
     }
     rows.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1194,6 +1214,12 @@ pub fn operate(
             if !area.join("verified").exists() {
                 for f in &m.files {
                     let path = confined(&root, &f.path)?;
+                    if f.bytes == 0 && !path.exists() {
+                        if let Some(parent) = path.parent() {
+                            fs::create_dir_all(parent).map_err(err)?;
+                        }
+                        File::create(&path).map_err(err)?;
+                    }
                     if fs::metadata(&path).map_err(err)?.len() != f.bytes
                         || digest(&path)? != f.sha256
                     {
@@ -1868,6 +1894,8 @@ mod integrity_tests {
         let temp = tempfile::tempdir().unwrap();
         let src = temp.path().join("src");
         fs::create_dir_all(src.join("many")).unwrap();
+        fs::create_dir_all(src.join("small_repo")).unwrap();
+        fs::write(src.join("small_repo/file.txt"), "x").unwrap();
         for i in 0..300 {
             fs::write(src.join(format!("many/{i}")), "").unwrap();
         }
@@ -1878,9 +1906,25 @@ mod integrity_tests {
         let rows: Vec<Row> = serde_json::from_value(found["rows"].clone()).unwrap();
         assert_eq!(found["truncated"], true);
         assert_eq!(rows.len(), MAX_ROWS);
-        assert_eq!(found["files"], 300 + MAX_ROWS + 10);
+        assert_eq!(found["files"], 301 + MAX_ROWS + 10);
         let many = rows.iter().find(|r| r.path == "many").unwrap();
         assert_eq!((many.bytes, many.files), (0, 300));
+        assert!(rows.iter().any(|r| r.path == "small_repo"));
+    }
+    #[test]
+    fn verify_restores_missing_empty_files_when_resuming_stage() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("empty.txt"), "").unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        let m: Manifest =
+            serde_json::from_value(operate(&a, Some(&src), Operation::Snapshot).unwrap()).unwrap();
+        operate(&b, None, Operation::Stage { manifest: m }).unwrap();
+        assert!(!b.join("workspace/empty.txt").exists());
+        operate(&b, None, Operation::Verify).unwrap();
+        assert_eq!(fs::read(b.join("workspace/empty.txt")).unwrap(), b"");
     }
     #[test]
     fn machine_transfer_preserves_git_history_and_uncommitted_work() {

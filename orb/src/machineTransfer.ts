@@ -93,11 +93,12 @@ export async function copyTransfer(action: TransferAction, progress: (done: numb
   for (const file of manifest.files) {
     const received = staged.received?.[file.path] ?? 0;
     done += received; progress(done, manifest.bytes);
-    for (let offset = received; offset < file.bytes || (offset === 0 && file.bytes === 0); offset += 1024 * 1024) {
+    for (let offset = received; offset < file.bytes || (file.bytes === 0 && offset === 0); offset += 1024 * 1024) {
       if (cancelled()) throw new Error("Transfer cancelled before activation.");
-      const { data } = await transferFiles<{ data: string }>(action, "source", { op: "read", path: file.path, offset });
+      const { data } = file.bytes === 0 ? { data: "" } : await transferFiles<{ data: string }>(action, "source", { op: "read", path: file.path, offset });
       await transferFiles(action, "destination", { op: "write", path: file.path, offset, data });
       done += Math.min(1024 * 1024, file.bytes - offset); progress(done, manifest.bytes);
+      if (file.bytes === 0) break;
     }
   }
   return action;

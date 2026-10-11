@@ -35,6 +35,17 @@ export function TransferSelection(p: { inventory: WorkspaceInventory; choice: Ch
   const children = (parent: InventoryRow) => moves(parent) && parent.folder ? rows().filter(row => beneath(row.path, parent.path)) : [];
   const over = () => totals().bytes > p.inventory.limits.bytes || totals().files > p.inventory.limits.files;
   const set = (row: InventoryRow, on: boolean) => { const next = { ...p.choice }; if (on === moves(row)) delete next[row.path]; else next[row.path] = on; p.onChoice(next); };
+  const topMoved = createMemo(() => roots().filter(moves));
+  const anyTopTicked = createMemo(() => topMoved().some(row => ticked(row, p.choice)));
+  const toggleAll = () => {
+    const next = { ...p.choice };
+    const turnOn = !anyTopTicked();
+    for (const row of topMoved()) {
+      if (turnOn) delete next[row.path];
+      else next[row.path] = false;
+    }
+    p.onChoice(next);
+  };
   const Line = (l: { row: InventoryRow; name: string }) => <label class="transfer-choice" classList={{ off: !ticked(l.row, p.choice) || blocked(l.row, rows(), p.choice) }}>
     <input type="checkbox" checked={ticked(l.row, p.choice) && !blocked(l.row, rows(), p.choice)} disabled={p.disabled || blocked(l.row, rows(), p.choice)} onChange={e => set(l.row, e.currentTarget.checked)} aria-label={`Move ${l.row.path}`} />
     <span class="transfer-path" title={l.row.path}>{l.name}{l.row.folder ? "/" : ""}</span>
@@ -51,7 +62,10 @@ export function TransferSelection(p: { inventory: WorkspaceInventory; choice: Ch
       <Meter label="Files" value={totals().files} limit={p.inventory.limits.files} text={`${totals().files.toLocaleString("en-US")} of ${p.inventory.limits.files.toLocaleString("en-US")}`} />
     </div>
     <Show when={over()}><p class="transfer-over" role="status">Too large to move. Untick folders until both bars fit.</p></Show>
-    <h3>Choose what to move</h3>
+    <div class="transfer-selection-head">
+      <h3>Choose what to move</h3>
+      <Show when={topMoved().length > 1}><button type="button" class="transfer-toggle-all" disabled={p.disabled} onClick={toggleAll}>{anyTopTicked() ? "Untick all" : "Select all"}</button></Show>
+    </div>
     <div class="transfer-groups">
       <For each={roots()}>{row => <Show when={children(row).length} fallback={<div class="transfer-leaf"><Line row={row} name={row.path} /></div>}>
         <details class="transfer-group"><summary><Line row={row} name={row.path} /></summary>

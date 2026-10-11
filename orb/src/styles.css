@@ -2082,6 +2082,11 @@ button.fork-trigger:hover { color: var(--fg); }
 .transfer-tag { flex: none; padding: 0 5px; border: 1px solid var(--stroke-strong); border-radius: var(--radius-xs); color: var(--fg-3); font-size: 10.5px; line-height: 15px; white-space: nowrap; }
 .transfer-leaf { display: flex; padding-left: 18px; border-radius: var(--radius-sm); }
 .transfer-leaf:hover { background: var(--bg-hover); }
+.transfer-selection-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 14px 0 4px; }
+.transfer-selection-head h3 { margin: 0; }
+.transfer-toggle-all { padding: 0; border: 0; background: none; color: var(--fg-3); font: inherit; font-size: 11px; cursor: pointer; }
+.transfer-toggle-all:hover:not(:disabled) { color: var(--fg); }
+.transfer-toggle-all:disabled { opacity: .45; cursor: default; }
 .transfer-selection li { padding: 0; }
 .transfer-selection ul { max-height: 190px; }
 .transfer-body p.transfer-note { margin: 10px 0 0; font-size: 11.5px; color: var(--fg-4); }
