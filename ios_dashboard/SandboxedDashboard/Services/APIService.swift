@@ -97,17 +97,26 @@ final class APIService {
     }()
 
     // Configuration
+    @ObservationIgnored private var cachedBaseURL: String?
+    @ObservationIgnored private var cachedTokenEndpoint: String?
+    @ObservationIgnored private var cachedJwtToken: String?
+
     var baseURL: String {
         get {
+            if let cachedBaseURL { return cachedBaseURL }
             let stored = UserDefaults.standard.string(forKey: "api_base_url")?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return stored.isEmpty ? Self.defaultBaseURL : stored
+            let resolved = stored.isEmpty ? Self.defaultBaseURL : stored
+            cachedBaseURL = resolved
+            return resolved
         }
         set {
-            UserDefaults.standard.set(
-                newValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                forKey: "api_base_url"
-            )
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolved = trimmed.isEmpty ? Self.defaultBaseURL : trimmed
+            cachedBaseURL = resolved
+            cachedTokenEndpoint = nil
+            cachedJwtToken = nil
+            UserDefaults.standard.set(trimmed, forKey: "api_base_url")
         }
     }
 
@@ -119,13 +128,29 @@ final class APIService {
     
     private var jwtToken: String? {
         get {
-            if let legacy = UserDefaults.standard.string(forKey: "jwt_token") {
-                if OrbKeychain.save(legacy, for: baseURL) { UserDefaults.standard.removeObject(forKey: "jwt_token") }
+            let currentEndpoint = baseURL
+            if cachedTokenEndpoint == currentEndpoint {
+                return cachedJwtToken
+            }
+            if let legacy = UserDefaults.standard.string(forKey: "jwt_token"), !legacy.isEmpty {
+                _ = OrbKeychain.save(legacy, for: currentEndpoint)
+                UserDefaults.standard.removeObject(forKey: "jwt_token")
+                cachedTokenEndpoint = currentEndpoint
+                cachedJwtToken = legacy
                 return legacy
             }
-            return OrbKeychain.token(for: baseURL)
+            let token = OrbKeychain.token(for: currentEndpoint)
+            cachedTokenEndpoint = currentEndpoint
+            cachedJwtToken = token
+            return token
         }
-        set { if OrbKeychain.save(newValue, for: baseURL) { UserDefaults.standard.removeObject(forKey: "jwt_token") } }
+        set {
+            let currentEndpoint = baseURL
+            cachedTokenEndpoint = currentEndpoint
+            cachedJwtToken = newValue
+            _ = OrbKeychain.save(newValue, for: currentEndpoint)
+            UserDefaults.standard.removeObject(forKey: "jwt_token")
+        }
     }
     
     var authToken: String? {
@@ -202,6 +227,8 @@ final class APIService {
               OrbKeychain.saveCredentials(.init(password: password, username: username), for: endpoint) else {
             throw NSError(domain: "OrbKeychain", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not securely save your login. Please unlock your device and try again."])
         }
+        cachedTokenEndpoint = endpoint
+        cachedJwtToken = response.token
         UserDefaults.standard.removeObject(forKey: "jwt_token")
         authSessionExpired = false
         return true

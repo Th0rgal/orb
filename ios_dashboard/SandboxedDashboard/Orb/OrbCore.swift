@@ -180,12 +180,13 @@ enum OrbKeychain {
     @discardableResult static func save(_ value: String?, for endpoint: String, service: String = "md.thomas.orb.core") -> Bool {
         let query = base(endpoint, service: service)
         guard let value else { let code = SecItemDelete(query as CFDictionary); return code == errSecSuccess || code == errSecItemNotFound }
-        let attributes: [CFString: Any] = [kSecValueData: Data(value.utf8)]
+        let data = Data(value.utf8)
+        let attributes: [CFString: Any] = [kSecValueData: data]
         let result = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if result == errSecSuccess { return true }
-        guard result == errSecItemNotFound else { return false }
+        _ = SecItemDelete(query as CFDictionary)
         var insert = query
-        insert[kSecValueData] = Data(value.utf8)
+        insert[kSecValueData] = data
         insert[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
     }
@@ -216,7 +217,10 @@ final class OrbCore {
             throw APIError.unauthorized
         }
         guard (200..<300).contains(http.statusCode) else { throw OrbHTTPError(status: http.statusCode, detail: String(data: data, encoding: .utf8) ?? "Request failed") }
-        return data.isEmpty ? .null : try JSONDecoder().decode(OrbJSON.self, from: data)
+        if data.isEmpty { return .null }
+        return try await Task.detached(priority: .userInitiated) {
+            try JSONDecoder().decode(OrbJSON.self, from: data)
+        }.value
     }
     func transcribe(_ wav: Data, language: String) async throws -> String {
         guard wav.count <= 4 * 1024 * 1024,
@@ -333,8 +337,15 @@ enum OrbReadCache {
     }
     static func seedMemory(_ name: String, value: OrbJSON) {
         let scope = key(name)
+        if name.hasPrefix("mission:"),
+           value["history"].items.isEmpty,
+           let existing = values[scope]?.value,
+           !existing["history"].items.isEmpty {
+            return
+        }
         if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
-        values[scope] = Entry(value: value, date: Date())
+        let isSummaryOnly = name.hasPrefix("mission:") && value["history"].items.isEmpty
+        values[scope] = Entry(value: value, date: isSummaryOnly ? .distantPast : Date())
     }
     static func seed(_ name: String, value: OrbJSON) {
         seedMemory(name, value: value)
@@ -355,10 +366,9 @@ enum OrbReadCache {
         for (proj, list) in byProject {
             let cacheName = "project:\(proj)"
             let scope = key(cacheName)
-            if values[scope] == nil {
-                let existingManifest = read(cacheName)?["manifest"] ?? .null
+            if values[scope] == nil && read(cacheName) == nil {
                 values[scope] = Entry(
-                    value: .object(["missions": .array(list), "manifest": existingManifest]),
+                    value: .object(["missions": .array(list), "manifest": .null]),
                     date: Date().addingTimeInterval(-25) // allow quick display while still refreshing
                 )
             }
@@ -454,7 +464,7 @@ enum OrbReadCache {
         let tasks: [Task<Void, Never>] = rows.prefix(5).map { row in
             Task { @MainActor in
                 guard !Task.isCancelled else { return }
-                if row.raw != .null {
+                if row.raw != .null && !row.raw["history"].items.isEmpty {
                     seedMemory("mission:\(row.id)", value: row.raw)
                 } else {
                     _ = try? await conversation(row.id)

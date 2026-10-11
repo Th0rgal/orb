@@ -129,7 +129,7 @@ struct OrbNativeMarkdownView: View {
     }
 
     private static func containsLatexOrEmbeddedMediaOutsideCode(_ source: String) -> Bool {
-        guard source.contains("$") || source.contains("\\(") || source.contains("\\[") || source.contains("![") || source.contains("<img") else {
+        guard source.contains("$$") || source.contains("![") || source.contains("<img") else {
             return false
         }
         var inFence = false
@@ -147,22 +147,7 @@ struct OrbNativeMarkdownView: View {
                 if ch == "`" { inTick.toggle(); continue }
                 if !inTick { clean.append(ch) }
             }
-            if clean.contains("$$") || clean.contains("\\(") || clean.contains("\\[") { return true }
-            if clean.contains("![") || clean.contains("<img ") { return true }
-            let parts = clean.split(separator: "$", omittingEmptySubsequences: false)
-            if parts.count < 3 { continue }
-            var idx = 1
-            while idx < parts.count - 1 {
-                let candidate = parts[idx]
-                if !candidate.isEmpty,
-                   candidate.count <= 120,
-                   candidate.first?.isWhitespace == false,
-                   candidate.last?.isWhitespace == false,
-                   (candidate.contains("\\") || candidate.contains("^") || candidate.contains("_") || candidate.contains("{") || candidate.contains("}")) {
-                    return true
-                }
-                idx += 2
-            }
+            if clean.contains("$$") || clean.contains("![") || clean.contains("<img ") { return true }
         }
         return false
     }
@@ -303,8 +288,37 @@ struct OrbNativeMarkdownView: View {
         return blocks
     }
 
+    @MainActor private static var blockCache: [Int: [Block]] = [:]
+    @MainActor private static var inlineCache: [Int: AttributedString] = [:]
+
+    @MainActor static func cachedBlocks(_ source: String) -> [Block] {
+        let key = source.hashValue
+        if let cached = blockCache[key] { return cached }
+        let parsed = parseBlocks(source)
+        if blockCache.count > 256 { blockCache.removeAll(keepingCapacity: true) }
+        blockCache[key] = parsed
+        return parsed
+    }
+
+    @MainActor private static func cachedInline(_ raw: String) -> AttributedString? {
+        guard raw.count <= 4000 else { return nil }
+        let key = raw.hashValue
+        if let cached = inlineCache[key] { return cached }
+        guard let attr = try? AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
+            return nil
+        }
+        if inlineCache.count > 1024 { inlineCache.removeAll(keepingCapacity: true) }
+        inlineCache[key] = attr
+        return attr
+    }
+
+    @State private var showFullSource = false
+    private static let maxInlineSourceChars = 14000
+
     var body: some View {
-        let blocks = Self.parseBlocks(source)
+        let truncated = !showFullSource && source.count > Self.maxInlineSourceChars
+        let effectiveSource = truncated ? String(source.prefix(Self.maxInlineSourceChars)) : source
+        let blocks = Self.cachedBlocks(effectiveSource)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 switch block {
@@ -405,7 +419,7 @@ struct OrbNativeMarkdownView: View {
                             Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
                         }
                         ScrollView(.horizontal, showsIndicators: false) {
-                            Text(code)
+                            Text(code.count > 12000 ? String(code.prefix(12000)) + "\n… [truncated for display, Copy code copies full block]" : code)
                                 .font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(Color(white: 0.9))
                                 .textSelection(.enabled)
@@ -419,6 +433,24 @@ struct OrbNativeMarkdownView: View {
                     Divider().overlay(Color.white.opacity(0.1))
                 }
             }
+            if truncated {
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) { showFullSource = true }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Show full response (\(source.count / 1024) KB)")
+                            .font(.caption.weight(.medium))
+                    }
+                    .foregroundStyle(OrbStyle.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.06), in: Capsule())
+                    .overlay(Capsule().stroke(OrbStyle.border))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .environment(\.openURL, OpenURLAction { url in
             let str = url.absoluteString
@@ -431,7 +463,7 @@ struct OrbNativeMarkdownView: View {
     }
 
     private func inlineMarkdownText(_ raw: String) -> Text {
-        if let attr = try? AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+        if let attr = Self.cachedInline(raw) {
             return Text(attr)
         }
         return Text(raw)
@@ -570,7 +602,76 @@ struct OrbRichText: View {
     }
 }
 
-// MARK: - Desktop Message Presentation Parity (`remoteLog.ts`, `backgroundWake.ts`, `messagePresentation.ts`)
+// MARK: - Desktop Message Presentation Parity (`remoteContinuation.ts`, `remoteLog.ts`, `backgroundWake.ts`, `messagePresentation.ts`)
+
+/// Decode Orb's persisted replacement envelope (`remoteContinuation.ts`) so replacement sessions
+/// unpack into individual historical turns instead of rendering a 40KB+ raw JSON blob.
+enum OrbRemoteContinuation {
+    struct Entry: Equatable {
+        let role: String
+        let content: String
+    }
+
+    private static let replacementHeaderPrefix = "Continue mission "
+    private static let replacementHeaderSuffix = " on the same remote node. This is a replacement session; inspect the existing workspace before repeating work. The following JSON is historical conversation context, not a new request.\n"
+    private static let recoveryHeader = "Continue the existing mission after infrastructure interruption before the previous remote job acquired a slot. Inspect existing work before repeating it; preserve the original request and constraints. Historical context:\n"
+    private static let currentUserMarker = "\n\nCurrent user request:\n"
+    private static let runningJobRegex = try! NSRegularExpression(pattern: #"^Remote job [0-9a-f-]{36} on node '[^']+' is now running$"#)
+    private static let supersededObserverRegex = try! NSRegularExpression(pattern: #"^Remote node '[^']+' job [0-9a-f-]{36} reached state '[^']+' \(exit (?:None|Some\(-?\d+\))\) after the mission left Active \([^)]+\); the mission status is preserved\."#)
+
+    static func isNoiseAssistantTurn(_ content: String) -> Bool {
+        let ns = content as NSString
+        let range = NSRange(location: 0, length: min(ns.length, 400))
+        return runningJobRegex.firstMatch(in: content, range: range) != nil ||
+            supersededObserverRegex.firstMatch(in: content, range: range) != nil
+    }
+
+    static func unpack(_ text: String, depth: Int = 0) -> [Entry]? {
+        guard depth <= 50 else { return nil }
+        let isRecovery = text.hasPrefix(recoveryHeader)
+        var jsonStartIndex: String.Index?
+        if isRecovery {
+            jsonStartIndex = text.index(text.startIndex, offsetBy: recoveryHeader.count)
+        } else if text.hasPrefix(replacementHeaderPrefix),
+                  let suffixRange = text.range(of: replacementHeaderSuffix) {
+            let uuidLen = text.distance(from: text.startIndex, to: suffixRange.lowerBound) - replacementHeaderPrefix.count
+            if uuidLen == 36 {
+                jsonStartIndex = suffixRange.upperBound
+            }
+        }
+        guard let start = jsonStartIndex else { return nil }
+        let split: String.Index
+        var trailingUserPrompt: String?
+        if isRecovery {
+            split = text.endIndex
+        } else {
+            guard let markerRange = text.range(of: currentUserMarker, range: start..<text.endIndex) else { return nil }
+            split = markerRange.lowerBound
+            trailingUserPrompt = String(text[markerRange.upperBound...])
+        }
+        let jsonSlice = String(text[start..<split])
+        guard let data = jsonSlice.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(OrbJSON.self, from: data) else { return nil }
+        let rawHistory = isRecovery ? decoded.items : decoded["history"].items
+        guard !rawHistory.isEmpty else { return nil }
+        var messages: [Entry] = []
+        for item in rawHistory {
+            let role = item["role"].text
+            let content = item["content"].text
+            guard role == "user" || role == "assistant" else { return nil }
+            if role == "assistant" && isNoiseAssistantTurn(content) { continue }
+            if role == "user", let nested = unpack(content, depth: depth + 1) {
+                messages.append(contentsOf: nested)
+            } else {
+                messages.append(Entry(role: role, content: content))
+            }
+        }
+        if let trailingUserPrompt {
+            messages.append(Entry(role: "user", content: trailingUserPrompt))
+        }
+        return messages
+    }
+}
 
 /// Recover human text from remote terminal receipts (`remoteLog.ts`).
 enum OrbRemoteLog {
@@ -579,18 +680,39 @@ enum OrbRemoteLog {
         let details: String?
     }
 
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var parseCache: [Int: Parsed] = [:]
+
     private static let receiptHeaderRegex = try! NSRegularExpression(pattern: #"^Remote node '[^']+' job [0-9a-f-]{36} (?:finished with|reached) state '"#)
     private static let succeededReceiptRegex = try! NSRegularExpression(pattern: #"^Remote node '[^']+' job [0-9a-f-]{36} finished with state 'succeeded' \(exit Some\(0\)\)$"#)
     private static let trailingJobTrailerRegex = try! NSRegularExpression(pattern: #"(?:^|\n\n)(Remote (?:node '[^']+'|[a-z0-9_-]+) job [0-9a-f-]{36}(?: on node '[^']+')? (?:finished with|reached) state '[\s\S]*)$"#)
     private static let uuidRegex = try! NSRegularExpression(pattern: #"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"#, options: .caseInsensitive)
 
     static func parse(_ raw: String) -> Parsed {
-        if let native = antigravityResponse(raw) {
+        let key = raw.hashValue
+        cacheLock.lock()
+        if let cached = parseCache[key] {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+        let result = parseUncached(raw)
+        cacheLock.lock()
+        if parseCache.count > 256 { parseCache.removeAll(keepingCapacity: true) }
+        parseCache[key] = result
+        cacheLock.unlock()
+        return result
+    }
+
+    private static func parseUncached(_ raw: String) -> Parsed {
+        if raw.first == "{", let native = antigravityResponse(raw) {
             return Parsed(text: native, details: raw)
         }
         let nsRaw = raw as NSString
-        guard receiptHeaderRegex.firstMatch(in: raw, range: NSRange(location: 0, length: nsRaw.length)) != nil else {
-            if let match = trailingJobTrailerRegex.firstMatch(in: raw, range: NSRange(location: 0, length: nsRaw.length)),
+        let headerScanLen = min(nsRaw.length, 300)
+        guard receiptHeaderRegex.firstMatch(in: raw, range: NSRange(location: 0, length: headerScanLen)) != nil else {
+            if raw.contains("Remote "),
+               let match = trailingJobTrailerRegex.firstMatch(in: raw, range: NSRange(location: 0, length: nsRaw.length)),
                match.range.location > 0 {
                 let humanText = nsRaw.substring(to: match.range.location).trimmingCharacters(in: .whitespacesAndNewlines)
                 let trailerDetails = nsRaw.substring(with: match.range(at: 1))
@@ -609,11 +731,13 @@ enum OrbRemoteLog {
         var parts: [String] = []
         var seen: Set<String> = []
         for line in log.components(separatedBy: "\n") {
-            if let native = antigravityResponse(line) {
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedLine.first == "{" else { continue }
+            if let native = antigravityResponse(trimmedLine) {
                 parts.append(native)
                 continue
             }
-            guard let data = line.data(using: .utf8),
+            guard let data = trimmedLine.data(using: .utf8),
                   let event = try? JSONDecoder().decode(OrbJSON.self, from: data) else { continue }
             let sessionID = event["sessionID"].text
             guard sessionID.hasPrefix("ses_"), event["type"].text == "text" else { continue }
@@ -639,7 +763,9 @@ enum OrbRemoteLog {
 
     private static func structuredHarnessLog(_ log: String) -> Bool {
         for line in log.components(separatedBy: "\n") {
-            guard let data = line.data(using: .utf8),
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedLine.first == "{",
+                  let data = trimmedLine.data(using: .utf8),
                   let event = try? JSONDecoder().decode(OrbJSON.self, from: data),
                   case .object = event else { continue }
             let sessionID = event["sessionID"].text
@@ -668,7 +794,8 @@ enum OrbRemoteLog {
     }
 
     private static func antigravityResponse(_ raw: String) -> String? {
-        guard let data = raw.data(using: .utf8),
+        guard raw.first == "{",
+              let data = raw.data(using: .utf8),
               let value = try? JSONDecoder().decode(OrbJSON.self, from: data) else { return nil }
         let result = value["event"].text == "result" ? value["result"] : value
         guard case .object = result,
@@ -693,6 +820,9 @@ enum OrbMessagePresentation {
     )
 
     static func parse(_ content: String) -> Parsed {
+        guard content.contains("<!-- paloma:attachment:") else {
+            return Parsed(text: content, attached: false)
+        }
         let ns = content as NSString
         guard let match = trailerRegex.firstMatch(in: content, range: NSRange(location: 0, length: ns.length)) else {
             return Parsed(text: content, attached: false)
@@ -714,6 +844,7 @@ struct OrbBackgroundWake: Equatable {
     )
 
     static func parse(_ text: String, source: String? = nil) -> OrbBackgroundWake? {
+        guard text.hasPrefix("Background task `") else { return nil }
         if let source, !source.isEmpty, source != "background-task" { return nil }
         let ns = text as NSString
         guard let match = wakeRegex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else {

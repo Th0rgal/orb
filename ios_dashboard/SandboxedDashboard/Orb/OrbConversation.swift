@@ -44,7 +44,12 @@ struct OrbConversation: View {
     @State private var answered: Set<String> = []
     @State private var copiedItemID: String?
     @State private var expandedLogIDs: Set<String> = []
+    @State private var expandedUserMessageIDs: Set<String> = []
     @State private var queueExpanded = true
+    @State private var history: [(String, String, String)] = []
+    @State private var contextItems: [OrbContextItem] = []
+    @State private var contextBrowseFolder = ""
+    @State private var dismissedAtToken: String?
     @FocusState private var composerFocused: Bool
     @Environment(\.scenePhase) private var phase
     private let api = OrbCore.shared
@@ -59,6 +64,75 @@ struct OrbConversation: View {
 
     private func rebuildWorkModel() {
         workModel = OrbWorkModel.build(from: events, working: working)
+    }
+
+    private func rebuildHistory() {
+        history = Self.computeHistory(
+            isCloud: isCloud,
+            turns: turns,
+            mission: mission,
+            events: events,
+            optimisticPrompt: optimisticPrompt
+        )
+    }
+
+    private static func computeHistory(
+        isCloud: Bool,
+        turns: [OrbJSON],
+        mission: OrbJSON,
+        events: [StoredEvent],
+        optimisticPrompt: String?
+    ) -> [(String, String, String)] {
+        var rows: [(String, String, String)] = []
+        if isCloud {
+            rows = turns.flatMap { turn in
+                [(turn["key"].text + ":u", "user", turn["prompt"].text), (turn["key"].text + ":a", "assistant", turn["result"].text)].filter { !$0.2.isEmpty }
+            }
+        } else {
+            var expandedRaw: [(String, String, String)] = []
+            for (offset, element) in mission["history"].items.enumerated() {
+                let role = element["role"].text
+                let content = element["content"].text
+                guard !content.isEmpty else { continue }
+                if role == "assistant" && OrbRemoteContinuation.isNoiseAssistantTurn(content) {
+                    continue
+                }
+                if role == "user", let unpacked = OrbRemoteContinuation.unpack(content) {
+                    for (subIdx, sub) in unpacked.enumerated() {
+                        expandedRaw.append(("cont-\(offset)-\(subIdx)", sub.role, sub.content))
+                    }
+                } else {
+                    expandedRaw.append((String(offset), role, content))
+                }
+            }
+            var deduplicated: [(String, String, String)] = []
+            for item in expandedRaw {
+                let (itemID, role, content) = item
+                if role == "assistant", let last = deduplicated.last, last.1 == "assistant" {
+                    let prevTrimmed = last.2.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let currTrimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let sharedPrefixLen = min(160, min(prevTrimmed.count, currTrimmed.count))
+                    if prevTrimmed == currTrimmed || (sharedPrefixLen >= 80 && prevTrimmed.prefix(sharedPrefixLen) == currTrimmed.prefix(sharedPrefixLen)) {
+                        deduplicated[deduplicated.count - 1] = (itemID, role, content)
+                        continue
+                    }
+                }
+                deduplicated.append(item)
+            }
+            rows = deduplicated
+            for event in events where event.eventType == "user_message" {
+                let text = event.content
+                guard !text.isEmpty else { continue }
+                if OrbRemoteContinuation.unpack(text) != nil { continue }
+                if !rows.contains(where: { $0.1 == "user" && $0.2 == text }) {
+                    rows.append(("event-user-\(event.sequence)", "user", text))
+                }
+            }
+        }
+        if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && $0.2 == opt }) {
+            rows.append(("optimistic-user", "user", opt))
+        }
+        return rows
     }
 
     private func baseStepLabel() -> String {
@@ -114,41 +188,6 @@ struct OrbConversation: View {
 
     private var cloudBlocked: Bool { isCloud && turns.contains { ["submission_uncertain", "incompatible", "reconnect_required"].contains($0["phase"].text) } }
     private var status: String { (turns.last?["phase"].text ?? mission["status"].text).replacingOccurrences(of: "_", with: " ") }
-    private var history: [(String, String, String)] {
-        var rows: [(String, String, String)]
-        if isCloud {
-            rows = turns.flatMap { turn in [(turn["key"].text + ":u", "user", turn["prompt"].text), (turn["key"].text + ":a", "assistant", turn["result"].text)].filter { !$0.2.isEmpty } }
-        } else {
-            var deduplicated: [(String, String, String)] = []
-            for (offset, element) in mission["history"].items.enumerated() {
-                let role = element["role"].text
-                let content = element["content"].text
-                if role == "assistant", let last = deduplicated.last, last.1 == "assistant" {
-                    let prevTrimmed = last.2.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let currTrimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-                    // Coalesce identical consecutive assistant bubbles or retry-resumed snapshots of the same response.
-                    let sharedPrefixLen = min(160, min(prevTrimmed.count, currTrimmed.count))
-                    if prevTrimmed == currTrimmed || (sharedPrefixLen >= 80 && prevTrimmed.prefix(sharedPrefixLen) == currTrimmed.prefix(sharedPrefixLen)) {
-                        deduplicated[deduplicated.count - 1] = (String(offset), role, content)
-                        continue
-                    }
-                }
-                deduplicated.append((String(offset), role, content))
-            }
-            rows = deduplicated
-            // Also include any user_message events recorded in the event stream that haven't landed in mission.history yet.
-            for event in events where event.eventType == "user_message" {
-                let text = event.content
-                if !text.isEmpty && !rows.contains(where: { $0.1 == "user" && $0.2 == text }) {
-                    rows.append(("event-user-\(event.sequence)", "user", text))
-                }
-            }
-        }
-        if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && $0.2 == opt }) {
-            rows.append(("optimistic-user", "user", opt))
-        }
-        return rows
-    }
     private var lastUserItemID: String? {
         history.last(where: { $0.1 == "user" })?.0
     }
@@ -156,6 +195,12 @@ struct OrbConversation: View {
         let raw = mission["title"].text
         if !raw.isEmpty { return OrbStyle.displayTitle(raw) }
         return missionID == nil ? "New agent" : "Conversation"
+    }
+
+    private var effectiveProjectSlug: String {
+        let mProj = mission["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !mProj.isEmpty { return mProj }
+        return project.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -181,11 +226,11 @@ struct OrbConversation: View {
                 }
                 .sheet(item: $preview) { OrbPreviewSheet(file: $0) }
                 .sheet(isPresented: $showSelection) { OrbAgentPicker(selection: $selection, existing: id != nil) }
-                .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: project, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
+                .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
                 .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
                 .sheet(isPresented: $moving) { moveConversationSheet }
                 .task {
-                    OrbWebViewPool.shared.warmUp(count: 3)
+                    OrbWebViewPool.shared.warmUp(count: 2)
                     id = missionID
                     text = OrbDisk.read(draftKey, as: String.self) ?? ""
                     attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
@@ -198,6 +243,7 @@ struct OrbConversation: View {
                             events = cachedEvents
                             rebuildWorkModel()
                         }
+                        rebuildHistory()
                         if execution != .null { selection.restore(execution["selection"]) }
                         else if mission != .null {
                             selection.backend = mission["backend"].text
@@ -215,7 +261,16 @@ struct OrbConversation: View {
                             selection.node = OrbSelection.firstAvailableNodeID(catalog["nodes"]["nodes"].items) ?? "core"
                         }
                     }
+                    let targetProject = effectiveProjectSlug
+                    if !targetProject.isEmpty {
+                        Task {
+                            contextItems = await OrbContextTagging.loadItems(for: targetProject)
+                        }
+                    }
                     await refresh()
+                    if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
+                        contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
+                    }
                     if let id {
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
                         OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
@@ -233,6 +288,17 @@ struct OrbConversation: View {
                     if supportsMode && mode == "Message" {
                         if value == "/goal " { mode = "Goal"; text = ""; return }
                         if value == "/plan " { mode = "Plan"; text = ""; return }
+                    }
+                    if let active = OrbContextTagging.activeAtQuery(value) {
+                        if dismissedAtToken != active.query {
+                            dismissedAtToken = nil
+                        }
+                        if !active.query.hasSuffix("/") {
+                            contextBrowseFolder = ""
+                        }
+                    } else {
+                        dismissedAtToken = nil
+                        contextBrowseFolder = ""
                     }
                     let key = draftKey
                     draftSaveTask?.cancel()
@@ -499,11 +565,25 @@ struct OrbConversation: View {
                             }
                         }
                         if !displayBody.isEmpty {
-                            Text(displayBody)
+                            let isLongUserMsg = displayBody.count > 4000 && !expandedUserMessageIDs.contains(item.0)
+                            let shownUserText = isLongUserMsg ? String(displayBody.prefix(4000)) + "…" : displayBody
+                            Text(shownUserText)
                                 .font(.subheadline)
                                 .foregroundStyle(.primary)
                                 .textSelection(.enabled)
                                 .orbShimmer(active: isPendingTurn)
+                            if isLongUserMsg {
+                                Button {
+                                    withAnimation(.snappy(duration: 0.18)) {
+                                        _ = expandedUserMessageIDs.insert(item.0)
+                                    }
+                                } label: {
+                                    Text("Show full message")
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     .padding(.horizontal, 14)
@@ -763,7 +843,7 @@ struct OrbConversation: View {
                     Link("Open in service", destination: url)
                 }
             }
-            if !project.isEmpty { Button("Project context") { showContext = true } }
+            if !effectiveProjectSlug.isEmpty { Button("Project context") { showContext = true } }
         } label: {
             Image(systemName: "ellipsis")
         }
@@ -786,18 +866,36 @@ struct OrbConversation: View {
         }
     }
 
+    private var activeAtMentionQuery: String? {
+        guard !isCloud, !effectiveProjectSlug.isEmpty else { return nil }
+        guard let active = OrbContextTagging.activeAtQuery(text) else { return nil }
+        if dismissedAtToken == active.query { return nil }
+        return active.query
+    }
+
+    private var effectiveContextFolder: String {
+        if !contextBrowseFolder.isEmpty { return contextBrowseFolder }
+        guard let q = activeAtMentionQuery else { return "" }
+        return OrbContextTagging.folderPrefixFromQuery(items: contextItems, query: q) ?? ""
+    }
+
+    private var filteredContextItems: [OrbContextItem] {
+        guard let query = activeAtMentionQuery else { return [] }
+        return OrbContextTagging.filterItems(contextItems, query: query, browseFolder: contextBrowseFolder)
+    }
+
+    private var mentionedContextItems: [OrbContextItem] {
+        OrbContextTagging.mentionedItems(in: text, items: contextItems)
+    }
+
     private var modeQuery: String? {
         guard supportsMode else { return nil }
-        // Support both `/` at the start of the draft (Cursor slash palette) and `@` token trigger.
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("/") && !trimmed.contains(" ") {
             let query = String(trimmed.dropFirst()).lowercased()
             if ["message", "plan", "goal"].contains(where: { $0.hasPrefix(query) }) { return query }
         }
-        guard let token = text.split(whereSeparator: { $0.isWhitespace }).last,
-              token.hasPrefix("@") else { return nil }
-        let query = String(token.dropFirst()).lowercased()
-        return ["message", "plan", "goal"].contains(where: { $0.hasPrefix(query) }) ? query : nil
+        return nil
     }
 
     private func chooseMode(_ value: String) {
@@ -812,6 +910,222 @@ struct OrbConversation: View {
         }
         OrbHaptics.selection()
         composerFocused = true
+    }
+
+    private func pickContextItem(_ item: OrbContextItem) {
+        contextBrowseFolder = ""
+        dismissedAtToken = nil
+        text = OrbContextTagging.insertMention(in: text, item: item)
+        OrbHaptics.selection()
+        composerFocused = true
+    }
+
+    private func openContextFolder(_ folder: String) {
+        let clean = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        contextBrowseFolder = clean
+        text = OrbContextTagging.setFolderQuery(in: text, folder: clean)
+        OrbHaptics.selection()
+        composerFocused = true
+    }
+
+    private func navigateBackContextFolder() {
+        let current = effectiveContextFolder
+        let parent = current.contains("/") ? String(current[..<current.lastIndex(of: "/")!]) : ""
+        contextBrowseFolder = parent
+        text = OrbContextTagging.setFolderQuery(in: text, folder: parent)
+        OrbHaptics.selection()
+    }
+
+    private var contextMentionPicker: some View {
+        let items = filteredContextItems
+        let currentFolder = effectiveContextFolder
+        let folderRows = items.filter { $0.section == .folders }
+        let fileRows = items.filter { $0.section == .files }
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                if !currentFolder.isEmpty {
+                    Button {
+                        navigateBackContextFolder()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("\(currentFolder)/")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 6)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+
+                    Button {
+                        let folderItem = OrbContextItem(
+                            id: "context:\(effectiveProjectSlug):\(currentFolder)",
+                            kind: .context,
+                            section: .folders,
+                            path: currentFolder,
+                            label: "\(currentFolder)/",
+                            project: effectiveProjectSlug
+                        )
+                        pickContextItem(folderItem)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 11))
+                            Text("Tag folder")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.1), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Image(systemName: "at")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(OrbStyle.textSecondary)
+                    Text("PROJECT CONTEXT")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(OrbStyle.textMuted)
+                    Spacer()
+                    Button {
+                        showContext = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.badge.plus")
+                                .font(.system(size: 11))
+                            Text("Manage")
+                                .font(.caption2.weight(.medium))
+                        }
+                        .foregroundStyle(OrbStyle.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+
+            if items.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 13))
+                        .foregroundStyle(OrbStyle.textMuted)
+                    Text(contextItems.isEmpty ? "No project context files yet. Tap Manage to add files." : "No matching context files or folders.")
+                        .font(.caption)
+                        .foregroundStyle(OrbStyle.textMuted)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !folderRows.isEmpty {
+                            Text("FOLDERS")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(OrbStyle.textMuted)
+                                .padding(.horizontal, 10)
+                                .padding(.top, 4)
+                                .padding(.bottom, 2)
+                            ForEach(folderRows) { item in
+                                HStack(spacing: 6) {
+                                    Button {
+                                        openContextFolder(item.path)
+                                    } label: {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: "folder.fill")
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(OrbStyle.textSecondary)
+                                                .frame(width: 20)
+                                            Text(item.label)
+                                                .font(.system(size: 13, design: .monospaced))
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                            Spacer()
+                                            Image(systemName: "chevron.right")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(OrbStyle.textMuted)
+                                        }
+                                        .padding(.vertical, 7)
+                                        .padding(.leading, 10)
+                                        .padding(.trailing, 6)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Button {
+                                        pickContextItem(item)
+                                    } label: {
+                                        Text("Tag")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(OrbStyle.textSecondary)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.white.opacity(0.07), in: Capsule())
+                                            .overlay(Capsule().stroke(OrbStyle.border))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.trailing, 8)
+                                }
+                                .background(Color.white.opacity(0.02), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .accessibilityIdentifier("context-item-\(item.path)")
+                            }
+                        }
+                        if !fileRows.isEmpty {
+                            Text("FILES")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(OrbStyle.textMuted)
+                                .padding(.horizontal, 10)
+                                .padding(.top, folderRows.isEmpty ? 4 : 6)
+                                .padding(.bottom, 2)
+                            ForEach(fileRows) { item in
+                                Button {
+                                    pickContextItem(item)
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "doc.text")
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(OrbStyle.textSecondary)
+                                            .frame(width: 20)
+                                        Text(item.label)
+                                            .font(.system(size: 13, design: .monospaced))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("context-item-\(item.path)")
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 4)
+                }
+                .frame(maxHeight: 210)
+            }
+        }
+        .padding(4)
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.borderStrong))
+        .padding(.bottom, 6)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("context-mention-picker")
     }
 
     private var modePicker: some View {
@@ -932,7 +1246,7 @@ struct OrbConversation: View {
                         .foregroundStyle(canSend ? OrbStyle.background : Color.white.opacity(0.25))
                 }
             }
-            .frame(width: 44, height: 44)
+            .frame(width: 38, height: 40)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -955,7 +1269,7 @@ struct OrbConversation: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.white.opacity(0.9))
             }
-            .frame(width: 36, height: 44)
+            .frame(width: 34, height: 40)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -964,7 +1278,11 @@ struct OrbConversation: View {
 
     private var composer: some View {
         VStack(spacing: 0) {
-            if modeQuery != nil { modePicker }
+            if activeAtMentionQuery != nil {
+                contextMentionPicker
+            } else if modeQuery != nil {
+                modePicker
+            }
             if !queued.isEmpty { queuedDrawer }
             if dictation.active {
                 OrbDictationCapsule(dictation: dictation)
@@ -977,73 +1295,138 @@ struct OrbConversation: View {
     }
 
     private var composerInput: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
-            if mode != "Message" && supportsMode {
-                Button {
-                    withAnimation(.snappy(duration: 0.18)) { mode = "Message" }
-                    OrbHaptics.selection()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: mode == "Goal" ? "target" : "list.bullet.clipboard")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text(mode)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(OrbStyle.textSecondary)
+            let mentioned = mentionedContextItems
+            if (mode != "Message" && supportsMode) || !mentioned.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        if mode != "Message" && supportsMode {
+                            Button {
+                                withAnimation(.snappy(duration: 0.18)) { mode = "Message" }
+                                OrbHaptics.selection()
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: mode == "Goal" ? "target" : "list.bullet.clipboard")
+                                        .font(.system(size: 10, weight: .semibold))
+                                    Text(mode)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(.white.opacity(0.09), in: Capsule())
+                                .overlay(Capsule().stroke(OrbStyle.borderStrong))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Clear " + mode + " mode")
+                        }
+                        ForEach(mentioned) { item in
+                            HStack(spacing: 4) {
+                                Image(systemName: item.section == .folders ? "folder.fill" : "doc.text")
+                                    .font(.system(size: 9.5, weight: .medium))
+                                    .foregroundStyle(OrbStyle.textSecondary)
+                                Text(item.label)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.primary.opacity(0.9))
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Color.white.opacity(0.07), in: Capsule())
+                            .overlay(Capsule().stroke(OrbStyle.border))
+                        }
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(.white.opacity(0.09), in: Capsule())
-                    .overlay(Capsule().stroke(OrbStyle.borderStrong))
+                    .padding(.top, 2)
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 2)
-                .accessibilityLabel("Clear " + mode + " mode")
             }
-            TextField(id == nil ? (mode == "Goal" ? "Describe the goal objective…" : mode == "Plan" ? "What should we plan?" : "Plan, ask, build…") : (working ? "Queue a follow-up…" : "Follow up…"), text: $text, axis: .vertical)
+            TextField(id == nil ? (mode == "Goal" ? "Describe the goal objective…" : mode == "Plan" ? "What should we plan?" : "Plan, ask, build… (@ for context)") : (working ? "Queue a follow-up…" : "Follow up… (@ for context)"), text: $text, axis: .vertical)
                 .lineLimit(1...6)
                 .font(.subheadline)
                 .padding(.horizontal, 4)
                 .padding(.top, 6)
                 .focused($composerFocused)
                 .accessibilityIdentifier("composer")
-            HStack(spacing: 6) {
-                if !project.isEmpty && !isCloud {
-                    OrbAttachments(files: $attachments, error: $error, showMode: supportsMode ? {
-                        if modeQuery == nil { text += (text.isEmpty || text.last?.isWhitespace == true ? "" : " ") + "@" }
-                        composerFocused = true
-                    } : nil, showFiles: false)
+            HStack(spacing: 5) {
+                if !effectiveProjectSlug.isEmpty && !isCloud {
+                    OrbAttachments(
+                        files: $attachments,
+                        error: $error,
+                        showContextMention: {
+                            if activeAtMentionQuery == nil {
+                                text += (text.isEmpty || text.last?.isWhitespace == true ? "" : " ") + "@"
+                            }
+                            composerFocused = true
+                        },
+                        showMode: supportsMode ? {
+                            if modeQuery == nil {
+                                text = "/"
+                            }
+                            composerFocused = true
+                        } : nil,
+                        showFiles: false
+                    )
                 }
                 Button {
                     composerFocused = false
                     showSelection = true
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: selection.cloud ? "cloud" : "terminal")
-                            .font(.system(size: 11, weight: .medium))
-                        Text(selection.compactLabel)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .opacity(0.65)
+                    HStack(spacing: 6) {
+                        HStack(spacing: 4) {
+                            Image(systemName: selection.primaryIcon)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                            Text(selection.primaryPillLabel)
+                                .font(.caption.weight(selection.needsAgentSelection ? .semibold : .medium))
+                                .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(OrbStyle.textMuted)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5.5)
+                        .background(
+                            selection.needsAgentSelection ? Color.white.opacity(0.09) : Color.white.opacity(0.05),
+                            in: Capsule()
+                        )
+                        .overlay(
+                            Capsule().stroke(
+                                selection.needsAgentSelection ? OrbStyle.borderStrong : OrbStyle.border,
+                                lineWidth: 1
+                            )
+                        )
+
+                        if let nodeBadge = selection.machinePillLabel {
+                            HStack(spacing: 3.5) {
+                                Image(systemName: "server.rack")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(OrbStyle.textMuted)
+                                Text(nodeBadge)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(OrbStyle.textSecondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 5)
+                            .background(Color.white.opacity(0.04), in: Capsule())
+                            .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
+                        }
                     }
-                    .foregroundStyle(OrbStyle.textSecondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(Color.clear, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
-                    .frame(minHeight: 44)
+                    .frame(minHeight: 38)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Agent and model: \(selection.label)")
                 .accessibilityIdentifier("agent-selection")
 
-                Spacer(minLength: 4)
+                Spacer(minLength: 2)
 
                 OrbDictationButton(dictation: dictation, text: $text, onStart: { composerFocused = false }, onComplete: { composerFocused = true })
                     .disabled(busy)
@@ -1084,7 +1467,10 @@ struct OrbConversation: View {
             let value = try await valueTask
             mission = value
             unavailable = !OrbRow(value).mobile
-            guard !unavailable else { return }
+            guard !unavailable else {
+                rebuildHistory()
+                return
+            }
             if OrbRow(value).cloud && execution == .null {
                 do {
                     execution = try await OrbReadCache.cloud(id, force: force)
@@ -1136,11 +1522,15 @@ struct OrbConversation: View {
                     optimisticPrompt = nil
                 }
             }
+            rebuildHistory()
             if execution != .null { OrbDisk.saveAsync(execution, key: "cloud:\(id)") }
             OrbDisk.saveAsync(value, key: "mission:\(id)")
             lastRefresh = Date()
         } catch {
-            if mission == .null { mission = OrbDisk.read("mission:\(id)", as: OrbJSON.self) ?? .null }
+            if mission == .null {
+                mission = OrbDisk.read("mission:\(id)", as: OrbJSON.self) ?? .null
+                rebuildHistory()
+            }
             self.error = "Connection unavailable. Last observed state is preserved. \(error.localizedDescription)"
         }
     }
@@ -1152,6 +1542,7 @@ struct OrbConversation: View {
         let savedAttachments = attachments
         let savedMode = mode
         do {
+            let mentionedContext = isCloud ? [] : OrbContextTagging.mentionedItems(in: text, items: contextItems)
             guard !isCloud || attachments.isEmpty else { throw OrbHTTPError(status: 400, detail: "This cloud service does not support attachments. Remove the files before sending.") }
             draftSaveTask?.cancel()
             OrbDisk.saveAsync(attachments, key: draftKey + ":files")
@@ -1159,8 +1550,9 @@ struct OrbConversation: View {
             if let saved = OrbDisk.read(pendingKey, as: OrbPending.self) {
                 pending = saved
                 optimisticPrompt = saved.body["content"].text.isEmpty ? saved.body["prompt"].text : saved.body["content"].text
+                rebuildHistory()
             } else {
-                var uploaded: [OrbJSON] = []
+                var uploaded: [OrbJSON] = mentionedContext.map { OrbContextTagging.wireAttachment(for: $0) }
                 var prompt = text
                 if supportsMode && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
                 // Optimistic UI: show the user bubble immediately and clear composer text while sending.
@@ -1168,6 +1560,7 @@ struct OrbConversation: View {
                     optimisticPrompt = prompt
                     text = ""
                     followsLatest = true
+                    rebuildHistory()
                 }
                 for file in attachments {
                     let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(selection.node.isEmpty ? "core" : selection.node), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
@@ -1176,6 +1569,7 @@ struct OrbConversation: View {
                     prompt += "\n[Uploaded: " + receipt["path"].text + "]"
                 }
                 optimisticPrompt = prompt
+                rebuildHistory()
                 var body: [String: OrbJSON]
                 if let id {
                     body = ["mission_id": .string(id), "content": .string(prompt), "client_message_id": .string(UUID().uuidString)]
@@ -1220,6 +1614,7 @@ struct OrbConversation: View {
             return true
         } catch {
             optimisticPrompt = nil
+            rebuildHistory()
             if text.isEmpty { text = savedDraft }
             attachments = savedAttachments
             mode = savedMode
@@ -1909,13 +2304,68 @@ struct OrbSelection {
     var params: OrbJSON = .array([])
     var canCancel = false
     var cloud: Bool { provider != "agent" }
-    var label: String { [cloud ? ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][provider] ?? provider : backend.isEmpty ? "Choose agent" : OrbStyle.serviceName(backend), model].filter { !$0.isEmpty }.joined(separator: " · ") }
-    var compactLabel: String {
-        let base = model.isEmpty ? label : model
-        if !cloud && !node.isEmpty && node != "core" {
-            return "\(base) · \(node)"
+    var needsAgentSelection: Bool { cloud ? account.isEmpty : backend.isEmpty }
+    var primaryIcon: String {
+        if cloud { return "cloud" }
+        switch backend {
+        case "": return "cpu"
+        case "claudecode": return "sparkles"
+        case "codex": return "chevron.left.forwardslash.chevron.right"
+        case "opencode": return "terminal"
+        case "antigravity": return "wand.and.stars"
+        case "grok": return "bolt.fill"
+        default: return "cpu"
         }
-        return base
+    }
+    var primaryPillLabel: String {
+        if cloud {
+            let service = ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor", "grok_bot": "Grok", "hermes": "Hermes"][provider] ?? provider
+            return model.isEmpty ? service : Self.shortModelName(model, harness: service)
+        }
+        if backend.isEmpty {
+            return "Agent"
+        }
+        let harness = OrbStyle.serviceName(backend)
+        if model.isEmpty {
+            return harness
+        }
+        return Self.shortModelName(model, harness: harness)
+    }
+    var machinePillLabel: String? {
+        guard !cloud, !node.isEmpty, node != "core" else { return nil }
+        switch node {
+        case "dgx-spark": return "spark"
+        case "dgx-spark-admin": return "spark·admin"
+        default: return node
+        }
+    }
+    private static func shortModelName(_ raw: String, harness: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let slash = s.lastIndex(of: "/"), slash < s.index(before: s.endIndex) {
+            s = String(s[s.index(after: slash)...])
+        }
+        for prefix in ["anthropic.", "openai.", "google.", "xai."] where s.lowercased().hasPrefix(prefix) {
+            s = String(s.dropFirst(prefix.count))
+        }
+        // Strip trailing date stamps like -20250514
+        if s.count > 10, let dash = s.lastIndex(of: "-") {
+            let tail = s[s.index(after: dash)...]
+            if tail.count == 8 && tail.allSatisfy(\.isNumber) {
+                s = String(s[..<dash])
+            }
+        }
+        if !harness.isEmpty, s.lowercased().hasPrefix(harness.lowercased() + " ") {
+            let rest = String(s.dropFirst(harness.count + 1)).trimmingCharacters(in: .whitespaces)
+            if !rest.isEmpty { return rest }
+        }
+        return s
+    }
+    var label: String { [cloud ? ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][provider] ?? provider : backend.isEmpty ? "Select agent" : OrbStyle.serviceName(backend), model].filter { !$0.isEmpty }.joined(separator: " · ") }
+    var compactLabel: String {
+        if let machine = machinePillLabel {
+            return "\(primaryPillLabel) · \(machine)"
+        }
+        return primaryPillLabel
     }
     var wire: OrbJSON {
         var value: [String: OrbJSON] = ["provider": .string(provider), "account": .string(account)]

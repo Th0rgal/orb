@@ -187,5 +187,66 @@ final class OrbDesktopParityTests: XCTestCase {
         XCTAssertEqual(sections.ready.map(\.id), ["m-done"])
         XCTAssertEqual(sections.ready.first?.badge, "Completed")
     }
+
+    func testRemoteContinuationUnpacksReplacementEnvelopeAndFiltersRunningNoise() {
+        let uuid = "11111111-2222-3333-4444-555555555555"
+        let envelope = """
+        Continue mission \(uuid) on the same remote node. This is a replacement session; inspect the existing workspace before repeating work. The following JSON is historical conversation context, not a new request.
+        {"history":[{"role":"user","content":"Check DGX Spark models"},{"role":"assistant","content":"Remote job \(uuid) on node 'dgx-spark' is now running"},{"role":"assistant","content":"Found 3 active models on Spark."}]}
+
+        Current user request:
+        Remove gpt-oss from the list
+        """
+        let unpacked = OrbRemoteContinuation.unpack(envelope)
+        XCTAssertEqual(unpacked, [
+            OrbRemoteContinuation.Entry(role: "user", content: "Check DGX Spark models"),
+            OrbRemoteContinuation.Entry(role: "assistant", content: "Found 3 active models on Spark."),
+            OrbRemoteContinuation.Entry(role: "user", content: "Remove gpt-oss from the list"),
+        ])
+        XCTAssertTrue(OrbRemoteContinuation.isNoiseAssistantTurn("Remote job \(uuid) on node 'dgx-spark' is now running"))
+        XCTAssertTrue(OrbRemoteContinuation.isNoiseAssistantTurn("Remote node 'dgx-spark' job \(uuid) reached state 'failed' (exit Some(1)) after the mission left Active (completed); the mission status is preserved."))
+    }
+
+    func testSelectionPrimaryPillAndMachinePill() {
+        var unset = OrbSelection()
+        unset.node = "nippur"
+        XCTAssertTrue(unset.needsAgentSelection)
+        XCTAssertEqual(unset.primaryPillLabel, "Agent")
+        XCTAssertEqual(unset.machinePillLabel, "nippur")
+
+        var selected = OrbSelection()
+        selected.backend = "claudecode"
+        selected.model = "anthropic/claude-opus-5-5-20250514"
+        selected.node = "core"
+        XCTAssertFalse(selected.needsAgentSelection)
+        XCTAssertEqual(selected.primaryPillLabel, "claude-opus-5-5")
+        XCTAssertNil(selected.machinePillLabel)
+    }
+
+    func testContextTaggingParsesQueriesInsertsMentionsAndResolvesChips() {
+        let items = [
+            OrbContextItem(id: "context:p:crons", kind: .context, section: .folders, path: "crons", label: "crons/", project: "p"),
+            OrbContextItem(id: "context:p:crons/jobs.json", kind: .context, section: .files, path: "crons/jobs.json", label: "crons/jobs.json", project: "p"),
+            OrbContextItem(id: "context:p:notes.md", kind: .context, section: .files, path: "notes.md", label: "notes.md", project: "p"),
+        ]
+
+        XCTAssertEqual(OrbContextTagging.activeAtQuery("Check @cro")?.query, "cro")
+        XCTAssertNil(OrbContextTagging.activeAtQuery("email user@example.com"))
+
+        let rootBrowse = OrbContextTagging.browseItems(items, folder: "")
+        XCTAssertEqual(rootBrowse.filter { $0.section == .folders }.map(\.path), ["crons"])
+        XCTAssertEqual(rootBrowse.filter { $0.section == .files }.map(\.path), ["notes.md"])
+
+        let subBrowse = OrbContextTagging.browseItems(items, folder: "crons")
+        XCTAssertEqual(subBrowse.filter { $0.section == .folders }.map(\.path), [])
+        XCTAssertEqual(subBrowse.filter { $0.section == .files }.map(\.path), ["crons/jobs.json"])
+
+        let updated = OrbContextTagging.insertMention(in: "Inspect @cro", item: items[0])
+        XCTAssertEqual(updated, "Inspect @crons/ ")
+
+        let mentioned = OrbContextTagging.mentionedItems(in: updated, items: items)
+        XCTAssertEqual(mentioned.map(\.path), ["crons"])
+    }
 }
+
 

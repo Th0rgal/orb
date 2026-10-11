@@ -74,5 +74,84 @@ final class OrbLiveUITests: XCTestCase {
         try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/tmp/orb-ios-inbox-undo-prod.png"))
         undoBtn.tap()
     }
+
+    @MainActor func testProductionLargeMissionPickerAndContextTagging() throws {
+        guard ProcessInfo.processInfo.environment["ORB_PROD_VERIFY"] == "1" else {
+            throw XCTSkip("Set ORB_PROD_VERIFY=1 to run the production verification flow")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+
+        let defaultProject = app.buttons["project.default"]
+        XCTAssertTrue(defaultProject.waitForExistence(timeout: 20))
+        defaultProject.tap()
+
+        // 1. Verify "New agent" composer before selecting a model/agent (and @ context tagging)
+        let newAgentBtn = app.buttons["new-agent"]
+        XCTAssertTrue(newAgentBtn.waitForExistence(timeout: 15))
+        newAgentBtn.tap()
+
+        let agentSelectionBtn = app.buttons["agent-selection"]
+        XCTAssertTrue(agentSelectionBtn.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 1.5)
+        try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/Users/thomas/.gemini/antigravity-cli/brain/d438faae-ff03-44f2-b954-ba174b48e842/scratch/verify_1_new_agent_selector.png"))
+
+        // Verify @ context tagging popup in composer
+        let composer = app.textFields["composer"].exists ? app.textFields["composer"] : app.textViews["composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        if !app.buttons["context-browse-back"].exists {
+            composer.tap()
+            composer.typeText("@")
+            Thread.sleep(forTimeInterval: 1.0)
+            try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/Users/thomas/.gemini/antigravity-cli/brain/d438faae-ff03-44f2-b954-ba174b48e842/scratch/verify_2_context_picker.png"))
+
+            let firstContextItem = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'context-item-'")).firstMatch
+            if firstContextItem.waitForExistence(timeout: 3) {
+                firstContextItem.tap()
+                Thread.sleep(forTimeInterval: 0.8)
+                try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/Users/thomas/.gemini/antigravity-cli/brain/d438faae-ff03-44f2-b954-ba174b48e842/scratch/verify_3_context_tagged.png"))
+            }
+        }
+
+        // Navigate back to Default project mission list
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // 2. Open large mission "Yukon (sig.golf)" (763 KB, 87 history items)
+        let yukonMission = app.buttons["mission.85cce150-8b72-4a5f-be57-61aea8043104"]
+        if yukonMission.waitForExistence(timeout: 10) {
+            yukonMission.tap()
+            Thread.sleep(forTimeInterval: 2.5)
+            try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/Users/thomas/.gemini/antigravity-cli/brain/d438faae-ff03-44f2-b954-ba174b48e842/scratch/verify_4_yukon_mission.png"))
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+
+        // 3. Open large replacement mission "DGX Spark" (178 KB, 91 history items, 43 KB replacement continuation envelope)
+        let dgxMission = app.buttons["mission.d2415091-a5e0-4e38-8582-62f6175ed355"]
+        if !dgxMission.exists {
+            // Switch filter to All or scroll down if needed
+            for _ in 0..<4 {
+                if dgxMission.exists && dgxMission.isHittable { break }
+                app.swipeUp()
+            }
+        }
+        if dgxMission.waitForExistence(timeout: 10) {
+            dgxMission.tap()
+            Thread.sleep(forTimeInterval: 2.5)
+            try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/Users/thomas/.gemini/antigravity-cli/brain/d438faae-ff03-44f2-b954-ba174b48e842/scratch/verify_5_dgx_spark_mission.png"))
+            // Also test tapping Load earlier messages to ensure unpacked continuation turns render without freezing
+            let loadEarlier = app.buttons["load-earlier"]
+            for _ in 0..<3 {
+                app.swipeDown()
+                if loadEarlier.exists && loadEarlier.isHittable {
+                    loadEarlier.tap()
+                    Thread.sleep(forTimeInterval: 0.8)
+                }
+            }
+            try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "/Users/thomas/.gemini/antigravity-cli/brain/d438faae-ff03-44f2-b954-ba174b48e842/scratch/verify_6_dgx_spark_earlier.png"))
+        }
+    }
 }
 
