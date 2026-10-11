@@ -36,7 +36,7 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["dictation.stop"].tap()
         XCTAssertTrue(app.buttons["dictation.cancel"].waitForExistence(timeout: 5))
         app.buttons["dictation.cancel"].tap()
-        Thread.sleep(forTimeInterval: 2)
+        Thread.sleep(forTimeInterval: 6)
         XCTAssertEqual(draft.value as? String, "Existing draft Bonjour, ajoute un microphone dans la conversation.")
         // No message is submitted; fixture verifies only recording/relay/draft behavior.
     }

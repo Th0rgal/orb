@@ -13,4 +13,4 @@ The microphone permission string explains remote transcription. Leaving the comp
 
 The existing Spark `dgx-router` forwards `/v1/audio/*` to Cohere Transcribe on localhost:8002 under its foreground GPU lock. Do not bypass the router, reload models, or restart chat/ASR inference to test iOS.
 
-The endpoint requires normal Core authentication, accepts only bounded PCM WAV (4 MiB / 120 s), permits two simultaneous requests, times out after 90 seconds, does not follow redirects and bounds the transcript response to 64 KiB. Busy or unavailable upstreams return a retryable error without exposing upstream response bodies/credentials.
+The endpoint requires normal Core authentication, accepts only bounded PCM WAV (4 MiB / 120 s recording plus one second of audio-frame timing tolerance), permits two simultaneous requests, times out after 90 seconds, does not follow redirects and bounds the transcript response to 64 KiB. Busy or unavailable upstreams return a retryable error without exposing upstream response bodies/credentials.

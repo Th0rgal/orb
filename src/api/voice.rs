@@ -62,7 +62,10 @@ fn validate_wav(wav: &[u8]) -> Result<(), Failure> {
                 format = true;
             }
             b"data" => {
-                if samples.is_some() || !(3200..=120 * 32000).contains(&size) || size % 2 != 0 {
+                if samples.is_some()
+                    || !(3200..=121 * 32000).contains(&size)
+                    || !size.is_multiple_of(2)
+                {
                     return Err(invalid);
                 }
                 samples = Some(size);
@@ -184,6 +187,19 @@ mod tests {
         let len = (w.len() - 8) as u32;
         w[4..8].copy_from_slice(&len.to_le_bytes());
         assert!(validate_wav(&w).is_ok());
+    }
+    #[test]
+    fn recording_deadline_has_bounded_audio_frame_tolerance() {
+        let mut w = wav();
+        let size = 120 * 32000 + 3200;
+        w[40..44].copy_from_slice(&(size as u32).to_le_bytes());
+        w.resize(44 + size, 0);
+        w[4..8].copy_from_slice(&((36 + size) as u32).to_le_bytes());
+        assert!(validate_wav(&w).is_ok());
+        w.resize(44 + 122 * 32000, 0);
+        w[40..44].copy_from_slice(&(122u32 * 32000).to_le_bytes());
+        w[4..8].copy_from_slice(&(36u32 + 122 * 32000).to_le_bytes());
+        assert!(validate_wav(&w).is_err());
     }
     #[test]
     fn compressed_wrong_rate_truncated_and_oversized_audio_is_rejected() {

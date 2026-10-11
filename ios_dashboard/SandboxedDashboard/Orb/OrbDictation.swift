@@ -61,14 +61,14 @@ final class OrbDictation {
             }
             do {
                 let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
                 try session.setActive(true)
                 self.ownsAudioSession = true
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent("orb-dictation-\(UUID()).wav")
                 self.file = url
                 let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000.0, AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false])
                 recorder.isMeteringEnabled = true
-                guard recorder.prepareToRecord(), recorder.record() else { throw URLError(.cannotCreateFile) }
+                guard recorder.prepareToRecord(), recorder.record(forDuration: 120) else { throw URLError(.cannotCreateFile) }
                 self.recorder = recorder
                 self.phase = .recording
                 OrbHaptics.selection()
@@ -76,7 +76,11 @@ final class OrbDictation {
                     while !Task.isCancelled {
                         try? await Task.sleep(for: .milliseconds(80))
                         guard let self, self.generation == current, self.phase == .recording, let recorder = self.recorder else { return }
-                        guard recorder.isRecording else { self.fail("Recording was interrupted. Please try again."); self.releaseRecorder(); return }
+                        guard recorder.isRecording else {
+                            if self.elapsed >= 119 { self.finish() }
+                            else { self.fail("Recording was interrupted. Please try again."); self.releaseRecorder() }
+                            return
+                        }
                         recorder.updateMeters()
                         self.elapsed = recorder.currentTime
                         self.levels.removeFirst()
@@ -94,7 +98,13 @@ final class OrbDictation {
 
     func finish() {
         guard phase == .recording else { return }
+        elapsed = max(elapsed, recorder?.currentTime ?? 0)
         releaseRecorder()
+        guard elapsed >= 0.2 else {
+            removeFile()
+            fail("Recording was too short. Cancel and record a longer message.")
+            return
+        }
         transcribe()
     }
     func retry() { guard phase == .failed, file != nil else { return }; transcribe() }
