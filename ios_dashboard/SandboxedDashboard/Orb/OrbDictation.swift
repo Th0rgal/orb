@@ -178,19 +178,20 @@ struct OrbDictationCapsule: View {
                             context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(.white.opacity(0.3 + Double(level) * 0.6)))
                         }
                     }.frame(height: 32).accessibilityHidden(true)
+                    Button { dictation.finish() } label: { Image(systemName: "stop.fill").font(.system(size: 16)).frame(width: 44, height: 44).background(.white.opacity(0.09), in: Circle()) }
+                        .accessibilityLabel("Stop recording and transcribe").accessibilityIdentifier("dictation.stop")
+                    Button { dictation.finish() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .medium)).foregroundStyle(.black).frame(width: 44, height: 44).background(.white, in: Circle()) }
+                        .accessibilityLabel("Use recording in draft").accessibilityIdentifier("dictation.use")
                 } else {
                     HStack(spacing: 7) {
                         if dictation.phase != .failed { ProgressView().tint(.white) }
                         Text(dictation.phase == .permission ? "Microphone…" : dictation.phase == .failed ? "Try again" : "Transcribing…").font(.subheadline).lineLimit(1)
                     }.frame(maxWidth: .infinity)
-                }
-                if dictation.phase == .recording {
-                    Button { dictation.finish() } label: { Image(systemName: "stop.fill").font(.system(size: 16)).frame(width: 44, height: 44).background(.white.opacity(0.09), in: Circle()) }
-                        .accessibilityLabel("Stop recording and transcribe").accessibilityIdentifier("dictation.stop")
-                    Button { dictation.finish() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .medium)).foregroundStyle(.black).frame(width: 44, height: 44).background(.white, in: Circle()) }
-                        .accessibilityLabel("Use recording in draft").accessibilityIdentifier("dictation.use")
-                } else if dictation.canRetry {
-                    Button { dictation.retry() } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44).background(.white.opacity(0.09), in: Circle()) }.accessibilityLabel("Retry transcription")
+                    if dictation.canRetry {
+                        Button { dictation.retry() } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44).background(.white.opacity(0.09), in: Circle()) }.accessibilityLabel("Retry transcription")
+                    } else {
+                        Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
+                    }
                 }
             }
             .buttonStyle(.plain).foregroundStyle(.white)
