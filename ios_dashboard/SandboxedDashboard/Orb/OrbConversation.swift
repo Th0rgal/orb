@@ -254,11 +254,11 @@ struct OrbConversation: View {
                 }
                 .onChange(of: missionID) { _, _ in dictation.cancel() }
                 .onChange(of: api.endpoint) { _, _ in dictation.cancel() }
-                .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notification in
+                .onReceive(OrbDictation.audioNotifications(AVAudioSession.interruptionNotification)) { notification in
                     if let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                        type == AVAudioSession.InterruptionType.began.rawValue { dictation.cancel() }
                 }
-                .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { notification in
+                .onReceive(OrbDictation.audioNotifications(AVAudioSession.routeChangeNotification)) { notification in
                     if let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                        reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { dictation.cancel() }
                 }

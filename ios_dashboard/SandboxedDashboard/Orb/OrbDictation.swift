@@ -1,6 +1,7 @@
 import AVFoundation
 import SwiftUI
 import Observation
+import Combine
 
 /// One short recording at a time. Cancellation fences permission and network callbacks.
 @Observable
@@ -14,6 +15,13 @@ final class OrbDictation {
     private(set) var error = ""
     private(set) var microphoneDenied = false
     var active: Bool { phase != .idle }
+    nonisolated static func audioNotifications(_ name: Notification.Name) -> AnyPublisher<Notification, Never> {
+        // Audio route changes arrive on a system thread. SwiftUI callbacks are
+        // MainActor-isolated, so hop before invoking them (including their guards).
+        NotificationCenter.default.publisher(for: name)
+            .receive(on: DispatchQueue.main)
+            .eraseToAnyPublisher()
+    }
     private let requestPermission: @MainActor () async -> Bool
     private var ownsAudioSession = false
     init(requestPermission: @escaping @MainActor () async -> Bool = { await AVAudioApplication.requestRecordPermission() }) {

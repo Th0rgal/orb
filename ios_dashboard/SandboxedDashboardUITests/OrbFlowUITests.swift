@@ -7,6 +7,25 @@ final class OrbFlowUITests: XCTestCase {
         app.launch()
         return app
     }
+    @MainActor func testRealMicrophonePermissionAndRecorderStartup() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18778", "-orb_test_reset", "YES", "-orb_dictation_fixture", "NO"]
+        app.launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        XCTAssertTrue(app.buttons["mission.long-chat"].waitForExistence(timeout: 10))
+        app.buttons["mission.long-chat"].tap()
+        let draft = app.textFields["composer"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.tap(); draft.typeText("Existing draft")
+        app.buttons["dictation.microphone"].tap()
+        let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if system.buttons["Allow"].waitForExistence(timeout: 5) { system.buttons["Allow"].tap() }
+        XCTAssertTrue(app.buttons["dictation.stop"].waitForExistence(timeout: 15))
+        capture(app, "dictation-real-recorder")
+        app.buttons["dictation.cancel"].tap()
+        XCTAssertEqual(draft.value as? String, "Existing draft")
+    }
     @MainActor func testDictationCapsulePreservesDraftAndCancellation() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-api_base_url", "http://127.0.0.1:18778", "-orb_test_reset", "YES", "-orb_dictation_fixture", "YES"]
