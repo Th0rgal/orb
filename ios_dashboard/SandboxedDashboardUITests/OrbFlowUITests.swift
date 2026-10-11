@@ -7,6 +7,58 @@ final class OrbFlowUITests: XCTestCase {
         app.launch()
         return app
     }
+    @MainActor func testDictationCapsulePreservesDraftAndCancellation() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18778", "-orb_test_reset", "YES", "-orb_dictation_fixture", "YES"]
+        app.launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        XCTAssertTrue(app.buttons["mission.long-chat"].waitForExistence(timeout: 10))
+        app.buttons["mission.long-chat"].tap()
+        let draft = app.textFields["composer"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.tap(); draft.typeText("Existing draft")
+        app.buttons["dictation.microphone"].tap()
+        XCTAssertTrue(app.buttons["dictation.stop"].waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(app.buttons["dictation.cancel"].frame.width, 44)
+        capture(app, "dictation-recording-capsule")
+        let detail = XCTAttachment(screenshot: app.otherElements["dictation.capsule"].screenshot())
+        detail.name = "dictation-capsule-detail"; detail.lifetime = .keepAlways; add(detail)
+        app.buttons["dictation.cancel"].tap()
+        XCTAssertEqual(draft.value as? String, "Existing draft")
+        app.buttons["dictation.microphone"].tap()
+        app.buttons["dictation.use"].tap()
+        XCTAssertTrue(app.staticTexts["Transcribing…"].waitForExistence(timeout: 5))
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        XCTAssertEqual(draft.value as? String, "Existing draft Bonjour, ajoute un microphone dans la conversation.")
+        capture(app, "dictation-editable-draft")
+        app.buttons["dictation.microphone"].tap()
+        app.buttons["dictation.stop"].tap()
+        XCTAssertTrue(app.buttons["dictation.cancel"].waitForExistence(timeout: 5))
+        app.buttons["dictation.cancel"].tap()
+        Thread.sleep(forTimeInterval: 6)
+        XCTAssertEqual(draft.value as? String, "Existing draft Bonjour, ajoute un microphone dans la conversation.")
+        // No message is submitted; fixture verifies only recording/relay/draft behavior.
+    }
+    @MainActor func testInlineInboxDictationKeepsReplyEditable() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18778", "-orb_test_reset", "YES", "-orb_dictation_fixture", "YES"]
+        app.launch()
+        XCTAssertTrue(app.buttons["home.tab.inbox"].waitForExistence(timeout: 20))
+        app.buttons["home.tab.inbox"].tap()
+        XCTAssertTrue(app.buttons["inbox.reply.reconnect"].waitForExistence(timeout: 15))
+        app.buttons["inbox.reply.reconnect"].tap()
+        let draft = app.textFields.matching(NSPredicate(format: "placeholderValue BEGINSWITH 'Send follow-up' OR placeholderValue BEGINSWITH 'Reply to'")).firstMatch
+        XCTAssertTrue(draft.waitForExistence(timeout: 5))
+        draft.tap(); draft.typeText("Inbox draft")
+        app.buttons["dictation.microphone"].tap()
+        XCTAssertTrue(app.buttons["dictation.stop"].waitForExistence(timeout: 5))
+        capture(app, "dictation-inbox-capsule")
+        app.buttons["dictation.stop"].tap()
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        XCTAssertEqual(draft.value as? String, "Inbox draft Bonjour, ajoute un microphone dans la conversation.")
+        XCTAssertTrue(app.buttons["inbox.send.reconnect"].exists)
+    }
     @MainActor private func capture(_ app: XCUIApplication, _ name: String) {
         Thread.sleep(forTimeInterval: 0.5)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = name; shot.lifetime = .keepAlways; add(shot)

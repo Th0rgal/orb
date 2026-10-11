@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import CryptoKit
 
 enum OrbInboxAccount {
@@ -1435,6 +1436,8 @@ struct OrbInboxView: View {
     @State private var eventsByMission: [String: [StoredEvent]] = [:]
     @State private var replyingMissionID: String?
     @State private var replyDraft = ""
+    @State private var dictation = OrbDictation()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var peekedIDs: Set<String> = []
     @FocusState private var replyFocused: Bool
     @State private var undoItem: (id: String, title: String)?
@@ -1626,6 +1629,19 @@ struct OrbInboxView: View {
                     await load(force: true)
                 }
             }
+        }
+        .onDisappear { dictation.cancel() }
+        .onChange(of: replyingMissionID) { _, _ in dictation.cancel() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background || (phase == .inactive && dictation.phase != .permission) { dictation.cancel() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notification in
+            if let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+               type == AVAudioSession.InterruptionType.began.rawValue { dictation.cancel() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { notification in
+            if let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+               reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { dictation.cancel() }
         }
         .onChange(of: projects) { _, _ in recomputeSections() }
         .onChange(of: unreadStore.version) { _, _ in recomputeSections() }
@@ -2276,7 +2292,9 @@ struct OrbInboxView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            if isReplying {
+            if isReplying && dictation.active {
+                OrbDictationCapsule(dictation: dictation)
+            } else if isReplying {
                 HStack(spacing: 8) {
                     TextField(
                         item.interaction != nil ? "Reply to \(item.headline)…" : "Send follow-up…",
@@ -2297,6 +2315,7 @@ struct OrbInboxView: View {
                             .stroke(OrbStyle.borderStrong, lineWidth: 1)
                     )
 
+                    OrbDictationButton(dictation: dictation, text: $replyDraft, onStart: { replyFocused = false }, onComplete: { replyFocused = true }).disabled(isBusy)
                     Button {
                         OrbHaptics.light()
                         Task { await submitInlineReply(item) }

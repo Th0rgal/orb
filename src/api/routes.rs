@@ -808,6 +808,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     let protected_routes = Router::new()
         .route(
+            "/api/voice/transcribe",
+            post(super::voice::transcribe)
+                .layer(DefaultBodyLimit::max(super::voice::MAX_AUDIO_BYTES)),
+        )
+        .route(
             "/api/uploads",
             post(super::uploads::upload)
                 .layer(DefaultBodyLimit::max(crate::uploads::MAX_BODY_BYTES)),
