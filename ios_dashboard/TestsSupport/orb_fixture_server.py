@@ -88,7 +88,13 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK: self.mutate()
     def mutate(self):
         global VALID_TOKEN, CORDONED
-        p=unquote(urlparse(self.path).path); size=int(self.headers.get('Content-Length',0)); body=json.loads(self.rfile.read(size)) if size else {}
+        p=unquote(urlparse(self.path).path); size=int(self.headers.get('Content-Length',0))
+        if p == '/api/voice/transcribe':
+            audio = self.rfile.read(size)
+            if not audio.startswith(b'RIFF'): return self.send({'error': 'Expected WAV'},400)
+            time.sleep(1.5)
+            return self.send({'text': 'Bonjour, ajoute un microphone dans la conversation.'})
+        body=json.loads(self.rfile.read(size)) if size else {}
         if p=='/__expire':
             VALID_TOKEN = 'orb-fixture-' + str(uuid.uuid4())
             return self.send({})

@@ -218,6 +218,26 @@ final class OrbCore {
         guard (200..<300).contains(http.statusCode) else { throw OrbHTTPError(status: http.statusCode, detail: String(data: data, encoding: .utf8) ?? "Request failed") }
         return data.isEmpty ? .null : try JSONDecoder().decode(OrbJSON.self, from: data)
     }
+    func transcribe(_ wav: Data, language: String) async throws -> String {
+        guard wav.count <= 4 * 1024 * 1024,
+              let url = URL(string: endpoint + "/api/voice/transcribe?language=" + Self.escape(language)) else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 100
+        request.setValue("Bearer \(APIService.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
+        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        request.httpBody = wav
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        if http.statusCode == 401 {
+            let api = APIService.shared
+            if url.absoluteString.hasPrefix(endpoint + "/"),
+               request.value(forHTTPHeaderField: "Authorization") == "Bearer \(api.authToken ?? "")" { api.markSessionExpired() }
+            throw APIError.unauthorized
+        }
+        guard (200..<300).contains(http.statusCode) else { throw OrbHTTPError(status: http.statusCode, detail: String(data: data, encoding: .utf8) ?? "Transcription failed") }
+        return try JSONDecoder().decode(OrbJSON.self, from: data)["text"].text
+    }
     static func escape(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }
     func missions(_ project: String, includeArchived: Bool = false) async throws -> [OrbRow] {
         var rows: [OrbRow] = [], offset = 0

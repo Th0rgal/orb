@@ -92,6 +92,7 @@ pub mod types;
 pub(crate) mod uploads;
 pub mod usage_optimize;
 pub mod validation;
+pub mod voice;
 pub mod webhook_markers;
 pub mod workspaces;
 pub mod writer_recycle;

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 struct OrbConversation: View {
     let missionID: String?
@@ -15,6 +16,7 @@ struct OrbConversation: View {
     @State private var mission: OrbJSON = .null
     @State private var execution: OrbJSON = .null
     @State private var text = ""
+    @State private var dictation = OrbDictation()
     @State private var error = ""
     @State private var busy = false
     @State private var unavailable = false
@@ -244,14 +246,28 @@ struct OrbConversation: View {
                     OrbDisk.saveAsync(value, key: draftKey + ":files")
                 }
                 .onDisappear {
+                    dictation.cancel()
                     draftSaveTask?.cancel()
                     eventRefreshTask?.cancel()
                     if !text.isEmpty { OrbDisk.saveAsync(text, key: draftKey) }
                     stream?.cancel(); stream = nil
                 }
+                .onChange(of: missionID) { _, _ in dictation.cancel() }
+                .onChange(of: api.endpoint) { _, _ in dictation.cancel() }
+                .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notification in
+                    if let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                       type == AVAudioSession.InterruptionType.began.rawValue { dictation.cancel() }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { notification in
+                    if let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                       reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { dictation.cancel() }
+                }
                 .onChange(of: phase) { _, value in
                     if value == .active { Task { await refresh(force: true) } }
-                    else { stream?.cancel(); stream = nil }
+                    else {
+                        if value == .background || dictation.phase != .permission { dictation.cancel() }
+                        stream?.cancel(); stream = nil
+                    }
                 }
         }
     }
@@ -950,7 +966,11 @@ struct OrbConversation: View {
         VStack(spacing: 0) {
             if modeQuery != nil { modePicker }
             if !queued.isEmpty { queuedDrawer }
-            composerInput
+            if dictation.active {
+                OrbDictationCapsule(dictation: dictation)
+            } else {
+                composerInput
+            }
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 6)
@@ -1025,6 +1045,8 @@ struct OrbConversation: View {
 
                 Spacer(minLength: 4)
 
+                OrbDictationButton(dictation: dictation, text: $text, onStart: { composerFocused = false }, onComplete: { composerFocused = true })
+                    .disabled(busy)
                 if working && (!isCloud || selection.canCancel) {
                     stopButton
                 }
