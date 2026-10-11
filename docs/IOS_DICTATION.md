@@ -6,6 +6,8 @@ The iPhone records mono 16 kHz, 16-bit PCM WAV. No recognition model is installe
 
 The microphone permission string explains remote transcription. Leaving the composer, entering background, or an audio interruption cancels and fences late responses. A microphone permission dialog may temporarily make the scene inactive; this must not cancel permission acquisition. The existing draft stays intact.
 
+Audio route-change and interruption notifications are delivered to composer observers on the main queue before accessing SwiftUI or `OrbDictation` state. System audio notifications can originate on a secondary thread; invoking a MainActor callback directly can crash under Swift 6. Regression coverage posts both notifications from a background queue and exercises real microphone permission and recorder startup in the simulator, alongside the deterministic transcription fixtures.
+
 ## Server configuration
 
 - `SANDBOXED_VOICE_TRANSCRIPTION_URL`: trusted upstream endpoint; default `http://100.77.4.93:8000/v1/audio/transcriptions`, reachable from Core over Tailscale.

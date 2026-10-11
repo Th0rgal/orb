@@ -1635,11 +1635,11 @@ struct OrbInboxView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .background || (phase == .inactive && dictation.phase != .permission) { dictation.cancel() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notification in
+        .onReceive(OrbDictation.audioNotifications(AVAudioSession.interruptionNotification)) { notification in
             if let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                type == AVAudioSession.InterruptionType.began.rawValue { dictation.cancel() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { notification in
+        .onReceive(OrbDictation.audioNotifications(AVAudioSession.routeChangeNotification)) { notification in
             if let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { dictation.cancel() }
         }

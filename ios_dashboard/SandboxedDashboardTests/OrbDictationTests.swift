@@ -1,7 +1,23 @@
 import XCTest
+import AVFoundation
+import Combine
 @testable import sandboxed_sh
 
 final class OrbDictationTests: XCTestCase {
+    func testAudioNotificationsFromSystemThreadAreDeliveredOnMainThread() async {
+        for name in [AVAudioSession.routeChangeNotification, AVAudioSession.interruptionNotification] {
+            let delivered = expectation(description: name.rawValue)
+            let subscription = OrbDictation.audioNotifications(name).sink { @Sendable _ in
+                XCTAssertTrue(Thread.isMainThread, "Audio notifications must reach SwiftUI on the main thread")
+                delivered.fulfill()
+            }
+            DispatchQueue.global().async {
+                NotificationCenter.default.post(name: name, object: nil)
+            }
+            await fulfillment(of: [delivered], timeout: 3)
+            subscription.cancel()
+        }
+    }
     @MainActor func testDeniedPermissionPreservesDraftAndShowsRecovery() async {
         let model = OrbDictation(requestPermission: { false })
         var draft = "Existing text"
