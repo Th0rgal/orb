@@ -8,6 +8,18 @@ import Combine
 @MainActor
 final class OrbDictation {
     enum Phase: Equatable { case idle, permission, recording, transcribing, failed }
+    /// Stored dictation language. Empty means "use the device language".
+    static let languageKey = "orb.dictationLanguage"
+    /// The user's preferred iOS language. `Locale.current` is not used: it follows
+    /// the app's own localizations, so it reports English on a French iPhone.
+    static var deviceLanguage: String {
+        let code = Locale.preferredLanguages.first.map { Locale(identifier: $0).language.languageCode?.identifier ?? "" } ?? ""
+        return languages.contains(where: { $0.0 == code }) ? code : "en"
+    }
+    static func resolve(_ stored: String) -> String {
+        languages.contains(where: { $0.0 == stored }) ? stored : deviceLanguage
+    }
+    static func name(_ code: String) -> String { languages.first(where: { $0.0 == code })?.1 ?? code }
     static let languages: [(String, String)] = [("en", "English"), ("fr", "Français"), ("de", "Deutsch"), ("es", "Español"), ("it", "Italiano"), ("pt", "Português"), ("nl", "Nederlands"), ("pl", "Polski"), ("el", "Ελληνικά"), ("ar", "العربية"), ("ja", "日本語"), ("zh", "中文"), ("vi", "Tiếng Việt"), ("ko", "한국어")]
     private(set) var phase: Phase = .idle
     private(set) var levels = Array(repeating: CGFloat(0.05), count: 36)
@@ -289,12 +301,11 @@ struct OrbDictationButton: View {
     @Binding var text: String
     var onStart: () -> Void
     var onComplete: () -> Void
-    @AppStorage("orb.dictationLanguage") private var language = Locale.current.language.languageCode?.identifier ?? "en"
+    @AppStorage(OrbDictation.languageKey) private var language = ""
     var body: some View {
         Button {
             onStart()
-            let code = OrbDictation.languages.contains(where: { $0.0 == language }) ? language : "en"
-            dictation.start(language: code) { transcript in
+            dictation.start(language: OrbDictation.resolve(language)) { transcript in
                 text += (text.isEmpty || text.last?.isWhitespace == true ? "" : " ") + transcript
                 onComplete()
             }
@@ -303,14 +314,42 @@ struct OrbDictationButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Dictate message")
-        .accessibilityHint("Touch and hold to choose the language. Current language: \(language)")
+        .accessibilityHint("Touch and hold to choose the language. Current language: \(OrbDictation.name(OrbDictation.resolve(language)))")
         .accessibilityIdentifier("dictation.microphone")
         .contextMenu {
+            Button { language = "" } label: {
+                let title = "Device language (\(OrbDictation.name(OrbDictation.deviceLanguage)))"
+                if language.isEmpty { Label(title, systemImage: "checkmark") } else { Text(title) }
+            }
             ForEach(OrbDictation.languages, id: \.0) { code, label in
                 Button { language = code } label: {
                     if language == code { Label(label, systemImage: "checkmark") } else { Text(label) }
                 }
             }
         }
+    }
+}
+
+/// Settings → Dictation: device language by default, or a fixed override.
+struct OrbDictationSettingsView: View {
+    @AppStorage(OrbDictation.languageKey) private var language = ""
+    var body: some View {
+        List {
+            Section {
+                Picker("Language", selection: $language) {
+                    Text("Device language (\(OrbDictation.name(OrbDictation.deviceLanguage)))").tag("")
+                    ForEach(OrbDictation.languages, id: \.0) { code, label in Text(label).tag(code) }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+                .accessibilityIdentifier("settings.dictation.language")
+            } header: {
+                Text("Dictation language")
+            } footer: {
+                Text("Speech is transcribed in this language. Choose a fixed language if you dictate in a language other than your iPhone's. You can also change it by touching and holding the microphone.")
+            }
+        }
+        .scrollContentBackground(.hidden).background(OrbStyle.background)
+        .navigationTitle("Dictation").navigationBarTitleDisplayMode(.inline)
     }
 }
