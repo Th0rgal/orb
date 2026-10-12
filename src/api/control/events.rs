@@ -162,6 +162,7 @@ pub enum AgentEvent {
         model_override: Option<String>,
         model_effort: Option<String>,
         fast_mode: bool,
+        service_tier: Option<crate::codex_speed::Tier>,
         config_profile: Option<String>,
         session_id: Option<String>,
         updated_at: String,
@@ -472,6 +473,7 @@ pub enum ControlCommand {
         model_effort: Option<String>,
         /// Enable Codex fast service tier for supported GPT models.
         fast_mode: bool,
+        service_tier: Option<crate::codex_speed::Tier>,
         /// Backend to use for this mission ("opencode" or "claudecode")
         backend: Option<String>,
         /// Config profile to use for this mission
@@ -512,6 +514,7 @@ pub enum ControlCommand {
         model_override: Option<Option<String>>,
         model_effort: Option<Option<String>>,
         fast_mode: Option<bool>,
+        service_tier: Option<crate::codex_speed::Tier>,
         config_profile: Option<Option<String>>,
         session_id: String,
         respond: oneshot::Sender<Result<Mission, String>>,

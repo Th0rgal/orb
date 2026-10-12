@@ -182,6 +182,8 @@ pub struct ThreadGoalGetResponse {
 
 #[derive(Debug, Serialize)]
 pub struct TurnStartParams {
+    #[serde(rename = "serviceTier", skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     #[serde(rename = "cyberAccessProgram", skip_serializing_if = "Option::is_none")]
     pub cyber_access_program: Option<String>,
     #[serde(rename = "collaborationMode", skip_serializing_if = "Option::is_none")]
@@ -792,6 +794,7 @@ mod tests {
     #[test]
     fn turn_start_params_serialize_threadid_camelcase() {
         let p = TurnStartParams {
+            service_tier: None,
             cyber_access_program: None,
             collaboration_mode: None,
             thread_id: "abc".to_string(),

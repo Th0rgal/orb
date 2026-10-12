@@ -1,3 +1,5 @@
+import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
+import type {CodexServiceTier} from './api';
 import { Picker } from "./Picker";
 import { Menu } from "./Menu";
 import { Popover } from "./Popover";
@@ -146,7 +148,7 @@ const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "A
 /** Harness + model chosen for new agents; persisted per user. `effort` is
  * absent for "let the backend decide", and is dropped whenever the selected
  * harness does not accept that level (see `effort.ts`). */
-export type HarnessPick = { backend: string; model: string; effort?: string };
+export type HarnessPick = { backend: string; model: string; effort?: string; service_tier?: CodexServiceTier };
 const PICK_KEY = "orb.harnessPick";
 const loadPick = (): HarnessPick | null => {
   try {
@@ -192,7 +194,7 @@ const effectivePick = (machine = "core"): HarnessPick | null => {
   const stored = harnessPick();
   if (stored) {
     const effort = normalizeEffort(stored.effort, stored.backend);
-    return effort ? { ...stored, effort } : { backend: stored.backend, model: stored.model };
+    return { ...stored, effort: effort ?? undefined };
   }
   const first = choices.find((c) => c.backend.id === "claudecode") ?? choices[0];
   return { backend: first.backend.id, model: first.models[0].value };
@@ -935,7 +937,7 @@ export function Composer(p: {
                 onClose={() => setWhich(null)} onSelect={value => {
                   const backend = choice()!.backend.id;
                   const effort = normalizeEffort(pick()?.effort, backend);
-                  setHarnessPick({backend,model:value,...(effort ? {effort} : {})});setWhich(null);
+                  setHarnessPick({...pick()!,backend,model:value,...(effort ? {effort} : {})});setWhich(null);
                 }}/>
 
             </Show>
@@ -959,13 +961,14 @@ export function Composer(p: {
                   items={[{id:"",label:defaultEffortLabel(pick()?.backend,pick()?.model)},...supportedEfforts(pick()?.backend).map(e => ({id:e,label:effortLabel(e)}))]}
                   onClose={() => setWhich(null)} onSelect={value => {
                     const cur = pick()!; const effort = normalizeEffort(value, cur.backend);
-                    setHarnessPick({backend:cur.backend,model:cur.model,...(effort ? {effort} : {})});setWhich(null);
+                    setHarnessPick({...cur,backend:cur.backend,model:cur.model,...(effort ? {effort} : {})});setWhich(null);
                   }}/>
 
               </Show>
             </div>
           </Show>
           <Show when={pick()?.backend === "codex"}>
+            <span class="picks-sep">·</span><CodexSpeedPicker model={pick()?.model??""} value={pick()?.service_tier??"standard"} local={p.uploadTarget==="local"} onChange={tier=>setHarnessPick({...pick()!,service_tier:tier})}/>
             <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} remote={!!p.uploadTarget&&p.uploadTarget!=="core"&&p.uploadTarget!=="local"} onChange={setDraftCyber}/>
           </Show>
         </Show>
@@ -1660,6 +1663,7 @@ export default function App() {
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number) => {
     const selectedCyber = draftCyber();
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
+    if (pick.backend === "codex") await requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true);
     const row = await localAgentForLaunch(pick.backend);
     if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Local agents. Your draft is kept.");
     const plan = await materializeMentions(projectSlug, prompt, attachChips());
@@ -1671,7 +1675,7 @@ export default function App() {
     const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify({...body, cyber_access:selectedCyber});
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setDraftCyber("standard");
     setAttachChips([]);
@@ -1723,11 +1727,11 @@ export default function App() {
         }
         // `effectivePick` already dropped an effort this harness can't take, so
         // an omitted field means "backend default" rather than a stale level.
-        if(pick.backend === "codex") await requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"});
+        if(pick.backend === "codex") { await requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"}); await requireSpeedSupport(pick.model,pick.service_tier??"standard"); }
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
-        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
+        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
@@ -2614,6 +2618,14 @@ function MissionDock(p: {
             </Show>
           </div>
         </Show>
+        <Show when={p.mission?.backend === "codex"}>
+          <span class="under-sep" aria-hidden="true">·</span>
+          <CodexSpeedPicker model={modelId()} value={missionSpeed(p.mission!)} missionId={p.mission!.id} local={catalogMachine()==="local"} disabled={saving()} onChange={tier=>{
+            const mission=p.mission; if(!mission||saving())return;
+            setSaving(true);
+            void updateMissionSettings(mission.id,{service_tier:tier}).then(updated=>{if(missionSpeed(updated)!==tier)throw new Error('The backend did not save the selected speed. Update it before retrying.');p.onMission?.(updated);}).catch(e=>p.onError?.(launchError(e))).finally(()=>setSaving(false));
+          }}/>
+        </Show>
         <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
       </Show>
       <div class="ctx-wrap">
@@ -3073,7 +3085,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
         if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
         if (!optimisticList().some(item => item.id === attemptId)) return true;
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
+        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,service_tier:binding.harness === "codex" ? missionSpeed(mission()??{}) : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
         setOptimisticList(prev => prev.filter(item => item.id !== attemptId));
         if (chips === followAttach()) setFollowAttach([]);
         return true;

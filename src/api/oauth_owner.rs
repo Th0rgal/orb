@@ -114,6 +114,8 @@ pub struct CliProxyEndpoint {
     pub base_url: String,
     /// Bearer key CLIProxyAPI expects (inert placeholder when it runs open).
     pub api_key: String,
+    /// Stable credential owner when a turn uses a scoped routing capability.
+    pub identity_url: Option<String>,
 }
 
 impl CliProxyEndpoint {
@@ -138,7 +140,11 @@ pub fn cli_proxy_endpoint() -> Option<CliProxyEndpoint> {
     }
     let api_key = crate::util::cli_proxy_api_key_from_env()
         .unwrap_or_else(|| "sandboxed-sh-cli-proxy".to_string());
-    Some(CliProxyEndpoint { base_url, api_key })
+    Some(CliProxyEndpoint {
+        base_url,
+        api_key,
+        identity_url: None,
+    })
 }
 
 /// Endpoint a harness must use for `provider` when CLIProxyAPI owns its OAuth

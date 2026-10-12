@@ -43,7 +43,13 @@ fn credential_identity(
             continuity::account_fingerprint("apikey", key)
         }
         crate::api::ai_providers::CodexCredentialOverride::CliProxy(endpoint) => {
-            continuity::account_fingerprint("cliproxy", &endpoint.base_url)
+            continuity::account_fingerprint(
+                "cliproxy",
+                endpoint
+                    .identity_url
+                    .as_deref()
+                    .unwrap_or(&endpoint.base_url),
+            )
         }
     }
 }
@@ -684,6 +690,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
     requested_model: Option<&str>,
     model_effort: Option<&str>,
     fast_mode: bool,
+    requested_service_tier: Option<crate::codex_speed::Tier>,
     agent: Option<&str>,
     mission_id: Uuid,
     events_tx: broadcast::Sender<AgentEvent>,
@@ -694,6 +701,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
     is_continuation: bool,
     tool_hub: Option<Arc<crate::api::control::FrontendToolHub>>,
 ) -> AgentResult {
+    let service_tier = crate::codex_speed::Tier::from_legacy(requested_service_tier, fast_mode);
     let cyber_access = {
         // Snapshot once per user turn, including credential retries.
         // Serialize promotion with next-turn changes from Orb.
@@ -729,8 +737,106 @@ pub(crate) async fn run_codex_turn_with_rotation(
     if !enabled {
         tracing::warn!(%mission_id, "Codex legacy mission has no verified native binding; preserving legacy continuation until an explicit checkpoint migration");
     }
+    let mut speed_scope = None;
+    let accelerated_pool = if service_tier != crate::codex_speed::Tier::Standard {
+        if let Err(error) = crate::api::control::speed::validate(
+            app_working_dir,
+            "codex",
+            requested_model,
+            service_tier,
+            Some(mission_id),
+        )
+        .await
+        {
+            return AgentResult::failure(error, 0);
+        }
+        let mut pool = Vec::new();
+        if let Some(endpoint) = crate::api::oauth_owner::codex_via_cli_proxy() {
+            let mut prefixes = Vec::new();
+            for account in crate::api::control::speed::eligible_proxy_accounts(
+                app_working_dir,
+                requested_model.unwrap(),
+                service_tier,
+            )
+            .await
+            {
+                match crate::api::control::speed::proxy_prefix(
+                    app_working_dir,
+                    &account,
+                    requested_model.unwrap(),
+                )
+                .await
+                {
+                    Ok(prefix) => prefixes.push(prefix),
+                    Err(error) => return AgentResult::failure(error, 0),
+                }
+            }
+            let Some(base) = workspace_api_base_url(workspace) else {
+                return AgentResult::failure(
+                    "Core speed routing is unavailable for this workspace",
+                    0,
+                );
+            };
+            let (scope, scoped_endpoint) = match crate::api::control::speed_proxy::register(
+                &base,
+                requested_model.unwrap(),
+                service_tier,
+                prefixes,
+                endpoint,
+            ) {
+                Ok(value) => value,
+                Err(error) => return AgentResult::failure(error, 0),
+            };
+            speed_scope = Some(scope);
+            pool.push(CodexCredential::CliProxy(scoped_endpoint));
+        } else {
+            pool.extend(
+                crate::api::control::speed::eligible_accounts(
+                    app_working_dir,
+                    requested_model.unwrap(),
+                    service_tier,
+                )
+                .await
+                .into_iter()
+                .map(CodexCredential::OAuth),
+            );
+        }
+        if pool.is_empty() {
+            return AgentResult::failure(
+                "No compatible subscription account remains available for this speed.",
+                0,
+            );
+        }
+        Some(pool)
+    } else {
+        None
+    };
+    let _speed_scope = speed_scope;
+    let eligible = accelerated_pool.as_ref().map(|pool| {
+        pool.iter()
+            .map(CodexCredential::fingerprint)
+            .collect::<HashSet<_>>()
+    });
     'codex_arm: {
-        let mut all_creds = collect_codex_credentials(app_working_dir);
+        let mut all_creds = accelerated_pool
+            .clone()
+            .unwrap_or_else(|| collect_codex_credentials(app_working_dir));
+        let excluded = all_creds
+            .iter()
+            .filter(|credential| {
+                eligible
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&credential.fingerprint()))
+            })
+            .map(|credential| credential.fingerprint())
+            .collect::<HashSet<_>>();
+        if eligible.is_some() && excluded.len() == all_creds.len() {
+            return AgentResult::failure(
+                "No compatible subscription account remains available for this speed.",
+                0,
+            );
+        }
+
         let mut prior_empty_result: Option<AgentResult> = None;
         if all_creds.is_empty() {
             let mut result = run_codex_turn(
@@ -740,6 +846,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                 requested_model,
                 model_effort,
                 fast_mode,
+                service_tier,
                 agent,
                 mission_id,
                 events_tx.clone(),
@@ -753,8 +860,9 @@ pub(crate) async fn run_codex_turn_with_rotation(
             )
             .await;
 
-            if let Some(fallback_model) =
-                codex_chatgpt_fallback_for_result(requested_model, &result)
+            if let Some(fallback_model) = (service_tier == crate::codex_speed::Tier::Standard)
+                .then(|| codex_chatgpt_fallback_for_result(requested_model, &result))
+                .flatten()
             {
                 tracing::warn!(
                     mission_id = %mission_id,
@@ -769,6 +877,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     Some(fallback_model),
                     model_effort,
                     fast_mode,
+                    service_tier,
                     agent,
                     mission_id,
                     events_tx.clone(),
@@ -798,6 +907,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     requested_model,
                     model_effort,
                     fast_mode,
+                    service_tier,
                     agent,
                     mission_id,
                     events_tx.clone(),
@@ -838,7 +948,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
             }
         }
         {
-            let mut attempted_credentials: HashSet<String> = HashSet::new();
+            let mut attempted_credentials: HashSet<String> = excluded.clone();
             let mut attempt_idx = 0usize;
             // A thread that did not exist before this turn and did nothing in
             // it holds no work: a usage limit may move the turn to another
@@ -878,8 +988,13 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     Ok(None) => {}
                     Err(error) => break continuity_failure(error),
                 }
-                let lease =
-                    lease_codex_account(app_working_dir, &attempted_credentials, &cancel).await;
+                let lease = lease_codex_account_from_pool(
+                    app_working_dir,
+                    &attempted_credentials,
+                    &cancel,
+                    all_creds.clone(),
+                )
+                .await;
                 let Some(lease) = lease else {
                     if let Some(prev) = last_constrained_result {
                         break prev;
@@ -893,6 +1008,14 @@ pub(crate) async fn run_codex_turn_with_rotation(
                 };
 
                 attempt_idx += 1;
+                if eligible
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&lease.credential.fingerprint()))
+                {
+                    attempted_credentials.insert(lease.credential.fingerprint());
+                    continue;
+                }
+                let proxy_owned = matches!(&lease.credential, CodexCredential::CliProxy(_));
                 let credential_label = lease.credential.label_for_logs();
                 let credential_fingerprint = lease.credential.fingerprint();
                 attempted_credentials.insert(credential_fingerprint.clone());
@@ -913,6 +1036,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                     requested_model,
                     model_effort,
                     fast_mode,
+                    service_tier,
                     agent,
                     mission_id,
                     events_tx.clone(),
@@ -926,8 +1050,9 @@ pub(crate) async fn run_codex_turn_with_rotation(
                 )
                 .await;
 
-                if let Some(fallback_model) =
-                    codex_chatgpt_fallback_for_result(requested_model, &result)
+                if let Some(fallback_model) = (service_tier == crate::codex_speed::Tier::Standard)
+                    .then(|| codex_chatgpt_fallback_for_result(requested_model, &result))
+                    .flatten()
                 {
                     tracing::warn!(
                         mission_id = %mission_id,
@@ -944,6 +1069,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                         Some(fallback_model),
                         model_effort,
                         fast_mode,
+                        service_tier,
                         agent,
                         mission_id,
                         events_tx.clone(),
@@ -975,6 +1101,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                         requested_model,
                         model_effort,
                         fast_mode,
+                        service_tier,
                         agent,
                         mission_id,
                         events_tx.clone(),
@@ -1033,7 +1160,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
                             reason,
                             "Codex account constrained; leasing next account"
                         );
-                        if !bound_before_turn {
+                        if !bound_before_turn || proxy_owned {
                             match continuity::release_unused(&native_input.path) {
                                 Ok(true) => tracing::info!(
                                     mission_id = %mission_id,
@@ -1081,6 +1208,7 @@ async fn run_codex_turn(
     model: Option<&str>,
     model_effort: Option<&str>,
     fast_mode: bool,
+    service_tier: crate::codex_speed::Tier,
     agent: Option<&str>,
     mission_id: Uuid,
     events_tx: broadcast::Sender<AgentEvent>,
@@ -1361,12 +1489,29 @@ async fn run_codex_turn(
         tx
     });
 
+    let chatgpt_plan_type = if service_tier != crate::codex_speed::Tier::Standard {
+        if let Some(account) = prepared_oauth_account.as_ref() {
+            crate::api::codex_usage::read_usage(
+                &reqwest::Client::new(),
+                &account.access_token,
+                &account.chatgpt_account_id,
+            )
+            .await
+            .ok()
+            .and_then(|usage| usage.plan_type)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let codex_config = crate::backend::codex::client::CodexConfig {
         cyber_access,
         interactive,
         cli_path,
         model_effort: model_effort.map(|s| s.to_string()),
         fast_mode,
+        service_tier: Some(service_tier),
         cancel_token: Some(cancel.clone()),
         extra_env,
         continuity,
@@ -1375,7 +1520,7 @@ async fn run_codex_turn(
             crate::backend::codex::client::CodexExternalChatgptAuth {
                 access_token: account.access_token.clone(),
                 chatgpt_account_id: account.chatgpt_account_id.clone(),
-                chatgpt_plan_type: None,
+                chatgpt_plan_type: chatgpt_plan_type.clone(),
                 working_dir: app_working_dir.to_path_buf(),
             }
         }),

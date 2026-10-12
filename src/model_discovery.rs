@@ -546,6 +546,9 @@ fn proxy_subscription_models(value: &Value, prefix: &str) -> Result<Vec<Provider
             // versions may return raw IDs or namespaced aliases; inference
             // always restores the explicit routing namespace.
             let raw = m.get("id")?.as_str()?.trim();
+            if raw.starts_with("orb-codex-") {
+                return None;
+            }
             let id = raw.strip_prefix(&format!("{prefix}/")).unwrap_or(raw);
             if id.is_empty() || !seen.insert(id.to_string()) {
                 return None;

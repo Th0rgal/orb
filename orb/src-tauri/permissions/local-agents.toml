@@ -34,6 +34,7 @@ commands.allow = [
   "local_interaction_answer",
   "local_session_git",
   "local_agents_cyber_capabilities",
+  "local_codex_speed_options",
   "local_agents_scan",
   "local_antigravity_models",
   "local_agents_workspace",

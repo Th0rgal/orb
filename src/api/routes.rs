@@ -775,6 +775,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             axum::routing::any(system_api::hermes_remote_proxy)
                 .layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
+        .route(
+            "/api/llm/codex-speed/v1/responses",
+            post(control::speed_proxy::responses).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
+        .route(
+            "/api/llm/codex-speed/v1/models",
+            get(control::speed_proxy::models),
+        )
         // OpenAI-compatible proxy endpoint (bearer token auth via SANDBOXED_PROXY_SECRET).
         // LLM payloads with tool outputs and long contexts can exceed the default 2MB
         // body limit, so set a generous 50MB limit for proxy routes.
@@ -1007,6 +1015,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/control/missions/:id/title",
             post(control::set_mission_title),
         )
+        .route("/api/control/codex-speed", get(control::speed::options))
         .route(
             "/api/control/cyber-capabilities",
             get(control::cyber::capabilities),

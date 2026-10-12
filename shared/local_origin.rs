@@ -13,6 +13,8 @@ pub struct Origin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<crate::codex_speed::Tier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cyber_access: Option<crate::cyber_access::Mode>,
     pub cwd: String,
     pub prompt: String,
@@ -37,6 +39,13 @@ pub struct Snapshot {
 }
 impl Snapshot {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(tier) = self.origin.service_tier {
+            if self.origin.backend != "codex"
+                || !tier.supports_model(self.origin.model.as_deref().unwrap_or(""))
+            {
+                return Err("Invalid local Codex speed for harness or model".into());
+            }
+        }
         if let Some(effort) = self.origin.effort.as_deref() {
             let accepted = match self.origin.backend.as_str() {
                 "antigravity" => matches!(effort, "low" | "medium" | "high"),
