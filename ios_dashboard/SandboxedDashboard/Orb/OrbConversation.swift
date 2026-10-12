@@ -1560,7 +1560,8 @@ struct OrbConversation: View {
                 let inHistory = mission["history"].items.contains(where: { $0["role"].text == "user" && $0["content"].text == opt })
                 let inEvents = events.contains(where: { $0.eventType == "user_message" && $0.content == opt })
                 let inCloud = turns.contains(where: { $0["prompt"].text == opt })
-                if inHistory || inEvents || inCloud {
+                let inQueue = queued.contains(where: { $0["content"].text == opt })
+                if inHistory || inEvents || inCloud || inQueue {
                     optimisticPrompt = nil
                 }
             }
@@ -1642,6 +1643,11 @@ struct OrbConversation: View {
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false), result["queued"] != .null else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance. The saved request is retained.") }
             }
             if id == nil { guard !result["id"].text.isEmpty else { throw URLError(.cannotParseResponse) }; id = result["id"].text }
+            // A queued follow-up is not in the conversation yet; the queue drawer shows it.
+            if pending.path == "/api/control/message" && result["queued"] == .bool(true) {
+                optimisticPrompt = nil
+                rebuildHistory()
+            }
             if let id {
                 OrbReadCache.invalidate("mission:\(id)")
             }

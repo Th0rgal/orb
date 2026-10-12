@@ -95,6 +95,7 @@ struct OrbAttachments: View {
     var showFiles = true
     @State private var importing = false
     @State private var photo: PhotosPickerItem?
+    @State private var choosingPhoto = false
     @State private var preview: OrbPreviewFile?
     var body: some View {
         VStack(alignment: .leading) {
@@ -103,7 +104,9 @@ struct OrbAttachments: View {
                     if let showContextMention {
                         Button(action: showContextMention) { Label("Project context", systemImage: "at") }
                     }
-                    PhotosPicker(selection: $photo, matching: .images) { Label("Photos", systemImage: "photo") }
+                    // A PhotosPicker inside a Menu is torn down with the menu and never
+                    // presents; open it from the view instead.
+                    Button { choosingPhoto = true } label: { Label("Photos", systemImage: "photo") }
                     Button { importing = true } label: { Label("Files", systemImage: "paperclip") }
                     if let showMode {
                         Divider()
@@ -144,8 +147,17 @@ struct OrbAttachments: View {
                 try add(Data(contentsOf: url), name: url.lastPathComponent)
             } catch { self.error = error.localizedDescription }
         }
+        .photosPicker(isPresented: $choosingPhoto, selection: $photo, matching: .images)
         .onChange(of: photo) { _, item in
-            Task { do { if let data = try await item?.loadTransferable(type: Data.self) { try add(data, name: "Photo.\(item?.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg")") } } catch { self.error = error.localizedDescription } }
+            guard let item else { return }
+            // Reset so picking the same photo again still triggers a change.
+            photo = nil
+            Task {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else { throw OrbHTTPError(status: 415, detail: "This photo could not be loaded.") }
+                    try add(data, name: "Photo.\(item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg")")
+                } catch { self.error = error.localizedDescription }
+            }
         }
         .sheet(item: $preview) { OrbPreviewSheet(file: $0) }
     }
