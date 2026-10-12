@@ -222,6 +222,7 @@ struct OrbConversation: View {
             conversationContainer(scroll: scroll)
                 .background(OrbStyle.background)
                 .scrollDismissesKeyboard(.interactively)
+                .background(OrbDoubleTapDismissesKeyboard(active: composerFocused) { composerFocused = false })
                 .navigationTitle(resolvedNavigationTitle)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
@@ -2593,4 +2594,67 @@ struct OrbAgentPicker: View {
     private static var starts: [String: Date] = [:]
     static func start(_ key: String) -> Date { if let date = starts[key] { return date }; let now = Date(); starts[key] = now; return now }
     static func stop(_ key: String) { starts[key] = nil }
+}
+
+/// Double-tapping anywhere in the conversation closes the keyboard. Messages
+/// render through UIKit text and web views that swallow SwiftUI gestures, so
+/// this is a window-level recognizer that never cancels their touches and
+/// ignores double-taps inside the focused field (word selection).
+struct OrbDoubleTapDismissesKeyboard: UIViewRepresentable {
+    let active: Bool
+    let dismiss: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = Anchor()
+        view.isUserInteractionEnabled = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.dismiss = dismiss
+        context.coordinator.recognizer.isEnabled = active
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.recognizer.view?.removeGestureRecognizer(coordinator.recognizer)
+    }
+
+    final class Anchor: UIView {
+        weak var coordinator: Coordinator?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let coordinator else { return }
+            coordinator.recognizer.view?.removeGestureRecognizer(coordinator.recognizer)
+            window?.addGestureRecognizer(coordinator.recognizer)
+        }
+    }
+
+    @MainActor final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var dismiss: () -> Void = {}
+        lazy var recognizer: UITapGestureRecognizer = {
+            let recognizer = UITapGestureRecognizer(target: self, action: #selector(fire))
+            recognizer.numberOfTapsRequired = 2
+            recognizer.cancelsTouchesInView = false
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        @objc private func fire() { dismiss() }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view = touch.view
+            while let current = view {
+                if current.isFirstResponder { return false }
+                view = current.superview
+            }
+            return true
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
 }
