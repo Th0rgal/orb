@@ -554,7 +554,7 @@ export function Composer(p: {
     if (p.uploadTarget === "local") void refreshLocalAgents(false);
     else if (p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
   });
-  const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : (p.uploadTarget === "core" || (!!p.uploadTarget && backend() === "vibe")) && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
+  const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : !!p.uploadTarget && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
     if (mode() || voiceActive() || slashOff()) return null;
     const q = slashQuery(text());
@@ -3318,7 +3318,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={clientPlaced() && localActivities(p.id).some(a => a.kind === "status" || a.id === "antigravity:status" || a.background || a.id.startsWith("task:"))}>
               <AgentActivity items={localActivities(p.id)} running={localRunActive(p.id)} completed={activityShouldCollapse(mission()?.status, localRunActive(p.id))} />
             </Show>
-            <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} />
+            <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
               <MissionFailure mission={mission()} active={busy() || localQueueActive() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>

@@ -165,43 +165,115 @@ struct OrbDictationCapsule: View {
     @Bindable var dictation: OrbDictation
     var body: some View {
         let levels = dictation.levels
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                Button { dictation.cancel() } label: { Image(systemName: "xmark").font(.system(size: 19, weight: .medium)).frame(width: 44, height: 44).background(.white.opacity(0.09), in: Circle()) }
-                    .accessibilityLabel("Cancel dictation").accessibilityIdentifier("dictation.cancel")
-                if dictation.phase == .recording {
-                    Canvas { context, size in
-                        let pitch = size.width / CGFloat(levels.count)
-                        for (i, level) in levels.enumerated() {
-                            let height = max(3, level * 28)
-                            let rect = CGRect(x: CGFloat(i) * pitch, y: (size.height - height) / 2, width: max(1, pitch * 0.55), height: height)
-                            context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(.white.opacity(0.3 + Double(level) * 0.6)))
+        let isRecording = dictation.phase == .recording
+        let statusText: String = {
+            switch dictation.phase {
+            case .permission: return "Microphone"
+            case .failed: return "Try again"
+            default: return "Transcribing"
+            }
+        }()
+        VStack(spacing: 6) {
+            HStack(spacing: 10) {
+                Button { dictation.cancel() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(.white.opacity(0.09), in: Circle())
+                }
+                .accessibilityLabel("Cancel dictation")
+                .accessibilityIdentifier("dictation.cancel")
+
+                if isRecording {
+                    HStack(spacing: 8) {
+                        Canvas { context, size in
+                            let pitch = size.width / CGFloat(levels.count)
+                            for (i, level) in levels.enumerated() {
+                                let height = max(3, level * 26)
+                                let rect = CGRect(x: CGFloat(i) * pitch, y: (size.height - height) / 2, width: max(1.5, pitch * 0.55), height: height)
+                                context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(.white.opacity(0.35 + Double(level) * 0.6)))
+                            }
                         }
-                    }.frame(height: 32).accessibilityHidden(true)
-                    // One action: stop and put the transcript in the draft.
-                    Button { dictation.finish() } label: { Image(systemName: "stop.fill").font(.system(size: 20)).foregroundStyle(.black).frame(width: 56, height: 56).background(.white, in: Circle()) }
-                        .accessibilityLabel("Stop recording and transcribe").accessibilityIdentifier("dictation.stop")
-                } else {
-                    HStack(spacing: 7) {
-                        if dictation.phase != .failed { ProgressView().tint(.white) }
-                        Text(dictation.phase == .permission ? "Microphone…" : dictation.phase == .failed ? "Try again" : "Transcribing…").font(.subheadline).lineLimit(1)
-                    }.frame(maxWidth: .infinity)
-                    if dictation.canRetry {
-                        Button { dictation.retry() } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44).background(.white.opacity(0.09), in: Circle()) }.accessibilityLabel("Retry transcription")
-                    } else {
-                        Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
+                        .frame(height: 28)
+                        .accessibilityHidden(true)
+
+                        Text("\(Int(dictation.elapsed) / 60):\(String(format: "%02d", Int(dictation.elapsed) % 60))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(OrbStyle.textSecondary)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    Text(statusText)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+
+                HStack(spacing: 8) {
+                    if isRecording {
+                        Button { dictation.finish() } label: {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 38, height: 38)
+                                .background(.white.opacity(0.09), in: Circle())
+                        }
+                        .accessibilityLabel("Stop recording and transcribe")
+                        .accessibilityIdentifier("dictation.stop")
+                    } else if dictation.canRetry {
+                        Button { dictation.retry() } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 38, height: 38)
+                                .background(.white.opacity(0.09), in: Circle())
+                        }
+                        .accessibilityLabel("Retry transcription")
+                    } else {
+                        ZStack {
+                            Circle()
+                                .fill(.white.opacity(0.09))
+                                .frame(width: 38, height: 38)
+                            if dictation.phase != .failed {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "exclamationmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.75))
+                            }
+                        }
+                        .accessibilityHidden(true)
+                    }
+
+                    Button {
+                        if isRecording { dictation.finish() }
+                        else if dictation.canRetry { dictation.retry() }
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.black.opacity(isRecording || dictation.canRetry ? 1.0 : 0.65))
+                            .frame(width: 38, height: 38)
+                            .background(Color.white.opacity(isRecording || dictation.canRetry ? 1.0 : 0.85), in: Circle())
+                    }
+                    .disabled(!isRecording && !dictation.canRetry)
+                    .accessibilityLabel("Use recording in draft")
+                    .accessibilityIdentifier("dictation.use")
                 }
             }
-            .buttonStyle(.plain).foregroundStyle(.white)
-            .padding(8).background(OrbStyle.surface, in: Capsule())
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(OrbStyle.surface, in: Capsule())
             .overlay(Capsule().stroke(OrbStyle.borderStrong))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("dictation.capsule")
-            if dictation.phase == .recording {
-                Text("\(Int(dictation.elapsed) / 60):\(String(format: "%02d", Int(dictation.elapsed) % 60)) · Tap to transcribe")
-                    .font(.caption2).foregroundStyle(OrbStyle.textSecondary).monospacedDigit()
-            }
+
             if !dictation.error.isEmpty {
                 Text(dictation.error).font(.caption).foregroundStyle(OrbStyle.textSecondary)
                 if dictation.microphoneDenied {

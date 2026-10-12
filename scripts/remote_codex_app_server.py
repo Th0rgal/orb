@@ -52,6 +52,17 @@ def goal_action(goal, prompt):
     return None
 
 
+def strip_plan_prefix(prompt):
+    trimmed = prompt.lstrip()
+    if not trimmed.startswith('/plan'):
+        return None
+    rest = trimmed[5:]
+    if rest and not rest[0].isspace():
+        return None
+    body = rest.lstrip()
+    return body if body else 'Review the conversation and workspace, then propose an implementation plan before making changes.'
+
+
 class NativeSession:
     def __init__(self, config):
         self.config = config
@@ -67,6 +78,7 @@ class NativeSession:
         self.text = {}
         self.pending_hint = None
         self.capacity_retries = 0
+        self.plan_updates = 0
         command = ['codex']
         if os.environ.get('SANDBOXED_MCP_WRAPPER'):
             command = [os.environ['SANDBOXED_MCP_WRAPPER'], 'launch', '--harness', 'codex', '--', 'codex']
@@ -130,6 +142,14 @@ class NativeSession:
         elif method == 'thread/goal/cleared':
             self.goal_status = 'cleared'
             emit('goal.status', status='cleared', objective='')
+        elif method == 'turn/plan/updated':
+            self.plan_updates += 1
+            call_id = f'codex-plan-{self.plan_updates}'
+            raw_input = {'explanation': params.get('explanation'), 'plan': params.get('plan', [])}
+            emit('item.started', item={'type': 'mcp_tool_call', 'id': call_id, 'tool': 'update_plan',
+                                       'arguments': raw_input, 'status': 'in_progress'})
+            emit('item.completed', item={'type': 'mcp_tool_call', 'id': call_id, 'tool': 'update_plan',
+                                         'arguments': raw_input, 'result': raw_input, 'status': 'completed'})
         elif method == 'turn/started':
             turn = params['turn']['id']
             self.turns.add(turn)
@@ -236,7 +256,25 @@ class NativeSession:
                 self.rpc('turn/steer', {'threadId': self.thread_id, 'expectedTurnId': next(iter(self.turns)),
                                       'input': [{'type': 'text', 'text': hint}]})
         else:
-            self.rpc('turn/start', {'threadId': self.thread_id, 'input': [{'type': 'text', 'text': self.config['prompt']}]})
+            plan_prompt = strip_plan_prefix(self.config['prompt'])
+            planning = plan_prompt is not None
+            turn_text = plan_prompt if planning else self.config['prompt']
+            turn_params = {
+                'threadId': self.thread_id,
+                'input': [{'type': 'text', 'text': turn_text}],
+                'collaborationMode': {
+                    'mode': 'plan' if planning else 'default',
+                    'settings': {
+                        'model': self.config['model'],
+                        'reasoning_effort': None,
+                        'developer_instructions': None,
+                    },
+                },
+            }
+            try:
+                self.rpc('turn/start', turn_params)
+            except RuntimeError:
+                self.rpc('turn/start', {'threadId': self.thread_id, 'input': [{'type': 'text', 'text': turn_text}]})
         terminal = {'complete', 'paused', 'blocked', 'budgetLimited', 'usageLimited', 'cleared'}
         while True:
             try:

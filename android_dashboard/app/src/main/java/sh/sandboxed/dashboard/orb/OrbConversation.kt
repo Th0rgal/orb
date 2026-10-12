@@ -1,7 +1,9 @@
 package sh.sandboxed.dashboard.orb
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -35,6 +37,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
@@ -52,6 +55,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.ListAlt
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Psychology
@@ -82,6 +86,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -120,8 +125,8 @@ enum class OrbComposeMode(
         val text = raw.trim()
         return when (this) {
             Message -> text
-            Plan -> "[MODE: PLAN]\nFirst inspect the relevant files and propose a clear, concise step-by-step plan. Wait for approval before making code changes.\n\n$text"
-            Goal -> "[MODE: GOAL]\nWork autonomously end-to-end until the goal is verified complete. Break down tasks, implement, run checks, and self-correct without stopping early.\n\n$text"
+            Plan -> if (text.startsWith("/plan", ignoreCase = true)) text else "/plan $text"
+            Goal -> if (text.startsWith("/goal", ignoreCase = true)) text else "/goal $text"
         }
     }
 }
@@ -806,6 +811,100 @@ fun OrbConversationPage(
             ?.takeIf { it.id != dismissedQuestionId }
     }
 
+    var dismissedPlanReviewKeys by remember(missionId) { mutableStateOf<Set<String>>(emptySet()) }
+    var isEditingPlanFeedback by remember(missionId) { mutableStateOf(false) }
+    var planFeedbackDraft by remember(missionId) { mutableStateOf("") }
+
+    val completedPlanTurnKey = remember(allTurns, isLive, activeQuestion, dismissedPlanReviewKeys) {
+        if (isLive || activeQuestion != null) return@remember null
+        val lastUser = allTurns.filterIsInstance<OrbTurn.User>().lastOrNull() ?: return@remember null
+        val trimmed = lastUser.text.trim()
+        val isPlanTurn = trimmed.equals("/plan", ignoreCase = true) ||
+            trimmed.lowercase().startsWith("/plan ") ||
+            trimmed.lowercase().startsWith("/plan\n") ||
+            trimmed.startsWith("[MODE: PLAN]")
+        if (!isPlanTurn) return@remember null
+        val lastUserIdx = allTurns.indexOfLast { it.id == lastUser.id }
+        val hasAssistantReply = lastUserIdx >= 0 && allTurns.drop(lastUserIdx + 1).any {
+            it is OrbTurn.Assistant && it.text.trim().isNotEmpty()
+        }
+        if (!hasAssistantReply) return@remember null
+        val key = "plan-review-${missionId ?: "new"}-${lastUser.id}"
+        if (dismissedPlanReviewKeys.contains(key)) null else key
+    }
+
+    var dictationPhase by remember(missionId) { mutableStateOf(OrbAndroidDictationPhase.Idle) }
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val spoken = matches?.firstOrNull()?.trim().orEmpty()
+            if (spoken.isNotEmpty()) {
+                inputText = if (inputText.trim().isEmpty()) spoken else "${inputText.trimEnd()} $spoken"
+                dictationPhase = OrbAndroidDictationPhase.Idle
+            } else {
+                dictationPhase = OrbAndroidDictationPhase.Failed
+            }
+        } else {
+            dictationPhase = OrbAndroidDictationPhase.Idle
+        }
+    }
+
+    fun launchSpeech() {
+        dictationPhase = OrbAndroidDictationPhase.Listening
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Microphone")
+        }
+        runCatching {
+            speechLauncher.launch(intent)
+        }.onFailure {
+            dictationPhase = OrbAndroidDictationPhase.Failed
+        }
+    }
+
+    // Project context files for `@` mentions
+    var projectFiles by remember(project.id, selectedWorkspaceId) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(project.id, selectedWorkspaceId) {
+        val slug = project.str("slug", "id") ?: project.id
+        val loaded = mutableListOf<String>()
+        runCatching {
+            val rows = core.fetchRows("/api/projects/${core.encodeComponent(slug)}/documents", "entries")
+            for (r in rows) {
+                val p = r.str("path", "name") ?: continue
+                if (r.str("kind", "type") != "dir") loaded.add(p)
+            }
+        }
+        if (selectedWorkspaceId.isNotEmpty()) {
+            runCatching {
+                val wsRows = core.fetchRows(
+                    "/api/control/workspaces/${core.encodeComponent(selectedWorkspaceId)}/files",
+                    "entries"
+                )
+                for (r in wsRows) {
+                    val p = r.str("path", "name") ?: continue
+                    if (r.str("kind", "type") != "dir") loaded.add(p)
+                }
+            }
+        }
+        projectFiles = loaded.distinct()
+    }
+
+    val activeAtMentionQuery = remember(inputText) {
+        val atIdx = inputText.lastIndexOf('@')
+        if (atIdx < 0) return@remember null
+        if (atIdx > 0 && !inputText[atIdx - 1].isWhitespace()) return@remember null
+        val tail = inputText.substring(atIdx + 1)
+        if (tail.contains(' ') || tail.contains('\n')) null else tail.lowercase()
+    }
+
+    val matchingContextFiles = remember(activeAtMentionQuery, projectFiles) {
+        val q = activeAtMentionQuery ?: return@remember emptyList()
+        val base = if (projectFiles.isNotEmpty()) projectFiles else listOf("AGENTS.md", "README.md", ".paloma/project.md")
+        base.filter { q.isEmpty() || it.lowercase().contains(q) }.take(6)
+    }
+
     val prUrl = remember(liveRow, events) {
         liveRow?.str("pr_url", "pull_request_url")
     }
@@ -815,25 +914,39 @@ fun OrbConversationPage(
     val workStepCount = remember(turns) {
         turns.filterIsInstance<OrbTurn.WorkFold>().sumOf { it.steps.size }
     }
-    LaunchedEffect(turns.size, turns.lastOrNull()?.id, workStepCount, streamingText.length) {
+
+    suspend fun scrollToAbsoluteBottom() {
+        val layout = listState.layoutInfo
+        val totalItems = layout.totalItemsCount
+        val targetIdx = maxOf(0, (if (totalItems > 0) totalItems else turns.size) - 1)
+        listState.scrollToItem(targetIdx, scrollOffset = 0)
+        val postLayout = listState.layoutInfo
+        val lastInfo = postLayout.visibleItemsInfo.lastOrNull()
+        if (lastInfo != null) {
+            val overflow = (lastInfo.offset + lastInfo.size) - postLayout.viewportEndOffset
+            if (overflow > 0) {
+                listState.scrollBy(overflow.toFloat())
+            }
+        }
+    }
+
+    LaunchedEffect(turns.size, turns.lastOrNull()?.id, workStepCount, streamingText.length, completedPlanTurnKey) {
         if (turns.isNotEmpty()) {
             val layout = listState.layoutInfo
             val totalItems = layout.totalItemsCount
             val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index ?: 0
             val nearBottom = !hasAnchoredInitial || totalItems == 0 || lastVisible >= totalItems - 3
             if (nearBottom) {
-                val targetIdx = maxOf(0, (if (totalItems > 0) totalItems else turns.size) - 1)
-                listState.scrollToItem(targetIdx, scrollOffset = 0)
-                // If the last item is taller than the viewport, scroll so its bottom edge aligns with the viewport bottom
-                val postLayout = listState.layoutInfo
-                val lastInfo = postLayout.visibleItemsInfo.lastOrNull()
-                if (lastInfo != null) {
-                    val overflow = (lastInfo.offset + lastInfo.size) - postLayout.viewportEndOffset
-                    if (overflow > 0) {
-                        listState.scrollBy(overflow.toFloat())
-                    }
+                scrollToAbsoluteBottom()
+                if (!hasAnchoredInitial) {
+                    hasAnchoredInitial = true
+                    withFrameNanos { }
+                    scrollToAbsoluteBottom()
+                    delay(90)
+                    scrollToAbsoluteBottom()
+                    delay(220)
+                    scrollToAbsoluteBottom()
                 }
-                hasAnchoredInitial = true
             }
         }
     }
@@ -1091,6 +1204,162 @@ fun OrbConversationPage(
                         onDismiss = { dismissedQuestionId = activeQuestion.id }
                     )
                 }
+            } else if (completedPlanTurnKey != null) {
+                item(key = completedPlanTurnKey) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(OrbStyle.panelRadius))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ListAlt,
+                                contentDescription = null,
+                                tint = OrbStyle.inboxBlue,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "Review the plan",
+                                color = OrbStyle.textMuted,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .orbPressClickable {
+                                        dismissedPlanReviewKeys = dismissedPlanReviewKeys + completedPlanTurnKey
+                                        isEditingPlanFeedback = false
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Dismiss",
+                                    tint = OrbStyle.textMuted,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = "Ready to implement this plan, or would you like to request adjustments first?",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                                    .orbPressClickable(enabled = !isSending) {
+                                        dismissedPlanReviewKeys = dismissedPlanReviewKeys + completedPlanTurnKey
+                                        isEditingPlanFeedback = false
+                                        composeMode = OrbComposeMode.Message
+                                        sendTurn("Approved — go ahead and implement the plan.")
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = "Implement plan",
+                                    color = Color.Black,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.card)
+                                    .border(1.dp, OrbStyle.border, CircleShape)
+                                    .orbPressClickable(enabled = !isSending) {
+                                        isEditingPlanFeedback = !isEditingPlanFeedback
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "Request changes",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        if (isEditingPlanFeedback) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(OrbStyle.card)
+                                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(10.dp))
+                                        .padding(horizontal = 11.dp, vertical = 8.dp)
+                                ) {
+                                    if (planFeedbackDraft.isEmpty()) {
+                                        Text(
+                                            text = "Describe changes to the plan…",
+                                            color = OrbStyle.textMuted,
+                                            fontSize = 13.sp
+                                        )
+                                    }
+                                    BasicTextField(
+                                        value = planFeedbackDraft,
+                                        onValueChange = { planFeedbackDraft = it },
+                                        textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                                        cursorBrush = SolidColor(Color.White),
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                val canSendFeedback = planFeedbackDraft.trim().isNotEmpty() && !isSending
+                                Box(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(if (canSendFeedback) Color.White else OrbStyle.card)
+                                        .orbPressClickable(enabled = canSendFeedback) {
+                                            val feedback = planFeedbackDraft.trim()
+                                            planFeedbackDraft = ""
+                                            isEditingPlanFeedback = false
+                                            dismissedPlanReviewKeys = dismissedPlanReviewKeys + completedPlanTurnKey
+                                            sendTurn("/plan Revise the plan: $feedback")
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                ) {
+                                    Text(
+                                        text = "Send",
+                                        color = if (canSendFeedback) Color.Black else OrbStyle.textMuted,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1101,6 +1370,62 @@ fun OrbConversationPage(
                 .padding(horizontal = 14.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // @ context file mention popup
+            if (matchingContextFiles.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(OrbStyle.panelRadius))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "CONTEXT FILES",
+                        color = OrbStyle.textMuted,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.7.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                    matchingContextFiles.forEach { filePath ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .orbPressClickable {
+                                    val atIdx = inputText.lastIndexOf('@')
+                                    if (atIdx >= 0) {
+                                        inputText = inputText.substring(0, atIdx) + "@$filePath "
+                                    } else {
+                                        inputText = "${inputText.trimEnd()} @$filePath "
+                                    }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Description,
+                                contentDescription = null,
+                                tint = OrbStyle.icon,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = filePath,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+
             // Slash mode menu popup
             if (showModePicker || inputText.startsWith("/")) {
                 Column(
@@ -1251,207 +1576,262 @@ fun OrbConversationPage(
                 }
             }
 
-            // Shared composer surface; touch targets are sized separately from its border.
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(OrbStyle.panelRadius))
-                    .background(OrbStyle.surface)
-                    .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (pendingAttachments.isNotEmpty()) {
-                    OrbAttachmentStrip(
-                        items = pendingAttachments,
-                        onRemove = { id -> pendingAttachments.removeAll { it.id == id } }
-                    )
-                }
-
-                Box(
+            if (dictationPhase != OrbAndroidDictationPhase.Idle) {
+                OrbAndroidDictationCapsule(
+                    phase = dictationPhase,
+                    elapsedSeconds = 0,
+                    onCancel = { dictationPhase = OrbAndroidDictationPhase.Idle },
+                    onFinish = { dictationPhase = OrbAndroidDictationPhase.Idle },
+                    onRetry = { launchSpeech() }
+                )
+            } else {
+                // Shared composer surface; touch targets are sized separately from its border.
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 24.dp, max = 140.dp)
-                        .padding(horizontal = 4.dp)
+                        .clip(RoundedCornerShape(OrbStyle.panelRadius))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (inputText.isEmpty()) {
-                        Text(
-                            text = when (composeMode) {
-                                OrbComposeMode.Message -> "Message agent…"
-                                OrbComposeMode.Plan -> "Ask agent to draft a plan…"
-                                OrbComposeMode.Goal -> "Describe autonomous goal…"
-                            },
-                            color = OrbStyle.textMuted,
-                            fontSize = 15.sp
+                    if (pendingAttachments.isNotEmpty()) {
+                        OrbAttachmentStrip(
+                            items = pendingAttachments,
+                            onRemove = { id -> pendingAttachments.removeAll { it.id == id } }
                         )
                     }
-                    BasicTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
-                        textStyle = TextStyle(
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            lineHeight = 20.sp
-                        ),
-                        cursorBrush = SolidColor(Color.White),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // + Attachment button
-                    Box {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 24.dp, max = 140.dp)
+                            .padding(horizontal = 4.dp)
+                    ) {
+                        if (inputText.isEmpty()) {
+                            Text(
+                                text = when (composeMode) {
+                                    OrbComposeMode.Message -> "Message agent…"
+                                    OrbComposeMode.Plan -> "Ask agent to draft a plan…"
+                                    OrbComposeMode.Goal -> "Describe autonomous goal…"
+                                },
+                                color = OrbStyle.textMuted,
+                                fontSize = 15.sp
+                            )
+                        }
+                        BasicTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            textStyle = TextStyle(
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                lineHeight = 20.sp
+                            ),
+                            cursorBrush = SolidColor(Color.White),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        // + Attachment button
+                        Box {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .orbPressClickable { showAttachMenu = true }
+                                    .padding(7.dp)
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.card)
+                                    .border(1.dp, OrbStyle.border, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "Attach",
+                                    tint = OrbStyle.textSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showAttachMenu,
+                                onDismissRequest = { showAttachMenu = false },
+                                containerColor = OrbStyle.elevated
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Photo Library", color = Color.White, fontSize = 14.sp) },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color.White)
+                                    },
+                                    onClick = {
+                                        showAttachMenu = false
+                                        photoPickerLauncher.launch("image/*")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Attach File", color = Color.White, fontSize = 14.sp) },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.AttachFile, contentDescription = null, tint = Color.White)
+                                    },
+                                    onClick = {
+                                        showAttachMenu = false
+                                        filePickerLauncher.launch("*/*")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Tag Context (@)", color = Color.White, fontSize = 14.sp) },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.AlternateEmail, contentDescription = null, tint = Color.White)
+                                    },
+                                    onClick = {
+                                        showAttachMenu = false
+                                        inputText = if (inputText.isEmpty() || inputText.endsWith(" ")) {
+                                            "$inputText@"
+                                        } else {
+                                            "$inputText @"
+                                        }
+                                    }
+                                )
+                            }
+                        }
+
+                        // Mode pill if Plan or Goal
+                        composeMode.badge?.let { badge ->
+                            Row(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.card)
+                                    .border(1.dp, OrbStyle.borderStrong, CircleShape)
+                                    .orbPressClickable { showModePicker = !showModePicker }
+                                    .padding(horizontal = 9.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = badge,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Reset mode",
+                                    tint = OrbStyle.textMuted,
+                                    modifier = Modifier
+                                        .size(11.dp)
+                                        .orbPressClickable { composeMode = OrbComposeMode.Message }
+                                )
+                            }
+                        }
+
+                        // Compact Agent / Harness + Machine selector pill (matching iOS)
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                            val selectedWorkspaceName = remember(selectedWorkspaceId, workspaces) {
+                                workspaces.firstOrNull { (it.str("id") ?: it.id) == selectedWorkspaceId }
+                                    ?.str("name", "title", "slug")
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                    .orbPressClickable { showAgentPicker = true }
+                                    .heightIn(min = 44.dp)
+                                    .padding(horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                OrbSfIcons.CpuIcon(
+                                    color = OrbStyle.textSecondary,
+                                    size = 13.dp
+                                )
+                                Text(
+                                    text = buildString {
+                                        append(selectedBackend.ifEmpty { "Agent" })
+                                        if (selectedModel.isNotEmpty()) {
+                                            append(" · ")
+                                            append(selectedModel.substringAfterLast('/'))
+                                        }
+                                        if (!selectedWorkspaceName.isNullOrEmpty()) {
+                                            append(" · ")
+                                            append(selectedWorkspaceName)
+                                        }
+                                    },
+                                    color = OrbStyle.textSecondary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.ExpandMore,
+                                    contentDescription = null,
+                                    tint = OrbStyle.textMuted,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                        }
+
+                        // Microphone dictation button
                         Box(
                             modifier = Modifier
-                                .size(48.dp)
-                                .orbPressClickable { showAttachMenu = true }
-                                .padding(9.dp)
+                                .size(44.dp)
+                                .orbPressClickable { launchSpeech() }
+                                .padding(7.dp)
                                 .clip(CircleShape)
                                 .background(OrbStyle.card)
                                 .border(1.dp, OrbStyle.border, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = "Attach",
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Microphone",
                                 tint = OrbStyle.textSecondary,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
-                        DropdownMenu(
-                            expanded = showAttachMenu,
-                            onDismissRequest = { showAttachMenu = false },
-                            containerColor = OrbStyle.elevated
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Photo Library", color = Color.White, fontSize = 14.sp) },
-                                leadingIcon = {
-                                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color.White)
-                                },
-                                onClick = {
-                                    showAttachMenu = false
-                                    photoPickerLauncher.launch("image/*")
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Attach File", color = Color.White, fontSize = 14.sp) },
-                                leadingIcon = {
-                                    Icon(Icons.Default.AttachFile, contentDescription = null, tint = Color.White)
-                                },
-                                onClick = {
-                                    showAttachMenu = false
-                                    filePickerLauncher.launch("*/*")
-                                }
-                            )
-                        }
-                    }
 
-                    // Mode pill if Plan or Goal
-                    composeMode.badge?.let { badge ->
-                        Row(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(OrbStyle.card)
-                                .border(1.dp, OrbStyle.borderStrong, CircleShape)
-                                .orbPressClickable { showModePicker = !showModePicker }
-                                .padding(horizontal = 9.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = badge,
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Reset mode",
-                                tint = OrbStyle.textMuted,
+                        if (isLive && missionId != null) {
+                            Box(
                                 modifier = Modifier
-                                    .size(11.dp)
-                                    .orbPressClickable { composeMode = OrbComposeMode.Message }
-                            )
+                                    .size(44.dp)
+                                    .orbPressClickable(enabled = !isStopping) { stopMission() }
+                                    .padding(7.dp)
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.card)
+                                    .border(1.dp, OrbStyle.borderStrong, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Stop,
+                                    contentDescription = "Stop",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                         }
-                    }
 
-                    // Agent / Harness picker pill (weighted so Stop/Send never get pushed off-screen)
-                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(OrbStyle.controlRadius))
-                                .orbPressClickable { showAgentPicker = true }
-                                .heightIn(min = 48.dp)
-                                .padding(horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            Text(
-                                text = buildString {
-                                    append(selectedBackend)
-                                    if (selectedModel.isNotEmpty()) {
-                                        append(" · ")
-                                        append(selectedModel.substringAfterLast('/'))
-                                    }
-                                },
-                                color = OrbStyle.textSecondary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            Icon(
-                                imageVector = Icons.Default.ExpandMore,
-                                contentDescription = null,
-                                tint = OrbStyle.textMuted,
-                                modifier = Modifier.size(13.dp)
-                            )
-                        }
-                    }
-
-                    if (isLive && missionId != null) {
+                        val canSend = inputText.trim().isNotEmpty() || pendingAttachments.isNotEmpty()
                         Box(
                             modifier = Modifier
-                                .size(48.dp)
-                                .orbPressClickable(enabled = !isStopping) { stopMission() }
-                                .padding(9.dp)
+                                .size(44.dp)
+                                .orbPressClickable(enabled = canSend) { sendTurn() }
+                                .padding(7.dp)
                                 .clip(CircleShape)
-                                .background(OrbStyle.card)
-                                .border(1.dp, OrbStyle.borderStrong, CircleShape),
+                                .background(if (canSend) Color.White else OrbStyle.card),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Stop,
-                                contentDescription = "Stop",
-                                tint = Color.White,
-                                modifier = Modifier.size(14.dp)
+                                imageVector = Icons.Default.ArrowUpward,
+                                contentDescription = "Send",
+                                tint = if (canSend) Color.Black else OrbStyle.textMuted,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
-                    }
-
-                    val canSend = inputText.trim().isNotEmpty() || pendingAttachments.isNotEmpty()
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .orbPressClickable(enabled = canSend) { sendTurn() }
-                            .padding(9.dp)
-                            .clip(CircleShape)
-                            .background(if (canSend) Color.White else OrbStyle.card),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowUpward,
-                            contentDescription = "Send",
-                            tint = if (canSend) Color.Black else OrbStyle.textMuted,
-                            modifier = Modifier.size(16.dp)
-                        )
                     }
                 }
             }
@@ -1500,17 +1880,21 @@ private fun OrbUserBubble(
     onPreviewFile: (String) -> Unit
 ) {
     val parsed = remember(turn.text) {
+        val trimmed = turn.text.trim()
         val strippedMode = when {
-            turn.text.startsWith("[MODE: GOAL]") -> turn.text.removePrefix("[MODE: GOAL]").trim()
-            turn.text.startsWith("[MODE: PLAN]") -> turn.text.removePrefix("[MODE: PLAN]").trim()
+            trimmed.startsWith("[MODE: GOAL]") -> trimmed.removePrefix("[MODE: GOAL]").trim()
+            trimmed.startsWith("[MODE: PLAN]") -> trimmed.removePrefix("[MODE: PLAN]").trim()
+            trimmed.lowercase().startsWith("/goal ") -> trimmed.drop(6).trim()
+            trimmed.lowercase().startsWith("/plan ") -> trimmed.drop(6).trim()
             else -> turn.text
         }
         OrbUserPromptParser.parse(strippedMode)
     }
     val modeBadge = remember(turn.text) {
+        val trimmed = turn.text.trim()
         when {
-            turn.text.startsWith("[MODE: GOAL]") -> "Goal"
-            turn.text.startsWith("[MODE: PLAN]") -> "Plan"
+            trimmed.startsWith("[MODE: GOAL]") || trimmed.lowercase().startsWith("/goal ") || trimmed.equals("/goal", ignoreCase = true) -> "Goal"
+            trimmed.startsWith("[MODE: PLAN]") || trimmed.lowercase().startsWith("/plan ") || trimmed.equals("/plan", ignoreCase = true) -> "Plan"
             else -> null
         }
     }

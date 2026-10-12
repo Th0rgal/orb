@@ -7,6 +7,61 @@ struct OrbProviderLogin: Identifiable {
     let proxy: Bool
 }
 
+struct OrbProviderLogo: View {
+    let type: String
+    var name: String = ""
+    var size: CGFloat = 18
+
+    static func assetName(type: String, name: String = "") -> String? {
+        let key = type.lowercased()
+        let combined = "\(key) \(name.lowercased())"
+        if key.contains("hermes") { return "provider-hermes" }
+        if combined.contains("spark") || combined.contains("nvidia") || combined.contains("local") { return "provider-nvidia" }
+        if key.contains("anthropic") || key.contains("claude") { return "provider-anthropic" }
+        if key.contains("openai") || key.contains("codex") || key.contains("chatgpt") { return "provider-openai" }
+        if key.contains("kimi") || key.contains("moonshot") { return "provider-kimi" }
+        if key.contains("grok") { return "provider-grok" }
+        if key.contains("cursor") { return "provider-cursor" }
+        if key.contains("xai") { return "provider-xai" }
+        if key.contains("meta") || key.contains("muse") || key.contains("llama") { return "provider-meta" }
+        if key.contains("minimax") { return "provider-minimax" }
+        if key.contains("mistral") || key.contains("vibe") { return "provider-mistral" }
+        if key.contains("google") || key.contains("antigravity") || key.contains("gemini") { return "provider-google" }
+        if key.contains("zai") || key.contains("z.ai") || key.contains("z-ai") || key.contains("z_ai") || key.contains("zhipu") || key.contains("glm") { return "provider-zai" }
+        return nil
+    }
+
+    var body: some View {
+        let asset = Self.assetName(type: type, name: name)
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(OrbStyle.border, lineWidth: 1))
+            if let asset {
+                if asset == "provider-hermes" {
+                    Image(asset)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: size, height: size)
+                } else {
+                    Image(asset)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(.primary)
+                        .frame(width: size, height: size)
+                }
+            } else {
+                Image(systemName: "cpu")
+                    .font(.system(size: size * 0.8, weight: .medium))
+                    .foregroundStyle(OrbStyle.textSecondary)
+            }
+        }
+        .frame(width: size + 12, height: size + 12)
+        .accessibilityHidden(true)
+    }
+}
+
 struct OrbProvidersSettings: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var client = OrbSettingsClient()
@@ -41,9 +96,12 @@ struct OrbProvidersSettings: View {
                         }
                         Button(provider["enabled"] == .bool(false) ? "Enable" : "Disable") { Task { await toggle(provider) } }.disabled(!ready || busy)
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(provider["name"].text)
-                            Text(status(provider)).font(.caption).foregroundStyle(.secondary)
+                        HStack(spacing: 12) {
+                            OrbProviderLogo(type: provider["provider_type"].text, name: provider["name"].text)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(provider["name"].text)
+                                Text(status(provider)).font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -53,7 +111,17 @@ struct OrbProvidersSettings: View {
                 Button("Add API key", systemImage: "plus") { editKey = nil; keySheet = true }.disabled(!ready)
                 Menu("Connect subscription") {
                     ForEach(Self.subscriptionTypes, id: \.self) { type in
-                        Button(type.capitalized) { login = Self.subscriptionLogin(type) }
+                        Button {
+                            login = Self.subscriptionLogin(type)
+                        } label: {
+                            Label {
+                                Text(type.capitalized)
+                            } icon: {
+                                if let asset = OrbProviderLogo.assetName(type: type) {
+                                    Image(asset)
+                                }
+                            }
+                        }
                     }
                 }.disabled(!ready)
             }
@@ -336,9 +404,12 @@ struct OrbCloudAccountsSettings: View {
                     }
                     if let raw = dashboards[account["provider"].text], let url = URL(string: raw) { Link("Open provider dashboard", destination: url) }
                 } label: {
-                    VStack(alignment: .leading) {
-                        Text(account["label"].text)
-                        Text(account["available"].flag ? "Available" : "Unavailable").font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        OrbProviderLogo(type: account["provider"].text, name: account["label"].text)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(account["label"].text)
+                            Text(account["available"].flag ? "Available" : "Unavailable").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

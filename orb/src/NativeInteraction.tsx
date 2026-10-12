@@ -12,7 +12,7 @@ const invoke=(command:string,args:Record<string,unknown>) => {
  if(!host.__TAURI_INTERNALS__) return Promise.reject(new Error('Open this session in Orb.'));
  return host.__TAURI_INTERNALS__.invoke(command,args);
 };
-export function NativeInteraction(p:{mission:string;active:boolean;remote?:boolean;items?:StreamItem[]}) {
+export function NativeInteraction(p:{mission:string;active:boolean;remote?:boolean;items?:StreamItem[];onSend?:(text:string)=>Promise<unknown>|unknown}) {
  // Native polling and remote snapshots deserialize fresh objects. Keep an
  // unchanged request stable so Solid's question list retains its DOM/focus.
  const [request,setRequest]=createSignal<Request|null>(null, {
@@ -56,6 +56,36 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    setRequest(next && !answered.has(next.id) ? next : null);
   },failure=>setSubscriptionError(`Couldn’t receive interaction updates: ${String(failure)}`)));
  });
+ const completedPlanTurn=()=>{
+  if(p.active||request()||!p.onSend||!p.items?.length)return null;
+  let lastUserIdx=-1;
+  for(let i=p.items.length-1;i>=0;i--){
+   const item=p.items[i];
+   if(item.kind==='user'&&!item.queued){lastUserIdx=i;break;}
+  }
+  if(lastUserIdx<0)return null;
+  const userItem=p.items[lastUserIdx];
+  if(userItem.kind!=='user'||!/^\s*\/plan(?:\s|$)/.test(userItem.text)||answered.has(userItem.key))return null;
+  const after=p.items.slice(lastUserIdx+1);
+  if(after.some(i=>i.kind==='error'))return null;
+  const replyText=[...after].reverse().find((i):i is Extract<StreamItem,{kind:'text'}>=>i.kind==='text'&&!i.live&&!!i.text.trim());
+  if(!replyText)return null;
+  return {id:userItem.key,plan:replyText.text,boundary:p.items.at(-1)?.key};
+ };
+ const replyCompletedPlan=async(action:'accept'|'revise')=>{
+  const completed=completedPlanTurn();
+  if(!completed||sending()||!p.onSend)return;
+  setSending(true);setError('');
+  try{
+   const text=action==='accept'?'Implement the approved plan.':`/plan ${feedback().trim()}`;
+   if(action==='accept'){
+    await rememberApprovedPlan(p.mission,{requestId:completed.id,text:completed.plan,approvedAt:new Date().toISOString(),boundary:completed.boundary}).catch(()=>{});
+   }
+   await p.onSend(text);
+   answered.add(completed.id);
+   setFeedback('');
+  }catch(e){setError(String(e));}finally{setSending(false);}
+ };
  const reply=async(action?:string)=>{
   const current=request();if(!current||sending())return;
   const selectedMission=p.mission;
@@ -104,5 +134,16 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    <button class="s-btn native-primary" disabled={sending()} onClick={()=>void reply('accept')}>{r().method==='plan'?'Implement plan':'Allow once'}</button>
   </Show><Show when={sending()}><span role="status">Sending…</span></Show></div>
   <Show when={error()}><div role="alert">{error()}</div></Show>
- </section>}</Show></>;
+ </section>}</Show><Show when={completedPlanTurn()}>{()=>
+  <section class="native-question" aria-label="Review the plan">
+   <div class="native-question-heading">Review the plan</div>
+   <details class="native-feedback"><summary>Request changes</summary><textarea aria-label="Requested changes" placeholder="Changes to the plan…" value={feedback()} onInput={e=>setFeedback(e.currentTarget.value)}/></details>
+   <div class="native-question-actions">
+    <button class="s-btn native-secondary" disabled={sending()||!feedback().trim()} onClick={()=>void replyCompletedPlan('revise')}>Request changes</button>
+    <button class="s-btn native-primary" disabled={sending()} onClick={()=>void replyCompletedPlan('accept')}>Implement plan</button>
+    <Show when={sending()}><span role="status">Sending…</span></Show>
+   </div>
+   <Show when={error()}><div role="alert">{error()}</div></Show>
+  </section>
+ }</Show></>;
 }

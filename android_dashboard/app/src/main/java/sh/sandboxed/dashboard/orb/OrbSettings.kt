@@ -565,6 +565,28 @@ fun OrbProvidersSettingsPage(
     var errorBanner by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
+    var showConnectSubscriptionMenu by remember { mutableStateOf(false) }
+    var oauthProviderType by remember { mutableStateOf<String?>(null) }
+    var oauthReauthProvider by remember { mutableStateOf<OrbRow?>(null) }
+    var oauthAuthUrl by remember { mutableStateOf<String?>(null) }
+    var oauthUserCode by remember { mutableStateOf<String?>(null) }
+    var oauthVerificationUri by remember { mutableStateOf<String?>(null) }
+    var oauthCallbackInput by remember { mutableStateOf("") }
+    var oauthStatusMessage by remember { mutableStateOf<String?>(null) }
+    var oauthLoading by remember { mutableStateOf(false) }
+
+    val oauthPresets = remember {
+        listOf(
+            "anthropic" to "Anthropic (Claude Max / Pro)",
+            "openai" to "OpenAI (ChatGPT Plus / Pro)",
+            "google" to "Google (Gemini / Antigravity)",
+            "xai" to "xAI (Grok)",
+            "kimi" to "Kimi",
+            "minimax" to "MiniMax",
+            "zai" to "Z.AI (GLM)"
+        )
+    }
+
     suspend fun loadProvidersAndUsage() {
         try {
             val loaded = core.fetchRows("/api/ai/providers", "providers")
@@ -609,6 +631,89 @@ fun OrbProvidersSettingsPage(
             }
             cloudUsage = mapped
         } catch (_: Throwable) {
+        }
+    }
+
+    fun startOauthFlow(providerType: String, existingProvider: OrbRow? = null) {
+        oauthProviderType = providerType
+        oauthReauthProvider = existingProvider
+        oauthAuthUrl = null
+        oauthUserCode = null
+        oauthVerificationUri = null
+        oauthCallbackInput = ""
+        oauthStatusMessage = "Starting authentication…"
+        oauthLoading = true
+        scope.launch {
+            try {
+                val path = if (existingProvider != null) {
+                    "/api/ai/providers/${core.encodeComponent(existingProvider.id)}/oauth/authorize"
+                } else {
+                    "/api/ai/providers/oauth/authorize"
+                }
+                val body = if (existingProvider != null) {
+                    emptyMap<String, Any?>()
+                } else {
+                    mapOf(
+                        "provider_type" to providerType,
+                        "name" to (oauthPresets.firstOrNull { it.first == providerType }?.second ?: providerType)
+                    )
+                }
+                val resp = core.request(path = path, method = "POST", body = body)
+                val dict = OrbJSON.dict(resp)
+                val url = OrbJSON.str(dict, "authorize_url", "auth_url", "url")
+                val userCode = OrbJSON.str(dict, "user_code")
+                val verifyUri = OrbJSON.str(dict, "verification_uri", "verification_uri_complete")
+                oauthAuthUrl = url
+                oauthUserCode = userCode
+                oauthVerificationUri = verifyUri
+                oauthStatusMessage = OrbJSON.str(dict, "message", "instructions")
+                    ?: "Open the sign-in page in your browser, then paste the callback URL or code if prompted."
+                val targetOpenUrl = url ?: verifyUri
+                if (!targetOpenUrl.isNullOrEmpty()) {
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetOpenUrl)))
+                    }
+                }
+            } catch (e: Throwable) {
+                oauthStatusMessage = e.message ?: "Failed to start OAuth flow"
+            } finally {
+                oauthLoading = false
+            }
+        }
+    }
+
+    fun completeOauthCallback() {
+        val pType = oauthProviderType ?: return
+        val existing = oauthReauthProvider
+        val trimmed = oauthCallbackInput.trim()
+        if (trimmed.isEmpty()) return
+        oauthLoading = true
+        scope.launch {
+            try {
+                val path = if (existing != null) {
+                    "/api/ai/providers/${core.encodeComponent(existing.id)}/oauth/callback"
+                } else {
+                    "/api/ai/providers/oauth/callback"
+                }
+                core.request(
+                    path = path,
+                    method = "POST",
+                    body = mapOf(
+                        "provider_type" to pType,
+                        "code" to trimmed,
+                        "callback_url" to trimmed
+                    )
+                )
+                oauthProviderType = null
+                oauthReauthProvider = null
+                statusBanner = "Connected $pType"
+                loadProvidersAndUsage()
+                core.refreshAll()
+            } catch (e: Throwable) {
+                oauthStatusMessage = e.message ?: "Callback failed"
+            } finally {
+                oauthLoading = false
+            }
         }
     }
 
@@ -798,11 +903,13 @@ fun OrbProvidersSettingsPage(
                             providers.forEachIndexed { idx, provider ->
                                 val pid = provider.id
                                 val name = provider.str("name", "label", "id") ?: pid
+                                val providerType = provider.str("provider_type", "type") ?: ""
                                 val detail = usageEntries[pid]
                                 val subtitle = providerStatusSubtitle(provider, detail)
                                 val expanded = expandedIds.contains(pid)
                                 val windows = providerQuotaWindows(detail)
-                                val canEditKey = provider.bool("has_api_key") == true || provider.bool("uses_oauth") != true
+                                val usesOauth = provider.bool("uses_oauth") == true
+                                val canEditKey = provider.bool("has_api_key") == true || !usesOauth
                                 val enabled = provider.bool("enabled") != false
 
                                 Column(
@@ -816,8 +923,14 @@ fun OrbProvidersSettingsPage(
                                 ) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                                     ) {
+                                        OrbProviderLogo(
+                                            type = providerType,
+                                            name = name,
+                                            size = 18.dp
+                                        )
                                         Column(
                                             modifier = Modifier.weight(1f),
                                             verticalArrangement = Arrangement.spacedBy(3.dp)
@@ -909,6 +1022,27 @@ fun OrbProvidersSettingsPage(
                                             }
 
                                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                if (usesOauth) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .clip(CircleShape)
+                                                            .background(OrbStyle.card)
+                                                            .border(1.dp, OrbStyle.border, CircleShape)
+                                                            .orbPressClickable {
+                                                                startOauthFlow(providerType.ifEmpty { "openai" }, provider)
+                                                            }
+                                                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "Reconnect",
+                                                            color = Color.White,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Medium,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                    }
+                                                }
                                                 if (canEditKey) {
                                                     Box(
                                                         modifier = Modifier
@@ -1007,7 +1141,7 @@ fun OrbProvidersSettingsPage(
                                 if (idx < providers.lastIndex) {
                                     HorizontalDivider(
                                         color = OrbStyle.border,
-                                        modifier = Modifier.padding(start = 16.dp)
+                                        modifier = Modifier.padding(start = 58.dp)
                                     )
                                 }
                             }
@@ -1045,6 +1179,7 @@ fun OrbProvidersSettingsPage(
                             cloudAccounts.forEachIndexed { idx, account ->
                                 val cid = account.id
                                 val label = account.str("label", "name", "provider", "id") ?: cid
+                                val cloudProvider = account.str("provider") ?: ""
                                 val available = account.bool("available") == true
                                 val expanded = expandedCloudIds.contains(cid)
                                 val reason = account.str("reason") ?: ""
@@ -1061,8 +1196,14 @@ fun OrbProvidersSettingsPage(
                                 ) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                                     ) {
+                                        OrbProviderLogo(
+                                            type = cloudProvider,
+                                            name = label,
+                                            size = 18.dp
+                                        )
                                         Column(
                                             modifier = Modifier.weight(1f),
                                             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -1138,7 +1279,7 @@ fun OrbProvidersSettingsPage(
                                 }
                                 HorizontalDivider(
                                     color = OrbStyle.border,
-                                    modifier = Modifier.padding(start = 16.dp)
+                                    modifier = Modifier.padding(start = 58.dp)
                                 )
                             }
                         }
@@ -1166,7 +1307,7 @@ fun OrbProvidersSettingsPage(
                     }
                 }
 
-                // Bottom action section ("Add API key", "Connect subscription")
+                // Bottom action section ("Connect subscription", "Add API key")
                 item {
                     Column(
                         modifier = Modifier
@@ -1175,6 +1316,152 @@ fun OrbProvidersSettingsPage(
                             .background(OrbStyle.surface)
                             .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
                     ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .orbPressClickable {
+                                    showConnectSubscriptionMenu = !showConnectSubscriptionMenu
+                                }
+                                .padding(horizontal = 16.dp, vertical = 13.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = OrbStyle.inboxBlue,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "Connect subscription",
+                                color = OrbStyle.inboxBlue,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        if (showConnectSubscriptionMenu) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                oauthPresets.forEach { (pType, pTitle) ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(OrbStyle.card)
+                                            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                                            .orbPressClickable {
+                                                showConnectSubscriptionMenu = false
+                                                startOauthFlow(pType, null)
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        OrbProviderLogo(type = pType, name = pTitle, size = 16.dp)
+                                        Text(
+                                            text = pTitle,
+                                            color = Color.White,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Icon(
+                                            imageVector = Icons.Default.ChevronRight,
+                                            contentDescription = null,
+                                            tint = OrbStyle.textMuted,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (oauthProviderType != null) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Connect ${oauthProviderType?.uppercase()}",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                oauthStatusMessage?.let { msg ->
+                                    Text(text = msg, color = OrbStyle.textSecondary, fontSize = 12.sp)
+                                }
+                                oauthUserCode?.takeIf { it.isNotEmpty() }?.let { code ->
+                                    Text(
+                                        text = "Code: $code",
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                val openUrl = oauthAuthUrl ?: oauthVerificationUri
+                                if (!openUrl.isNullOrEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(OrbStyle.card)
+                                            .border(1.dp, OrbStyle.border, CircleShape)
+                                            .orbPressClickable {
+                                                runCatching {
+                                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(openUrl)))
+                                                }
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Text("Open sign-in page in browser", color = OrbStyle.inboxBlue, fontSize = 12.sp)
+                                    }
+                                }
+                                OrbMiniField("Paste callback URL or authorization code", oauthCallbackInput) {
+                                    oauthCallbackInput = it
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(Color.White)
+                                            .orbPressClickable(enabled = !oauthLoading && oauthCallbackInput.trim().isNotEmpty()) {
+                                                completeOauthCallback()
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 7.dp)
+                                    ) {
+                                        Text(
+                                            text = if (oauthLoading) "Connecting…" else "Complete sign-in",
+                                            color = Color.Black,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(OrbStyle.card)
+                                            .border(1.dp, OrbStyle.border, CircleShape)
+                                            .orbPressClickable {
+                                                oauthProviderType = null
+                                                oauthReauthProvider = null
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 7.dp)
+                                    ) {
+                                        Text("Cancel", color = OrbStyle.textSecondary, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()

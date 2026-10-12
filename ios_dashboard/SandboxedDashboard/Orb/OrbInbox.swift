@@ -1460,6 +1460,8 @@ struct OrbInboxView: View {
     @State private var dictation = OrbDictation()
     @Environment(\.scenePhase) private var scenePhase
     @State private var peekedIDs: Set<String> = []
+    @State private var expandedEarlierTurnMissionIDs: Set<String> = []
+    @State private var expandedTurnBubbleIDs: Set<String> = []
     @State private var seenUnreadIDs: Set<String> = []
     @FocusState private var replyFocused: Bool
     @State private var undoItem: (id: String, title: String)?
@@ -1709,6 +1711,15 @@ struct OrbInboxView: View {
                 }
                 .background(OrbStyle.background)
                 .refreshable { await load(force: true) }
+                .onChange(of: replyingMissionID) { _, newID in
+                    guard let newID else { return }
+                    Task { @MainActor in
+                        await Task.yield()
+                        withAnimation(.snappy(duration: 0.22)) {
+                            scrollProxy.scrollTo("inbox.replyBox.\(newID)", anchor: .center)
+                        }
+                    }
+                }
 
                 if let undo = undoItem {
                     undoToast(undo)
@@ -2023,6 +2034,17 @@ struct OrbInboxView: View {
         let isPeeked = peekedIDs.contains(item.id)
         let isBusy = busyIDs.contains(item.id)
         let showBadge = !(item.category == .ready && item.badge == "Completed")
+        let nonDuplicatePeekTurns: [OrbInboxPeekTurn] = {
+            if item.peekTurns.count == 1,
+               item.peekTurns[0].id == "fallback",
+               item.peekTurns[0].text.trimmingCharacters(in: .whitespacesAndNewlines) == item.summary.trimmingCharacters(in: .whitespacesAndNewlines) {
+                return []
+            }
+            return item.peekTurns
+        }()
+        let showAllEarlierTurns = expandedEarlierTurnMissionIDs.contains(item.id)
+        let visiblePeekTurns = showAllEarlierTurns ? nonDuplicatePeekTurns : Array(nonDuplicatePeekTurns.suffix(3))
+        let hiddenPeekTurnCount = max(0, nonDuplicatePeekTurns.count - visiblePeekTurns.count)
 
         return VStack(alignment: .leading, spacing: 8) {
             Button {
@@ -2073,11 +2095,11 @@ struct OrbInboxView: View {
                         }
                     }
 
-                    // Keep the collapsed summary short; the complete response is available in Peek.
+                    // Keep the card summary concise even in Peek mode so it doesn't duplicate the Peek turns below.
                     Text(item.summary)
                         .font(.footnote)
                         .foregroundStyle(OrbStyle.textSecondary)
-                        .lineLimit(isPeeked ? nil : 3)
+                        .lineLimit(nonDuplicatePeekTurns.isEmpty && isPeeked ? nil : 3)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -2126,45 +2148,6 @@ struct OrbInboxView: View {
                             }.font(.caption).foregroundStyle(OrbStyle.textSecondary)
                         }
                     }.padding(12).background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius))
-                }
-                if (isPeeked || isReplying), current, item.interaction == nil, let suggestions = digest.suggestions, !suggestions.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Suggested actions")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(OrbStyle.textMuted)
-                        ForEach(Array(suggestions.enumerated()), id: \.offset) { idx, suggestion in
-                            Button {
-                                OrbHaptics.selection()
-                                replyingMissionID = item.id
-                                replyDraft = suggestion
-                                replyFocused = true
-                            } label: {
-                                HStack(alignment: .top, spacing: 7) {
-                                    Text("\(idx + 1)")
-                                        .font(.system(size: 10.5, weight: .medium))
-                                        .foregroundStyle(OrbStyle.textMuted)
-                                        .frame(minWidth: 16, minHeight: 16)
-                                        .padding(.horizontal, 3)
-                                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                                        .padding(.top, 1)
-                                    Text(suggestion)
-                                        .font(.caption)
-                                        .foregroundStyle(.primary)
-                                        .multilineTextAlignment(.leading)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 7)
-                                .background(OrbStyle.elevated.opacity(0.75), in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous)
-                                        .stroke(OrbStyle.border, lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(isBusy)
-                        }
-                    }
                 }
             }
 
@@ -2351,62 +2334,53 @@ struct OrbInboxView: View {
                 .accessibilityIdentifier("inbox.done.\(item.id)")
             }
 
-            if isPeeked {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(item.peekTurns) { turn in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(alignment: .top, spacing: 8) {
-                                Text(turn.role == "user" ? "YOU" : (turn.role == "error" ? "ERROR" : "AGENT"))
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(
-                                        turn.role == "error"
-                                            ? OrbStyle.error
-                                            : (turn.role == "assistant"
-                                                ? Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255)
-                                                : OrbStyle.textSecondary)
-                                    )
-                                    .lineLimit(1)
-                                    .fixedSize(horizontal: true, vertical: false)
-                                    .frame(width: 42, alignment: .leading)
-                                Text(turn.text)
-                                    .font(.caption)
-                                    .foregroundStyle(OrbStyle.textSecondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+            // Suggested actions and inline Reply composer appear right under the action bar (above peek turns)
+            if let digest = item.aiOverview {
+                let current = digest.updatedAt == item.row.updatedAt && (inboxTimestamp(digest.sourceUpdatedAt ?? "") ?? 0) + 2 >= (inboxTimestamp(item.row.updatedAt) ?? .infinity)
+                if (isPeeked || isReplying), current, item.interaction == nil, let suggestions = digest.suggestions, !suggestions.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Suggested actions")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(OrbStyle.textMuted)
+                        ForEach(Array(suggestions.enumerated()), id: \.offset) { idx, suggestion in
+                            Button {
+                                OrbHaptics.selection()
+                                replyingMissionID = item.id
+                                replyDraft = suggestion
+                                replyFocused = true
+                            } label: {
+                                HStack(alignment: .top, spacing: 7) {
+                                    Text("\(idx + 1)")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                        .foregroundStyle(OrbStyle.textMuted)
+                                        .frame(minWidth: 16, minHeight: 16)
+                                        .padding(.horizontal, 3)
+                                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                        .padding(.top, 1)
+                                    Text(suggestion)
+                                        .font(.caption)
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 7)
+                                .background(OrbStyle.elevated.opacity(0.75), in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous)
+                                        .stroke(OrbStyle.border, lineWidth: 1)
+                                )
                             }
-                            if let receipt = turn.workReceipt, !receipt.isEmpty {
-                                Text(receipt)
-                                    .font(.system(size: 10.5, design: .monospaced))
-                                    .foregroundStyle(OrbStyle.textMuted)
-                                    .padding(.leading, 50)
-                            }
+                            .buttonStyle(.plain)
+                            .disabled(isBusy)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .background(
-                            turn.role == "error" ? OrbStyle.error.opacity(0.08) : Color.black.opacity(0.24),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                    }
-                    HStack {
-                        Spacer()
-                        Button {
-                            OrbHaptics.selection()
-                            markItemAndChildrenRead(item)
-                            onOpenMission(item.row)
-                        } label: {
-                            Text("Open full conversation →")
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(OrbStyle.textSecondary)
-                        }
-                        .buttonStyle(.plain)
                     }
                 }
-                .padding(.top, 2)
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
             if isReplying && dictation.active {
                 OrbDictationCapsule(dictation: dictation)
+                    .id("inbox.replyBox.\(item.id)")
             } else if isReplying {
                 HStack(spacing: 8) {
                     TextField(
@@ -2457,6 +2431,95 @@ struct OrbInboxView: View {
                     .accessibilityIdentifier("inbox.send.\(item.id)")
                     .disabled(isBusy || replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                .id("inbox.replyBox.\(item.id)")
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if isPeeked {
+                VStack(alignment: .leading, spacing: 6) {
+                    if hiddenPeekTurnCount > 0 {
+                        Button {
+                            OrbHaptics.selection()
+                            withAnimation(.snappy(duration: 0.18)) {
+                                _ = expandedEarlierTurnMissionIDs.insert(item.id)
+                            }
+                        } label: {
+                            Text("Show \(hiddenPeekTurnCount) earlier \(hiddenPeekTurnCount == 1 ? "turn" : "turns")")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(OrbStyle.textSecondary)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .frame(maxWidth: .infinity)
+                                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(OrbStyle.border, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    ForEach(visiblePeekTurns) { turn in
+                        let bubbleID = "\(item.id):\(turn.id)"
+                        let isBubbleExpanded = expandedTurnBubbleIDs.contains(bubbleID)
+                        Button {
+                            withAnimation(.snappy(duration: 0.18)) {
+                                if isBubbleExpanded {
+                                    expandedTurnBubbleIDs.remove(bubbleID)
+                                } else {
+                                    expandedTurnBubbleIDs.insert(bubbleID)
+                                }
+                            }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text(turn.role == "user" ? "YOU" : (turn.role == "error" ? "ERROR" : "AGENT"))
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(
+                                            turn.role == "error"
+                                                ? OrbStyle.error
+                                                : (turn.role == "assistant"
+                                                    ? Color(red: 112 / 255, green: 175 / 255, blue: 245 / 255)
+                                                    : OrbStyle.textSecondary)
+                                        )
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                        .frame(width: 42, alignment: .leading)
+                                    Text(turn.text)
+                                        .font(.caption)
+                                        .foregroundStyle(OrbStyle.textSecondary)
+                                        .lineLimit(isBubbleExpanded ? nil : 5)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                if let receipt = turn.workReceipt, !receipt.isEmpty {
+                                    Text(receipt)
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundStyle(OrbStyle.textMuted)
+                                        .padding(.leading, 50)
+                                }
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 7)
+                            .background(
+                                turn.role == "error" ? OrbStyle.error.opacity(0.08) : Color.black.opacity(0.24),
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    HStack {
+                        Spacer()
+                        Button {
+                            OrbHaptics.selection()
+                            markItemAndChildrenRead(item)
+                            onOpenMission(item.row)
+                        } label: {
+                            Text("Open full conversation →")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(OrbStyle.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.top, 2)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }

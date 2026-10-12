@@ -13475,10 +13475,14 @@ pub(crate) fn remote_execution_for_plan(
             prompt,
             resume_session_id,
         } => {
+            let plan_body = strip_remote_plan_prefix(prompt);
             let mut command = String::from(
                 "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; \
                  claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages",
             );
+            if plan_body.is_some() {
+                command.push_str(" --permission-mode plan");
+            }
             if let Some(model) = model {
                 command.push_str(" --model ");
                 command.push_str(&shell_single_quote(model));
@@ -13487,6 +13491,7 @@ pub(crate) fn remote_execution_for_plan(
                 command.push_str(" --resume ");
                 command.push_str(&shell_single_quote(session));
             }
+            let effective_prompt = plan_body.unwrap_or(prompt.as_str());
             let mut env = HashMap::from([
                 ("ANTHROPIC_BASE_URL".to_string(), api_base_url.to_string()),
                 ("ANTHROPIC_AUTH_TOKEN".to_string(), proxy_key.to_string()),
@@ -13494,10 +13499,10 @@ pub(crate) fn remote_execution_for_plan(
                 ("GH_NO_PAGER".to_string(), "1".to_string()),
                 ("GH_PROMPT_DISABLED".to_string(), "1".to_string()),
             ]);
-            match stdin_prompt(prompt) {
+            match stdin_prompt(effective_prompt) {
                 None => {
                     command.push(' ');
-                    command.push_str(&shell_single_quote(&positional_prompt(prompt)));
+                    command.push_str(&shell_single_quote(&positional_prompt(effective_prompt)));
                 }
                 Some(staged) => {
                     command = format!("{}{command} <&3", staged.prelude);
@@ -13516,6 +13521,7 @@ pub(crate) fn remote_execution_for_plan(
             prompt,
             resume_session_id,
         } => {
+            let plan_body = strip_remote_plan_prefix(prompt);
             // Inline config through OPENCODE_CONFIG_CONTENT: nothing is
             // written into the job cwd (the node's per-mission directory,
             // also its HOME), and nothing depends on the service user's home.
@@ -13523,6 +13529,9 @@ pub(crate) fn remote_execution_for_plan(
                 "command -v opencode >/dev/null 2>&1 || { echo 'opencode is not installed on this node' >&2; exit 127; }; \
                  opencode run --format json --thinking",
             );
+            if plan_body.is_some() {
+                command.push_str(" --agent plan");
+            }
             let mut env = HashMap::from([
                 (REMOTE_PROXY_KEY_ENV.to_string(), proxy_key.to_string()),
                 ("NO_COLOR".to_string(), "1".to_string()),
@@ -13540,8 +13549,9 @@ pub(crate) fn remote_execution_for_plan(
                 REMOTE_OPENCODE_CONFIG_ENV.to_string(),
                 remote_opencode_config(model, api_base_url).to_string(),
             );
+            let effective_prompt = plan_body.unwrap_or(prompt.as_str());
             command.push(' ');
-            command.push_str(&shell_single_quote(&positional_prompt(prompt)));
+            command.push_str(&shell_single_quote(&positional_prompt(effective_prompt)));
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,
@@ -13550,6 +13560,19 @@ pub(crate) fn remote_execution_for_plan(
             }
         }
     }
+}
+
+fn strip_remote_plan_prefix(prompt: &str) -> Option<&str> {
+    let rest = prompt.trim_start().strip_prefix("/plan")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let body = rest.trim_start();
+    Some(if body.is_empty() {
+        "Review the conversation and workspace, then propose an implementation plan before making changes."
+    } else {
+        body
+    })
 }
 
 /// Name of the per-mission proxy key a typed remote launch mints. Keyed by

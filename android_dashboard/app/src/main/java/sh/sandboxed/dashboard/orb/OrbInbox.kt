@@ -1,7 +1,12 @@
 package sh.sandboxed.dashboard.orb
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -31,6 +36,7 @@ import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CheckCircleOutline
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -1715,6 +1721,19 @@ fun OrbInboxView(
         }
     }
 
+    LaunchedEffect(replyingItemId) {
+        val targetId = replyingItemId ?: return@LaunchedEffect
+        delay(80)
+        val targetKeyNeeds = "needs-$targetId"
+        val targetKeyDone = "done-$targetId"
+        val idx = listState.layoutInfo.visibleItemsInfo.firstOrNull {
+            it.key == targetKeyNeeds || it.key == targetKeyDone
+        }?.index
+        if (idx != null) {
+            runCatching { listState.animateScrollToItem(idx) }
+        }
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         PullToRefreshBox(
             isRefreshing = isRefreshing,
@@ -2381,6 +2400,60 @@ private fun OrbInboxCard(
     val pColor = OrbProjectAppearance.color(item.project)
     val showBadge = !(item.kind == OrbInboxKind.Finished && item.badge == "Completed")
 
+    var showAllPeekTurns by remember(item.id) { mutableStateOf(false) }
+    var expandedTurnIds by remember(item.id) { mutableStateOf<Set<String>>(emptySet()) }
+    var dictationPhase by remember(item.id) { mutableStateOf(OrbAndroidDictationPhase.Idle) }
+
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val spoken = matches?.firstOrNull()?.trim().orEmpty()
+            if (spoken.isNotEmpty()) {
+                val merged = if (replyDraft.trim().isEmpty()) spoken else "${replyDraft.trimEnd()} $spoken"
+                onReplyDraftChange(merged)
+                dictationPhase = OrbAndroidDictationPhase.Idle
+            } else {
+                dictationPhase = OrbAndroidDictationPhase.Failed
+            }
+        } else {
+            dictationPhase = OrbAndroidDictationPhase.Idle
+        }
+    }
+
+    fun launchSpeech() {
+        dictationPhase = OrbAndroidDictationPhase.Listening
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Microphone")
+        }
+        runCatching {
+            speechLauncher.launch(intent)
+        }.onFailure {
+            dictationPhase = OrbAndroidDictationPhase.Failed
+        }
+    }
+
+    val nonDuplicatePeekTurns = remember(peekTurns, item.summary) {
+        if (peekTurns.size == 1 &&
+            peekTurns[0].role != "user" &&
+            peekTurns[0].text.trim() == item.summary.trim()
+        ) {
+            emptyList()
+        } else {
+            peekTurns
+        }
+    }
+
+    val currentDigest = remember(item.aiOverview, item.updatedAt) {
+        val digest = item.aiOverview ?: return@remember null
+        val ok = digest.updatedAt == item.updatedAt && runCatching {
+            Instant.parse(digest.sourceUpdatedAt).toEpochMilli() + 2000 >= Instant.parse(item.updatedAt).toEpochMilli()
+        }.getOrDefault(false)
+        if (ok) digest else null
+    }
+
     Column(
         modifier = modifier
             .testTag("inbox.row.${item.id}")
@@ -2450,14 +2523,14 @@ private fun OrbInboxCard(
                 }
             }
 
-            // Keep the collapsed summary short; the complete response is available in Peek.
+            // Keep summary capped at 3 lines when peekTurns will render below, avoiding duplicate walls of text.
             if (item.summary.isNotEmpty()) {
                 Text(
                     text = item.summary,
                     color = OrbStyle.textSecondary,
                     fontSize = 13.sp,
                     lineHeight = 18.sp,
-                    maxLines = if (isPeeked) Int.MAX_VALUE else 3,
+                    maxLines = if (isPeeked && nonDuplicatePeekTurns.isEmpty()) Int.MAX_VALUE else 3,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -2496,9 +2569,10 @@ private fun OrbInboxCard(
         }
         item.aiOverview?.let { digest ->
             Text("AI summary · ${digest.model}", color = OrbStyle.textMuted, fontSize = 11.sp)
-            val current = digest.updatedAt == item.updatedAt && runCatching { Instant.parse(digest.sourceUpdatedAt).toEpochMilli() + 2000 >= Instant.parse(item.updatedAt).toEpochMilli() }.getOrDefault(false)
-            if (!current) Text("Summary is out of date", color = OrbStyle.textMuted, fontSize = 11.sp)
-            if (isPeeked && current) {
+            if (currentDigest == null) {
+                Text("Summary is out of date", color = OrbStyle.textMuted, fontSize = 11.sp)
+            }
+            if (isPeeked && currentDigest != null) {
                 Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(OrbStyle.controlRadius)).background(OrbStyle.elevated).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     listOf("Context" to digest.context, "Scope" to digest.contextDetails, "Unresolved" to digest.unresolved, "To decide" to digest.decision).filter { it.second.isNotBlank() }.forEach { (label, value) ->
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2510,39 +2584,6 @@ private fun OrbInboxCard(
                     Text(if (sourcesOpen) "Sources ▴" else "Sources ▾", fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.fillMaxWidth().orbPressClickable { sourcesOpen = !sourcesOpen }.padding(vertical = 12.dp))
                     if (sourcesOpen) digest.sources.forEach { quote ->
                         Text(quote, fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.fillMaxWidth().orbPressClickable { onSelectMission() }.padding(vertical = 8.dp))
-                    }
-                }
-            }
-            if ((isPeeked || isReplying) && current && item.pendingInteraction == null && digest.suggestions.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Suggested actions", fontSize = 11.sp, color = OrbStyle.textMuted, fontWeight = FontWeight.Medium)
-                    digest.suggestions.forEachIndexed { idx, suggestion ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(OrbStyle.controlRadius))
-                                .background(OrbStyle.elevated.copy(alpha = 0.75f))
-                                .border(1.dp, OrbStyle.border, RoundedCornerShape(OrbStyle.controlRadius))
-                                .orbPressClickable(enabled = !isSending) {
-                                    onReplyDraftChange(suggestion)
-                                    if (!isReplying) onToggleReply()
-                                }
-                                .padding(horizontal = 9.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.Top,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .padding(top = 1.dp)
-                                    .size(width = 16.dp, height = 16.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Color.White.copy(alpha = 0.08f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("${idx + 1}", fontSize = 10.5.sp, color = OrbStyle.textMuted, fontWeight = FontWeight.Medium)
-                            }
-                            Text(suggestion, fontSize = 12.sp, color = OrbStyle.textPrimary, lineHeight = 16.sp, modifier = Modifier.weight(1f))
-                        }
                     }
                 }
             }
@@ -2653,7 +2694,6 @@ private fun OrbInboxCard(
                     modifier = Modifier
                         .clip(RoundedCornerShape(OrbStyle.controlRadius))
                         .background(Color.Transparent)
-
                         .orbPressClickable(enabled = !isSending) {
                             onSendQuickReply("Continue from where you left off.")
                         }
@@ -2682,9 +2722,9 @@ private fun OrbInboxCard(
                 modifier = Modifier
                     .clip(RoundedCornerShape(OrbStyle.controlRadius))
                     .background(if (isPeeked) OrbStyle.elevated else Color.Transparent)
-
                     .orbPressClickable { onTogglePeek() }
-                    .heightIn(min = 48.dp).padding(horizontal = 9.dp)
+                    .heightIn(min = 48.dp).padding(horizontal = 9.dp),
+                contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = "Peek",
@@ -2702,7 +2742,6 @@ private fun OrbInboxCard(
                 modifier = Modifier
                     .clip(RoundedCornerShape(OrbStyle.controlRadius))
                     .background(if (isReplying) OrbStyle.elevated else Color.Transparent)
-
                     .orbPressClickable { onToggleReply() }
                     .heightIn(min = 48.dp).padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -2728,7 +2767,6 @@ private fun OrbInboxCard(
                 modifier = Modifier
                     .clip(RoundedCornerShape(OrbStyle.controlRadius))
                     .background(Color.Transparent)
-
                     .orbPressClickable { onDismiss() }
                     .heightIn(min = 48.dp).padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -2751,9 +2789,126 @@ private fun OrbInboxCard(
             }
         }
 
+        // Suggested actions + inline Reply composer directly under the action bar (above peekTurns)
+        if ((isPeeked || isReplying) && currentDigest != null && item.pendingInteraction == null && currentDigest.suggestions.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Suggested actions", fontSize = 11.sp, color = OrbStyle.textMuted, fontWeight = FontWeight.Medium)
+                currentDigest.suggestions.forEachIndexed { idx, suggestion ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                            .background(OrbStyle.elevated.copy(alpha = 0.75f))
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(OrbStyle.controlRadius))
+                            .orbPressClickable(enabled = !isSending) {
+                                onReplyDraftChange(suggestion)
+                                if (!isReplying) onToggleReply()
+                            }
+                            .padding(horizontal = 9.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.Top,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 1.dp)
+                                .size(width = 16.dp, height = 16.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.White.copy(alpha = 0.08f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("${idx + 1}", fontSize = 10.5.sp, color = OrbStyle.textMuted, fontWeight = FontWeight.Medium)
+                        }
+                        Text(suggestion, fontSize = 12.sp, color = OrbStyle.textPrimary, lineHeight = 16.sp, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+
+        if (isReplying) {
+            if (dictationPhase != OrbAndroidDictationPhase.Idle) {
+                OrbAndroidDictationCapsule(
+                    phase = dictationPhase,
+                    elapsedSeconds = 0,
+                    onCancel = { dictationPhase = OrbAndroidDictationPhase.Idle },
+                    onFinish = { dictationPhase = OrbAndroidDictationPhase.Idle },
+                    onRetry = { launchSpeech() }
+                )
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                            .background(Color.Black.copy(alpha = 0.28f))
+                            .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.controlRadius))
+                            .padding(horizontal = 11.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            if (replyDraft.isEmpty()) {
+                                Text(
+                                    text = "Send follow-up…",
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            BasicTextField(
+                                value = replyDraft,
+                                onValueChange = onReplyDraftChange,
+                                textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                                cursorBrush = SolidColor(Color.White),
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 32.dp)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .orbPressClickable { launchSpeech() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Dictate reply",
+                                tint = OrbStyle.textSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    val canSend = replyDraft.trim().isNotEmpty() && !isSending
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(if (canSend) Color.White else Color.White.copy(alpha = 0.08f))
+                            .orbPressClickable(enabled = canSend) { onSendQuickReply(replyDraft) }
+                            .heightIn(min = 48.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isSending) "…" else "Send",
+                            color = if (canSend) OrbStyle.background else OrbStyle.textMuted,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+
         if (isPeeked) {
             Column(
-                modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (isLoadingPeek && peekTurns.isEmpty()) {
@@ -2772,20 +2927,26 @@ private fun OrbInboxCard(
                             fontSize = 12.sp
                         )
                     }
-                } else {
-                    val turnsToShow = peekTurns.ifEmpty {
-                        listOf(
-                            OrbInboxPeekTurn(
-                                id = "fallback",
-                                role = "assistant",
-                                text = item.summary,
-                                workReceipt = item.workReceipt
-                            )
+                } else if (nonDuplicatePeekTurns.isNotEmpty()) {
+                    val hiddenCount = maxOf(0, nonDuplicatePeekTurns.size - 3)
+                    val visibleTurns = if (showAllPeekTurns) nonDuplicatePeekTurns else nonDuplicatePeekTurns.takeLast(3)
+
+                    if (hiddenCount > 0 && !showAllPeekTurns) {
+                        Text(
+                            text = "Show $hiddenCount earlier ${if (hiddenCount == 1) "turn" else "turns"}",
+                            color = OrbStyle.inboxBlue,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .orbPressClickable { showAllPeekTurns = true }
+                                .padding(vertical = 2.dp)
                         )
                     }
-                    turnsToShow.forEach { turn ->
+
+                    visibleTurns.forEach { turn ->
                         val isUser = turn.role == "user"
                         val isError = turn.role == "error"
+                        val isExpanded = expandedTurnIds.contains(turn.id)
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -2794,6 +2955,9 @@ private fun OrbInboxCard(
                                     if (isError) OrbStyle.error.copy(alpha = 0.08f)
                                     else Color.Black.copy(alpha = 0.24f)
                                 )
+                                .orbPressClickable {
+                                    expandedTurnIds = if (isExpanded) expandedTurnIds - turn.id else expandedTurnIds + turn.id
+                                }
                                 .padding(horizontal = 9.dp, vertical = 7.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
@@ -2823,6 +2987,8 @@ private fun OrbInboxCard(
                                     color = OrbStyle.textSecondary,
                                     fontSize = 12.sp,
                                     lineHeight = 17.sp,
+                                    maxLines = if (isExpanded) Int.MAX_VALUE else 5,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -2837,60 +3003,6 @@ private fun OrbInboxCard(
                             }
                         }
                     }
-                }
-            }
-        }
-
-        if (isReplying) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(OrbStyle.controlRadius))
-                        .background(Color.Black.copy(alpha = 0.28f))
-                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.controlRadius))
-                        .padding(horizontal = 11.dp, vertical = 8.dp)
-                ) {
-                    if (replyDraft.isEmpty()) {
-                        Text(
-                            text = "Send follow-up…",
-                            color = OrbStyle.textMuted,
-                            fontSize = 13.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    BasicTextField(
-                        value = replyDraft,
-                        onValueChange = onReplyDraftChange,
-                        textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
-                        cursorBrush = SolidColor(Color.White),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 32.dp)
-                    )
-                }
-                val canSend = replyDraft.trim().isNotEmpty() && !isSending
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(if (canSend) Color.White else Color.White.copy(alpha = 0.08f))
-                        .orbPressClickable(enabled = canSend) { onSendQuickReply(replyDraft) }
-                        .heightIn(min = 48.dp)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = if (isSending) "…" else "Send",
-                        color = if (canSend) OrbStyle.background else OrbStyle.textMuted,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false
-                    )
                 }
             }
         }

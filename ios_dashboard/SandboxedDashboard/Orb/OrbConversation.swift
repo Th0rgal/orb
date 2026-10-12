@@ -268,6 +268,7 @@ struct OrbConversation: View {
                             rebuildWorkModel()
                         }
                         rebuildHistory()
+                        scrollToBottomOnOpen(scroll: scroll)
                         if execution != .null { selection.restore(execution["selection"]) }
                         else if mission != .null {
                             selection.backend = mission["backend"].text
@@ -292,6 +293,7 @@ struct OrbConversation: View {
                         }
                     }
                     await refresh()
+                    scrollToBottomOnOpen(scroll: scroll)
                     if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
                         contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
                     }
@@ -362,6 +364,21 @@ struct OrbConversation: View {
         }
     }
 
+    private func scrollToBottomOnOpen(scroll: ScrollViewProxy) {
+        guard !history.isEmpty else { return }
+        followsLatest = true
+        openedAtLatest = true
+        scroll.scrollTo("conversation-bottom", anchor: .bottom)
+        Task { @MainActor in
+            await Task.yield()
+            if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+            try? await Task.sleep(for: .milliseconds(90))
+            if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+            try? await Task.sleep(for: .milliseconds(220))
+            if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+        }
+    }
+
     @ViewBuilder
     private func conversationContainer(scroll: ScrollViewProxy) -> some View {
         ZStack(alignment: .bottomTrailing) {
@@ -399,7 +416,7 @@ struct OrbConversation: View {
             atBottom = value
             if value {
                 followsLatest = true
-            } else if userScrolling || openedAtLatest {
+            } else if userScrolling {
                 followsLatest = false
             }
         }
@@ -421,8 +438,90 @@ struct OrbConversation: View {
             if !openedAtLatest || followsLatest {
                 scroll.scrollTo("conversation-bottom", anchor: .bottom)
                 openedAtLatest = true
+                Task { @MainActor in
+                    await Task.yield()
+                    if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+                    try? await Task.sleep(for: .milliseconds(120))
+                    if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
+                }
             }
         }
+    }
+
+    private var completedPlanTurnKey: String? {
+        guard !working, !isCloud, pendingQuestionEvents.isEmpty else { return nil }
+        guard let lastUserIdx = history.lastIndex(where: { $0.1 == "user" }) else { return nil }
+        let userItem = history[lastUserIdx]
+        let presentation = OrbMessagePresentation.parse(userItem.2)
+        let images = OrbMessageImages.parse(presentation.text)
+        guard OrbStyle.planObjective(images.text) != nil else { return nil }
+        let hasAssistantReply = history[(lastUserIdx + 1)...].contains(where: { $0.1 == "assistant" && !$0.2.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        guard hasAssistantReply else { return nil }
+        let key = "plan-review:\(userItem.0)"
+        guard !answered.contains(key) else { return nil }
+        return key
+    }
+
+    @ViewBuilder
+    private func completedPlanReviewCard(key: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "list.bullet.clipboard")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(OrbStyle.textSecondary)
+                Text("Review the plan")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Spacer()
+            }
+            HStack(spacing: 8) {
+                Button {
+                    OrbHaptics.selection()
+                    answered.insert(key)
+                    mode = "Message"
+                    Task { _ = await sendReply("Proceed with implementing the plan.") }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("Implement plan")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(OrbStyle.background)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.white, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+                .accessibilityIdentifier("plan.implement")
+
+                Button {
+                    OrbHaptics.selection()
+                    answered.insert(key)
+                    mode = "Plan"
+                    composerFocused = true
+                } label: {
+                    Text("Request changes")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.07), in: Capsule())
+                        .overlay(Capsule().stroke(OrbStyle.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+                .accessibilityIdentifier("plan.requestChanges")
+
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(12)
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.borderStrong, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plan-review-card")
     }
 
     @ViewBuilder
@@ -496,6 +595,9 @@ struct OrbConversation: View {
             if let data = event.content.data(using: .utf8), let request = try? JSONDecoder().decode(OrbJSON.self, from: data) {
                 OrbQuestion(event: event, request: request) { answered.insert(event.toolCallId ?? "") }
             }
+        }
+        if let planKey = completedPlanTurnKey {
+            completedPlanReviewCard(key: planKey)
         }
         if !working && ["failed", "blocked", "interrupted", "cancelled", "reconnect required", "submission uncertain", "incompatible", "waiting user"].contains(status), turns.last?["detail"].text.isEmpty != false {
             HStack(spacing: 6) {

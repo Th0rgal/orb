@@ -506,85 +506,6 @@ fun OrbHomeScreen(
                             }
                         }
 
-                        // Pinned Inbox Row (exact match to iOS home.inbox)
-                        if (searchQuery.trim().isEmpty()) {
-                            item(key = "pinned_inbox") {
-                                Column {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .orbPressClickable { onSelectTab(OrbTopTab.Inbox) }
-                                            .padding(vertical = 12.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                                    ) {
-                                        OrbSfIcons.TrayFull(
-                                            color = OrbStyle.icon,
-                                            size = 20.dp
-                                        )
-                                        Text(
-                                            text = "Inbox",
-                                            color = Color.White,
-                                            fontSize = 17.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        if (liveMissionsCount > 0) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                            ) {
-                                                OrbRunningDots(
-                                                    color = Color.White,
-                                                    dotSize = 2.0.dp,
-                                                    spacing = 2.0.dp
-                                                )
-                                                Text(
-                                                    text = "$liveMissionsCount working",
-                                                    color = OrbStyle.textSecondary,
-                                                    fontSize = 12.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    maxLines = 1,
-                                                    softWrap = false
-                                                )
-                                            }
-                                        }
-                                        if (inboxCount > 0) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(CircleShape)
-                                                    .background(OrbStyle.elevated)
-                                                    .border(0.5.dp, OrbStyle.borderStrong, CircleShape)
-                                                    .padding(horizontal = 8.dp, vertical = 2.5.dp),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Text(
-                                                    text = "$inboxCount",
-                                                    color = Color.White,
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    maxLines = 1,
-                                                    softWrap = false
-                                                )
-                                            }
-                                        }
-                                        OrbSfIcons.ChevronRightSmall(
-                                            color = OrbStyle.textMuted,
-                                            size = 11.dp
-                                        )
-                                    }
-                                    HorizontalDivider(
-                                        color = OrbStyle.border,
-                                        thickness = 0.5.dp,
-                                        modifier = Modifier.padding(start = 34.dp)
-                                    )
-                                }
-                            }
-                        }
-
                         if (isLoading && visibleProjects.isEmpty()) {
                             items(5) {
                                 OrbSkeletonRow()
@@ -595,6 +516,11 @@ fun OrbHomeScreen(
                                 val pColor = OrbProjectAppearance.color(proj)
                                 val latestTime = remember(proj) {
                                     OrbJSON.relative(proj.str("updated_at", "created_at"))
+                                }
+                                val projectWorkingCount = remember(proj, missions, projects) {
+                                    missionsForProject(proj, missions, projects).count { m ->
+                                        OrbMissionTree.isLive(m)
+                                    }
                                 }
 
                                 Box {
@@ -623,6 +549,26 @@ fun OrbHomeScreen(
                                                 overflow = TextOverflow.Ellipsis,
                                                 modifier = Modifier.weight(1f)
                                             )
+                                            if (projectWorkingCount > 0) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                                ) {
+                                                    OrbRunningDots(
+                                                        color = Color.White,
+                                                        dotSize = 2.0.dp,
+                                                        spacing = 2.0.dp
+                                                    )
+                                                    Text(
+                                                        text = "$projectWorkingCount working",
+                                                        color = OrbStyle.textSecondary,
+                                                        fontSize = 12.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
+                                                }
+                                            }
                                             if (latestTime.isNotEmpty()) {
                                                 Text(
                                                     text = latestTime,

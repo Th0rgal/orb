@@ -40,6 +40,9 @@ export function recoverPlan(items:StreamItem[]):ApprovedPlan|undefined {
    if(typeof text==='string'&&text.trim())return {requestId:item.callId,text,approvedAt:'',boundary:item.key};
   }
  }
+ for(const item of [...later].reverse()){
+  if(item.kind==='text'&&!item.live&&item.text.trim())return {requestId:marker.key,text:item.text,approvedAt:'',boundary:marker.key};
+ }
  return {requestId:marker.key,text:marker.text.replace(/^\s*\/plan\s*/,''),approvedAt:'',boundary:marker.key};
 }
 // Plan tracking belongs to its conversation turn. A historical /plan marker
