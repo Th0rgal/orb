@@ -1,5 +1,5 @@
 import Foundation
-import UserNotifications
+@preconcurrency import UserNotifications
 import SwiftUI
 
 /// Deep-link target when the operator taps an Inbox notification or `orb://inbox/<mission-id>`.

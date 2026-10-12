@@ -249,7 +249,16 @@ struct OrbConversation: View {
                     id = missionID
                     text = OrbDisk.read(draftKey, as: String.self) ?? ""
                     attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
-                    if OrbDisk.read(pendingKey, as: OrbPending.self) != nil { error = "An earlier send needs verification. Retry sends the same request without creating a new identity." }
+                    if let pending = OrbDisk.read(pendingKey, as: OrbPending.self) {
+                        if OrbSendsInFlight.keys.contains(pendingKey) {
+                            // Sent from an earlier visit and still awaiting Core: show it as
+                            // working, not as a failed send, and settle when it returns.
+                            optimisticPrompt = pending.body["content"].text.isEmpty ? pending.body["prompt"].text : pending.body["content"].text
+                            Task { await settleInFlightSend() }
+                        } else {
+                            error = "An earlier send needs verification. Retry sends the same request without creating a new identity."
+                        }
+                    }
                     if let id {
                         mission = OrbReadCache.read("mission:\(id)") ?? .null
                         execution = OrbReadCache.read("cloud:\(id)") ?? .null
@@ -1626,6 +1635,8 @@ struct OrbConversation: View {
                 }
                 try OrbDisk.save(pending, key: pendingKey)
             }
+            OrbSendsInFlight.keys.insert(pendingKey)
+            defer { OrbSendsInFlight.keys.remove(pendingKey) }
             let result = try await api.call(pending.path, method: "POST", body: pending.body)
             if pending.path == "/api/control/message" {
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false), result["queued"] != .null else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance. The saved request is retained.") }
@@ -1655,6 +1666,19 @@ struct OrbConversation: View {
             self.error = "Message kept. \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Waits for a send started by an earlier instance of this screen.
+    private func settleInFlightSend() async {
+        while OrbSendsInFlight.keys.contains(pendingKey) {
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        optimisticPrompt = nil
+        if OrbDisk.read(pendingKey, as: OrbPending.self) != nil {
+            error = "An earlier send needs verification. Retry sends the same request without creating a new identity."
+        }
+        rebuildHistory()
+        await refresh(force: true)
     }
 
     private func move() async {
@@ -2657,4 +2681,10 @@ struct OrbDoubleTapDismissesKeyboard: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
     }
+}
+
+/// Sends survive leaving the screen; a reopened conversation must not mistake
+/// one still awaiting Core for a failed send.
+@MainActor enum OrbSendsInFlight {
+    static var keys: Set<String> = []
 }

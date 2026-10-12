@@ -178,10 +178,9 @@ struct OrbDictationCapsule: View {
                             context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(.white.opacity(0.3 + Double(level) * 0.6)))
                         }
                     }.frame(height: 32).accessibilityHidden(true)
-                    Button { dictation.finish() } label: { Image(systemName: "stop.fill").font(.system(size: 16)).frame(width: 44, height: 44).background(.white.opacity(0.09), in: Circle()) }
+                    // One action: stop and put the transcript in the draft.
+                    Button { dictation.finish() } label: { Image(systemName: "stop.fill").font(.system(size: 20)).foregroundStyle(.black).frame(width: 56, height: 56).background(.white, in: Circle()) }
                         .accessibilityLabel("Stop recording and transcribe").accessibilityIdentifier("dictation.stop")
-                    Button { dictation.finish() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .medium)).foregroundStyle(.black).frame(width: 44, height: 44).background(.white, in: Circle()) }
-                        .accessibilityLabel("Use recording in draft").accessibilityIdentifier("dictation.use")
                 } else {
                     HStack(spacing: 7) {
                         if dictation.phase != .failed { ProgressView().tint(.white) }
