@@ -222,6 +222,7 @@ struct OrbConversation: View {
             conversationContainer(scroll: scroll)
                 .background(OrbStyle.background)
                 .scrollDismissesKeyboard(.interactively)
+                .background(OrbDoubleTapDismissesKeyboard(active: composerFocused) { composerFocused = false })
                 .navigationTitle(resolvedNavigationTitle)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
@@ -248,7 +249,16 @@ struct OrbConversation: View {
                     id = missionID
                     text = OrbDisk.read(draftKey, as: String.self) ?? ""
                     attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
-                    if OrbDisk.read(pendingKey, as: OrbPending.self) != nil { error = "An earlier send needs verification. Retry sends the same request without creating a new identity." }
+                    if let pending = OrbDisk.read(pendingKey, as: OrbPending.self) {
+                        if OrbSendsInFlight.keys.contains(pendingKey) {
+                            // Sent from an earlier visit and still awaiting Core: show it as
+                            // working, not as a failed send, and settle when it returns.
+                            optimisticPrompt = pending.body["content"].text.isEmpty ? pending.body["prompt"].text : pending.body["content"].text
+                            Task { await settleInFlightSend() }
+                        } else {
+                            error = "An earlier send needs verification. Retry sends the same request without creating a new identity."
+                        }
+                    }
                     if let id {
                         mission = OrbReadCache.read("mission:\(id)") ?? .null
                         execution = OrbReadCache.read("cloud:\(id)") ?? .null
@@ -1625,6 +1635,8 @@ struct OrbConversation: View {
                 }
                 try OrbDisk.save(pending, key: pendingKey)
             }
+            OrbSendsInFlight.keys.insert(pendingKey)
+            defer { OrbSendsInFlight.keys.remove(pendingKey) }
             let result = try await api.call(pending.path, method: "POST", body: pending.body)
             if pending.path == "/api/control/message" {
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false), result["queued"] != .null else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance. The saved request is retained.") }
@@ -1654,6 +1666,19 @@ struct OrbConversation: View {
             self.error = "Message kept. \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Waits for a send started by an earlier instance of this screen.
+    private func settleInFlightSend() async {
+        while OrbSendsInFlight.keys.contains(pendingKey) {
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        optimisticPrompt = nil
+        if OrbDisk.read(pendingKey, as: OrbPending.self) != nil {
+            error = "An earlier send needs verification. Retry sends the same request without creating a new identity."
+        }
+        rebuildHistory()
+        await refresh(force: true)
     }
 
     private func move() async {
@@ -2593,4 +2618,73 @@ struct OrbAgentPicker: View {
     private static var starts: [String: Date] = [:]
     static func start(_ key: String) -> Date { if let date = starts[key] { return date }; let now = Date(); starts[key] = now; return now }
     static func stop(_ key: String) { starts[key] = nil }
+}
+
+/// Double-tapping anywhere in the conversation closes the keyboard. Messages
+/// render through UIKit text and web views that swallow SwiftUI gestures, so
+/// this is a window-level recognizer that never cancels their touches and
+/// ignores double-taps inside the focused field (word selection).
+struct OrbDoubleTapDismissesKeyboard: UIViewRepresentable {
+    let active: Bool
+    let dismiss: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = Anchor()
+        view.isUserInteractionEnabled = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.dismiss = dismiss
+        context.coordinator.recognizer.isEnabled = active
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.recognizer.view?.removeGestureRecognizer(coordinator.recognizer)
+    }
+
+    final class Anchor: UIView {
+        weak var coordinator: Coordinator?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let coordinator else { return }
+            coordinator.recognizer.view?.removeGestureRecognizer(coordinator.recognizer)
+            window?.addGestureRecognizer(coordinator.recognizer)
+        }
+    }
+
+    @MainActor final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var dismiss: () -> Void = {}
+        lazy var recognizer: UITapGestureRecognizer = {
+            let recognizer = UITapGestureRecognizer(target: self, action: #selector(fire))
+            recognizer.numberOfTapsRequired = 2
+            recognizer.cancelsTouchesInView = false
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        @objc private func fire() { dismiss() }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view = touch.view
+            while let current = view {
+                if current.isFirstResponder { return false }
+                view = current.superview
+            }
+            return true
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+}
+
+/// Sends survive leaving the screen; a reopened conversation must not mistake
+/// one still awaiting Core for a failed send.
+@MainActor enum OrbSendsInFlight {
+    static var keys: Set<String> = []
 }

@@ -46,7 +46,7 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["dictation.cancel"].tap()
         XCTAssertEqual(draft.value as? String, "Existing draft")
         app.buttons["dictation.microphone"].tap()
-        app.buttons["dictation.use"].tap()
+        app.buttons["dictation.stop"].tap()
         XCTAssertTrue(app.staticTexts["Transcribing…"].waitForExistence(timeout: 5))
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         XCTAssertEqual(draft.value as? String, "Existing draft Bonjour, ajoute un microphone dans la conversation.")
