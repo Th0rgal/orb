@@ -134,7 +134,7 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    <button class="s-btn native-primary" disabled={sending()} onClick={()=>void reply('accept')}>{r().method==='plan'?'Implement plan':'Allow once'}</button>
   </Show><Show when={sending()}><span role="status">Sending…</span></Show></div>
   <Show when={error()}><div role="alert">{error()}</div></Show>
- </section>}</Show><Show when={completedPlanTurn()}>{()=>
+ </section>}</Show><Show when={completedPlanTurn()}>{plan=>
   <section class="native-question" aria-label="Review the plan">
    <div class="native-question-heading">Review the plan</div>
    <details class="native-feedback"><summary>Request changes</summary><textarea aria-label="Requested changes" placeholder="Changes to the plan…" value={feedback()} onInput={e=>setFeedback(e.currentTarget.value)}/></details>

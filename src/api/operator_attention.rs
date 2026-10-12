@@ -281,6 +281,7 @@ mod tests {
             model_override: None,
             model_effort: None,
             fast_mode: false,
+            service_tier: None,
             backend: "opencode".into(),
             config_profile: None,
             history: vec![],

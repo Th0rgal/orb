@@ -353,6 +353,7 @@ impl MissionStore for InMemoryMissionStore {
             model_override: model_override.map(|s| s.to_string()),
             model_effort: model_effort.map(|s| s.to_string()),
             fast_mode,
+            service_tier: None,
             backend: backend.unwrap_or("claudecode").to_string(),
             config_profile: config_profile.map(|s| s.to_string()),
             history: vec![],
@@ -647,6 +648,7 @@ impl MissionStore for InMemoryMissionStore {
         model_override: Option<Option<&str>>,
         model_effort: Option<Option<&str>>,
         fast_mode: Option<bool>,
+        service_tier: Option<crate::codex_speed::Tier>,
         config_profile: Option<Option<&str>>,
         session_id: &str,
     ) -> Result<Mission, String> {
@@ -679,6 +681,12 @@ impl MissionStore for InMemoryMissionStore {
         }
         if let Some(fast_mode) = fast_mode {
             mission.fast_mode = fast_mode;
+        }
+        if let Some(tier) =
+            service_tier.or(fast_mode.map(|fast| crate::codex_speed::Tier::from_legacy(None, fast)))
+        {
+            mission.service_tier = Some(tier);
+            mission.fast_mode = tier == crate::codex_speed::Tier::Fast;
         }
         if let Some(config_profile) = config_profile {
             mission.config_profile = config_profile.map(ToString::to_string);
@@ -1616,6 +1624,7 @@ mod tests {
             .update_mission_run_settings(
                 mission.id,
                 Some("codex"),
+                None,
                 None,
                 None,
                 None,

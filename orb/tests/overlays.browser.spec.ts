@@ -247,3 +247,27 @@ for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard n
  await page.keyboard.press('Escape');
  await expect(page.getByRole('button',{name:'Reasoning effort: low',exact:true})).toBeFocused();
 });
+
+test('Codex speed uses keyboard selection and excludes unsupported subscriptions',async({page})=>{
+ await page.addInitScript(()=>localStorage.setItem('orb.apiUrl',location.origin));
+ await page.route('**/api/control/codex-speed?**',route=>route.fulfill({json:{tiers:[{id:'standard',available:true},{id:'fast',available:true},{id:'ultrafast',available:false,reason:'Requires a compatible subscription'}]},headers:{'Access-Control-Allow-Origin':'*'}}));
+ await page.goto('/tests/overlays.html?speed');
+ await page.getByRole('button',{name:'Speed: Standard'}).click();
+ await expect(page.getByRole('option',{name:/Ultrafast/})).toBeDisabled();
+ await page.getByRole('option',{name:/^Standard/}).focus();
+ await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter');
+ await expect(page.getByRole('button',{name:'Speed: Fast'})).toBeFocused();
+ await page.getByRole('button',{name:'Speed: Fast'}).click();
+ await page.keyboard.press('Escape');
+ await expect(page.getByRole('button',{name:'Speed: Fast'})).toBeFocused();
+});
+test('Codex Ultrafast is a distinct committed selection',async({page})=>{
+ await page.addInitScript(()=>localStorage.setItem('orb.apiUrl',location.origin));
+ await page.route('**/api/control/codex-speed?**',route=>route.fulfill({json:{tiers:[{id:'standard',available:true},{id:'fast',available:true},{id:'ultrafast',available:true}]},headers:{'Access-Control-Allow-Origin':'*'}}));
+ await page.goto('/tests/overlays.html?speed');
+ await page.getByRole('button',{name:'Speed: Standard'}).click();
+ await page.getByRole('option',{name:/Ultrafast/}).click();
+ await expect(page.getByRole('button',{name:'Speed: Ultrafast'})).toBeVisible();
+ await page.getByRole('button',{name:'Speed: Ultrafast'}).click();
+ await expect(page.getByRole('option',{name:/Ultrafast/})).toHaveAttribute('aria-selected','true');
+});

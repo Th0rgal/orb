@@ -11028,6 +11028,7 @@ async fn host_parallel_followup_preserves_cooldown_and_cancellable_rollback() {
         None,
         None,
         false,
+        None,
     );
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
@@ -12069,6 +12070,7 @@ async fn captured_vibe_control_turn(
         model.map(str::to_owned),
         None,
         false,
+        None,
         Some(agent.into()),
         session_id.map(str::to_owned),
         force_session_resume,

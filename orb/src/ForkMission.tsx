@@ -1,3 +1,6 @@
+import {CodexSpeedPicker,missionSpeed,requireSpeedSupport} from './CodexSpeedPicker';
+import {localBinding} from './localAgents';
+import type {CodexServiceTier} from './api';
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createSignal, onMount } from "solid-js";
 import { forkMission, shortModelLabel, type HarnessChoice, type Mission } from "./api";
@@ -6,23 +9,25 @@ import { Menu } from "./Menu";
 
 export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; destination: string; anchor?: HTMLElement; onOpen?: () => void; onClose: () => void; onFork: (mission: Mission) => void }) {
   const [backend, setBackend] = createSignal(p.mission.backend ?? p.choices[0]?.backend.id ?? "");
+  const [speed,setSpeed]=createSignal<CodexServiceTier>(missionSpeed(p.mission));
   const [model, setModel] = createSignal(p.mission.model_override ?? "");
   const [modelAnchor, setModelAnchor] = createSignal<HTMLButtonElement>();
   const [effortAnchor, setEffortAnchor] = createSignal<HTMLButtonElement>();
   const [busy, setBusy] = createSignal(false), [error, setError] = createSignal("");
   const choices = () => p.choices.find(choice => choice.backend.id === backend())?.models ?? [];
-  const unavailable = (id: string) => !!p.mission.remote_node_id && !["grok", "claudecode", "opencode", "antigravity", "vibe"].includes(id);
+  const unavailable = (id: string) => !!p.mission.remote_node_id && !["codex", "grok", "claudecode", "opencode", "antigravity", "vibe"].includes(id);
   const key = crypto.randomUUID();
   onMount(() => p.onOpen?.());
   const fork = async (effort = "") => {
     if (busy() || !backend() || unavailable(backend()) || !choices().some(choice => choice.value === model())) return;
     setBusy(true); setError("");
-    try { p.onFork(await forkMission(p.mission.id, { backend: backend(), model_override: model(), model_effort: effort, idempotency_key: key })); }
+    try { if(backend()==="codex")await requireSpeedSupport(model(),speed(),undefined,!!localBinding(p.mission.id)); p.onFork(await forkMission(p.mission.id, { backend: backend(), model_override: model(), model_effort: effort, service_tier:backend()==="codex"?speed():undefined, idempotency_key: key })); }
     catch (e) {setError(e instanceof Error ? e.message : String(e));}
     finally {setBusy(false);}
   };
   const openModels = (id: string, anchor: HTMLButtonElement) => {
     if (busy() || unavailable(id)) return;
+    if(id!==backend())setSpeed('standard');
     setBackend(id); setEffortAnchor(undefined); setModelAnchor(anchor);
   };
   return <Menu label="Fork conversation" class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={p.onClose}>
@@ -45,6 +50,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
       }}</For>
       <Show when={!choices().length}><div class="menu-group">No models available</div></Show>
       <Show when={effortAnchor()}>{anchor => <Menu label="Choose effort" class="fork-effort-menu" anchor={anchor()} placement="right-start" busy={busy()} onClose={() => setEffortAnchor(undefined)}>
+        <Show when={backend()==="codex"}><CodexSpeedPicker model={model()} value={speed()} local={!!localBinding(p.mission.id)} disabled={busy()} onChange={setSpeed}/></Show>
         <For each={["", ...supportedEfforts(backend())]}>{effort => <button type="button" role="menuitem" class="menu-item" disabled={busy()} onClick={() => void fork(effort)}>{effortLabel(effort || undefined,backend(),model())}</button>}</For>
         <Show when={error()}><ErrorNotice error={error()}/></Show>
       </Menu>}</Show>

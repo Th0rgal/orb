@@ -313,6 +313,7 @@ mod tests {
             model: None,
             model_effort: None,
             fast_mode: false,
+            service_tier: None,
             agent: None,
             mission_id: mission.id,
             events_tx,

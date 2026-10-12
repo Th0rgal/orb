@@ -1,3 +1,5 @@
+import {CodexSpeedPicker} from '../src/CodexSpeedPicker';
+import type {CodexServiceTier} from '../src/api';
 import {FindBar} from "../src/FindBar";
 import { createSignal, Show, onMount, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
@@ -25,6 +27,7 @@ function Gallery() {
   const [busy,setBusy] = createSignal(false), [error,setError] = createSignal<string|null>(null), [attempts,setAttempts] = createSignal(0);
   const [selected,setSelected] = createSignal("one"), [searchOpen,setSearchOpen] = createSignal(false);
   const [anchor,setAnchor] = createSignal<HTMLElement>(), [sub,setSub] = createSignal<HTMLElement>();
+  const [speed,setSpeed] = createSignal<CodexServiceTier>('standard');
   const [schedule,setSchedule] = createSignal("every 1h");
   const close = () => setOpen("");
   const show = (kind:string,button:HTMLButtonElement) => {setAnchor(button); setError(null); setOpen(kind);};
@@ -46,6 +49,8 @@ function Gallery() {
       <DialogButton onClick={e=>show("project",e.currentTarget)}>New project</DialogButton>
       <DialogButton onClick={e=>show("error",e.currentTarget)}>Error details</DialogButton>
       <DialogButton onClick={e=>show("image",e.currentTarget)}>Image preview</DialogButton>
+    <Show when={new URLSearchParams(location.search).has("speed")}><CodexSpeedPicker model="gpt-6.1-sol" value={speed()} onChange={setSpeed}/></Show>
+
     </section>
     <p role="status">Save attempts: {attempts()} · Selected: {selected()}</p>
     <section class="gallery-message" aria-label="Message editor example"><UserTurn text="Document the exact prompt an agent needs to continue this work, including the full scope, acceptance criteria and the evidence already collected." onSend={async()=>true}/></section>

@@ -1047,6 +1047,7 @@ pub async fn operate(
 
 #[derive(Deserialize)]
 pub struct ClientRunRequest {
+    pub service_tier: Option<crate::codex_speed::Tier>,
     pub model: Option<String>,
     pub cyber_access: Option<cyber::Mode>,
     pub cyber_revision: Option<Uuid>,
@@ -1209,6 +1210,13 @@ pub async fn client_run(
     }
     let owner = format!("orb-client:{}", req.client_id);
     if req.op == "begin" {
+        if m.backend == "codex" {
+            let selected = crate::codex_speed::Tier::from_legacy(m.service_tier, m.fast_mode);
+            if req.service_tier.unwrap_or_default() != selected {
+                return Err(conflict("The local runner has a different speed setting. Refresh or update Orb before starting."));
+            }
+        }
+
         let cyber_mode = if m.backend == "codex" {
             let saved = cyber::read(&state.config.working_dir, id).map_err(internal_error)?;
             cyber::validate_client_selection(&saved, req.cyber_access, req.cyber_revision)

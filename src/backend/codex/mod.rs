@@ -280,8 +280,16 @@ async fn send_message_streaming_app_server(
     // supplies an access token at startup and answers refresh requests under
     // our per-account lock.
     let mut enabled_features = vec!["goals".to_string()];
-    if cfg.fast_mode {
-        enabled_features.push("fast_mode".to_string());
+    let service_tier = crate::codex_speed::Tier::from_legacy(cfg.service_tier, cfg.fast_mode);
+    if service_tier != crate::codex_speed::Tier::Standard {
+        enabled_features.push(
+            if service_tier == crate::codex_speed::Tier::Ultrafast {
+                "ultrafast_mode"
+            } else {
+                "fast_mode"
+            }
+            .to_string(),
+        );
     }
     let app_cfg = AppServerConfig {
         cli_path: cfg.cli_path.clone(),
@@ -360,7 +368,7 @@ async fn send_message_streaming_app_server(
         model: resolved_model,
         cwd: Some(thread_cwd.clone()),
         reasoning_effort: cfg.model_effort.clone(),
-        service_tier: cfg.fast_mode.then(|| "fast".to_string()),
+        service_tier: Some(service_tier.wire().to_string()),
         ephemeral: None,
         // Match exec-mode's `--dangerously-bypass-approvals-and-sandbox`.
         // Without these, codex defaults to `on-request` + `read-only`, which
@@ -589,6 +597,7 @@ async fn send_message_streaming_app_server(
         } else if !already_primed { if let Err(e) = session_for_rpc
             .turn_start(TurnStartParams {
                 cyber_access_program: cyber_program.clone(),
+                service_tier: Some(service_tier.wire().to_string()),
                 collaboration_mode: planning.then(||collaboration_mode(true, &plan_model)),
                 thread_id: thread_id.clone(),
                 input: vec![UserInputItem::Text {
@@ -926,6 +935,7 @@ async fn send_message_streaming_app_server(
                                     let result = session_arc
                                         .turn_start(TurnStartParams {
                                             cyber_access_program: cyber_program.clone(),
+                                            service_tier: Some(service_tier.wire().to_string()),
                                             thread_id: thread_id.clone(),
                                             input: vec![UserInputItem::Text { text: text.into() }],
                                             collaboration_mode: Some(collaboration_mode(

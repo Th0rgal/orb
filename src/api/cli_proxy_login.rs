@@ -90,6 +90,36 @@ impl ManagementClient {
                 })?,
         })
     }
+    pub(crate) async fn version(&self) -> Result<String, ApiError> {
+        let response = self
+            .http
+            .get(format!("{}/config", self.base))
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CLIProxyAPI version unavailable".into(),
+                )
+            })?
+            .error_for_status()
+            .map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CLIProxyAPI management unavailable".into(),
+                )
+            })?;
+        response
+            .headers()
+            .get("x-cpa-version")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CLIProxyAPI did not report its version".into(),
+            ))
+    }
     pub(crate) async fn request(
         &self,
         method: reqwest::Method,

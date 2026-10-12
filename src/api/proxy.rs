@@ -1575,6 +1575,53 @@ async fn native_protocol_proxy(
         }
     }
     let parsed_body: serde_json::Value = serde_json::from_slice(&body).expect("validated request");
+    let mut speed_tier = None;
+    let speed_accounts = if let Some(value) = headers.get("x-sandboxed-codex-speed") {
+        let tier = match value.to_str().ok() {
+            Some("default") => crate::codex_speed::Tier::Standard,
+            Some("fast" | "priority") => crate::codex_speed::Tier::Fast,
+            Some("ultrafast") => crate::codex_speed::Tier::Ultrafast,
+            _ => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid Codex speed selection".into(),
+                    "unsupported_service_tier",
+                )
+            }
+        };
+        if tier != crate::codex_speed::Tier::Standard {
+            if parsed_body
+                .get("service_tier")
+                .is_some_and(|value| !value.is_null() && value.as_str() != Some(tier.wire()))
+            {
+                return error_response(StatusCode::BAD_REQUEST, "The Codex client did not apply the selected speed. Update Codex before retrying.".into(), "unsupported_service_tier");
+            }
+            if let Err(error) = super::control::speed::validate(
+                &state.config.working_dir,
+                "codex",
+                Some(&requested_model),
+                tier,
+                None,
+            )
+            .await
+            {
+                return error_response(StatusCode::BAD_REQUEST, error, "unsupported_service_tier");
+            }
+            speed_tier = Some(tier);
+            Some(
+                super::control::speed::eligible_account_ids(
+                    &state.config.working_dir,
+                    &requested_model,
+                    tier,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let cyber_program = match super::control::cyber::enforce_proxy_selection(
         cyber_receipt.as_ref().map(|(_, _, selection, _)| selection),
         &requested_model,
@@ -1702,6 +1749,59 @@ async fn native_protocol_proxy(
     let mut supported_entries = 0usize;
     let mut last_upstream_error: Option<(StatusCode, HeaderMap, bytes::Bytes)> = None;
     for entry in &entries {
+        if speed_accounts
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&entry.account_id))
+        {
+            continue;
+        }
+
+        let mut body = body.clone();
+        if let Some(tier) = speed_tier {
+            let mut request = parsed_body.clone();
+            request["service_tier"] = serde_json::json!(tier.wire());
+            body = bytes::Bytes::from(serde_json::to_vec(&request).expect("request serialization"));
+            if super::oauth_owner::codex_via_cli_proxy().is_some() {
+                let accounts = super::control::speed::eligible_proxy_accounts(
+                    &state.config.working_dir,
+                    &requested_model,
+                    tier,
+                )
+                .await;
+                let Some(account) = accounts
+                    .iter()
+                    .find(|account| account.provider_id == entry.account_id)
+                else {
+                    continue;
+                };
+                let prefix = match super::control::speed::proxy_prefix(
+                    &state.config.working_dir,
+                    account,
+                    &requested_model,
+                )
+                .await
+                {
+                    Ok(prefix) => prefix,
+                    Err(error) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            error,
+                            "unsupported_service_tier",
+                        )
+                    }
+                };
+                request["model"] = serde_json::json!(format!(
+                    "{prefix}/{}",
+                    requested_model
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&requested_model)
+                ));
+                body = bytes::Bytes::from(
+                    serde_json::to_vec(&request).expect("request serialization"),
+                );
+            }
+        }
         let provider_type =
             ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
         if !native_protocol_supported(
@@ -1838,7 +1938,16 @@ async fn native_protocol_proxy(
         {
             return error_response(StatusCode::BAD_REQUEST, "This route cannot guarantee the selected cyber program and model. Use a direct OpenAI route or choose Automatic explicitly.".into(), "unsupported_access_program");
         }
-        let rewrite_model_id = if via_cli_proxy && provider_type == ProviderType::Xai {
+        let routed_model = if speed_tier.is_some() && via_cli_proxy {
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value["model"].as_str().map(str::to_owned))
+        } else {
+            None
+        };
+        let rewrite_model_id = if let Some(model) = routed_model.as_deref() {
+            model
+        } else if via_cli_proxy && provider_type == ProviderType::Xai {
             cli_proxy_xai_model_id(&entry.model_id)
         } else {
             entry.model_id.as_str()

@@ -1104,7 +1104,13 @@ impl CodexCredential {
         match self {
             CodexCredential::ApiKey(k) => format!("apikey:{}", k),
             CodexCredential::OAuth(acc) => format!("oauth:{}", acc.chatgpt_account_id),
-            CodexCredential::CliProxy(endpoint) => format!("cliproxy:{}", endpoint.base_url),
+            CodexCredential::CliProxy(endpoint) => format!(
+                "cliproxy:{}",
+                endpoint
+                    .identity_url
+                    .as_deref()
+                    .unwrap_or(&endpoint.base_url)
+            ),
         }
     }
 
@@ -1667,7 +1673,21 @@ pub(crate) async fn lease_codex_account(
     tried_fingerprints: &HashSet<String>,
     cancel: &CancellationToken,
 ) -> Option<LeasedCodexAccount> {
-    let creds = collect_codex_credentials(working_dir);
+    lease_codex_account_from_pool(
+        working_dir,
+        tried_fingerprints,
+        cancel,
+        collect_codex_credentials(working_dir),
+    )
+    .await
+}
+
+pub(crate) async fn lease_codex_account_from_pool(
+    working_dir: &std::path::Path,
+    tried_fingerprints: &HashSet<String>,
+    cancel: &CancellationToken,
+    creds: Vec<CodexCredential>,
+) -> Option<LeasedCodexAccount> {
     if creds.is_empty() {
         return None;
     }
@@ -2937,6 +2957,7 @@ pub struct MissionRunner {
 
     /// Request Codex fast service tier for supported GPT models.
     pub fast_mode: bool,
+    pub service_tier: Option<crate::codex_speed::Tier>,
 
     /// Durable PR capability copied from the mission's `pr-readonly` tag.
     /// This controls process-level git/gh mutation guards; prompt wording is
@@ -3037,6 +3058,7 @@ impl MissionRunner {
         model_override: Option<String>,
         model_effort: Option<String>,
         fast_mode: bool,
+        service_tier: Option<crate::codex_speed::Tier>,
     ) -> Self {
         Self {
             mission_id,
@@ -3049,6 +3071,7 @@ impl MissionRunner {
             model_override,
             model_effort,
             fast_mode,
+            service_tier,
             pr_readonly: false,
             queue: VecDeque::new(),
             inflight_message: None,
@@ -3419,6 +3442,7 @@ impl MissionRunner {
         let model_override = self.model_override.clone();
         let model_effort = self.model_effort.clone();
         let fast_mode = self.fast_mode;
+        let service_tier = self.service_tier;
         let pr_readonly = self.pr_readonly;
         let backend_id = self.backend_id.clone();
         let session_id = self.session_id.clone();
@@ -3490,6 +3514,7 @@ impl MissionRunner {
                         model_override,
                         model_effort,
                         fast_mode,
+                        service_tier,
                         secrets,
                         session_id,
                         config_profile,
@@ -3873,6 +3898,7 @@ pub(crate) async fn run_mission_turn(
     model_override: Option<String>,
     model_effort: Option<String>,
     fast_mode: bool,
+    service_tier: Option<crate::codex_speed::Tier>,
     secrets: Option<Arc<SecretsStore>>,
     session_id: Option<String>,
     mission_config_profile: Option<String>,
@@ -4621,6 +4647,7 @@ pub(crate) async fn run_mission_turn(
                     model: config.default_model.as_deref(),
                     model_effort: model_effort.as_deref(),
                     fast_mode,
+                    service_tier,
                     agent: effective_agent.as_deref(),
                     mission_id,
                     events_tx: events_tx.clone(),
@@ -14565,6 +14592,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let message_id = Uuid::new_v4();
         runner.queue_message(
@@ -14611,6 +14639,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         runner.queue_message(Uuid::new_v4(), "queued follow-up".to_string(), None, None);
 
@@ -14633,6 +14662,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         runner.state = MissionRunState::Running;
         runner.running_handle = Some(tokio::spawn(async {
@@ -14669,6 +14699,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let old_work = barrier.clone();
@@ -14718,6 +14749,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         runner.state = MissionRunState::Running;
         runner.running_handle = Some(tokio::spawn(async {
@@ -14747,6 +14779,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
 
         runner.cancel();
