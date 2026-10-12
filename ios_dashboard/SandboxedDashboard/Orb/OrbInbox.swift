@@ -410,6 +410,7 @@ final class OrbInboxDigestStore {
 
 struct OrbInboxSettingsView: View {
     @State private var settings = OrbInboxSettings.shared
+    @State private var notifications = OrbNotificationCenter.shared
     @State private var customModel: String = {
         let cur = OrbInboxSettings.shared.model
         let isPreset = OrbInboxSettings.modelPresets.contains(where: { $0.id == cur })
@@ -419,12 +420,14 @@ struct OrbInboxSettingsView: View {
     var body: some View {
         List {
             Section {
+                Toggle("Notifications for finished & blocked runs", isOn: $notifications.notificationsEnabled)
+                    .accessibilityIdentifier("settings.inbox.notifications")
                 Toggle("Include autonomous agents", isOn: $settings.includeAutonomous)
                     .accessibilityIdentifier("settings.inbox.includeAutonomous")
                 Toggle("AI Overview summaries", isOn: $settings.aiSummary)
                     .accessibilityIdentifier("settings.inbox.aiSummary")
             } footer: {
-                Text("Summarizes your latest request and what the agent accomplished in 2–3 sentences using the configured router.")
+                Text("Notifies you with the AI Overview when a hybrid or autonomous run needs your input or finishes, and opens its Inbox summary card directly.")
             }
 
             if settings.aiSummary {
@@ -1466,6 +1469,8 @@ struct OrbInboxView: View {
     private let unreadStore = OrbMissionUnreadStore.shared
     private let digestStore = OrbInboxDigestStore.shared
     private let inboxSettings = OrbInboxSettings.shared
+    private let notificationCenter = OrbNotificationCenter.shared
+    @State private var focusedMissionID: String?
 
     private func recomputeSections() {
         let built = OrbInboxModel.buildSections(
@@ -1489,6 +1494,66 @@ struct OrbInboxView: View {
         let newUnread = (built.needsYou + built.ready).filter(\.unread).count
         if actionableCount != newUnread {
             actionableCount = newUnread
+        }
+        notificationCenter.reconcile(needsYou: built.needsYou, ready: built.ready, working: built.working)
+    }
+
+    private func applyPendingFocusIfNeeded(scrollProxy: ScrollViewProxy) {
+        guard let req = notificationCenter.consumeFocus() else { return }
+        let targetID = req.missionID
+        guard !targetID.isEmpty else { return }
+
+        dismissedIDs.remove(targetID)
+        selectedProject = nil
+        seenUnreadIDs.insert(targetID)
+        if req.expandPeek {
+            peekedIDs.insert(targetID)
+        }
+        if req.openReply {
+            replyingMissionID = targetID
+            replyFocused = true
+        }
+        focusedMissionID = targetID
+
+        if let matchedRow = missions.first(where: { $0.id == targetID || $0.id.hasPrefix(targetID) }) {
+            let resolvedID = matchedRow.id
+            seenUnreadIDs.insert(resolvedID)
+            if req.expandPeek {
+                peekedIDs.insert(resolvedID)
+            }
+            if req.openReply {
+                replyingMissionID = resolvedID
+            }
+            focusedMissionID = resolvedID
+            let diskCached = OrbReadCache.readEvents(resolvedID)
+            if !diskCached.isEmpty && eventsByMission[resolvedID] == nil {
+                eventsByMission[resolvedID] = diskCached
+            }
+            digestStore.request(row: matchedRow, events: eventsByMission[resolvedID] ?? [], priority: 0)
+            if eventsByMission[resolvedID] == nil {
+                Task {
+                    if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: resolvedID, limit: 120, sinceSeq: nil) {
+                        OrbReadCache.saveEvents(resolvedID, events: batch.events)
+                        eventsByMission[resolvedID] = batch.events
+                        digestStore.request(row: matchedRow, events: batch.events, priority: 0)
+                        recomputeSections()
+                    }
+                }
+            }
+        }
+        recomputeSections()
+
+        let visibleIDs = Set((filteredNeedsYou + filteredReady).map(\.id))
+        if let fID = focusedMissionID, !visibleIDs.contains(fID) {
+            filterMode = .all
+        }
+
+        let scrollTarget = focusedMissionID ?? targetID
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            withAnimation(.snappy(duration: 0.25)) {
+                scrollProxy.scrollTo(scrollTarget, anchor: .top)
+            }
         }
     }
 
@@ -1533,8 +1598,8 @@ struct OrbInboxView: View {
 
     private func matchesFilter(_ item: OrbInboxItem, mode: OrbInboxFilterMode? = nil) -> Bool {
         switch mode ?? filterMode {
-        case .unread: return item.unread || seenUnreadIDs.contains(item.id) || peekedIDs.contains(item.id) || replyingMissionID == item.id
-        case .attention: return item.attention
+        case .unread: return item.unread || seenUnreadIDs.contains(item.id) || peekedIDs.contains(item.id) || replyingMissionID == item.id || focusedMissionID == item.id
+        case .attention: return item.attention || focusedMissionID == item.id
         case .all: return true
         }
     }
@@ -1581,72 +1646,89 @@ struct OrbInboxView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    modeFilterBar
+        ScrollViewReader { scrollProxy in
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        modeFilterBar
 
-                    if projectFilters.count > 1 {
-                        projectFilterChips
-                    }
+                        if projectFilters.count > 1 {
+                            projectFilterChips
+                        }
 
-                    if !error.isEmpty {
-                        OrbNotice(message: error)
-                    }
+                        if !error.isEmpty {
+                            OrbNotice(message: error)
+                        }
 
-                    if showWorking && !computed.working.isEmpty {
-                        workingSection
-                    }
+                        if showWorking && !computed.working.isEmpty {
+                            workingSection
+                        }
 
-                    if loading && missions.isEmpty {
-                        inboxSkeletons
-                    } else if filteredNeedsYou.isEmpty && filteredReady.isEmpty {
-                        emptyInboxState
-                    } else {
-                        if !filteredNeedsYou.isEmpty {
-                            sectionHeader(title: "Needs you", count: filteredNeedsYou.count)
-                            VStack(spacing: 8) {
-                                ForEach(filteredNeedsYou) { item in
-                                    inboxCard(item)
+                        if loading && missions.isEmpty {
+                            inboxSkeletons
+                        } else if filteredNeedsYou.isEmpty && filteredReady.isEmpty {
+                            emptyInboxState
+                        } else {
+                            if !filteredNeedsYou.isEmpty {
+                                sectionHeader(title: "Needs you", count: filteredNeedsYou.count)
+                                VStack(spacing: 8) {
+                                    ForEach(filteredNeedsYou) { item in
+                                        inboxCard(item)
+                                            .id(item.id)
+                                    }
+                                }
+                            }
+
+                            if !filteredReady.isEmpty {
+                                HStack {
+                                    sectionHeader(title: "Ready for review", count: filteredReady.count)
+                                    Spacer()
+                                    Button {
+                                        OrbHaptics.success()
+                                        Task { await markAllReadyDone() }
+                                    } label: {
+                                        Text("Mark all done")
+                                            .font(.caption.weight(.medium))
+                                            .foregroundStyle(OrbStyle.textSecondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("inbox.markAllDone")
+                                }
+                                VStack(spacing: 8) {
+                                    ForEach(filteredReady) { item in
+                                        inboxCard(item)
+                                            .id(item.id)
+                                    }
                                 }
                             }
                         }
-
-                        if !filteredReady.isEmpty {
-                            HStack {
-                                sectionHeader(title: "Ready for review", count: filteredReady.count)
-                                Spacer()
-                                Button {
-                                    OrbHaptics.success()
-                                    Task { await markAllReadyDone() }
-                                } label: {
-                                    Text("Mark all done")
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(OrbStyle.textSecondary)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("inbox.markAllDone")
-                            }
-                            VStack(spacing: 8) {
-                                ForEach(filteredReady) { item in
-                                    inboxCard(item)
-                                }
-                            }
-                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, undoItem != nil ? 76 : 24)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, undoItem != nil ? 76 : 24)
-            }
-            .background(OrbStyle.background)
-            .refreshable { await load(force: true) }
+                .background(OrbStyle.background)
+                .refreshable { await load(force: true) }
 
-            if let undo = undoItem {
-                undoToast(undo)
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 14)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                if let undo = undoItem {
+                    undoToast(undo)
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 14)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .onChange(of: notificationCenter.pendingFocus) { _, _ in
+                applyPendingFocusIfNeeded(scrollProxy: scrollProxy)
+            }
+            .onChange(of: missions) { _, _ in
+                if notificationCenter.pendingFocus != nil {
+                    applyPendingFocusIfNeeded(scrollProxy: scrollProxy)
+                }
+            }
+            .onAppear {
+                if notificationCenter.pendingFocus != nil {
+                    applyPendingFocusIfNeeded(scrollProxy: scrollProxy)
+                }
             }
         }
         .task {
@@ -2380,7 +2462,10 @@ struct OrbInboxView: View {
         }
         .padding(14)
         .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.border, lineWidth: 1) }
+        .overlay {
+            RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous)
+                .stroke(focusedMissionID == item.id ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: focusedMissionID == item.id ? 1.5 : 1)
+        }
         .opacity(isBusy ? 0.6 : 1.0)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inbox.row.\(item.id)")

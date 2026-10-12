@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1526,6 +1527,13 @@ fun OrbInboxView(
         OrbInboxModel.workingMissions(projects, missions)
     }
 
+    LaunchedEffect(allItems, workingMissions, OrbNotifications.notificationsEnabled) {
+        OrbNotifications.reconcile(allItems, workingMissions)
+    }
+
+    val listState = rememberLazyListState()
+    var highlightedItemId by remember { mutableStateOf<String?>(null) }
+
     val unreadCount = remember(allItems) { allItems.count { it.isUnread } }
     val attentionCount = remember(allItems) { allItems.count { it.isAttention } }
     val totalActionableCount = allItems.size
@@ -1588,6 +1596,7 @@ fun OrbInboxView(
             if (rows.isNotEmpty()) {
                 OrbReadCache.saveRows("mission_events_${item.id}", rows)
                 peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, rows, item.summary)
+                OrbInboxDigestStore.request(core, item.mission, rows, priority = 0)
                 eventsVersion += 1
             } else if (peekTurnsByItem[item.id].isNullOrEmpty()) {
                 peekTurnsByItem[item.id] = OrbInboxModel.extractPeekTurns(item.mission, emptyList(), item.summary)
@@ -1595,6 +1604,58 @@ fun OrbInboxView(
             if (loadingPeekId == item.id) {
                 loadingPeekId = null
             }
+        }
+    }
+
+    LaunchedEffect(OrbNotifications.pendingInboxFocus, allItems) {
+        val target = OrbNotifications.pendingInboxFocus ?: return@LaunchedEffect
+        val matched = allItems.firstOrNull {
+            it.id.equals(target.missionId, ignoreCase = true) ||
+                it.id.lowercase().startsWith(target.missionId.lowercase())
+        } ?: return@LaunchedEffect
+        OrbNotifications.consumeInboxFocus()
+
+        if (!matched.isUnread && filterMode == OrbInboxFilterMode.Unread) {
+            filterMode = OrbInboxFilterMode.All
+        }
+        selectedProjectSlug = null
+        highlightedItemId = matched.id
+        if (target.expandPeek) {
+            if (peekedItemId != matched.id) {
+                togglePeek(matched)
+            } else {
+                val cached = OrbReadCache.loadRows("mission_events_${matched.id}")
+                OrbInboxDigestStore.request(core, matched.mission, cached, priority = 0)
+            }
+        }
+        if (target.openReply) {
+            replyingItemId = matched.id
+            replyDraft = ""
+        }
+        delay(120L)
+        val targetKey = if (matched.kind == OrbInboxKind.NeedsInput) "needs-${matched.id}" else "done-${matched.id}"
+        val idx = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == targetKey }?.index
+        if (idx != null) {
+            runCatching { listState.animateScrollToItem(idx) }
+        } else {
+            val allNeeds = allItems.filter {
+                (if (filterMode == OrbInboxFilterMode.Unread) it.isUnread else true) && it.kind == OrbInboxKind.NeedsInput
+            }
+            val allDone = allItems.filter {
+                (if (filterMode == OrbInboxFilterMode.Unread) it.isUnread else true) && it.kind == OrbInboxKind.Finished
+            }
+            val needsIdx = allNeeds.indexOfFirst { it.id == matched.id }
+            val doneIdx = allDone.indexOfFirst { it.id == matched.id }
+            val computedIndex = when {
+                needsIdx >= 0 -> 2 + needsIdx
+                doneIdx >= 0 -> 1 + (if (allNeeds.isNotEmpty()) 1 + allNeeds.size else 0) + 1 + doneIdx
+                else -> 0
+            }
+            runCatching { listState.animateScrollToItem(computedIndex) }
+        }
+        delay(2600L)
+        if (highlightedItemId == matched.id) {
+            highlightedItemId = null
         }
     }
 
@@ -1667,6 +1728,7 @@ fun OrbInboxView(
             modifier = Modifier.fillMaxSize()
         ) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = 16.dp,
@@ -1681,6 +1743,10 @@ fun OrbInboxView(
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Include autonomous agents", fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.weight(1f))
                             androidx.compose.material3.Switch(checked = OrbInboxSettings.includeAutonomous, onCheckedChange = { OrbInboxSettings.update(newIncludeAutonomous = it) }, modifier = Modifier.testTag("inbox.includeAutonomous"))
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Notifications (AI summary & blockers)", fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.weight(1f))
+                            androidx.compose.material3.Switch(checked = OrbNotifications.notificationsEnabled, onCheckedChange = { OrbNotifications.setEnabled(it) }, modifier = Modifier.testTag("inbox.notificationsEnabled"))
                         }
                         // Minimalist filter bar + inline working pill + Read all
                         Row(
@@ -2036,6 +2102,7 @@ fun OrbInboxView(
                             ) {
                                 OrbInboxCard(
                                     item = item,
+                                    isFocused = highlightedItemId == item.id,
                                     isReplying = replyingItemId == item.id,
                                     replyDraft = if (replyingItemId == item.id) replyDraft else "",
                                     onReplyDraftChange = { replyDraft = it },
@@ -2105,6 +2172,7 @@ fun OrbInboxView(
                             ) {
                                 OrbInboxCard(
                                     item = item,
+                                    isFocused = highlightedItemId == item.id,
                                     isReplying = replyingItemId == item.id,
                                     replyDraft = if (replyingItemId == item.id) replyDraft else "",
                                     onReplyDraftChange = { replyDraft = it },
@@ -2292,6 +2360,7 @@ private fun OrbInboxSectionHeader(title: String, count: Int) {
 @Composable
 private fun OrbInboxCard(
     item: OrbInboxItem,
+    isFocused: Boolean = false,
     isReplying: Boolean,
     replyDraft: String,
     onReplyDraftChange: (String) -> Unit,
@@ -2318,7 +2387,11 @@ private fun OrbInboxCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(OrbStyle.panelRadius))
             .background(OrbStyle.surface)
-            .border(1.dp, OrbStyle.border, RoundedCornerShape(OrbStyle.panelRadius))
+            .border(
+                if (isFocused) 1.5.dp else 1.dp,
+                if (isFocused) Color.White.copy(alpha = 0.45f) else OrbStyle.border,
+                RoundedCornerShape(OrbStyle.panelRadius)
+            )
             .semantics {
                 stateDescription = if (item.isUnread) "Unread" else "Read"
                 customActions = listOf(CustomAccessibilityAction(if (item.isUnread) "Mark read" else "Mark unread") {

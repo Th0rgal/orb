@@ -247,6 +247,76 @@ final class OrbDesktopParityTests: XCTestCase {
         let mentioned = OrbContextTagging.mentionedItems(in: updated, items: items)
         XCTAssertEqual(mentioned.map(\.path), ["crons"])
     }
+
+    @MainActor func testInboxNotificationPayloadAndDeepLinkFocus() throws {
+        let focus = OrbInboxFocusRequest(missionID: "m-hybrid-42", expandPeek: true, openReply: false)
+        let url = try XCTUnwrap(focus.deepLinkURL)
+        XCTAssertEqual(url.absoluteString, "orb://inbox/m-hybrid-42?peek=1")
+
+        let parsed = try XCTUnwrap(OrbInboxFocusRequest.parse(url: url))
+        XCTAssertEqual(parsed.missionID, focus.missionID)
+        XCTAssertEqual(parsed.expandPeek, focus.expandPeek)
+        XCTAssertEqual(parsed.openReply, focus.openReply)
+
+        let replyURL = try XCTUnwrap(URL(string: "orb://inbox/m-hybrid-42?peek=1&reply=1"))
+        let parsedReply = try XCTUnwrap(OrbInboxFocusRequest.parse(url: replyURL))
+        XCTAssertEqual(parsedReply.missionID, "m-hybrid-42")
+        XCTAssertTrue(parsedReply.expandPeek)
+        XCTAssertTrue(parsedReply.openReply)
+
+        let mission = OrbRow(.object([
+            "id": .string("m-hybrid-42"),
+            "title": .string("Prove soundness theorem"),
+            "status": .string("completed"),
+            "project": .string("paloma"),
+            "updated_at": .string("2026-10-12T08:00:00Z"),
+        ]))
+        let digest = OrbInboxDigest(
+            task: "Prove soundness theorem",
+            outcome: "Completed the Lean 4 proof on DGX Spark with zero sorries.",
+            verdict: "Ready to merge",
+            model: "builtin/smart",
+            updatedAt: "2026-10-12T08:00:00Z",
+            context: "Soundness proof for protocol",
+            contextDetails: "Edited 3 files",
+            unresolved: "",
+            decision: "Approve opening the PR on master",
+            suggestions: ["Open the PR now"],
+            sources: [],
+            sourceUpdatedAt: "2026-10-12T08:00:00Z",
+            sourceRevision: "rev-1"
+        )
+        let item = OrbInboxItem(
+            id: "m-hybrid-42",
+            row: mission,
+            projectSlug: "paloma",
+            projectTitle: "Paloma",
+            headline: "Prove soundness theorem",
+            summary: "Finished the task and is ready for your review.",
+            lastRequest: nil,
+            workReceipt: "4 commands · Edited 3 files",
+            aiOverview: digest,
+            badge: "Completed",
+            tone: .green,
+            category: .ready,
+            machine: "dgx-spark",
+            isGoal: false,
+            unread: true,
+            attention: false,
+            canRetry: false,
+            peekTurns: [],
+            childSummary: nil,
+            updatedAt: "2026-10-12T08:00:00Z",
+            interaction: nil
+        )
+
+        let payload = try XCTUnwrap(OrbNotificationPayload.build(from: item))
+        XCTAssertEqual(payload.title, "✅ Paloma · Prove soundness theorem")
+        XCTAssertEqual(payload.subtitle, "Completed · AI Summary · dgx-spark · 4 commands · Edited 3 files")
+        XCTAssertTrue(payload.body.contains("Completed the Lean 4 proof on DGX Spark with zero sorries."))
+        XCTAssertTrue(payload.body.contains("To decide: Approve opening the PR on master"))
+        XCTAssertEqual(payload.categoryIdentifier, OrbNotificationCenter.categoryInboxReady)
+    }
 }
 
 

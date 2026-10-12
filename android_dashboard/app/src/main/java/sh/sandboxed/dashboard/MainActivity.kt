@@ -37,6 +37,13 @@ class MainActivity : FragmentActivity(), PipHost {
         enableEdgeToEdge()
         val container = (application as SandboxedDashboardApp).container
         val orbCore = OrbCore.getInstance(applicationContext)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                runCatching {
+                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+                }
+            }
+        }
         handleIncomingIntent(intent, container, orbCore)
         setContent {
             SandboxedTheme {
@@ -115,6 +122,18 @@ class MainActivity : FragmentActivity(), PipHost {
             val pathSegments = data.pathSegments.map { it.trim() }.filter { it.isNotEmpty() }
             if (host == "inbox") {
                 orbCore.requestInboxOpen()
+                val missionId = pathSegments.firstOrNull()
+                    ?: data.getQueryParameter("mission")?.trim()
+                    ?: data.getQueryParameter("id")?.trim()
+                if (!missionId.isNullOrEmpty()) {
+                    val expandPeek = data.getQueryParameter("peek")?.lowercase() !in setOf("0", "false")
+                    val openReply = data.getQueryParameter("reply")?.lowercase() in setOf("1", "true")
+                    sh.sandboxed.dashboard.orb.OrbNotifications.requestInboxFocus(
+                        missionId = missionId,
+                        expandPeek = expandPeek,
+                        openReply = openReply
+                    )
+                }
                 return
             }
             if (host == "settings") {

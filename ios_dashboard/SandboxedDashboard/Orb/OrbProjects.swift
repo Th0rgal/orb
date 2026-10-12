@@ -331,6 +331,7 @@ struct OrbHome: View {
                 ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
             }
             .task {
+                OrbNotificationCenter.shared.start()
                 if let m = Self.argValue("-orb_open_mission") {
                     linkedProject = Self.argValue("-orb_open_project") ?? "verity-core"
                     linkedFolder = ""
@@ -338,7 +339,17 @@ struct OrbHome: View {
                 } else if let p = Self.argValue("-orb_open_project") {
                     linkedProjectObj = projects.first(where: { $0.id == p }) ?? OrbRow(.object(["slug": .string(p), "title": .string(p == "verity-core" ? "Verity" : p.capitalized)]), project: true)
                 }
+                if OrbNotificationCenter.shared.pendingFocus != nil {
+                    homeTab = "inbox"
+                }
                 await load()
+            }
+            .onChange(of: OrbNotificationCenter.shared.pendingFocus) { _, newValue in
+                if newValue != nil {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        homeTab = "inbox"
+                    }
+                }
             }
             .sheet(isPresented: $settings) { OrbSettingsHome(onBackendChanged: { settings = false; Task { await load() } }) }
             .alert("New project", isPresented: $creating) {
@@ -353,7 +364,16 @@ struct OrbHome: View {
             .navigationDestination(item: $linkedMission) { OrbConversation(missionID: $0, project: linkedProject, folder: linkedFolder) }
             .navigationDestination(item: $linkedProjectObj) { OrbProjectPage(project: $0) }
             .onOpenURL { url in
-                if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission" {
+                if let focus = OrbInboxFocusRequest.parse(url: url) {
+                    homeTab = "inbox"
+                    if !focus.missionID.isEmpty {
+                        OrbNotificationCenter.shared.focusInbox(
+                            missionID: focus.missionID,
+                            expandPeek: focus.expandPeek,
+                            openReply: focus.openReply
+                        )
+                    }
+                } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission" {
                     linkedProject = ""
                     linkedFolder = ""
                     linkedMission = url.lastPathComponent

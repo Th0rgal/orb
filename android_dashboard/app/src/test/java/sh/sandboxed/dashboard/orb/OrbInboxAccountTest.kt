@@ -28,4 +28,17 @@ class OrbInboxAccountTest {
         } finally { OrbSharedInboxState.applying = false }
     }
 
+    @Test fun focusTargetQueuesAndConsumesCleanly() {
+        OrbNotifications.consumeInboxFocus()
+        assertNull(OrbNotifications.pendingInboxFocus)
+        OrbNotifications.requestInboxFocus("m-hybrid-99", expandPeek = true, openReply = true)
+        val pending = OrbNotifications.pendingInboxFocus
+        assertNotNull(pending)
+        assertEquals("m-hybrid-99", pending?.missionId)
+        assertEquals(true, pending?.expandPeek)
+        assertEquals(true, pending?.openReply)
+        val consumed = OrbNotifications.consumeInboxFocus()
+        assertEquals(pending, consumed)
+        assertNull(OrbNotifications.pendingInboxFocus)
+    }
 }

@@ -115,6 +115,7 @@ fun OrbAppRoot(
         OrbInboxModel.init(context)
         OrbInboxSettings.init(context)
         OrbInboxDigestStore.init(context)
+        OrbNotifications.init(context)
         true
     }
 
@@ -148,8 +149,8 @@ fun OrbAppRoot(
         }
     }
 
-    LaunchedEffect(pendingInbox) {
-        if (pendingInbox && core.consumeInboxOpen()) {
+    LaunchedEffect(pendingInbox, OrbNotifications.pendingInboxFocus) {
+        if ((pendingInbox && core.consumeInboxOpen()) || OrbNotifications.pendingInboxFocus != null) {
             showSettingsSheet = false
             backStack.value = listOf(OrbNavScreen.Home)
             topTab = OrbTopTab.Inbox
