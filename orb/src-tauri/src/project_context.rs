@@ -449,6 +449,7 @@ pub async fn project_context_file(
         directory: operation == "mkdir",
         delete: false,
         source: "Orb".into(),
+        confirmed_large: false,
     })?;
     if receipt.conflict {
         if operation == "write" {
@@ -464,6 +465,7 @@ pub async fn project_context_file(
                 directory: false,
                 delete: false,
                 source: "Orb edit conflict".into(),
+                confirmed_large: false,
             })?;
             return Err(format!(
                 "Context changed while editing. Your variant is saved as {variant}"

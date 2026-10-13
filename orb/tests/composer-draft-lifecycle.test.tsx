@@ -24,3 +24,24 @@ it("does not overwrite an unseen stored draft if the composer closes before load
   view.unmount();
   expect(saveComposerDraft).not.toHaveBeenCalled();
 });
+
+it("cancels a pending debounced draft save when a message is sent quickly so remounting stays empty", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(readComposerDraft).mockResolvedValue(undefined);
+    const view = render(() => <Composer scope="m:archived-resume" placeholder="Reply" busy={false} onSend={async () => true} />);
+    await vi.waitFor(() => expect(readComposerDraft).toHaveBeenCalledWith("m:archived-resume"));
+    const input = screen.getByPlaceholderText("Reply") as HTMLTextAreaElement;
+    fireEvent.input(input, { target: { value: "quel est le statut de l’EV bench ?" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await vi.waitFor(() => expect(saveComposerDraft).toHaveBeenCalledWith("m:archived-resume", { text: "", images: [] }));
+    vi.mocked(saveComposerDraft).mockClear();
+    vi.advanceTimersByTime(250);
+    expect(saveComposerDraft).not.toHaveBeenCalled();
+    view.unmount();
+    expect(saveComposerDraft).not.toHaveBeenCalledWith("m:archived-resume", expect.objectContaining({ text: "quel est le statut de l’EV bench ?" }));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+

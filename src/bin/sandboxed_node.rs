@@ -170,6 +170,21 @@ async fn main() -> anyhow::Result<()> {
             "/uploads",
             post(upload_file).layer(DefaultBodyLimit::max(sandboxed_sh::uploads::MAX_BODY_BYTES)),
         )
+        .route("/uploads/sessions", post(upload_session_init))
+        .route(
+            "/uploads/sessions/:upload_id/chunks/:index",
+            axum::routing::put(upload_session_chunk).layer(DefaultBodyLimit::max(
+                sandboxed_sh::uploads::MAX_CHUNK_BYTES,
+            )),
+        )
+        .route(
+            "/uploads/sessions/:upload_id/complete",
+            post(upload_session_complete),
+        )
+        .route(
+            "/uploads/sessions/:upload_id",
+            axum::routing::delete(upload_session_cancel),
+        )
         .route("/execute", post(execute))
         // Private-source jobs carry bounded payloads before base64 encoding,
         // so this route needs the same bounded wire allowance as the core
@@ -1167,6 +1182,77 @@ async fn upload_file(
     .map_err(|e| internal_error(e.into()))?
     .map(Json)
     .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn upload_session_init(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    Json(request): Json<sandboxed_sh::uploads::SessionInit>,
+) -> Result<Json<sandboxed_sh::uploads::SessionStatus>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let root = state.work_root.join("uploads");
+    tokio::task::spawn_blocking(move || {
+        sandboxed_sh::uploads::init_or_status_session(&root, request)
+    })
+    .await
+    .map_err(|e| internal_error(e.into()))?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn upload_session_chunk(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    AxumPath((upload_id, index)): AxumPath<(String, usize)>,
+    bytes: axum::body::Bytes,
+) -> Result<Json<sandboxed_sh::uploads::SessionStatus>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let root = state.work_root.join("uploads");
+    let slot = sandboxed_sh::uploads::CHUNK_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Upload queue unavailable".into(),
+            )
+        })?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        sandboxed_sh::uploads::write_session_chunk(&root, &upload_id, index, &bytes)
+    })
+    .await
+    .map_err(|e| internal_error(e.into()))?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn upload_session_complete(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    AxumPath(upload_id): AxumPath<String>,
+) -> Result<Json<sandboxed_sh::uploads::Receipt>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let root = state.work_root.join("uploads");
+    tokio::task::spawn_blocking(move || sandboxed_sh::uploads::complete_session(&root, &upload_id))
+        .await
+        .map_err(|e| internal_error(e.into()))?
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn upload_session_cancel(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    AxumPath(upload_id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let root = state.work_root.join("uploads");
+    tokio::task::spawn_blocking(move || sandboxed_sh::uploads::cancel_session(&root, &upload_id))
+        .await
+        .map_err(|e| internal_error(e.into()))?
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
 #[derive(serde::Deserialize)]

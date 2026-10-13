@@ -155,6 +155,8 @@ impl Replica {
                     directory: !replacing && entry.is_some_and(|e| e.directory),
                     delete: replacing || entry.is_none(),
                     source: self.source.clone(),
+                    confirmed_large: entry
+                        .is_some_and(|e| e.size > super::project_context::FILE_LIMIT as u64),
                 });
             }
             // Children before parents on deletion; parents before children on creation.
@@ -308,6 +310,7 @@ impl Replica {
                     directory: false,
                     delete: true,
                     source: "sync".into(),
+                    confirmed_large: false,
                 })?;
                 if removed.conflict {
                     continue;
@@ -315,6 +318,8 @@ impl Replica {
                 expected = None;
             }
             if !same(existing, desired) {
+                let is_large =
+                    desired.is_some_and(|e| e.size > super::project_context::FILE_LIMIT as u64);
                 if let Some(hash) = desired.and_then(|e| e.hash.as_ref()) {
                     let mut response = self
                         .request(
@@ -327,19 +332,45 @@ impl Replica {
                         .await?;
                     if response
                         .content_length()
-                        .is_some_and(|size| size > super::project_context::FILE_LIMIT as u64)
+                        .is_some_and(|size| size > super::project_context::CONFIRMED_FILE_LIMIT)
                     {
                         return Err("Context file exceeds limit".into());
                     }
-                    let mut bytes = Vec::new();
-                    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-                        if bytes.len() + chunk.len() > super::project_context::FILE_LIMIT {
-                            return Err("Context file exceeds limit".into());
+                    if is_large {
+                        use std::io::Write;
+                        std::fs::create_dir_all(&self.store.metadata).map_err(|e| e.to_string())?;
+                        let temp = self
+                            .store
+                            .metadata
+                            .join(format!(".replica-blob-{}.tmp", uuid::Uuid::new_v4()));
+                        let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+                        let mut received = 0u64;
+                        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+                            received += chunk.len() as u64;
+                            if received > super::project_context::CONFIRMED_FILE_LIMIT {
+                                let _ = std::fs::remove_file(&temp);
+                                return Err("Context file exceeds limit".into());
+                            }
+                            file.write_all(&chunk).map_err(|e| e.to_string())?;
                         }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    if self.store.put_blob(&bytes)? != *hash {
-                        return Err("Context checksum mismatch".into());
+                        file.sync_all().map_err(|e| e.to_string())?;
+                        drop(file);
+                        let stored = self.store.put_blob_file(&temp, true);
+                        let _ = std::fs::remove_file(&temp);
+                        if stored?.0 != *hash {
+                            return Err("Context checksum mismatch".into());
+                        }
+                    } else {
+                        let mut bytes = Vec::new();
+                        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+                            if bytes.len() + chunk.len() > super::project_context::FILE_LIMIT {
+                                return Err("Context file exceeds limit".into());
+                            }
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        if self.store.put_blob(&bytes)? != *hash {
+                            return Err("Context checksum mismatch".into());
+                        }
                     }
                 }
                 let receipt = self.store.apply(Operation {
@@ -350,6 +381,7 @@ impl Replica {
                     directory: desired.is_some_and(|e| e.directory),
                     delete: desired.is_none(),
                     source: "sync".into(),
+                    confirmed_large: is_large,
                 })?;
                 if receipt.conflict {
                     continue;

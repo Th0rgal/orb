@@ -825,6 +825,20 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(super::uploads::upload)
                 .layer(DefaultBodyLimit::max(crate::uploads::MAX_BODY_BYTES)),
         )
+        .route("/api/uploads/sessions", post(super::uploads::session_init))
+        .route(
+            "/api/uploads/sessions/:upload_id/chunks/:index",
+            axum::routing::put(super::uploads::session_chunk)
+                .layer(DefaultBodyLimit::max(crate::uploads::MAX_CHUNK_BYTES)),
+        )
+        .route(
+            "/api/uploads/sessions/:upload_id/complete",
+            post(super::uploads::session_complete),
+        )
+        .route(
+            "/api/uploads/sessions/:upload_id",
+            axum::routing::delete(super::uploads::session_cancel),
+        )
         .route("/api/stats", get(get_stats))
         .route("/api/software", get(super::agent_software::inventory))
         .route("/api/software/updates", post(super::agent_software::update))

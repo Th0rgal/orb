@@ -34,7 +34,7 @@ import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, rec
 import { adoptTransferredWorkspace } from "./machineTransfer";
 import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
-import { encoded, hasNativePicker, pickNativeFiles, transferFile, prepareUploads, uploadToken, type UploadedFile, type UploadSource } from "./uploads";
+import { backgroundUploads, cancelBackgroundUpload, encoded, formatFileSize, HARD_MAX_BYTES, hasNativePicker, pauseBackgroundUpload, pickNativeFiles, prepareUploads, resumeBackgroundUpload, softLimitForDestination, startBackgroundUpload, statUploadSource, transferFile, uploadToken, type UploadedFile, type UploadSource } from "./uploads";
 import { readComposerDraft, saveComposerDraft } from "./composerDrafts";
 import { readImagePaste, imagePrompt, stageLocalImages, stageRemoteImages, IMAGE_COUNT, type DraftImage } from "./imageAttachments";
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
@@ -371,27 +371,65 @@ export function Composer(p: {
   const [text, setText] = createSignal("");
   const [uploading, setUploading] = createSignal(false);
   const [uploadError, setUploadError] = createSignal<string | null>(null);
+  const [pendingLargeUploads, setPendingLargeUploads] = createSignal<Array<{ source: UploadSource; size: number; destination: string }>>([]);
   let uploaded: UploadedFile[] = [];
   let disposed = false;
   onCleanup(() => { disposed = true; });
   let fileInput!: HTMLInputElement;
   const uploadTarget = () => p.uploadTarget ?? "core";
   const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : p.projectSlug ? `context:${p.projectSlug}` : uploadTarget();
+  const insertUploadedFile = (file: UploadedFile) => {
+    uploaded.push(file);
+    const current = ta ? (ta.selectionStart ?? text().length) : text().length;
+    const token = uploadToken(file.path) + " ";
+    const next = insertAtCaret(text(), current, ta ? (ta.selectionEnd ?? current) : current, token);
+    write(next.value); setCaret(next.caret); ta?.setSelectionRange(next.caret, next.caret);
+  };
+  const confirmLargeUploads = () => {
+    const items = pendingLargeUploads();
+    setPendingLargeUploads([]);
+    const scopeKey = p.scope ?? "new";
+    for (const item of items) {
+      startBackgroundUpload({
+        source: item.source,
+        destination: item.destination,
+        totalBytes: item.size,
+        confirmedLarge: true,
+        scope: scopeKey,
+        onComplete: (file) => {
+          if (!disposed) insertUploadedFile(file);
+        },
+      });
+    }
+  };
+  const scopedBgUploads = createMemo(() => {
+    const scopeKey = p.scope ?? "new";
+    return backgroundUploads().filter((item) => item.scope === scopeKey && (item.state === "uploading" || item.state === "paused" || item.state === "failed"));
+  });
   const attachSources = async (sources: UploadSource[]) => {
     if (p.textOnly || p.imagesOnly) return;
     const scope = p.scope;
     const destination = attachmentTarget();
+    const softLimit = softLimitForDestination(destination);
     setUploading(true); setUploadError(null); setCtx(false);
     try {
+      const largeQueue: Array<{ source: UploadSource; size: number; destination: string }> = [];
       for (const source of sources) {
         if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
+        const stat = await statUploadSource(source);
+        if (stat.size > HARD_MAX_BYTES) {
+          throw new Error(`${source.name} (${formatFileSize(stat.size)}) exceeds the 2 GiB maximum.`);
+        }
+        if (stat.size > softLimit) {
+          largeQueue.push({ source, size: stat.size, destination });
+          continue;
+        }
         const file = await transferFile(source, destination);
         if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
-        uploaded.push(file);
-        const current = ta.selectionStart ?? text().length;
-        const token = uploadToken(file.path) + " ";
-        const next = insertAtCaret(text(), current, ta.selectionEnd ?? current, token);
-        write(next.value); setCaret(next.caret); ta.setSelectionRange(next.caret, next.caret);
+        insertUploadedFile(file);
+      }
+      if (largeQueue.length) {
+        setPendingLargeUploads((prev) => [...prev, ...largeQueue]);
       }
     } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
     finally { setUploading(false); }
@@ -755,6 +793,12 @@ export function Composer(p: {
         if (sideMode) p.onAttachments?.([]);
         if (uploaded === resolved.files) uploaded = [];
         setUploadError(null);
+        if (draftTimer !== undefined) {
+          clearTimeout(draftTimer);
+          draftTimer = undefined;
+        }
+        pendingDraftSave = null;
+        if (sendingCount() <= 1) setPendingSend(null);
         if (draftScope && !text() && !images().length) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(() => {});
         if (!text()) setMode(null);
       }
@@ -1036,6 +1080,49 @@ export function Composer(p: {
       {atMenu}
       <Show when={uploading()}><div class="composer-upload-status" role="status">Attaching file…</div></Show>
       <Show when={uploadError()}><div class="composer-upload-status error" role="alert">{uploadError()}</div></Show>
+      <Show when={pendingLargeUploads().length > 0}>
+        <div class="composer-large-confirm" role="alertdialog" aria-label="Confirm large file upload" onClick={(e) => e.stopPropagation()}>
+          <div class="composer-large-confirm-text">
+            <strong>Large file{pendingLargeUploads().length > 1 ? "s" : ""}</strong>
+            <span>
+              {pendingLargeUploads().map((item) => `${item.source.name} (${formatFileSize(item.size)})`).join(", ")} exceed{pendingLargeUploads().length === 1 ? "s" : ""} the standard limit ({formatFileSize(softLimitForDestination(attachmentTarget()))}). Upload in the background with resumable chunks?
+            </span>
+          </div>
+          <div class="composer-large-confirm-actions">
+            <button type="button" class="s-btn" onClick={() => setPendingLargeUploads([])}>Cancel</button>
+            <button type="button" class="s-btn primary" onClick={confirmLargeUploads}>Upload in background</button>
+          </div>
+        </div>
+      </Show>
+      <Show when={scopedBgUploads().length > 0}>
+        <div class="composer-bg-uploads" role="status" aria-live="polite" onClick={(e) => e.stopPropagation()}>
+          <For each={scopedBgUploads()}>{(item) => {
+            const pct = () => item.totalBytes > 0 ? Math.min(100, Math.round((item.uploadedBytes / item.totalBytes) * 100)) : 0;
+            return (
+              <div class={`composer-bg-upload-row ${item.state === "failed" ? "error" : item.state}`}>
+                <span class="composer-bg-upload-name" title={item.name}>{item.name}</span>
+                <span class="composer-bg-upload-meta">
+                  {item.state === "paused"
+                    ? `Paused · ${pct()}%`
+                    : item.state === "failed"
+                      ? `Interrupted (${pct()}%)${item.error ? ` — ${item.error}` : ""}`
+                      : `${pct()}% · ${formatFileSize(item.uploadedBytes)} / ${formatFileSize(item.totalBytes)}${item.speedBps > 0 ? ` · ${formatFileSize(item.speedBps)}/s` : ""}`}
+                </span>
+                <div class="composer-bg-upload-actions">
+                  <Show when={item.state === "uploading"}>
+                    <button type="button" class="bg-upload-btn" onClick={() => pauseBackgroundUpload(item.id)}>Pause</button>
+                  </Show>
+                  <Show when={item.state === "paused" || item.state === "failed"}>
+                    <button type="button" class="bg-upload-btn" onClick={() => resumeBackgroundUpload(item.id)}>Resume</button>
+                  </Show>
+                  <button type="button" class="bg-upload-btn" aria-label={`Cancel upload of ${item.name}`} onClick={() => cancelBackgroundUpload(item.id)}>×</button>
+                </div>
+                <span class="bg-upload-bar"><i style={{ width: `${pct()}%` }} /></span>
+              </div>
+            );
+          }}</For>
+        </div>
+      </Show>
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
       <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
         <Ic.PencilIcon size={12} /><span class="mode-chip-label">Edit Queued</span>
@@ -2657,11 +2744,15 @@ function MissionDock(p: {
 function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null);
   const [error, setError] = createSignal("");
+  createEffect(() => {
+    const init = p.initial;
+    if (init) setResolved(prev => prev && prev.id === init.id ? { ...prev, ...init } : init);
+  });
   onMount(() => {
     if (p.id) void loadTranscript(p.id).catch(() => {});
     if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e)));
   });
-  return <Show when={resolved()} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}>{m => <Show when={m().backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={m()} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show>}</Show>;
+  return <Show when={Boolean(resolved())} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show></Show>;
 }
 
 export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {

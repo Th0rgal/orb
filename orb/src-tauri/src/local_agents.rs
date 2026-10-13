@@ -1972,7 +1972,13 @@ fn spawn_codex(
         .service_tier
         .is_some_and(|tier| tier != crate::codex_speed::Tier::Standard)
     {
-        command.arg("-c").arg(if request.service_tier == Some(crate::codex_speed::Tier::Ultrafast) { "features.ultrafast_mode=true" } else { "features.fast_mode=true" });
+        command.arg("-c").arg(
+            if request.service_tier == Some(crate::codex_speed::Tier::Ultrafast) {
+                "features.ultrafast_mode=true"
+            } else {
+                "features.fast_mode=true"
+            },
+        );
     }
     let mut child = command
         .current_dir(&request.cwd)

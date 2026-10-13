@@ -139,6 +139,115 @@ pub async fn stage_upload_file(
     Ok(path.to_string_lossy().into_owned())
 }
 
+#[derive(Serialize)]
+pub struct FileStat {
+    pub size: u64,
+    pub modified: u64,
+}
+
+fn verify_allowed_file(path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    if canonical != path
+        || !selected()
+            .lock()
+            .map_err(|e| e.to_string())?
+            .contains(&canonical)
+    {
+        return Err("Choose this file again using the file picker".into());
+    }
+    if !canonical.is_file() {
+        return Err("Only regular files can be attached".into());
+    }
+    Ok(canonical)
+}
+
+#[tauri::command]
+pub async fn stat_upload_file(path: String) -> Result<FileStat, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let canonical = verify_allowed_file(&path)?;
+        let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Ok(FileStat {
+            size: meta.len(),
+            modified,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn read_upload_file_chunk(
+    path: String,
+    offset: u64,
+    length: usize,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{Seek, SeekFrom};
+        if length == 0 || length > 16 * 1024 * 1024 {
+            return Err("Invalid chunk length".into());
+        }
+        let canonical = verify_allowed_file(&path)?;
+        let mut file = std::fs::File::open(&canonical).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| e.to_string())?;
+        let mut bytes = Vec::with_capacity(length);
+        file.take(length as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn stage_upload_file_from_path(
+    app: tauri::AppHandle,
+    path: String,
+    name: String,
+) -> Result<String, String> {
+    use tauri::Manager;
+    if name.is_empty()
+        || name.contains(['/', '\\'])
+        || name == "."
+        || name == ".."
+        || name.len() > 240
+    {
+        return Err("Invalid filename".into());
+    }
+    let directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("attachments")
+        .join(uuid::Uuid::new_v4().to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        let canonical = verify_allowed_file(&path)?;
+        let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
+        if meta.len() > 2 * 1024 * 1024 * 1024 {
+            return Err("Files must be 2 GiB or smaller".into());
+        }
+        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        let dest = directory.join(name);
+        std::fs::copy(&canonical, &dest).map_err(|e| e.to_string())?;
+        let dest = dest.canonicalize().map_err(|e| e.to_string())?;
+        selected()
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(dest.clone());
+        Ok(dest.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn pick_working_directory() -> Result<Option<String>, String> {
     let Some(folder) = rfd::AsyncFileDialog::new()

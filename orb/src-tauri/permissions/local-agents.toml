@@ -51,6 +51,9 @@ commands.allow = [
   "browse_local_files",
   "pick_upload_files",
   "read_upload_file",
+  "read_upload_file_chunk",
+  "stat_upload_file",
   "stage_upload_file",
+  "stage_upload_file_from_path",
   "local_agents_stop",
 ]

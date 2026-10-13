@@ -3256,3 +3256,158 @@ select.orb-select-native:disabled { cursor: default; }
 .launch-status .recovery-actions { margin-top: 8px; gap: 12px; }
 .recovery-actions button { padding: 0; border: 0; background: none; color: var(--fg-2); font-size: 12px; cursor: pointer; }
 .recovery-actions button:hover { color: var(--fg); }
+
+/* Subtle inline download feedback and resumable background upload progress. */
+.file-binary-action {
+  position: relative;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease), background-color var(--t) var(--ease);
+}
+.file-binary-action.is-downloading {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--fg) 10%, transparent) var(--download-pct, 0%),
+    transparent var(--download-pct, 0%)
+  );
+  border-color: var(--stroke-strong);
+  color: var(--fg);
+}
+.file-binary-action.is-downloaded {
+  border-color: color-mix(in srgb, var(--green) 36%, var(--stroke));
+  color: var(--green);
+}
+.file-truncated-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.file-truncated-download {
+  min-height: 26px;
+  padding: 2px 10px;
+  font-size: 11.5px;
+}
+
+.composer-large-confirm {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 4px 2px 2px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--amber) 34%, var(--stroke));
+  background: color-mix(in srgb, var(--amber) 6%, var(--bg-elev));
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.composer-large-confirm-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 200px;
+}
+.composer-large-confirm-text strong {
+  color: var(--fg);
+  font-weight: 500;
+}
+.composer-large-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.composer-large-confirm-actions .s-btn {
+  min-height: 26px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+}
+
+.composer-bg-uploads {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 2px 2px;
+}
+.composer-bg-upload-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--stroke-soft);
+  background: var(--bg-inset);
+  font-size: 11.5px;
+  color: var(--fg-2);
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+.composer-bg-upload-row.error {
+  border-color: color-mix(in srgb, var(--amber) 35%, var(--stroke));
+}
+.composer-bg-upload-name {
+  font-weight: 500;
+  color: var(--fg);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-bg-upload-meta {
+  color: var(--fg-3);
+  margin-right: auto;
+  white-space: nowrap;
+}
+.composer-bg-upload-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.bg-upload-btn {
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--stroke-soft);
+  background: var(--bg-elev);
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.bg-upload-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.bg-upload-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--stroke-soft);
+  overflow: hidden;
+}
+.bg-upload-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--fg-2);
+  transition: width 120ms linear;
+}
+.bg-upload-sidebar-row {
+  position: relative;
+  overflow: hidden;
+  padding-bottom: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.bg-upload-sidebar-row .row-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
