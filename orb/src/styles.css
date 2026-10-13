@@ -829,7 +829,7 @@ button.under-model { color: inherit; }
   display: grid; place-items: center;
 }
 .env-btn:hover { background: var(--bg-active); color: var(--fg); }
-.env-menu { top: calc(100% + 6px); left: 0; right: auto; bottom: auto; min-width: 220px; }
+.env-menu { min-width: 220px; }
 .na-meta { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 4px 10px; }
 .na-drop { position: relative; }
 .na-drop-btn {
@@ -1212,10 +1212,7 @@ button.under-model { color: inherit; }
 .field-row { display: grid; grid-template-columns: 1fr 88px; gap: 10px; }
 .dlg-spacer { flex: 1; }
 
-.row-wrap { position: relative; }
-.row-wrap .plus-menu { top: 28px; right: 4px; left: auto; bottom: auto; min-width: 168px; z-index: 20; }
 .plus-wrap { position: relative; flex: none; align-self: end; }
-.plus-wrap .plus-menu { top: auto; bottom: 28px; left: 0; right: auto; min-width: 200px; }
 .add-form { display: flex; gap: 8px; margin-bottom: 16px; }
 .add-form input {
   height: 32px; padding: 0 10px; border-radius: var(--radius-md);
@@ -1501,9 +1498,9 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 .mode-chip-x svg { width: 10px; height: 10px; }
 .mode-sep { width: 1px; height: 14px; background: var(--stroke-strong); flex: none; }
 .slash-menu {
-  left: 8px; right: auto; bottom: calc(100% + 8px); min-width: 240px; max-width: 320px;
+  min-width: 240px; max-width: 340px;
   max-height: min(320px, 60vh); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
-  padding: 6px; z-index: 20;
+  padding: 6px;
 }
 .slash-head {
   padding: 6px 8px 4px; font-size: 11px; font-weight: 500; color: var(--fg-4);

@@ -266,3 +266,37 @@ it.each(['active', 'pending', 'waiting_background'])('never replaces a %s missio
  expect(fetcher).toHaveBeenCalledTimes(2);
  expect(fetcher.mock.calls.some(([url])=>url.endsWith('/missions'))).toBe(false);
 });
+
+it.each(['paused', 'acknowledged'])('transitions a %s mission to awaiting_user before sending a follow-up message', async status => {
+ setConnection('http://unpause-before-send.test', 'token');
+ const calls: Array<{ url: string; method: string; body: any }> = [];
+ const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+  const method = init?.method ?? 'GET';
+  const body = init?.body ? JSON.parse(init.body as string) : undefined;
+  calls.push({ url, method, body });
+  if (url.endsWith('/missions/restored-mission')) {
+   return Response.json({ id: 'restored-mission', status, remote_node_id: 'sepolia' });
+  }
+  if (url.endsWith('/missions/restored-mission/status')) {
+   return Response.json({ ok: true });
+  }
+  if (url.endsWith('/api/control/message')) {
+   return Response.json({ id: 'msg-1', queued: false, message_accepted: true });
+  }
+  return Response.json({});
+ });
+ vi.stubGlobal('fetch', fetcher);
+ const receipt = await sendMissionMessage('restored-mission', 'Resume benchmark work', undefined, 'msg-1');
+ expect(receipt).toEqual({ id: 'msg-1', queued: false, message_accepted: true });
+ expect(calls.map(c => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+  ['GET', '/api/control/missions/restored-mission', undefined],
+  ['POST', '/api/control/missions/restored-mission/status', { status: 'awaiting_user' }],
+  ['POST', '/api/control/message', {
+   content: 'Resume benchmark work',
+   mission_id: 'restored-mission',
+   queue_followup: true,
+   client_message_id: 'msg-1',
+  }],
+ ]);
+});
+

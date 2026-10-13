@@ -987,8 +987,18 @@ export async function sendMissionMessage(
   };
   const retry = remoteReplacements.get(replacementKey);
   if (retry) return createReplacement(retry);
-  const mission = await getMission(id);
+  let mission = await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+  if (mission.status === "acknowledged" || mission.status === "paused") {
+    await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "awaiting_user" }),
+    });
+    if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+    await confirmCoreChange({ id, status: "awaiting_user" });
+    mission = { ...mission, status: "awaiting_user" };
+  }
   // A reply continues the selected conversation. Send the exact current identity
   // so mentions of other PRs are not mistaken for silently retasking a writer.
   // Remote-node continuation currently accepts content only.

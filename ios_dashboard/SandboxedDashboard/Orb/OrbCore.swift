@@ -150,6 +150,30 @@ enum OrbMissionTree {
             sum + (matches(child.mission) ? 1 : 0) + countNested(child, matches: matches)
         }
     }
+
+    static func subtree(_ missions: [OrbRow], rootIDs: [String]) -> [OrbRow] {
+        var included = Set(rootIDs)
+        var added = true
+        while added {
+            added = false
+            for mission in missions where !included.contains(mission.id) {
+                if let parent = mission.parentMissionID, included.contains(parent) {
+                    included.insert(mission.id)
+                    added = true
+                }
+            }
+        }
+        return missions.filter { included.contains($0.id) }
+    }
+
+    static func filterArchivedByAge(_ rows: [OrbRow], maxAgeSeconds: TimeInterval?, now: Date = Date()) -> [OrbRow] {
+        guard let maxAgeSeconds else { return rows }
+        let cutoff = now.addingTimeInterval(-maxAgeSeconds)
+        return rows.filter { row in
+            guard let date = OrbStyle.parseDate(row.updatedAt) else { return false }
+            return date <= cutoff
+        }
+    }
 }
 
 struct OrbHTTPError: LocalizedError {

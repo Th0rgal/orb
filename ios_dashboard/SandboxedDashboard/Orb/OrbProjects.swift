@@ -42,6 +42,7 @@ enum OrbStyle {
         case "blocked": return "Blocked"
         case "failed": return "Failed"
         case "interrupted", "cancelled": return "Stopped"
+        case "paused": return "Paused"
         case "acknowledged": return "Archived"
         default: return state.replacingOccurrences(of: "_", with: " ")
         }
@@ -54,9 +55,13 @@ enum OrbStyle {
     }()
     nonisolated(unsafe) private static let isoFallbackFormatter = ISO8601DateFormatter()
 
+    static func parseDate(_ raw: String) -> Date? {
+        guard !raw.isEmpty else { return nil }
+        return isoFractionalFormatter.date(from: raw) ?? isoFallbackFormatter.date(from: raw)
+    }
+
     static func relativeTime(_ raw: String, now: Date = Date()) -> String {
-        guard !raw.isEmpty else { return "" }
-        guard let date = isoFractionalFormatter.date(from: raw) ?? isoFallbackFormatter.date(from: raw) else { return "" }
+        guard let date = parseDate(raw) else { return "" }
         let delta = max(0, Int(now.timeIntervalSince(date)))
         if delta < 45 { return "now" }
         if delta < 3600 { return "\(delta / 60)m" }
@@ -278,6 +283,46 @@ struct OrbListIcon: View {
     }
 }
 
+struct OrbArchiveProjectGroup: Identifiable, Equatable {
+    let slug: String
+    let label: String
+    let roots: [OrbNestedMission]
+    let totalCount: Int
+    var id: String { "archive-project:\(slug)" }
+
+    static func build(archivedMissions: [OrbRow], projects: [OrbRow], searchQuery: String = "") -> [OrbArchiveProjectGroup] {
+        let projectTitles = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0.name) })
+        let trimmedSearch = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sorted = archivedMissions
+            .filter { $0.mobile && $0.state == "acknowledged" }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        var byProject: [String: [OrbRow]] = [:]
+        for row in sorted {
+            let slug = row.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            byProject[slug, default: []].append(row)
+        }
+        var groups: [OrbArchiveProjectGroup] = []
+        for (slug, rows) in byProject {
+            let label = projectTitles[slug] ?? (slug.isEmpty ? "No project" : slug)
+            let filteredRows: [OrbRow]
+            if trimmedSearch.isEmpty || label.localizedCaseInsensitiveContains(trimmedSearch) || slug.localizedCaseInsensitiveContains(trimmedSearch) {
+                filteredRows = rows
+            } else {
+                filteredRows = rows.filter {
+                    $0.name.localizedCaseInsensitiveContains(trimmedSearch) ||
+                    OrbStyle.displayTitle($0.name).localizedCaseInsensitiveContains(trimmedSearch)
+                }
+            }
+            guard !filteredRows.isEmpty else { continue }
+            let roots = trimmedSearch.isEmpty
+                ? OrbMissionTree.nest(filteredRows)
+                : filteredRows.map { OrbNestedMission(mission: $0) }
+            groups.append(OrbArchiveProjectGroup(slug: slug, label: label, roots: roots, totalCount: filteredRows.count))
+        }
+        return groups.sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
+    }
+}
+
 struct OrbHome: View {
     @State private var projects: [OrbRow] = []
     @State private var loading = true
@@ -295,8 +340,22 @@ struct OrbHome: View {
     @State private var inboxCount = 0
     @State private var workingByProject: [String: Int] = [:]
     @State private var linkedProjectObj: OrbRow?
+    @State private var archivesOpen = false
+    @State private var archiveExpanded: Set<String> = []
+    @State private var archiveExpandedMissions: Set<String> = []
+    @State private var archivedMissions: [OrbRow] = []
+    @State private var archivesLoading = false
+    @State private var archivesLoaded = false
+    @State private var archivesError: String?
+    @State private var archivesMore = false
+    @State private var archivesOffset = 0
+    @State private var deletingArchiveIDs: Set<String> = []
+    @State private var deleteTargets: [String] = []
+    @State private var deleteConfirmBusy = false
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
+    private static let archiveDaySeconds: TimeInterval = 24 * 60 * 60
+    private static let archiveWeekSeconds: TimeInterval = 7 * 24 * 60 * 60
     private static func argValue(_ flag: String) -> String? {
         let args = ProcessInfo.processInfo.arguments
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
@@ -351,6 +410,11 @@ struct OrbHome: View {
                     }
                 }
             }
+            .onChange(of: search) { _, newValue in
+                if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !archivesLoaded && !archivesLoading {
+                    Task { await loadArchives() }
+                }
+            }
             .sheet(isPresented: $settings) { OrbSettingsHome(onBackendChanged: { settings = false; Task { await load() } }) }
             .alert("New project", isPresented: $creating) {
                 TextField("Project name", text: $name)
@@ -360,6 +424,18 @@ struct OrbHome: View {
                 TextField("Name", text: $renamedTitle)
                 Button("Save") { if let project = renaming { Task { do { _ = try await api.call("/api/projects", method: "PUT", body: .object(["slug": .string(project.id), "title": .string(renamedTitle)])); await load() } catch { self.error = error.localizedDescription } } } }
                 Button("Cancel", role: .cancel) {}
+            }
+            .alert(
+                "Delete \(deleteTargets.count) agent\(deleteTargets.count == 1 ? "" : "s")?",
+                isPresented: Binding(get: { !deleteTargets.isEmpty }, set: { if !$0 { deleteTargets = [] } })
+            ) {
+                Button("Delete", role: .destructive) {
+                    let targets = deleteTargets
+                    Task { await deleteMissions(targets) }
+                }
+                Button("Cancel", role: .cancel) { deleteTargets = [] }
+            } message: {
+                Text("This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running will be kept.")
             }
             .navigationDestination(item: $linkedMission) { OrbConversation(missionID: $0, project: linkedProject, folder: linkedFolder) }
             .navigationDestination(item: $linkedProjectObj) { OrbProjectPage(project: $0) }
@@ -443,6 +519,330 @@ struct OrbHome: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
+    private var archiveGroups: [OrbArchiveProjectGroup] {
+        OrbArchiveProjectGroup.build(
+            archivedMissions: archivedMissions.filter { !deletingArchiveIDs.contains($0.id) },
+            projects: projects,
+            searchQuery: search
+        )
+    }
+
+    private struct FlattenedArchivedMission: Identifiable {
+        let node: OrbNestedMission
+        let depth: Int
+        let launched: Int
+        let launchedLive: Int
+        let isExpanded: Bool
+        var id: String { node.id }
+    }
+
+    private func flattenArchived(_ nodes: [OrbNestedMission], depth: Int = 0) -> [FlattenedArchivedMission] {
+        var result: [FlattenedArchivedMission] = []
+        for node in nodes {
+            let isExpanded = archiveExpandedMissions.contains(node.id)
+            let launched = OrbMissionTree.countNested(node)
+            let launchedLive = OrbMissionTree.countNested(node, matches: \.active)
+            result.append(FlattenedArchivedMission(node: node, depth: depth, launched: launched, launchedLive: launchedLive, isExpanded: isExpanded))
+            if isExpanded && !node.children.isEmpty {
+                result.append(contentsOf: flattenArchived(node.children, depth: depth + 1))
+            }
+        }
+        return result
+    }
+
+    @ViewBuilder
+    private func archiveDeleteMenuContent(slug: String? = nil) -> some View {
+        Button(role: .destructive) {
+            Task { await selectAndDeleteArchives(maxAgeSeconds: nil, slug: slug) }
+        } label: {
+            Label("Delete all…", systemImage: "trash")
+        }
+        Button(role: .destructive) {
+            Task { await selectAndDeleteArchives(maxAgeSeconds: Self.archiveDaySeconds, slug: slug) }
+        } label: {
+            Label("Delete older than 1 day…", systemImage: "trash")
+        }
+        Button(role: .destructive) {
+            Task { await selectAndDeleteArchives(maxAgeSeconds: Self.archiveWeekSeconds, slug: slug) }
+        } label: {
+            Label("Delete older than 1 week…", systemImage: "trash")
+        }
+    }
+
+    private var archivedSectionView: some View {
+        let isSearching = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let effectiveOpen = archivesOpen || (isSearching && !archiveGroups.isEmpty)
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                let next = !archivesOpen
+                withAnimation(.snappy(duration: 0.18)) {
+                    archivesOpen = next
+                }
+                OrbHaptics.selection()
+                if next {
+                    Task { await loadArchives() }
+                }
+            } label: {
+                HStack(spacing: 14) {
+                    OrbListIcon(symbol: "archivebox")
+                    Text("Archived")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                    Spacer()
+                    if (archivesLoading && effectiveOpen) || !deletingArchiveIDs.isEmpty || deleteConfirmBusy {
+                        OrbRunningDots(size: 10)
+                    } else if archivesLoaded && !archivedMissions.isEmpty {
+                        Text("\(archivedMissions.filter { !deletingArchiveIDs.contains($0.id) }.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .lineLimit(1)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(effectiveOpen ? 90 : 0))
+                }
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 34)
+                }
+            }
+            .buttonStyle(OrbPressButtonStyle())
+            .accessibilityIdentifier("home.archived.toggle")
+            .contextMenu {
+                archiveDeleteMenuContent(slug: nil)
+            }
+
+            if effectiveOpen {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(archiveGroups) { group in
+                        let subprojectOpen = archiveExpanded.contains(group.slug) || isSearching
+                        VStack(alignment: .leading, spacing: 0) {
+                            Button {
+                                withAnimation(.snappy(duration: 0.18)) {
+                                    if !archiveExpanded.insert(group.slug).inserted {
+                                        archiveExpanded.remove(group.slug)
+                                    }
+                                }
+                                OrbHaptics.selection()
+                            } label: {
+                                HStack(spacing: 12) {
+                                    OrbListIcon(
+                                        symbol: subprojectOpen ? "folder.fill" : "folder",
+                                        color: group.slug.isEmpty ? nil : appearance.color(group.slug)
+                                    )
+                                    Text(group.label)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                    Spacer()
+                                    Text("\(group.totalCount)")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(OrbStyle.textMuted)
+                                        .lineLimit(1)
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(OrbStyle.icon)
+                                        .rotationEffect(.degrees(subprojectOpen ? 90 : 0))
+                                }
+                                .padding(.vertical, 10)
+                                .padding(.leading, 18)
+                                .contentShape(Rectangle())
+                                .overlay(alignment: .bottom) {
+                                    Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 50)
+                                }
+                            }
+                            .buttonStyle(OrbPressButtonStyle())
+                            .accessibilityIdentifier("archive.project.\(group.slug.isEmpty ? "none" : group.slug)")
+                            .contextMenu {
+                                archiveDeleteMenuContent(slug: group.slug)
+                            }
+
+                            if subprojectOpen {
+                                ForEach(flattenArchived(group.roots)) { item in
+                                    archivedMissionRow(item, projectSlug: group.slug)
+                                        .padding(.leading, CGFloat(34 + min(36, item.depth * 16)))
+                                }
+                            }
+                        }
+                    }
+
+                    if let archivesError, !archivesError.isEmpty {
+                        HStack(spacing: 8) {
+                            Text("Couldn’t load archives.")
+                                .font(.footnote)
+                                .foregroundStyle(OrbStyle.warning)
+                            Spacer()
+                            Button("Retry") {
+                                Task { await loadArchives() }
+                            }
+                            .font(.footnote.weight(.medium))
+                        }
+                        .padding(.vertical, 10)
+                        .padding(.leading, 18)
+                    } else if !archivesLoading && archiveGroups.isEmpty {
+                        Text("No archived conversations.")
+                            .font(.footnote)
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .padding(.vertical, 12)
+                            .padding(.leading, 34)
+                            .accessibilityIdentifier("archive.empty")
+                    }
+
+                    if archivesMore {
+                        Button {
+                            Task { await loadArchives(more: true) }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if archivesLoading {
+                                    OrbRunningDots(size: 10)
+                                }
+                                Text("Load older conversations")
+                                    .font(.footnote.weight(.medium))
+                                    .foregroundStyle(OrbStyle.textSecondary)
+                            }
+                            .padding(.vertical, 10)
+                            .padding(.leading, 34)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(archivesLoading)
+                        .accessibilityIdentifier("archive.load-more")
+                    }
+                }
+            }
+        }
+    }
+
+    private func archivedMissionRow(_ item: FlattenedArchivedMission, projectSlug: String) -> some View {
+        let row = item.node.mission
+        let isGoal = OrbStyle.goalObjective(row.name) != nil || row.raw["goal_mode"].flag
+        let cleanTitle = OrbStyle.displayTitle(row.name)
+        let rel = OrbStyle.relativeTime(row.updatedAt)
+        return HStack(alignment: .top, spacing: 6) {
+            NavigationLink {
+                OrbConversation(missionID: row.id, project: projectSlug, folder: row.folder)
+            } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    OrbListIcon(symbol: "bubble.left")
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(alignment: .center, spacing: 6) {
+                            if isGoal {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "target")
+                                        .font(.system(size: 9, weight: .semibold))
+                                    Text("Goal")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                }
+                                .foregroundStyle(OrbStyle.textSecondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.white.opacity(0.07), in: Capsule())
+                            }
+                            Text(cleanTitle)
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 4)
+                            if item.launched == 0, !rel.isEmpty {
+                                Text(rel)
+                                    .font(.caption2)
+                                    .foregroundStyle(OrbStyle.textMuted)
+                                    .monospacedDigit()
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                        }
+                        let folderSuffix = row.folder.isEmpty ? "" : " · \(row.folder)"
+                        Text("\(OrbStyle.serviceName(row.backend)) · Archived\(folderSuffix)")
+                            .font(.caption)
+                            .foregroundStyle(OrbStyle.textMuted)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(OrbPressButtonStyle())
+            .accessibilityIdentifier("archive.mission.\(row.id)")
+
+            if item.launched > 0 {
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) {
+                        if !archiveExpandedMissions.insert(item.node.id).inserted {
+                            archiveExpandedMissions.remove(item.node.id)
+                        }
+                    }
+                    OrbHaptics.selection()
+                } label: {
+                    HStack(alignment: .center, spacing: 6) {
+                        HStack(spacing: 3) {
+                            Text("\(item.launched)")
+                                .font(.caption2.weight(.medium).monospacedDigit())
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .rotationEffect(.degrees(item.isExpanded ? 90 : 0))
+                        }
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .padding(.leading, 6)
+                        .padding(.trailing, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Color.white.opacity(item.isExpanded ? 0.10 : 0.05),
+                            in: Capsule()
+                        )
+                        .overlay(
+                            Capsule().stroke(
+                                item.isExpanded ? OrbStyle.borderStrong : OrbStyle.border,
+                                lineWidth: 0.75
+                            )
+                        )
+                        if !rel.isEmpty {
+                            Text(rel)
+                                .font(.caption2)
+                                .foregroundStyle(OrbStyle.textMuted)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
+                    .padding(.top, 8)
+                    .padding(.bottom, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32)
+        }
+        .contextMenu {
+            Button {
+                Task { await restoreArchivedMission(row) }
+            } label: {
+                Label("Restore", systemImage: "arrow.uturn.backward")
+            }
+            Divider()
+            Button(role: .destructive) {
+                deleteTargets = [row.id]
+            } label: {
+                Label("Delete agent…", systemImage: "trash")
+            }
+            Divider()
+            archiveDeleteMenuContent(slug: projectSlug)
+        }
+    }
+
     private var projectsScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -504,9 +904,17 @@ struct OrbHome: View {
                 }
                 if loading && projects.isEmpty { projectSkeletons }
                 if !loading && projects.isEmpty && error.isEmpty { ContentUnavailableView("Your projects", systemImage: "folder", description: Text("Create a project to start a conversation.")) }
+                if !loading || !projects.isEmpty {
+                    archivedSectionView
+                }
             }.padding(.horizontal, 18)
         }
-        .refreshable { await load() }
+        .refreshable {
+            await load()
+            if archivesOpen {
+                await loadArchives()
+            }
+        }
     }
     private var projectSkeletons: some View {
         VStack(spacing: 0) {
@@ -546,6 +954,131 @@ struct OrbHome: View {
             counts[slug, default: 0] += 1
         }
         return counts
+    }
+    private func loadArchives(more: Bool = false) async {
+        guard !archivesLoading else { return }
+        archivesLoading = true
+        archivesError = nil
+        defer { archivesLoading = false }
+        let offset = more ? archivesOffset : 0
+        do {
+            let raw = try await api.call("/api/control/missions?status=acknowledged&limit=100&offset=\(offset)")
+            let pageItems = raw.items
+            for item in pageItems {
+                let mid = item["id"].text
+                if !mid.isEmpty {
+                    OrbReadCache.seedMemory("mission:\(mid)", value: item)
+                }
+            }
+            let rows = pageItems.map { OrbRow($0) }.filter { $0.mobile && !deletingArchiveIDs.contains($0.id) }
+            if more {
+                let existingIDs = Set(archivedMissions.map(\.id))
+                archivedMissions.append(contentsOf: rows.filter { !existingIDs.contains($0.id) })
+            } else {
+                archivedMissions = rows
+            }
+            archivesOffset = offset + pageItems.count
+            archivesLoaded = true
+            archivesMore = pageItems.count == 100
+        } catch {
+            archivesError = error.localizedDescription
+        }
+    }
+    private func restoreArchivedMission(_ mission: OrbRow) async {
+        let subtree = OrbMissionTree.subtree(archivedMissions, rootIDs: [mission.id])
+        let targets = subtree.isEmpty ? [mission] : subtree
+        let targetIDs = Set(targets.map(\.id))
+        let previous = archivedMissions
+        withAnimation(.snappy(duration: 0.18)) {
+            archivedMissions.removeAll { targetIDs.contains($0.id) }
+        }
+        do {
+            for target in targets {
+                _ = try await api.call(
+                    "/api/control/missions/\(OrbCore.escape(target.id))/status",
+                    method: "POST",
+                    body: .object(["status": .string("paused")])
+                )
+                OrbReadCache.invalidate("mission:\(target.id)")
+            }
+            let slug = mission.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !slug.isEmpty {
+                OrbReadCache.invalidate("project:\(slug)")
+                OrbReadCache.invalidate("project:\(slug):all")
+            }
+            OrbHaptics.success()
+        } catch {
+            archivedMissions = previous
+            self.error = error.localizedDescription
+        }
+    }
+    private func selectAndDeleteArchives(maxAgeSeconds: TimeInterval?, slug: String?) async {
+        withAnimation(.snappy(duration: 0.18)) {
+            archivesOpen = true
+            if let slug { archiveExpanded.insert(slug) }
+        }
+        if !archivesLoaded {
+            await loadArchives(more: false)
+        }
+        while archivesMore && archivesError == nil {
+            await loadArchives(more: true)
+        }
+        guard archivesError == nil else { return }
+        let candidates = archivedMissions.filter { row in
+            !deletingArchiveIDs.contains(row.id) &&
+            (slug == nil || row.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines) == slug)
+        }
+        let matching = OrbMissionTree.filterArchivedByAge(candidates, maxAgeSeconds: maxAgeSeconds)
+        for row in matching {
+            archiveExpanded.insert(row.raw["project"].text.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        deleteTargets = matching.map(\.id)
+    }
+    private func deleteMissions(_ targetIDs: [String]) async {
+        guard !deleteConfirmBusy, !targetIDs.isEmpty else { return }
+        deleteConfirmBusy = true
+        defer { deleteConfirmBusy = false }
+        let subtree = OrbMissionTree.subtree(archivedMissions, rootIDs: targetIDs)
+        let allIDs = Array(Set(targetIDs + subtree.map(\.id)))
+        deletingArchiveIDs.formUnion(allIDs)
+        deleteTargets = []
+        var failures: [String] = []
+        var affectedProjects: Set<String> = []
+        for id in targetIDs {
+            do {
+                let mission = try await api.call("/api/control/missions/\(OrbCore.escape(id))")
+                let status = mission["status"].text
+                if ["active", "waiting_background"].contains(status) {
+                    failures.append("\(id.prefix(8)): Stop or finish this agent before deleting it.")
+                    continue
+                }
+                if status == "paused" {
+                    _ = try await api.call(
+                        "/api/control/missions/\(OrbCore.escape(id))/status",
+                        method: "POST",
+                        body: .object(["status": .string("acknowledged")])
+                    )
+                }
+                _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))", method: "DELETE")
+                let slug = mission["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !slug.isEmpty { affectedProjects.insert(slug) }
+                OrbReadCache.invalidate("mission:\(id)")
+            } catch let http as OrbHTTPError where http.status == 404 {
+                OrbReadCache.invalidate("mission:\(id)")
+            } catch {
+                failures.append("\(id.prefix(8)): \(error.localizedDescription)")
+            }
+        }
+        archivedMissions.removeAll { allIDs.contains($0.id) }
+        deletingArchiveIDs.subtract(allIDs)
+        for slug in affectedProjects {
+            OrbReadCache.invalidate("project:\(slug)")
+            OrbReadCache.invalidate("project:\(slug):all")
+        }
+        if !failures.isEmpty {
+            self.error = "Couldn’t delete \(failures.count) agent(s). \(failures.joined(separator: "; "))"
+            await loadArchives()
+        }
     }
     private func load() async {
         defer { loading = false }
@@ -1015,11 +1548,25 @@ struct OrbProjectPage: View {
             Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32)
         }
         .contextMenu {
+            if ["completed", "failed", "interrupted", "acknowledged", "cancelled"].contains(row.state) {
+                Button(row.state == "acknowledged" ? "Restore" : "Reopen") {
+                    Task {
+                        do {
+                            _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/status", method: "POST", body: .object(["status": .string("paused")]))
+                            OrbReadCache.invalidate("mission:\(row.id)")
+                            OrbReadCache.invalidate("project:\(project.id)")
+                            OrbReadCache.invalidate("project:\(project.id):all")
+                            await load(force: true)
+                        } catch { self.error = error.localizedDescription }
+                    }
+                }
+            }
             if !row.active && row.state != "acknowledged" {
                 Button("Archive") {
                     Task {
                         do {
                             _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/status", method: "POST", body: .object(["status": .string("acknowledged")]))
+                            OrbReadCache.invalidate("mission:\(row.id)")
                             OrbReadCache.invalidate("project:\(project.id)")
                             OrbReadCache.invalidate("project:\(project.id):all")
                             await load(force: true)

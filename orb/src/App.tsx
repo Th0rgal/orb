@@ -1185,7 +1185,7 @@ export default function App() {
   const [creating, setCreating] = createSignal(false);
   const [newAgentRevision, setNewAgentRevision] = createSignal<{ text: string; append?: boolean } | undefined>();
   const [launchPreview, setLaunchPreview] = createSignal<LaunchReceipt | null>(null);
-  const [launchViewKey,setLaunchViewKey]=createSignal('');
+  const [launchViewKey,setLaunchViewKey]=createSignal<string>(crypto.randomUUID());
   let retryLaunch:(()=>void)|undefined;
   const launchedViewKeys=new Map<string,string>();
   const prepareLaunch=(draft:{text:string;images:DraftImage[];retry?:()=>void}|null)=>{
@@ -1680,7 +1680,7 @@ export default function App() {
     setDraftCyber("standard");
     setAttachChips([]);
     rememberLaunch(m.id, {messageKey:launchPreview()?.messageKey,prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
-    launchedViewKeys.set(m.id,launchViewKey());
+    launchedViewKeys.set(m.id, launchViewKey());
     setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
     if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
     void refreshMissions();
@@ -1697,7 +1697,9 @@ export default function App() {
       const title = missionTitle(text);
       const launchNavigation = navigationVersion;
       const machine = newMachine();
-      const receipt = {messageKey:launchPreview()?.messageKey,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
+      if (!launchPreview() || !launchViewKey()) setLaunchViewKey(crypto.randomUUID());
+      const activeViewKey = launchViewKey();
+      const receipt = {messageKey:launchPreview()?.messageKey ?? `initial:${activeViewKey}`,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
       const projectSlug = effectiveNewProject();
       const pick = effectivePick(machine);
       const selectedCyber = draftCyber();
@@ -1740,7 +1742,7 @@ export default function App() {
         setAttachChips([]);
         rememberLaunch(m.id, {...receipt,prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");
-        launchedViewKeys.set(m.id,launchViewKey());
+        launchedViewKeys.set(m.id, activeViewKey);
         setMissions(prev => [m, ...prev.filter(old => old.id !== m.id)]);
         if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
         void refreshMissions();
@@ -2663,6 +2665,8 @@ function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
 }
 
 export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
+  const boundMissionId = p.id;
+  const staleMission = () => disposed || Boolean(boundMissionId && p.id !== boundMissionId);
   const receipt = p.launch ?? recalledLaunch(p.id);
   let disposed=false;
   onCleanup(()=>{disposed=true;});
@@ -3054,20 +3058,22 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // A different draft/selection, or a definitive rejection, starts a new attempt.
   let retryMessage: { key: string; id: string } | null = null;
   const sendMsgOnce = async (text: string, images: DraftImage[], chips: AttachChip[], attemptId: ReturnType<typeof crypto.randomUUID>, explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId || staleMission()) return false;
     const optEntry = optimisticList().find(item => item.id === attemptId);
     setSendError(null);
     if(explicitId&&optimisticList().length&&!optimisticList().some(item=>item.id===explicitId))setOptimisticList([]);
     if (clientPlaced()) {
-      const sendVersion=connectionVersion(),sendMission=p.id;
+      const sendVersion=connectionVersion(),sendMission=targetMissionId;
       try {
         await import("./localAgents").then(m => m.refreshLocalBindings());
       } catch (error) {
-        if (!localBinding(p.id)) {
+        if (!localBinding(sendMission)) {
           setSendError(`Couldn’t restore this computer’s session: ${error instanceof Error ? error.message : String(error)}. Your draft is kept.`);
           return false;
         }
       }
-      const binding = localBinding(p.id);
+      const binding = localBinding(sendMission);
       if (!binding) {
         setSendError("This session runs on the computer that started it. Your draft is kept.");
         return false;
@@ -3083,26 +3089,28 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
-        if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
+        if(connectionVersion()!==sendVersion||staleMission()||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
         if (!optimisticList().some(item => item.id === attemptId)) return true;
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,service_tier:binding.harness === "codex" ? missionSpeed(mission()??{}) : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
+        await enqueueLocalMessage({id:sendMission,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,service_tier:binding.harness === "codex" ? missionSpeed(mission()??{}) : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
         setOptimisticList(prev => prev.filter(item => item.id !== attemptId));
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {
         // Launch rejection belongs to the composer; it is not a second mission failure.
-        recordLocalFailure(p.id, null);
+        recordLocalFailure(sendMission, null);
         setSendError(e instanceof Error ? e.message : String(e));
         return false;
       }
     }
     const attachments = chips.map(chipToAttachment);
-    const key = JSON.stringify([connectionVersion(), text, attachments, images.map(image => image.id)]);
+    const key = JSON.stringify([connectionVersion(), targetMissionId, text, attachments, images.map(image => image.id)]);
     if (retryMessage?.key !== key) retryMessage = { key, id: attemptId };
     try {
       const sent = imagePrompt(text, await stageRemoteImages(images, mission()), images);
-      const result = await sendMissionMessage(p.id, sent, attachments, explicitId ?? retryMessage.id);
+      if (staleMission() || p.id !== targetMissionId) throw new Error("Conversation changed. Your draft is kept.");
+      const result = await sendMissionMessage(targetMissionId, sent, attachments, explicitId ?? retryMessage.id);
       retryMessage = null;
+      if (staleMission()) return true;
       if (result.replacement) {
         const replacement = result.replacement;
         const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
@@ -3122,7 +3130,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
     catch (e) {
       if (e instanceof MessageRejectedError || (e instanceof ApiError && e.status < 500 && e.status !== 408)) retryMessage = null;
-      setSendError(launchError(e)); return false;
+      if (!staleMission()) setSendError(launchError(e));
+      return false;
     }
   };
   const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
@@ -3146,13 +3155,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     try {
       const project=mission()?.project;
       const chips=project?mentionedChips(row.text,await loadAttachItems(project)):[];
-      if(version!==connectionVersion())return;
+      if(version!==connectionVersion()||staleMission())return;
       const accepted=await sendMsg(row.text,[],chips,row.id);
-      if(version!==connectionVersion())return;
+      if(version!==connectionVersion()||staleMission())return;
       setResend({...row,state:accepted?"accepted":"error",error:accepted?undefined:sendError()||"Couldn’t send. Retry uses the same message identity."});
       if(!accepted)setSendError(null);
     } catch(error) {
-      if(version===connectionVersion())setResend({...row,state:"error",error:String(error)});
+      if(version===connectionVersion()&&!staleMission())setResend({...row,state:"error",error:String(error)});
     }
   };
   const sendEditedPrompt = (text: string) => {
@@ -3167,22 +3176,25 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   };
 
   const stopM = () => {
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId) return;
     if (clientPlaced()) {
-      void stopLocal(p.id).then(() => setClientMissionStatus(p.id, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
+      void stopLocal(targetMissionId).then(() => setClientMissionStatus(targetMissionId, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
       return;
     }
-    void cancelMission(p.id)
+    void cancelMission(targetMissionId)
       .catch(() => {})
       .then(() => refresh());
   };
 
   const [recoveryPending, setRecoveryPending] = createSignal(false);
   const actOnRecovery = async (action: "resume" | "cancel") => {
-    if (recoveryPending()) return;
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId || recoveryPending()) return;
     setRecoveryPending(true);
     try {
       if (action === "resume") await resume();
-      else { await cancelMission(p.id); await refresh(); }
+      else { await cancelMission(targetMissionId); await refresh(); }
     } catch (error) { setSendError(launchError(error)); }
     finally { setRecoveryPending(false); }
   };
@@ -3191,6 +3203,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     ordered: { id: string; content: string; attached?: boolean }[],
     liveInjected?: { id: string; content: string; attached?: boolean }[],
   ) => {
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId || staleMission()) return;
     if (liveInjected?.length) {
       for (const row of liveInjected) {
         const presented = messagePresentation(row.content);
@@ -3215,11 +3229,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     setSendError(null);
     try {
       if (wasBusy) {
-        await cancelMission(p.id).catch(() => {});
+        await cancelMission(targetMissionId).catch(() => {});
         for (let poll = 0; poll < 75; poll++) {
+          if (staleMission() || p.id !== targetMissionId) return;
           try {
-            const current = await getMission(p.id);
-            if (disposed) return;
+            const current = await getMission(targetMissionId);
+            if (staleMission() || p.id !== targetMissionId) return;
             setMission(current);
             const stillStopping =
               ["active", "running", "starting", "resuming"].includes(current.status) ||
@@ -3232,18 +3247,24 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           await new Promise(r => setTimeout(r, 200));
         }
       }
+      if (staleMission() || p.id !== targetMissionId) return;
       const project = mission()?.project;
       const attachItems = project ? await loadAttachItems(project).catch(() => []) : [];
+      if (staleMission() || p.id !== targetMissionId) return;
+      const maxAttempts = wasBusy ? 30 : 1;
       for (let i = 0; i < ordered.length; i++) {
+        if (staleMission() || p.id !== targetMissionId) return;
         const row = ordered[i];
         const presented = messagePresentation(row.content);
         const cleanText = presented.text;
         const attachments = (project ? mentionedChips(cleanText, attachItems) : []).map(chipToAttachment);
         let sent = false;
-        for (let attempt = 0; attempt < 30; attempt++) {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          if (staleMission() || p.id !== targetMissionId) return;
           const freshId = crypto.randomUUID();
           try {
-            const result = await sendMissionMessage(p.id, cleanText, attachments, freshId);
+            const result = await sendMissionMessage(targetMissionId, cleanText, attachments, freshId);
+            if (staleMission() || p.id !== targetMissionId) return;
             if (result.replacement) {
               const replacement = result.replacement;
               const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
@@ -3256,7 +3277,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               p.onFork?.(replacement);
               return;
             }
-            if (i === 0 && result.queued && attempt < 29) {
+            if (i === 0 && wasBusy && result.queued && attempt < maxAttempts - 1) {
               await api(`/api/control/queue/${encodeURIComponent(result.id)}`, { method: "DELETE" }).catch(() => {});
               await new Promise(r => setTimeout(r, 250));
               continue;
@@ -3268,7 +3289,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             break;
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            if (attempt < 29 && /still has a remote job|stopping|409/i.test(msg)) {
+            if (attempt < maxAttempts - 1 && /still has a remote job|stopping|409/i.test(msg)) {
               await new Promise(r => setTimeout(r, 250));
               continue;
             }
@@ -3277,9 +3298,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         }
         if (!sent) break;
       }
-      await refresh();
+      if (!staleMission()) await refresh();
     } catch (e) {
-      setSendError(launchError(e));
+      if (!staleMission()) setSendError(launchError(e));
       throw e;
     } finally {
       setSendingImmediate(false);

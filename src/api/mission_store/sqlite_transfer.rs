@@ -87,7 +87,7 @@ pub(super) async fn save(
             if let Some(data)=existing{let old:Transfer=serde_json::from_str(&data).map_err(error)?;if old.destination!=action.destination||old.backend!=action.backend||old.model!=action.model{return Err("Idempotency key already used for another destination".into());}return Ok(old);}
             guard_start(&tx,action.mission_id)?;
             let (status,revision):(String,String)=tx.query_row("SELECT status,updated_at FROM missions WHERE id=?1",[&mid],|r|Ok((r.get(0)?,r.get(1)?))).map_err(error)?;
-            if !matches!(status.as_str(),"awaiting_user"|"completed"|"failed"|"interrupted"|"paused") || revision!=action.source_revision{return Err("Mission changed or is running; stop it before moving".into());}
+            if !matches!(status.as_str(),"awaiting_user"|"completed"|"failed"|"interrupted"|"paused"|"blocked"|"not_feasible"|"acknowledged") || revision!=action.source_revision{return Err("Mission changed or is running; stop it before moving".into());}
             let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_runs WHERE mission_id=?1 AND execution_state<>'terminal')",[&mid],|r|r.get(0)).map_err(error)?;
             if running{return Err("Source execution has not confirmed termination".into());}
             if let Some(root)=action.source_root.as_deref(){
@@ -458,6 +458,33 @@ mod tests {
         assert!(
             guard_placement(&conn, m.id, "remote-job:test", Some("remote-node:target")).is_ok()
         );
+    }
+    #[tokio::test]
+    async fn machine_transfer_allows_blocked_not_feasible_and_acknowledged_missions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().into(), "transfer-statuses")
+            .await
+            .unwrap();
+        for status in [
+            MissionStatus::Blocked,
+            MissionStatus::NotFeasible,
+            MissionStatus::Acknowledged,
+        ] {
+            let m = store
+                .create_mission(None, None, None, None, None, Some("codex"), None)
+                .await
+                .unwrap();
+            store
+                .update_mission_status_with_reason(m.id, status, Some("native_goal_stopped"))
+                .await
+                .unwrap();
+            let m = store.get_mission(m.id).await.unwrap().unwrap();
+            let prepared = store
+                .save_machine_transfer(action(&m), None)
+                .await
+                .unwrap_or_else(|e| panic!("status {status} should allow transfer prepare: {e}"));
+            assert_eq!(prepared.phase, "preparing");
+        }
     }
 }
 
