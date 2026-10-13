@@ -254,7 +254,7 @@ test("new file: traversal is refused and an existing name is never overwritten",
 test("composer effort: shown after harness and model for Codex, and sent on create", async ({ page }) => {
   const { posts } = await setup(page);
   const picks = page.locator(".picks .model:not(.cyber-pill)");
-  await expect(picks).toHaveText(["Codex", "GPT-6 Astra", "Default"]);
+  await expect(picks).toHaveText(["Codex", "GPT-6 Astra", "Default", "Standard"]);
 
   await picks.nth(2).click();
   const menu = page.locator(".picker");

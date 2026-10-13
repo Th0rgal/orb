@@ -213,8 +213,9 @@ async fn codex_continuity_resume_applies_model_effort_and_clears_fast_tier() {
     let params = &f.requests("thread/resume")[0];
     assert_eq!(params["model"], "synthetic-model");
     assert_eq!(params["config"]["model_reasoning_effort"], "high");
-    assert!(params.as_object().unwrap().contains_key("serviceTier"));
-    assert!(params["serviceTier"].is_null());
+    // Standard speed is sent explicitly as the `default` tier, which clears a
+    // previously selected fast tier on the native thread.
+    assert_eq!(params["serviceTier"], "default");
     assert_eq!(params["approvalPolicy"], "never");
     assert_eq!(params["sandbox"], "danger-full-access");
     assert!(params.get("history").is_none());
