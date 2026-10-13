@@ -1897,7 +1897,6 @@ button.fork-trigger:hover { color: var(--fg); }
 .composer-image .icon-btn { position:absolute;right:3px;top:3px;width:18px;height:18px;border-radius:50%;background:rgb(0 0 0 / 65%);color:white;border:0;opacity:0;transition:opacity .12s; }
 .composer-image:hover .icon-btn, .composer-image:focus-within .icon-btn { opacity:1; }
 @media (hover:none) { .composer-image .icon-btn { opacity:1; } }
-.image-paste-error { flex-basis:100%;color:var(--fg-2);font-size:12px; }
 
 .message-images { display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px; }
 .message-image { position:relative;display:grid;place-items:center;width:64px;height:72px;padding:0;border:1px solid var(--stroke);border-radius: var(--radius-md);overflow:hidden;background:var(--bg);color:var(--fg-3); }
@@ -3411,3 +3410,19 @@ select.orb-select-native:disabled { cursor: default; }
   gap: 4px;
 }
 
+/* Bottom notifications (toast.tsx). Same surface as the Inbox undo bar. */
+.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(560px, calc(100vw - 32px)); pointer-events: none; }
+.toast { pointer-events: auto; display: flex; align-items: center; gap: 10px; max-width: 100%; padding: 8px 8px 8px 14px; border-radius: 8px; background: var(--overlay-surface); border: 1px solid var(--overlay-border); box-shadow: var(--shadow-lg); color: var(--fg-2); font-size: 12px; animation: toast-in 140ms ease-out; }
+.toast-icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--red); }
+.toast-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.toast-title { color: var(--fg); font-weight: 500; }
+.toast-message { color: var(--fg-2); }
+.toast-details { color: var(--fg-3); }
+.toast-details summary { cursor: pointer; width: fit-content; }
+.toast-details pre { margin: 6px 0 0; max-height: 160px; overflow: auto; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; }
+.toast-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
+.toast-btn:hover { background: var(--overlay-hover); }
+.toast-btn kbd { display: inline-grid; place-items: center; min-width: 15px; height: 16px; padding: 0 3px; border-radius: 3px; color: var(--fg-3); font: 10px/1 var(--sans); }
+.toast-icon-btn { flex: none; width: 24px; height: 24px; align-self: flex-start; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }

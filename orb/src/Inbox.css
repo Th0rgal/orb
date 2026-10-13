@@ -136,7 +136,7 @@
 .inbox-act-btn:hover, .inbox-act-btn.on, .inbox-context-chip:hover, .inbox-peek-more-btn:hover, .inbox-peek-open:hover { background: var(--bg-active); color: var(--fg-strong); }
 .inbox-page button:disabled { opacity: .45; cursor: default; }
 .inbox-act-kbd { display: none; }
-.inbox-opt-btn kbd, .inbox-undo-btn kbd { display: inline-grid; place-items: center; min-width: 15px; height: 16px; padding: 0 3px; border-radius: 3px; color: var(--inbox-muted); font: 10px/1 var(--sans); }
+.inbox-opt-btn kbd { display: inline-grid; place-items: center; min-width: 15px; height: 16px; padding: 0 3px; border-radius: 3px; color: var(--inbox-muted); font: 10px/1 var(--sans); }
 .inbox-opt-btn.primary kbd { color: inherit; opacity: .7; }
 .inbox-perm-code { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--bg-inset); border: 1px solid var(--stroke); color: var(--fg-2); font: 12px/1.5 var(--mono); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -199,11 +199,6 @@
 .inbox-empty strong { font-size: 15px; font-weight: 500; color: var(--fg-strong); }
 .inbox-empty p { margin: 0 0 8px; max-width: 400px; color: var(--fg-3); font-size: 13px; line-height: 20px; }
 .inbox-empty-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: center; }
-.inbox-undo-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 32px); padding: 8px 10px 8px 14px; border-radius: 8px; background: var(--overlay-surface); border: 1px solid var(--overlay-border); box-shadow: var(--shadow-lg); color: var(--fg-2); font-size: 12px; }
-.inbox-undo-toast > span { min-width: 0; overflow-wrap: anywhere; }
-.inbox-undo-toast strong { color: var(--fg); font-weight: 500; }
-.inbox-undo-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
-.inbox-undo-btn:hover { background: var(--overlay-hover); }
 
 .inbox-skeleton { margin-top: 20px; }
 .inbox-sk-head { margin: 0 0 10px; }

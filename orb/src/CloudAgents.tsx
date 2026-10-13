@@ -1,4 +1,5 @@
 import { pollWhileVisible } from "./poll";
+import { ErrorToast } from "./toast";
 import { QuizAnswer } from "./QuizAnswer";
 import * as Ic from "./icons";
 import { For, Show, createSignal, createEffect, onMount, onCleanup } from 'solid-js';
@@ -189,7 +190,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
         <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = prompt().replaceAll(`[Image #${image.reference}]`, ""); setPrompt(value); if (ta) ta.value = value; } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show>
         <Show when={uploadedFiles().length}><div class="attach-pills"><For each={uploadedFiles()}>{file => <button type="button" class="pill on" title={file.path} onClick={e => { e.stopPropagation(); setUploadedFiles(cur => cur.filter(item => item.path !== file.path)); const token = uploadToken(file.path); const value = prompt().replaceAll(`${token} `, "").replaceAll(token, ""); setPrompt(value); if (ta) ta.value = value; }}><Ic.FileIcon size={12}/> {file.name} <Ic.CloseIcon size={12}/></button>}</For></div></Show>
         <Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
-        <Show when={imageError()}><span class="image-paste-error" role="alert">{imageError()}</span></Show>
+        <ErrorToast error={imageError()} title="Couldn’t add the image" onDismiss={() => setImageError('')} />
         <textarea ref={ta} aria-label="Prompt" autofocus rows={2} placeholder="Describe a task for your cloud agent" value={prompt()} disabled={busy()} onPaste={event => void pasteImages(event)} onInput={e => setPrompt(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); } }} />
       </div>
       <div class="plus-wrap">

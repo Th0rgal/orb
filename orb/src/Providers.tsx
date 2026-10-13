@@ -1,4 +1,5 @@
 import { AntigravityProvider } from "./AntigravityProvider";
+import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
@@ -435,7 +436,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
       <Show when={p.loadError}>{error => <ErrorNotice title="Could not refresh providers" error={error()}>
         <button class="s-btn" onClick={p.onRefresh}>Try again</button>
       </ErrorNotice>}</Show>
-      <Show when={toggleError()}><p class="s-row-desc c-red" role="alert">{toggleError()}</p></Show>
+      <ErrorToast error={toggleError()} title="Couldn’t update the provider" onDismiss={() => setToggleError(null)} />
 
       <section class="s-sec">
         <div class="section-row"><h3>Subscriptions</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button></div>

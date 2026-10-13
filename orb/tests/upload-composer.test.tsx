@@ -22,7 +22,7 @@ it("keeps the draft when transferring the file fails", async () => {
   render(() => <Composer placeholder="Task" busy={false} onSend={() => {}} onStop={() => {}} uploadTarget="ashur" picker={false} />);
   fireEvent.input(screen.getByPlaceholderText("Task"), { target: { value: "Keep my draft" } });
   fireEvent.click(screen.getByTitle("Add context")); fireEvent.click(screen.getByText("Upload file or image…"));
-  await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Machine offline"));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Machine offline"));
   expect((screen.getByPlaceholderText("Task") as HTMLTextAreaElement).value).toBe("Keep my draft");
 });
 it("moves submitted text into a pending message immediately and restores it on rejection",async()=>{

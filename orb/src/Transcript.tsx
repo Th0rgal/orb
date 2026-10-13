@@ -1,4 +1,5 @@
 import {AutomaticReminder, reminderMessages} from "./AutomaticReminder";
+import { ErrorToast } from "./toast";
 import {PromptEditor} from "./PromptEditor";
 import {VirtualTurns} from "./VirtualTurns";
 import type { JSX } from "solid-js";
@@ -304,7 +305,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
           <span role="status">{copyState()}</span>
           <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Adds a new message at the end of this conversation (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}><Ic.ArrowUpIcon size={14}/></button></Show>
         </div>
-        <Show when={sendError()}><ErrorNotice error={sendError()} /></Show>
+        <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError("")} />
       </Show>
     </div>
     }><details class="background-wake">

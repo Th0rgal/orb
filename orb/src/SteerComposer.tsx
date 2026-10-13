@@ -1,4 +1,4 @@
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { For, Show, createSignal } from "solid-js";
 import { ArrowUpIcon, Spinner } from "./icons";
 import { addProjectSteer, controllerAction, type ProjectSteer, type ProjectSteers } from "./api";
@@ -93,9 +93,7 @@ export function SteerComposer(p: {
           </button>
         </div>
       </div>
-      <Show when={error()}>
-        <ErrorNotice error={error()!} />
-      </Show>
+      <ErrorToast error={error()} title="Couldn’t send your message" onDismiss={() => setError(null)} />
     </div>
   );
 }

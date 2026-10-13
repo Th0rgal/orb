@@ -1,4 +1,5 @@
 import {For,Show,createMemo,createSignal} from 'solid-js';
+import { ErrorToast } from "./toast";
 import {canDiscardQueuedMessage,queuedLocalMessages,prioritizeQueuedMessage,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
 import * as Ic from './icons';
 /** Follow-ups waiting for the current turn, shown like Cursor's queue: one line per
@@ -49,6 +50,6 @@ export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:st
     </div>
    </li>}</For>
   </ol></Show>
-  <Show when={error()&&!rows().some(row=>row.error?.includes(error()))}><p role="alert">{error()}</p></Show>
+  <ErrorToast error={error()&&!rows().some(row=>row.error?.includes(error()!))?error():null} onDismiss={() => setError('')} />
  </section></Show>;
 }
