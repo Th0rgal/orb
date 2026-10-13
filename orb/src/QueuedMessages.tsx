@@ -37,7 +37,7 @@ export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:st
      </span>}><span class="queue-editing">Editing</span></Show>
     </div>
     <Show when={row.state==='dispatching'}><small>{row.error?'Needs review':'Sending…'}</small></Show>
-    <Show when={row.error}><small role="alert">{row.error}</small><Show when={row.state==='error'||row.state==='dispatching'||row.interrupted}><button type="button" class="queue-send-now" disabled={working()||busyIds().has(row.id)} onClick={()=>void actRow(row.id,()=>retryQueuedMessage(row.id))}>Retry</button></Show></Show>
+    <Show when={row.error}><small class="inline-error" role="alert">{row.error}</small><Show when={row.state==='error'||row.state==='dispatching'||row.interrupted}><button type="button" class="queue-send-now" disabled={working()||busyIds().has(row.id)} onClick={()=>void actRow(row.id,()=>retryQueuedMessage(row.id))}>Retry</button></Show></Show>
    </li>}</For>
    <For each={pendingRows()}>{row=><li class="queue-row">
     <div class="queue-line">

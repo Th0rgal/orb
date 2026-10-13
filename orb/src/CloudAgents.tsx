@@ -224,7 +224,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
       <Show when={!account()}><p class="cloud-note" role="status">{loaded() ? 'No connected account for this service' : 'Checking connected accounts…'}</p></Show>
       <Show when={account()?.reason && !account()?.available}><p class="cloud-note" role="status">{account()?.reason}</p></Show>
 
-      <Show when={error()}><p class="cloud-note" role="alert">{error()}</p></Show>
+      <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
     </div>
   </div></section>;
 }
@@ -301,7 +301,7 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     return `${label} · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
   };
   return <><div class="scroll"><div class="col cloud-transcript">
-    <Show when={error()}><p class="cloud-note" role="alert">{error()}</p></Show>
+    <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
     <Show when={execution()} fallback={<p role="status">Loading cloud conversation…</p>}>{e => <>
       <Transcript items={items()} pending={active()} renderText={(item, fallback) =>
         <Show when={e().selection.provider === 'chatgpt'} fallback={fallback}>
