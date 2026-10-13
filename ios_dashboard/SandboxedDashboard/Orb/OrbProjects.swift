@@ -361,34 +361,39 @@ struct OrbHome: View {
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
         return args[idx + 1]
     }
+    /// Split out of `body` so the Swift type checker finishes in reasonable time.
+    private var homeRoot: some View {
+        Group {
+            if homeTab == "inbox" {
+                OrbInboxView(
+                    projects: projects,
+                    actionableCount: $inboxCount,
+                    onOpenMission: { row in
+                        linkedProject = row.raw["project"].text
+                        linkedFolder = row.folder
+                        linkedMission = row.id
+                    }
+                )
+            } else {
+                projectsScrollView
+                    .searchable(text: $search, prompt: "Search projects")
+            }
+        }
+        .background(OrbStyle.background)
+        .navigationTitle(homeTab == "inbox" ? "Inbox" : "Projects")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) { Button { settings = true } label: { OrbCircle(symbol: "person.crop.circle") }.accessibilityLabel("Settings") }
+            ToolbarItem(placement: .principal) { homeModePicker }
+            ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            Group {
-                if homeTab == "inbox" {
-                    OrbInboxView(
-                        projects: projects,
-                        actionableCount: $inboxCount,
-                        onOpenMission: { row in
-                            linkedProject = row.raw["project"].text
-                            linkedFolder = row.folder
-                            linkedMission = row.id
-                        }
-                    )
-                } else {
-                    projectsScrollView
-                        .searchable(text: $search, prompt: "Search projects")
-                }
-            }
-            .background(OrbStyle.background)
-            .navigationTitle(homeTab == "inbox" ? "Inbox" : "Projects")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button { settings = true } label: { OrbCircle(symbol: "person.crop.circle") }.accessibilityLabel("Settings") }
-                ToolbarItem(placement: .principal) { homeModePicker }
-                ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
-            }
+            homeRoot
             .task {
                 OrbNotificationCenter.shared.start()
                 if let m = Self.argValue("-orb_open_mission") {
