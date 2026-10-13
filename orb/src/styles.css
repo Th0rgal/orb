@@ -3395,3 +3395,10 @@ select.orb-select-native:disabled { cursor: default; }
 
 /* Inline errors attached to a row, field or panel. Transient failures use toast.tsx. */
 .inline-error { margin: 4px 0 0; color: var(--red) !important; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.md-workspace-image { display:block; margin:12px 0; }
+.md-workspace-image .md-image { margin:0; }
+.md-workspace-image-open { display:block; max-width:100%; padding:0; border:0; background:none; cursor:zoom-in; }
+.md-workspace-image-missing { display:inline-flex; align-items:center; gap:8px; max-width:100%; padding:8px 12px; border:1px solid var(--stroke); border-radius: var(--radius-md); background:var(--bg-elev); color:var(--fg-2); font:inherit; text-align:left; }
+.md-workspace-image-missing > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.md-workspace-image-missing small { color:var(--fg-3); white-space:nowrap; }
+.md-workspace-image-missing:not(:disabled):hover { border-color:var(--fg-3); }

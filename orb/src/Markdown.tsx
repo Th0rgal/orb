@@ -6,6 +6,8 @@ import { FileReference, FileReferenceText } from "./fileReferenceContext";
 import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
 import { timed } from "./diagnostics";
+import { RICH_TAG, parseRichTag } from "./richTags";
+import { WorkspaceImage } from "./WorkspaceImage";
 
 /**
  * Source-vs-preview for Markdown file views, shared by every one of them so ⌘/
@@ -61,20 +63,38 @@ function MathFormula(p: {text: string; display?: boolean}) {
   const html = createMemo(() => katex.renderToString(p.text, {displayMode: !!p.display, throwOnError: false, trust: false, strict: "ignore", maxExpand: 1000}));
   return <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={html()} />;
 }
+/** `<image>`/`<file>` tags are taken before any other inline syntax so their
+ * quoted paths are never read as emphasis, code or links. */
 function inline(text: string, links = true): JSX.Element[] {
+  if (!links || !/<(?:image|file)\s/i.test(text)) return inlineMarkdown(text, links);
+  const out: JSX.Element[] = [];
+  let last = 0;
+  for (const m of text.matchAll(RICH_TAG)) {
+    const tag = parseRichTag(m[1], m[2], m[3]);
+    if (!tag) continue;
+    if (m.index! > last) out.push(...inlineMarkdown(text.slice(last, m.index), links));
+    out.push(tag.type === "image" ? <WorkspaceImage path={tag.path} alt={tag.label} /> : <FileReference raw={tag.path}>{tag.label}</FileReference>);
+    last = m.index! + m[0].length;
+  }
+  if (last < text.length) out.push(...inlineMarkdown(text.slice(last), links));
+  return out;
+}
+function inlineMarkdown(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
   // Keep code spans opaque. Numeric math is valid; currency such as "$15 and
   // $20" stays text because a closing delimiter cannot precede a digit/word.
   // Emphasis that wraps a code span is taken whole first, or the span would
   // split it and leave its asterisks as text. Links likewise stay whole so
   // code-formatted labels do not expose their brackets and destination.
-  const pattern = /(?<![\\*])\*\*(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\\$])\$\$([^\n]+?)\$\$(?!\$)|(?<![\w\\$])\$(?![\s$])([^$\n]+?)(?<!\s)\$(?![\w$])/g;
+  const pattern = /(?<![\\*])\*\*(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n]|\*(?!\*))*?(?<=\S)\*\*|(?<![\\*])\*(?!\*)(?=\S)(?:\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`\n]*`|[^`*\n])+?(?<=\S)\*(?!\*)|!\[([^\]]*)\]\(([^)\s]+)\)|(?<![\\!])\[(?:`[^`\n]*`|[^\]`\n])+\]\((?:<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|`[^`]*`|\\\((.+?)\\\)|(?<![\\$])\$\$([^\n]+?)\$\$(?!\$)|(?<![\w\\$])\$(?![\s$])([^$\n]+?)(?<!\s)\$(?![\w$])/g;
   let last = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index! > last) out.push(...inlineText(text.slice(last, match.index), links));
     if (match[0].startsWith('**')) out.push(<strong>{inline(match[0].slice(2, -2), links)}</strong>);
     else if (match[0].startsWith('*')) out.push(<em>{inline(match[0].slice(1, -1), links)}</em>);
-    else if (match[0].startsWith('![')) out.push(<img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>);
+    else if (match[0].startsWith('![')) out.push(/^https?:\/\//i.test(match[2])
+      ? <img class="md-image" src={match[2]} alt={match[1]} loading="lazy" referrerPolicy="no-referrer"/>
+      : links && !/^(?!file:)[a-z][a-z0-9+.-]*:/i.test(match[2]) ? <WorkspaceImage path={fileLinkTarget(match[2])} alt={match[1] || match[2].split("/").pop() || match[2]}/> : match[0]);
     else if (match[0].startsWith('[')) out.push(...inlineText(match[0], links));
     else if (match[0].startsWith('`')) out.push(...inlineText(match[0], links));
     else out.push(<MathFormula text={match[3] ?? match[4] ?? match[5]} display={match[4] !== undefined}/>);
@@ -358,7 +378,7 @@ function parseBlocks(src: string): Block[] {
 /** Freeze only completed blocks; fences keep blank lines inside the active tail. */
 /** Search the same block content without mounting historical Markdown. */
 export function markdownText(source:string):string{
- const plain=(text:string):string=>text.replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
+ const plain=(text:string):string=>text.replace(RICH_TAG,(tag,type:string,attrs:string,inner?:string)=>parseRichTag(type,attrs,inner)?.label??tag).replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
  const blockText=(block:Block):string=>block.t==='hr'?'':block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(it=>typeof it==='string'?plain(it):[plain(it.text),...(it.sub?.map(blockText)??[])].filter(Boolean).join('\n')).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text);
  return parseMarkdown(source).map(blockText).filter(Boolean).join('\n');
 }
