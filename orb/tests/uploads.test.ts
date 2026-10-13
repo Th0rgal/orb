@@ -5,7 +5,7 @@ describe("uploaded file destinations", () => {
   it("transfers a selected local file before rewriting its path for a node", async () => {
     const transfer = vi.fn(async (source, destination) => ({ source, destination, path: "/node/uploads/photo one.png", connection: 0 }));
     const result = await prepareUploads(`Inspect ${uploadToken(file.path)}`, [file], "ashur", transfer, 0);
-    expect(transfer).toHaveBeenCalledWith(file.source, "ashur");
+    expect(transfer).toHaveBeenCalledWith(file.source, "ashur", { confirmedLarge: undefined });
     expect(result.text).toBe('Inspect @"/node/uploads/photo one.png"');
     expect(result.text).not.toContain("/Users/");
   });
