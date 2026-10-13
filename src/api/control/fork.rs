@@ -446,7 +446,7 @@ fn initial_prompt(
         return Ok(prompt);
     }
     let context = serde_json::to_string(history).map_err(internal_error)?;
-    let mut budget = 8 * 1024;
+    let mut budget = crate::antigravity::MAX_PROMPT_BYTES / 2;
     while budget > 0 {
         let mut head = (budget / 4).min(context.len());
         while !context.is_char_boundary(head) {
@@ -558,7 +558,7 @@ mod tests {
     fn antigravity_forks_bound_history_and_preserve_current_instructions() {
         let history = vec![
             serde_json::json!({"role":"user","content":"ORIGINAL_OBJECTIVE"}),
-            serde_json::json!({"role":"assistant","content":"é🌲".repeat(20_000)}),
+            serde_json::json!({"role":"assistant","content":"é🌲".repeat(25_000)}),
             serde_json::json!({"role":"user","content":"LATEST_DIRECTION"}),
         ];
         for question in [None, Some("CURRENT_QUESTION")] {
@@ -574,10 +574,14 @@ mod tests {
             assert!(crate::antigravity::validate_prompt(&prompt).is_ok());
             assert!(prompt.contains("ORIGINAL_OBJECTIVE"));
             assert!(prompt.contains("LATEST_DIRECTION"));
-            assert!(prompt.contains("middle omitted"));
             if let Some(question) = question {
+                assert!(
+                    prompt.contains("middle omitted")
+                        || prompt.contains("historical context omitted")
+                );
                 assert!(prompt.ends_with(question));
             } else {
+                assert!(prompt.contains("middle omitted"));
                 assert!(prompt.contains("First inspect the current workspace state"));
             }
         }
@@ -586,7 +590,7 @@ mod tests {
             None,
             &history,
             "antigravity",
-            Some(&"x".repeat(20_000)),
+            Some(&"x".repeat(crate::antigravity::MAX_PROMPT_BYTES + 1)),
             true
         )
         .is_err());

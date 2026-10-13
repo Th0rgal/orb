@@ -34,6 +34,7 @@ commands.allow = [
   "local_interaction_answer",
   "local_session_git",
   "local_agents_cyber_capabilities",
+  "local_codex_speed_options",
   "local_agents_scan",
   "local_antigravity_models",
   "local_agents_workspace",
@@ -50,6 +51,9 @@ commands.allow = [
   "browse_local_files",
   "pick_upload_files",
   "read_upload_file",
+  "read_upload_file_chunk",
+  "stat_upload_file",
   "stage_upload_file",
+  "stage_upload_file_from_path",
   "local_agents_stop",
 ]

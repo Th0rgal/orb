@@ -227,6 +227,7 @@ export interface RemoteJob {
   terminal_reason?: string | null;
 }
 
+export type CodexServiceTier = 'standard' | 'fast' | 'ultrafast';
 export interface Mission {
   recovery?: { kind: "transient" | "background" | "quota" | "output_limit"; reason: string; resume_at: string; attempt: number; max_attempts: number } | null;
   scheduling?: { owner: "sandboxed"; durable: boolean; native_schedule_wakeup: boolean; native_cron: boolean; transport: "mcp" | "acp_mcp" | "local_command" | "unavailable" };
@@ -265,6 +266,7 @@ export interface Mission {
   /** Reasoning effort in force for the next turn. Absent means backend default. */
   model_effort?: string | null;
   fast_mode?: boolean;
+  service_tier?: CodexServiceTier;
   project?: string | null;
   track?: string | null;
   github_pr?: string | null;
@@ -285,6 +287,7 @@ export interface CreateMissionBody {
   working_directory?: string;
   agent?: string;
   fast_mode?: boolean;
+  service_tier?: CodexServiceTier;
   tags?: string[];
   idempotency_key?: string;
   title?: string;
@@ -984,8 +987,18 @@ export async function sendMissionMessage(
   };
   const retry = remoteReplacements.get(replacementKey);
   if (retry) return createReplacement(retry);
-  const mission = await getMission(id);
+  let mission = await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+  if (mission.status === "acknowledged" || mission.status === "paused") {
+    await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "awaiting_user" }),
+    });
+    if (connectionVersion() !== version) throw new Error("Connection changed. Your draft is kept.");
+    await confirmCoreChange({ id, status: "awaiting_user" });
+    mission = { ...mission, status: "awaiting_user" };
+  }
   // A reply continues the selected conversation. Send the exact current identity
   // so mentions of other PRs are not mistaken for silently retasking a writer.
   // Remote-node continuation currently accepts content only.
@@ -1123,7 +1136,7 @@ export async function markMissionOpened(id: string): Promise<void> {
  * omitted field leaves the stored effort untouched. */
 export async function updateMissionSettings(
   id: string,
-  body: { model_override?: string; backend?: string; model_effort?: string },
+  body: { model_override?: string; backend?: string; model_effort?: string; service_tier?: CodexServiceTier },
 ): Promise<Mission> {
   return api(`/api/control/missions/${id}/settings`, {
     method: "PATCH",
@@ -1229,7 +1242,7 @@ export function holdsCapSlot(status: string | null | undefined): boolean {
 }
 
 /** A conversation fork preserves the source workspace and never switches the source harness. */
-export async function forkMission(id: string, body: { backend: string; model_override: string; model_effort: string; idempotency_key: string }): Promise<Mission> {
+export async function forkMission(id: string, body: { backend: string; model_override: string; model_effort: string; service_tier?: CodexServiceTier; idempotency_key: string }): Promise<Mission> {
   try {
     return await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/fork`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),

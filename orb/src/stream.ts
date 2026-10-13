@@ -110,6 +110,8 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
     }
     case "error":
       return d({ message: ev.content, resumable: false });
+    case "mission_status_changed":
+      return d({ status: ev.metadata?.status, summary: ev.content || undefined });
     default:
       return null;
   }

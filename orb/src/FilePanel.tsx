@@ -712,33 +712,95 @@ export function FilePanelProvider(p: {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
+  const [downloads, setDownloads] = createSignal<
+    Record<string, { received: number; total: number; abort: AbortController }>
+  >({});
+  const [downloadedKey, setDownloadedKey] = createSignal<string>();
+  let downloadedTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => {
+    if (downloadedTimer) clearTimeout(downloadedTimer);
+    for (const item of Object.values(downloads())) item.abort.abort();
+  });
+  const formatBytesShort = (bytes: number) =>
+    bytes < 1024
+      ? `${bytes} B`
+      : bytes < 1048576
+        ? `${Math.round(bytes / 1024)} KB`
+        : `${(bytes / 1048576).toFixed(1)} MB`;
+  const activeDownload = createMemo(() => {
+    const ref = selected();
+    return ref ? downloads()[identity(ref)] : undefined;
+  });
+  const isDownloaded = createMemo(() => {
+    const ref = selected();
+    return !!ref && downloadedKey() === identity(ref);
+  });
   async function download() {
     const ref = selected();
     if (!ref) return;
+    const key = identity(ref);
+    const existing = downloads()[key];
+    if (existing) {
+      existing.abort.abort();
+      setDownloads((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      return;
+    }
     setError(undefined);
+    const abort = new AbortController();
+    const initialTotal = content()?.size ?? 0;
+    setDownloads((prev) => ({
+      ...prev,
+      [key]: { received: 0, total: initialTotal, abort },
+    }));
     try {
       const chunks: Uint8Array[] = [];
       let offset = 0,
-        total = 1;
+        total = Math.max(1, initialTotal);
       while (offset < total) {
+        abort.signal.throwIfAborted();
         const r = await client.call(ref.source, {
           action: "download",
           path: ref.path,
           offset,
         });
+        abort.signal.throwIfAborted();
         if (!r.bytes?.length) break;
         chunks.push(new Uint8Array(r.bytes));
         offset = r.next!;
         total = r.size!;
+        setDownloads((prev) =>
+          prev[key]
+            ? { ...prev, [key]: { ...prev[key], received: offset, total } }
+            : prev,
+        );
       }
+      abort.signal.throwIfAborted();
       const url = URL.createObjectURL(new Blob(chunks as BlobPart[]));
       const a = document.createElement("a");
       a.href = url;
       a.download = ref.name;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setDownloadedKey(key);
+      if (downloadedTimer) clearTimeout(downloadedTimer);
+      downloadedTimer = setTimeout(() => {
+        setDownloadedKey((curr) => (curr === key ? undefined : curr));
+      }, 1800);
     } catch (e) {
-      setError((e as Error).message);
+      if (!abort.signal.aborted) {
+        setError((e as Error).message);
+      }
+    } finally {
+      setDownloads((prev) => {
+        if (prev[key]?.abort !== abort) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
     }
   }
   const closeTab = (key: string) => {
@@ -1006,8 +1068,31 @@ export function FilePanelProvider(p: {
                           : ""}
                       </div></Show>
                       <Show when={data().truncated && !data().binary}>
-                        <p class="file-muted">
-                          Preview limited to 1 MiB. {isLocalFile() ? "Reveal in Finder to access the full file." : "Download for the full file."}
+                        <p class="file-muted file-truncated-row">
+                          <span>Preview limited to 1 MiB.</span>
+                          <button
+                            class="s-btn file-binary-action file-inline-download"
+                            classList={{
+                              "is-downloading": !!activeDownload(),
+                              "is-downloaded": isDownloaded(),
+                            }}
+                            style={
+                              activeDownload()
+                                ? {
+                                    "--download-pct": `${Math.min(100, Math.round((activeDownload()!.received / Math.max(1, activeDownload()!.total)) * 100))}%`,
+                                  }
+                                : undefined
+                            }
+                            onClick={() => void (isLocalFile() ? revealFile() : download())}
+                          >
+                            {isLocalFile()
+                              ? "Reveal in Finder"
+                              : activeDownload()
+                                ? `Downloading ${Math.min(100, Math.round((activeDownload()!.received / Math.max(1, activeDownload()!.total)) * 100))}% · ${formatBytesShort(activeDownload()!.received)} / ${formatBytesShort(activeDownload()!.total)}`
+                                : isDownloaded()
+                                  ? "Downloaded ✓"
+                                  : "Download full file"}
+                          </button>
                         </p>
                       </Show>
                       <Show
@@ -1021,8 +1106,32 @@ export function FilePanelProvider(p: {
                             <Show when={imageMime(selected()?.name ?? "")}><button class="s-btn file-binary-action" onClick={() => setShowImage(true)}>View image</button></Show>
                             <p>{/\.pdf$/i.test(selected()?.name ?? "") || imageMime(selected()?.name ?? "") ? "View this document directly in Orb." : "Preview isn’t available for this file."}</p>
                             <Show when={/\.pdf$/i.test(selected()?.name ?? "")}><button class="s-btn file-binary-action" onClick={() => setShowPdf(true)}><Ic.FileIcon size={16} />View PDF</button></Show>
-                            <button class="s-btn file-binary-action" onClick={() => void (isLocalFile() ? revealFile() : download())}>
-                              <Ic.FolderOpenIcon size={16} />{isLocalFile() ? "Reveal in Finder" : "Download file"}
+                            <button
+                              class="s-btn file-binary-action"
+                              classList={{
+                                "is-downloading": !!activeDownload(),
+                                "is-downloaded": isDownloaded(),
+                              }}
+                              style={
+                                activeDownload()
+                                  ? {
+                                      "--download-pct": `${Math.min(100, Math.round((activeDownload()!.received / Math.max(1, activeDownload()!.total)) * 100))}%`,
+                                    }
+                                  : undefined
+                              }
+                              title={activeDownload() ? "Click to cancel download" : undefined}
+                              onClick={() => void (isLocalFile() ? revealFile() : download())}
+                            >
+                              <Ic.FolderOpenIcon size={16} />
+                              <span>
+                                {isLocalFile()
+                                  ? "Reveal in Finder"
+                                  : activeDownload()
+                                    ? `Downloading ${Math.min(100, Math.round((activeDownload()!.received / Math.max(1, activeDownload()!.total)) * 100))}% · ${formatBytesShort(activeDownload()!.received)} / ${formatBytesShort(activeDownload()!.total)}`
+                                    : isDownloaded()
+                                      ? "Downloaded ✓"
+                                      : "Download file"}
+                              </span>
                             </button>
                             <Show when={data().modified}><small>Modified {new Date(data().modified! * 1000).toLocaleDateString(undefined, {day:"numeric", month:"short", year:"numeric"})}</small></Show>
                           </div>}>

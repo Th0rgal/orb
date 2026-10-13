@@ -41,6 +41,8 @@ pub mod antigravity;
 pub mod api;
 pub mod backend;
 pub mod backend_config;
+#[path = "../shared/codex_speed.rs"]
+pub mod codex_speed;
 pub mod config;
 pub mod container_tmp;
 pub mod cost;

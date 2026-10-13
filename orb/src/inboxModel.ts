@@ -429,6 +429,7 @@ export function isSubagentMission(
       (tag) =>
         tag.startsWith("worker-dispatch:") ||
         tag === "superseded" ||
+        tag.startsWith("superseded_by:") ||
         tag.startsWith("superseded-by:"),
     )
   ) {
@@ -451,7 +452,16 @@ export function isAutonomousInboxMission(mission: Mission): boolean {
 
 function isInInboxScope(mission: Mission, scope: InboxScope): boolean {
   // Superseded attempts stay hidden even when showing autonomous agents.
-  if (mission.tags?.some((tag) => tag === "superseded" || tag.startsWith("superseded-by:"))) return false;
+  if (
+    mission.tags?.some(
+      (tag) =>
+        tag === "superseded" ||
+        tag.startsWith("superseded_by:") ||
+        tag.startsWith("superseded-by:"),
+    )
+  ) {
+    return false;
+  }
   return Boolean(scope.includeAutonomous) || !isAutonomousInboxMission(mission);
 }
 
@@ -1597,7 +1607,7 @@ export function listUnreadInboxCandidates(
   for (const m of missions) {
     if (!scope.includeAutonomous) break;
     if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
-    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded-by:"))) continue;
+    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
     const parentId = m.parent_mission_id || m.callback_parent_mission_id;
     if (!parentId) continue;
     if (
@@ -1739,7 +1749,7 @@ export function buildInboxSections(
   const childrenByParent = new Map<string, InboxChildSummary>();
   for (const m of missions) {
     if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
-    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded-by:"))) continue;
+    if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
     const parentId = m.parent_mission_id || m.callback_parent_mission_id;
     if (!parentId) continue;
     let group = childrenByParent.get(parentId);

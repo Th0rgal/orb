@@ -33,6 +33,41 @@ pub fn local_agents_cyber_capabilities() -> u32 {
     2
 }
 
+fn speed_options(model: &str, account: &Value, catalog: &Value) -> Value {
+    let subscription = account.pointer("/account/type").and_then(Value::as_str) == Some("chatgpt");
+    let plan = account.pointer("/account/planType").and_then(Value::as_str);
+    let tiers = [crate::codex_speed::Tier::Standard, crate::codex_speed::Tier::Fast, crate::codex_speed::Tier::Ultrafast].map(|tier| {
+        let available = tier == crate::codex_speed::Tier::Standard || (subscription && tier.supports_model(model)
+            && (tier != crate::codex_speed::Tier::Ultrafast || crate::codex_speed::eligible_ultrafast_plan(plan))
+            && crate::codex_speed::catalog_advertises(catalog, model, tier));
+        json!({"id":tier,"available":available,"reason":if available { None } else { Some("The signed-in Codex subscription does not advertise this speed for this model.") }})
+    });
+    json!({"tiers":tiers})
+}
+
+#[tauri::command]
+pub async fn local_codex_speed_options(bin: String, model: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut child = Command::new(&bin).arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+        let mut stdin = child.stdin.take().ok_or("Codex stdin unavailable")?;
+        let mut reader = BufReader::new(child.stdout.take().ok_or("Codex stdout unavailable")?);
+        let child = Arc::new(Mutex::new(child));
+        let watchdog = Arc::clone(&child);
+        let (finished, waiting) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || { if waiting.recv_timeout(Duration::from_secs(20)).is_err() { if let Ok(mut child) = watchdog.lock() { let _ = child.kill(); } } });
+        let result = (|| {
+            rpc(&mut stdin, &mut reader, "initialize", json!({"clientInfo":{"name":"orb","version":"0.1.0"},"capabilities":{"experimentalApi":true}}))?;
+            write_line(&mut stdin, &json!({"method":"initialized"}).to_string())?;
+            let account = rpc(&mut stdin, &mut reader, "account/read", json!({"refreshToken":false}))?;
+            let catalog = rpc(&mut stdin, &mut reader, "model/list", json!({"includeHidden":true,"limit":100}))?;
+            Ok(speed_options(&model, &account, &catalog))
+        })();
+        let _ = finished.send(());
+        if let Ok(mut child) = child.lock() { let _ = child.kill(); let _ = child.wait(); }
+        result
+    }).await.map_err(|e|e.to_string())?
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ScanRequest {
     #[serde(default)]
@@ -79,6 +114,7 @@ pub struct WriteReport {
 
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct StartRequest {
+    pub service_tier: Option<crate::codex_speed::Tier>,
     pub cyber_revision: Option<uuid::Uuid>,
     pub cyber_access: Option<crate::cyber_access::Mode>,
     #[serde(default)]
@@ -1932,6 +1968,18 @@ fn spawn_codex(
             .arg("-c")
             .arg("mcp_servers.orb-wakeups.default_tools_approval_mode=\"approve\"");
     }
+    if request
+        .service_tier
+        .is_some_and(|tier| tier != crate::codex_speed::Tier::Standard)
+    {
+        command.arg("-c").arg(
+            if request.service_tier == Some(crate::codex_speed::Tier::Ultrafast) {
+                "features.ultrafast_mode=true"
+            } else {
+                "features.fast_mode=true"
+            },
+        );
+    }
     let mut child = command
         .current_dir(&request.cwd)
         .arg("app-server")
@@ -1948,6 +1996,7 @@ fn spawn_codex(
     let mission_id = crate::interactions::session(&request.id);
     let image_paths = request.image_paths.clone();
     let cyber_access = request.cyber_access.unwrap_or_default();
+    let service_tier = request.service_tier.unwrap_or_default();
     let model = request.model.clone();
     let cwd = request.cwd.clone();
     let resume = request.session_id.clone().filter(|s| !s.is_empty());
@@ -1975,6 +2024,7 @@ fn spawn_codex(
             &image_paths,
             model.as_deref(),
             cyber_access,
+            service_tier,
             &cwd,
             resume.as_deref(),
             &text_bg,
@@ -2034,6 +2084,7 @@ fn drive_codex(
     image_paths: &[String],
     model: Option<&str>,
     cyber_access: crate::cyber_access::Mode,
+    service_tier: crate::codex_speed::Tier,
     cwd: &str,
     resume: Option<&str>,
     text: &Output,
@@ -2050,8 +2101,27 @@ fn drive_codex(
         }),
     )?;
     let _ = write_line(stdin, &json!({"method": "initialized"}).to_string());
+    if service_tier != crate::codex_speed::Tier::Standard {
+        let model = model.ok_or("Choose an explicit model before enabling accelerated speed.")?;
+        let account = rpc(stdin, reader, "account/read", json!({"refreshToken":false}))?;
+        let catalog = rpc(
+            stdin,
+            reader,
+            "model/list",
+            json!({"includeHidden":true,"limit":100}),
+        )?;
+        let available = speed_options(model, &account, &catalog);
+        if !available["tiers"].as_array().is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| option["id"] == json!(service_tier) && option["available"] == true)
+        }) {
+            return Err("unsupported_service_tier: the signed-in subscription cannot use the selected speed. No thread or turn was started.".into());
+        }
+    }
     let params = json!({
         "model": model,
+        "serviceTier": service_tier.wire(),
         "cwd": cwd,
         "approvalPolicy": "never",
         "sandbox": "danger-full-access"
@@ -2158,6 +2228,7 @@ fn drive_codex(
             json!({
                 "threadId": thread_id,
                 "cyberAccessProgram": cyber_program,
+                "serviceTier": service_tier.wire(),
                 "input": input,
                 "collaborationMode": {"mode": if planning {"plan"} else {"default"}, "settings": {"model":resolved_model.ok_or("Codex did not resolve a model for collaboration mode")?, "reasoning_effort":null, "developer_instructions":null}}
             }),
@@ -2953,6 +3024,37 @@ pub(crate) fn is_secret_path(rel: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_speed_requires_account_capability_and_an_unambiguous_plan() {
+        use serde_json::json;
+        let catalog = json!({"data":[{"id":"gpt-6.1-sol","serviceTiers":[{"id":"priority"},{"id":"ultrafast"}]}]});
+        let supports = |plan: &str| {
+            super::speed_options(
+                "gpt-6.1-sol",
+                &json!({"account":{"type":"chatgpt","planType":plan}}),
+                &catalog,
+            )
+        };
+        assert_eq!(supports("promax")["tiers"][2]["available"], true);
+        assert_eq!(supports("pro")["tiers"][2]["available"], false);
+        assert_eq!(supports("pro")["tiers"][1]["available"], true);
+        assert_eq!(
+            super::speed_options(
+                "gpt-6.1-sol",
+                &json!({"account":{"type":"apiKey"}}),
+                &catalog
+            )["tiers"][1]["available"],
+            false
+        );
+        assert_eq!(
+            super::speed_options(
+                "gpt-6-luna",
+                &json!({"account":{"type":"chatgpt","planType":"promax"}}),
+                &catalog
+            )["tiers"][2]["available"],
+            false
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn vibe_uses_the_tool_interpreter_even_without_python3_on_path() {
@@ -2975,6 +3077,7 @@ mod tests {
     fn retired_gemini_cannot_be_launched_from_saved_requests() {
         assert!(!HARNESSES.iter().any(|(id, _)| *id == "gemini"));
         let request = StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -3039,6 +3142,7 @@ mod tests {
             std::fs::write(&bin, script).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let request = StartRequest {
+                service_tier: None,
                 effort: None,
                 cyber_revision: None,
                 cyber_access: None,
@@ -3207,6 +3311,7 @@ mod tests {
     #[test]
     fn grok_and_opencode_args_match_the_pinned_flags() {
         let fresh = StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -3325,6 +3430,7 @@ mod tests {
                 &[],
                 Some("gpt-6.1-sol"),
                 crate::cyber_access::Mode::Standard,
+                crate::codex_speed::Tier::Standard,
                 "/tmp",
                 None,
                 &Output::default(),
@@ -3366,6 +3472,7 @@ mod tests {
             &[],
             Some("gpt-6.1-sol"),
             crate::cyber_access::Mode::Daybreak,
+            crate::codex_speed::Tier::Standard,
             "/tmp",
             None,
             &Output::default(),
@@ -3408,6 +3515,7 @@ mod tests {
             &["/tmp/pasted.png".into()],
             None,
             crate::cyber_access::Mode::Automatic,
+            crate::codex_speed::Tier::Standard,
             "/tmp",
             None,
             &output,
@@ -3491,6 +3599,7 @@ mod tests {
             &[],
             None,
             crate::cyber_access::Mode::Automatic,
+            crate::codex_speed::Tier::Standard,
             "/tmp",
             None,
             &Output::default(),
@@ -3528,6 +3637,7 @@ mod tests {
             &[],
             None,
             crate::cyber_access::Mode::Automatic,
+            crate::codex_speed::Tier::Standard,
             "/tmp",
             None,
             &output,
@@ -3578,6 +3688,7 @@ mod tests {
     #[test]
     fn argument_prompt_harnesses_receive_eof_on_stdin() {
         let request = StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -3635,6 +3746,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-permission-{}", uuid_like());
         local_agents_start(StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -3782,6 +3894,7 @@ printf '%s\n' '{"type":"result"}'
             .insert(id.clone(), vec![Duration::from_millis(150)]);
         let started = Instant::now();
         local_agents_start(StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -3859,6 +3972,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-background-{}", uuid_like());
         local_agents_start(StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -3935,6 +4049,7 @@ printf '%s\n' '{"type":"result"}'
     #[test]
     fn completed_local_run_can_be_replaced_by_a_followup() {
         let request = StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -3973,6 +4088,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("generation-test-{}", uuid_like());
         local_agents_start(StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -4008,6 +4124,7 @@ printf '%s\n' '{"type":"result"}'
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("stop-launcher-{}", uuid_like());
             local_agents_start(StartRequest {
+                service_tier: None,
                 effort: None,
                 cyber_revision: None,
                 cyber_access: None,
@@ -4071,6 +4188,7 @@ printf '%s\n' '{"type":"result"}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("resumed-{}", uuid_like());
         local_agents_start(StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -4118,7 +4236,8 @@ printf '%s\n' '{"type":"result"}'
             std::fs::write(&bin, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'claude 1.0.0'; exit 0; }}\ncat '{}'\ncat >/dev/null\n", file.display())).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             let id = format!("zero-turn-{}", uuid_like());
-            local_agents_start(StartRequest { effort: None, cyber_revision: None, cyber_access: None,
+            local_agents_start(StartRequest {
+                service_tier: None, effort: None, cyber_revision: None, cyber_access: None,
                 id: id.clone(),
                 harness: "claudecode".into(),
                 bin: bin.to_string_lossy().into_owned(),
@@ -4173,7 +4292,7 @@ mod plan_smoke {
             }
         }
         let _cleanup = Cleanup(id.clone());
-        local_agents_start(StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into(), shared_cwd_with: None }).unwrap();
+        local_agents_start(StartRequest { service_tier: None, effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness,bin:std::env::var("ORB_PLAN_BIN").unwrap(),cwd:cwd.to_string_lossy().into(),model:None,session_id:None,image_paths:vec![],prompt:"/plan Plan creating hello.txt containing hello. First ask me one question using your native question tool: should it say hello or bonjour? Then present a short plan for approval. Do not delegate. After approval implement it.".into(), shared_cwd_with: None }).unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         let mut approved = false;
         let mut revised = std::env::var_os("ORB_PLAN_REVISE").is_none();
@@ -4287,6 +4406,7 @@ mod directory_tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let first = uuid::Uuid::new_v4().to_string();
         let request = StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,

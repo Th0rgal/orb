@@ -492,7 +492,7 @@ export function startLocalQueueWorker(){
       const effort = row.request.harness === 'antigravity'
        ? normalizeEffort(mission.model_effort, row.request.harness) ?? undefined
        : row.request.effort;
-      return {pending:startLocal({...row.request,effort,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId})};
+      return {pending:startLocal({...row.request,effort,service_tier:row.request.harness==='codex' ? mission.service_tier ?? (mission.fast_mode ? 'fast' : 'standard') : undefined,prompt:row.autoResumed?resumedPrompt(row.request.prompt,row.cut):row.request.prompt,sessionId:localBinding(row.mission)?.sessionId})};
      });
      if(!launch)continue;
      const receipt=await launch.pending;

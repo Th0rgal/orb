@@ -1,4 +1,5 @@
 import { readInboxState } from "./inboxState";
+import { ErrorToast, dismissToast, notify } from "./toast";
 import { applySharedInboxSeen } from "./missionUnread";
 import { applySharedInboxPreferences } from "./inboxSettings";
 import {
@@ -27,7 +28,6 @@ import {
 } from "./api";
 import { Composer } from "./App";
 import { chipToAttachment, type AttachChip } from "./attach";
-import { ErrorNotice } from "./ErrorNotice";
 import {
   FileReferenceContext,
   type ReferenceResolver,
@@ -1778,11 +1778,7 @@ export function InboxPage(p: {
       </div>
 
       <Show when={error()}>
-        <ErrorNotice
-          error={error()!}
-          title="Couldn’t update mission"
-          onDismiss={() => setError(null)}
-        />
+        <ErrorToast error={error()} title="Couldn’t update mission" onDismiss={() => setError(null)} />
       </Show>
 
       <Show
@@ -2045,18 +2041,19 @@ export function InboxPage(p: {
         </div>
       </Show>
 
-      <Show when={undoItem()}>
-        {(u) => (
-          <div class="inbox-undo-toast" role="status" aria-live="polite">
-            <span>
-              Marked <strong>{u().title}</strong> done
-            </span>
-            <button type="button" class="inbox-undo-btn" onClick={() => void undoLastDone()}>
-              Undo <kbd>Z</kbd>
-            </button>
-          </div>
-        )}
-      </Show>
+      <UndoToast item={undoItem()} onUndo={() => void undoLastDone()} onDismiss={() => setUndoItem(null)} />
     </div>
   );
+}
+
+/** The 6 s "Marked … done · Undo" bar, shown through the shared Toaster. */
+function UndoToast(p: { item: { id: string; title: string } | null; onUndo: () => void; onDismiss: () => void }) {
+  createEffect(() => {
+    const item = p.item;
+    if (!item) return dismissToast("inbox-undo");
+    // Inbox owns the 6 s timer (undoItem), so the toast itself never expires.
+    notify({ key: "inbox-undo", kind: "info", title: <>Marked <strong>{item.title}</strong> done</>, actions: [{ label: "Undo", kbd: "Z", run: p.onUndo }], onDismiss: p.onDismiss });
+  });
+  onCleanup(() => dismissToast("inbox-undo"));
+  return null;
 }

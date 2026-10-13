@@ -1,3 +1,5 @@
+import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
+import type {CodexServiceTier} from './api';
 import { Picker } from "./Picker";
 import { Menu } from "./Menu";
 import { Popover } from "./Popover";
@@ -32,11 +34,11 @@ import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, rec
 import { adoptTransferredWorkspace } from "./machineTransfer";
 import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
-import { encoded, hasNativePicker, pickNativeFiles, transferFile, prepareUploads, uploadToken, type UploadedFile, type UploadSource } from "./uploads";
+import { backgroundUploads, cancelBackgroundUpload, encoded, formatFileSize, HARD_MAX_BYTES, hasNativePicker, pauseBackgroundUpload, pickNativeFiles, prepareUploads, resumeBackgroundUpload, softLimitForDestination, startBackgroundUpload, statUploadSource, transferFile, uploadToken, type UploadedFile, type UploadSource } from "./uploads";
 import { readComposerDraft, saveComposerDraft } from "./composerDrafts";
 import { readImagePaste, imagePrompt, stageLocalImages, stageRemoteImages, IMAGE_COUNT, type DraftImage } from "./imageAttachments";
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorToast } from "./toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, phaseIsQuiet, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, nodeLabel, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, missionSettingsIdle, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalObjective, goalPrompt, planObjective, missionTitle, displayTitle, GoalTag, EMPTY_GOAL_ERROR, absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "./goal";
 import { atQuery, browseAttachItems, chipToAttachment, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "./attach";
@@ -146,7 +148,7 @@ const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "A
 /** Harness + model chosen for new agents; persisted per user. `effort` is
  * absent for "let the backend decide", and is dropped whenever the selected
  * harness does not accept that level (see `effort.ts`). */
-export type HarnessPick = { backend: string; model: string; effort?: string };
+export type HarnessPick = { backend: string; model: string; effort?: string; service_tier?: CodexServiceTier };
 const PICK_KEY = "orb.harnessPick";
 const loadPick = (): HarnessPick | null => {
   try {
@@ -192,7 +194,7 @@ const effectivePick = (machine = "core"): HarnessPick | null => {
   const stored = harnessPick();
   if (stored) {
     const effort = normalizeEffort(stored.effort, stored.backend);
-    return effort ? { ...stored, effort } : { backend: stored.backend, model: stored.model };
+    return { ...stored, effort: effort ?? undefined };
   }
   const first = choices.find((c) => c.backend.id === "claudecode") ?? choices[0];
   return { backend: first.backend.id, model: first.models[0].value };
@@ -369,27 +371,65 @@ export function Composer(p: {
   const [text, setText] = createSignal("");
   const [uploading, setUploading] = createSignal(false);
   const [uploadError, setUploadError] = createSignal<string | null>(null);
+  const [pendingLargeUploads, setPendingLargeUploads] = createSignal<Array<{ source: UploadSource; size: number; destination: string }>>([]);
   let uploaded: UploadedFile[] = [];
   let disposed = false;
   onCleanup(() => { disposed = true; });
   let fileInput!: HTMLInputElement;
   const uploadTarget = () => p.uploadTarget ?? "core";
   const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : p.projectSlug ? `context:${p.projectSlug}` : uploadTarget();
+  const insertUploadedFile = (file: UploadedFile) => {
+    uploaded.push(file);
+    const current = ta ? (ta.selectionStart ?? text().length) : text().length;
+    const token = uploadToken(file.path) + " ";
+    const next = insertAtCaret(text(), current, ta ? (ta.selectionEnd ?? current) : current, token);
+    write(next.value); setCaret(next.caret); ta?.setSelectionRange(next.caret, next.caret);
+  };
+  const confirmLargeUploads = () => {
+    const items = pendingLargeUploads();
+    setPendingLargeUploads([]);
+    const scopeKey = p.scope ?? "new";
+    for (const item of items) {
+      startBackgroundUpload({
+        source: item.source,
+        destination: item.destination,
+        totalBytes: item.size,
+        confirmedLarge: true,
+        scope: scopeKey,
+        onComplete: (file) => {
+          if (!disposed) insertUploadedFile(file);
+        },
+      });
+    }
+  };
+  const scopedBgUploads = createMemo(() => {
+    const scopeKey = p.scope ?? "new";
+    return backgroundUploads().filter((item) => item.scope === scopeKey && (item.state === "uploading" || item.state === "paused" || item.state === "failed"));
+  });
   const attachSources = async (sources: UploadSource[]) => {
     if (p.textOnly || p.imagesOnly) return;
     const scope = p.scope;
     const destination = attachmentTarget();
+    const softLimit = softLimitForDestination(destination);
     setUploading(true); setUploadError(null); setCtx(false);
     try {
+      const largeQueue: Array<{ source: UploadSource; size: number; destination: string }> = [];
       for (const source of sources) {
         if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
+        const stat = await statUploadSource(source);
+        if (stat.size > HARD_MAX_BYTES) {
+          throw new Error(`${source.name} (${formatFileSize(stat.size)}) exceeds the 2 GiB maximum.`);
+        }
+        if (stat.size > softLimit) {
+          largeQueue.push({ source, size: stat.size, destination });
+          continue;
+        }
         const file = await transferFile(source, destination);
         if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
-        uploaded.push(file);
-        const current = ta.selectionStart ?? text().length;
-        const token = uploadToken(file.path) + " ";
-        const next = insertAtCaret(text(), current, ta.selectionEnd ?? current, token);
-        write(next.value); setCaret(next.caret); ta.setSelectionRange(next.caret, next.caret);
+        insertUploadedFile(file);
+      }
+      if (largeQueue.length) {
+        setPendingLargeUploads((prev) => [...prev, ...largeQueue]);
       }
     } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
     finally { setUploading(false); }
@@ -753,6 +793,12 @@ export function Composer(p: {
         if (sideMode) p.onAttachments?.([]);
         if (uploaded === resolved.files) uploaded = [];
         setUploadError(null);
+        if (draftTimer !== undefined) {
+          clearTimeout(draftTimer);
+          draftTimer = undefined;
+        }
+        pendingDraftSave = null;
+        if (sendingCount() <= 1) setPendingSend(null);
         if (draftScope && !text() && !images().length) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(() => {});
         if (!text()) setMode(null);
       }
@@ -935,7 +981,7 @@ export function Composer(p: {
                 onClose={() => setWhich(null)} onSelect={value => {
                   const backend = choice()!.backend.id;
                   const effort = normalizeEffort(pick()?.effort, backend);
-                  setHarnessPick({backend,model:value,...(effort ? {effort} : {})});setWhich(null);
+                  setHarnessPick({...pick()!,backend,model:value,...(effort ? {effort} : {})});setWhich(null);
                 }}/>
 
             </Show>
@@ -959,13 +1005,14 @@ export function Composer(p: {
                   items={[{id:"",label:defaultEffortLabel(pick()?.backend,pick()?.model)},...supportedEfforts(pick()?.backend).map(e => ({id:e,label:effortLabel(e)}))]}
                   onClose={() => setWhich(null)} onSelect={value => {
                     const cur = pick()!; const effort = normalizeEffort(value, cur.backend);
-                    setHarnessPick({backend:cur.backend,model:cur.model,...(effort ? {effort} : {})});setWhich(null);
+                    setHarnessPick({...cur,backend:cur.backend,model:cur.model,...(effort ? {effort} : {})});setWhich(null);
                   }}/>
 
               </Show>
             </div>
           </Show>
           <Show when={pick()?.backend === "codex"}>
+            <span class="picks-sep">·</span><CodexSpeedPicker model={pick()?.model??""} value={pick()?.service_tier??"standard"} local={p.uploadTarget==="local"} onChange={tier=>setHarnessPick({...pick()!,service_tier:tier})}/>
             <span class="picks-sep">·</span><CyberPicker value={draftCyber()} model={pick()?.model??""} remote={!!p.uploadTarget&&p.uploadTarget!=="core"&&p.uploadTarget!=="local"} onChange={setDraftCyber}/>
           </Show>
         </Show>
@@ -1032,7 +1079,50 @@ export function Composer(p: {
       {slashMenu}
       {atMenu}
       <Show when={uploading()}><div class="composer-upload-status" role="status">Attaching file…</div></Show>
-      <Show when={uploadError()}><div class="composer-upload-status error" role="alert">{uploadError()}</div></Show>
+      <Show when={pendingLargeUploads().length > 0}>
+        <div class="composer-large-confirm" role="alertdialog" aria-label="Confirm large file upload" onClick={(e) => e.stopPropagation()}>
+          <div class="composer-large-confirm-text">
+            <strong>Large file{pendingLargeUploads().length > 1 ? "s" : ""}</strong>
+            <span>
+              {pendingLargeUploads().map((item) => `${item.source.name} (${formatFileSize(item.size)})`).join(", ")} exceed{pendingLargeUploads().length === 1 ? "s" : ""} the standard limit ({formatFileSize(softLimitForDestination(attachmentTarget()))}). Upload in the background with resumable chunks?
+            </span>
+          </div>
+          <div class="composer-large-confirm-actions">
+            <button type="button" class="s-btn" onClick={() => setPendingLargeUploads([])}>Cancel</button>
+            <button type="button" class="s-btn primary" onClick={confirmLargeUploads}>Upload in background</button>
+          </div>
+        </div>
+      </Show>
+      <Show when={scopedBgUploads().length > 0}>
+        <div class="composer-bg-uploads" role="status" aria-live="polite" onClick={(e) => e.stopPropagation()}>
+          <For each={scopedBgUploads()}>{(item) => {
+            const pct = () => item.totalBytes > 0 ? Math.min(100, Math.round((item.uploadedBytes / item.totalBytes) * 100)) : 0;
+            return (
+              <div class={`composer-bg-upload-row ${item.state === "failed" ? "error" : item.state}`}>
+                <span class="composer-bg-upload-name" title={item.name}>{item.name}</span>
+                <span class="composer-bg-upload-meta">
+                  {item.state === "paused"
+                    ? `Paused · ${pct()}%`
+                    : item.state === "failed"
+                      ? `Interrupted (${pct()}%)${item.error ? ` — ${item.error}` : ""}`
+                      : `${pct()}% · ${formatFileSize(item.uploadedBytes)} / ${formatFileSize(item.totalBytes)}${item.speedBps > 0 ? ` · ${formatFileSize(item.speedBps)}/s` : ""}`}
+                </span>
+                <div class="composer-bg-upload-actions">
+                  <Show when={item.state === "uploading"}>
+                    <button type="button" class="bg-upload-btn" onClick={() => pauseBackgroundUpload(item.id)}>Pause</button>
+                  </Show>
+                  <Show when={item.state === "paused" || item.state === "failed"}>
+                    <button type="button" class="bg-upload-btn" onClick={() => resumeBackgroundUpload(item.id)}>Resume</button>
+                  </Show>
+                  <button type="button" class="bg-upload-btn" aria-label={`Cancel upload of ${item.name}`} onClick={() => cancelBackgroundUpload(item.id)}>×</button>
+                </div>
+                <span class="bg-upload-bar"><i style={{ width: `${pct()}%` }} /></span>
+              </div>
+            );
+          }}</For>
+        </div>
+      </Show>
+      <ErrorToast error={uploadError()} title="Couldn’t upload the file" onDismiss={() => setUploadError(null)} />
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
       <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
         <Ic.PencilIcon size={12} /><span class="mode-chip-label">Edit Queued</span>
@@ -1040,7 +1130,7 @@ export function Composer(p: {
       </span>}</Show>
       <div class="composer-field">
         <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = text().replaceAll(`[Image #${image.reference}]`, ""); setText(value); ta.value = value; resize(); } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show><Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
-        <Show when={imageError()}><span class="image-paste-error" role="alert">{imageError()}</span></Show>
+        <ErrorToast error={imageError()} title="Couldn’t add the image" onDismiss={() => setImageError(null)} />
         <textarea readOnly={sendingLocked()}
           ref={ta}
           onPaste={event => void pasteImages(event)}
@@ -1182,7 +1272,7 @@ export default function App() {
   const [creating, setCreating] = createSignal(false);
   const [newAgentRevision, setNewAgentRevision] = createSignal<{ text: string; append?: boolean } | undefined>();
   const [launchPreview, setLaunchPreview] = createSignal<LaunchReceipt | null>(null);
-  const [launchViewKey,setLaunchViewKey]=createSignal('');
+  const [launchViewKey,setLaunchViewKey]=createSignal<string>(crypto.randomUUID());
   let retryLaunch:(()=>void)|undefined;
   const launchedViewKeys=new Map<string,string>();
   const prepareLaunch=(draft:{text:string;images:DraftImage[];retry?:()=>void}|null)=>{
@@ -1660,6 +1750,7 @@ export default function App() {
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number) => {
     const selectedCyber = draftCyber();
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
+    if (pick.backend === "codex") await requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true);
     const row = await localAgentForLaunch(pick.backend);
     if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Local agents. Your draft is kept.");
     const plan = await materializeMentions(projectSlug, prompt, attachChips());
@@ -1671,12 +1762,12 @@ export default function App() {
     const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify({...body, cyber_access:selectedCyber});
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
-    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+    const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
     setDraftCyber("standard");
     setAttachChips([]);
     rememberLaunch(m.id, {messageKey:launchPreview()?.messageKey,prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
-    launchedViewKeys.set(m.id,launchViewKey());
+    launchedViewKeys.set(m.id, launchViewKey());
     setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
     if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
     void refreshMissions();
@@ -1693,7 +1784,9 @@ export default function App() {
       const title = missionTitle(text);
       const launchNavigation = navigationVersion;
       const machine = newMachine();
-      const receipt = {messageKey:launchPreview()?.messageKey,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
+      if (!launchPreview() || !launchViewKey()) setLaunchViewKey(crypto.randomUUID());
+      const activeViewKey = launchViewKey();
+      const receipt = {messageKey:launchPreview()?.messageKey ?? `initial:${activeViewKey}`,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
       const projectSlug = effectiveNewProject();
       const pick = effectivePick(machine);
       const selectedCyber = draftCyber();
@@ -1723,11 +1816,11 @@ export default function App() {
         }
         // `effectivePick` already dropped an effort this harness can't take, so
         // an omitted field means "backend default" rather than a stale level.
-        if(pick.backend === "codex") await requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"});
+        if(pick.backend === "codex") { await requireCyberSupport({model:pick.model,mode:selectedCyber,remote:machine !== "core"}); await requireSpeedSupport(pick.model,pick.service_tier??"standard"); }
         const effort = normalizeEffort(pick.effort, pick.backend);
         const attachments = attachChips().map(chipToAttachment);
         const sentPrompt = imagePrompt(prompt, await stageRemoteImages(images, undefined, machine), images);
-        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
+        const body = {...(pick.backend === "codex" ? {cyber_access:selectedCyber,service_tier:pick.service_tier??"standard"} : {}),...(pick.backend === "vibe" && planObjective(prompt) !== null ? {agent:"plan"} : {}),title,prompt:sentPrompt,working_directory:workingDirectory().trim() || undefined,project:projectSlug,tags:folderTags(projectSlug),backend:pick.backend,model_override:pick.model,...(effort ? {model_effort:effort} : {}),...(machine === "core" ? {} : {remote_node_id:machine}),...(attachments.length ? {attachments} : {})};
         const signature = JSON.stringify(body);
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
@@ -1736,7 +1829,7 @@ export default function App() {
         setAttachChips([]);
         rememberLaunch(m.id, {...receipt,prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");
-        launchedViewKeys.set(m.id,launchViewKey());
+        launchedViewKeys.set(m.id, activeViewKey);
         setMissions(prev => [m, ...prev.filter(old => old.id !== m.id)]);
         if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
         void refreshMissions();
@@ -2263,30 +2356,9 @@ export default function App() {
                   onAttachments={setAttachChips}
                 />
                 <Show when={newMachine() === "local" && localAgentsScanning()}><div class="local-scan-status" role="status"><Ic.Spinner size={12} /> Checking local agents…</div></Show>
-                <Show when={createError()}>
-                  <ErrorNotice error={createError()!} title="Couldn’t start the mission" onDismiss={() => setCreateError(null)}>
-                    <Show when={/GiB required.*GiB is free/.test(createError()!)}><button class="s-btn sm" onClick={() => setEnvOpen("machine")}>Choose machine</button></Show>
-                    <Show when={createRefusal()}>
-                      {(r) => (
-                        <div class="launch-refusal-actions">
-                          <Show when={r().refusal.kind === "project_cap" && r().project}>
-                            <span class="launch-refusal-meta">
-                              {(r().refusal as Extract<LaunchRefusal, { kind: "project_cap" }>).active} of{" "}
-                              {(r().refusal as Extract<LaunchRefusal, { kind: "project_cap" }>).cap} unfinished
-                            </span>
-                          </Show>
-                          <Show when={r().project}>
-                            {(slug) => (
-                              <button class="s-btn sm" onClick={() => open(`ps:${slug()}`)}>
-                                Open project settings
-                              </button>
-                            )}
-                          </Show>
-                        </div>
-                      )}
-                    </Show>
-                  </ErrorNotice>
-                </Show>
+                <ErrorToast error={createError()} title="Couldn’t start the mission" onDismiss={() => setCreateError(null)}
+                  action={/GiB required.*GiB is free/.test(createError() ?? "") ? { label: "Choose machine", run: () => setEnvOpen("machine") }
+                    : createRefusal()?.project ? { label: "Open project settings", run: () => open(`ps:${createRefusal()!.project}`) } : undefined} />
                 </div>
               </div>
             </div>
@@ -2614,6 +2686,14 @@ function MissionDock(p: {
             </Show>
           </div>
         </Show>
+        <Show when={p.mission?.backend === "codex"}>
+          <span class="under-sep" aria-hidden="true">·</span>
+          <CodexSpeedPicker model={modelId()} value={missionSpeed(p.mission!)} missionId={p.mission!.id} local={catalogMachine()==="local"} disabled={saving()} onChange={tier=>{
+            const mission=p.mission; if(!mission||saving())return;
+            setSaving(true);
+            void updateMissionSettings(mission.id,{service_tier:tier}).then(updated=>{if(missionSpeed(updated)!==tier)throw new Error('The backend did not save the selected speed. Update it before retrying.');p.onMission?.(updated);}).catch(e=>p.onError?.(launchError(e))).finally(()=>setSaving(false));
+          }}/>
+        </Show>
         <Show when={p.mission?.backend === "codex"}><MissionCyber mission={p.mission!} onError={p.onError}/></Show>
       </Show>
       <div class="ctx-wrap">
@@ -2643,14 +2723,20 @@ function MissionDock(p: {
 function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null);
   const [error, setError] = createSignal("");
+  createEffect(() => {
+    const init = p.initial;
+    if (init) setResolved(prev => prev && prev.id === init.id ? { ...prev, ...init } : init);
+  });
   onMount(() => {
     if (p.id) void loadTranscript(p.id).catch(() => {});
     if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e)));
   });
-  return <Show when={resolved()} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}>{m => <Show when={m().backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={m()} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show>}</Show>;
+  return <Show when={Boolean(resolved())} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show></Show>;
 }
 
 export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null) => void; onFork?: (mission: Mission) => void }) {
+  const boundMissionId = p.id;
+  const staleMission = () => disposed || Boolean(boundMissionId && p.id !== boundMissionId);
   const receipt = p.launch ?? recalledLaunch(p.id);
   let disposed=false;
   onCleanup(()=>{disposed=true;});
@@ -3042,20 +3128,22 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // A different draft/selection, or a definitive rejection, starts a new attempt.
   let retryMessage: { key: string; id: string } | null = null;
   const sendMsgOnce = async (text: string, images: DraftImage[], chips: AttachChip[], attemptId: ReturnType<typeof crypto.randomUUID>, explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId || staleMission()) return false;
     const optEntry = optimisticList().find(item => item.id === attemptId);
     setSendError(null);
     if(explicitId&&optimisticList().length&&!optimisticList().some(item=>item.id===explicitId))setOptimisticList([]);
     if (clientPlaced()) {
-      const sendVersion=connectionVersion(),sendMission=p.id;
+      const sendVersion=connectionVersion(),sendMission=targetMissionId;
       try {
         await import("./localAgents").then(m => m.refreshLocalBindings());
       } catch (error) {
-        if (!localBinding(p.id)) {
+        if (!localBinding(sendMission)) {
           setSendError(`Couldn’t restore this computer’s session: ${error instanceof Error ? error.message : String(error)}. Your draft is kept.`);
           return false;
         }
       }
-      const binding = localBinding(p.id);
+      const binding = localBinding(sendMission);
       if (!binding) {
         setSendError("This session runs on the computer that started it. Your draft is kept.");
         return false;
@@ -3071,26 +3159,28 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
         const imagePaths = await stageLocalImages(binding.cwd, images);
         const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
-        if(connectionVersion()!==sendVersion||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
+        if(connectionVersion()!==sendVersion||staleMission()||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
         if (!optimisticList().some(item => item.id === attemptId)) return true;
-        await enqueueLocalMessage({id:p.id,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
+        await enqueueLocalMessage({id:sendMission,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,service_tier:binding.harness === "codex" ? missionSpeed(mission()??{}) : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
         setOptimisticList(prev => prev.filter(item => item.id !== attemptId));
         if (chips === followAttach()) setFollowAttach([]);
         return true;
       } catch (e) {
         // Launch rejection belongs to the composer; it is not a second mission failure.
-        recordLocalFailure(p.id, null);
+        recordLocalFailure(sendMission, null);
         setSendError(e instanceof Error ? e.message : String(e));
         return false;
       }
     }
     const attachments = chips.map(chipToAttachment);
-    const key = JSON.stringify([connectionVersion(), text, attachments, images.map(image => image.id)]);
+    const key = JSON.stringify([connectionVersion(), targetMissionId, text, attachments, images.map(image => image.id)]);
     if (retryMessage?.key !== key) retryMessage = { key, id: attemptId };
     try {
       const sent = imagePrompt(text, await stageRemoteImages(images, mission()), images);
-      const result = await sendMissionMessage(p.id, sent, attachments, explicitId ?? retryMessage.id);
+      if (staleMission() || p.id !== targetMissionId) throw new Error("Conversation changed. Your draft is kept.");
+      const result = await sendMissionMessage(targetMissionId, sent, attachments, explicitId ?? retryMessage.id);
       retryMessage = null;
+      if (staleMission()) return true;
       if (result.replacement) {
         const replacement = result.replacement;
         const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
@@ -3110,7 +3200,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
     catch (e) {
       if (e instanceof MessageRejectedError || (e instanceof ApiError && e.status < 500 && e.status !== 408)) retryMessage = null;
-      setSendError(launchError(e)); return false;
+      if (!staleMission()) setSendError(launchError(e));
+      return false;
     }
   };
   const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
@@ -3134,13 +3225,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     try {
       const project=mission()?.project;
       const chips=project?mentionedChips(row.text,await loadAttachItems(project)):[];
-      if(version!==connectionVersion())return;
+      if(version!==connectionVersion()||staleMission())return;
       const accepted=await sendMsg(row.text,[],chips,row.id);
-      if(version!==connectionVersion())return;
+      if(version!==connectionVersion()||staleMission())return;
       setResend({...row,state:accepted?"accepted":"error",error:accepted?undefined:sendError()||"Couldn’t send. Retry uses the same message identity."});
       if(!accepted)setSendError(null);
     } catch(error) {
-      if(version===connectionVersion())setResend({...row,state:"error",error:String(error)});
+      if(version===connectionVersion()&&!staleMission())setResend({...row,state:"error",error:String(error)});
     }
   };
   const sendEditedPrompt = (text: string) => {
@@ -3155,22 +3246,25 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   };
 
   const stopM = () => {
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId) return;
     if (clientPlaced()) {
-      void stopLocal(p.id).then(() => setClientMissionStatus(p.id, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
+      void stopLocal(targetMissionId).then(() => setClientMissionStatus(targetMissionId, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
       return;
     }
-    void cancelMission(p.id)
+    void cancelMission(targetMissionId)
       .catch(() => {})
       .then(() => refresh());
   };
 
   const [recoveryPending, setRecoveryPending] = createSignal(false);
   const actOnRecovery = async (action: "resume" | "cancel") => {
-    if (recoveryPending()) return;
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId || recoveryPending()) return;
     setRecoveryPending(true);
     try {
       if (action === "resume") await resume();
-      else { await cancelMission(p.id); await refresh(); }
+      else { await cancelMission(targetMissionId); await refresh(); }
     } catch (error) { setSendError(launchError(error)); }
     finally { setRecoveryPending(false); }
   };
@@ -3179,6 +3273,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     ordered: { id: string; content: string; attached?: boolean }[],
     liveInjected?: { id: string; content: string; attached?: boolean }[],
   ) => {
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId || staleMission()) return;
     if (liveInjected?.length) {
       for (const row of liveInjected) {
         const presented = messagePresentation(row.content);
@@ -3203,11 +3299,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     setSendError(null);
     try {
       if (wasBusy) {
-        await cancelMission(p.id).catch(() => {});
+        await cancelMission(targetMissionId).catch(() => {});
         for (let poll = 0; poll < 75; poll++) {
+          if (staleMission() || p.id !== targetMissionId) return;
           try {
-            const current = await getMission(p.id);
-            if (disposed) return;
+            const current = await getMission(targetMissionId);
+            if (staleMission() || p.id !== targetMissionId) return;
             setMission(current);
             const stillStopping =
               ["active", "running", "starting", "resuming"].includes(current.status) ||
@@ -3220,18 +3317,24 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           await new Promise(r => setTimeout(r, 200));
         }
       }
+      if (staleMission() || p.id !== targetMissionId) return;
       const project = mission()?.project;
       const attachItems = project ? await loadAttachItems(project).catch(() => []) : [];
+      if (staleMission() || p.id !== targetMissionId) return;
+      const maxAttempts = wasBusy ? 30 : 1;
       for (let i = 0; i < ordered.length; i++) {
+        if (staleMission() || p.id !== targetMissionId) return;
         const row = ordered[i];
         const presented = messagePresentation(row.content);
         const cleanText = presented.text;
         const attachments = (project ? mentionedChips(cleanText, attachItems) : []).map(chipToAttachment);
         let sent = false;
-        for (let attempt = 0; attempt < 30; attempt++) {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          if (staleMission() || p.id !== targetMissionId) return;
           const freshId = crypto.randomUUID();
           try {
-            const result = await sendMissionMessage(p.id, cleanText, attachments, freshId);
+            const result = await sendMissionMessage(targetMissionId, cleanText, attachments, freshId);
+            if (staleMission() || p.id !== targetMissionId) return;
             if (result.replacement) {
               const replacement = result.replacement;
               const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
@@ -3244,7 +3347,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               p.onFork?.(replacement);
               return;
             }
-            if (i === 0 && result.queued && attempt < 29) {
+            if (i === 0 && wasBusy && result.queued && attempt < maxAttempts - 1) {
               await api(`/api/control/queue/${encodeURIComponent(result.id)}`, { method: "DELETE" }).catch(() => {});
               await new Promise(r => setTimeout(r, 250));
               continue;
@@ -3256,7 +3359,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             break;
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            if (attempt < 29 && /still has a remote job|stopping|409/i.test(msg)) {
+            if (attempt < maxAttempts - 1 && /still has a remote job|stopping|409/i.test(msg)) {
               await new Promise(r => setTimeout(r, 250));
               continue;
             }
@@ -3265,9 +3368,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         }
         if (!sent) break;
       }
-      await refresh();
+      if (!staleMission()) await refresh();
     } catch (e) {
-      setSendError(launchError(e));
+      if (!staleMission()) setSendError(launchError(e));
       throw e;
     } finally {
       setSendingImmediate(false);
@@ -3393,11 +3496,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             projectSlug={mission()?.project ?? undefined}
             onAttachments={setFollowAttach}
           />
-          <Show when={p.launchError}><ErrorNotice title="Couldn’t send your message" error={p.launchError!}><button onClick={p.onRetryLaunch}>Retry</button></ErrorNotice></Show>
+          <ErrorToast title="Couldn’t send your message" error={p.launchError} action={p.onRetryLaunch ? { label: "Retry", run: p.onRetryLaunch } : undefined} />
           <Show when={mission()?.local_sync_pending}><div class="dim" role="status">{mission()?.local_sync_error || "Saved on this computer · syncing to Core…"}</div></Show>
-          <Show when={sendError() || error() || queueError()}>
-            <ErrorNotice error={(sendError() || error() || queueError())!} title={sendError() ? "Couldn’t send your message" : "Couldn’t load the conversation"} onDismiss={sendError() ? undefined : () => { setError(null); setQueueError(null); }}><Show when={sendError()&&optimistic()}><button onClick={()=>{const draft=optimistic();if(draft?.retry)draft.retry();else if(draft)void sendMsg(draft.text,draft.images,followAttach(),draft.id);}}>Retry</button></Show></ErrorNotice>
-          </Show>
+          <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)}
+            action={optimistic() ? { label: "Retry", run: () => { const draft = optimistic(); if (draft?.retry) draft.retry(); else if (draft) void sendMsg(draft.text, draft.images, followAttach(), draft.id); } } : undefined} />
+          <ErrorToast error={error() || queueError()} title="Couldn’t load the conversation" onDismiss={() => { setError(null); setQueueError(null); }} />
           <MissionDock mission={mission()} items={viewItems()} destination={missionDestination(mission(), receipt)} onMission={setMission} onError={setError} onFork={p.onFork} />
         </div>
       </div>

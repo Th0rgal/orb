@@ -775,6 +775,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             axum::routing::any(system_api::hermes_remote_proxy)
                 .layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
+        .route(
+            "/api/llm/codex-speed/v1/responses",
+            post(control::speed_proxy::responses).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
+        .route(
+            "/api/llm/codex-speed/v1/models",
+            get(control::speed_proxy::models),
+        )
         // OpenAI-compatible proxy endpoint (bearer token auth via SANDBOXED_PROXY_SECRET).
         // LLM payloads with tool outputs and long contexts can exceed the default 2MB
         // body limit, so set a generous 50MB limit for proxy routes.
@@ -816,6 +824,20 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/uploads",
             post(super::uploads::upload)
                 .layer(DefaultBodyLimit::max(crate::uploads::MAX_BODY_BYTES)),
+        )
+        .route("/api/uploads/sessions", post(super::uploads::session_init))
+        .route(
+            "/api/uploads/sessions/:upload_id/chunks/:index",
+            axum::routing::put(super::uploads::session_chunk)
+                .layer(DefaultBodyLimit::max(crate::uploads::MAX_CHUNK_BYTES)),
+        )
+        .route(
+            "/api/uploads/sessions/:upload_id/complete",
+            post(super::uploads::session_complete),
+        )
+        .route(
+            "/api/uploads/sessions/:upload_id",
+            axum::routing::delete(super::uploads::session_cancel),
         )
         .route("/api/stats", get(get_stats))
         .route("/api/software", get(super::agent_software::inventory))
@@ -1007,6 +1029,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/control/missions/:id/title",
             post(control::set_mission_title),
         )
+        .route("/api/control/codex-speed", get(control::speed::options))
         .route(
             "/api/control/cyber-capabilities",
             get(control::cyber::capabilities),

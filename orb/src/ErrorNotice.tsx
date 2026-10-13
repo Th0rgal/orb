@@ -30,6 +30,8 @@ export function describeError(raw: string, fallback = "Something went wrong"): E
   if (/No space left on device|ENOSPC/i.test(raw)) return { title: "Disk full on the execution machine", message: "The machine ran out of disk space while the agent was working. Free up space or move the conversation to another machine, then resume." };
   if (/Antigravity ended its headless turn while background task\(s\).*were still running/i.test(raw)) return { title: "Antigravity turn ended while background tasks were still running", message: "Your conversation is saved. Resume to inspect task logs or continue from the last completed step." };
   if (/Antigravity ended without a SUCCESS result/i.test(raw)) return { title: "Antigravity stopped before completing its turn", message: "The CLI exited early without a final result. Your conversation is saved; resume to continue from the last completed step." };
+  const agyLimit = raw.match(/Antigravity prompts must be at most (\d+ KiB)/i);
+  if (agyLimit) return { title: `Antigravity prompt exceeds ${agyLimit[1]}`, message: `Shorten the message or put large context in workspace files so the prompt stays within ${agyLimit[1]}. Your draft is kept.` };
   if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(raw)) return { title: "Can’t reach the backend", message: "Check your connection and backend settings, then try again." };
   if (/Workspace exceeds transfer limit/.test(raw)) {
     const found = raw.match(/: (.+?) in (\d+) files\. Largest: (.+)$/);

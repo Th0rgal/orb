@@ -2153,6 +2153,7 @@ async fn continue_inner(
         RemoteHarnessPlan::Codex {
             effort: mission.model_effort.clone(),
             fast_mode: mission.fast_mode,
+            service_tier: mission.service_tier,
             model: mission.model_override.clone().ok_or_else(|| {
                 (
                     StatusCode::CONFLICT,

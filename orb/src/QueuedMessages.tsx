@@ -1,4 +1,5 @@
 import {For,Show,createMemo,createSignal} from 'solid-js';
+import { ErrorToast } from "./toast";
 import {canDiscardQueuedMessage,queuedLocalMessages,prioritizeQueuedMessage,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
 import * as Ic from './icons';
 /** Follow-ups waiting for the current turn, shown like Cursor's queue: one line per
@@ -36,7 +37,7 @@ export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:st
      </span>}><span class="queue-editing">Editing</span></Show>
     </div>
     <Show when={row.state==='dispatching'}><small>{row.error?'Needs review':'Sending…'}</small></Show>
-    <Show when={row.error}><small role="alert">{row.error}</small><Show when={row.state==='error'||row.state==='dispatching'||row.interrupted}><button type="button" class="queue-send-now" disabled={working()||busyIds().has(row.id)} onClick={()=>void actRow(row.id,()=>retryQueuedMessage(row.id))}>Retry</button></Show></Show>
+    <Show when={row.error}><small class="inline-error" role="alert">{row.error}</small><Show when={row.state==='error'||row.state==='dispatching'||row.interrupted}><button type="button" class="queue-send-now" disabled={working()||busyIds().has(row.id)} onClick={()=>void actRow(row.id,()=>retryQueuedMessage(row.id))}>Retry</button></Show></Show>
    </li>}</For>
    <For each={pendingRows()}>{row=><li class="queue-row">
     <div class="queue-line">
@@ -49,6 +50,6 @@ export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:st
     </div>
    </li>}</For>
   </ol></Show>
-  <Show when={error()&&!rows().some(row=>row.error?.includes(error()))}><p role="alert">{error()}</p></Show>
+  <ErrorToast error={error()&&!rows().some(row=>row.error?.includes(error()!))?error():null} onDismiss={() => setError('')} />
  </section></Show>;
 }

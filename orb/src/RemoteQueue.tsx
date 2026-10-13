@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
+import { ErrorToast } from "./toast";
 import { messagePresentation } from "./messagePresentation";
 import { api, connectionVersion, listQueuedMessages, type QueuedMessage } from "./api";
 import * as Ic from "./icons";
@@ -226,7 +227,7 @@ export function RemoteQueue(p: {
           <Show when={row.queue_error}><small title={row.queue_error ?? undefined}>Delivery paused · {row.queue_error}</small></Show>
         </li>;
       }}</For></ol></Show>
-      <Show when={error()}><p role="alert">{error()}</p></Show>
+      <ErrorToast error={error()} onDismiss={() => setError("")} />
     </section>
   </Show>;
 }

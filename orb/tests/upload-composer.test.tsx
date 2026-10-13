@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-li
 import { afterEach, expect, it, vi } from "vitest";
 import { Composer } from "../src/App";
 import * as uploads from "../src/uploads";
-vi.mock("../src/uploads", async (original) => ({ ...await original<typeof import("../src/uploads")>(), hasNativePicker: () => true, pickNativeFiles: vi.fn(), transferFile: vi.fn() }));
+vi.mock("../src/uploads", async (original) => ({ ...await original<typeof import("../src/uploads")>(), hasNativePicker: () => true, pickNativeFiles: vi.fn(), transferFile: vi.fn(), statUploadSource: vi.fn(async () => ({ size: 10, modified: 0 })) }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 it("opens an upload choice with no project context and inserts a real local path", async () => {
   vi.mocked(uploads.pickNativeFiles).mockResolvedValue([{ name: "notes.txt", localPath: "/Users/test/notes.txt" }]);
@@ -22,7 +22,7 @@ it("keeps the draft when transferring the file fails", async () => {
   render(() => <Composer placeholder="Task" busy={false} onSend={() => {}} onStop={() => {}} uploadTarget="ashur" picker={false} />);
   fireEvent.input(screen.getByPlaceholderText("Task"), { target: { value: "Keep my draft" } });
   fireEvent.click(screen.getByTitle("Add context")); fireEvent.click(screen.getByText("Upload file or image…"));
-  await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Machine offline"));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Machine offline"));
   expect((screen.getByPlaceholderText("Task") as HTMLTextAreaElement).value).toBe("Keep my draft");
 });
 it("moves submitted text into a pending message immediately and restores it on rejection",async()=>{

@@ -516,4 +516,52 @@ it('completes launching the side session in the background if the UI watch signa
  expect(btwSession('bg-parent')).toMatchObject({id:'bg-child',question:'Status?',active:true});
 });
 
+it('starts a clean side session with preserved history on retry after an empty completion instead of reusing the broken session',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMission).mockImplementation(async id=>({
+  id,
+  status:id==='empty-turn-parent'?'active':'completed',
+  tags:id==='empty-turn-parent'?[]:['btw-parent:empty-turn-parent'],
+  history:[],
+  title:'EV Bench',
+  created_at:'',
+  updated_at:'',
+ }));
+ vi.mocked(api).mockResolvedValueOnce({id:'side-1'}).mockResolvedValueOnce({id:'side-2'});
+ vi.mocked(getMissionEvents).mockResolvedValueOnce([{event_type:'assistant_message',content:'First turn answer',sequence:1,id:1,timestamp:''}]);
+ await askBtwAgent('empty-turn-parent','Turn 1','ctx-1',[],new AbortController().signal,()=>{});
+ expect(btwSession('empty-turn-parent')?.conversationCursor).toEqual({sequence:10,visibleHash:'hash'});
+
+ // Turn 2 reuses side-1, but finishes with a synthetic empty-response note and 0 tools.
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'delta-ctx',cursor:{sequence:25,visibleHash:'hash-25'}});
+ vi.mocked(getMissionEvents)
+  .mockResolvedValueOnce([{event_type:'assistant_message',content:'First turn answer',sequence:1,id:1,timestamp:''}])
+  .mockResolvedValueOnce([
+   {event_type:'user_message',content:'Turn 2',sequence:2,id:2,timestamp:''},
+   {event_type:'assistant_message',content:"Remote opencode job 5c8a6bb1-1f74-4515-8c9e-12a868cfd315 on node 'nippur' finished without assistant text (stop reason: end_turn).",sequence:3,id:3,timestamp:''},
+  ]);
+ vi.mocked(sendMissionMessage).mockResolvedValueOnce({id:'m2',queued:false});
+ const history=[{question:'Turn 1',answer:'First turn answer'}];
+ await expect(askBtwAgent('empty-turn-parent','Turn 2','ctx-2',history as any,new AbortController().signal,()=>{})).rejects.toThrow('The model returned an empty completion without running any tools; retry to start a clean side session.');
+ // Cursor from Turn 1 is preserved because Turn 2 failed, and brokenSession is set.
+ expect(btwSession('empty-turn-parent')?.conversationCursor).toEqual({sequence:10,visibleHash:'hash'});
+ expect(btwSession('empty-turn-parent')?.brokenSession).toBe(true);
+
+ // Retrying Turn 2 creates a fresh side session (side-2) with history instead of sending a duplicate prompt to broken side-1.
+ vi.mocked(sendMissionMessage).mockClear();
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'fresh-ctx',cursor:{sequence:25,visibleHash:'hash-25'}});
+ vi.mocked(getMissionEvents).mockResolvedValueOnce([{event_type:'assistant_message',content:'Recovered turn 2 answer',sequence:1,id:1,timestamp:''}]);
+ const events:any[]=[];
+ await askBtwAgent('empty-turn-parent','Turn 2','ctx-2',history as any,new AbortController().signal,e=>events.push(e));
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+ expect(btwSession('empty-turn-parent')?.id).toBe('side-2');
+ expect(btwSession('empty-turn-parent')?.brokenSession).toBeUndefined();
+ expect(btwSession('empty-turn-parent')?.conversationCursor).toEqual({sequence:25,visibleHash:'hash-25'});
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[3]).toBeUndefined();
+ expect(vi.mocked(prepareBtwContext).mock.calls.at(-1)?.[4]).toEqual(history);
+ expect(events.at(-1)).toEqual({type:'done',answer:'Recovered turn 2 answer'});
+});
+
+
 

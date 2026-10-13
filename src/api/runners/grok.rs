@@ -2696,6 +2696,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
                         "generic-not-native",
                     )
                     .await
@@ -2840,6 +2841,7 @@ sys.exit(0 if sys.argv[1]=='success_without_id' else 1)
                         None,
                         None,
                         None,
+                        None,
                         "other",
                     )
                     .await
@@ -2848,6 +2850,7 @@ sys.exit(0 if sys.argv[1]=='success_without_id' else 1)
                     .update_mission_run_settings(
                         mission.id,
                         Some("grok"),
+                        None,
                         None,
                         None,
                         None,

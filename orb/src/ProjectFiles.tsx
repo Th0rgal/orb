@@ -1,7 +1,8 @@
 import { useTooltip } from "./Tooltip";
+import { ErrorToast } from "./toast";
 import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
-import type {UploadSource} from "./uploads";
+import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
 import { assertFolderHasNoWork, moveFolderWork, copyFileReference, readFileReference, copyCronReference, readCronReference, copyItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
@@ -74,7 +75,7 @@ import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheR
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, holds, nestMissions, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants, type NestedMission } from "./missionTree";
+import { countNested, holds, nestMissions, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants, type NestedMission } from "./missionTree";
 
 const [deletingIds, setDeletingIds] = createSignal<ReadonlySet<string>>(new Set());
 export const isMissionDeleting = (id: string): boolean => deletingIds().has(id);
@@ -199,7 +200,10 @@ export function LiveProjectsSection(p: {
         : [current, ...rows])
       : rows;
     const extraArchived = archivedMissions().filter(m => (m.project ?? "") === slug && !withCurrent.some(r => r.id === m.id));
-    return missionTreeRows([...withCurrent, ...extraArchived], m => !isArchived(m));
+    const allRows = [...withCurrent, ...extraArchived];
+    const byId = new Map(allRows.map(m => [m.id, m]));
+    const selectedId = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : undefined;
+    return missionTreeRows(allRows, m => !isArchived(m) && (m.id === selectedId || !isSupersededInTree(m, byId)));
   };
   const allKnownMissions = (): Mission[] => {
     const byId = new Map<string, Mission>();
@@ -1872,16 +1876,49 @@ export function LiveProjectsSection(p: {
   };
   let dropTree:HTMLDivElement|undefined;
   const [importing,setImporting]=createSignal(false),[importStatus,setImportStatus]=createSignal('');
+  const [pendingLargeImport, setPendingLargeImport] = createSignal<{
+    slug: string;
+    folder: string;
+    files: Array<{ source: UploadSource; size: number }>;
+  } | null>(null);
   const dropAt=(x:number,y:number)=>{const el=document.elementFromPoint(x,y)?.closest<HTMLElement>('[data-drop-project]');return el&&dropTree?.contains(el)?el:undefined;};
+  const runImportFiles = async (slug: string, folder: string, sources: UploadSource[], confirmedLarge = false) => {
+    const version = connectionVersion();
+    setImporting(true); setImportStatus('Importing files to shared context…'); setActionError(null);
+    try {
+      const result = await importProjectFiles(slug, folder, sources, {
+        confirmedLarge,
+        onBackgroundStarted: () => {
+          void loadDir(slug, folder, true);
+        },
+      });
+      if (!currentConnection(version)) return;
+      if (result.largeFiles?.length) {
+        setPendingLargeImport({ slug, folder, files: result.largeFiles });
+      }
+      if (result.paths.length) {
+        await loadDir(slug, folder, true);
+        setExpanded(`${slug}:${folder}`, true);
+        setImportStatus(
+          confirmedLarge
+            ? `Uploading ${result.paths.length} large file(s) in the background…`
+            : `${result.paths.length} file(s) saved to shared context. Available with @; connected agents synchronize automatically.`,
+        );
+      } else {
+        setImportStatus('');
+      }
+      if (result.warnings.length) setActionError(result.warnings.join('\n'));
+    } catch (error) {
+      setImportStatus('');
+      setActionError(String(error));
+    } finally {
+      setImporting(false);
+    }
+  };
   const importFiles=async(sources:UploadSource[],target:HTMLElement)=>{
    if(importing()){setActionError('An import is already in progress. Wait before dropping more files.');return;}
-   const slug=target.dataset.dropProject!,folder=target.dataset.dropFolder??'',version=connectionVersion();
-   setImporting(true);setImportStatus('Importing files to shared context…');setActionError(null);
-   try{const result=await importProjectFiles(slug,folder,sources);if(!currentConnection(version))return;
-    await loadDir(slug,folder,true);setExpanded(`${slug}:${folder}`,true);
-    setImportStatus(result.paths.length?`${result.paths.length} file(s) saved to shared context. Available with @; connected agents synchronize automatically.`:'');
-    if(result.warnings.length)setActionError(result.warnings.join('\n'));
-   }catch(error){setImportStatus('');setActionError(String(error));}finally{setImporting(false);}
+   const slug=target.dataset.dropProject!,folder=target.dataset.dropFolder??'';
+   await runImportFiles(slug, folder, sources, false);
   };
   nativeComposerDrop(()=>dropTree,importFiles,dropAt);
   // Navigation (fork, search, history) owns the current selection. An old
@@ -2053,9 +2090,40 @@ export function LiveProjectsSection(p: {
       <Show when={error()}>
         <div class="row note">{error()} <button class="text-btn" onClick={() => refresh(true)}>Retry</button></div>
       </Show>
-      <Show when={cronWarning()}><ErrorNotice error={cronWarning()!} /></Show>
+      <ErrorToast error={cronWarning()} onDismiss={() => setCronWarning(null)} />
       <Show when={!deleteTargets().length && actionError()}>{error => <ErrorDialog error={error()} onClose={() => setActionError(null)} />}</Show>
       <Show when={importStatus()}><div class="row note" role="status">{importStatus()}</div></Show>
+      <For each={backgroundUploads().filter(t => t.scope?.startsWith("project:"))}>
+        {task => {
+          const pct = () => Math.min(100, Math.round((task.uploadedBytes / Math.max(1, task.totalBytes)) * 100));
+          return (
+            <div class="row note bg-upload-sidebar-row" role="status">
+              <div class="bg-upload-sidebar-main">
+                <span class="bg-upload-sidebar-name" title={task.name}>{task.name}</span>
+                <span class="bg-upload-sidebar-meta">
+                  {task.state === "completed"
+                    ? "Synced ✓"
+                    : task.state === "paused"
+                      ? `Paused · ${pct()}%`
+                      : task.state === "failed"
+                        ? "Failed"
+                        : `${pct()}%${task.speedBps > 0 ? ` · ${formatFileSize(task.speedBps)}/s` : ""}`}
+                </span>
+                <Show when={task.state === "uploading"}>
+                  <button type="button" class="text-btn" onClick={() => pauseBackgroundUpload(task.id)}>Pause</button>
+                </Show>
+                <Show when={task.state === "paused" || task.state === "failed"}>
+                  <button type="button" class="text-btn" onClick={() => resumeBackgroundUpload(task.id)}>Resume</button>
+                </Show>
+                <Show when={task.state !== "completed"}>
+                  <button type="button" class="text-btn" onClick={() => cancelBackgroundUpload(task.id)}>×</button>
+                </Show>
+              </div>
+              <div class="bg-upload-bar"><span style={{ width: `${pct()}%` }} /></div>
+            </div>
+          );
+        }}
+      </For>
       <div ref={dropTree} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} /></div>
       <Show when={projects().length === 0 && !error()}>
         <div class="row note">No projects on the core backend.</div>
@@ -2079,6 +2147,21 @@ export function LiveProjectsSection(p: {
           description="This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running will be kept."
           busy={deleteConfirmBusy()} error={actionError()} onConfirm={() => void deleteSelected()} onClose={() => {setActionError(null);setDeleteTargets([]);}}/>
       </Show>
+      <Show when={pendingLargeImport()} keyed>{pending => (
+        <ConfirmDialog
+          title={`Upload large file${pending.files.length === 1 ? "" : "s"} to shared context?`}
+          destructive={false}
+          action="Upload in background"
+          description={`${pending.files.map(f => `${f.source.name} (${formatFileSize(f.size)})`).join(", ")} exceed${pending.files.length === 1 ? "s" : ""} the 10 MB default sync limit. Confirm to upload ${pending.files.length === 1 ? "it" : "them"} in the background using resumable chunks so you can keep working and resume if interrupted.`}
+          busy={importing()}
+          onConfirm={() => {
+            const target = pending;
+            setPendingLargeImport(null);
+            void runImportFiles(target.slug, target.folder, target.files.map(f => f.source), true);
+          }}
+          onClose={() => setPendingLargeImport(null)}
+        />
+      )}</Show>
       <Show when={archiveMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={archiveDeleteMenuItems(menu.slug)} onClose={() => setArchiveMenu(null)} />}</Show>
       <Show when={multiSelectMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={multiSelectMenuItems(menu.treeIds)} onClose={() => setMultiSelectMenu(null)} />}</Show>
       <Show when={controllerMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={[

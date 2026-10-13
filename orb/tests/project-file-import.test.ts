@@ -1,8 +1,8 @@
 import {beforeEach,it,expect,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({version:1,api:vi.fn(),manifest:vi.fn(),encoded:vi.fn()}));
+const mocks=vi.hoisted(()=>({version:1,api:vi.fn(),manifest:vi.fn(),encoded:vi.fn(),stat:vi.fn(async(source:{file?:{size:number}})=>({size:source.file?.size??10,modified:0}))}));
 vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,api:mocks.api}));
 vi.mock('../src/projectContext',()=>({contextManifest:mocks.manifest}));
-vi.mock('../src/uploads',()=>({encoded:mocks.encoded}));
+vi.mock('../src/uploads',async original=>({...await original<typeof import('../src/uploads')>(),encoded:mocks.encoded,statUploadSource:mocks.stat}));
 import {importProjectFiles,CONTEXT_FILE_LIMIT,CONTEXT_PROJECT_LIMIT} from '../src/projectFileImport';
 beforeEach(()=>{mocks.version=1;mocks.api.mockReset().mockImplementation(async(path:string)=>path.endsWith('/blobs')?{hash:'abc'}:{conflict:false});mocks.manifest.mockReset().mockResolvedValue({revision:1,entries:{}});mocks.encoded.mockReset().mockResolvedValue(btoa('%PDF-1.7\x00\xff'));});
 it('imports unchanged binary bytes into the selected subfolder and publishes its path',async()=>{
@@ -14,9 +14,9 @@ it('imports unchanged binary bytes into the selected subfolder and publishes its
  expect(mocks.encoded).toHaveBeenCalledWith(expect.anything(),CONTEXT_FILE_LIMIT);
  expect(event).toHaveBeenCalledTimes(1);window.removeEventListener('orb:context-imported',event);
 });
-it('warns before reading an oversized browser file and does not publish it',async()=>{
+it('asks before uploading an oversized browser file and does not read or publish it',async()=>{
  const result=await importProjectFiles('health','PPL',[{name:'large.pdf',file:{size:CONTEXT_FILE_LIMIT+1} as File}]);
- expect(result.paths).toEqual([]);expect(result.warnings[0]).toContain('10 MiB');expect(mocks.encoded).not.toHaveBeenCalled();expect(mocks.api).not.toHaveBeenCalled();
+ expect(result.paths).toEqual([]);expect(result.largeFiles?.map(f=>f.size)).toEqual([CONTEXT_FILE_LIMIT+1]);expect(mocks.encoded).not.toHaveBeenCalled();expect(mocks.api).not.toHaveBeenCalled();
 });
 it('preserves an existing filename and refuses exceeding the project quota',async()=>{
  mocks.manifest.mockResolvedValueOnce({entries:{'PPL/guide.pdf':{size:5}}});

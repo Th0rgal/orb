@@ -46,6 +46,10 @@ fn parent(root: &Path, path: &str, create: bool) -> Result<(File, CString), Stri
 }
 #[cfg(unix)]
 pub fn read(root: &Path, path: &str) -> Result<Vec<u8>, String> {
+    read_with_limit(root, path, super::FILE_LIMIT)
+}
+#[cfg(unix)]
+pub fn read_with_limit(root: &Path, path: &str, limit: usize) -> Result<Vec<u8>, String> {
     let (parent, name) = parent(root, path, false)?;
     let fd = unsafe {
         libc::openat(
@@ -64,14 +68,14 @@ pub fn read(root: &Path, path: &str) -> Result<Vec<u8>, String> {
     }
     let mut bytes = Vec::new();
     (&file)
-        .take(super::FILE_LIMIT as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let after = file.metadata().map_err(|e| e.to_string())?;
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         return Err("context file changed while reading".into());
     }
-    if bytes.len() > super::FILE_LIMIT {
+    if bytes.len() > limit {
         return Err("context file exceeds 10 MiB".into());
     }
     Ok(bytes)
@@ -93,6 +97,39 @@ pub fn write(root: &Path, path: &str, bytes: &[u8]) -> Result<(), String> {
     }
     let mut file = unsafe { File::from_raw_fd(fd) };
     file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
+    if unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            temp.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    parent.sync_all().map_err(|e| e.to_string())
+}
+#[cfg(unix)]
+pub fn copy_from_file(root: &Path, path: &str, src: &Path) -> Result<(), String> {
+    let mut source = File::open(src).map_err(|e| e.to_string())?;
+    let (parent, name) = parent(root, path, true)?;
+    let temp = CString::new(format!(".context-{}.tmp", uuid::Uuid::new_v4())).unwrap();
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            temp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    std::io::copy(&mut source, &mut file)
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())?;
     if unsafe {
@@ -150,7 +187,15 @@ pub fn read(_: &std::path::Path, _: &str) -> Result<Vec<u8>, String> {
     Err("Secure context storage requires Unix".into())
 }
 #[cfg(not(unix))]
+pub fn read_with_limit(_: &std::path::Path, _: &str, _: usize) -> Result<Vec<u8>, String> {
+    Err("Secure context storage requires Unix".into())
+}
+#[cfg(not(unix))]
 pub fn write(_: &std::path::Path, _: &str, _: &[u8]) -> Result<(), String> {
+    Err("Secure context storage requires Unix".into())
+}
+#[cfg(not(unix))]
+pub fn copy_from_file(_: &std::path::Path, _: &str, _: &std::path::Path) -> Result<(), String> {
     Err("Secure context storage requires Unix".into())
 }
 #[cfg(not(unix))]

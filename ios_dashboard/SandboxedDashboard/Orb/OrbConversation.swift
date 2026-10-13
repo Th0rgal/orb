@@ -965,7 +965,8 @@ struct OrbConversation: View {
     }
 
     private var conversationToolbarMenu: some View {
-        Menu {
+        let currentStatus = mission["status"].text
+        return Menu {
             if id != nil && !unavailable {
                 Section {
                     Text(selection.label)
@@ -973,7 +974,15 @@ struct OrbConversation: View {
                 }
                 Button("Rename") { title = mission["title"].text; rename = true }
                 Button("Move") { destinationProject = mission["project"].text; destinationFolder = OrbRow(mission).folder; moving = true }
-                Button("Archive") { Task { await mutate(["status": .string("acknowledged")]) } }.disabled(working)
+                if ["completed", "failed", "interrupted", "acknowledged", "cancelled"].contains(currentStatus) {
+                    Button(currentStatus == "acknowledged" ? "Restore" : "Reopen") {
+                        Task { await mutate(["status": .string("paused")]) }
+                    }
+                    .disabled(working)
+                }
+                if currentStatus != "acknowledged" {
+                    Button("Archive") { Task { await mutate(["status": .string("acknowledged")]) } }.disabled(working)
+                }
                 if working && (!isCloud || selection.canCancel) {
                     Button("Stop", role: .destructive) { Task { await cancel() } }
                 }
@@ -1740,6 +1749,16 @@ struct OrbConversation: View {
             }
             OrbSendsInFlight.keys.insert(pendingKey)
             defer { OrbSendsInFlight.keys.remove(pendingKey) }
+            if pending.path == "/api/control/message", let id, !isCloud {
+                let currentStatus = mission["status"].text
+                if currentStatus == "paused" || currentStatus == "acknowledged" {
+                    _ = try await api.call(
+                        "/api/control/missions/\(OrbCore.escape(id))/status",
+                        method: "POST",
+                        body: .object(["status": .string("awaiting_user")])
+                    )
+                }
+            }
             let result = try await api.call(pending.path, method: "POST", body: pending.body)
             if pending.path == "/api/control/message" {
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false), result["queued"] != .null else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance. The saved request is retained.") }

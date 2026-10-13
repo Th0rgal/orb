@@ -17,7 +17,7 @@ it("keeps the saved steer when triggering fails and reports the separate failure
   const ui = render(() => <SteerComposer slug="test" steers={steers()} running={false} onSteers={setSteers} />);
   fireEvent.input(ui.getByRole("textbox"), { target: { value: "Check the report" } });
   fireEvent.click(ui.getByRole("button", { name: "Steer", exact: true }));
-  await waitFor(() => expect(ui.container.textContent).toContain("Steer saved, but the controller could not start"));
+  await waitFor(() => expect(document.body.textContent).toContain("Steer saved, but the controller could not start"));
   expect(ui.container.textContent).not.toContain("Run requested");
   expect(save).toHaveBeenCalledTimes(1);
   expect(steers().pending).toHaveLength(1);

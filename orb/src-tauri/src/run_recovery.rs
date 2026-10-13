@@ -325,7 +325,7 @@ pub async fn local_run_launch(
     )
     .await?;
     let client_id = transfers::local_machine_identity()?;
-    let response=post(&connection,&request.id,"client-run",json!({"op":"begin","model":request.model,"cyber_access":request.cyber_access,"cyber_revision":request.cyber_revision,"client_id":client_id,"prompt":request.prompt,"cwd":request.cwd,"session_id":request.session_id})).await?;
+    let response=post(&connection,&request.id,"client-run",json!({"op":"begin","model":request.model,"service_tier":request.service_tier,"cyber_access":request.cyber_access,"cyber_revision":request.cyber_revision,"client_id":client_id,"prompt":request.prompt,"cwd":request.cwd,"session_id":request.session_id})).await?;
     let status = response.status();
     let body = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -492,6 +492,7 @@ mod protocol_tests {
             Some((1, id.clone())),
         );
         let request = local_agents::StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -529,6 +530,7 @@ mod protocol_tests {
             ),
         ]);
         let request = local_agents::StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -599,6 +601,7 @@ mod protocol_tests {
             (200, json!({"contract_version":"1","identity":{"role":"executor","mission_id":id},"tools":[],"limits":{"session_expires_at":chrono::Utc::now().timestamp()+3600}}).to_string()),
         ]);
         let request = local_agents::StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -693,6 +696,7 @@ mod process_tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         local_agents::local_agents_start(local_agents::StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -735,6 +739,7 @@ mod btw_smoke {
             token: std::env::var("ORB_BTW_TEST_TOKEN").unwrap(),
         };
         let request = local_agents::StartRequest {
+            service_tier: None,
             effort: None,
             cyber_revision: None,
             cyber_access: None,
@@ -795,7 +800,7 @@ mod btw_smoke {
             api_url: std::env::var("ORB_BTW_TEST_URL").unwrap(),
             token: std::env::var("ORB_BTW_TEST_TOKEN").unwrap(),
         };
-        let request=local_agents::StartRequest { effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness:"opencode".into(),bin:"/opt/homebrew/bin/opencode".into(),cwd:cwd.clone(),prompt:"Integration check: use the bash tool to run pwd, then read btw-fixture.txt in this directory. Reply with its exact content and the working directory. Do not edit any files or delegate.".into(),model:Some("builtin/smart".into()),session_id:None,image_paths:vec![], shared_cwd_with: None };
+        let request=local_agents::StartRequest { service_tier: None, effort: None, cyber_revision: None, cyber_access: None,id:id.clone(),harness:"opencode".into(),bin:"/opt/homebrew/bin/opencode".into(),cwd:cwd.clone(),prompt:"Integration check: use the bash tool to run pwd, then read btw-fixture.txt in this directory. Reply with its exact content and the working directory. Do not edit any files or delegate.".into(),model:Some("builtin/smart".into()),session_id:None,image_paths:vec![], shared_cwd_with: None };
         let receipt =
             tauri::async_runtime::block_on(local_run_launch(request, connection.clone())).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(180);

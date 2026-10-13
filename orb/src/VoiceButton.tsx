@@ -1,4 +1,5 @@
 import { Menu } from "./Menu";
+import { ErrorToast } from "./toast";
 /**
  * Dictation button for the composer: idle → recording → transcribing → text
  * handed back to the composer (never sent). Only rendered where native voice
@@ -398,11 +399,7 @@ export function VoiceButton(p: {
           </button>
         </Show>
       </Show>
-      <Show when={error()}>
-        <div class="voice-err" role="alert">
-          {error()}
-        </div>
-      </Show>
+      <ErrorToast error={error()} title="Voice input failed" onDismiss={() => setError(null)} />
     </span>
   );
 }

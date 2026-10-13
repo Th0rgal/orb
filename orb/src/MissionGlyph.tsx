@@ -78,11 +78,11 @@ export function MissionGlyph(p: { status: string; missionId?: string; unread?: b
     <Show when={p.identity} fallback={<Icon.Bot />}>{p.identity}</Show>
     <Show when={state().icon} fallback={<Show when={p.unread}><span class="mission-unread-dot" aria-hidden="true" /></Show>}>{Glyph => <span class="mission-status-mark" aria-hidden="true"><Dynamic component={Glyph()} size={10} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} /></span>}</Show>
   </span><Show when={open()}><Dialog title="Scheduled wake-ups" busy={busy()} onClose={() => setOpen(false)}>
-    <Show when={error()}><p role="alert">{error()}</p></Show>
+    <Show when={error()}><p class="inline-error" role="alert">{error()}</p></Show>
     <For each={items()} fallback={<p>No pending wake-ups.</p>}>{item => <div class="wake-up-item">
       <p>{continuationLabel({ count: 1, items: [item] })}</p>
       <Show when={item.reason}><p>{item.reason}</p></Show>
-      <Show when={item.error}><p role="alert">{item.error}</p></Show>
+      <Show when={item.error}><p class="inline-error" role="alert">{item.error}</p></Show>
       <Show when={item.state === "scheduled" || item.state === "queued" || item.state === "error"}>
         <div class="wake-up-actions"><Show when={item.state === "scheduled" || item.state === "queued"}><button type="button" disabled={busy()} onClick={() => void act(item.id, "resume")}>Resume now</button></Show>
         <button type="button" disabled={busy()} onClick={() => void act(item.id, "cancel")}>{item.source === "orb-local-rejected" ? "Dismiss rejected request" : "Cancel wake-up"}</button></div>

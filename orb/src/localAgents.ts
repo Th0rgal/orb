@@ -400,6 +400,7 @@ export async function writeLocalFiles(root: string, files: LocalFile[]): Promise
 }
 
 export interface StartLocal {
+  service_tier?: import("./api").CodexServiceTier;
   cyber_access?: CyberMode;
   cyber_revision?: string;
   imagePaths?: string[];
@@ -715,3 +716,9 @@ async function requireLocalCyber(invoke:NonNullable<ReturnType<typeof tauriInvok
  throw Error("Update Orb desktop before requesting a cyber program on this computer. Your selection was not silently omitted.");
 }
 
+
+export async function localCodexSpeedOptions(model: string): Promise<{tiers: {id: import('./api').CodexServiceTier; available: boolean; reason?: string}[]}> {
+ const invoke=tauriInvoke(); if(!invoke)throw new Error('Open Orb desktop to check the local Codex subscription.');
+ const cli=await localAgentForLaunch('codex'); if(!cli?.path)throw new Error('Codex is not installed on this computer.');
+ return await invoke('local_codex_speed_options',{bin:cli.path,model}) as {tiers: {id: import('./api').CodexServiceTier; available: boolean; reason?: string}[]};
+}

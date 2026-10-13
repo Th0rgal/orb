@@ -1575,6 +1575,53 @@ async fn native_protocol_proxy(
         }
     }
     let parsed_body: serde_json::Value = serde_json::from_slice(&body).expect("validated request");
+    let mut speed_tier = None;
+    let speed_accounts = if let Some(value) = headers.get("x-sandboxed-codex-speed") {
+        let tier = match value.to_str().ok() {
+            Some("default") => crate::codex_speed::Tier::Standard,
+            Some("fast" | "priority") => crate::codex_speed::Tier::Fast,
+            Some("ultrafast") => crate::codex_speed::Tier::Ultrafast,
+            _ => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid Codex speed selection".into(),
+                    "unsupported_service_tier",
+                )
+            }
+        };
+        if tier != crate::codex_speed::Tier::Standard {
+            if parsed_body
+                .get("service_tier")
+                .is_some_and(|value| !value.is_null() && value.as_str() != Some(tier.wire()))
+            {
+                return error_response(StatusCode::BAD_REQUEST, "The Codex client did not apply the selected speed. Update Codex before retrying.".into(), "unsupported_service_tier");
+            }
+            if let Err(error) = super::control::speed::validate(
+                &state.config.working_dir,
+                "codex",
+                Some(&requested_model),
+                tier,
+                None,
+            )
+            .await
+            {
+                return error_response(StatusCode::BAD_REQUEST, error, "unsupported_service_tier");
+            }
+            speed_tier = Some(tier);
+            Some(
+                super::control::speed::eligible_account_ids(
+                    &state.config.working_dir,
+                    &requested_model,
+                    tier,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let cyber_program = match super::control::cyber::enforce_proxy_selection(
         cyber_receipt.as_ref().map(|(_, _, selection, _)| selection),
         &requested_model,
@@ -1702,6 +1749,59 @@ async fn native_protocol_proxy(
     let mut supported_entries = 0usize;
     let mut last_upstream_error: Option<(StatusCode, HeaderMap, bytes::Bytes)> = None;
     for entry in &entries {
+        if speed_accounts
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&entry.account_id))
+        {
+            continue;
+        }
+
+        let mut body = body.clone();
+        if let Some(tier) = speed_tier {
+            let mut request = parsed_body.clone();
+            request["service_tier"] = serde_json::json!(tier.wire());
+            body = bytes::Bytes::from(serde_json::to_vec(&request).expect("request serialization"));
+            if super::oauth_owner::codex_via_cli_proxy().is_some() {
+                let accounts = super::control::speed::eligible_proxy_accounts(
+                    &state.config.working_dir,
+                    &requested_model,
+                    tier,
+                )
+                .await;
+                let Some(account) = accounts
+                    .iter()
+                    .find(|account| account.provider_id == entry.account_id)
+                else {
+                    continue;
+                };
+                let prefix = match super::control::speed::proxy_prefix(
+                    &state.config.working_dir,
+                    account,
+                    &requested_model,
+                )
+                .await
+                {
+                    Ok(prefix) => prefix,
+                    Err(error) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            error,
+                            "unsupported_service_tier",
+                        )
+                    }
+                };
+                request["model"] = serde_json::json!(format!(
+                    "{prefix}/{}",
+                    requested_model
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&requested_model)
+                ));
+                body = bytes::Bytes::from(
+                    serde_json::to_vec(&request).expect("request serialization"),
+                );
+            }
+        }
         let provider_type =
             ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
         if !native_protocol_supported(
@@ -1838,7 +1938,16 @@ async fn native_protocol_proxy(
         {
             return error_response(StatusCode::BAD_REQUEST, "This route cannot guarantee the selected cyber program and model. Use a direct OpenAI route or choose Automatic explicitly.".into(), "unsupported_access_program");
         }
-        let rewrite_model_id = if via_cli_proxy && provider_type == ProviderType::Xai {
+        let routed_model = if speed_tier.is_some() && via_cli_proxy {
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value["model"].as_str().map(str::to_owned))
+        } else {
+            None
+        };
+        let rewrite_model_id = if let Some(model) = routed_model.as_deref() {
+            model
+        } else if via_cli_proxy && provider_type == ProviderType::Xai {
             cli_proxy_xai_model_id(&entry.model_id)
         } else {
             entry.model_id.as_str()
@@ -3059,52 +3168,99 @@ pub(crate) async fn chat_completions_inner(
 
         if use_google_oauth_adapter || use_google_api_adapter {
             if is_stream && status.is_success() {
-                let mut response_headers = HeaderMap::new();
-                response_headers.insert(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static(TEXT_EVENT_STREAM),
-                );
-                response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_CACHE));
+                match peek_google_sse_stream(upstream_resp.bytes_stream()).await {
+                    Ok((peek_buf, rest_stream)) => {
+                        let mut response_headers = HeaderMap::new();
+                        response_headers.insert(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static(TEXT_EVENT_STREAM),
+                        );
+                        response_headers
+                            .insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_CACHE));
 
-                let stream_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-                let stream_created = chrono::Utc::now().timestamp();
-                let model_id = entry.model_id.clone();
-                let response_stream = transform_google_sse_to_openai(
-                    upstream_resp.bytes_stream(),
-                    stream_id,
-                    stream_created,
-                    model_id,
-                );
+                        let stream_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+                        let stream_created = chrono::Utc::now().timestamp();
+                        let model_id = entry.model_id.clone();
+                        let peek_stream = futures::stream::once(async move {
+                            Ok::<_, reqwest::Error>(bytes::Bytes::from(peek_buf))
+                        });
+                        let combined = peek_stream.chain(rest_stream);
+                        let response_stream = transform_google_sse_to_openai(
+                            combined,
+                            stream_id,
+                            stream_created,
+                            model_id,
+                        );
 
-                let ttft_ms = request_start.elapsed().as_millis() as u64;
-                state
-                    .health_tracker
-                    .record_latency(entry.account_id, ttft_ms)
-                    .await;
-                let account_id = entry.account_id;
-                let health_tracker = state.health_tracker.clone();
-                let tracked_stream = track_stream_health(
-                    response_stream,
-                    health_tracker,
-                    account_id,
-                    None,
-                    entry.subscription_key.clone(),
-                    Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
-                    liveness_mission_id,
-                );
+                        let ttft_ms = request_start.elapsed().as_millis() as u64;
+                        state
+                            .health_tracker
+                            .record_latency(entry.account_id, ttft_ms)
+                            .await;
+                        let account_id = entry.account_id;
+                        let health_tracker = state.health_tracker.clone();
+                        let tracked_stream = track_stream_health(
+                            response_stream,
+                            health_tracker,
+                            account_id,
+                            None,
+                            entry.subscription_key.clone(),
+                            Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
+                            liveness_mission_id,
+                        );
 
-                let success_provider = entry.provider_id.clone();
-                for evt in &mut pending_fallback_events {
-                    if evt.to_provider.is_none() {
-                        evt.to_provider = Some(success_provider.clone());
+                        let success_provider = entry.provider_id.clone();
+                        for evt in &mut pending_fallback_events {
+                            if evt.to_provider.is_none() {
+                                evt.to_provider = Some(success_provider.clone());
+                            }
+                        }
+                        for evt in pending_fallback_events {
+                            state.health_tracker.record_fallback_event(evt).await;
+                        }
+
+                        return (status, response_headers, Body::from_stream(tracked_stream))
+                            .into_response();
+                    }
+                    Err((reason, detail)) => {
+                        let elapsed_ms = request_start.elapsed().as_millis() as u64;
+                        tracing::warn!(
+                            provider = %entry.provider_id,
+                            account_id = %entry.account_id,
+                            model = %entry.model_id,
+                            reason = %reason,
+                            detail = %detail,
+                            "Google SSE stream failed or returned empty completion before first content chunk; trying next entry"
+                        );
+                        let cooldown = state
+                            .health_tracker
+                            .record_entry_failure(entry, reason, None)
+                            .await;
+                        pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                            timestamp: chrono::Utc::now(),
+                            chain_id: chain_id.clone(),
+                            from_provider: entry.provider_id.clone(),
+                            from_model: entry.model_id.clone(),
+                            from_account_id: entry.account_id,
+                            reason,
+                            cooldown_secs: Some(cooldown.as_secs_f64()),
+                            to_provider: None,
+                            latency_ms: Some(elapsed_ms),
+                            attempt_number: (entry_idx + 1) as u32,
+                            chain_length,
+                        });
+                        match reason {
+                            CooldownReason::RateLimit
+                            | CooldownReason::QuotaExhausted
+                            | CooldownReason::Overloaded => rate_limit_count += 1,
+                            CooldownReason::AuthError | CooldownReason::ClientError => {
+                                client_error_count += 1
+                            }
+                            _ => server_error_count += 1,
+                        }
+                        continue;
                     }
                 }
-                for evt in pending_fallback_events {
-                    state.health_tracker.record_fallback_event(evt).await;
-                }
-
-                return (status, response_headers, Body::from_stream(tracked_stream))
-                    .into_response();
             }
 
             let response_headers = upstream_resp.headers().clone();
@@ -6887,13 +7043,23 @@ fn translate_google_json_to_openai(
             }
         }
     }
-    let finish_reason = finish_reason_from_google(
-        candidate
-            .get("finishReason")
-            .and_then(|v| v.as_str())
-            .or(Some("STOP")),
-    );
+    let finish_reason_raw = candidate.get("finishReason").and_then(|v| v.as_str());
+    let finish_reason = finish_reason_from_google(finish_reason_raw.or(Some("STOP")));
     let has_tool_calls = !tool_calls.is_empty();
+    if content.is_empty() && !has_tool_calls {
+        let detail = finish_reason_raw
+            .or_else(|| {
+                response
+                    .get("promptFeedback")
+                    .and_then(|pf| pf.get("blockReason"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("empty_parts");
+        return Err(format!(
+            "Google response contained no text or tool calls ({})",
+            detail
+        ));
+    }
 
     let prompt_tokens = response
         .get("usageMetadata")
@@ -6947,6 +7113,116 @@ fn translate_google_json_to_openai(
     Ok((bytes, Some((prompt_tokens, completion_tokens))))
 }
 
+fn google_sse_payload_has_output(resp: &serde_json::Value) -> bool {
+    resp.get("candidates")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.get("text")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| !t.is_empty())
+                    || part.get("functionCall").is_some()
+            })
+        })
+}
+
+async fn peek_google_sse_stream<S, E>(
+    inner: S,
+) -> Result<(Vec<u8>, std::pin::Pin<Box<S>>), (CooldownReason, String)>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display,
+{
+    let mut stream = Box::pin(inner);
+    let mut peek_buf = Vec::<u8>::new();
+    let mut scanned = 0usize;
+    let mut last_empty_reason: Option<String> = None;
+
+    const MAX_PEEK_BYTES: usize = 64 * 1024;
+    while peek_buf.len() < MAX_PEEK_BYTES {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                peek_buf.extend_from_slice(&chunk);
+                while let Some(rel) = peek_buf[scanned..].iter().position(|&b| b == b'\n') {
+                    let line_end = scanned + rel;
+                    let line = &peek_buf[scanned..=line_end];
+                    scanned = line_end + 1;
+                    let trimmed = line
+                        .strip_suffix(b"\r\n")
+                        .or_else(|| line.strip_suffix(b"\n"))
+                        .unwrap_or(line);
+                    let Some(payload) = trimmed.strip_prefix(b"data: ") else {
+                        continue;
+                    };
+                    if payload == b"[DONE]" {
+                        return Err((
+                            CooldownReason::ServerError,
+                            last_empty_reason
+                                .unwrap_or_else(|| "DONE before any candidate output".to_string()),
+                        ));
+                    }
+                    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                        continue;
+                    };
+                    if parsed.get("error").is_some() {
+                        let reason = classify_google_error_reason(payload)
+                            .unwrap_or_else(|| classify_embedded_error(&parsed));
+                        let msg = parsed
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("google sse error")
+                            .to_string();
+                        return Err((reason, msg));
+                    }
+                    let resp = parsed.get("response").unwrap_or(&parsed);
+                    if let Some(block_reason) = resp
+                        .get("promptFeedback")
+                        .and_then(|pf| pf.get("blockReason"))
+                        .and_then(|v| v.as_str())
+                    {
+                        return Err((
+                            CooldownReason::ServerError,
+                            format!("promptFeedback.blockReason={}", block_reason),
+                        ));
+                    }
+                    if google_sse_payload_has_output(resp) {
+                        return Ok((peek_buf, stream));
+                    }
+                    if let Some(fr) = resp
+                        .get("candidates")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|c| c.get("finishReason"))
+                        .and_then(|v| v.as_str())
+                    {
+                        last_empty_reason = Some(format!("empty candidate finishReason={}", fr));
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                return Err((
+                    CooldownReason::ServerError,
+                    format!("stream read error: {}", e),
+                ));
+            }
+            None => {
+                return Err((
+                    CooldownReason::ServerError,
+                    last_empty_reason.unwrap_or_else(|| {
+                        "stream closed with zero text or tool parts".to_string()
+                    }),
+                ));
+            }
+        }
+    }
+    Ok((peek_buf, stream))
+}
+
 fn transform_google_sse_to_openai(
     inner: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     stream_id: String,
@@ -6959,6 +7235,7 @@ fn transform_google_sse_to_openai(
             Vec::<u8>::new(),
             false,  // sent role chunk
             false,  // emitted terminal chunk
+            false,  // emitted any text/thought/tool content
             0usize, // next tool call index across the entire SSE stream
             stream_id,
             model_id,
@@ -6970,6 +7247,7 @@ fn transform_google_sse_to_openai(
             mut buf,
             mut sent_role,
             mut emitted_done,
+            mut has_output,
             mut next_tool_idx,
             stream_id,
             model_id,
@@ -6997,6 +7275,7 @@ fn transform_google_sse_to_openai(
                                     buf,
                                     sent_role,
                                     emitted_done,
+                                    has_output,
                                     next_tool_idx,
                                     stream_id,
                                     model_id,
@@ -7011,6 +7290,36 @@ fn transform_google_sse_to_openai(
                         Ok(v) => v,
                         Err(_) => continue,
                     };
+                    if let Some(err_obj) = parsed.get("error") {
+                        let chunk = serde_json::json!({
+                            "id": stream_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_id,
+                            "choices": [{ "index": 0, "delta": {}, "finish_reason": "error" }],
+                            "error": err_obj,
+                        });
+                        let mut out = format!("data: {}\n\n", chunk);
+                        if !emitted_done {
+                            out.push_str("data: [DONE]\n\n");
+                            emitted_done = true;
+                        }
+                        return Some((
+                            Ok(bytes::Bytes::from(out)),
+                            (
+                                stream,
+                                buf,
+                                sent_role,
+                                emitted_done,
+                                has_output,
+                                next_tool_idx,
+                                stream_id,
+                                model_id,
+                                created,
+                                usage_seen,
+                            ),
+                        ));
+                    }
                     let resp = parsed.get("response").unwrap_or(&parsed);
                     // Gemini reports usageMetadata on (at least) the final
                     // chunk; remember the latest so the finish chunk can carry
@@ -7059,6 +7368,7 @@ fn transform_google_sse_to_openai(
                         for part in parts {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                 if !text.is_empty() {
+                                    has_output = true;
                                     let is_thought = part
                                         .get("thought")
                                         .and_then(|v| v.as_bool())
@@ -7079,6 +7389,7 @@ fn transform_google_sse_to_openai(
                                 }
                             }
                             if let Some(fc) = part.get("functionCall") {
+                                has_output = true;
                                 let tool_idx = next_tool_idx;
                                 next_tool_idx += 1;
                                 let name =
@@ -7116,6 +7427,8 @@ fn transform_google_sse_to_openai(
                         let mut finish_reason = finish_reason_from_google(Some(fr)).to_string();
                         if next_tool_idx > 0 && finish_reason == "stop" {
                             finish_reason = "tool_calls".to_string();
+                        } else if !has_output && finish_reason == "stop" {
+                            finish_reason = "error".to_string();
                         }
                         let mut finish_chunk = serde_json::json!({
                             "id": stream_id,
@@ -7128,6 +7441,12 @@ fn transform_google_sse_to_openai(
                                 "finish_reason": finish_reason,
                             }],
                         });
+                        if finish_reason == "error" {
+                            finish_chunk["error"] = serde_json::json!({
+                                "message": format!("Google stream finished with no output (finishReason={})", fr),
+                                "type": "upstream_empty_response"
+                            });
+                        }
                         if let Some((prompt, completion)) = usage_seen {
                             finish_chunk["usage"] = serde_json::json!({
                                 "prompt_tokens": prompt,
@@ -7151,6 +7470,7 @@ fn transform_google_sse_to_openai(
                             buf,
                             sent_role,
                             emitted_done,
+                            has_output,
                             next_tool_idx,
                             stream_id,
                             model_id,
@@ -7170,6 +7490,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 emitted_done,
+                                has_output,
                                 next_tool_idx,
                                 stream_id,
                                 model_id,
@@ -7179,6 +7500,10 @@ fn transform_google_sse_to_openai(
                         ));
                     }
                     None => {
+                        if !buf.is_empty() && !buf.ends_with(b"\n") {
+                            buf.push(b'\n');
+                            continue;
+                        }
                         if emitted_done {
                             return None;
                         }
@@ -7189,6 +7514,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 true,
+                                has_output,
                                 next_tool_idx,
                                 stream_id,
                                 model_id,
@@ -9535,6 +9861,58 @@ mod tests {
                 .as_deref(),
             Some("builtin/smart")
         );
+    }
+
+    #[tokio::test]
+    async fn peek_google_sse_rejects_empty_candidate_completion() {
+        let chunks = vec![
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+                b"data: {\"candidates\":[{\"content\":{\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":59184,\"totalTokenCount\":59184}}\n\n",
+            )),
+        ];
+        let res = peek_google_sse_stream(futures::stream::iter(chunks)).await;
+        let (reason, detail) = match res {
+            Ok(_) => panic!("empty Google SSE completion should fail peek"),
+            Err(err) => err,
+        };
+        assert!(matches!(reason, CooldownReason::ServerError));
+        assert!(detail.contains("empty candidate finishReason=STOP"));
+    }
+
+    #[tokio::test]
+    async fn peek_google_sse_accepts_stream_once_first_text_part_arrives() {
+        let chunks = vec![
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+                b"data: {\"usageMetadata\":{\"promptTokenCount\":120}}\n\n",
+            )),
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+                b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n",
+            )),
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+                b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\" world\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+            )),
+        ];
+        let (peek_buf, rest) = peek_google_sse_stream(futures::stream::iter(chunks))
+            .await
+            .expect("stream with text part should pass peek");
+        assert!(std::str::from_utf8(&peek_buf).unwrap().contains("Hello"));
+        let remaining: Vec<_> = rest.collect().await;
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn google_json_translation_rejects_empty_candidate_without_text_or_tools() {
+        let body = serde_json::json!({
+            "candidates": [{"content": {"role": "model"}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 59184, "totalTokenCount": 59184}
+        });
+        let err = translate_google_json_to_openai(
+            &serde_json::to_vec(&body).unwrap(),
+            "gemini-4-argon-eap",
+            0,
+        )
+        .expect_err("empty candidate should be rejected");
+        assert!(err.contains("no text or tool calls"));
     }
 }
 

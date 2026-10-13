@@ -396,6 +396,8 @@ test("connected empty context never substitutes demo attachment items",async({pa
  await expect(page.getByRole("listbox",{name:"Context"}).getByRole("option")).toHaveCount(0);
  await page.getByTitle("Add context").click();
  await expect(page.locator(".plus-menu .menu-item")).toHaveText(["Upload file or image…"]);
+ const box=await page.locator(".plus-menu").boundingBox();
+ expect(box?.height).toBeGreaterThan(28);
  // Nothing was offered, so nothing was written into the draft either.
  await expect(input).toHaveValue("@");
 });
@@ -421,7 +423,7 @@ test("context picks preserve multiline whitespace and land at the caret",async({
  await expect(input).toHaveValue("Before @notes/foo.md inserted after");
 });
 
-test("disk refusal stays below the draft with readable details and a dismiss action",async({page})=>{
+test("disk refusal shows a notification clear of the draft with details, an action and a dismiss button",async({page})=>{
  await setup(page);
  const raw="mission needs an estimated 64 GiB scratch plus a 64 GiB emergency floor (128 GiB required), but only 127 GiB is free at /root (filesystem statvfs:7321850625438636562); select a remote node or free space";
  await page.route("**/api/control/missions",async route=>{
@@ -430,13 +432,14 @@ test("disk refusal stays below the draft with readable details and a dismiss act
  });
  const input=composerInput(page);await input.fill("Summarize the Pareto audit progress");await input.press("Enter");
  const alert=page.getByRole("alert");await expect(alert).toContainText("Not enough disk space");await expect(input).toHaveValue("Summarize the Pareto audit progress");
- const composer=await page.locator(".composer").boundingBox(),notice=await alert.boundingBox();expect(notice!.y).toBeGreaterThanOrEqual(composer!.y+composer!.height);
- await expect(alert.locator("pre")).toBeHidden();await alert.getByText("Technical details").click();await expect(alert.locator("pre")).toHaveText(raw);await alert.getByText("Technical details").click();
- await page.screenshot({path:"test-results/error-notice-dark.png"});
+ const composer=await page.locator(".composer").boundingBox(),notice=await alert.boundingBox();expect(notice!.y>=composer!.y+composer!.height||notice!.y+notice!.height<=composer!.y).toBe(true);
+ await expect(alert.getByRole("button",{name:"Choose machine"})).toBeVisible();
+ await expect(alert.locator("pre")).toBeHidden();await alert.getByText("Details").click();await expect(alert.locator("pre")).toHaveText(raw);await alert.getByText("Details").click();
+ await page.screenshot({path:"test-results/error-toast-dark.png"});
  await page.setViewportSize({width:480,height:850});
  await page.getByRole("button", {name:"Close sidebar", exact:true}).click();
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
- await alert.getByRole("button",{name:"Dismiss error"}).click();await expect(alert).toHaveCount(0);await expect(input).toHaveValue("Summarize the Pareto audit progress");
+ await alert.getByRole("button",{name:"Dismiss"}).click();await expect(alert).toHaveCount(0);await expect(input).toHaveValue("Summarize the Pareto audit progress");
 });
 
 test('follow-up composer does not alternate layouts while typing wrapped text',async({page})=>{

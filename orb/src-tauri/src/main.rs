@@ -3,6 +3,8 @@
 mod agent_software;
 #[path = "../../../shared/antigravity.rs"]
 mod antigravity;
+#[path = "../../../shared/codex_speed.rs"]
+pub mod codex_speed;
 #[path = "../../../shared/cyber_access.rs"]
 pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
@@ -172,7 +174,10 @@ fn main() {
             uploads::pick_upload_files,
             uploads::pick_working_directory,
             uploads::read_upload_file,
+            uploads::read_upload_file_chunk,
+            uploads::stat_upload_file,
             uploads::stage_upload_file,
+            uploads::stage_upload_file_from_path,
             browse_local_files,
             machine_metrics::local_machine_metrics,
             open_url,
@@ -196,6 +201,7 @@ fn main() {
             skills::local_skills_status,
             skills::local_skills_sync,
             local_agents::local_agents_cyber_capabilities,
+            local_agents::local_codex_speed_options,
             local_agents::local_agents_scan,
             local_agents::local_antigravity_models,
             local_agents::local_agents_workspace,

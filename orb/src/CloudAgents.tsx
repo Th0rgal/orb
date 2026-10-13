@@ -1,4 +1,5 @@
 import { pollWhileVisible } from "./poll";
+import { ErrorToast } from "./toast";
 import { QuizAnswer } from "./QuizAnswer";
 import * as Ic from "./icons";
 import { For, Show, createSignal, createEffect, onMount, onCleanup } from 'solid-js';
@@ -189,7 +190,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
         <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = prompt().replaceAll(`[Image #${image.reference}]`, ""); setPrompt(value); if (ta) ta.value = value; } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show>
         <Show when={uploadedFiles().length}><div class="attach-pills"><For each={uploadedFiles()}>{file => <button type="button" class="pill on" title={file.path} onClick={e => { e.stopPropagation(); setUploadedFiles(cur => cur.filter(item => item.path !== file.path)); const token = uploadToken(file.path); const value = prompt().replaceAll(`${token} `, "").replaceAll(token, ""); setPrompt(value); if (ta) ta.value = value; }}><Ic.FileIcon size={12}/> {file.name} <Ic.CloseIcon size={12}/></button>}</For></div></Show>
         <Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
-        <Show when={imageError()}><span class="image-paste-error" role="alert">{imageError()}</span></Show>
+        <ErrorToast error={imageError()} title="Couldn’t add the image" onDismiss={() => setImageError('')} />
         <textarea ref={ta} aria-label="Prompt" autofocus rows={2} placeholder="Describe a task for your cloud agent" value={prompt()} disabled={busy()} onPaste={event => void pasteImages(event)} onInput={e => setPrompt(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); } }} />
       </div>
       <div class="plus-wrap">
@@ -223,7 +224,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
       <Show when={!account()}><p class="cloud-note" role="status">{loaded() ? 'No connected account for this service' : 'Checking connected accounts…'}</p></Show>
       <Show when={account()?.reason && !account()?.available}><p class="cloud-note" role="status">{account()?.reason}</p></Show>
 
-      <Show when={error()}><p class="cloud-note" role="alert">{error()}</p></Show>
+      <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
     </div>
   </div></section>;
 }
@@ -300,7 +301,7 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     return `${label} · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
   };
   return <><div class="scroll"><div class="col cloud-transcript">
-    <Show when={error()}><p class="cloud-note" role="alert">{error()}</p></Show>
+    <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
     <Show when={execution()} fallback={<p role="status">Loading cloud conversation…</p>}>{e => <>
       <Transcript items={items()} pending={active()} renderText={(item, fallback) =>
         <Show when={e().selection.provider === 'chatgpt'} fallback={fallback}>

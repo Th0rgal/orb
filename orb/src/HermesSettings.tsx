@@ -1,8 +1,8 @@
 import { For, Show, createSignal, onMount } from "solid-js";
+import { ErrorToast } from "./toast";
 import { getHermesSettings, updateHermesSettings, type HermesSettingsState } from "./cloudAgentApi";
 import { isConnected } from "./api";
 import { Select } from "./Select";
-import { ErrorNotice } from "./ErrorNotice";
 import { ProviderLogo } from "./ProviderLogo";
 
 export function HermesSettings() {
@@ -122,9 +122,7 @@ export function HermesSettings() {
             </section>
           }
         >
-          <Show when={error()}>
-            <ErrorNotice error={error()} onDismiss={() => setError("")} />
-          </Show>
+          <ErrorToast error={error()} onDismiss={() => setError("")} />
           <Show when={loading() && !state()}>
             <section class="s-sec">
               <div class="s-card">

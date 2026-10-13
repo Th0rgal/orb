@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
-import { countNested, holds, nestMissions, missionSubtree, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
+import { countNested, holds, nestMissions, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededMission, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
 
-const m = (id: string, parent?: string, status = "completed") => ({ id, parent_mission_id: parent, status });
+const m = (id: string, parent?: string, status = "completed", tags?: string[]) => ({ id, parent_mission_id: parent, status, tags });
 
 test("missions are placed inside the mission that launched them", () => {
   const roots = nestMissions([m("boss"), m("w1", "boss", "active"), m("other"), m("w2", "boss"), m("w1a", "w1", "active")]);
@@ -90,5 +90,34 @@ test("expandMissionDescendants transitively includes known children and callback
     "child-1",
     "grandchild",
     "callback-child",
+  ]);
+});
+
+test("superseded child missions and their stopped descendants are excluded unless selected or still running", () => {
+  const rows = [
+    m("yukon-all", undefined, "active"),
+    m("tier1-superseded", "yukon-all", "interrupted", ["superseded", "superseded_by:yukon-all"]),
+    m("tier1-failed-grandchild", "tier1-superseded", "failed"),
+    m("tier1-hyphen", "yukon-all", "paused", ["superseded-by:yukon-all"]),
+    m("tier1-still-running", "yukon-all", "running", ["superseded"]),
+    m("tier1-live-child", "yukon-all", "completed"),
+  ];
+  const byId = new Map(rows.map(r => [r.id, r]));
+  expect(isSupersededMission(rows[1])).toBe(true);
+  expect(isSupersededMission(rows[4])).toBe(false);
+  expect(isSupersededInTree(rows[2], byId)).toBe(true);
+
+  const visible = missionTreeRows(rows, r => r.status !== "acknowledged" && !isSupersededInTree(r, byId));
+  expect(visible.map(r => r.id)).toEqual(["yukon-all", "tier1-still-running", "tier1-live-child"]);
+
+  const withSelected = missionTreeRows(
+    rows,
+    r => r.status !== "acknowledged" && (r.id === "tier1-superseded" || !isSupersededInTree(r, byId)),
+  );
+  expect(withSelected.map(r => r.id)).toEqual([
+    "yukon-all",
+    "tier1-superseded",
+    "tier1-still-running",
+    "tier1-live-child",
   ]);
 });

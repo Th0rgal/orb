@@ -28,7 +28,7 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
    // Plain INSERT is intentional: an offline record can NEVER adopt, replace,
    // or restart an existing mission, even when its UUID collides.
    let tags=serde_json::to_string(&o.tags.iter().cloned().chain(std::iter::once("placement:client".to_owned())).collect::<Vec<_>>()).map_err(err)?;
-   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin,agent) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?10,'orb-client',?12)",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort,o.initial_agent()]).map_err(err)?;
+   tx.execute("INSERT INTO missions (id,status,title,workspace_id,backend,model_override,model_effort,created_at,updated_at,working_directory,requires_local_disk,project,tags,origin,agent,service_tier) VALUES (?1,'active',?2,?3,?4,?5,?11,?6,?7,?8,0,?9,?10,'orb-client',?12,?13)",params![id,o.title,crate::workspace::DEFAULT_WORKSPACE_ID.to_string(),o.backend,o.model,o.created_at,now,o.cwd,o.project,tags,o.effort,o.initial_agent(),o.service_tier.map(|tier|tier.id().to_string())]).map_err(err)?;
    if let Some(objective)=o.prompt.trim().strip_prefix("/goal").filter(|rest| rest.starts_with(char::is_whitespace)).map(str::trim).filter(|rest| !rest.is_empty()) {
     tx.execute("UPDATE missions SET goal_mode=1,goal_objective=?2 WHERE id=?1",params![id,objective]).map_err(err)?;
    }
@@ -55,6 +55,7 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             origin: Origin {
+                service_tier: None,
                 cyber_access: None,
                 id: Uuid::new_v4(),
                 run_id: Uuid::new_v4(),

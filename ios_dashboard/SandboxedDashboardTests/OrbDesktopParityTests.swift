@@ -317,6 +317,63 @@ final class OrbDesktopParityTests: XCTestCase {
         XCTAssertTrue(payload.body.contains("To decide: Approve opening the PR on master"))
         XCTAssertEqual(payload.categoryIdentifier, OrbNotificationCenter.categoryInboxReady)
     }
+
+    func testArchiveProjectGroupingNestsConversationsAndFiltersByAgeAndSearch() throws {
+        let projects: [OrbRow] = [
+            OrbRow(.object(["slug": .string("paloma"), "title": .string("Paloma")]), project: true),
+            OrbRow(.object(["slug": .string("benchmarks"), "title": .string("Benchmarks")]), project: true),
+        ]
+        let archived: [OrbRow] = [
+            OrbRow(.object([
+                "id": .string("m-parent"),
+                "title": .string("Run formal verification benchmark"),
+                "status": .string("acknowledged"),
+                "project": .string("benchmarks"),
+                "updated_at": .string("2026-10-12T10:00:00Z"),
+            ])),
+            OrbRow(.object([
+                "id": .string("m-child"),
+                "title": .string("Worker task 1"),
+                "status": .string("acknowledged"),
+                "project": .string("benchmarks"),
+                "parent_mission_id": .string("m-parent"),
+                "updated_at": .string("2026-10-12T10:05:00Z"),
+            ])),
+            OrbRow(.object([
+                "id": .string("m-paloma-old"),
+                "title": .string("Old coordinator fix"),
+                "status": .string("acknowledged"),
+                "project": .string("paloma"),
+                "updated_at": .string("2026-10-01T10:00:00Z"),
+            ])),
+            OrbRow(.object([
+                "id": .string("m-unassigned"),
+                "title": .string("Scratch agent"),
+                "status": .string("acknowledged"),
+                "project": .string(""),
+                "updated_at": .string("2026-10-11T15:00:00Z"),
+            ])),
+        ]
+
+        let groups = OrbArchiveProjectGroup.build(archivedMissions: archived, projects: projects)
+        XCTAssertEqual(groups.map(\.label), ["Benchmarks", "No project", "Paloma"])
+        XCTAssertEqual(groups[0].slug, "benchmarks")
+        XCTAssertEqual(groups[0].totalCount, 2)
+        XCTAssertEqual(groups[0].roots.count, 1)
+        XCTAssertEqual(groups[0].roots[0].id, "m-parent")
+        XCTAssertEqual(groups[0].roots[0].children.map(\.id), ["m-child"])
+
+        let searchedByTitle = OrbArchiveProjectGroup.build(archivedMissions: archived, projects: projects, searchQuery: "coordinator")
+        XCTAssertEqual(searchedByTitle.map(\.slug), ["paloma"])
+        XCTAssertEqual(searchedByTitle[0].roots.map(\.id), ["m-paloma-old"])
+
+        let subtree = OrbMissionTree.subtree(archived, rootIDs: ["m-parent"])
+        XCTAssertEqual(Set(subtree.map(\.id)), Set(["m-parent", "m-child"]))
+
+        let now = try XCTUnwrap(OrbStyle.parseDate("2026-10-12T12:00:00Z"))
+        let olderThanDay = OrbMissionTree.filterArchivedByAge(archived, maxAgeSeconds: 24 * 60 * 60, now: now)
+        XCTAssertEqual(olderThanDay.map(\.id), ["m-paloma-old"])
+    }
 }
 
 

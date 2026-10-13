@@ -244,6 +244,14 @@ export class TranscriptReducer {
         if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled"].includes(status)) {
           this.close();
         }
+        const summary = str(d.summary ?? d.content).trim();
+        if (["failed", "not_feasible"].includes(status) && summary) {
+          const lastUser = this.items.reduce((last, item, idx) => item.kind === "user" && !item.queued ? idx : last, -1);
+          const alreadyShown = this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
+          if (!alreadyShown) {
+            this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
+          }
+        }
         return;
       }
     }

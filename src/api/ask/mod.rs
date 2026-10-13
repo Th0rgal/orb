@@ -1108,6 +1108,7 @@ async fn execute_tool(turn: &AskTurn, name: &str, arguments: &str) -> String {
                     model_override: None,
                     model_effort: None,
                     fast_mode: false,
+                    service_tier: None,
                     backend,
                     config_profile: None,
                     parent_mission_id: None,

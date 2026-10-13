@@ -128,16 +128,41 @@ async fn context_resolve(
 async fn context_blob(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath((slug, hash)): AxumPath<(String, String)>,
-) -> Result<impl axum::response::IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
     let store = context_store(&state, &slug)?;
-    let bytes = tokio::task::spawn_blocking(move || store.blob(&hash))
-        .await
-        .map_err(internal)?
-        .map_err(not_found)?;
+    let size = store.blob_size(&hash).map_err(not_found)?;
+    if size <= crate::project_context::FILE_LIMIT as u64 {
+        let bytes = tokio::task::spawn_blocking(move || store.blob(&hash))
+            .await
+            .map_err(internal)?
+            .map_err(not_found)?;
+        return Ok((
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/octet-stream".to_string(),
+                ),
+                (axum::http::header::CONTENT_LENGTH, size.to_string()),
+            ],
+            bytes,
+        )
+            .into_response());
+    }
+    let path = store.blob_path(&hash).map_err(not_found)?;
+    let file = tokio::fs::File::open(path).await.map_err(internal)?;
+    let stream = tokio_util::io::ReaderStream::new(file);
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        bytes,
-    ))
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_string(),
+            ),
+            (axum::http::header::CONTENT_LENGTH, size.to_string()),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
 }
 async fn context_upload(
     State(state): State<Arc<super::routes::AppState>>,
@@ -150,6 +175,59 @@ async fn context_upload(
         .map_err(internal)?
         .map_err(bad_request)?;
     Ok(Json(serde_json::json!({"hash":hash})))
+}
+async fn context_session_init(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<crate::project_context::UploadSessionInit>,
+) -> Result<Json<crate::project_context::UploadSessionStatus>, ApiError> {
+    let store = context_store(&state, &slug)?;
+    tokio::task::spawn_blocking(move || store.init_upload_session(req))
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(bad_request)
+}
+async fn context_session_chunk(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath((slug, upload_id, index)): AxumPath<(String, String, usize)>,
+    bytes: axum::body::Bytes,
+) -> Result<Json<crate::project_context::UploadSessionStatus>, ApiError> {
+    let _permit = crate::uploads::CHUNK_SLOTS
+        .acquire()
+        .await
+        .map_err(internal)?;
+    let store = context_store(&state, &slug)?;
+    tokio::task::spawn_blocking(move || store.write_upload_chunk(&upload_id, index, &bytes))
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(bad_request)
+}
+async fn context_session_complete(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath((slug, upload_id)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = crate::uploads::SLOTS.acquire().await.map_err(internal)?;
+    let store = context_store(&state, &slug)?;
+    let (hash, size) =
+        tokio::task::spawn_blocking(move || store.complete_upload_session(&upload_id))
+            .await
+            .map_err(internal)?
+            .map_err(bad_request)?;
+    Ok(Json(serde_json::json!({"hash":hash,"size":size})))
+}
+async fn context_session_cancel(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath((slug, upload_id)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = context_store(&state, &slug)?;
+    let cancelled = upload_id.clone();
+    tokio::task::spawn_blocking(move || store.cancel_upload_session(&upload_id))
+        .await
+        .map_err(internal)?
+        .map_err(bad_request)?;
+    Ok(Json(serde_json::json!({"cancelled":cancelled})))
 }
 
 /// Reject absolute paths, parent traversal and anything that is not a plain
@@ -301,6 +379,7 @@ async fn write_file(
             directory: false,
             delete: false,
             source: "orb".into(),
+            confirmed_large: false,
         })
     })
     .await
@@ -405,6 +484,7 @@ async fn mkdir(
                     directory: true,
                     delete: false,
                     source: "orb".into(),
+                    confirmed_large: false,
                 })
                 .map_err(bad_request)?;
             if receipt.conflict {
@@ -583,6 +663,21 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
             post(context_upload).layer(axum::extract::DefaultBodyLimit::max(
                 crate::project_context::FILE_LIMIT,
             )),
+        )
+        .route("/:slug/context/upload-sessions", post(context_session_init))
+        .route(
+            "/:slug/context/upload-sessions/:upload_id/chunks/:index",
+            put(context_session_chunk).layer(axum::extract::DefaultBodyLimit::max(
+                crate::project_context::MAX_CHUNK_BYTES,
+            )),
+        )
+        .route(
+            "/:slug/context/upload-sessions/:upload_id/complete",
+            post(context_session_complete),
+        )
+        .route(
+            "/:slug/context/upload-sessions/:upload_id",
+            delete(context_session_cancel),
         )
         .route("/:slug/files", get(list_files))
         .route("/:slug/file", get(read_file))

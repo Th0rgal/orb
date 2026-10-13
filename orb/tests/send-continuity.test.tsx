@@ -180,4 +180,44 @@ it('allows rapidly stacking multiple follow-up messages while earlier sends are 
  expect(confirmedTexts).toEqual(['First rapid message','Second rapid message','Third rapid message']);
 });
 
+it('never leaks an in-flight Send now retry to another mission when the selected mission changes',async()=>{
+ const {getMission,sendMissionMessage}=await import('../src/api');
+ const [missionId,setMissionId]=createSignal('mission-origin');
+ vi.mocked(getMission).mockImplementation(async(id)=>({
+  id,
+  status:id==='mission-origin'?'active':'completed',
+  history:[],
+  created_at:'',
+  updated_at:'',
+ }));
+ const sentTargets:string[]=[];
+ let releaseCancelPoll!:()=>void;
+ const cancelPollGate=new Promise<void>(r=>{releaseCancelPoll=r;});
+ vi.mocked(sendMissionMessage).mockImplementation(async(id,_text,_attachments,clientMessageId)=>{
+  sentTargets.push(id);
+  return {id:clientMessageId??'msg',queued:true};
+ });
+ vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
+  const u=String(url);
+  if(u.endsWith('/send-now')&&options?.method==='POST')return Response.json({ok:true,delivered:false});
+  if(u.endsWith('/cancel')&&options?.method==='POST'){
+   setMissionId('mission-unrelated');
+   releaseCancelPoll();
+   return Response.json({ok:true});
+  }
+  if(options?.method==='DELETE')return Response.json({ok:true});
+  if(u.includes('/queue?'))return Response.json([{id:'q-1',mission_id:'mission-origin',content:'Do not leak this prompt',source:'remote-queue'}]);
+  return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
+ }));
+ render(()=><NativeMissionView id={missionId()} initial={{id:missionId(),status:'active',history:[],created_at:'',updated_at:''}}/>);
+ await screen.findByText('Do not leak this prompt');
+ const {fireEvent}=await import('@solidjs/testing-library');
+ await fireEvent.click(screen.getByRole('button',{name:'Send now: Do not leak this prompt'}));
+ await cancelPollGate;
+ await new Promise(r=>setTimeout(r,50));
+ expect(sentTargets).not.toContain('mission-unrelated');
+ expect(sentTargets).toEqual([]);
+});
+
+
 

@@ -525,6 +525,9 @@ pub struct Mission {
     /// Request Codex fast service tier for supported GPT models.
     #[serde(default)]
     pub fast_mode: bool,
+    /// Explicit service tier. None preserves the legacy fast_mode setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<crate::codex_speed::Tier>,
     /// Backend to use for this mission ("opencode" or "claudecode")
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -2432,6 +2435,7 @@ pub trait MissionStore: Send + Sync {
         model_override: Option<Option<&str>>,
         model_effort: Option<Option<&str>>,
         fast_mode: Option<bool>,
+        service_tier: Option<crate::codex_speed::Tier>,
         config_profile: Option<Option<&str>>,
         session_id: &str,
     ) -> Result<Mission, String>;
@@ -4570,6 +4574,7 @@ mod tests {
             model_override: None,
             model_effort: None,
             fast_mode: false,
+            service_tier: None,
             backend: default_backend(),
             config_profile: None,
             history: vec![],
@@ -4909,6 +4914,7 @@ mod harness_session_tests {
                         None,
                         None,
                         None,
+                        None,
                         "placeholder",
                     )
                     .await
@@ -4930,6 +4936,7 @@ mod harness_session_tests {
                         None,
                         None,
                         None,
+                        None,
                         "other-placeholder",
                     )
                     .await
@@ -4938,6 +4945,7 @@ mod harness_session_tests {
                     .update_mission_run_settings(
                         other.id,
                         Some(harness),
+                        None,
                         None,
                         None,
                         None,
@@ -5077,6 +5085,7 @@ mod harness_session_tests {
                     None,
                     None,
                     None,
+                    None,
                     &Uuid::new_v4().to_string(),
                 )
                 .await
@@ -5156,6 +5165,7 @@ mod harness_session_tests {
                     None,
                     None,
                     None,
+                    None,
                     "codex-placeholder",
                 )
                 .await
@@ -5165,6 +5175,7 @@ mod harness_session_tests {
                 .update_mission_run_settings(
                     fresh.id,
                     Some("grok"),
+                    None,
                     None,
                     None,
                     None,
@@ -5392,6 +5403,7 @@ mod harness_session_tests {
                     None,
                     None,
                     None,
+                    None,
                     "unverified-generated-id",
                 )
                 .await
@@ -5431,6 +5443,7 @@ mod harness_session_tests {
                     None,
                     None,
                     None,
+                    None,
                     "must-not-rotate",
                 )
                 .await
@@ -5458,6 +5471,7 @@ mod harness_session_tests {
                     None,
                     None,
                     None,
+                    None,
                     "must-not-replace",
                 )
                 .await
@@ -5471,6 +5485,7 @@ mod harness_session_tests {
                 .update_mission_run_settings(
                     mission.id,
                     Some("grok"),
+                    None,
                     None,
                     None,
                     None,

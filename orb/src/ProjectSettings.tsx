@@ -1,4 +1,5 @@
 import { projectColor, projectColors, projectColorsSynced, setProjectColor } from "./projectAppearance";
+import { ErrorToast } from "./toast";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as Ic from "./icons";
@@ -182,9 +183,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
                 </div>
               </div>
             </div>
-            <Show when={saveError()}>
-              <ErrorNotice error={saveError()!} />
-            </Show>
+            <ErrorToast error={saveError()} title="Couldn’t save project settings" onDismiss={() => setSaveError(null)} />
             <Show when={saved()}>
               <p class="ps-saved" role="status">Saved.</p>
             </Show>

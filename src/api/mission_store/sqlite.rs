@@ -494,6 +494,7 @@ CREATE TABLE IF NOT EXISTS missions (
     model_override TEXT,
     model_effort TEXT,
     fast_mode INTEGER NOT NULL DEFAULT 0,
+    service_tier TEXT,
     backend TEXT NOT NULL DEFAULT 'opencode',
     config_profile TEXT,
     created_at TEXT NOT NULL,
@@ -1488,34 +1489,44 @@ impl SqliteMissionStore {
         conn.execute("DROP TABLE IF EXISTS board_projects", [])
             .map_err(|e| format!("Failed to drop board_projects: {e}"))?;
 
-        // Check if 'backend' column exists in missions table
-        let has_backend_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'backend'")
-            .map_err(|e| format!("Failed to check for backend column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_backend_column {
-            tracing::info!("Running migration: adding 'backend' column to missions table");
-            conn.execute(
-                "ALTER TABLE missions ADD COLUMN backend TEXT NOT NULL DEFAULT 'opencode'",
-                [],
-            )
-            .map_err(|e| format!("Failed to add backend column: {}", e))?;
+        fn add_column_if_missing(
+            conn: &Connection,
+            table: &str,
+            column: &str,
+            ddl_type: &str,
+        ) -> Result<(), String> {
+            let exists: bool = conn
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+                ))
+                .map_err(|e| format!("Failed to check for {table}.{column} column: {e}"))?
+                .exists(params![column])
+                .map_err(|e| format!("Failed to query {table} table info: {e}"))?;
+            if !exists {
+                tracing::info!("Running migration: adding '{column}' column to {table} table");
+                match conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"),
+                    [],
+                ) {
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("duplicate column") => {
+                        tracing::warn!(
+                            "Adding '{column}' column to {table} skipped (already present or concurrent migration): {e}"
+                        );
+                    }
+                    Err(e) => return Err(format!("Failed to add {table}.{column} column: {e}")),
+                }
+            }
+            Ok(())
         }
 
-        // Check if 'session_id' column exists in missions table
-        let has_session_id_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'session_id'")
-            .map_err(|e| format!("Failed to check for session_id column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_session_id_column {
-            tracing::info!("Running migration: adding 'session_id' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN session_id TEXT", [])
-                .map_err(|e| format!("Failed to add session_id column: {}", e))?;
-        }
+        add_column_if_missing(
+            conn,
+            "missions",
+            "backend",
+            "TEXT NOT NULL DEFAULT 'opencode'",
+        )?;
+        add_column_if_missing(conn, "missions", "session_id", "TEXT")?;
 
         // Add performance indexes if they don't exist (idempotent)
         conn.execute_batch(
@@ -1526,180 +1537,28 @@ impl SqliteMissionStore {
         )
         .map_err(|e| format!("Failed to create performance indexes: {}", e))?;
 
-        // Check if 'terminal_reason' column exists in missions table
-        let has_terminal_reason_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'terminal_reason'")
-            .map_err(|e| format!("Failed to check for terminal_reason column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_terminal_reason_column {
-            tracing::info!("Running migration: adding 'terminal_reason' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN terminal_reason TEXT", [])
-                .map_err(|e| format!("Failed to add terminal_reason column: {}", e))?;
+        for (column, ddl_type) in [
+            ("terminal_reason", "TEXT"),
+            ("config_profile", "TEXT"),
+            ("model_effort", "TEXT"),
+            ("service_tier", "TEXT"),
+            ("fast_mode", "INTEGER NOT NULL DEFAULT 0"),
+            ("short_description", "TEXT"),
+            ("metadata_updated_at", "TEXT"),
+            ("metadata_source", "TEXT"),
+            ("metadata_model", "TEXT"),
+            ("metadata_version", "TEXT"),
+            ("parent_mission_id", "TEXT"),
+            ("working_directory", "TEXT"),
+            ("mission_mode", "TEXT NOT NULL DEFAULT 'task'"),
+        ] {
+            add_column_if_missing(conn, "missions", column, ddl_type)?;
         }
-
-        // Check if 'config_profile' column exists in missions table
-        let has_config_profile_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'config_profile'")
-            .map_err(|e| format!("Failed to check for config_profile column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_config_profile_column {
-            tracing::info!("Running migration: adding 'config_profile' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN config_profile TEXT", [])
-                .map_err(|e| format!("Failed to add config_profile column: {}", e))?;
-        }
-
-        // Check if 'model_effort' column exists in missions table
-        let has_model_effort_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'model_effort'")
-            .map_err(|e| format!("Failed to check for model_effort column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_model_effort_column {
-            tracing::info!("Running migration: adding 'model_effort' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN model_effort TEXT", [])
-                .map_err(|e| format!("Failed to add model_effort column: {}", e))?;
-        }
-
-        let has_fast_mode_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'fast_mode'")
-            .map_err(|e| format!("Failed to check for fast_mode column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_fast_mode_column {
-            tracing::info!("Running migration: adding 'fast_mode' column to missions table");
-            conn.execute(
-                "ALTER TABLE missions ADD COLUMN fast_mode INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|e| format!("Failed to add fast_mode column: {}", e))?;
-        }
-
-        // Check if 'short_description' column exists in missions table
-        let has_short_description_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'short_description'")
-            .map_err(|e| format!("Failed to check for short_description column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_short_description_column {
-            tracing::info!(
-                "Running migration: adding 'short_description' column to missions table"
-            );
-            conn.execute("ALTER TABLE missions ADD COLUMN short_description TEXT", [])
-                .map_err(|e| format!("Failed to add short_description column: {}", e))?;
-        }
-
-        // Check if 'metadata_updated_at' column exists in missions table
-        let has_metadata_updated_at_column: bool = conn
-            .prepare(
-                "SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_updated_at'",
-            )
-            .map_err(|e| format!("Failed to check for metadata_updated_at column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_metadata_updated_at_column {
-            tracing::info!(
-                "Running migration: adding 'metadata_updated_at' column to missions table"
-            );
-            conn.execute(
-                "ALTER TABLE missions ADD COLUMN metadata_updated_at TEXT",
-                [],
-            )
-            .map_err(|e| format!("Failed to add metadata_updated_at column: {}", e))?;
-        }
-
-        let has_metadata_source_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_source'")
-            .map_err(|e| format!("Failed to check for metadata_source column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_metadata_source_column {
-            tracing::info!("Running migration: adding 'metadata_source' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN metadata_source TEXT", [])
-                .map_err(|e| format!("Failed to add metadata_source column: {}", e))?;
-        }
-
-        let has_metadata_model_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_model'")
-            .map_err(|e| format!("Failed to check for metadata_model column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_metadata_model_column {
-            tracing::info!("Running migration: adding 'metadata_model' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN metadata_model TEXT", [])
-                .map_err(|e| format!("Failed to add metadata_model column: {}", e))?;
-        }
-
-        let has_metadata_version_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_version'")
-            .map_err(|e| format!("Failed to check for metadata_version column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_metadata_version_column {
-            tracing::info!("Running migration: adding 'metadata_version' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN metadata_version TEXT", [])
-                .map_err(|e| format!("Failed to add metadata_version column: {}", e))?;
-        }
-
-        // Check if 'parent_mission_id' column exists in missions table
-        let has_parent_mission_id_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'parent_mission_id'")
-            .map_err(|e| format!("Failed to check for parent_mission_id column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_parent_mission_id_column {
-            tracing::info!(
-                "Running migration: adding 'parent_mission_id' column to missions table"
-            );
-            conn.execute("ALTER TABLE missions ADD COLUMN parent_mission_id TEXT", [])
-                .map_err(|e| format!("Failed to add parent_mission_id column: {}", e))?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_missions_parent ON missions(parent_mission_id)",
-                [],
-            )
-            .map_err(|e| format!("Failed to create parent_mission_id index: {}", e))?;
-        }
-
-        // Check if 'working_directory' column exists in missions table
-        let has_working_directory_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'working_directory'")
-            .map_err(|e| format!("Failed to check for working_directory column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_working_directory_column {
-            tracing::info!(
-                "Running migration: adding 'working_directory' column to missions table"
-            );
-            conn.execute("ALTER TABLE missions ADD COLUMN working_directory TEXT", [])
-                .map_err(|e| format!("Failed to add working_directory column: {}", e))?;
-        }
-
-        // Check if 'mission_mode' column exists in missions table
-        let has_mission_mode_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'mission_mode'")
-            .map_err(|e| format!("Failed to check for mission_mode column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-
-        if !has_mission_mode_column {
-            tracing::info!("Running migration: adding 'mission_mode' column to missions table");
-            conn.execute(
-                "ALTER TABLE missions ADD COLUMN mission_mode TEXT NOT NULL DEFAULT 'task'",
-                [],
-            )
-            .map_err(|e| format!("Failed to add mission_mode column: {}", e))?;
-        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_missions_parent ON missions(parent_mission_id)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create parent_mission_id index: {}", e))?;
 
         // Ensure telegram_channels table exists (for existing databases)
         let has_telegram_channels: bool = conn
@@ -1738,48 +1597,9 @@ impl SqliteMissionStore {
             )
             .map_err(|e| format!("Failed to create telegram_channels table: {}", e))?;
         } else {
-            // Add webhook_secret column if missing (migration for existing tables)
-            let has_webhook_secret: bool = conn
-                .prepare("SELECT 1 FROM pragma_table_info('telegram_channels') WHERE name='webhook_secret'")
-                .map_err(|e| format!("Failed to check for webhook_secret column: {}", e))?
-                .exists([])
-                .map_err(|e| format!("Failed to query pragma_table_info: {}", e))?;
-            if !has_webhook_secret {
-                tracing::info!(
-                    "Running migration: adding 'webhook_secret' column to telegram_channels"
-                );
-                conn.execute(
-                    "ALTER TABLE telegram_channels ADD COLUMN webhook_secret TEXT",
-                    [],
-                )
-                .map_err(|e| format!("Failed to add webhook_secret column: {}", e))?;
-            }
-            // Add instructions column if missing (ignore "duplicate column" from concurrent init)
-            let has_instructions: bool = conn
-                .prepare("SELECT 1 FROM pragma_table_info('telegram_channels') WHERE name='instructions'")
-                .map_err(|e| format!("Failed to check for instructions column: {}", e))?
-                .exists([])
-                .map_err(|e| format!("Failed to query pragma_table_info: {}", e))?;
-            if !has_instructions {
-                tracing::info!(
-                    "Running migration: adding 'instructions' column to telegram_channels"
-                );
-                match conn.execute(
-                    "ALTER TABLE telegram_channels ADD COLUMN instructions TEXT",
-                    [],
-                ) {
-                    Ok(_) => {}
-                    Err(e) if e.to_string().contains("duplicate column") => {
-                        tracing::debug!(
-                            "instructions column already exists (concurrent migration)"
-                        );
-                    }
-                    Err(e) => return Err(format!("Failed to add instructions column: {}", e)),
-                }
-            }
-
-            // Add auto-create mission columns
-            let auto_create_cols = [
+            for (col_name, col_type) in [
+                ("webhook_secret", "TEXT"),
+                ("instructions", "TEXT"),
                 ("auto_create_missions", "INTEGER NOT NULL DEFAULT 0"),
                 ("default_backend", "TEXT"),
                 ("default_model_override", "TEXT"),
@@ -1787,33 +1607,8 @@ impl SqliteMissionStore {
                 ("default_workspace_id", "TEXT"),
                 ("default_config_profile", "TEXT"),
                 ("default_agent", "TEXT"),
-            ];
-            for (col_name, col_type) in &auto_create_cols {
-                let has_col: bool = conn
-                    .prepare(&format!(
-                        "SELECT 1 FROM pragma_table_info('telegram_channels') WHERE name='{}'",
-                        col_name
-                    ))
-                    .map_err(|e| format!("Failed to check for {} column: {}", col_name, e))?
-                    .exists([])
-                    .map_err(|e| format!("Failed to query pragma_table_info: {}", e))?;
-                if !has_col {
-                    tracing::info!(
-                        "Running migration: adding '{}' column to telegram_channels",
-                        col_name
-                    );
-                    match conn.execute(
-                        &format!(
-                            "ALTER TABLE telegram_channels ADD COLUMN {} {}",
-                            col_name, col_type
-                        ),
-                        [],
-                    ) {
-                        Ok(_) => {}
-                        Err(e) if e.to_string().contains("duplicate column") => {}
-                        Err(e) => return Err(format!("Failed to add {} column: {}", col_name, e)),
-                    }
-                }
+            ] {
+                add_column_if_missing(conn, "telegram_channels", col_name, col_type)?;
             }
         }
 
@@ -2224,28 +2019,7 @@ impl SqliteMissionStore {
             ("target_chat_type", "TEXT"),
             ("target_request_message_id", "INTEGER"),
         ] {
-            let has_col: bool = conn
-                .prepare(&format!(
-                    "SELECT 1 FROM pragma_table_info('telegram_workflows') WHERE name='{}'",
-                    col_name
-                ))
-                .map_err(|e| format!("Failed to check for {} column: {}", col_name, e))?
-                .exists([])
-                .map_err(|e| format!("Failed to query pragma_table_info: {}", e))?;
-            if !has_col {
-                tracing::info!(
-                    "Running migration: adding '{}' column to telegram_workflows",
-                    col_name
-                );
-                conn.execute(
-                    &format!(
-                        "ALTER TABLE telegram_workflows ADD COLUMN {} {}",
-                        col_name, col_type
-                    ),
-                    [],
-                )
-                .map_err(|e| format!("Failed to add {} column: {}", col_name, e))?;
-            }
+            add_column_if_missing(conn, "telegram_workflows", col_name, col_type)?;
         }
 
         conn.execute_batch(
@@ -2281,133 +2055,18 @@ impl SqliteMissionStore {
         Self::migrate_automations_table(conn)?;
         Self::ensure_automation_indexes(conn)?;
 
-        // Goal-mode columns (PR #403): set to true when a mission was started
-        // via codex `/goal <objective>`. The codex backend infers from the
-        // user's message at send time; persisting on the row lets the UI
-        // render the goal pill from a fresh page load without SSE replay.
-        let has_goal_mode_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'goal_mode'")
-            .map_err(|e| format!("Failed to check for goal_mode column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_goal_mode_column {
-            tracing::info!("Running migration: adding 'goal_mode' column to missions table");
-            conn.execute(
-                "ALTER TABLE missions ADD COLUMN goal_mode INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|e| format!("Failed to add goal_mode column: {}", e))?;
-        }
-        let has_goal_objective_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'goal_objective'")
-            .map_err(|e| format!("Failed to check for goal_objective column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_goal_objective_column {
-            tracing::info!("Running migration: adding 'goal_objective' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN goal_objective TEXT", [])
-                .map_err(|e| format!("Failed to add goal_objective column: {}", e))?;
-        }
-
-        // first_viewed_at: timestamp of the user's first open of the mission
-        // since it last entered AwaitingUser. Drives the ack grace timer and
-        // the "opened" dot on Finished missions.
-        let has_first_viewed_at_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'first_viewed_at'")
-            .map_err(|e| format!("Failed to check for first_viewed_at column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_first_viewed_at_column {
-            tracing::info!("Running migration: adding 'first_viewed_at' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN first_viewed_at TEXT", [])
-                .map_err(|e| format!("Failed to add first_viewed_at column: {}", e))?;
-        }
-
-        // FLEET-001 scheduling columns: priority (dispatch ordering), not_before
-        // (earliest dispatch time), deadline (soft deadline for observability).
-        let has_priority_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'priority'")
-            .map_err(|e| format!("Failed to check for priority column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_priority_column {
-            tracing::info!("Running migration: adding 'priority' column to missions table");
-            conn.execute(
-                "ALTER TABLE missions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .map_err(|e| format!("Failed to add priority column: {}", e))?;
-        }
-
-        let has_not_before_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'not_before'")
-            .map_err(|e| format!("Failed to check for not_before column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_not_before_column {
-            tracing::info!("Running migration: adding 'not_before' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN not_before TEXT", [])
-                .map_err(|e| format!("Failed to add not_before column: {}", e))?;
-        }
-
-        let has_deadline_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'deadline'")
-            .map_err(|e| format!("Failed to check for deadline column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_deadline_column {
-            tracing::info!("Running migration: adding 'deadline' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN deadline TEXT", [])
-                .map_err(|e| format!("Failed to add deadline column: {}", e))?;
-        }
-
-        // FLEET-001 scheduling dispatch: the goal a not_before-deferred mission
-        // will run once the scheduler dispatches it. Held here (rather than in
-        // mission history) so a Pending mission carries dispatchable work
-        // without prematurely appearing as a committed turn.
-        let has_deferred_goal_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'deferred_goal'")
-            .map_err(|e| format!("Failed to check for deferred_goal column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_deferred_goal_column {
-            tracing::info!("Running migration: adding 'deferred_goal' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN deferred_goal TEXT", [])
-                .map_err(|e| format!("Failed to add deferred_goal column: {}", e))?;
-        }
-
-        // FLEET-004: when a mission was last paused (status Paused). Drives pause
-        // age in the UI and future zombie-pause cleanup.
-        let has_paused_at_column: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'paused_at'")
-            .map_err(|e| format!("Failed to check for paused_at column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_paused_at_column {
-            tracing::info!("Running migration: adding 'paused_at' column to missions table");
-            conn.execute("ALTER TABLE missions ADD COLUMN paused_at TEXT", [])
-                .map_err(|e| format!("Failed to add paused_at column: {}", e))?;
-        }
-
-        // Placement is authority for local-disk admission after a restart.
-        // Existing rows predate this field and are deliberately migrated as
-        // local, the fail-closed compatibility policy.
-        let has_requires_local_disk_column: bool = conn
-            .prepare(
-                "SELECT 1 FROM pragma_table_info('missions') WHERE name = 'requires_local_disk'",
-            )
-            .map_err(|e| format!("Failed to check for requires_local_disk column: {e}"))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {e}"))?;
-        if !has_requires_local_disk_column {
-            tracing::info!(
-                "Running migration: adding 'requires_local_disk' column to missions table"
-            );
-            conn.execute(
-                "ALTER TABLE missions ADD COLUMN requires_local_disk INTEGER NOT NULL DEFAULT 1",
-                [],
-            )
-            .map_err(|e| format!("Failed to add requires_local_disk column: {e}"))?;
+        for (column, ddl_type) in [
+            ("goal_mode", "INTEGER NOT NULL DEFAULT 0"),
+            ("goal_objective", "TEXT"),
+            ("first_viewed_at", "TEXT"),
+            ("priority", "INTEGER NOT NULL DEFAULT 0"),
+            ("not_before", "TEXT"),
+            ("deadline", "TEXT"),
+            ("deferred_goal", "TEXT"),
+            ("paused_at", "TEXT"),
+            ("requires_local_disk", "INTEGER NOT NULL DEFAULT 1"),
+        ] {
+            add_column_if_missing(conn, "missions", column, ddl_type)?;
         }
 
         // Project tagging + awaiting_kind classification + activity timestamps +
@@ -2747,53 +2406,32 @@ impl SqliteMissionStore {
             .map_err(|e| format!("Failed to create automation webhook index: {}", e))?;
         }
 
-        let has_stop_policy: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('automations') WHERE name = 'stop_policy'")
-            .map_err(|e| format!("Failed to check stop_policy column: {}", e))?
-            .exists([])
-            .map_err(|e| format!("Failed to query table info: {}", e))?;
-        if !has_stop_policy {
-            tracing::info!("Running migration: adding 'stop_policy' column to automations table");
-            conn.execute(
-                "ALTER TABLE automations ADD COLUMN stop_policy TEXT NOT NULL DEFAULT 'consecutive_failures:2'",
-                [],
-            )
-            .map_err(|e| format!("Failed to add stop_policy column: {}", e))?;
-        }
-
-        // Migration: add fresh_session column if it doesn't exist
-        let has_fresh_session: bool = conn
-            .query_row(
-                "SELECT 1 FROM pragma_table_info('automations') WHERE name = 'fresh_session'",
-                [],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-        if !has_fresh_session {
-            tracing::info!("Running migration: adding 'fresh_session' column to automations table");
-            conn.execute(
-                "ALTER TABLE automations ADD COLUMN fresh_session TEXT NOT NULL DEFAULT 'keep'",
-                [],
-            )
-            .map_err(|e| format!("Failed to add fresh_session column: {}", e))?;
-        }
-
-        // Migration: add driver column distinguishing OA-scheduled automations
-        // from harness-driven native loops (claudecode/codex `/goal`, etc).
-        let has_driver: bool = conn
-            .query_row(
-                "SELECT 1 FROM pragma_table_info('automations') WHERE name = 'driver'",
-                [],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-        if !has_driver {
-            tracing::info!("Running migration: adding 'driver' column to automations table");
-            conn.execute(
-                "ALTER TABLE automations ADD COLUMN driver TEXT NOT NULL DEFAULT 'scheduler'",
-                [],
-            )
-            .map_err(|e| format!("Failed to add driver column: {}", e))?;
+        for (column, ddl_type) in [
+            (
+                "stop_policy",
+                "TEXT NOT NULL DEFAULT 'consecutive_failures:2'",
+            ),
+            ("fresh_session", "TEXT NOT NULL DEFAULT 'keep'"),
+            ("driver", "TEXT NOT NULL DEFAULT 'scheduler'"),
+        ] {
+            let exists: bool = conn
+                .prepare("SELECT 1 FROM pragma_table_info('automations') WHERE name = ?1")
+                .map_err(|e| format!("Failed to check automations.{column} column: {e}"))?
+                .exists(params![column])
+                .map_err(|e| format!("Failed to query automations table info: {e}"))?;
+            if !exists {
+                tracing::info!("Running migration: adding '{column}' column to automations table");
+                match conn.execute(
+                    &format!("ALTER TABLE automations ADD COLUMN {column} {ddl_type}"),
+                    [],
+                ) {
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("duplicate column") => {}
+                    Err(e) => {
+                        return Err(format!("Failed to add automations.{column} column: {e}"))
+                    }
+                }
+            }
         }
 
         // Cleanup: drop stale inactive harness-loop automations. These are
@@ -2850,6 +2488,7 @@ fn row_to_mission(row: &rusqlite::Row<'_>) -> rusqlite::Result<Mission> {
         model_override: row.get(11)?,
         model_effort: row.get(12)?,
         fast_mode: row.get::<_, i32>(41)? != 0,
+        service_tier: read_service_tier(row)?,
         backend,
         config_profile,
         history: vec![], // Loaded separately if needed
@@ -2905,7 +2544,23 @@ const MISSION_LIST_COLUMNS: &str = "id, status, title, short_description, metada
      COALESCE(goal_mode, 0) as goal_mode, goal_objective, first_viewed_at, \
      COALESCE(priority, 0) as priority, not_before, deadline, paused_at, \
      project, track, intent, github_pr, tags, desired_state, next_check_at, awaiting_kind, last_status_change_at, \
-     COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk";
+     COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier";
+
+fn read_service_tier(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Option<crate::codex_speed::Tier>> {
+    row.get::<_, Option<String>>("service_tier")?
+        .map(|tier| {
+            serde_json::from_value(serde_json::Value::String(tier)).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })
+        .transpose()
+}
 
 fn parse_status(s: &str) -> MissionStatus {
     match s {
@@ -3392,7 +3047,7 @@ impl MissionStore for SqliteMissionStore {
                             COALESCE(mission_mode, 'task') as mission_mode, COALESCE(goal_mode, 0) as goal_mode, goal_objective, first_viewed_at,
                             COALESCE(priority, 0) as priority, not_before, deadline, paused_at,
                             project, track, intent, github_pr, tags, desired_state, next_check_at, awaiting_kind, last_status_change_at,
-                            COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk FROM missions WHERE id = ?1",
+                            COALESCE(fast_mode, 0) as fast_mode, origin, origin_session_id, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier FROM missions WHERE id = ?1",
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -3425,6 +3080,7 @@ impl MissionStore for SqliteMissionStore {
                         model_override: row.get(11)?,
                         model_effort: row.get(12)?,
                         fast_mode: row.get::<_, i32>(41)? != 0,
+                        service_tier: read_service_tier(row)?,
                         backend,
                         config_profile,
                         history: vec![],
@@ -3963,6 +3619,7 @@ impl MissionStore for SqliteMissionStore {
             model_override: model_override.map(|s| s.to_string()),
             model_effort: model_effort.map(|s| s.to_string()),
             fast_mode,
+            service_tier: None,
             backend: backend.clone(),
             config_profile: config_profile.map(|s| s.to_string()),
             history: vec![],
@@ -4075,7 +3732,7 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
-                .prepare("SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, interrupted_at, resumable, session_id, terminal_reason, parent_mission_id, working_directory, COALESCE(mission_mode, 'task') as mission_mode, COALESCE(fast_mode, 0) as fast_mode, COALESCE(requires_local_disk, 1) as requires_local_disk FROM missions WHERE parent_mission_id = ?1")
+                .prepare("SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, interrupted_at, resumable, session_id, terminal_reason, parent_mission_id, working_directory, COALESCE(mission_mode, 'task') as mission_mode, COALESCE(fast_mode, 0) as fast_mode, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier FROM missions WHERE parent_mission_id = ?1")
                 .map_err(|e| e.to_string())?;
             let missions = stmt
                 .query_map(params![parent_id_str], |row| {
@@ -4094,6 +3751,7 @@ impl MissionStore for SqliteMissionStore {
                         model_override: row.get(10)?,
                         model_effort: row.get(11)?,
                         fast_mode: row.get::<_, i32>(23)? != 0,
+                        service_tier: read_service_tier(row)?,
                         backend: row.get::<_, String>(12)?,
                         config_profile: row.get(13)?,
                         history: vec![],
@@ -4520,15 +4178,23 @@ impl MissionStore for SqliteMissionStore {
         model_override: Option<Option<&str>>,
         model_effort: Option<Option<&str>>,
         fast_mode: Option<bool>,
+        service_tier: Option<crate::codex_speed::Tier>,
         config_profile: Option<Option<&str>>,
         session_id: &str,
     ) -> Result<Mission, String> {
+        let fast_mode = service_tier
+            .map(|tier| tier == crate::codex_speed::Tier::Fast)
+            .or(fast_mode);
         let conn = self.conn.clone();
         let now = now_string();
         let backend_set = backend.is_some();
         let agent_set = agent.is_some();
         let model_override_set = model_override.is_some();
         let model_effort_set = model_effort.is_some();
+        let tier = service_tier
+            .or(fast_mode.map(|fast| crate::codex_speed::Tier::from_legacy(None, fast)));
+        let tier_set = tier.is_some();
+        let tier = tier.map(|value| value.id().to_string());
         let fast_mode_set = fast_mode.is_some();
         let config_profile_set = config_profile.is_some();
         let backend = backend.map(ToString::to_string);
@@ -4573,6 +4239,7 @@ impl MissionStore for SqliteMissionStore {
                          fast_mode = CASE WHEN ?9 THEN ?10 ELSE fast_mode END,
                          config_profile = CASE WHEN ?11 THEN ?12 ELSE config_profile END,
                          session_id = ?13,
+                         service_tier = CASE WHEN ?16 THEN ?17 ELSE service_tier END,
                          updated_at = ?14
                      WHERE id = ?15",
                     params![
@@ -4591,6 +4258,8 @@ impl MissionStore for SqliteMissionStore {
                         selected_session,
                         now,
                         id_str,
+                        tier_set,
+                        tier,
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -5376,6 +5045,7 @@ impl MissionStore for SqliteMissionStore {
                         model_override: row.get(6)?,
                         model_effort: None,
                         fast_mode: false,
+                        service_tier: None,
                         backend,
                         config_profile: None,
                         history: vec![],
@@ -8145,6 +7815,7 @@ impl MissionStore for SqliteMissionStore {
                         model_override: None,
                         model_effort: None,
                         fast_mode: false,
+                        service_tier: None,
                         backend: row.get(5).unwrap_or_else(|_| "claudecode".to_string()),
                         config_profile: None,
                         history: vec![],
@@ -11384,6 +11055,10 @@ impl MissionStore for SqliteMissionStore {
             )
             .map_err(|e| format!("Failed to insert mission: {e}"))?;
 
+            tx.execute("UPDATE missions SET service_tier = ?1 WHERE id = ?2", rusqlite::params![
+                mission.service_tier.map(|tier| tier.id().to_string()), new_mission_id.to_string()
+            ]).map_err(|e| e.to_string())?;
+
             // --- events ---
             // Re-spill large content to the target's content_dir so the
             // existing inline/file split logic stays consistent.
@@ -12787,6 +12462,7 @@ mod tests {
                 None,
                 Some(false),
                 None,
+                None,
                 "new-session",
             )
             .await
@@ -13955,10 +13631,16 @@ mod tests {
                 .expect("drop text github_pr");
             conn.execute("ALTER TABLE missions ADD COLUMN github_pr INTEGER", [])
                 .expect("re-add integer github_pr");
-            conn.execute("ALTER TABLE missions DROP COLUMN desired_state", [])
-                .ok();
-            conn.execute("ALTER TABLE missions DROP COLUMN next_check_at", [])
-                .ok();
+            for column in [
+                "desired_state",
+                "next_check_at",
+                "requires_local_disk",
+                "fast_mode",
+                "service_tier",
+            ] {
+                conn.execute(&format!("ALTER TABLE missions DROP COLUMN {column}"), [])
+                    .ok();
+            }
             for column in [
                 "repository",
                 "branch",
@@ -14001,7 +13683,13 @@ mod tests {
             )
             .expect("github_pr column present");
         assert_eq!(ty.to_uppercase(), "TEXT");
-        for col in ["desired_state", "next_check_at"] {
+        for col in [
+            "desired_state",
+            "next_check_at",
+            "requires_local_disk",
+            "fast_mode",
+            "service_tier",
+        ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = ?1")
                 .unwrap()

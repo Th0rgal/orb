@@ -38,7 +38,11 @@ use std::{
 };
 
 pub const FILE_LIMIT: usize = 10 * 1024 * 1024;
+pub const CONFIRMED_FILE_LIMIT: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+pub const DEFAULT_CHUNK_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+pub const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 pub const PROJECT_LIMIT: u64 = 100 * 1024 * 1024;
+pub const CONFIRMED_PROJECT_LIMIT: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
 pub const ENTRY_LIMIT: usize = 5000;
 pub type Result<T> = std::result::Result<T, String>;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,11 +74,39 @@ pub struct Operation {
     #[serde(default)]
     pub delete: bool,
     pub source: String,
+    #[serde(default)]
+    pub confirmed_large: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Receipt {
     pub revision: u64,
     pub conflict: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UploadSessionInit {
+    pub upload_id: String,
+    pub size: u64,
+    #[serde(default)]
+    pub chunk_size: Option<usize>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UploadSessionStatus {
+    pub upload_id: String,
+    pub size: u64,
+    pub chunk_size: usize,
+    pub total_chunks: usize,
+    pub received_chunks: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct UploadSessionMeta {
+    upload_id: String,
+    size: u64,
+    chunk_size: usize,
+    total_chunks: usize,
+    #[serde(default)]
+    hash: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Manifest {
@@ -106,6 +138,23 @@ fn timestamp() -> u64 {
 
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+pub fn digest_file(path: &Path) -> Result<(String, u64)> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((format!("{:x}", hasher.finalize()), total))
 }
 pub fn valid_path(path: &str) -> Result<()> {
     if path.is_empty()
@@ -237,51 +286,314 @@ impl Store {
         }
         Ok(hash)
     }
-    pub fn blob(&self, hash: &str) -> Result<Vec<u8>> {
+    pub fn put_blob_file(&self, src: &Path, confirmed_large: bool) -> Result<(String, u64)> {
+        let meta = fs::metadata(src).map_err(|e| e.to_string())?;
+        let max_bytes = if confirmed_large {
+            CONFIRMED_FILE_LIMIT
+        } else {
+            FILE_LIMIT as u64
+        };
+        if meta.len() > max_bytes {
+            return Err(if confirmed_large {
+                "context file exceeds 2 GiB".into()
+            } else {
+                "context file exceeds 10 MiB".into()
+            });
+        }
+        let (hash, size) = digest_file(src)?;
+        let dest = self.metadata.join("blobs").join(&hash);
+        if !dest.exists() {
+            let parent = dest.parent().ok_or("missing parent")?;
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            let temp = parent.join(format!(".context-{}.tmp", uuid::Uuid::new_v4()));
+            fs::copy(src, &temp).map_err(|e| e.to_string())?;
+            fs::rename(&temp, &dest).map_err(|e| e.to_string())?;
+        }
+        Ok((hash, size))
+    }
+    pub fn blob_path(&self, hash: &str) -> Result<PathBuf> {
         if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("invalid content hash".into());
         }
-        let data = fs::read(self.metadata.join("blobs").join(hash)).map_err(|e| e.to_string())?;
+        let path = self.metadata.join("blobs").join(hash);
+        if !path.is_file() {
+            return Err("blob not found".into());
+        }
+        Ok(path)
+    }
+    pub fn blob_size(&self, hash: &str) -> Result<u64> {
+        let path = self.blob_path(hash)?;
+        Ok(fs::metadata(&path).map_err(|e| e.to_string())?.len())
+    }
+    pub fn blob(&self, hash: &str) -> Result<Vec<u8>> {
+        let path = self.blob_path(hash)?;
+        let data = fs::read(&path).map_err(|e| e.to_string())?;
         if digest(&data) != hash {
             return Err("context content checksum mismatch".into());
         }
         Ok(data)
+    }
+    fn upload_session_dir(&self, upload_id: &str) -> Result<PathBuf> {
+        if upload_id.is_empty()
+            || upload_id.len() > 128
+            || !upload_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err("invalid upload session ID".into());
+        }
+        let sessions = self.metadata.join("upload-sessions");
+        fs::create_dir_all(&sessions).map_err(|e| e.to_string())?;
+        Ok(sessions.join(upload_id))
+    }
+    fn read_upload_bitmap(dir: &Path, total_chunks: usize) -> Vec<usize> {
+        let Ok(bytes) = fs::read(dir.join("bitmap.bin")) else {
+            return Vec::new();
+        };
+        bytes
+            .into_iter()
+            .take(total_chunks)
+            .enumerate()
+            .filter_map(|(idx, b)| (b == 1).then_some(idx))
+            .collect()
+    }
+    fn mark_upload_bitmap(dir: &Path, total_chunks: usize, index: usize) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dir.join("bitmap.bin"))
+            .map_err(|e| e.to_string())?;
+        if file.metadata().map_err(|e| e.to_string())?.len() < total_chunks as u64 {
+            file.set_len(total_chunks as u64)
+                .map_err(|e| e.to_string())?;
+        }
+        file.seek(SeekFrom::Start(index as u64))
+            .map_err(|e| e.to_string())?;
+        file.write_all(&[1]).map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    pub fn init_upload_session(&self, req: UploadSessionInit) -> Result<UploadSessionStatus> {
+        if req.size > CONFIRMED_FILE_LIMIT {
+            return Err("context file exceeds 2 GiB".into());
+        }
+        let chunk_size = req.chunk_size.unwrap_or(DEFAULT_CHUNK_BYTES);
+        if chunk_size == 0 || chunk_size > MAX_CHUNK_BYTES {
+            return Err("invalid upload chunk size".into());
+        }
+        let total_chunks = if req.size == 0 {
+            1
+        } else {
+            (req.size as usize).div_ceil(chunk_size)
+        };
+        let dir = self.upload_session_dir(&req.upload_id)?;
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let meta_path = dir.join("meta.json");
+        if meta_path.is_file() {
+            let existing: UploadSessionMeta =
+                serde_json::from_slice(&fs::read(&meta_path).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            if existing.size != req.size || existing.chunk_size != chunk_size {
+                return Err("upload session parameters do not match existing session".into());
+            }
+            let received_chunks = if existing.hash.is_some() {
+                (0..existing.total_chunks).collect()
+            } else {
+                Self::read_upload_bitmap(&dir, existing.total_chunks)
+            };
+            return Ok(UploadSessionStatus {
+                upload_id: existing.upload_id,
+                size: existing.size,
+                chunk_size: existing.chunk_size,
+                total_chunks: existing.total_chunks,
+                received_chunks,
+                hash: existing.hash,
+            });
+        }
+        let part_path = dir.join("payload.part");
+        let part = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&part_path)
+            .map_err(|e| e.to_string())?;
+        part.set_len(req.size).map_err(|e| e.to_string())?;
+        fs::write(dir.join("bitmap.bin"), vec![0u8; total_chunks]).map_err(|e| e.to_string())?;
+        let meta = UploadSessionMeta {
+            upload_id: req.upload_id.clone(),
+            size: req.size,
+            chunk_size,
+            total_chunks,
+            hash: None,
+        };
+        atomic(
+            &meta_path,
+            &serde_json::to_vec(&meta).map_err(|e| e.to_string())?,
+        )?;
+        Ok(UploadSessionStatus {
+            upload_id: meta.upload_id,
+            size: meta.size,
+            chunk_size: meta.chunk_size,
+            total_chunks: meta.total_chunks,
+            received_chunks: Vec::new(),
+            hash: None,
+        })
+    }
+    pub fn write_upload_chunk(
+        &self,
+        upload_id: &str,
+        index: usize,
+        bytes: &[u8],
+    ) -> Result<UploadSessionStatus> {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = self.upload_session_dir(upload_id)?;
+        let meta_path = dir.join("meta.json");
+        let meta: UploadSessionMeta = serde_json::from_slice(
+            &fs::read(&meta_path).map_err(|_| "upload session not found; reinitialize")?,
+        )
+        .map_err(|e| e.to_string())?;
+        if let Some(hash) = meta.hash {
+            return Ok(UploadSessionStatus {
+                upload_id: meta.upload_id,
+                size: meta.size,
+                chunk_size: meta.chunk_size,
+                total_chunks: meta.total_chunks,
+                received_chunks: (0..meta.total_chunks).collect(),
+                hash: Some(hash),
+            });
+        }
+        if index >= meta.total_chunks {
+            return Err("chunk index out of bounds".into());
+        }
+        let offset = (index as u64)
+            .checked_mul(meta.chunk_size as u64)
+            .ok_or("chunk offset overflow")?;
+        let expected_len = if meta.size == 0 {
+            0
+        } else if index + 1 == meta.total_chunks {
+            (meta.size - offset) as usize
+        } else {
+            meta.chunk_size
+        };
+        if bytes.len() != expected_len {
+            return Err(format!(
+                "chunk {index} size mismatch: expected {expected_len}, got {}",
+                bytes.len()
+            ));
+        }
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join("payload.part"))
+            .map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())?;
+        Self::mark_upload_bitmap(&dir, meta.total_chunks, index)?;
+        Ok(UploadSessionStatus {
+            upload_id: meta.upload_id,
+            size: meta.size,
+            chunk_size: meta.chunk_size,
+            total_chunks: meta.total_chunks,
+            received_chunks: Self::read_upload_bitmap(&dir, meta.total_chunks),
+            hash: None,
+        })
+    }
+    pub fn complete_upload_session(&self, upload_id: &str) -> Result<(String, u64)> {
+        let dir = self.upload_session_dir(upload_id)?;
+        let meta_path = dir.join("meta.json");
+        let mut meta: UploadSessionMeta = serde_json::from_slice(
+            &fs::read(&meta_path).map_err(|_| "upload session not found; reinitialize")?,
+        )
+        .map_err(|e| e.to_string())?;
+        if let Some(hash) = meta.hash {
+            return Ok((hash, meta.size));
+        }
+        let received = Self::read_upload_bitmap(&dir, meta.total_chunks);
+        if received.len() != meta.total_chunks {
+            return Err(format!(
+                "upload incomplete: received {}/{} chunks",
+                received.len(),
+                meta.total_chunks
+            ));
+        }
+        let part_path = dir.join("payload.part");
+        let actual = fs::metadata(&part_path).map_err(|e| e.to_string())?.len();
+        if actual != meta.size {
+            return Err("staged upload size mismatch".into());
+        }
+        let (hash, size) = digest_file(&part_path)?;
+        let dest = self.metadata.join("blobs").join(&hash);
+        if !dest.exists() {
+            let parent = dest.parent().ok_or("missing parent")?;
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            if fs::rename(&part_path, &dest).is_err() {
+                let temp = parent.join(format!(".context-{}.tmp", uuid::Uuid::new_v4()));
+                fs::copy(&part_path, &temp).map_err(|e| e.to_string())?;
+                fs::rename(&temp, &dest).map_err(|e| e.to_string())?;
+                let _ = fs::remove_file(&part_path);
+            }
+        } else {
+            let _ = fs::remove_file(&part_path);
+        }
+        meta.hash = Some(hash.clone());
+        atomic(
+            &meta_path,
+            &serde_json::to_vec(&meta).map_err(|e| e.to_string())?,
+        )?;
+        let _ = fs::remove_file(dir.join("bitmap.bin"));
+        Ok((hash, size))
+    }
+    pub fn cancel_upload_session(&self, upload_id: &str) -> Result<()> {
+        let dir = self.upload_session_dir(upload_id)?;
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
     fn recover(&self, state: &mut State) -> Result<()> {
         for change in state.pending.clone() {
             // Preserve a write made after a commit but before crash recovery.
             let target = checked(&self.root, &change.path)?;
             if target.is_file() {
-                let bytes = secure_fs::read(&self.root, &change.path)?;
-                let hash = digest(&bytes);
-                if change.entry.as_ref().and_then(|e| e.hash.as_ref()) != Some(&hash)
-                    && change.before.as_ref().and_then(|e| e.hash.as_ref()) != Some(&hash)
-                {
-                    self.put_blob(&bytes)?;
-                    let id = uuid::Uuid::new_v4().to_string();
-                    state.conflicts.insert(
-                        id.clone(),
-                        Operation {
-                            id,
-                            path: change.path.clone(),
-                            base: change.before.as_ref().map(|e| e.revision),
-                            hash: Some(hash),
-                            directory: false,
-                            delete: false,
-                            source: "recovered filesystem edit".into(),
-                        },
-                    );
-                    self.save(state)?;
+                let meta = fs::metadata(&target).map_err(|e| e.to_string())?;
+                if meta.len() <= FILE_LIMIT as u64 {
+                    let bytes = secure_fs::read(&self.root, &change.path)?;
+                    let hash = digest(&bytes);
+                    if change.entry.as_ref().and_then(|e| e.hash.as_ref()) != Some(&hash)
+                        && change.before.as_ref().and_then(|e| e.hash.as_ref()) != Some(&hash)
+                    {
+                        self.put_blob(&bytes)?;
+                        let id = uuid::Uuid::new_v4().to_string();
+                        state.conflicts.insert(
+                            id.clone(),
+                            Operation {
+                                id,
+                                path: change.path.clone(),
+                                base: change.before.as_ref().map(|e| e.revision),
+                                hash: Some(hash),
+                                directory: false,
+                                delete: false,
+                                source: "recovered filesystem edit".into(),
+                                confirmed_large: false,
+                            },
+                        );
+                        self.save(state)?;
+                    }
                 }
             }
             let path = checked(&self.root, &change.path)?;
             match &change.entry {
                 Some(entry) if entry.directory => secure_fs::mkdir(&self.root, &change.path)?,
-                Some(entry) => secure_fs::write(
-                    &self.root,
-                    &change.path,
-                    &self.blob(entry.hash.as_deref().ok_or("missing hash")?)?,
-                )?,
+                Some(entry) => {
+                    let hash = entry.hash.as_deref().ok_or("missing hash")?;
+                    let blob_path = self.blob_path(hash)?;
+                    secure_fs::copy_from_file(&self.root, &change.path, &blob_path)?;
+                }
                 None if path.is_dir() => secure_fs::remove(&self.root, &change.path, true)?,
                 None if path.exists() => secure_fs::remove(&self.root, &change.path, false)?,
                 None => (),
@@ -296,9 +608,19 @@ impl Store {
     fn scan_dir(
         &self,
         rel: &str,
+        existing_manifest: &BTreeMap<String, Entry>,
         entries: &mut BTreeMap<String, Entry>,
         size: &mut u64,
     ) -> Result<()> {
+        let has_large_tracked = existing_manifest
+            .values()
+            .any(|e| e.size > FILE_LIMIT as u64);
+        let total_tracked: u64 = existing_manifest.values().map(|e| e.size).sum();
+        let project_limit = if has_large_tracked || total_tracked > PROJECT_LIMIT {
+            CONFIRMED_PROJECT_LIMIT
+        } else {
+            PROJECT_LIMIT
+        };
         let dir = if rel.is_empty() {
             self.root.clone()
         } else {
@@ -330,17 +652,51 @@ impl Store {
                     revision: 0,
                     size: 0,
                 }
-            } else {
-                if meta.len() > FILE_LIMIT as u64 {
+            } else if meta.len() > FILE_LIMIT as u64 {
+                if let Some(tracked) = existing_manifest.get(&path) {
+                    if !tracked.directory && tracked.size == meta.len() {
+                        *size += tracked.size;
+                        if *size > project_limit {
+                            return Err("context exceeds project size limit".into());
+                        }
+                        Entry {
+                            hash: tracked.hash.clone(),
+                            directory: false,
+                            revision: tracked.revision,
+                            size: tracked.size,
+                        }
+                    } else if meta.len() <= CONFIRMED_FILE_LIMIT {
+                        let (hash, file_size) = self.put_blob_file(&full, true)?;
+                        let after = fs::metadata(&full).map_err(|e| e.to_string())?;
+                        if meta.len() != after.len()
+                            || meta.modified().ok() != after.modified().ok()
+                        {
+                            return Err("context file changed during read; retry".into());
+                        }
+                        *size += file_size;
+                        if *size > CONFIRMED_PROJECT_LIMIT {
+                            return Err("context exceeds project size limit".into());
+                        }
+                        Entry {
+                            hash: Some(hash),
+                            directory: false,
+                            revision: 0,
+                            size: file_size,
+                        }
+                    } else {
+                        return Err(format!("{path} exceeds 2 GiB"));
+                    }
+                } else {
                     return Err(format!("{path} exceeds 10 MiB"));
                 }
+            } else {
                 let bytes = secure_fs::read(&self.root, &path)?;
                 let after = fs::metadata(&full).map_err(|e| e.to_string())?;
                 if meta.len() != after.len() || meta.modified().ok() != after.modified().ok() {
                     return Err("context file changed during read; retry".into());
                 }
                 *size += bytes.len() as u64;
-                if *size > PROJECT_LIMIT {
+                if *size > project_limit {
                     return Err("context exceeds 100 MiB".into());
                 }
                 Entry {
@@ -361,7 +717,7 @@ impl Store {
             }
             entries.insert(path.clone(), entry);
             if directory {
-                self.scan_dir(&path, entries, size)?;
+                self.scan_dir(&path, existing_manifest, entries, size)?;
             }
         }
         Ok(())
@@ -386,7 +742,7 @@ impl Store {
         }
         self.recover(state)?;
         let mut entries = BTreeMap::new();
-        self.scan_dir("", &mut entries, &mut 0)?;
+        self.scan_dir("", &state.manifest.entries, &mut entries, &mut 0)?;
         let mut changes = Vec::new();
         for (path, entry) in &mut entries {
             if let Some(old) = state
@@ -503,7 +859,7 @@ impl Store {
             // Persist both sides together before touching the visible tree. Recovery
             // materializes the destination before deleting the source, including
             // after a crash. A rename consumes no additional quota.
-            self.blob(entry.hash.as_deref().ok_or("missing content hash")?)?;
+            self.blob_path(entry.hash.as_deref().ok_or("missing content hash")?)?;
             state.manifest.revision += 1;
             let mut moved = entry.clone();
             moved.revision = state.manifest.revision;
@@ -541,6 +897,7 @@ impl Store {
                 directory: false,
                 delete: false,
                 source: "Orb".into(),
+                confirmed_large: entry.size > FILE_LIMIT as u64,
             },
             state,
             None,
@@ -596,7 +953,18 @@ impl Store {
             }
             let total: u64 = state.manifest.entries.values().map(|e| e.size).sum();
             let added: u64 = sources.iter().map(|(_, e)| e.size).sum();
-            if total + added > PROJECT_LIMIT {
+            let has_large = sources.iter().any(|(_, e)| e.size > FILE_LIMIT as u64)
+                || state
+                    .manifest
+                    .entries
+                    .values()
+                    .any(|e| e.size > FILE_LIMIT as u64);
+            let limit = if has_large {
+                CONFIRMED_PROJECT_LIMIT
+            } else {
+                PROJECT_LIMIT
+            };
+            if total + added > limit {
                 return Err("context exceeds 100 MiB".into());
             }
         }
@@ -605,7 +973,7 @@ impl Store {
             let target = format!("{destination}{}", &source[path.len()..]);
             valid_path(&target)?;
             if !entry.directory {
-                self.blob(entry.hash.as_deref().ok_or("missing content hash")?)?;
+                self.blob_path(entry.hash.as_deref().ok_or("missing content hash")?)?;
             }
             state.manifest.revision += 1;
             let mut created = entry.clone();
@@ -671,6 +1039,7 @@ impl Store {
                 directory: false,
                 delete: true,
                 source: "Orb".into(),
+                confirmed_large: false,
             })?;
             if receipt.conflict {
                 return Err("A file changed during deletion; the remaining files were kept".into());
@@ -726,12 +1095,29 @@ impl Store {
             return Err("context exceeds 5000 entries".into());
         }
         let total: u64 = existing.entries.values().map(|e| e.size).sum();
-        if total + sources.iter().map(|(_, e)| e.size).sum::<u64>() > PROJECT_LIMIT {
+        let has_large = sources.iter().any(|(_, e)| e.size > FILE_LIMIT as u64)
+            || existing
+                .entries
+                .values()
+                .any(|e| e.size > FILE_LIMIT as u64);
+        let limit = if has_large {
+            CONFIRMED_PROJECT_LIMIT
+        } else {
+            PROJECT_LIMIT
+        };
+        if total + sources.iter().map(|(_, e)| e.size).sum::<u64>() > limit {
             return Err("context exceeds 100 MiB".into());
         }
         for (source, entry) in &sources {
             let hash = match entry.hash.as_deref() {
-                Some(hash) if !entry.directory => Some(target.put_blob(&self.blob(hash)?)?),
+                Some(hash) if !entry.directory => {
+                    let blob_path = self.blob_path(hash)?;
+                    Some(
+                        target
+                            .put_blob_file(&blob_path, entry.size > FILE_LIMIT as u64)?
+                            .0,
+                    )
+                }
                 _ => None,
             };
             let receipt = target.apply(Operation {
@@ -742,6 +1128,7 @@ impl Store {
                 directory: entry.directory,
                 delete: false,
                 source: "Orb".into(),
+                confirmed_large: entry.size > FILE_LIMIT as u64,
             })?;
             if receipt.conflict {
                 return Err("The destination changed. The source was kept".into());
@@ -759,6 +1146,7 @@ impl Store {
                 directory: false,
                 delete: true,
                 source: "Orb".into(),
+                confirmed_large: false,
             })?;
             if receipt.conflict {
                 return Err(
@@ -807,8 +1195,27 @@ impl Store {
                 }
             }
         }
+        let size = if operation.directory || operation.delete {
+            0
+        } else {
+            let hash = operation.hash.as_deref().ok_or("missing content hash")?;
+            let blob_len = self.blob_size(hash)?;
+            if blob_len <= FILE_LIMIT as u64 {
+                self.blob(hash)?;
+            }
+            blob_len
+        };
         if !operation.delete && !operation.directory {
-            self.blob(operation.hash.as_deref().ok_or("missing content hash")?)?;
+            let max_file = if operation.confirmed_large
+                || size > FILE_LIMIT as u64 && operation.source == "sync"
+            {
+                CONFIRMED_FILE_LIMIT
+            } else {
+                FILE_LIMIT as u64
+            };
+            if size > max_file {
+                return Err("context file exceeds 10 MiB".into());
+            }
         }
         if conflict {
             state
@@ -830,13 +1237,20 @@ impl Store {
                     return Err("delete existing entry before changing its type".into());
                 }
             }
-            let size = if operation.directory || operation.delete {
-                0
-            } else {
-                self.blob(operation.hash.as_deref().unwrap())?.len() as u64
-            };
             let total: u64 = state.manifest.entries.values().map(|e| e.size).sum();
-            if total - current.map_or(0, |e| e.size) + size > PROJECT_LIMIT {
+            let has_large = operation.confirmed_large
+                || size > FILE_LIMIT as u64
+                || state
+                    .manifest
+                    .entries
+                    .values()
+                    .any(|e| e.size > FILE_LIMIT as u64);
+            let max_project = if has_large || total > PROJECT_LIMIT {
+                CONFIRMED_PROJECT_LIMIT
+            } else {
+                PROJECT_LIMIT
+            };
+            if total - current.map_or(0, |e| e.size) + size > max_project {
                 return Err("context exceeds 100 MiB".into());
             }
             if !operation.delete && current.is_none() && state.manifest.entries.len() >= ENTRY_LIMIT
@@ -934,6 +1348,7 @@ mod tests {
                 directory: false,
                 delete: false,
                 source: "test".into(),
+                confirmed_large: false,
             })
             .unwrap()
     }
@@ -1099,7 +1514,8 @@ mod tests {
                 hash: Some(hash),
                 directory: false,
                 delete: false,
-                source: "test".into()
+                source: "test".into(),
+                confirmed_large: false,
             })
             .is_err());
     }
@@ -1146,5 +1562,45 @@ mod tests {
             std::os::unix::fs::symlink("/tmp", s.root.join("escape")).unwrap();
             assert!(s.manifest().is_err());
         }
+    }
+    #[test]
+    fn resumable_upload_session_reassembles_chunks_and_persists_blob() {
+        let (_dir, s) = setup();
+        let payload = b"resumable-context-blob-payload";
+        let status = s
+            .init_upload_session(UploadSessionInit {
+                upload_id: "ctx_1".into(),
+                size: payload.len() as u64,
+                chunk_size: Some(10),
+            })
+            .unwrap();
+        assert_eq!(status.total_chunks, 3);
+        assert!(status.received_chunks.is_empty());
+
+        let status = s.write_upload_chunk("ctx_1", 2, &payload[20..30]).unwrap();
+        assert_eq!(status.received_chunks, vec![2]);
+        let status = s.write_upload_chunk("ctx_1", 0, &payload[0..10]).unwrap();
+        assert_eq!(status.received_chunks, vec![0, 2]);
+        let status = s.write_upload_chunk("ctx_1", 1, &payload[10..20]).unwrap();
+        assert_eq!(status.received_chunks, vec![0, 1, 2]);
+
+        let (hash, size) = s.complete_upload_session("ctx_1").unwrap();
+        assert_eq!(size, payload.len() as u64);
+        assert_eq!(hash, digest(payload));
+
+        let receipt = s
+            .apply(Operation {
+                id: "op_large".into(),
+                path: "archive.bin".into(),
+                base: None,
+                hash: Some(hash),
+                directory: false,
+                delete: false,
+                source: "orb".into(),
+                confirmed_large: true,
+            })
+            .unwrap();
+        assert!(!receipt.conflict);
+        assert_eq!(fs::read(s.root.join("archive.bin")).unwrap(), payload);
     }
 }

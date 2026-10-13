@@ -115,7 +115,8 @@ class NativeGoalTests(unittest.TestCase):
         self.assertEqual(events[-1], {'type':'turn.completed'})
         self.assertFalse(any(event['type'] == 'goal.status' for event in events))
         self.assertEqual([params for method, params in calls if method == 'turn/start'], [{
-            'threadId':'same-thread', 'input':[{'type':'text','text':'What were the results?'}]}])
+            'threadId':'same-thread', 'input':[{'type':'text','text':'What were the results?'}],
+            'collaborationMode':{'mode':'default','settings':{'model':'test-model','reasoning_effort':None,'developer_instructions':None}}}])
         self.assertFalse(any(method == 'thread/goal/set' for method, _ in calls))
 
     def test_goal_controls_act_on_the_native_goal_without_objective_check(self):
