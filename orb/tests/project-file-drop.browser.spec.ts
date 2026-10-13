@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-test('dropping a PDF into an empty nested folder preserves bytes, refreshes @ and warns for oversized files',async({page})=>{
+test('dropping a PDF into an empty nested folder preserves bytes, refreshes @ and asks before uploading oversized files',async({page})=>{
  const paths:string[]=[];let blob:Buffer|undefined;
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
  await page.route('**/api/**',async route=>{
@@ -16,5 +16,5 @@ test('dropping a PDF into an empty nested folder preserves bytes, refreshes @ an
  async function drop(large=false){const rect=await (large?page.locator('.row.folder[data-drop-folder="PPL"]'):empty).boundingBox();const transfer=await page.evaluateHandle(large=>{const dt=new DataTransfer();dt.items.add(new File([large?new Uint8Array(10*1024*1024+1):new Uint8Array([37,80,68,70,0,255])],large?'large.pdf':'guide.pdf',{type:'application/pdf'}));return dt;},large);await page.locator('.row.folder[data-drop-folder="PPL"]').dispatchEvent('drop',{dataTransfer:transfer,clientX:rect!.x+10,clientY:rect!.y+5});}
  await drop();await expect.poll(()=>paths).toEqual(['PPL/guide.pdf']);expect([...blob!]).toEqual([37,80,68,70,0,255]);await expect(page.getByRole('button',{name:'guide.pdf',exact:true})).toBeVisible();
  const composer=page.locator('.composer textarea').first();await composer.fill('@guide');await expect(page.getByRole('option',{name:'PPL/guide.pdf',exact:true})).toBeVisible();
- await drop(true);await expect(page.getByRole('alert')).toContainText('10 MiB');expect(paths).toHaveLength(1);
+ await drop(true);const confirm=page.getByRole('dialog');await expect(confirm).toContainText('large.pdf');await expect(confirm).toContainText('10 MB default sync limit');expect(paths).toHaveLength(1);await confirm.getByRole('button',{name:'Cancel'}).click();expect(paths).toHaveLength(1);
 });

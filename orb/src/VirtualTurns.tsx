@@ -62,9 +62,11 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    const key=props.segment.key;nodes.set(key,element);
    const observer=new ResizeObserver(()=>timed("turn resized",()=>{
     const rect=element.getBoundingClientRect(),height=rect.height;if(height<=0||sizes.get(key)===height)return;
-    const prevHeight=sizes.get(key);
+    // Unmeasured rows were laid out at the 300px estimate; correct from that too,
+    // or older turns paged in above the viewport push the reader's place down.
+    const prevHeight=sizes.get(key)??300;
     sizes.set(key,height);
-    if(scroller&&prevHeight!==undefined){
+    if(scroller){
      const scrollerTop=scroller.getBoundingClientRect().top;
      if(rect.bottom<=scrollerTop+1)scroller.scrollTop+=height-prevHeight;
     }

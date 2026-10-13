@@ -5,7 +5,7 @@ import {nativeComposerDrop} from '../src/composerDrop';
 const handlers = new Map<string, (event: any) => void>();
 afterEach(() => { cleanup(); handlers.clear(); delete (window as any).__TAURI__; vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 it('inserts all native local paths while the agent runs and deduplicates the relay', async () => {
-  const invoke = vi.fn(), send = vi.fn();
+  const invoke = vi.fn(async (cmd: string) => cmd === 'stat_upload_file' ? { size: 10, modified: 0 } : undefined), send = vi.fn();
   (window as any).__TAURI__ = { core: { invoke }, event: { listen: vi.fn(async (name, handler) => { handlers.set(name, handler); return () => handlers.delete(name); }) } };
   vi.stubGlobal('devicePixelRatio', 2);
   const view = render(() => <Composer placeholder="Drop here" uploadTarget="local" busy={true} onSend={send} onStop={() => {}} />);
@@ -34,7 +34,7 @@ it('inserts all native local paths while the agent runs and deduplicates the rel
 it('uploads Finder files to shared project context before sending context references', async () => {
   vi.spyOn(navigator,'platform','get').mockReturnValue('MacIntel');
   vi.stubGlobal('devicePixelRatio',2);
-  const invoke = vi.fn(async () => btoa('DROP_TEST_CONTENT'));
+  const invoke = vi.fn(async (cmd: string) => cmd === 'stat_upload_file' ? { size: 17, modified: 0 } : btoa('DROP_TEST_CONTENT'));
   (window as any).__TAURI__ = { core: { invoke }, event: { listen: vi.fn(async (name, handler) => { handlers.set(name, handler); return () => handlers.delete(name); }) } };
   const requests: {url:string; init:any}[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
@@ -56,7 +56,7 @@ it('uploads Finder files to shared project context before sending context refere
   expect(input.value).not.toContain('/Users/');
   expect(requests.filter(r=>r.url.endsWith('/blobs'))).toHaveLength(2);
   expect(requests.some(r=>r.url.endsWith('/api/uploads'))).toBe(false);
-  expect(invoke.mock.calls.every(call=>call[0]==='read_upload_file')).toBe(true);
+  expect(invoke.mock.calls.every(call=>call[0]==='read_upload_file'||call[0]==='stat_upload_file')).toBe(true);
   fireEvent.click(screen.getByTitle('Send'));
   await waitFor(()=>expect(send).toHaveBeenCalledOnce());
   expect(attachments).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({kind:'context',project:'drop-test',path:expect.stringMatching(/^attachments\//)})]));

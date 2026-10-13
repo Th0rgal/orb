@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-li
 import { afterEach, expect, it, vi } from "vitest";
 import { Composer } from "../src/App";
 import * as uploads from "../src/uploads";
-vi.mock("../src/uploads", async (original) => ({ ...await original<typeof import("../src/uploads")>(), hasNativePicker: () => true, pickNativeFiles: vi.fn(), transferFile: vi.fn() }));
+vi.mock("../src/uploads", async (original) => ({ ...await original<typeof import("../src/uploads")>(), hasNativePicker: () => true, pickNativeFiles: vi.fn(), transferFile: vi.fn(), statUploadSource: vi.fn(async () => ({ size: 10, modified: 0 })) }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 it("opens an upload choice with no project context and inserts a real local path", async () => {
   vi.mocked(uploads.pickNativeFiles).mockResolvedValue([{ name: "notes.txt", localPath: "/Users/test/notes.txt" }]);
