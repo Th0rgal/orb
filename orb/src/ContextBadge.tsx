@@ -58,7 +58,7 @@ export function ContextBadge(p:{slug:string}){
    <strong>{conflicts().length?'Changes need review':authError()?'Reconnect to sync context':error()?'Sync interrupted':'Synchronizing context'}</strong>
    <p>{conflicts().length?'Open file history to compare and resolve conflicting versions.':pending()?`${pending()} local change${pending()===1?'':'s'} waiting to sync.`:error()?'No queued changes. The latest server version could not be checked.':'Checking the latest changes.'}</p>
    <Show when={conflicts().length}><p>{conflicts().join('\n')}</p></Show>
-   <Show when={error()}><p class="context-sync-error">{authError()?'Check your backend connection in Settings.':error()}</p></Show>
+   <Show when={error()}><p class="context-sync-error inline-error">{authError()?'Check your backend connection in Settings.':error()}</p></Show>
    <Show when={nativeInvoke()}><button class="s-btn" disabled={retrying()} onClick={()=>void retry()}>{retrying()?'Syncing…':'Retry sync'}</button></Show>
   </Popover></Show>
  </div></Show>;

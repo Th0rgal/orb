@@ -1097,7 +1097,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                             </button>
                           </div>
                           <Show when={newSkillError()}>
-                            {(err) => <p class="skills-form-err" role="alert">{err()}</p>}
+                            {(err) => <p class="inline-error" role="alert">{err()}</p>}
                           </Show>
                         </div>
                       </Show>

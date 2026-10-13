@@ -1,4 +1,5 @@
 import { For, Show, createMemo, createSignal, createEffect, createUniqueId, type JSX } from 'solid-js';
+import { ErrorToast } from "./toast";
 import { MdView } from './Markdown';
 import { parseQuiz } from './quiz';
 import './quiz.css';
@@ -37,7 +38,7 @@ export function QuizAnswer(p: {text: string; disabled: boolean; onSubmit: (text:
           <button class="s-btn native-primary quiz-next" disabled={!answers()[question().number] || sending()} onClick={() => setIndex(index()+1)}>Suivant →</button>
         </Show>
       </div>
-      <Show when={error()}><p role="alert">{error()}</p></Show>
+      <ErrorToast error={error()} title="Couldn’t send your answer" onDismiss={() => setError('')} />
     </section>
     <Show when={quiz()!.after}><MdView compact text={quiz()!.after}/></Show>
   </Show>;

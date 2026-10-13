@@ -493,7 +493,7 @@ export function WorkingDirectoryPicker(p: {
             </div>
           </Show>
 
-          <Show when={folderError()}><p role="alert" class="field-error">{folderError()}</p></Show>
+          <Show when={folderError()}><p role="alert" class="field-error inline-error">{folderError()}</p></Show>
           <div class="directory-browser-list" role="listbox" aria-label="Folders" onKeyDown={e => navigateOverlayItems(e, e.currentTarget, "[role=option]")}>
             <button
               type="button"

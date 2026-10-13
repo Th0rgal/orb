@@ -1,4 +1,5 @@
 import { Select } from "./Select";
+import { ErrorToast } from "./toast";
 import { RoutingPicker } from "./RoutingPicker";
 import { ProxyApiKeys } from "./ProxyApiKeys";
 import {
@@ -665,9 +666,7 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
                 </article>
               )}
             </For>
-            <Show when={actionError()}>
-              <ErrorNotice error={actionError()} />
-            </Show>
+            <ErrorToast error={actionError()} onDismiss={() => setActionError("")} />
           </section>
           </Show>
           <Show when={tab() === "health"}>

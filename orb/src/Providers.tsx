@@ -1,4 +1,5 @@
 import { AntigravityProvider } from "./AntigravityProvider";
+import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
@@ -435,7 +436,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
       <Show when={p.loadError}>{error => <ErrorNotice title="Could not refresh providers" error={error()}>
         <button class="s-btn" onClick={p.onRefresh}>Try again</button>
       </ErrorNotice>}</Show>
-      <Show when={toggleError()}><p class="s-row-desc c-red" role="alert">{toggleError()}</p></Show>
+      <ErrorToast error={toggleError()} title="Couldn’t update the provider" onDismiss={() => setToggleError(null)} />
 
       <section class="s-sec">
         <div class="section-row"><h3>Subscriptions</h3><button class="s-btn sm quiet" disabled={!loginOptions()?.available} onClick={() => { setAddType(loginOptions()?.providers[0]?.id ?? ""); setAdding(true); }}><Ic.PlusIcon size={12}/> Add subscription account</button></div>
@@ -662,7 +663,7 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
       </div>
     </div>
     <p class="s-row-desc p-key-foot-note">{p.provider ? "Enter a replacement key. The saved key is never displayed." : "Encrypted at rest on the connected backend and never shown again."}</p>
-    <Show when={error()}><p role="alert" class="c-red">{error()}</p></Show>
+    <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>
   </Dialog>;
 }
 
@@ -896,7 +897,7 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
   const type = () => u().provider_type;
   return (
     <div class="p-detail">
-      <Show when={u().status === "needs_reauth"}><p class="s-row-desc c-red">Reconnect this account to check its quota and use it for new requests.</p></Show>
+      <Show when={u().status === "needs_reauth"}><p class="s-row-desc inline-error">Reconnect this account to check its quota and use it for new requests.</p></Show>
       <div class="p-detail-meta">
         <Show when={u().account_email && u().account_email !== p.headerEmail}><span>{u().account_email}</span></Show>
         <Show when={u().account_name}><span>{u().account_name}</span></Show>
@@ -964,7 +965,7 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
 
       <Show when={u().usage_note}><p class="s-row-desc">{u().usage_note}</p></Show>
       <Show when={u().error}>
-        <p class="s-row-desc c-red">{u().error?.replace(/\s*—\s*/g, ". ")}</p>
+        <p class="s-row-desc inline-error">{u().error?.replace(/\s*—\s*/g, ". ")}</p>
       </Show>
     </div>
   );
@@ -1030,7 +1031,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
           <Show when={hasProviderUsageDetails(p.usage)}>
             <UsageDetail usage={p.usage!} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
           </Show>
-          <Show when={!p.usage?.error && (a.status.reason || a.status.message)}><p class="s-row-desc c-red">{(a.status.reason || a.status.message)?.replace(/\s*—\s*/g, ". ")}</p></Show>
+          <Show when={!p.usage?.error && (a.status.reason || a.status.message)}><p class="s-row-desc inline-error">{(a.status.reason || a.status.message)?.replace(/\s*—\s*/g, ". ")}</p></Show>
           <Show when={p.onEditKey}><div class="p-acc-actions"><button class="s-btn" onClick={p.onEditKey}>Edit API key</button></div></Show>
           <Show when={canReconnect() && needsAuth()}>
             <div class="p-acc-actions">

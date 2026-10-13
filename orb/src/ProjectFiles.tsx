@@ -1,4 +1,5 @@
 import { useTooltip } from "./Tooltip";
+import { ErrorToast } from "./toast";
 import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
@@ -2086,7 +2087,7 @@ export function LiveProjectsSection(p: {
       <Show when={error()}>
         <div class="row note">{error()} <button class="text-btn" onClick={() => refresh(true)}>Retry</button></div>
       </Show>
-      <Show when={cronWarning()}><ErrorNotice error={cronWarning()!} /></Show>
+      <ErrorToast error={cronWarning()} onDismiss={() => setCronWarning(null)} />
       <Show when={!deleteTargets().length && actionError()}>{error => <ErrorDialog error={error()} onClose={() => setActionError(null)} />}</Show>
       <Show when={importStatus()}><div class="row note" role="status">{importStatus()}</div></Show>
       <For each={backgroundUploads().filter(t => t.scope?.startsWith("project:"))}>

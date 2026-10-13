@@ -1,4 +1,5 @@
 import {followInteraction} from "./nativeInteractionStream";
+import { ErrorToast } from "./toast";
 import {rememberApprovedPlan} from "./PlanProgress";
 import {For,Show,createEffect,createSignal,onCleanup,untrack} from 'solid-js';
 import {MdView} from './Markdown';
@@ -133,7 +134,7 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
    <button class="s-btn native-secondary" disabled={sending()||(r().method==='plan'&&!feedback().trim())} onClick={()=>void reply('revise')}>{r().method==='plan'?'Request changes':'Decline'}</button>
    <button class="s-btn native-primary" disabled={sending()} onClick={()=>void reply('accept')}>{r().method==='plan'?'Implement plan':'Allow once'}</button>
   </Show><Show when={sending()}><span role="status">Sending…</span></Show></div>
-  <Show when={error()}><div role="alert">{error()}</div></Show>
+  <ErrorToast error={error()} title="Couldn’t send your answer" onDismiss={() => setError('')} />
  </section>}</Show><Show when={completedPlanTurn()}>{plan=>
   <section class="native-question" aria-label="Review the plan">
    <div class="native-question-heading">Review the plan</div>
@@ -143,7 +144,7 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
     <button class="s-btn native-primary" disabled={sending()} onClick={()=>void replyCompletedPlan('accept')}>Implement plan</button>
     <Show when={sending()}><span role="status">Sending…</span></Show>
    </div>
-   <Show when={error()}><div role="alert">{error()}</div></Show>
+   <ErrorToast error={error()} title="Couldn’t send your answer" onDismiss={() => setError('')} />
   </section>
  }</Show></>;
 }

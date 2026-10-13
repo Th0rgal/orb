@@ -337,7 +337,7 @@ describe("VoiceButton flow", () => {
     fireEvent.click(button());
     await waitFor(() => expect(button().getAttribute("aria-pressed")).toBe("true"));
     fireEvent.click(button());
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("No speech detected."));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("No speech detected."));
     expect(onText).not.toHaveBeenCalled();
   });
 

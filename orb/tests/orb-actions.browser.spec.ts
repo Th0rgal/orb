@@ -344,7 +344,6 @@ test("a project cap refusal explains itself and links to that project's settings
   await expect(alert).toContainText("increase the limit in Project settings");
   // The refusal proves nothing about the provider, so it must not vouch for it.
   await expect(alert).not.toContainText(/nothing is wrong/i);
-  await expect(page.locator(".launch-refusal-meta")).toHaveText("2 of 2 unfinished");
 
   // The draft survives, and nothing was retried on its own.
   await expect(composer).toHaveValue("start the SRv3 report");

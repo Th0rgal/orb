@@ -1438,14 +1438,6 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 }
 .voice-ok:hover { background: var(--send-bg-hover); }
 .voice-btn:disabled { opacity: .5; cursor: default; }
-.voice-err {
-  position: absolute; right: 0; bottom: 32px; z-index: 10;
-  max-width: 320px; padding: 7px 10px; border-radius: var(--radius-md);
-  background: var(--menu-bg); border: 1px solid var(--stroke-strong); box-shadow: var(--shadow-lg);
-  color: var(--fg); font-size: 12px; line-height: 16px; white-space: normal; text-align: left;
-  animation: pop .1s ease-out;
-}
-
 .new-agent.launching { justify-content: flex-start; padding: 16px 24px 24px; overflow-y: auto; scrollbar-gutter: stable both-edges; }
 .new-agent.launching .new-inner { max-width: var(--col); }
 .launching .na-meta { display: none; }
@@ -1888,7 +1880,6 @@ button.fork-trigger:hover { color: var(--fg); }
 
 .composer-upload-status { grid-column: 1 / -1; grid-row: 2; padding: 4px 4px 0; font-size: 12px; color: var(--fg-2); }
 .composer.tall .composer-upload-status { grid-row: 3; }
-.composer-upload-status.error { color: #df7b83; }
 /* Pasted images sit above the draft and keep the action row in place. */
 .composer-field { flex-wrap:wrap; }
 .composer-images { flex-basis:100%;min-width:0;display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:8px; }
@@ -1897,7 +1888,6 @@ button.fork-trigger:hover { color: var(--fg); }
 .composer-image .icon-btn { position:absolute;right:3px;top:3px;width:18px;height:18px;border-radius:50%;background:rgb(0 0 0 / 65%);color:white;border:0;opacity:0;transition:opacity .12s; }
 .composer-image:hover .icon-btn, .composer-image:focus-within .icon-btn { opacity:1; }
 @media (hover:none) { .composer-image .icon-btn { opacity:1; } }
-.image-paste-error { flex-basis:100%;color:var(--fg-2);font-size:12px; }
 
 .message-images { display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px; }
 .message-image { position:relative;display:grid;place-items:center;width:64px;height:72px;padding:0;border:1px solid var(--stroke);border-radius: var(--radius-md);overflow:hidden;background:var(--bg);color:var(--fg-3); }
@@ -2386,7 +2376,6 @@ select.orb-select-native:disabled { cursor: default; }
 .context-sync-detail {width:280px;white-space:normal;overflow-wrap:anywhere;padding:12px;line-height:1.5; }
 .context-sync-detail strong { color:var(--fg);font-weight:500; }
 .context-sync-detail p { margin:7px 0;white-space:pre-wrap; }
-.context-sync-error { color:var(--fg-3,var(--fg-2)); }
 @keyframes context-sync-pulse { 50% { opacity:.35; } }
 @media(prefers-reduced-motion:reduce) { .context-sync-state[data-state="syncing"] .context-sync-dot { animation:none; } }
 .context-history-row { flex-wrap:wrap; }
@@ -2685,11 +2674,11 @@ select.orb-select-native:disabled { cursor: default; }
 .software-version { color:var(--fg-3);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
 .software-status { white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-left:auto;color:var(--fg-3);font-size:11px;text-align:right; }
 .software-status.attention { color:#b8a568; }
-.software-status.failed,.software-error { color:var(--danger,#ce8585); }
+.software-status.failed { color:var(--red); }
 .software-actions { position:absolute;top:1px;right:0; }
 .software-details { display:flex;flex-direction:column;gap:5px;padding:6px 12px 12px 20px;font-size:11px;color:var(--fg-3);user-select:text;-webkit-user-select:text; }
 .software-details code { overflow-wrap:anywhere;white-space:normal; }
-.software-details p,.software-error { margin:3px 0; }
+.software-details p { margin:3px 0; }
 .software-empty { font-size:12px;color:var(--fg-3); }
 .software-owner { color:var(--fg-3);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
 .software-entry .s-btn { min-height:24px;padding:2px 8px;font-size:11px; }
@@ -3240,10 +3229,6 @@ select.orb-select-native:disabled { cursor: default; }
 .skills-new-inputs .s-input {
   flex: 1; min-width: 150px;
 }
-.skills-form-err {
-  margin: 0; font-size: 12px; color: var(--red);
-}
-
 @media (max-width: 640px) {
   .skills-coverage { display: none; }
   .skills-search { width: 100%; }
@@ -3411,3 +3396,22 @@ select.orb-select-native:disabled { cursor: default; }
   gap: 4px;
 }
 
+/* Bottom notifications (toast.tsx). Same surface as the Inbox undo bar. */
+.toaster { position: fixed; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: min(560px, calc(100vw - 32px)); pointer-events: none; }
+.toast { pointer-events: auto; display: flex; align-items: center; gap: 10px; max-width: 100%; padding: 8px 8px 8px 14px; border-radius: 8px; background: var(--overlay-surface); border: 1px solid var(--overlay-border); box-shadow: var(--shadow-lg); color: var(--fg-2); font-size: 12px; animation: toast-in 140ms ease-out; }
+.toast-icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--red); }
+.toast-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.toast-title { color: var(--fg); font-weight: 500; }
+.toast-message { color: var(--fg-2); }
+.toast-details { color: var(--fg-3); }
+.toast-details summary { cursor: pointer; width: fit-content; }
+.toast-details pre { margin: 6px 0 0; max-height: 160px; overflow: auto; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; }
+.toast-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
+.toast-btn:hover { background: var(--overlay-hover); }
+.toast-btn kbd { display: inline-grid; place-items: center; min-width: 15px; height: 16px; padding: 0 3px; border-radius: 3px; color: var(--fg-3); font: 10px/1 var(--sans); }
+.toast-icon-btn { flex: none; width: 24px; height: 24px; align-self: flex-start; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+
+/* Inline errors attached to a row, field or panel. Transient failures use toast.tsx. */
+.inline-error { margin: 4px 0 0; color: var(--red) !important; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
