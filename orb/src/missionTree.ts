@@ -75,6 +75,44 @@ export function archiveOnlyRows<M extends {id:string;status:string}>(archived:M[
  return archived.filter(m=>m.status==="acknowledged"&&!visible.has(m.id));
 }
 
+const SUPERSEDED_RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
+
+export function hasSupersededTag(tags?: readonly string[] | null): boolean {
+  return Boolean(
+    tags?.some(
+      tag =>
+        tag === "superseded" ||
+        tag.startsWith("superseded_by:") ||
+        tag.startsWith("superseded-by:"),
+    ),
+  );
+}
+
+/** True when a mission was explicitly superseded by a replacement attempt and is no longer running. */
+export function isSupersededMission(mission: { status?: string | null; tags?: readonly string[] | null }): boolean {
+  if (mission.status && SUPERSEDED_RUNNING.has(mission.status)) return false;
+  return hasSupersededTag(mission.tags);
+}
+
+/** True when a mission or any of its ancestors is superseded and this mission is not actively running. */
+export function isSupersededInTree<M extends Linked & { status?: string | null; tags?: readonly string[] | null }>(
+  mission: M,
+  byId: ReadonlyMap<string, M>,
+): boolean {
+  if (mission.status && SUPERSEDED_RUNNING.has(mission.status)) return false;
+  if (isSupersededMission(mission)) return true;
+  const seen = new Set<string>([mission.id]);
+  let parent = missionParent(mission);
+  while (parent && !seen.has(parent)) {
+    seen.add(parent);
+    const row = byId.get(parent);
+    if (!row) break;
+    if (isSupersededMission(row)) return true;
+    parent = missionParent(row);
+  }
+  return false;
+}
+
 export const ARCHIVE_DAY_MS = 24 * 60 * 60 * 1000;
 export const ARCHIVE_WEEK_MS = 7 * ARCHIVE_DAY_MS;
 

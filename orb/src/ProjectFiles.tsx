@@ -75,7 +75,7 @@ import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheR
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, holds, nestMissions, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants, type NestedMission } from "./missionTree";
+import { countNested, holds, nestMissions, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants, type NestedMission } from "./missionTree";
 
 const [deletingIds, setDeletingIds] = createSignal<ReadonlySet<string>>(new Set());
 export const isMissionDeleting = (id: string): boolean => deletingIds().has(id);
@@ -200,7 +200,10 @@ export function LiveProjectsSection(p: {
         : [current, ...rows])
       : rows;
     const extraArchived = archivedMissions().filter(m => (m.project ?? "") === slug && !withCurrent.some(r => r.id === m.id));
-    return missionTreeRows([...withCurrent, ...extraArchived], m => !isArchived(m));
+    const allRows = [...withCurrent, ...extraArchived];
+    const byId = new Map(allRows.map(m => [m.id, m]));
+    const selectedId = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : undefined;
+    return missionTreeRows(allRows, m => !isArchived(m) && (m.id === selectedId || !isSupersededInTree(m, byId)));
   };
   const allKnownMissions = (): Mission[] => {
     const byId = new Map<string, Mission>();
