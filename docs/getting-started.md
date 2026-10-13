@@ -27,7 +27,7 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **sandbo
 ### iOS (`ios_dashboard/`)
 
 1. Open **Orb** on iOS and enter your **Server URL** and **Password** in the connection sheet.
-2. Tap the top-right profile icon at any time to manage **Backend**, **Providers**, and **Machines** (including the shared SSH address book).
+2. Tap the top-right profile icon at any time to manage **Backend**, **Providers**, and **Machines**.
 
 <p align="center">
   <img src="../screenshots/orb-ios-projects.webp" width="240" alt="Orb on iOS Projects" />

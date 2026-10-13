@@ -94,7 +94,6 @@ fun OrbSettingsSheet(
     val baseURL by core.baseURLFlow.collectAsState()
     val providers by core.providers.collectAsState()
     val nodes by core.nodes.collectAsState()
-    val remoteTargets by core.remoteTargets.collectAsState()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -172,7 +171,7 @@ fun OrbSettingsSheet(
                             OrbSettingsRow(
                                 icon = Icons.Default.Memory,
                                 title = "Machines",
-                                subtitle = "${nodes.size} nodes · ${remoteTargets.size} SSH",
+                                subtitle = "${nodes.size} nodes",
                                 onClick = { route = OrbSettingsRoute.Machines }
                             )
                             HorizontalDivider(
@@ -1537,19 +1536,9 @@ fun OrbMachinesSettingsPage(
 ) {
     val scope = rememberCoroutineScope()
     val cachedNodes by core.nodes.collectAsState()
-    val cachedTargets by core.remoteTargets.collectAsState()
     var nodes by remember(cachedNodes) { mutableStateOf(cachedNodes) }
-    var sshHosts by remember(cachedTargets) { mutableStateOf(cachedTargets) }
     var expandedNodeIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var isRefreshing by remember { mutableStateOf(false) }
-    var showTargetEditor by remember { mutableStateOf(false) }
-    var editingTarget by remember { mutableStateOf<OrbRow?>(null) }
-
-    var nameField by remember { mutableStateOf("") }
-    var hostField by remember { mutableStateOf("") }
-    var portField by remember { mutableStateOf("22") }
-    var userField by remember { mutableStateOf("ubuntu") }
-    var noteField by remember { mutableStateOf("") }
     var errorBanner by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
@@ -1561,68 +1550,12 @@ fun OrbMachinesSettingsPage(
         } catch (e: Throwable) {
             errorBanner = "Fleet unavailable. ${e.message ?: ""}"
         }
-        try {
-            sshHosts = core.fetchRows("/api/settings/ssh-hosts", null)
-        } catch (_: Throwable) {
-        }
     }
 
     LaunchedEffect(Unit) {
         isRefreshing = true
         loadMachines()
         isRefreshing = false
-    }
-
-    fun openEditor(target: OrbRow?) {
-        editingTarget = target
-        nameField = target?.str("name", "label") ?: ""
-        hostField = target?.str("host", "hostname") ?: ""
-        portField = (target?.int("port") ?: 22).toString()
-        userField = target?.str("user", "username") ?: "ubuntu"
-        noteField = target?.str("note") ?: ""
-        showTargetEditor = true
-    }
-
-    fun saveSshHost(delete: Boolean = false) {
-        if (busy) return
-        busy = true
-        val existing = editingTarget
-        val base = "/api/settings/ssh-hosts"
-        val id = existing?.id?.takeIf { it.isNotEmpty() }
-        val revision = existing?.int("revision") ?: 0
-        val path = if (id == null) base else "$base/${core.encodeComponent(id)}"
-        scope.launch {
-            try {
-                if (delete && id != null) {
-                    core.request(
-                        path = "$path?revision=$revision",
-                        method = "DELETE"
-                    )
-                } else {
-                    val body = mapOf(
-                        "name" to nameField.trim(),
-                        "host" to hostField.trim(),
-                        "user" to userField.trim().ifEmpty { "ubuntu" },
-                        "port" to (portField.toIntOrNull() ?: 22),
-                        "note" to noteField.trim(),
-                        "revision" to revision
-                    )
-                    core.request(
-                        path = path,
-                        method = if (id == null) "POST" else "PUT",
-                        body = body
-                    )
-                }
-                showTargetEditor = false
-                editingTarget = null
-                loadMachines()
-                core.refreshAll()
-            } catch (e: Throwable) {
-                errorBanner = e.message
-            } finally {
-                busy = false
-            }
-        }
     }
 
     fun toggleCordon(node: OrbRow) {
@@ -1861,194 +1794,6 @@ fun OrbMachinesSettingsPage(
                                         color = OrbStyle.border,
                                         modifier = Modifier.padding(start = 16.dp)
                                     )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Section("SSH address book") matching OrbMachinesSettings.swift
-                item {
-                    Text(
-                        text = "SSH ADDRESS BOOK",
-                        color = OrbStyle.textMuted,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.7.sp
-                    )
-                }
-
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(OrbStyle.surface)
-                            .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
-                    ) {
-                        if (sshHosts.isEmpty()) {
-                            Text(
-                                text = "No SSH addresses yet.",
-                                color = OrbStyle.textMuted,
-                                fontSize = 14.sp,
-                                modifier = Modifier.padding(16.dp)
-                            )
-                            HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
-                        } else {
-                            sshHosts.forEach { target ->
-                                val name = target.str("name", "label", "id") ?: target.id
-                                val host = target.str("host", "hostname") ?: ""
-                                val user = target.str("user", "username") ?: "ubuntu"
-                                val port = target.int("port") ?: 22
-                                val note = target.str("note") ?: ""
-
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .orbPressClickable { openEditor(target) }
-                                        .padding(horizontal = 16.dp, vertical = 13.dp),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
-                                    Text(
-                                        text = name,
-                                        color = Color.White,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                    Text(
-                                        text = "$user@$host:$port",
-                                        color = OrbStyle.textSecondary,
-                                        fontSize = 12.sp
-                                    )
-                                    if (note.isNotEmpty()) {
-                                        Text(
-                                            text = note,
-                                            color = OrbStyle.textMuted,
-                                            fontSize = 12.sp
-                                        )
-                                    }
-                                }
-                                HorizontalDivider(
-                                    color = OrbStyle.border,
-                                    modifier = Modifier.padding(start = 16.dp)
-                                )
-                            }
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .orbPressClickable { openEditor(null) }
-                                .padding(horizontal = 16.dp, vertical = 13.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = null,
-                                tint = OrbStyle.inboxBlue,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = "Add SSH address",
-                                color = OrbStyle.inboxBlue,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
-                }
-
-                item {
-                    Text(
-                        text = "Shared with Orb desktop through this backend. An address does not register an execution node.",
-                        color = OrbStyle.textMuted,
-                        fontSize = 12.sp
-                    )
-                }
-
-                if (showTargetEditor) {
-                    item {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(OrbStyle.surface)
-                                .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(16.dp))
-                                .padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = if (editingTarget == null) "Add SSH address" else "SSH address",
-                                color = Color.White,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            OrbMiniField("Name", nameField) { nameField = it }
-                            OrbMiniField("Host", hostField) { hostField = it }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Box(modifier = Modifier.weight(1f)) {
-                                    OrbMiniField("User", userField) { userField = it }
-                                }
-                                Box(modifier = Modifier.width(90.dp)) {
-                                    OrbMiniField("Port", portField) { portField = it }
-                                }
-                            }
-                            OrbMiniField("Note", noteField) { noteField = it }
-
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(OrbStyle.card)
-                                        .orbPressClickable { showTargetEditor = false }
-                                        .padding(horizontal = 14.dp, vertical = 8.dp)
-                                ) {
-                                    Text(
-                                        text = "Cancel",
-                                        color = OrbStyle.textSecondary,
-                                        fontSize = 13.sp,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(Color.White)
-                                        .orbPressClickable(enabled = !busy && nameField.trim().isNotEmpty() && hostField.trim().isNotEmpty()) {
-                                            saveSshHost(delete = false)
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 8.dp)
-                                ) {
-                                    Text(
-                                        text = "Save",
-                                        color = Color.Black,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                                if (editingTarget != null) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(CircleShape)
-                                            .background(OrbStyle.card)
-                                            .orbPressClickable(enabled = !busy) {
-                                                saveSshHost(delete = true)
-                                            }
-                                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                                    ) {
-                                        Text(
-                                            text = "Delete",
-                                            color = OrbStyle.error,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
                                 }
                             }
                         }

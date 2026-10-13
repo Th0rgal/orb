@@ -667,8 +667,6 @@ class OrbCore private constructor(context: Context) {
     private val _assistantStatus = MutableStateFlow<OrbDict>(emptyMap())
     val assistantStatus: StateFlow<OrbDict> = _assistantStatus.asStateFlow()
 
-    private val _remoteTargets = MutableStateFlow<List<OrbRow>>(emptyList())
-    val remoteTargets: StateFlow<List<OrbRow>> = _remoteTargets.asStateFlow()
 
     private val _pendingProjectFocus = MutableStateFlow<String?>(null)
     val pendingProjectFocus: StateFlow<String?> = _pendingProjectFocus.asStateFlow()
@@ -832,7 +830,6 @@ class OrbCore private constructor(context: Context) {
         _nodes.value = emptyList()
         _fleetSummary.value = emptyMap()
         _assistantStatus.value = emptyMap()
-        _remoteTargets.value = emptyList()
         _hasLoadedSuccessfully.value = false
         _lastError.value = null
         _lastErrorLog.value = null
@@ -869,7 +866,6 @@ class OrbCore private constructor(context: Context) {
         val r = OrbJSON.dictList(OrbDisk.read("repositories")).map { OrbRow(it) }
         val pr = OrbJSON.dictList(OrbDisk.read("providers")).map { OrbRow(it) }
         val n = OrbJSON.dictList(OrbDisk.read("nodes")).map { OrbRow(it) }
-        val rt = OrbJSON.dictList(OrbDisk.read("remote_targets")).map { OrbRow(it) }
         seedMissionAndProjectCaches(m)
         _projects.value = p
         _missions.value = m
@@ -879,7 +875,6 @@ class OrbCore private constructor(context: Context) {
         _repositories.value = r
         _providers.value = pr
         _nodes.value = n
-        _remoteTargets.value = rt
         if (p.isNotEmpty() || m.isNotEmpty() || h.isNotEmpty()) {
             _hasLoadedSuccessfully.value = true
         }
@@ -949,7 +944,6 @@ class OrbCore private constructor(context: Context) {
             val prTask = async { runCatching { fetchRows("/api/ai/providers", "providers") } }
             val nTask = async { runCatching { fetchDict("/api/remote-nodes") } }
             val aTask = async { runCatching { fetchDict("/api/assistant/status") } }
-            val rtTask = async { runCatching { fetchRows("/api/settings/ssh-hosts", null) } }
 
             val pResult = pTask.await()
             val mResult = mTask.await()
@@ -1008,10 +1002,6 @@ class OrbCore private constructor(context: Context) {
             }
             aTask.await().onSuccess { status ->
                 _assistantStatus.value = status
-            }
-            rtTask.await().onSuccess { rows ->
-                _remoteTargets.value = rows
-                launch(Dispatchers.IO) { OrbDisk.write("remote_targets", rows.map { it.raw }) }
             }
 
             if (anyCoreSuccess) {
