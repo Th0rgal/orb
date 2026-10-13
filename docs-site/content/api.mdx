@@ -87,7 +87,6 @@ curl -X POST "https://orb.thomas.md/api/auth/login" \
 | `/api/remote-nodes` | `GET` | Fleet node roster, health, disk budgets, and `remote_launch` capabilities |
 | `/api/software` | `GET` | Host CLI versions across Core and `?node=<id>` |
 | `/api/software/updates` | `POST` | Trigger atomic managed CLI update on Core or a node |
-| `/api/settings/ssh-hosts` | `GET` / `POST` / `PUT` / `DELETE` | Shared non-secret SSH address book across Orb desktop and iOS |
 | `/api/ai/providers/cli-proxy-login` | `GET` / `POST` / `DELETE` | Start, complete, or cancel CLIProxyAPI OAuth subscription login |
 | `/api/providers/backend-models` | `GET` | Model catalog across configured backends |
 | `/api/providers/antigravity-models` | `GET` | Workspace-native `agy models` discovery |

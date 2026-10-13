@@ -196,23 +196,15 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertLessThanOrEqual(file.frame.maxY, app.otherElements["conversation-composer"].frame.minY)
         capture(app, "rich-response-final-bottom")
     }
-    @MainActor func testSettingsNavigationAndSharedAddressCreation() throws {
+    @MainActor func testSettingsNavigation() throws {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.buttons["settings.machines"].waitForExistence(timeout: 5))
         capture(app, "settings-home")
         app.buttons["settings.machines"].tap()
-        XCTAssertTrue(app.buttons["ssh.fixture-host"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: 10))
         capture(app, "settings-machines")
-        app.buttons["ssh.add"].tap()
-        let name = app.textFields["ssh.name"]
-        XCTAssertTrue(name.waitForExistence(timeout: 5))
-        name.tap(); name.typeText("iPhone address")
-        let host = app.textFields["ssh.host"]
-        host.tap(); host.typeText("phone-test.example")
-        app.buttons["Save"].tap()
-        XCTAssertTrue(app.staticTexts["iPhone address"].waitForExistence(timeout: 10))
         app.navigationBars["Machines"].buttons["Settings"].tap()
         app.buttons["settings.providers"].tap()
         XCTAssertTrue(app.staticTexts["Fixture provider"].waitForExistence(timeout: 10))

@@ -30,7 +30,7 @@
 - **[Scheduled Continuations](SCHEDULED_CONTINUATIONS.md)** — Durable mission wake-ups (`schedule_wakeup` / `schedule_job_wakeup`).
 - **[File Attachments & Uploads](ORB_FILE_UPLOADS.md)** — Native multi-file picker and 20 MiB destination-routed uploads (`POST /api/uploads`).
 - **[Codex Cyber Access](ORB_CYBER_ACCESS.md)** — Per-mission `Standard`, `Daybreak`, and `Automatic` access program selection.
-- **[Settings & Shared SSH Address Book](ORB_SETTINGS.md)** — Synchronized non-secret SSH host directory (`GET/POST /api/settings/ssh-hosts`).
+- **[Orb Settings](ORB_SETTINGS.md)** — Backend, Providers and Machines settings in Orb.
 - **[Model Routing Settings](ORB_ROUTING_SETTINGS.md)** — Ordered fallback chains, provider health, and fallback event inspection.
 
 ## 3. Execution, Harnesses & Fleet

@@ -57,8 +57,7 @@ Projects organize missions, per-project colors, skills and a synced local
 
 Orb for **iOS** connects to the same sandboxed.sh server: browse projects with
 synced colors, inspect mission transcripts and activity folds, send follow-ups,
-view or edit shared Markdown context, and manage backend, machines (with a
-shared SSH address book) and providers.
+view or edit shared Markdown context, and manage backend, machines and providers.
 
 <p align="center">
   <img src="screenshots/orb-ios-projects.webp" width="260" alt="Orb on iOS showing the production projects list with synced project colors" />
