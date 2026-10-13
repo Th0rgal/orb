@@ -11794,6 +11794,12 @@ pub(super) async fn create_mission_inner(
                 .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
         }
     }
+    if backend.as_deref() == Some("antigravity") {
+        if let Some(prompt) = req.prompt.as_deref() {
+            crate::antigravity::validate_prompt(prompt)
+                .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        }
+    }
 
     // Model effort is supported for Codex and Claude Code missions.
     if !matches!(
@@ -13182,7 +13188,10 @@ pub(crate) fn plan_remote_harness(
             resume_session_id: None,
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
-        "antigravity" => Ok(RemoteHarnessPlan::Antigravity { effort: None, model, prompt, resume_session_id: None }),
+        "antigravity" => {
+            crate::antigravity::validate_prompt(&prompt)?;
+            Ok(RemoteHarnessPlan::Antigravity { effort: None, model, prompt, resume_session_id: None })
+        }
         "claudecode" => Ok(RemoteHarnessPlan::ClaudeCode {
             resume_session_id: None,
             // Claude Code expects bare model ids.
@@ -13481,22 +13490,35 @@ pub(crate) fn remote_execution_for_plan(
             prompt,
             resume_session_id,
         } => {
+            let staged = stdin_prompt(prompt);
             let args = crate::antigravity::args_with_effort(
                 model.as_deref(),
                 effort.as_deref(),
                 resume_session_id.as_deref(),
-                prompt,
+                if staged.is_some() { "" } else { prompt },
             );
-            RemoteExecution {
-                managed_auth: vec!["antigravity".into()],
-                command: format!(
-                    "exec agy {} 2>/dev/null",
+            let mut env = HashMap::from([("NO_COLOR".into(), "1".into())]);
+            let (prelude, quoted_args) = if let Some(staged) = staged {
+                let mut quoted: Vec<String> = args[..args.len() - 1]
+                    .iter()
+                    .map(|arg| shell_single_quote(arg))
+                    .collect();
+                quoted.push("\"$(cat <&3)\"".into());
+                env.extend(staged.env);
+                (staged.prelude, quoted.join(" "))
+            } else {
+                (
+                    String::new(),
                     args.iter()
                         .map(|arg| shell_single_quote(arg))
                         .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                env: Some(HashMap::from([("NO_COLOR".into(), "1".into())])),
+                        .join(" "),
+                )
+            };
+            RemoteExecution {
+                managed_auth: vec!["antigravity".into()],
+                command: format!("{prelude}exec agy {quoted_args} 2>/dev/null"),
+                env: Some(env),
                 label,
             }
         }
@@ -40319,6 +40341,22 @@ Investigate <service/> failures.
             plan_remote_harness(None, "antigravity", Some("gemini-account"), Some("hello")),
             Ok(RemoteHarnessPlan::Antigravity { .. })
         ));
+        let large_prompt = "'".repeat(40 * 1024);
+        let plan = plan_remote_harness(None, "antigravity", Some("agy-demo"), Some(&large_prompt))
+            .expect("40 KiB antigravity prompt should be accepted");
+        let execution = remote_execution_for_plan(&plan, "", "");
+        assert!(
+            execution.command.contains("exec agy ") && execution.command.contains("\"$(cat <&3)\""),
+            "{}",
+            execution.command
+        );
+        let oversized = "a".repeat(crate::antigravity::MAX_PROMPT_BYTES + 1);
+        let rejected = plan_remote_harness(None, "antigravity", Some("agy-demo"), Some(&oversized))
+            .expect_err("oversized antigravity prompt must be rejected before mission creation");
+        assert!(
+            rejected.contains("Antigravity prompts must be at most 64 KiB"),
+            "{rejected}"
+        );
     }
 
     #[test]

@@ -67,3 +67,40 @@ it("does not duplicate a failure already in the transcript and renders Resume in
  btn?.click();
  expect(resumed).toBe(1);
 });
+
+it("surfaces stored mission_status_changed failure summaries instead of generic remote dispatch failed", async () => {
+  const { MissionFailure } = await import("../src/missionLaunch");
+  const events = [
+    storedToStream({
+      id: 1, sequence: 1, event_id: "u-1", event_type: "user_message",
+      timestamp: "", content: "Large prompt", metadata: {},
+    })!,
+    storedToStream({
+      id: 2, sequence: 2, event_id: "s-2", event_type: "mission_status_changed",
+      timestamp: "", content: "Antigravity prompts must be at most 16 KiB; put large context in workspace files",
+      metadata: { status: "failed", summary: "Antigravity prompts must be at most 16 KiB; put large context in workspace files" },
+    })!,
+    storedToStream({
+      id: 3, sequence: 3, event_id: "s-3", event_type: "mission_status_changed",
+      timestamp: "", content: "",
+      metadata: { status: "failed", summary: null },
+    })!,
+  ];
+  const items = buildTranscript(events);
+  const visible = visibleTranscript(items);
+  const failureInTranscript = visible.some(item => item.kind === "error" && !item.resumable && !item.diagnostic);
+  expect(failureInTranscript).toBe(true);
+  const mission = { status: "failed", terminal_reason: "remote_dispatch_failed" } as import("../src/api").Mission;
+  const { container } = render(() => (
+    <>
+      <Transcript items={items} />
+      <MissionFailure mission={mission} failureInTranscript={failureInTranscript} />
+    </>
+  ));
+  const cards = container.querySelectorAll(".error-notice");
+  expect(cards).toHaveLength(1);
+  expect(cards[0].textContent).toContain("Antigravity prompt exceeds 16 KiB");
+  expect(cards[0].textContent).toContain("Antigravity prompts must be at most 16 KiB; put large context in workspace files");
+  expect(cards[0].textContent).not.toContain("remote dispatch failed");
+});
+

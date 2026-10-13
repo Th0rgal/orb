@@ -36,7 +36,7 @@ pub(crate) fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &
             }
             let marker = "[Earlier history omitted to fit the native prompt budget]\n";
             let base = frame_goal(marker).len();
-            let budget = (16usize * 1024).saturating_sub(base);
+            let budget = crate::antigravity::MAX_PROMPT_BYTES.saturating_sub(base);
             let mut start = history.len().saturating_sub(budget);
             while !history.is_char_boundary(start) {
                 start += 1;
@@ -50,7 +50,7 @@ pub(crate) fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &
     }
     let marker = "[Earlier history omitted to fit the native prompt budget]\n";
     let base = crate::util::frame_turn_prompt(marker, message).len() + suffix.len();
-    let budget = (16usize * 1024).saturating_sub(base);
+    let budget = crate::antigravity::MAX_PROMPT_BYTES.saturating_sub(base);
     let mut start = history.len().saturating_sub(budget);
     while !history.is_char_boundary(start) {
         start += 1;
@@ -61,7 +61,7 @@ pub(crate) fn antigravity_handoff_prompt(history: &str, message: &str, suffix: &
 #[cfg(test)]
 #[test]
 fn antigravity_handoff_preserves_request_and_recent_unicode_history() {
-    let history = "é🕊".repeat(10_000) + "RECENT_HISTORY";
+    let history = "é🕊".repeat(20_000) + "RECENT_HISTORY";
     let prompt = antigravity_handoff_prompt(&history, "CURRENT_REQUEST", "REQUIRED_INSTRUCTIONS");
     assert!(crate::antigravity::validate_prompt(&prompt).is_ok());
     assert!(prompt.contains("CURRENT_REQUEST"));

@@ -4,11 +4,13 @@ pub mod thoughts;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-/// Bound the native argv and the remote shell's worst-case quote expansion.
+/// Bound the native argv (`MAX_ARG_STRLEN` is 128 KiB on Linux).
+pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
+
 pub fn validate_prompt(prompt: &str) -> Result<(), String> {
-    if prompt.len() > 16 * 1024 {
+    if prompt.len() > MAX_PROMPT_BYTES {
         Err(
-            "Antigravity prompts must be at most 16 KiB; put large context in workspace files"
+            "Antigravity prompts must be at most 64 KiB; put large context in workspace files"
                 .into(),
         )
     } else {
@@ -1286,9 +1288,9 @@ mod tests {
     }
     #[test]
     fn rejects_oversized_prompt_before_native_launch() {
-        assert!(validate_prompt(&"a".repeat(16 * 1024)).is_ok());
-        assert!(validate_prompt(&"'".repeat(16 * 1024 + 1)).is_err());
-        assert!(validate_prompt(&"é".repeat(16 * 1024)).is_err());
+        assert!(validate_prompt(&"a".repeat(MAX_PROMPT_BYTES)).is_ok());
+        assert!(validate_prompt(&"'".repeat(MAX_PROMPT_BYTES + 1)).is_err());
+        assert!(validate_prompt(&"é".repeat(MAX_PROMPT_BYTES)).is_err());
     }
     #[test]
     fn resumes_exact_session_and_keeps_prompt_one_argument() {
