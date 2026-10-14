@@ -46,6 +46,26 @@ it("exposes API key editing and keeps real error details", async () => {
   expect(await screen.findByText("Account unavailable")).toBeTruthy();
 });
 
+it("removes an API key provider from its actions menu", async () => {
+  setConnection("http://core.test", "test-token");
+  let deleted = false;
+  const fetch = vi.fn(async (url: string, options?: RequestInit) => {
+    if (options?.method === "DELETE") { expect(url).toContain("/api/ai/providers/stale-muse"); deleted = true; return new Response("{}"); }
+    const data = url.endsWith("/cloud/accounts") ? [] : url.endsWith("/providers")
+      ? (deleted ? [] : [{ id: "stale-muse", name: "Meta Muse API", provider_type: "muse", uses_oauth: false, enabled: false, status: { type: "connected" } }])
+      : {};
+    return new Response(JSON.stringify(data));
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(() => <Providers />);
+  fireEvent.click(await screen.findByRole("button", { name: "Actions for Meta Muse API", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Remove provider…", exact: true }));
+  expect(await screen.findByText("This deletes the provider and its saved API key. Running work may need another account.")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Remove provider and credentials" }));
+  await waitFor(() => expect(deleted).toBe(true));
+  await waitFor(() => expect(screen.queryByText("Meta Muse API")).toBeNull());
+});
+
 it("feeds a Claude authorization code to CLIProxyAPI while preserving the reconnect UUID", async () => {
   const id = "3be8246a-6fa4-41a5-948c-f0d333e6e247";
   setConnection("http://core.test", "test-token");
