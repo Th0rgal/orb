@@ -293,22 +293,39 @@ async fn detect_bws_version() -> Option<String> {
     }
 }
 
+/// The token travels in the child's environment, never argv, where any local
+/// user could read it from the process list. The child gets no other parent
+/// environment. User-supplied positionals follow `--` so a value starting with
+/// `-` cannot be parsed as a flag such as `--server-url`.
+fn bws_command(
+    token: &str,
+    server_url: Option<&str>,
+    args: &[&str],
+    positionals: &[&str],
+) -> Command {
+    let mut cmd = Command::new("bws");
+    cmd.env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("BWS_ACCESS_TOKEN", token);
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
+    }
+    if let Some(url) = server_url.map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.env("BWS_SERVER_URL", url);
+    }
+    cmd.args(args)
+        .args(["--color", "no", "--"])
+        .args(positionals);
+    cmd
+}
+
 async fn run_bws(
     token: &str,
     server_url: Option<&str>,
     args: &[&str],
+    positionals: &[&str],
 ) -> Result<String, (StatusCode, String)> {
-    let mut cmd = Command::new("bws");
-    cmd.args(args)
-        .arg("--access-token")
-        .arg(token)
-        .arg("--color")
-        .arg("no");
-    if let Some(url) = server_url.map(str::trim).filter(|s| !s.is_empty()) {
-        cmd.arg("--server-url").arg(url);
-    }
-
-    let output = cmd.output().await.map_err(|e| {
+    let output = bws_command(token, server_url, args, positionals).output().await.map_err(|e| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("Failed to execute `bws` CLI: {e}. Ensure Bitwarden Secrets CLI (`bws`) is installed on the backend host."),
@@ -412,6 +429,7 @@ async fn update_config(
                     trimmed,
                     bw.server_url.as_deref(),
                     &["project", "list", "--output", "json"],
+                    &[],
                 )
                 .await?;
             }
@@ -465,6 +483,7 @@ async fn list_projects(
         &token,
         server_url.as_deref(),
         &["project", "list", "--output", "json"],
+        &[],
     )
     .await?;
     let mut projects: Vec<BitwardenProject> = serde_json::from_str(&stdout).map_err(|e| {
@@ -493,7 +512,8 @@ async fn list_project_secrets(
     let stdout = run_bws(
         &token,
         server_url.as_deref(),
-        &["secret", "list", project_id, "--output", "json"],
+        &["secret", "list", "--output", "json"],
+        &[project_id],
     )
     .await?;
     let mut secrets: Vec<BitwardenSecretSummary> = serde_json::from_str(&stdout).map_err(|e| {
@@ -519,7 +539,8 @@ async fn reveal_secret(
     let stdout = run_bws(
         &token,
         server_url.as_deref(),
-        &["secret", "get", secret_id, "--output", "json"],
+        &["secret", "get", "--output", "json"],
+        &[secret_id],
     )
     .await?;
     let secret: BitwardenSecretDetail = serde_json::from_str(&stdout).map_err(|e| {
@@ -546,16 +567,21 @@ async fn create_project_secret(
         ));
     }
     let (token, server_url) = require_token_and_url(&state).await?;
-    let mut args = vec![
-        "secret", "create", key, &req.value, project_id, "--output", "json",
-    ];
-    let note_owned;
-    if let Some(note) = req.note.as_deref().filter(|n| !n.is_empty()) {
-        note_owned = note.to_string();
-        args.push("--note");
-        args.push(&note_owned);
-    }
-    let stdout = run_bws(&token, server_url.as_deref(), &args).await?;
+    // `--flag=value` keeps a user value that starts with `-` from becoming a flag.
+    let note = req
+        .note
+        .as_deref()
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("--note={n}"));
+    let mut args = vec!["secret", "create", "--output", "json"];
+    args.extend(note.as_deref());
+    let stdout = run_bws(
+        &token,
+        server_url.as_deref(),
+        &args,
+        &[key, &req.value, project_id],
+    )
+    .await?;
     let created: BitwardenSecretDetail = serde_json::from_str(&stdout).map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -582,33 +608,28 @@ async fn update_secret(
         ));
     }
     let (token, server_url) = require_token_and_url(&state).await?;
-    let mut args: Vec<&str> = vec!["secret", "edit"];
-    if let Some(key) = req.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
-        args.push("--key");
-        args.push(key);
-    }
-    if let Some(value) = req.value.as_deref() {
-        args.push("--value");
-        args.push(value);
-    }
-    if let Some(note) = req.note.as_deref() {
-        args.push("--note");
-        args.push(note);
-    }
-    if let Some(project_id) = req
+    let key = req
+        .key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| format!("--key={k}"));
+    let value = req.value.as_deref().map(|v| format!("--value={v}"));
+    let note = req.note.as_deref().map(|n| format!("--note={n}"));
+    let project = req
         .project_id
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty())
-    {
-        args.push("--project-id");
-        args.push(project_id);
-    }
-    args.push("--output");
-    args.push("json");
-    args.push(secret_id);
+        .map(|p| format!("--project-id={p}"));
+    let mut args: Vec<&str> = vec!["secret", "edit", "--output", "json"];
+    args.extend(
+        [&key, &value, &note, &project]
+            .into_iter()
+            .filter_map(|o| o.as_deref()),
+    );
 
-    let stdout = run_bws(&token, server_url.as_deref(), &args).await?;
+    let stdout = run_bws(&token, server_url.as_deref(), &args, &[secret_id]).await?;
     let updated: BitwardenSecretDetail = serde_json::from_str(&stdout).map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -631,10 +652,59 @@ async fn delete_secret(
     run_bws(
         &token,
         server_url.as_deref(),
-        &["secret", "delete", secret_id, "--output", "none"],
+        &["secret", "delete", "--output", "none"],
+        &[secret_id],
     )
     .await?;
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[cfg(test)]
+mod bws_command_tests {
+    use super::bws_command;
+
+    #[test]
+    fn token_is_passed_in_env_not_argv_and_positionals_follow_separator() {
+        let cmd = bws_command(
+            "secret-token",
+            Some("https://vault.example"),
+            &["secret", "get", "--output", "json"],
+            &["--server-url=evil"],
+        );
+        let std = cmd.as_std();
+        let args: Vec<_> = std
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|a| a.contains("secret-token")));
+        assert_eq!(
+            args,
+            [
+                "secret",
+                "get",
+                "--output",
+                "json",
+                "--color",
+                "no",
+                "--",
+                "--server-url=evil"
+            ]
+        );
+        let envs: Vec<_> = std
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(envs.contains(&("BWS_ACCESS_TOKEN".into(), Some("secret-token".into()))));
+        assert!(envs.contains(&(
+            "BWS_SERVER_URL".into(),
+            Some("https://vault.example".into())
+        )));
+    }
 }
 
 #[cfg(test)]
