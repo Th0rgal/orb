@@ -38,6 +38,8 @@ test('context sync status is compact, explains offline state, and retries',async
  await expect(badge).toBeVisible();
  expect((await badge.boundingBox())!.height).toBeLessThan(32);
  await badge.click();
+ // The popover opens under its badge, not in the window corner.
+ expect((await page.locator('.context-sync-detail').boundingBox())!.y).toBeGreaterThan((await badge.boundingBox())!.y);
  await expect(page.getByText('nothing is waiting to upload',{exact:false})).toBeVisible();
  await page.screenshot({path:'/tmp/orb-context-sync.png'});
  await page.getByRole('button',{name:'Retry now'}).click();
