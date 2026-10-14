@@ -167,3 +167,9 @@ describe('automatic provider recovery',()=>{
   expect(container.querySelector('.user')).not.toBeNull();
  });
 });
+
+it('does not turn uploads quoted in a fork history into thumbnails',()=>{
+ const prompt='Continue the work from this conversation in a fresh native session.\n<fork_context>\n'+JSON.stringify({source_mission_id:'m1',source_title:'Yukon',messages:[{role:'user',content:'see [Uploaded: /tmp/old.png]'}]})+'\n</fork_context>';
+ const {container}=render(()=><Transcript items={[{kind:'user',key:'u',text:prompt}]}/>);
+ expect(container.querySelector('.message-images')).toBeNull();
+});

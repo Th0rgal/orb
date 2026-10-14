@@ -246,7 +246,8 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
   const fork = createMemo(() => forkContext(p.text));
   const presentation = createMemo(() => messagePresentation(p.text));
   const images = createMemo(() => messageImages(presentation().text));
-  const thumbnails = createMemo(() => images().paths.length
+  // A fork's history quotes old uploads; those markers are not this turn's images.
+  const thumbnails = createMemo(() => fork() ? [] : images().paths.length
     ? images().paths.map((path,index)=>({path,reference:images().references[index]}))
     : (p.images ?? []).map((image,index)=>({path:image.dataUrl,reference:image.reference ?? index+1})));
   const goal = createMemo(() => goalDraft(images().text));
