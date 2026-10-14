@@ -54,6 +54,7 @@
 		708B491B7A83A6648C03CA8A /* WorkerPeekView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF9A2A12846A5FFB3FC7497 /* WorkerPeekView.swift */; };
 		71559C7052796FED7EBACF3F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018CEF52A93FCF430A128017 /* Theme.swift */; };
 		7D0338496466B0EF19ADC62F /* OrbSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */; };
+		7D14495A7577C1F02ABED730 /* OrbBitwardenSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED1F6637B3B1DF50E0D44A79 /* OrbBitwardenSettings.swift */; };
 		7E46D4311CFAF1F7A90E9AAD /* APIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55F4658A2D65748FC7AC5DE3 /* APIService.swift */; };
 		7E9D0E83D72B53C90238CDDC /* HermesConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A8EAA60E82182885A782D60 /* HermesConversationView.swift */; };
 		7EB05EBADEA32903B21527E9 /* OrbRichText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B134E3A21E30BFC16C6AC7AA /* OrbRichText.swift */; };
@@ -216,6 +217,7 @@
 		EB25F60D74459F14EEB22EFD /* ControlSupportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlSupportViews.swift; sourceTree = "<group>"; };
 		EB3EDA65C036030CC45BAD0E /* NavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationState.swift; sourceTree = "<group>"; };
 		ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSettings.swift; sourceTree = "<group>"; };
+		ED1F6637B3B1DF50E0D44A79 /* OrbBitwardenSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbBitwardenSettings.swift; sourceTree = "<group>"; };
 		EFD2C112534D498211B26C38 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		F2F0AD1E30FB3F3BC08A39FB /* HermesConversationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesConversationUITests.swift; sourceTree = "<group>"; };
 		F53686D00374BEDA33228269 /* ToolUIDataTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolUIDataTableView.swift; sourceTree = "<group>"; };
@@ -347,6 +349,7 @@
 				273DF8C1DD6EDF4D4D8627A0 /* OrbQuiz.swift */,
 				B134E3A21E30BFC16C6AC7AA /* OrbRichText.swift */,
 				ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */,
+				ED1F6637B3B1DF50E0D44A79 /* OrbBitwardenSettings.swift */,
 			);
 			path = Orb;
 			sourceTree = "<group>";
@@ -665,6 +668,7 @@
 				42EB1014A46E016216A63172 /* OrbQuiz.swift in Sources */,
 				7EB05EBADEA32903B21527E9 /* OrbRichText.swift in Sources */,
 				7D0338496466B0EF19ADC62F /* OrbSettings.swift in Sources */,
+				7D14495A7577C1F02ABED730 /* OrbBitwardenSettings.swift in Sources */,
 				B2C28CDD378203A229D62B9B /* PhosphorIcon.swift in Sources */,
 				6EC32F7CE8BFDB84428DFF4A /* Project.swift in Sources */,
 				B5F362452171D8F33FE32B9F /* ProjectDetailView.swift in Sources */,

@@ -1488,6 +1488,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/proxy-keys", proxy_keys_api::routes())
         // Secrets management endpoints
         .nest("/api/secrets", secrets_api::routes())
+        // Bitwarden Secrets Manager (`bws`) integration endpoints
+        .nest("/api/bitwarden", super::bitwarden::routes())
         // Global settings endpoints
         .nest("/api/settings", settings_api::routes())
         // Desktop session management endpoints

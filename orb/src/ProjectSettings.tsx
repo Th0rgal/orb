@@ -17,6 +17,7 @@ import {
   type Mission,
   type ProjectGrant,
 } from "./api";
+import { getBitwardenStatus, listBitwardenProjects, type BitwardenProject, type BitwardenStatus } from "./bitwardenApi";
 import { ControllerSkeleton } from "./Skeleton";
 
 /** Shown for context, changed elsewhere. Saving the limit above leaves every
@@ -44,6 +45,8 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
   const [grant, setGrant] = createSignal<ProjectGrant | null>(null);
   const [title, setTitle] = createSignal<string | null>(null);
   const [missions, setMissions] = createSignal<Mission[]>([]);
+  const [bwStatus, setBwStatus] = createSignal<BitwardenStatus | null>(null);
+  const [bwProjects, setBwProjects] = createSignal<BitwardenProject[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [saveError, setSaveError] = createSignal<string | null>(null);
@@ -62,15 +65,31 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
     return value == null ? "" : String(value);
   };
 
+  const boundBitwardenProject = () => {
+    const st = bwStatus();
+    if (!st) return null;
+    const boundId = st.project_bindings?.[p.slug] ?? (p.slug === "paloma" ? st.default_project_id : null);
+    if (!boundId) return null;
+    const found = bwProjects().find((proj) => proj.id === boundId);
+    return {
+      id: boundId,
+      name: found?.name ?? (boundId === "297f3106-758f-43d5-8a4b-b460007558c8" ? "paloma" : boundId),
+    };
+  };
+
   const load = async () => {
     if (!isConnected()) return;
     try {
-      const [g, ms] = await Promise.all([
+      const [g, ms, bws, bwp] = await Promise.all([
         getProjectGrant(p.slug),
         listProjectMissions(p.slug).catch(() => [] as Mission[]),
+        getBitwardenStatus().catch(() => null),
+        listBitwardenProjects().catch(() => [] as BitwardenProject[]),
       ]);
       setGrant(g);
       setMissions(ms);
+      setBwStatus(bws);
+      setBwProjects(bwp);
       // Never stomp on what the user is typing.
       if (!dirty()) setDraft(fieldFor(g));
       setError(null);
@@ -199,6 +218,34 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
                 </For>
               </div>
             </Show>
+          </section>
+
+          <section class="s-sec">
+            <h3>Secrets</h3>
+            <div class="s-card">
+              <div class="s-row">
+                <div class="s-row-text">
+                  <div class="s-row-title">Bitwarden Secrets Manager</div>
+                  <div class="s-row-desc">
+                    <Show
+                      when={boundBitwardenProject()}
+                      fallback="Connect a Bitwarden project to manage secrets for this project."
+                    >
+                      {(bp) => (
+                        <>
+                          Connected to Bitwarden project <code>{bp().name}</code>
+                        </>
+                      )}
+                    </Show>
+                  </div>
+                </div>
+                <div class="s-row-ctrl">
+                  <button class="s-btn" onClick={() => p.onOpenPage("bitwarden-settings")}>
+                    Manage secrets
+                  </button>
+                </div>
+              </div>
+            </div>
           </section>
 
           <section class="s-sec">

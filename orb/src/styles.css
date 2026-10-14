@@ -3402,3 +3402,70 @@ select.orb-select-native:disabled { cursor: default; }
 .md-workspace-image-missing > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .md-workspace-image-missing small { color:var(--fg-3); white-space:nowrap; }
 .md-workspace-image-missing:not(:disabled):hover { border-color:var(--fg-3); }
+
+/* Bitwarden Secrets Manager settings page */
+.bitwarden-inner { max-width: 900px !important; }
+.bw-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+.bw-header h2 { margin-bottom: 4px; }
+.bw-header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bw-unlocked-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--bg-elev); border: 1px solid var(--stroke-soft); color: var(--fg-2); font-size: 11.5px; }
+.bw-status-line { display: inline-flex; align-items: center; gap: 8px; }
+.bw-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); flex: none; }
+.bw-dot.online { background: var(--green); }
+.bw-dot.offline { background: var(--amber, #e0a458); }
+.bw-badge { font: 11px/1.3 var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--bg-inset); border: 1px solid var(--stroke-soft); color: var(--fg-2); }
+.bw-mono { font-family: var(--mono); font-size: 11.5px; }
+.bw-binding-ctrl { display: inline-flex; align-items: center; gap: 8px; }
+.bw-notice { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; margin-bottom: 14px; border-radius: var(--radius-sm); background: var(--bg-elev); border: 1px solid var(--stroke-soft); color: var(--fg); font-size: 12.5px; }
+.bw-notice-close { background: none; border: none; color: var(--fg-3); cursor: pointer; display: grid; place-items: center; padding: 2px; border-radius: 4px; }
+.bw-notice-close:hover { color: var(--fg); background: var(--bg-hover); }
+
+.bw-secrets-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.bw-secrets-title { display: inline-flex; align-items: center; gap: 8px; }
+.bw-secrets-title h3 { margin: 0 !important; display: inline-flex; align-items: center; gap: 6px; }
+.bw-project-pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; background: var(--bg-inset); border: 1px solid var(--stroke-soft); color: var(--fg-2); font: 500 11.5px/1.3 var(--sans); text-transform: none; letter-spacing: 0; }
+.bw-count-badge { font: 11px/1.3 var(--mono); color: var(--fg-3); padding: 2px 6px; border-radius: 999px; background: var(--bg-elev); border: 1px solid var(--stroke-soft); }
+.bw-secrets-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bw-search-wrap { position: relative; display: flex; align-items: center; }
+.bw-search-wrap > svg { position: absolute; left: 9px; color: var(--fg-3); pointer-events: none; }
+.bw-search-input { padding-left: 27px !important; width: 250px !important; }
+
+.bw-secrets-card { padding: 0 !important; overflow: hidden; }
+.bw-table-head { display: grid; grid-template-columns: minmax(240px, 1.8fr) 100px 165px 190px; align-items: center; gap: 12px; padding: 9px 14px; border-bottom: 1px solid var(--stroke-soft); background: var(--bg-inset); color: var(--fg-3); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.03em; }
+.bw-col-actions { text-align: right; }
+.bw-secret-row { display: grid; grid-template-columns: minmax(240px, 1.8fr) 100px 165px 190px; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--stroke-soft); transition: background 90ms ease; }
+.bw-secret-row:last-child { border-bottom: none; }
+.bw-secret-row:hover { background: var(--bg-hover); }
+.bw-secret-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.bw-secret-key-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.bw-key-ico { color: var(--fg-3); display: inline-flex; flex: none; }
+.bw-secret-key { background: none; border: none; padding: 0; color: var(--fg); font: 600 12.5px/1.3 var(--mono); cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bw-secret-key:hover { text-decoration: underline; }
+.bw-secret-note { font-size: 11.5px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.bw-secret-sub { display: inline-flex; align-items: center; gap: 5px; padding-left: 19px; color: var(--fg-3); }
+.bw-secret-id { font: 11px/1.2 var(--mono); color: var(--fg-3); }
+.bw-mini-copy { background: none; border: none; padding: 2px; color: var(--fg-3); cursor: pointer; border-radius: 3px; display: inline-grid; place-items: center; }
+.bw-mini-copy:hover { color: var(--fg); background: var(--bg-active); }
+.bw-revealed-box { margin: 4px 0 2px 19px; padding: 6px 9px; border-radius: var(--radius-xs); background: var(--bg-inset); border: 1px solid var(--stroke-soft); overflow-x: auto; }
+.bw-revealed-val { font: 11.5px/1.45 var(--mono); color: var(--fg); white-space: pre-wrap; word-break: break-all; }
+.bw-secret-proj { display: flex; align-items: center; }
+.bw-secret-date { font-size: 11.5px; color: var(--fg-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bw-secret-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
+.bw-act-btn { padding: 3px 8px !important; font-size: 11.5px !important; min-height: 24px !important; }
+.bw-danger-btn:hover { color: var(--red) !important; border-color: color-mix(in srgb, var(--red) 40%, var(--stroke-soft)) !important; }
+.bw-empty { padding: 28px 16px; text-align: center; color: var(--fg-3); font-size: 12.5px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+
+.bw-dialog-form { display: flex; flex-direction: column; gap: 14px; }
+.bw-dialog-form .s-input { width: 100%; }
+.bw-textarea { width: 100%; min-height: 88px; padding: 8px 10px; resize: vertical; line-height: 1.45; }
+.bw-masked-textarea { -webkit-text-security: disc; }
+.bw-value-editor { display: flex; flex-direction: column; gap: 6px; }
+.bw-value-bar { display: flex; align-items: center; gap: 6px; }
+.bw-loading-inline { display: flex; align-items: center; gap: 8px; padding: 12px 0; color: var(--fg-3); font-size: 12px; }
+
+@media (max-width: 760px) {
+  .bw-table-head { display: none; }
+  .bw-secret-row { grid-template-columns: 1fr; gap: 8px; }
+  .bw-secret-actions { justify-content: flex-start; padding-left: 19px; }
+  .bw-secret-proj, .bw-secret-date { padding-left: 19px; }
+}

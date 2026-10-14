@@ -94,6 +94,7 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 mod bindings;
+mod biometrics;
 mod diagnostics;
 use bindings::local_bindings;
 
@@ -153,6 +154,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             diagnostics::diagnostics_append,
+            biometrics::biometric_status,
+            biometrics::biometric_authenticate,
             bindings::local_binding_set,
             bindings::local_bindings_refresh,
             bindings::local_bindings_subscribe,
