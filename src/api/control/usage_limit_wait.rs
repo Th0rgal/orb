@@ -711,11 +711,11 @@ pub(crate) async fn plan_remote(
     .filter(|wait| {
         // A recovery must fit inside the mission deadline, including provider
         // Retry-After delays; otherwise the UI would promise an invalid replay.
-        !mission
+        mission
             .as_ref()
             .and_then(|mission| mission.scheduling.deadline.as_deref())
             .and_then(|deadline| DateTime::parse_from_rfc3339(deadline).ok())
-            .is_some_and(|deadline| deadline <= wait.resume_at)
+            .is_none_or(|deadline| deadline > wait.resume_at)
     });
     update_remote_wait(working_dir, mission_id, |previous| {
         if planned.is_none() && !success && !sustained_progress {
@@ -814,7 +814,7 @@ pub(crate) fn after_replay_failure(
 ) -> ReplayFailure {
     let passing = server_error || message.contains(super::remote_grok::REMOTE_JOB_STILL_RUNNING);
     let at = now + Duration::seconds(REPLAY_RETRY_SECS);
-    if passing && wait.retries < MAX_REPLAY_RETRIES && !deadline.is_some_and(|end| at >= end) {
+    if passing && wait.retries < MAX_REPLAY_RETRIES && deadline.is_none_or(|end| at < end) {
         ReplayFailure::Retry(at)
     } else {
         ReplayFailure::GiveUp

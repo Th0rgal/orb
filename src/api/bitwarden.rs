@@ -492,7 +492,7 @@ async fn list_projects(
             format!("Invalid JSON from `bws project list`: {e}"),
         )
     })?;
-    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    projects.sort_by_key(|p| p.name.to_lowercase());
     Ok(Json(projects))
 }
 
@@ -522,7 +522,7 @@ async fn list_project_secrets(
             format!("Invalid JSON from `bws secret list`: {e}"),
         )
     })?;
-    secrets.sort_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
+    secrets.sort_by_key(|s| s.key.to_lowercase());
     Ok(Json(secrets))
 }
 
