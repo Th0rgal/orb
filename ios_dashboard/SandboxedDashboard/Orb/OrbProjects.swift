@@ -389,6 +389,7 @@ struct OrbHome: View {
             ToolbarItem(placement: .principal) { homeModePicker }
             ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
         }
+        .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
     }
 
     var body: some View {
@@ -895,16 +896,25 @@ struct OrbHome: View {
                     .buttonStyle(OrbPressButtonStyle())
                     .accessibilityIdentifier("project.\(project.id)")
                     .contextMenu {
-                        Button("Rename") { renamedTitle = project.name; renaming = project }
+                        if OrbMoveClipboard.shared.canDrop(project: project.id, folder: "") {
+                            Button {
+                                Task {
+                                    do { try await OrbMoveClipboard.shared.drop(project: project.id, folder: ""); await load() }
+                                    catch { self.error = error.localizedDescription }
+                                }
+                            } label: { Label("Move here", systemImage: "arrow.down.to.line") }
+                            Divider()
+                        }
+                        Button { renamedTitle = project.name; renaming = project } label: { Label("Rename", systemImage: "pencil") }
                         OrbProjectColorMenu(project: project.id)
-                        Button("Archive") {
+                        Button {
                             Task {
                                 do {
                                     _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/action", method: "POST", body: .object(["action": .string("archive")]))
                                     await load()
                                 } catch { self.error = error.localizedDescription }
                             }
-                        }
+                        } label: { Label("Archive", systemImage: "archivebox") }
                     }
                 }
                 if loading && projects.isEmpty { projectSkeletons }
@@ -1157,6 +1167,9 @@ struct OrbProjectPage: View {
     @State private var moveFolderDraft = ""
     @State private var deletingFolder: String?
     @State private var loadedArchived = false
+    @State private var renamingMission: OrbRow?
+    @State private var missionTitleDraft = ""
+    private let moveClipboard = OrbMoveClipboard.shared
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
     private func matchesFilter(_ row: OrbRow) -> Bool {
@@ -1256,9 +1269,12 @@ struct OrbProjectPage: View {
                     Text(option)
                 }
             }
-            Button("New folder") { newFolderParent = ""; folderName = ""; newFolder = true }
+            if moveClipboard.canDrop(project: project.id, folder: "") {
+                Button { Task { await drop(into: "") } } label: { Label("Move here (project root)", systemImage: "arrow.down.to.line") }
+            }
+            Button { newFolderParent = ""; folderName = ""; newFolder = true } label: { Label("New folder", systemImage: "folder.badge.plus") }
             OrbProjectColorMenu(project: project.id)
-            NavigationLink("Project context") { OrbDocuments(project: project.id, path: "") }
+            NavigationLink { OrbDocuments(project: project.id, path: "") } label: { Label("Project context", systemImage: "doc.text") }
         } label: {
             OrbCircle(symbol: "ellipsis")
         }
@@ -1284,6 +1300,12 @@ struct OrbProjectPage: View {
                 Button("Create") { Task { await mkdir() } }
                 Button("Cancel", role: .cancel) { newFolderParent = ""; folderName = "" }
             }
+            .alert("Rename conversation", isPresented: Binding(get: { renamingMission != nil }, set: { if !$0 { renamingMission = nil } })) {
+                TextField("Title", text: $missionTitleDraft)
+                Button("Save") { if let row = renamingMission { Task { await renameMission(row, to: missionTitleDraft) } } }
+                Button("Cancel", role: .cancel) { renamingMission = nil }
+            }
+            .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
             .alert("Rename folder", isPresented: Binding(get: { renamingFolder != nil }, set: { if !$0 { renamingFolder = nil } })) {
                 TextField("Folder name", text: $renameFolderDraft)
                 Button("Rename") {
@@ -1375,6 +1397,10 @@ struct OrbProjectPage: View {
             }
             .contentShape(Rectangle())
             .contextMenu {
+                if moveClipboard.canDrop(project: project.id, folder: folder) {
+                    Button { Task { await drop(into: folder) } } label: { Label("Move here", systemImage: "arrow.down.to.line") }
+                    Divider()
+                }
                 NavigationLink {
                     OrbConversation(missionID: nil, project: project.id, folder: folder)
                 } label: {
@@ -1552,34 +1578,68 @@ struct OrbProjectPage: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(OrbStyle.border).frame(height: 0.5).padding(.leading, 32)
         }
-        .contextMenu {
-            if ["completed", "failed", "interrupted", "acknowledged", "cancelled"].contains(row.state) {
-                Button(row.state == "acknowledged" ? "Restore" : "Reopen") {
-                    Task {
-                        do {
-                            _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/status", method: "POST", body: .object(["status": .string("paused")]))
-                            OrbReadCache.invalidate("mission:\(row.id)")
-                            OrbReadCache.invalidate("project:\(project.id)")
-                            OrbReadCache.invalidate("project:\(project.id):all")
-                            await load(force: true)
-                        } catch { self.error = error.localizedDescription }
-                    }
-                }
-            }
-            if !row.active && row.state != "acknowledged" {
-                Button("Archive") {
-                    Task {
-                        do {
-                            _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/status", method: "POST", body: .object(["status": .string("acknowledged")]))
-                            OrbReadCache.invalidate("mission:\(row.id)")
-                            OrbReadCache.invalidate("project:\(project.id)")
-                            OrbReadCache.invalidate("project:\(project.id):all")
-                            await load(force: true)
-                        } catch { self.error = error.localizedDescription }
-                    }
-                }
+        .contextMenu { missionMenu(row) }
+    }
+    /// Rename and Move work at any time; a running agent is stopped before it is archived.
+    @ViewBuilder private func missionMenu(_ row: OrbRow) -> some View {
+        Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
+        Button { moveClipboard.pick(row, from: project.id) } label: { Label("Move…", systemImage: "folder") }
+        Divider()
+        if ["completed", "failed", "interrupted", "acknowledged", "cancelled"].contains(row.state) {
+            Button { Task { await setStatus(row, "paused") } } label: {
+                Label(row.state == "acknowledged" ? "Restore" : "Reopen", systemImage: "arrow.uturn.backward")
             }
         }
+        if row.state != "acknowledged" {
+            if row.active || row.raw["execution"]["state"].text == "running" {
+                Button(role: .destructive) { Task { await stopAndArchive(row) } } label: { Label("Stop & archive", systemImage: "archivebox") }
+            } else {
+                Button { Task { await setStatus(row, "acknowledged") } } label: { Label("Archive", systemImage: "archivebox") }
+            }
+        }
+    }
+    private func invalidate(_ row: OrbRow) {
+        OrbReadCache.invalidate("mission:\(row.id)")
+        OrbReadCache.invalidate("project:\(project.id)")
+        OrbReadCache.invalidate("project:\(project.id):all")
+    }
+    private func setStatus(_ row: OrbRow, _ status: String) async {
+        do {
+            _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/status", method: "POST", body: .object(["status": .string(status)]))
+            invalidate(row)
+            await load(force: true)
+        } catch { self.error = error.localizedDescription }
+    }
+    private func renameMission(_ row: OrbRow, to raw: String) async {
+        let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != row.name else { return }
+        do {
+            _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/title", method: "POST", body: .object(["title": .string(title)]))
+            invalidate(row)
+            await load(force: true)
+        } catch { self.error = error.localizedDescription }
+    }
+    /// Archiving only changes status, so a live runner is cancelled and must
+    /// settle first; otherwise it would keep working on an archived conversation.
+    private func stopAndArchive(_ row: OrbRow) async {
+        do {
+            _ = try await api.call("/api/control/missions/\(OrbCore.escape(row.id))/\(row.cloud ? "cloud/cancel" : "cancel")", method: "POST")
+            for _ in 0..<30 {
+                let mission = OrbRow(try await api.call("/api/control/missions/\(OrbCore.escape(row.id))"))
+                if !mission.active && mission.raw["execution"]["state"].text != "running" {
+                    await setStatus(row, "acknowledged")
+                    return
+                }
+                try await Task.sleep(for: .seconds(1))
+            }
+            self.error = "The agent is still stopping. Try archiving again in a moment."
+            invalidate(row)
+            await load(force: true)
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+    private func drop(into folder: String) async {
+        do { try await moveClipboard.drop(project: project.id, folder: folder); await load(force: true) }
+        catch { self.error = error.localizedDescription }
     }
     private func apply(_ value: OrbJSON) {
         let nextMissions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)
@@ -1708,5 +1768,56 @@ struct OrbProjectPage: View {
             OrbReadCache.invalidate("project:\(project.id):all")
             await load(force: true)
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// A conversation picked up with "Move", waiting for a destination chosen by
+/// long-pressing a folder, the project menu, or another project.
+@MainActor @Observable
+final class OrbMoveClipboard {
+    static let shared = OrbMoveClipboard()
+    private(set) var mission: OrbRow?
+    private(set) var sourceProject = ""
+    func pick(_ mission: OrbRow, from project: String) { self.mission = mission; sourceProject = project; OrbHaptics.selection() }
+    func clear() { mission = nil; sourceProject = "" }
+    func canDrop(project: String, folder: String) -> Bool {
+        guard let mission else { return false }
+        return project != sourceProject || folder != mission.folder
+    }
+    /// Keeps every tag except the folder, which becomes the destination.
+    func drop(project: String, folder: String) async throws {
+        guard let mission else { return }
+        var tags = mission.raw["tags"].items.filter { !$0.text.isEmpty && !$0.text.hasPrefix("orb-folder:") }
+        if !folder.isEmpty { tags.append(.string("orb-folder:" + folder)) }
+        _ = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(mission.id))/project", method: "POST", body: .object(["project": .string(project), "tags": .array(tags)]))
+        for slug in Set([sourceProject, project]) {
+            OrbReadCache.invalidate("project:\(slug)")
+            OrbReadCache.invalidate("project:\(slug):all")
+        }
+        OrbReadCache.invalidate("mission:\(mission.id)")
+        clear()
+    }
+}
+
+/// Shown while a conversation is picked up for moving.
+struct OrbMoveBanner: View {
+    private let clipboard = OrbMoveClipboard.shared
+    var body: some View {
+        if let mission = clipboard.mission {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right").foregroundStyle(OrbStyle.textSecondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Moving “\(OrbStyle.displayTitle(mission.name))”").font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text("Long-press a folder or project, then choose Move here.").font(.caption).foregroundStyle(OrbStyle.textSecondary)
+                }
+                Spacer(minLength: 4)
+                Button("Cancel") { clipboard.clear() }.font(.subheadline.weight(.medium)).accessibilityIdentifier("move.cancel")
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(OrbStyle.border, lineWidth: 0.75))
+            .padding(.horizontal, 14).padding(.bottom, 6)
+            .accessibilityIdentifier("move.banner")
+        }
     }
 }

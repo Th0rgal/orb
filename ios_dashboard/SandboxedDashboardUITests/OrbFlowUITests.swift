@@ -82,6 +82,54 @@ final class OrbFlowUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    @MainActor func testMissionLongPressRenameMoveAndStopArchive() throws {
+        let app = launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        let mission = app.buttons["mission.long-chat"]
+        XCTAssertTrue(mission.waitForExistence(timeout: 10))
+        mission.press(forDuration: 1.0)
+        XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Archive"].exists)
+        capture(app, "mission-long-press")
+        app.buttons["Move…"].tap()
+        XCTAssertTrue(app.otherElements["move.banner"].waitForExistence(timeout: 5) || app.staticTexts["Long-press a folder or project, then choose Move here."].exists)
+        let folder = app.buttons["folder.Design/Images"]
+        XCTAssertTrue(folder.waitForExistence(timeout: 5))
+        folder.press(forDuration: 1.0)
+        XCTAssertTrue(app.buttons["Move here"].waitForExistence(timeout: 5))
+        capture(app, "folder-move-here")
+        app.buttons["Move here"].tap()
+        let banner = app.staticTexts["Long-press a folder or project, then choose Move here."]
+        let gone = NSPredicate(format: "exists == false")
+        expectation(for: gone, evaluatedWith: banner); waitForExpectations(timeout: 10)
+
+        let running = app.buttons["mission.rich-growth"]
+        XCTAssertTrue(running.waitForExistence(timeout: 10))
+        running.press(forDuration: 1.0)
+        XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Move…"].exists)
+        XCTAssertTrue(app.buttons["Stop & archive"].exists)
+        capture(app, "running-mission-long-press")
+        app.buttons["Rename"].tap()
+        let title = app.textFields["Title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap(); title.typeText(" renamed")
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.staticTexts["Growing rich response renamed"].waitForExistence(timeout: 10))
+
+        app.buttons["Project actions"].tap()
+        XCTAssertTrue(app.buttons["New folder"].waitForExistence(timeout: 5))
+        capture(app, "project-actions-menu")
+    }
+    @MainActor func testProviderLogosRender() throws {
+        let app = launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["Settings"].tap()
+        app.buttons["settings.providers"].tap()
+        XCTAssertTrue(app.staticTexts["Fixture provider"].waitForExistence(timeout: 10))
+        capture(app, "provider-logos")
+    }
     @MainActor func testPolishedInboxAndReplyLayout() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-api_base_url", "http://127.0.0.1:18766", "-orb_test_reset", "YES"]

@@ -134,6 +134,7 @@ class Handler(BaseHTTPRequestHandler):
             m=MISSIONS[p.split('/')[4]]
             if p.endswith('/title') or p.endswith('/status'): m.update(body)
             if p.endswith('/cancel'): m['status']='interrupted'
+            if p.endswith('/project'): m.update(project=body['project'], tags=body['tags'])
             return self.send(m)
         return self.send({'error':'Unknown route'},404)
 if __name__=='__main__':

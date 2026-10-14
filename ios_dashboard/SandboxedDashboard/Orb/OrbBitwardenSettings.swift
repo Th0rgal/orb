@@ -24,7 +24,7 @@ struct OrbBitwardenSettings: View {
 
     @State private var tokenSheet = false
     @State private var createSheet = false
-    @State private var editingSecret: OrbJSON?
+    @State private var editingSecret: OrbEditingSecret?
     @State private var deletingSecret: OrbJSON?
 
     private var filteredSecrets: [OrbJSON] {
@@ -99,14 +99,14 @@ struct OrbBitwardenSettings: View {
                 }
             )
         }
-        .sheet(item: $editingSecret) { secret in
+        .sheet(item: $editingSecret) { editing in
             OrbBitwardenSecretEditorSheet(
                 client: client,
                 projectId: selectedProjectId,
                 projectName: selectedProjectName,
-                existing: secret,
+                existing: editing.secret,
                 onSaved: {
-                    revealedValues.removeValue(forKey: secret["id"].text)
+                    revealedValues.removeValue(forKey: editing.id)
                     Task { await loadSecrets(projectId: selectedProjectId) }
                 }
             )
@@ -317,7 +317,7 @@ struct OrbBitwardenSettings: View {
                 .buttonStyle(.borderless)
 
                 Button {
-                    editingSecret = secret
+                    editingSecret = OrbEditingSecret(secret: secret)
                 } label: {
                     Label("Edit", systemImage: "pencil")
                         .font(.caption)
@@ -690,4 +690,10 @@ private struct OrbBitwardenSecretEditorSheet: View {
             self.error = error.localizedDescription
         }
     }
+}
+
+/// `sheet(item:)` needs an identity; a secret is identified by its Bitwarden id.
+struct OrbEditingSecret: Identifiable {
+    let secret: OrbJSON
+    var id: String { secret["id"].text }
 }
