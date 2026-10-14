@@ -7,6 +7,10 @@ export function messagePresentation(content: string): { text: string; attached: 
   return match ? { text: content.slice(0, match.index), attached: true } : { text: content, attached: false };
 }
 
+/** Sent by the Resume button; shown collapsed so it doesn't read like a user turn. */
+export const resumePrompt='Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work.';
+export const isResumePrompt = (content: string) => content.trim() === resumePrompt;
+
 /** Exact coordinator markers; a user's normal request to resume stays a user turn. */
 export function isAutomaticRecovery(content: string): boolean {
   return /^\[Automatic (?:recovery|resume after a usage limit)\]/i.test(content.trimStart());
