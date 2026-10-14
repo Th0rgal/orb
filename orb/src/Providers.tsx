@@ -467,7 +467,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API key providers configured.</div></div>
@@ -551,7 +551,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
           </div>
         </Dialog>
       </Show>
-      <Show when={removing()}>{account => <ConfirmDialog title={`Remove ${account().name}?`} description="This deletes the subscription login and any independent API key saved on this provider. Running work may need another account." action="Remove provider and credentials" destructive busy={removeBusy()} error={removeError()} onConfirm={() => void remove()} onClose={() => setRemoving(null)}/>}</Show>
+      <Show when={removing()}>{account => <ConfirmDialog title={`Remove ${account().name}?`} description={!isKey(account()) ? "This deletes the subscription login and any independent API key saved on this provider. Running work may need another account." : "This deletes the provider and its saved API key. Running work may need another account."} action="Remove provider and credentials" destructive busy={removeBusy()} error={removeError()} onConfirm={() => void remove()} onClose={() => setRemoving(null)}/>}</Show>
       <Show when={keyEditor()} keyed>{target => <ApiKeyDialog provider={target === "new" ? undefined : target} onClose={() => setKeyEditor(null)} onDone={() => { setKeyEditor(null); p.onRefresh(); }}/>}</Show>
       <Show when={reauth()}>
         {(a) => (

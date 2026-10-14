@@ -1659,7 +1659,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .error-notice details, .legacy-log { margin-top: 8px; color: var(--fg-3); font-size: 12px; }
 .error-notice summary, .legacy-log summary { cursor: pointer; width: fit-content; }
 .error-notice pre, .legacy-log pre { margin: 8px 0 0; padding: 10px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
-.error-notice-actions { margin-top: 8px; }
+.error-notice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .error-notice > .icon-btn { flex: none; width: 22px; height: 22px; }
 
 .machine-menu { width: 280px; }
