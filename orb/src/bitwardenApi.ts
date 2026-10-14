@@ -134,3 +134,7 @@ export const deleteBitwardenSecret = (secretId: string) =>
       method: "DELETE",
     },
   );
+
+/** True when the user dismissed the Touch ID / password sheet. */
+export const isBiometricCancelled = (e: unknown) =>
+  (e instanceof Error ? e.message : String(e)) === "biometric_cancelled";

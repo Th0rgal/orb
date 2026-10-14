@@ -12,3 +12,8 @@ commands.allow = ["set_window_theme"]
 identifier = "allow-open-url"
 description = "Open validated external links in the default browser"
 commands.allow = ["open_url"]
+
+[[permission]]
+identifier = "allow-biometrics"
+description = "Check and request Touch ID / Mac password authentication"
+commands.allow = ["biometric_status", "biometric_authenticate"]

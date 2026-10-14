@@ -5,6 +5,9 @@
 
 use serde::Serialize;
 
+/// Error string returned when the user dismisses the prompt; the UI ignores it.
+pub const CANCELLED: &str = "biometric_cancelled";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BiometricStatus {
     pub available: bool,
@@ -106,6 +109,12 @@ mod macos {
                     let _ = tx.send(Ok(()));
                 } else if !error.is_null() {
                     let err_ref = &*error;
+                    // LAErrorUserCancel / SystemCancel / AppCancel: the user dismissed the
+                    // sheet or macOS interrupted it, which is not an error worth surfacing.
+                    if matches!(err_ref.code(), -2 | -4 | -9) {
+                        let _ = tx.send(Err(super::CANCELLED.to_string()));
+                        return;
+                    }
                     let desc = err_ref.localizedDescription().to_string();
                     let _ = tx.send(Err(if desc.is_empty() {
                         "Authentication cancelled.".to_string()
@@ -113,7 +122,7 @@ mod macos {
                         desc
                     }));
                 } else {
-                    let _ = tx.send(Err("Authentication cancelled.".to_string()));
+                    let _ = tx.send(Err(super::CANCELLED.to_string()));
                 }
             });
 

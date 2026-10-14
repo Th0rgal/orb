@@ -131,6 +131,12 @@ export const KeyIcon = (p: P) => (
     <path d="M8.2 8h5.2l-1.3 1.4M11.2 8v1.6" />
   </I>
 );
+export const LockIcon = (p: P) => (
+  <I {...p}>
+    <rect x="3.6" y="7.2" width="8.8" height="6.4" rx="1.4" />
+    <path d="M5.6 7.2V5.4a2.4 2.4 0 0 1 4.8 0v1.8" />
+  </I>
+);
 export const FileIcon = (p: P) => (
   <I {...p}>
     <path d="M4.2 2.4h5.2L12 5.2v8.4c0 .7-.6 1.2-1.3 1.2H4.2c-.7 0-1.2-.5-1.2-1.2V3.6c0-.7.5-1.2 1.2-1.2z" />

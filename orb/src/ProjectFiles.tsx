@@ -2012,7 +2012,7 @@ export function LiveProjectsSection(p: {
         <span class="row-label">{d.label}</span>
         <Show when={!row.expanded && currentMission()?.project === d.slug}><span class="current-location-label">Open</span></Show>
       </button>
-      <Show when={row.expanded}><ContextBadge slug={d.slug}/></Show>
+      <Show when={row.expanded}><ContextBadge slug={d.slug} compact/></Show>
       <button class="row-action" aria-label={`Project actions for ${d.label}`} title="Project actions"
         onPointerDown={e => setActionFocus(e.pointerType !== "mouse")}
         onKeyDown={e => { if (e.key === "Enter" || e.key === " ") setActionFocus(true); }}
