@@ -676,14 +676,14 @@ code {
   grid-template-columns: auto 1fr auto auto;
   grid-template-rows: 1fr auto;
   align-items: center;
-  border-radius: var(--radius-2xl); min-height: 112px;
+  border-radius: var(--radius-2xl); min-height: 96px;
   padding: 12px 14px 10px; gap: 6px 8px;
 }
 .composer.tall .composer-field {
   grid-column: 1 / -1; grid-row: 1;
-  align-items: flex-start; align-self: stretch; min-height: 56px;
+  align-items: flex-start; align-self: stretch; min-height: 44px;
 }
-.composer.tall .composer-field textarea { min-height: 56px; padding-left: 2px; align-self: stretch; }
+.composer.tall .composer-field textarea { min-height: 44px; padding-left: 2px; align-self: stretch; }
 .composer.tall .plus-wrap { grid-column: 1; grid-row: 2; align-self: center; }
 .composer.tall .picks { grid-column: 2; grid-row: 2; justify-self: start; align-self: center; }
 .composer.tall .voice-slot { grid-column: 3; grid-row: 2; align-self: center; }
@@ -1737,14 +1737,14 @@ button.fork-trigger:hover { color: var(--fg); }
 .prompt-edit { position: absolute; top: 8px; right: 8px; opacity: 0; background: var(--bg-elev); }
 .user:hover .prompt-edit, .prompt-edit:focus-visible { opacity: 1; }
 .prompt-editor { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: 0; color: var(--fg); font: inherit; line-height: inherit; resize: none; min-height: 1lh; max-height: none; display: block; padding: 0; }
-.user.editing { content-visibility:visible; width:var(--editing-width); min-height:var(--editing-height); max-width:100%; box-sizing:border-box; padding:16px; border:1px solid var(--overlay-border); border-radius:16px; background:var(--overlay-field); }
+.user.editing { content-visibility:visible; width:var(--editing-width); min-height:var(--editing-height); max-width:100%; box-sizing:border-box; padding:10px 12px 8px 14px; border:1px solid var(--overlay-border); border-radius:14px; background:var(--overlay-field); }
 .scroll:has(.user.editing) { overflow-anchor: none; }
 .user.editing .prompt-editor { min-height: var(--editing-text-height, 1lh); }
-.prompt-editor-actions { display:flex; align-items:center; gap:8px; min-height:32px; margin:16px 0 0; }
-.prompt-editor-actions > .icon-btn { width:28px; height:28px; color:var(--fg-3); border-radius:6px; }
+.prompt-editor-actions { display:flex; align-items:center; gap:4px; min-height:28px; margin:6px -4px 0 -6px; }
+.prompt-editor-actions > .icon-btn { width:24px; height:24px; color:var(--fg-3); border-radius:6px; }
 .prompt-editor-actions > .icon-btn:hover { background:var(--overlay-hover); color:var(--fg); }
 .prompt-editor-actions > span { flex:1; color:var(--fg-3); font-size:12px; }
-.prompt-editor-actions .send { flex:none; margin-left:auto; width:32px; height:32px; padding:0; border-radius:50%; display:grid; place-items:center; background:var(--send-bg); color:var(--send-fg); }
+.prompt-editor-actions .send { flex:none; margin-left:auto; width:28px; height:28px; padding:0; border-radius:50%; display:grid; place-items:center; background:var(--send-bg); color:var(--send-fg); }
 .prompt-editor-actions .send:hover:not(:disabled) { background:var(--send-bg-hover); }
 .prompt-editor-actions .send:disabled { opacity: .35; cursor: default; }
 
