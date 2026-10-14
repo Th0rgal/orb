@@ -31,7 +31,7 @@ export const resumedPrompt=(prompt:string,cut:'restart'|'connection'|'background
  return `${note}\n\n${prompt}`;
 };
 /** What Resume sends when no message is waiting: the agent keeps its session and picks its work up. */
-export const resumePrompt='Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work.';
+export {resumePrompt} from './messagePresentation';
 const closedRun='The previous run ended before syncing finished. Your message and any response are saved on this computer. Retry to continue the conversation.';
 /** A turn that ended because the model API could not be reached or because a background task outlived the headless CLI turn did not fail at its task. */
 const CONNECTION=/ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|socket hang up|Can't reach the API server|Connection error|network connection was lost|fetch failed|network issue connecting to the server|servers are experiencing high traffic right now|no route to host|network is unreachable|no such host|connection reset by peer|i\/o timeout|TLS handshake timeout|unexpected EOF|UNAVAILABLE \(code 503\)|The service is currently unavailable|ended its headless turn while background task\(s\)/i;
