@@ -2351,11 +2351,21 @@ select.orb-select-native:disabled { cursor: default; }
 .context-sync-trigger:hover,.context-sync-trigger[aria-expanded="true"] { background:var(--bg-elev);color:var(--fg); }
 .context-sync-trigger:focus-visible { outline:2px solid var(--fg-2);outline-offset:2px; }
 .context-sync-dot { width:5px;height:5px;border-radius:50%;background:currentColor;flex:none; }
-.context-sync-state[data-state="warning"] .context-sync-dot { background:#c99b52; }
+.context-sync-state[data-state="warning"] .context-sync-dot { background:#d98a4a;box-shadow:0 0 0 3px #d98a4a26; }
+.context-sync-state[data-state="failed"] .context-sync-dot { background:#c99b52; }
+.context-sync-state.compact .context-sync-trigger { padding:7px; }
+.context-sync-state.compact .context-sync-dot { width:6px;height:6px; }
 .context-sync-state[data-state="syncing"] .context-sync-dot { animation:context-sync-pulse 1.4s ease-in-out infinite; }
 .context-sync-detail {width:280px;white-space:normal;overflow-wrap:anywhere;padding:12px;line-height:1.5; }
 .context-sync-detail strong { color:var(--fg);font-weight:500; }
-.context-sync-detail p { margin:7px 0;white-space:pre-wrap; }
+.context-sync-detail p { margin:7px 0;white-space:pre-wrap;color:var(--fg-2); }
+.context-sync-meta { display:flex;flex-direction:column;align-items:flex-start;gap:2px;margin:8px 0 2px;color:var(--fg-3);font-size:12px; }
+.context-sync-more { border:0;background:none;padding:0;color:inherit;font:inherit;cursor:pointer; }
+.context-sync-more:hover { color:var(--fg-2); }
+.context-sync-raw { display:block;margin-top:4px;padding:6px 8px;border-radius:var(--radius-sm);background:var(--bg-active);color:var(--fg-2);font-size:11px;user-select:text; }
+.context-sync-actions .s-btn.ghost { background:transparent;border-color:transparent;color:var(--fg-3); }
+.context-sync-actions .s-btn.ghost:hover { color:var(--fg);background:var(--bg-active); }
+.context-sync-actions { display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:12px; }
 @keyframes context-sync-pulse { 50% { opacity:.35; } }
 @media(prefers-reduced-motion:reduce) { .context-sync-state[data-state="syncing"] .context-sync-dot { animation:none; } }
 .context-history-row { flex-wrap:wrap; }

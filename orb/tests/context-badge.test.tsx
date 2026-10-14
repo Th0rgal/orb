@@ -11,12 +11,12 @@ it('reads native status without waiting for the server and retries an offline ca
  mocks.conflicts.mockReturnValue(new Promise(()=>{}));
  mocks.invoke.mockResolvedValue({state:{initialized:true,pending:[],error:'Context server unavailable'}});
  render(()=><ContextBadge slug="test"/>);
- await fireEvent.click(await screen.findByRole('button',{name:'Context offline'}));
- expect(screen.getByText(/No queued changes/)).toBeTruthy();
+ await fireEvent.click(await screen.findByRole('button',{name:/^Sync failed/}));
+ expect(screen.getByText(/nothing is waiting to upload/)).toBeTruthy();
  mocks.invoke.mockResolvedValue({state:{initialized:true,pending:[],error:null}});
- await fireEvent.click(screen.getByRole('button',{name:'Retry sync'}));
+ await fireEvent.click(screen.getByRole('button',{name:'Retry now'}));
  await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith('project_context_sync',{request:{endpoint:'https://example.test',token:'token',project:'test'}}));
- await waitFor(()=>expect(screen.queryByRole('button',{name:'Context offline'})).toBeNull());
+ await waitFor(()=>expect(screen.queryByRole('button',{name:/^Sync failed/})).toBeNull());
 });
 it('ignores responses from the previous project',async()=>{
  let resolveOld!:(v:unknown)=>void;
@@ -39,4 +39,15 @@ it('exposes authorization failures and supports Escape',async()=>{
  expect(screen.getByText('Check your backend connection in Settings.')).toBeTruthy();
  await fireEvent.keyDown(button,{key:'Escape'});
  expect(screen.queryByRole('region')).toBeNull();
+});
+it('retries automatically with a visible countdown',async()=>{
+ vi.useFakeTimers({shouldAdvanceTime:true});
+ try{
+  mocks.conflicts.mockResolvedValue({});
+  mocks.invoke.mockImplementation(async(command:string)=>({state:{initialized:true,pending:[],error:command==='project_context_sync'?null:'Context stream failed (500)'}}));
+  render(()=><ContextBadge slug="test"/>);
+  expect(await screen.findByRole('button',{name:/Sync failed · retrying in 10s/})).toBeTruthy();
+  await vi.advanceTimersByTimeAsync(10_000);
+  await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith('project_context_sync',expect.anything()));
+ }finally{vi.useRealTimers();}
 });
