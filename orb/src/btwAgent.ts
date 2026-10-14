@@ -178,10 +178,11 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  }
  }finally{stopStream?.();signal.removeEventListener('abort',abortWake);wake?.();}
 }
-export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[],launchSignal:AbortSignal=signal){
+export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[],launchSignal:AbortSignal=signal,allowCleanRetry=true){
  const version=connectionVersion();
  const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');
  let unlock!:()=>void;locks.set(key,new Promise<void>(r=>{unlock=r;}));
+ let reusedExisting=false;
  try{
   let s=btwSession(parent);
   let current:Mission|undefined;
@@ -246,6 +247,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    try{
     if(!local)await sendMissionMessage(next.id,prompt);
     s=next;save(parent,s);
+    reusedExisting=true;
    }catch(error){
     if(!(error instanceof ApiError)||error.status!==409||!error.detail.startsWith('REMOTE_RESUME_REQUIRES_REPLACEMENT:'))throw error;
     // Only an explicit pre-submit refusal permits a fresh native side session.
@@ -263,7 +265,17 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
  }finally{locks.delete(key);unlock();}
  if(signal.aborted)return;
- await watchBtw(parent,signal,receive);
+ try{
+  await watchBtw(parent,signal,receive);
+ }catch(error){
+  const msg=error instanceof Error?error.message:String(error);
+  if(allowCleanRetry&&reusedExisting&&!signal.aborted&&connectionVersion()===version&&msg.includes('The model returned an empty completion without running any tools')){
+   receive({type:'status',text:'Starting clean side session…'});
+   await askBtwAgent(parent,question,context,history,signal,receive,attachments,launchSignal,false);
+   return;
+  }
+  throw error;
+ }
 }
 
 export function extractBtwUserQuestion(content:string):string{
