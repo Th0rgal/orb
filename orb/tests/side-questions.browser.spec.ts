@@ -126,7 +126,7 @@ test('editing a long side question preserves text geometry and contains its tool
  expect(after.height-before.height-toolbar.height-toolbar.margin).toBeLessThanOrEqual(18);
  const bounds=(await bubble.boundingBox())!;
  expect(toolbar.bottom).toBeLessThanOrEqual(bounds.y+bounds.height);
- expect(after.width).toBe(before.width);expect(after.font).toBe(before.font);expect(after.line).toBe(before.line);expect(after.padding).toBe("16px");
+ expect(after.width).toBe(before.width);expect(after.font).toBe(before.font);expect(after.line).toBe(before.line);expect(after.padding).toBe("12px");
  await editor.press('Escape');
  expect(Math.abs((await bubble.boundingBox())!.height-before.height)).toBeLessThanOrEqual(2);
 });

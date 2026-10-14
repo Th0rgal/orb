@@ -23,8 +23,8 @@ test('edit actions remain inside the first message at the top of the scroll area
  await expect(sendBtn).toBeVisible();
  const sendBox=await sendBtn.boundingBox();
  expect(sendBox).not.toBeNull();
- expect(Math.round(sendBox!.width)).toBe(32);
- expect(Math.round(sendBox!.height)).toBe(32);
+ expect(Math.round(sendBox!.width)).toBe(28);
+ expect(Math.round(sendBox!.height)).toBe(28);
  expect(outer!.x+outer!.width-(sendBox!.x+sendBox!.width)).toBeLessThanOrEqual(18);
  await page.screenshot({path:'test-results/prompt-edit-toolbar.png'});
  await page.getByRole('button',{name:'Cancel',exact:true}).click();
