@@ -3469,3 +3469,7 @@ select.orb-select-native:disabled { cursor: default; }
   .bw-secret-actions { justify-content: flex-start; padding-left: 19px; }
   .bw-secret-proj, .bw-secret-date { padding-left: 19px; }
 }
+.bw-unlock-btn { display: inline-flex; align-items: center; gap: 6px; }
+.bw-unlock-btn[aria-busy="true"] { opacity: .7; cursor: progress; }
+.bw-act-btn { display: inline-flex; align-items: center; gap: 4px; }
+.bw-unlocked-pill { font-variant-numeric: tabular-nums; }

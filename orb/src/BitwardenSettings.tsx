@@ -11,6 +11,7 @@ import { connectionVersion, isConnected, listProjects, type ProjectSummary } fro
 import {
   PALOMA_BITWARDEN_PROJECT_ID,
   authenticateBiometric,
+  isBiometricCancelled,
   createBitwardenSecret,
   deleteBitwardenSecret,
   getBiometricStatus,
@@ -86,6 +87,8 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
   });
   const [unlockedUntil, setUnlockedUntil] = createSignal<number>(0);
   const [nowTick, setNowTick] = createSignal<number>(Date.now());
+  const [authenticating, setAuthenticating] = createSignal(false);
+  let pendingAuth: Promise<boolean> | null = null;
 
   // Modals: Token configuration, Create/Edit Secret, Delete Secret
   const [tokenModalOpen, setTokenModalOpen] = createSignal(false);
@@ -124,16 +127,30 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
       setNowTick(Date.now());
       return true;
     }
-    try {
-      await authenticateBiometric(reason);
-      const now = Date.now();
-      setNowTick(now);
-      setUnlockedUntil(now + UNLOCK_TTL_MS);
-      return true;
-    } catch (e) {
-      setToastError(e instanceof Error ? e.message : String(e));
-      return false;
-    }
+    // One sheet at a time: a second click while macOS is prompting joins it.
+    if (pendingAuth) return pendingAuth;
+    setAuthenticating(true);
+    pendingAuth = (async () => {
+      try {
+        await authenticateBiometric(reason);
+        const now = Date.now();
+        setNowTick(now);
+        setUnlockedUntil(now + UNLOCK_TTL_MS);
+        return true;
+      } catch (e) {
+        if (!isBiometricCancelled(e)) setToastError(e instanceof Error ? e.message : String(e));
+        return false;
+      } finally {
+        pendingAuth = null;
+        setAuthenticating(false);
+      }
+    })();
+    return pendingAuth;
+  };
+  const bioLabel = () => bioStatus().label || "Touch ID";
+  const remaining = () => {
+    const s = Math.max(0, Math.ceil((unlockedUntil() - nowTick()) / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   };
 
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -481,16 +498,19 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
               when={isUnlocked()}
               fallback={
                 <button
-                  class="s-btn"
+                  class="s-btn primary bw-unlock-btn"
+                  disabled={authenticating()}
+                  aria-busy={authenticating()}
                   onClick={() => void requireBiometric("unlock Bitwarden project secrets")}
-                  title={`Authenticate with ${bioStatus().label || "Touch ID"} to reveal and edit secrets`}
+                  title={`Authenticate with ${bioLabel()} to reveal and edit secrets for 5 minutes`}
                 >
-                  <Ic.KeyIcon size={13} /> Unlock with {bioStatus().label || "Touch ID"}
+                  <Ic.LockIcon size={13} />
+                  {authenticating() ? `Waiting for ${bioLabel()}…` : `Unlock with ${bioLabel()}`}
                 </button>
               }
             >
               <span class="bw-unlocked-pill" role="status">
-                <span class="bw-dot online" /> Unlocked · {bioStatus().label || "Touch ID"}
+                <span class="bw-dot online" /> Unlocked · locks in {remaining()}
               </span>
               <button class="s-btn" onClick={lockSession}>
                 Lock
@@ -778,6 +798,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                                     : `Reveal with ${bioStatus().label || "Touch ID"}`
                                 }
                               >
+                                <Show when={!isUnlocked() && !isRev()}><Ic.LockIcon size={11} /></Show>
                                 {isBusy() ? "…" : isRev() ? "Hide" : "Reveal"}
                               </button>
                               <button
@@ -787,6 +808,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                                 onClick={() => void handleCopySecretValue(secret)}
                                 title={`Copy secret value (${bioStatus().label || "Touch ID"})`}
                               >
+                                <Show when={!isUnlocked() && copiedId() !== `val:${secret.id}`}><Ic.LockIcon size={11} /></Show>
                                 {copiedId() === `val:${secret.id}` ? "Copied" : "Copy"}
                               </button>
                               <button
