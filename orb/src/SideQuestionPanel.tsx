@@ -79,7 +79,11 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setAnswer(saved?.pending?.answer&&!isSyntheticRemoteAssistantNote(saved.pending.answer)?saved.pending.answer:'');
   let launching:Promise<void>|undefined;
   try{if('btwLaunchPending' in btwMod&&typeof btwMod.btwLaunchPending==='function')launching=btwMod.btwLaunchPending(missionId);}catch{}
-  setError(saved?.pending && !launching ? saved.pending.error || 'Side question interrupted. Retry to request a complete answer.' : '');
+  const rawSavedError = saved?.pending?.error || 'Side question interrupted. Retry to request a complete answer.';
+  const normalizedSavedError = rawSavedError.includes('Check its activity for tool errors') && btwActivities(missionId).length === 0
+   ? rawSavedError.replace('Check its activity for tool errors, then retry.', 'The model returned an empty completion without running any tools; retry to start a clean side session.')
+   : rawSavedError;
+  setError(saved?.pending && !launching ? normalizedSavedError : '');
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   setQueue(saved?.queue??[]);
   setLoadedKey(current);
