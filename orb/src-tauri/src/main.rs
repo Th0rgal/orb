@@ -66,6 +66,37 @@ fn paloma_ssh_pubkey() -> Result<String, String> {
     std::fs::read_to_string(format!("{home}/.ssh/paloma.pub")).map_err(|e| e.to_string())
 }
 
+/// Show a file the webview saved to ~/Downloads, or the folder when the browser
+/// renamed it (e.g. "name (1).jar"). Only bare file names are accepted.
+#[tauri::command]
+fn reveal_download(name: String) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Err("invalid file name".into());
+    }
+    let downloads = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join("Downloads"))
+        .ok_or("no home directory")?;
+    let file = downloads.join(&name);
+    #[cfg(target_os = "macos")]
+    let status = if file.exists() {
+        std::process::Command::new("open").arg("-R").arg(&file).status()
+    } else {
+        std::process::Command::new("open").arg(&downloads).status()
+    };
+    #[cfg(target_os = "windows")]
+    let status = if file.exists() {
+        std::process::Command::new("explorer").arg(format!("/select,{}", file.display())).status()
+    } else {
+        std::process::Command::new("explorer").arg(&downloads).status()
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let status = std::process::Command::new("xdg-open").arg(&downloads).status();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        _ => Err("Could not open the Downloads folder".into()),
+    }
+}
+
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -184,6 +215,7 @@ fn main() {
             browse_local_files,
             machine_metrics::local_machine_metrics,
             open_url,
+            reveal_download,
             set_window_theme,
             voice::voice_capability,
             voice::voice_prewarm,

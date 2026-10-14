@@ -36,6 +36,12 @@ const apiMock = vi.fn(async (_path: string, init?: RequestInit) => {
   return { entries: [] };
 });
 
+const native = vi.hoisted(() => ({ invoke: null as null | ((cmd: string, args?: unknown) => Promise<unknown>) }));
+vi.mock("../src/clientRuns", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/clientRuns")>()),
+  nativeInvoke: () => native.invoke,
+}));
+
 vi.mock("../src/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/api")>()),
   getProjectController: vi.fn(async () => ({ settings: {} })),
@@ -116,6 +122,28 @@ describe("FilePanel download feedback & resumable background uploads", () => {
     expect(createObjectURL).toHaveBeenCalled();
     expect(anchorClickSpy).toHaveBeenCalled();
     anchorClickSpy.mockRestore();
+  });
+
+  it("reveals the saved copy instead of downloading a file twice", async () => {
+    const invoke = vi.fn(async () => undefined);
+    native.invoke = invoke;
+    let resolver!: ReferenceResolver;
+    const Capture = () => { resolver = useContext(FileReferenceContext)!; return null; };
+    Object.defineProperty(URL, "createObjectURL", { value: vi.fn(() => "blob:x"), configurable: true, writable: true });
+    Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn(), configurable: true, writable: true });
+    const anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    try {
+      const { getByRole } = render(() => (
+        <div class="app"><FilePanelProvider scope={{ project: "test" }}><Capture /></FilePanelProvider></div>
+      ));
+      resolver.open({ source: "workspace", path: "archive.zip", name: "archive.zip", kind: "file" });
+      fireEvent.click(await waitFor(() => getByRole("treeitem", { name: /archive\.zip/i })));
+      fireEvent.click(await waitFor(() => getByRole("button", { name: /Download file/i })));
+      const done = await waitFor(() => getByRole("button", { name: /Show in Finder/ }));
+      fireEvent.click(done);
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith("reveal_download", { name: "archive.zip" }));
+      expect(anchorClickSpy).toHaveBeenCalledTimes(1);
+    } finally { native.invoke = null; anchorClickSpy.mockRestore(); }
   });
 
   it("enforces destination soft limits (10 MiB for context, 20 MiB for direct machine)", () => {
