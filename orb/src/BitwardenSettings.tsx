@@ -48,6 +48,22 @@ function formatRevisionDate(raw?: string): string {
   });
 }
 
+function relativeDate(raw?: string): string {
+  const ts = raw ? Date.parse(raw) : NaN;
+  if (!Number.isFinite(ts)) return raw || "—";
+  const minutes = Math.round((Date.now() - ts) / 60000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return days === 1 ? "Yesterday" : `${days} days ago`;
+  const date = new Date(ts);
+  return date.toLocaleDateString(undefined, date.getFullYear() === new Date().getFullYear()
+    ? { month: "short", day: "numeric" }
+    : { month: "short", day: "numeric", year: "numeric" });
+}
+
 function sourceLabel(src: string | null | undefined): string {
   switch (src) {
     case "settings":
@@ -114,6 +130,9 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
   );
   const [savingBinding, setSavingBinding] = createSignal(false);
 
+  const [managing, setManaging] = createSignal(false);
+  const isBound = () =>
+    !!selectedProjectId() && status()?.project_bindings?.[bindingPalomaSlug()] === selectedProjectId();
   const isUnlocked = () => unlockedUntil() > nowTick();
 
   const lockSession = () => {
@@ -489,9 +508,9 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
       <div class="s-inner bitwarden-inner">
         <div class="bw-header">
           <div>
-            <h2>Bitwarden Secrets Manager</h2>
+            <h2>Secrets</h2>
             <p class="s-lead">
-              Connect a Bitwarden Machine Account to view and edit project secrets (`paloma`), protected by {bioStatus().label || "Touch ID"}.
+              Project secrets from Bitwarden Secrets Manager, unlocked with {bioStatus().label || "Touch ID"}.
             </p>
           </div>
           <div class="bw-header-actions">
@@ -563,9 +582,39 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
             </section>
           }
         >
+          <Show when={status()?.configured && isBound() && !managing()}>
+            <section class="s-sec">
+              <div class="s-card">
+                <div class="s-row">
+                  <div class="s-row-text">
+                    <div class="s-row-title">
+                      <span class="bw-status-line">
+                        <span class={`bw-dot ${status()?.bws_installed ? "online" : "offline"}`} />
+                        Bitwarden
+                      </span>
+                    </div>
+                    <div class="s-row-desc">
+                      Project <strong>{currentProjectName()}</strong> ↔ Paloma{" "}
+                      <strong>{bindingPalomaSlug()}</strong> · {secrets().length} secrets
+                    </div>
+                  </div>
+                  <div class="s-row-ctrl">
+                    <button class="s-btn" onClick={() => setManaging(true)}>Manage</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </Show>
+
           {/* Machine Account & Connected Project Card */}
+          <Show when={!status()?.configured || !isBound() || managing()}>
           <section class="s-sec">
-            <h3>Machine Account &amp; Project Binding</h3>
+            <div class="bw-section-head">
+              <h3>Bitwarden connection</h3>
+              <Show when={status()?.configured && isBound()}>
+                <button class="s-btn" onClick={() => setManaging(false)}>Done</button>
+              </Show>
+            </div>
             <div class="s-card">
               <div class="s-row">
                 <div class="s-row-text">
@@ -649,34 +698,35 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                         {(slug) => <option value={slug}>{slug}</option>}
                       </For>
                     </Select>
-                    <button
-                      class="s-btn primary"
-                      disabled={
-                        savingBinding() ||
-                        status()?.project_bindings?.[bindingPalomaSlug()] === selectedProjectId()
+                    <Show
+                      when={!isBound()}
+                      fallback={
+                        <span class="bw-connected-label" role="status">
+                          <Ic.CheckIcon size={12} /> Connected
+                        </span>
                       }
-                      onClick={() => void handleBindProject(bindingPalomaSlug(), selectedProjectId())}
                     >
-                      {status()?.project_bindings?.[bindingPalomaSlug()] === selectedProjectId()
-                        ? "Connected"
-                        : savingBinding()
-                          ? "Connecting…"
-                          : "Connect Project"}
-                    </button>
+                      <button
+                        class="s-btn primary"
+                        disabled={savingBinding()}
+                        onClick={() => void handleBindProject(bindingPalomaSlug(), selectedProjectId())}
+                      >
+                        {savingBinding() ? "Connecting…" : "Connect Project"}
+                      </button>
+                    </Show>
                   </div>
                 </div>
               </Show>
             </div>
           </section>
+          </Show>
 
           {/* Secrets Table Section */}
           <Show when={status()?.configured}>
             <section class="s-sec">
               <div class="bw-secrets-bar">
                 <div class="bw-secrets-title">
-                  <h3>
-                    Secrets in <span class="bw-project-pill">{currentProjectName()}</span>
-                  </h3>
+                  <h3>Secrets</h3>
                   <span class="bw-count-badge">
                     {filteredSecrets().length}
                     <Show when={search().trim()}> / {secrets().length}</Show>
@@ -688,7 +738,8 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                     <input
                       class="s-input bw-search-input"
                       type="search"
-                      placeholder="Filter secrets by name, ID, or note…"
+                      placeholder="Filter secrets"
+                      aria-label="Filter secrets by name, ID, or note"
                       value={search()}
                       onInput={(e) => setSearch(e.currentTarget.value)}
                     />
@@ -705,9 +756,8 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
               <div class="s-card bw-secrets-card">
                 <div class="bw-table-head">
                   <span>Name</span>
-                  <span>Project</span>
                   <span>Last edited</span>
-                  <span class="bw-col-actions">Actions</span>
+                  <span />
                 </div>
 
                 <Show
@@ -747,31 +797,12 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                                 >
                                   {secret.key}
                                 </button>
-                                <Show when={secret.note}>
-                                  <span class="bw-secret-note" title={secret.note}>
-                                    {secret.note}
-                                  </span>
-                                </Show>
                               </div>
-                              <div class="bw-secret-sub">
-                                <code class="bw-secret-id">{secret.id}</code>
-                                <button
-                                  type="button"
-                                  class="bw-mini-copy"
-                                  title="Copy secret UUID"
-                                  onClick={() => {
-                                    copyText(secret.id);
-                                    flashCopied(`id:${secret.id}`);
-                                  }}
-                                >
-                                  <Show
-                                    when={copiedId() === `id:${secret.id}`}
-                                    fallback={<Ic.CopyIcon size={11} />}
-                                  >
-                                    <Ic.CheckIcon size={11} />
-                                  </Show>
-                                </button>
-                              </div>
+                              <Show when={secret.note}>
+                                <div class="bw-secret-note" title={secret.note}>
+                                  {secret.note}
+                                </div>
+                              </Show>
                               <Show when={isRev()}>
                                 <div class="bw-revealed-box">
                                   <code class="bw-revealed-val">{revealed()[secret.id]}</code>
@@ -779,12 +810,11 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                               </Show>
                             </div>
 
-                            <div class="bw-secret-proj">
-                              <span class="bw-project-pill">{currentProjectName()}</span>
-                            </div>
-
-                            <div class="bw-secret-date">
-                              {formatRevisionDate(secret.revisionDate || secret.creationDate)}
+                            <div
+                              class="bw-secret-date"
+                              title={formatRevisionDate(secret.revisionDate || secret.creationDate)}
+                            >
+                              {relativeDate(secret.revisionDate || secret.creationDate)}
                             </div>
 
                             <div class="bw-secret-actions">
@@ -815,8 +845,23 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                               <button
                                 type="button"
                                 class="s-btn bw-act-btn"
+                                title={`Copy ID ${secret.id}`}
+                                aria-label="Copy secret ID"
+                                onClick={() => {
+                                  copyText(secret.id);
+                                  flashCopied(`id:${secret.id}`);
+                                }}
+                              >
+                                <Show when={copiedId() === `id:${secret.id}`} fallback={<Ic.CopyIcon size={12} />}>
+                                  <Ic.CheckIcon size={12} />
+                                </Show>
+                              </button>
+                              <button
+                                type="button"
+                                class="s-btn bw-act-btn"
                                 onClick={() => void handleOpenEditSecret(secret)}
                                 title="Edit secret"
+                                aria-label="Edit secret"
                               >
                                 <Ic.PencilIcon size={12} />
                               </button>
@@ -825,6 +870,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                                 class="s-btn bw-act-btn bw-danger-btn"
                                 onClick={() => setDeleteTarget(secret)}
                                 title="Delete secret"
+                                aria-label="Delete secret"
                               >
                                 <Ic.TrashIcon size={12} />
                               </button>

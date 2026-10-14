@@ -487,7 +487,7 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
 
  // 5. Open Hermes Settings page and save updated configuration
  await page.getByRole('button',{name:'Settings',exact:true}).click();
- await page.getByRole('button',{name:'Hermes',exact:true}).click();
+ await page.getByRole('button',{name:'Coordinator',exact:true}).click();
  await expect(page.getByText('Paloma · hermes-gateway.service')).toBeVisible();
  await page.getByRole('button',{name:'Save',exact:true}).click();
  await expect.poll(()=>settingsPuts.length).toBe(1);

@@ -19,9 +19,9 @@ await expect(page.getByLabel('Model 2')).toHaveValue('muse-spark-1.3-contributor
 await page.getByRole('button', {name:'Cancel',exact:true}).click();
 await expect(page.getByRole('dialog', {name:'Discard unsaved changes?'})).toBeVisible();
 await page.getByRole('button', {name:'Discard changes',exact:true}).click();
-await page.getByRole('button',{name:'Client',exact:true}).click();await page.screenshot({path:'/tmp/orb-settings-client-after.png'});
+await page.getByRole('button',{name:'General',exact:true}).click();await page.screenshot({path:'/tmp/orb-settings-client-after.png'});
 console.log(await page.evaluate(()=>({width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth})));
-await page.getByRole('button',{name:'Routing',exact:true}).click();
+await page.getByRole('button',{name:'Models & Routing',exact:true}).click();
 await page.getByRole('button',{name:/Smart/}).click();
 
 await page.setViewportSize({width:560,height:850});

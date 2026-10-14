@@ -383,7 +383,7 @@ test("Concurrency limits expand inside client settings and preserve the draft", 
   await expect(global).not.toBeVisible();
   await summary.click();
   await expect(global).toHaveValue("7");
-  await expect(page.locator(".settings-body h2")).toHaveText("Client");
+  await expect(page.locator(".settings-body h2")).toHaveText("General");
   await page.screenshot({ path: "artifacts/orb-execution-settings.png" });
 });
 

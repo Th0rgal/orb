@@ -52,7 +52,7 @@ test("manages proxy keys in Routing and fits narrow settings", async ({ page }) 
   await page.getByRole("button", { name: "Clean Up", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: /Cursor/ })).toBeVisible();
   await page.locator(".settings-body").evaluate(el => { el.scrollTop = 0; });
-  await expect(page.getByRole("heading", { name: "Routing", exact: true })).toBeInViewport();
+  await expect(page.getByRole("heading", { name: "Models & Routing", exact: true })).toBeInViewport();
   await page.waitForTimeout(150);
   await page.screenshot({ path: "/tmp/orb-proxy-keys-dark.png", fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
