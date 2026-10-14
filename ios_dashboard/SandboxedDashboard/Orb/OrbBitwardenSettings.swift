@@ -187,7 +187,7 @@ struct OrbBitwardenSettings: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             Circle()
-                                .fill(status["configured"] == .bool(true) && status["bws_available"] == .bool(true) ? Color.green : Color.orange)
+                                .fill(status["configured"] == .bool(true) && isBwsAvailable ? Color.green : Color.orange)
                                 .frame(width: 8, height: 8)
                             Text(statusHeadline)
                                 .font(.subheadline.weight(.medium))
@@ -339,8 +339,12 @@ struct OrbBitwardenSettings: View {
         .padding(.vertical, 4)
     }
 
+    private var isBwsAvailable: Bool {
+        status["bws_installed"] == .bool(true) || status["bws_available"] == .bool(true)
+    }
+
     private var statusHeadline: String {
-        if status["bws_available"] == .bool(false) { return "bws CLI not installed" }
+        if status != .null && !isBwsAvailable { return "bws CLI not installed" }
         if status["configured"] == .bool(true) { return "Connected" }
         return "Access token required"
     }
@@ -417,7 +421,7 @@ struct OrbBitwardenSettings: View {
             let defaultProj = !boundPaloma.isEmpty ? boundPaloma : (!st["default_project_id"].text.isEmpty ? st["default_project_id"].text : "297f3106-758f-43d5-8a4b-b460007558c8")
             selectedProjectId = defaultProj
 
-            if st["configured"] == .bool(true) && st["bws_available"] == .bool(true) {
+            if st["configured"] == .bool(true) && isBwsAvailable {
                 let projs = (try? await client.call("/api/bitwarden/projects").items) ?? []
                 projects = projs
                 let target = projs.contains(where: { $0["id"].text == defaultProj })
