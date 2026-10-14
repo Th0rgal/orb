@@ -17,6 +17,8 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
  const[attempt,setAttempt]=createSignal(0),[retryAt,setRetryAt]=createSignal(0),[now,setNow]=createSignal(Date.now());
  const[showDetails,setShowDetails]=createSignal(false);
  const id=createUniqueId();
+ // Clicked buttons don't take focus in WebKit, so the popover needs an explicit anchor.
+ let trigger!:HTMLButtonElement;
  let retry=async()=>{};
  // Memoized so a refresh returning the same failure doesn't restart the retry countdown.
  const error=createMemo(()=>retryError()||state()?.error||'');
@@ -79,10 +81,10 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
   pending()?`${pending()} local change${pending()===1?'':'s'} waiting to sync.`:
   error()?'Your local changes are safe — nothing is waiting to upload.':'Checking the latest changes.';
  return <Show when={label()}><div class="context-sync-state" classList={{compact:!!p.compact}} data-state={conflicts().length||(error()&&pending())?'warning':error()?'failed':'syncing'} >
-  <button class="context-sync-trigger" aria-label={label()} title={p.compact?label():undefined} aria-expanded={expanded()} aria-controls={id} onClick={event=>{event.stopPropagation();setExpanded(!expanded());}}>
+  <button ref={trigger} class="context-sync-trigger" aria-label={label()} title={p.compact?label():undefined} aria-expanded={expanded()} aria-controls={id} onClick={event=>{event.stopPropagation();setExpanded(!expanded());}}>
    <span class="context-sync-dot" aria-hidden="true"/><Show when={!p.compact}><span>{label()}</span></Show>
   </button>
-  <Show when={expanded()}><Popover id={id} class="context-sync-detail" label="Context synchronization" onClose={() => setExpanded(false)}>
+  <Show when={expanded()}><Popover id={id} anchor={trigger} placement="bottom-start" class="context-sync-detail" label="Context synchronization" onClose={() => setExpanded(false)}>
    <strong>{title()}</strong>
    <p>{body()}</p>
    <Show when={conflicts().length}><p>{conflicts().join('\n')}</p></Show>
