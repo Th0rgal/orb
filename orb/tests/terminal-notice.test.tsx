@@ -104,3 +104,14 @@ it("surfaces stored mission_status_changed failure summaries instead of generic 
   expect(cards[0].textContent).not.toContain("remote dispatch failed");
 });
 
+
+it("shows one card when a harness failure is followed by the node's generic status summary", () => {
+  const events = [
+    storedToStream({ id: 1, sequence: 1, event_id: "u-1", event_type: "user_message", timestamp: "", content: "Go", metadata: {} })!,
+    storedToStream({ id: 2, sequence: 2, event_id: "a-2", event_type: "assistant_message", timestamp: "", content: "Remote codex job failed: Argument list too long (os error 7).", metadata: { success: false } })!,
+    storedToStream({ id: 3, sequence: 3, event_id: "s-3", event_type: "mission_status_changed", timestamp: "", content: "Remote node 'ashur' finished", metadata: { status: "failed", summary: "Remote node 'ashur' finished" } })!,
+  ];
+  const errors = buildTranscript(events).filter(item => item.kind === "error");
+  expect(errors).toHaveLength(1);
+  expect(errors[0].kind === "error" && errors[0].text).toContain("Argument list too long");
+});
