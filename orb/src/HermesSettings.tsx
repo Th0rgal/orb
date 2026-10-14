@@ -106,7 +106,7 @@ export function HermesSettings() {
   return (
     <div class="s-body settings-body" aria-label="Hermes settings">
       <div class="s-inner">
-        <h2>Hermes</h2>
+        <h2>Coordinator</h2>
         <Show
           when={isConnected()}
           fallback={

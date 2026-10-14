@@ -577,7 +577,7 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     <div class="s-body settings-body">
       <div class="s-inner routing-page">
         <div class="routing-heading">
-          <h2>Routing</h2>
+          <h2>Models &amp; Routing</h2>
           <Show when={tab() !== "keys"}>
           <button
             class="s-btn"

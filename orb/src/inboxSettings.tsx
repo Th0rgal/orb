@@ -119,7 +119,7 @@ export function InboxSettings() {
   return (
     <div class="s-body settings-body">
       <div class="s-inner">
-        <h2>Inbox</h2>
+        <h2>Notifications</h2>
         <section class="s-sec">
           <h3>Notifications</h3>
           <div class="s-card">

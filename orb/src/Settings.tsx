@@ -205,7 +205,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
   return (
     <div class="s-body settings-body">
       <div class="s-inner">
-        <h2>Client</h2>
+        <h2>General</h2>
         <BackendTab />
         <LocalAgentsCard />
         <CloudAccountsCard onOpenPage={p.onOpenPage} />

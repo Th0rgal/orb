@@ -2069,13 +2069,16 @@ export default function App() {
               <span class="row-label">Back</span>
             </button>
             <div class="settings-nav-gap" />
-            <button class={`row ${selected() === "settings" ? "active" : ""}`} onClick={() => open("settings")}><span class="row-ico"><Ic.GearIcon /></span><span class="row-label">Client</span></button>
+            <button class={`row ${selected() === "settings" ? "active" : ""}`} onClick={() => open("settings")}><span class="row-ico"><Ic.GearIcon /></span><span class="row-label">General</span></button>
+            <div class="settings-nav-group-gap" />
+            <button class={`row ${selected() === "routing" ? "active" : ""}`} onClick={() => open("routing")}><span class="row-ico"><Ic.CubeIcon /></span><span class="row-label">Models &amp; Routing</span></button>
+            <button class={`row ${selected() === "hermes-settings" ? "active" : ""}`} onClick={() => open("hermes-settings")}><span class="row-ico"><Ic.TargetIcon /></span><span class="row-label">Coordinator</span></button>
+            <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Side Questions</span></button>
+            <div class="settings-nav-group-gap" />
             <button class={`row ${selected() === "skills-settings" ? "active" : ""}`} onClick={() => open("skills-settings")}><span class="row-ico"><Ic.SkillsIcon /></span><span class="row-label">Skills</span></button>
             <button class={`row ${selected() === "bitwarden-settings" ? "active" : ""}`} onClick={() => open("bitwarden-settings")}><span class="row-ico"><Ic.KeyIcon /></span><span class="row-label">Secrets</span></button>
-            <button class={`row ${selected() === "inbox-settings" ? "active" : ""}`} onClick={() => open("inbox-settings")}><span class="row-ico"><Ic.InboxIcon /></span><span class="row-label">Inbox</span></button>
-            <button class={`row ${selected() === "hermes-settings" ? "active" : ""}`} onClick={() => open("hermes-settings")}><span class="row-ico"><ProviderLogo type="hermes" /></span><span class="row-label">Hermes</span></button>
-            <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Btw</span></button>
-            <button class={`row ${selected() === "routing" ? "active" : ""}`} onClick={() => open("routing")}><span class="row-ico"><Ic.BranchIcon /></span><span class="row-label">Routing</span></button>
+            <div class="settings-nav-group-gap" />
+            <button class={`row ${selected() === "inbox-settings" ? "active" : ""}`} onClick={() => open("inbox-settings")}><span class="row-ico"><Ic.BellIcon /></span><span class="row-label">Notifications</span></button>
           </Show>
         </nav>
         <div class="sb-foot">
@@ -2111,14 +2114,14 @@ export default function App() {
         <div class="tb-title" data-tauri-drag-region>
           <Switch>
             <Match when={selected() === "settings" || selected() === "execution"}>
-              <span>Settings · Client</span>
+              <span>Settings · General</span>
             </Match>
             <Match when={selected() === "skills-settings"}><span>Settings · Skills</span></Match>
             <Match when={selected() === "bitwarden-settings"}><span>Settings · Secrets</span></Match>
-            <Match when={selected() === "inbox-settings"}><span>Settings · Inbox</span></Match>
-            <Match when={selected() === "hermes-settings"}><span>Settings · Hermes</span></Match>
-            <Match when={selected() === "btw-settings"}><span>Settings · Btw</span></Match>
-            <Match when={selected() === "routing"}><span>Settings · Routing</span></Match>
+            <Match when={selected() === "inbox-settings"}><span>Settings · Notifications</span></Match>
+            <Match when={selected() === "hermes-settings"}><span>Settings · Coordinator</span></Match>
+            <Match when={selected() === "btw-settings"}><span>Settings · Side Questions</span></Match>
+            <Match when={selected() === "routing"}><span>Settings · Models &amp; Routing</span></Match>
             <Match when={selected() === "machines"}>
               <span>Machines</span>
             </Match>
