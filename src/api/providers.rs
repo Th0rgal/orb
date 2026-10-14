@@ -2262,7 +2262,11 @@ pub async fn list_backend_model_options(
                     let mut additional: Vec<_> = visible_models
                         .iter()
                         .filter(|id| {
-                            is_codex_backend_model_id(id)
+                            // `prefix/model` entries are per-account routing
+                            // aliases (e.g. `orb-codex-<id>/gpt-5.5` pinned by
+                            // speed routing), not distinct models.
+                            !id.contains('/')
+                                && is_codex_backend_model_id(id)
                                 && !options.iter().any(|opt| &opt.value == *id)
                         })
                         .cloned()
