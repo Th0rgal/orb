@@ -222,7 +222,8 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
         setUnlockedUntil(0);
         setRevealed({});
       }
-    }, 5000);
+      // Every second: the unlocked pill shows a m:ss countdown.
+    }, 1000);
     const onVisChange = () => {
       if (document.hidden) lockSession();
     };

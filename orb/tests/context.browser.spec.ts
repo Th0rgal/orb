@@ -34,12 +34,12 @@ test('context sync status is compact, explains offline state, and retries',async
  });
  await page.route('http://context.test/**',route=>route.request().url().endsWith('/stream')?undefined:route.fulfill({json:{}}));
  await page.goto('/tests/context.html');
- const badge=page.getByRole('button',{name:'Context offline'});
+ const badge=page.getByRole('button',{name:/^Sync failed/});
  await expect(badge).toBeVisible();
  expect((await badge.boundingBox())!.height).toBeLessThan(32);
  await badge.click();
- await expect(page.getByText('No queued changes.',{exact:false})).toBeVisible();
+ await expect(page.getByText('nothing is waiting to upload',{exact:false})).toBeVisible();
  await page.screenshot({path:'/tmp/orb-context-sync.png'});
- await page.getByRole('button',{name:'Retry sync'}).click();
+ await page.getByRole('button',{name:'Retry now'}).click();
  await expect(badge).toHaveCount(0);
 });
