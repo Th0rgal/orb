@@ -3,6 +3,13 @@ import XCTest
 
 @MainActor
 final class OrbSettingsTests: XCTestCase {
+    /// Core trims messages, so a keyboard's trailing space must not leave the
+    /// optimistic bubble next to the stored copy.
+    func testOptimisticMessageMatchesTrimmedCoreCopy() {
+        XCTAssertTrue(OrbConversation.sameMessage("Vas y ", "Vas y"))
+        XCTAssertTrue(OrbConversation.sameMessage("\nVas y\n", "Vas y"))
+        XCTAssertFalse(OrbConversation.sameMessage("Vas y", "Vas-y"))
+    }
     func testQuotaUnitsAndRemainingPercent() {
         let values: OrbJSON = .object(["unified_5h_utilization": .number(0.4), "codex_primary_used_percent": .number(20), "minimax_weekly_remaining_percent": .number(70)])
         let windows = OrbProviderQuota.windows(values)

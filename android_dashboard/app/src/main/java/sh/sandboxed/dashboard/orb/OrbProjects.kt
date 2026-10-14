@@ -496,6 +496,9 @@ fun OrbHomeScreen(
                             bottom = 96.dp
                         )
                     ) {
+                        if (OrbMoveClipboard.mission != null) {
+                            item(key = "move_banner") { OrbMoveBanner(modifier = Modifier.padding(vertical = 6.dp)) }
+                        }
                         lastError?.let { err ->
                             item(key = "home_error") {
                                 OrbNotice(
@@ -596,6 +599,23 @@ fun OrbHomeScreen(
                                         onDismissRequest = { contextMenuProject = null },
                                         containerColor = OrbStyle.elevated
                                     ) {
+                                        val dropSlug = OrbProjectAppearance.slug(proj)
+                                        if (OrbMoveClipboard.canDrop(dropSlug, "")) {
+                                            DropdownMenuItem(
+                                                text = { Text("Move here", color = Color.White) },
+                                                leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
+                                                onClick = {
+                                                    contextMenuProject = null
+                                                    scope.launch {
+                                                        runCatching {
+                                                            OrbMoveClipboard.drop(core, dropSlug, "")
+                                                            core.refreshMissionsQuietly()
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                            HorizontalDivider(color = OrbStyle.border)
+                                        }
                                         DropdownMenuItem(
                                             text = { Text("Rename", color = Color.White) },
                                             leadingIcon = {
@@ -943,6 +963,8 @@ fun OrbProjectPage(
     var moveFolderTarget by remember { mutableStateOf<String?>(null) }
     var moveFolderDraft by remember { mutableStateOf("") }
     var deleteFolderTarget by remember { mutableStateOf<String?>(null) }
+    var renameMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
+    var renameMissionDraft by remember { mutableStateOf("") }
 
     val projectSlug = remember(liveProject) {
         OrbProjectAppearance.slug(liveProject)
@@ -1113,6 +1135,25 @@ fun OrbProjectPage(
         val nextStatus = if (currentlyArchived) "completed" else "acknowledged"
         scope.launch {
             runCatching {
+                // Archiving only changes status, so a live runner is cancelled and
+                // must settle first or it keeps working on an archived conversation.
+                if (!currentlyArchived && OrbMissionTree.isLive(mission)) {
+                    core.request(
+                        path = "/api/control/missions/${core.encodeComponent(mission.id)}/cancel",
+                        method = "POST"
+                    )
+                    var stopped = false
+                    repeat(30) {
+                        if (stopped) return@repeat
+                        val latest = OrbRow(mission.id, core.fetchDict("/api/control/missions/${core.encodeComponent(mission.id)}"))
+                        if (!OrbMissionTree.isLive(latest)) stopped = true else kotlinx.coroutines.delay(1000)
+                    }
+                    if (!stopped) {
+                        folderActionError = "The agent is still stopping. Try archiving again in a moment."
+                        loadProjectData()
+                        return@runCatching
+                    }
+                }
                 core.request(
                     path = "/api/control/missions/${core.encodeComponent(mission.id)}/status",
                     method = "POST",
@@ -1121,6 +1162,32 @@ fun OrbProjectPage(
                 loadProjectData()
                 core.refreshMissionsQuietly()
             }
+        }
+    }
+
+    fun performRenameMission(mission: OrbRow, rawTitle: String) {
+        val title = rawTitle.trim()
+        if (title.isEmpty()) return
+        scope.launch {
+            runCatching {
+                core.request(
+                    path = "/api/control/missions/${core.encodeComponent(mission.id)}/title",
+                    method = "POST",
+                    body = mapOf("title" to title)
+                )
+                loadProjectData()
+                core.refreshMissionsQuietly()
+            }.onFailure { folderActionError = it.message ?: "Couldn’t rename the conversation." }
+        }
+    }
+
+    fun dropMovedMission(folder: String) {
+        scope.launch {
+            runCatching {
+                OrbMoveClipboard.drop(core, projectSlug, folder)
+                loadProjectData()
+                core.refreshMissionsQuietly()
+            }.onFailure { folderActionError = it.message ?: "Couldn’t move the conversation." }
         }
     }
 
@@ -1327,6 +1394,16 @@ fun OrbProjectPage(
                                 )
                             }
                             HorizontalDivider(color = OrbStyle.border)
+                            if (OrbMoveClipboard.canDrop(projectSlug, "")) {
+                                DropdownMenuItem(
+                                    text = { Text("Move here (project root)", color = Color.White) },
+                                    leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
+                                    onClick = {
+                                        showMenu = false
+                                        dropMovedMission("")
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("New folder", color = Color.White) },
                                 leadingIcon = {
@@ -1416,6 +1493,9 @@ fun OrbProjectPage(
                         }
                     }
 
+                    if (OrbMoveClipboard.mission != null) {
+                        item(key = "move_banner") { OrbMoveBanner(modifier = Modifier.padding(vertical = 6.dp)) }
+                    }
                     folderActionError?.let { err ->
                         item(key = "folder_action_error") {
                             OrbNotice(
@@ -1445,7 +1525,16 @@ fun OrbProjectPage(
                             onLongClick = { contextMenuMission = node.mission },
                             showContextMenu = contextMenuMission?.id == node.mission.id,
                             onDismissContextMenu = { contextMenuMission = null },
-                            onToggleArchive = {
+                            onRename = {
+                                contextMenuMission = null
+                                renameMissionDraft = OrbJSON.cleanTitle(node.mission.str("title", "name") ?: "")
+                                renameMissionTarget = node.mission
+                            },
+                            onMove = {
+                                contextMenuMission = null
+                                OrbMoveClipboard.pick(node.mission, projectSlug)
+                            },
+                            onArchive = {
                                 contextMenuMission = null
                                 toggleArchiveMission(node.mission)
                             }
@@ -1509,6 +1598,17 @@ fun OrbProjectPage(
                                     onDismissRequest = { contextMenuFolder = null },
                                     containerColor = OrbStyle.elevated
                                 ) {
+                                    if (OrbMoveClipboard.canDrop(projectSlug, folderPath)) {
+                                        DropdownMenuItem(
+                                            text = { Text("Move here", color = Color.White) },
+                                            leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
+                                            onClick = {
+                                                contextMenuFolder = null
+                                                dropMovedMission(folderPath)
+                                            }
+                                        )
+                                        HorizontalDivider(color = OrbStyle.border)
+                                    }
                                     DropdownMenuItem(
                                         text = { Text("New agent in folder", color = Color.White) },
                                         leadingIcon = {
@@ -1598,7 +1698,16 @@ fun OrbProjectPage(
                                     onLongClick = { contextMenuMission = node.mission },
                                     showContextMenu = contextMenuMission?.id == node.mission.id,
                                     onDismissContextMenu = { contextMenuMission = null },
-                                    onToggleArchive = {
+                                    onRename = {
+                                        contextMenuMission = null
+                                        renameMissionDraft = OrbJSON.cleanTitle(node.mission.str("title", "name") ?: "")
+                                        renameMissionTarget = node.mission
+                                    },
+                                    onMove = {
+                                        contextMenuMission = null
+                                        OrbMoveClipboard.pick(node.mission, projectSlug)
+                                    },
+                                    onArchive = {
                                         contextMenuMission = null
                                         toggleArchiveMission(node.mission)
                                     },
@@ -1774,6 +1883,51 @@ fun OrbProjectPage(
         )
     }
 
+    renameMissionTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { renameMissionTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            title = { Text("Rename conversation", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    if (renameMissionDraft.isEmpty()) {
+                        Text("Title", color = OrbStyle.textMuted, fontSize = 14.sp)
+                    }
+                    BasicTextField(
+                        value = renameMissionDraft,
+                        onValueChange = { renameMissionDraft = it },
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val next = renameMissionDraft
+                    renameMissionTarget = null
+                    performRenameMission(target, next)
+                }) {
+                    Text("Save", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameMissionTarget = null }) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
     renameFolderTarget?.let { targetFolder ->
         AlertDialog(
             onDismissRequest = { renameFolderTarget = null },
@@ -1917,7 +2071,9 @@ private fun OrbMissionListItem(
     onLongClick: () -> Unit,
     showContextMenu: Boolean,
     onDismissContextMenu: () -> Unit,
-    onToggleArchive: () -> Unit,
+    onRename: () -> Unit,
+    onMove: () -> Unit,
+    onArchive: () -> Unit,
     extraIndentDp: Int = 0
 ) {
     val mission = node.mission
@@ -2104,17 +2260,34 @@ private fun OrbMissionListItem(
             onDismissRequest = onDismissContextMenu,
             containerColor = OrbStyle.elevated
         ) {
+            // Rename and Move work at any time; a live agent is stopped before it is archived.
             val isArchived = OrbMissionTree.isArchived(mission)
             DropdownMenuItem(
-                text = { Text(if (isArchived) "Unarchive" else "Archive", color = Color.White) },
+                text = { Text("Rename", color = Color.White) },
+                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = Color.White) },
+                onClick = onRename
+            )
+            DropdownMenuItem(
+                text = { Text("Move…", color = Color.White) },
+                leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
+                onClick = onMove
+            )
+            HorizontalDivider(color = OrbStyle.border)
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (isArchived) "Unarchive" else if (isLive) "Stop & archive" else "Archive",
+                        color = if (!isArchived && isLive) OrbStyle.error else Color.White
+                    )
+                },
                 leadingIcon = {
                     Icon(
                         imageVector = if (isArchived) Icons.Default.Unarchive else Icons.Default.Archive,
                         contentDescription = null,
-                        tint = Color.White
+                        tint = if (!isArchived && isLive) OrbStyle.error else Color.White
                     )
                 },
-                onClick = onToggleArchive
+                onClick = onArchive
             )
         }
     }
@@ -2181,4 +2354,62 @@ private fun latestActivityRelative(
         }
     }
     return OrbJSON.relative(bestRaw)
+}
+
+/** A conversation picked up with "Move", waiting for a destination chosen by
+ * long-pressing a folder, the project menu, or another project. */
+object OrbMoveClipboard {
+    var mission by mutableStateOf<OrbRow?>(null)
+        private set
+    var sourceSlug by mutableStateOf("")
+        private set
+
+    fun pick(target: OrbRow, slug: String) { mission = target; sourceSlug = slug }
+    fun clear() { mission = null; sourceSlug = "" }
+    fun canDrop(slug: String, folder: String): Boolean {
+        val m = mission ?: return false
+        return slug != sourceSlug || folder != (OrbMissionTree.folderPath(m) ?: "")
+    }
+
+    /** Keeps every tag except the folder, which becomes the destination. */
+    suspend fun drop(core: OrbCore, slug: String, folder: String) {
+        val m = mission ?: return
+        val tags = OrbJSON.strList(m.raw, "tags").filter { it.isNotEmpty() && !it.startsWith("orb-folder:") }.toMutableList()
+        if (folder.isNotEmpty()) tags.add("orb-folder:$folder")
+        core.request(
+            path = "/api/control/missions/${core.encodeComponent(m.id)}/project",
+            method = "POST",
+            body = mapOf("project" to slug, "tags" to tags)
+        )
+        clear()
+    }
+}
+
+@Composable
+fun OrbMoveBanner(modifier: Modifier = Modifier) {
+    val mission = OrbMoveClipboard.mission ?: return
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(OrbStyle.surface)
+            .border(0.75.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = OrbStyle.textSecondary)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Moving “${OrbJSON.cleanTitle(mission.str("title", "name") ?: "")}”",
+                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Text("Long-press a folder or project, then choose Move here.", color = OrbStyle.textSecondary, fontSize = 12.sp)
+        }
+        Text(
+            "Cancel", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+            modifier = Modifier.orbPressClickable { OrbMoveClipboard.clear() }
+        )
+    }
 }

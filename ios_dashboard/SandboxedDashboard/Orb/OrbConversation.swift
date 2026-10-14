@@ -57,6 +57,11 @@ struct OrbConversation: View {
     private var pendingKey: String { draftKey + ":pending" }
     private var turns: [OrbJSON] { execution["turns"].items }
     private var isCloud: Bool { execution != .null || !mission["cloud"]["provider"].text.isEmpty || (id == nil && selection.cloud) }
+    /// Core stores trimmed text, so a reply echoed back may differ from the
+    /// draft only by surrounding whitespace.
+    static func sameMessage(_ a: String, _ b: String) -> Bool {
+        a.trimmingCharacters(in: .whitespacesAndNewlines) == b.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     static let workingPhases: Set<String> = ["queued", "submitting", "running", "cancel_requested"]
     static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode"]
     private var supportsMode: Bool { !isCloud && (selection.backend.isEmpty || Self.goalHarnesses.contains(selection.backend)) }
@@ -133,12 +138,12 @@ struct OrbConversation: View {
                 let text = event.content
                 guard !text.isEmpty else { continue }
                 if OrbRemoteContinuation.unpack(text) != nil { continue }
-                if !rows.contains(where: { $0.1 == "user" && $0.2 == text }) {
+                if !rows.contains(where: { $0.1 == "user" && Self.sameMessage($0.2, text) }) {
                     rows.append(("event-user-\(event.sequence)", "user", text))
                 }
             }
         }
-        if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && $0.2 == opt }) {
+        if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && Self.sameMessage($0.2, opt) }) {
             rows.append(("optimistic-user", "user", opt))
         }
         if !isCloud {
@@ -1668,10 +1673,10 @@ struct OrbConversation: View {
                 selection.canCancel = account?["capabilities"]["cancel"].flag ?? false
             }
             if let opt = optimisticPrompt {
-                let inHistory = mission["history"].items.contains(where: { $0["role"].text == "user" && $0["content"].text == opt })
-                let inEvents = events.contains(where: { $0.eventType == "user_message" && $0.content == opt })
-                let inCloud = turns.contains(where: { $0["prompt"].text == opt })
-                let inQueue = queued.contains(where: { $0["content"].text == opt })
+                let inHistory = mission["history"].items.contains(where: { $0["role"].text == "user" && Self.sameMessage($0["content"].text, opt) })
+                let inEvents = events.contains(where: { $0.eventType == "user_message" && Self.sameMessage($0.content, opt) })
+                let inCloud = turns.contains(where: { Self.sameMessage($0["prompt"].text, opt) })
+                let inQueue = queued.contains(where: { Self.sameMessage($0["content"].text, opt) })
                 if inHistory || inEvents || inCloud || inQueue {
                     optimisticPrompt = nil
                 }
@@ -1707,7 +1712,9 @@ struct OrbConversation: View {
                 rebuildHistory()
             } else {
                 var uploaded: [OrbJSON] = mentionedContext.map { OrbContextTagging.wireAttachment(for: $0) }
-                var prompt = text
+                // Core trims messages; send exactly what it will store so the
+                // optimistic bubble is recognised and replaced, not shown twice.
+                var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if supportsMode && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
                 // Optimistic UI: show the user bubble immediately and clear composer text while sending.
                 withAnimation(.snappy(duration: 0.18)) {
