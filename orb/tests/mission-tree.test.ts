@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { countNested, holds, nestMissions, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededMission, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
+import { countNested, countVersions, forkTitle, missionParent, versionLabel, holds, nestMissions, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededMission, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "../src/missionTree";
 
 const m = (id: string, parent?: string, status = "completed", tags?: string[]) => ({ id, parent_mission_id: parent, status, tags });
 
@@ -120,4 +120,33 @@ test("superseded child missions and their stopped descendants are excluded unles
     "tier1-still-running",
     "tier1-live-child",
   ]);
+});
+
+test("the most recently active fork leads and earlier versions fold inside it", () => {
+  const original = { id: "ev", title: "EV Bench", backend: "claudecode", model_override: "claude-opus-5-5", updated_at: "2026-10-14T10:00:00Z" };
+  const legacyFork = { id: "ev-fork", parent_mission_id: "ev", title: "EV Bench · fork", backend: "codex", model_override: "gpt-6.1-sol", updated_at: "2026-10-14T12:00:00Z" };
+  const worker = { id: "w", parent_mission_id: "ev-fork", title: "worker", updated_at: "2026-10-14T12:30:00Z" };
+  const roots = nestMissions([original, legacyFork, worker, { id: "other", updated_at: "2026-10-13T00:00:00Z" }]);
+  expect(roots.map(r => r.mission.id)).toEqual(["ev-fork", "other"]);
+  expect(roots[0].children.map(c => [c.mission.id, !!c.version])).toEqual([["w", false], ["ev", true]]);
+  expect(countNested(roots[0])).toBe(1);
+  expect(countVersions(roots[0])).toBe(1);
+  expect(versionLabel(original)).toBe("Claude Code · claude-opus-5-5");
+  expect(forkTitle(legacyFork.title)).toBe("EV Bench");
+  // Returning to the original makes it lead again.
+  const back = nestMissions([{ ...original, updated_at: "2026-10-15T09:00:00Z" }, legacyFork]);
+  expect(back.map(r => r.mission.id)).toEqual(["ev"]);
+  expect(back[0].children.map(c => c.mission.id)).toEqual(["ev-fork"]);
+});
+
+test("a tagged fork of a worker stays inside the worker's parent", () => {
+  const roots = nestMissions([
+    { id: "boss", updated_at: "2026-10-14T09:00:00Z" },
+    { id: "w", parent_mission_id: "boss", updated_at: "2026-10-14T10:00:00Z" },
+    { id: "w2", tags: ["fork-of:w"], updated_at: "2026-10-14T11:00:00Z" },
+  ]);
+  expect(roots.map(r => r.mission.id)).toEqual(["boss"]);
+  expect(roots[0].children.map(c => c.mission.id)).toEqual(["w2"]);
+  expect(roots[0].children[0].children.map(c => [c.mission.id, c.version])).toEqual([["w", true]]);
+  expect(missionParent({ id: "w2", tags: ["fork-of:w"] })).toBeUndefined();
 });

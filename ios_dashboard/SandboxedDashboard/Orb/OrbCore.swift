@@ -57,16 +57,25 @@ struct OrbRow: Identifiable, Hashable, Sendable {
     init(_ value: OrbJSON, project: Bool = false) {
         raw = value
         id = value[project ? "slug" : "id"].text
-        name = value["title"].text.isEmpty ? id : value["title"].text
+        // Forks share the conversation's name; older forks were titled "… · fork".
+        let title = value["title"].text
+        name = title.isEmpty ? id : (title.hasSuffix(" · fork") ? String(title.dropLast(7)) : title)
         state = value["status"].text
         folder = value["tags"].items.map(\.text).first(where: { $0.hasPrefix("orb-folder:") }).map { String($0.dropFirst(11)) } ?? ""
         backend = value["backend"].text
         cloud = value["backend"].text.hasPrefix("cloud_") || value["execution_kind"].text == "cloud" || value["tags"].items.contains(where: { $0.text.hasPrefix("cloud:") }) || value["cloud"] != .null
         updatedAt = value["updated_at"].text.isEmpty ? value["created_at"].text : value["updated_at"].text
     }
+    /// The conversation this one was forked from (a `fork-of:` tag, or an older fork stored as a child).
+    var forkSource: String? {
+        if let tag = raw["tags"].items.map(\.text).first(where: { $0.hasPrefix("fork-of:") }) { return String(tag.dropFirst(8)) }
+        let p = raw["parent_mission_id"].text
+        return !p.isEmpty && raw["title"].text.hasSuffix(" · fork") ? p : nil
+    }
+    /// The mission that launched this one. A fork is another version, never launched work.
     var parentMissionID: String? {
         let p = raw["parent_mission_id"].text
-        if !p.isEmpty { return p }
+        if !p.isEmpty && forkSource != p { return p }
         let cp = raw["callback_parent_mission_id"].text
         return cp.isEmpty ? nil : cp
     }
@@ -77,10 +86,13 @@ struct OrbRow: Identifiable, Hashable, Sendable {
 struct OrbNestedMission: Identifiable, Hashable {
     let mission: OrbRow
     var children: [OrbNestedMission]
+    /// An earlier version (fork) of the conversation it is listed in.
+    var version: Bool
     var id: String { mission.id }
-    init(mission: OrbRow, children: [OrbNestedMission] = []) {
+    init(mission: OrbRow, children: [OrbNestedMission] = [], version: Bool = false) {
         self.mission = mission
         self.children = children
+        self.version = version
     }
 }
 
@@ -103,16 +115,49 @@ enum OrbMissionTree {
         return missions.filter { retained.contains($0.id) }
     }
 
+    /// Maps each listed fork to the most recently active version of its conversation.
+    static func forkLeaders(_ missions: [OrbRow]) -> [String: OrbRow] {
+        var byID: [String: OrbRow] = [:]
+        for mission in missions where byID[mission.id] == nil { byID[mission.id] = mission }
+        func root(_ mission: OrbRow) -> String {
+            var current = mission
+            var seen: Set<String> = []
+            while let source = current.forkSource, let next = byID[source], !seen.contains(source) {
+                seen.insert(current.id)
+                current = next
+            }
+            return current.id
+        }
+        var groups: [String: [OrbRow]] = [:]
+        for mission in missions { groups[root(mission), default: []].append(mission) }
+        var leaders: [String: OrbRow] = [:]
+        for group in groups.values where group.count > 1 {
+            let leader = group.max { $0.updatedAt < $1.updatedAt }!
+            for mission in group { leaders[mission.id] = leader }
+        }
+        return leaders
+    }
+
     /// Roots keep the order of the list, and so do the children of each mission.
+    /// The most recently active version of a forked conversation leads; earlier
+    /// versions are listed inside it after its launched work.
     static func nest(_ missions: [OrbRow]) -> [OrbNestedMission] {
         var byID: [String: OrbRow] = [:]
         for mission in missions where byID[mission.id] == nil {
             byID[mission.id] = mission
         }
+        let leaders = forkLeaders(missions)
+        var versionsByLeader: [String: [OrbRow]] = [:]
         var childrenByParent: [String: [OrbRow]] = [:]
         var roots: [OrbRow] = []
         for mission in missions {
-            if let parentID = mission.parentMissionID,
+            if let leader = leaders[mission.id], leader.id != mission.id {
+                versionsByLeader[leader.id, default: []].append(mission)
+                continue
+            }
+            // A leading fork takes the place of the conversation it continues.
+            let place = leaders[mission.id].flatMap { leader in missions.first { leaders[$0.id]?.id == leader.id && $0.forkSource == nil } } ?? mission
+            if let parentID = place.parentMissionID,
                let parent = byID[parentID],
                parent.id != mission.id,
                !reaches(byID: byID, from: parent, target: mission.id) {
@@ -125,7 +170,12 @@ enum OrbMissionTree {
             var nextVisited = visited
             nextVisited.insert(row.id)
             let kids = (childrenByParent[row.id] ?? []).filter { !nextVisited.contains($0.id) }.map { build($0, visited: nextVisited) }
-            return OrbNestedMission(mission: row, children: kids)
+            let versions = (versionsByLeader[row.id] ?? []).sorted { $0.updatedAt > $1.updatedAt }.map { version -> OrbNestedMission in
+                var node = build(version, visited: nextVisited)
+                node.version = true
+                return node
+            }
+            return OrbNestedMission(mission: row, children: kids + versions)
         }
         return roots.map { build($0, visited: []) }
     }
@@ -147,9 +197,11 @@ enum OrbMissionTree {
 
     static func countNested(_ node: OrbNestedMission, matches: (OrbRow) -> Bool = { _ in true }) -> Int {
         node.children.reduce(0) { sum, child in
-            sum + (matches(child.mission) ? 1 : 0) + countNested(child, matches: matches)
+            child.version ? sum : sum + (matches(child.mission) ? 1 : 0) + countNested(child, matches: matches)
         }
     }
+
+    static func countVersions(_ node: OrbNestedMission) -> Int { node.children.filter(\.version).count }
 
     static func subtree(_ missions: [OrbRow], rootIDs: [String]) -> [OrbRow] {
         var included = Set(rootIDs)

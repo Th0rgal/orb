@@ -203,10 +203,14 @@ pub async fn fork_mission(
     let mut tags = vec![format!("fork-workspace:{workspace_source}")];
     if req.side_question.is_some() {
         tags.push(format!("btw-parent:{id}"));
+    } else {
+        // A fork is another version of the conversation, not work it launched:
+        // clients group versions by this link instead of nesting them as children.
+        tags.push(format!("fork-of:{id}"));
     }
 
     let create: CreateMissionRequest = serde_json::from_value(serde_json::json!({
-        "title": format!("{} · {}", source.title.as_deref().unwrap_or("Conversation"), if req.side_question.is_some(){"btw"}else{"fork"}),
+        "title": if req.side_question.is_some() { format!("{} · btw", source.title.as_deref().unwrap_or("Conversation")) } else { fork_title(source.title.as_deref()) },
         "placement": if client {Some("client")}else{None},
         "workspace_id": source.workspace_id,
         "working_directory": working_directory,
@@ -217,7 +221,7 @@ pub async fn fork_mission(
         "model_override": req.model_override,
         "model_effort": req.model_effort,
         "fast_mode": false,
-        "parent_mission_id": if req.side_question.is_some(){None}else{Some(id)},
+        "parent_mission_id": None::<Uuid>,
         "project": source.project.project,
         "tags": tags,
         "idempotency_key": if req.side_question.is_some() { side_request_key(id, &req.idempotency_key) } else { req.idempotency_key },
@@ -331,6 +335,13 @@ pub(super) fn side_payload_fingerprint(
     format!("{:x}", Sha256::digest(payload.to_string().as_bytes()))
 }
 
+/// Versions share the conversation's name; harness and model tell them apart.
+/// Forks made before `fork-of:` tags were titled "… · fork".
+fn fork_title(source: Option<&str>) -> String {
+    let title = source.unwrap_or("Conversation").trim();
+    title.strip_suffix(" · fork").unwrap_or(title).to_string()
+}
+
 fn side_request_key(parent: Uuid, key: &str) -> String {
     format!("btw:{parent}:{}", key.trim())
 }
@@ -400,6 +411,13 @@ fn side_agent_prompt(
 #[cfg(test)]
 mod side_context_tests {
     use super::*;
+    #[test]
+    fn forks_keep_the_conversation_name() {
+        assert_eq!(super::fork_title(Some("EV Bench · fork")), "EV Bench");
+        assert_eq!(super::fork_title(Some("EV Bench")), "EV Bench");
+        assert_eq!(super::fork_title(None), "Conversation");
+    }
+
     #[test]
     fn incremental_context_does_not_reinject_parent_history() {
         let history = vec![serde_json::json!({"role":"user", "content":"x".repeat(200_000)})];

@@ -1,3 +1,4 @@
+import { missionParent } from "./missionTree";
 import { isBtwMission, type Mission, type ProjectSummary } from "./api";
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { DEFAULT_PROJECT } from "./defaultProject";
@@ -423,7 +424,7 @@ export function extractInboxInteraction(
 export function isSubagentMission(
   mission: Pick<Mission, "title" | "parent_mission_id" | "callback_parent_mission_id" | "tags">,
 ): boolean {
-  if (mission.parent_mission_id || mission.callback_parent_mission_id) return true;
+  if (missionParent(mission)) return true;
   if (
     mission.tags?.some(
       (tag) =>
@@ -1608,7 +1609,7 @@ export function listUnreadInboxCandidates(
     if (!scope.includeAutonomous) break;
     if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
     if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
-    const parentId = m.parent_mission_id || m.callback_parent_mission_id;
+    const parentId = missionParent(m);
     if (!parentId) continue;
     if (
       (m.status === "failed" || m.status === "blocked" || m.status === "not_feasible") &&
@@ -1750,7 +1751,7 @@ export function buildInboxSections(
   for (const m of missions) {
     if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
     if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
-    const parentId = m.parent_mission_id || m.callback_parent_mission_id;
+    const parentId = missionParent(m);
     if (!parentId) continue;
     let group = childrenByParent.get(parentId);
     if (!group) {

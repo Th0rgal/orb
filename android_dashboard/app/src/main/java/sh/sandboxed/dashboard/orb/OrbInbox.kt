@@ -751,7 +751,7 @@ object OrbInboxModel {
         val tags = OrbJSON.strList(mission.raw, "tags")
         if (tags.any { it == "superseded" || it.startsWith("superseded-by:") }) return true
         if (OrbInboxSettings.includeAutonomous) return false
-        if (!mission.str("parent_mission_id").isNullOrEmpty() || !mission.str("callback_parent_mission_id").isNullOrEmpty()) return true
+        if (!OrbMissionTree.parentId(mission).isNullOrEmpty()) return true
         if (mission.str("origin") == "hermes" || tags.any { it.startsWith("worker-dispatch:") || it == "origin:hermes" || it == "origin:hermes-assistant" }) return true
         return Regex("^you are a sub-?agent\\b", RegexOption.IGNORE_CASE).containsMatchIn((mission.str("title", "name") ?: "").trim())
     }
@@ -786,7 +786,7 @@ object OrbInboxModel {
         val seenChildren = mutableSetOf<String>()
         for (child in mobileMissions) {
             if (!seenChildren.add(child.id)) continue
-            val parentId = child.str("parent_mission_id", "callback_parent_mission_id") ?: ""
+            val parentId = OrbMissionTree.parentId(child) ?: ""
             val state = (child.str("status", "state") ?: "").lowercase()
             if (parentId.isNotEmpty() && state !in hiddenStatuses) {
                 childrenByParent.getOrPut(parentId) { mutableListOf() }.add(child)

@@ -966,7 +966,7 @@ enum OrbInboxModel {
     }
 
     static func isSubagent(row: OrbRow, includeAutonomous: Bool = false) -> Bool {
-        if !includeAutonomous && (!row.raw["parent_mission_id"].text.isEmpty || !row.raw["callback_parent_mission_id"].text.isEmpty) { return true }
+        if !includeAutonomous && row.parentMissionID != nil { return true }
         let tags = row.raw["tags"].items.map(\.text)
         if tags.contains("superseded") || tags.contains(where: { $0.hasPrefix("superseded-by:") }) { return true }
         if includeAutonomous { return false }
@@ -1201,9 +1201,7 @@ enum OrbInboxModel {
         var seenChildren: Set<String> = []
         for child in missions where !seenChildren.contains(child.id) {
             seenChildren.insert(child.id)
-            let parentID = !child.raw["parent_mission_id"].text.isEmpty
-                ? child.raw["parent_mission_id"].text
-                : child.raw["callback_parent_mission_id"].text
+            let parentID = child.parentMissionID ?? ""
             guard !parentID.isEmpty, !hiddenStatuses.contains(child.state) else { continue }
             childrenByParent[parentID, default: []].append(child)
         }
@@ -1331,9 +1329,7 @@ enum OrbInboxModel {
         var seenChildren: Set<String> = []
         for child in missions where !seenChildren.contains(child.id) {
             seenChildren.insert(child.id)
-            let parentID = !child.raw["parent_mission_id"].text.isEmpty
-                ? child.raw["parent_mission_id"].text
-                : child.raw["callback_parent_mission_id"].text
+            let parentID = child.parentMissionID ?? ""
             guard !parentID.isEmpty, !hiddenStatuses.contains(child.state) else { continue }
             childrenByParent[parentID, default: []].append(child)
         }

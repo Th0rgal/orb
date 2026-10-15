@@ -2081,7 +2081,12 @@ private fun OrbMissionListItem(
     val isGoal = OrbMissionTree.isGoal(mission)
     val unread = OrbMissionUnreadStore.isUnread(mission)
     val needsAttn = isNeedsAttention(mission)
-    val title = OrbInboxModel.missionHeadline(mission)
+    // An earlier version is told apart from the current one by harness and model.
+    val title = if (node.version) {
+        listOf(serviceName(mission.str("backend") ?: ""), mission.str("model_override") ?: "").filter { it.isNotEmpty() }.joinToString(" · ") + " · earlier"
+    } else {
+        OrbMissionTree.forkTitle(OrbInboxModel.missionHeadline(mission))
+    }
     val relTime = OrbJSON.relative(mission.str("updated_at", "completed_at", "started_at", "created_at"))
     val indentDp = (minOf(48, node.depth * 18) + extraIndentDp).dp
     val backendRaw = mission.str("backend", "harness", "backend_id") ?: "claudecode"
@@ -2183,7 +2188,7 @@ private fun OrbMissionListItem(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
-                        if (node.childCount > 0) {
+                        if (node.childCount > 0 || node.versionCount > 0) {
                             val liveChildren = node.runningChildCount > 0
                             val badgeColor = if (liveChildren) OrbStyle.success else OrbStyle.textSecondary
                             Row(
@@ -2206,7 +2211,9 @@ private fun OrbMissionListItem(
                                 horizontalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
                                 Text(
-                                    text = if (liveChildren) {
+                                    text = if (node.childCount == 0) {
+                                        "${node.versionCount} earlier"
+                                    } else if (liveChildren) {
                                         "${node.runningChildCount}/${node.childCount}"
                                     } else {
                                         "${node.childCount}"

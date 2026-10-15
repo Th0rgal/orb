@@ -1,19 +1,80 @@
-/** Missions launched by a mission are shown inside it, like files in a folder. */
-export interface NestedMission<M> { mission: M; children: NestedMission<M>[] }
+/** Missions launched by a mission are shown inside it, like files in a folder.
+ * Forks are versions of one conversation, not launched work: the most recently
+ * active version leads and earlier versions are listed inside it (`version`). */
+export interface NestedMission<M> { mission: M; children: NestedMission<M>[]; version?: boolean }
 
-type Linked = { id: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null };
-export const missionParent = (mission: Linked): string | undefined => mission.parent_mission_id || mission.callback_parent_mission_id || undefined;
+type Linked = { id: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null; title?: string | null; tags?: readonly string[] | null };
+type Dated = { updated_at?: string | null; created_at?: string | null };
+
+const LEGACY_FORK_TITLE = /\s·\sfork$/i;
+
+/** The conversation this one was forked from. Older forks were stored as
+ * children titled "… · fork"; newer ones carry a `fork-of:` tag instead. */
+export function forkSource(mission: Omit<Linked, "id">): string | undefined {
+  const tag = mission.tags?.find(t => t.startsWith("fork-of:"))?.slice(8);
+  if (tag) return tag;
+  return mission.parent_mission_id && LEGACY_FORK_TITLE.test(mission.title ?? "") ? mission.parent_mission_id : undefined;
+}
+
+/** The mission that launched this one. A fork is never launched work. */
+export const missionParent = (mission: Omit<Linked, "id">): string | undefined =>
+  (forkSource(mission) === mission.parent_mission_id ? undefined : mission.parent_mission_id) || mission.callback_parent_mission_id || undefined;
+
+/** A fork shares its conversation's name; versions are told apart by harness and model. */
+export const forkTitle = (title: string | null | undefined): string => (title ?? "").replace(LEGACY_FORK_TITLE, "");
+
+const HARNESS_NAMES: Record<string, string> = { claudecode: "Claude Code", codex: "Codex", opencode: "OpenCode", grok: "Grok", gemini: "Gemini", vibe: "Mistral Vibe", antigravity: "Antigravity CLI", hermes: "Hermes" };
+
+/** "Codex · gpt-6.1-sol": how an earlier version is told apart from the current one. */
+export const versionLabel = (mission: { backend?: string | null; model_override?: string | null }): string =>
+  [mission.backend ? HARNESS_NAMES[mission.backend] ?? mission.backend : "", mission.model_override ?? ""].filter(Boolean).join(" · ") || "Earlier version";
+
+const activity = (mission: Dated) => Date.parse(mission.updated_at || mission.created_at || "") || 0;
+
+/** Groups the listed forks of one conversation; maps each version to its group's leader. */
+export function forkLeaders<M extends Linked & Dated>(missions: readonly M[]): Map<string, M> {
+  const byId = new Map(missions.map(m => [m.id, m]));
+  const root = (mission: M) => {
+    const seen = new Set<string>();
+    let current = mission;
+    for (let source = forkSource(current); source && byId.has(source) && !seen.has(source); source = forkSource(current)) { seen.add(current.id); current = byId.get(source)!; }
+    return current.id;
+  };
+  const groups = new Map<string, M[]>();
+  for (const mission of missions) groups.set(root(mission), [...(groups.get(root(mission)) ?? []), mission]);
+  const leaders = new Map<string, M>();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const leader = group.reduce((best, m) => activity(m) > activity(best) ? m : best);
+    for (const mission of group) leaders.set(mission.id, leader);
+  }
+  return leaders;
+}
 
 /** Roots keep the order of the list, and so do the children of each mission.
  * A mission whose parent is not in the list stays a root. */
-export function nestMissions<M extends Linked>(missions: M[]): NestedMission<M>[] {
+export function nestMissions<M extends Linked & Dated>(missions: M[]): NestedMission<M>[] {
+  const leaders = forkLeaders(missions);
   const nodes = new Map(missions.map(mission => [mission.id, { mission, children: [] as NestedMission<M>[] }]));
   const roots: NestedMission<M>[] = [];
+  const versions = new Map<string, NestedMission<M>[]>();
   for (const mission of missions) {
     const node = nodes.get(mission.id)!;
-    const parent = missionParent(mission) ? nodes.get(missionParent(mission)!) : undefined;
+    const leader = leaders.get(mission.id);
+    if (leader && leader.id !== mission.id) {
+      versions.set(leader.id, [...(versions.get(leader.id) ?? []), { ...node, version: true }]);
+      continue;
+    }
+    // A leading fork takes the place of the conversation it continues.
+    const placeOf = leader ? missions.find(m => leaders.get(m.id) === leader && !forkSource(m) ) ?? mission : mission;
+    const parentId = missionParent(placeOf);
+    const parent = parentId ? nodes.get(parentId) : undefined;
     if (parent && parent !== node && !reaches(nodes, parent.mission, mission.id)) parent.children.push(node);
     else roots.push(node);
+  }
+  for (const [leaderId, earlier] of versions) {
+    earlier.sort((a, b) => activity(b.mission) - activity(a.mission));
+    nodes.get(leaderId)!.children.push(...earlier);
   }
   return roots;
 }
@@ -28,9 +89,12 @@ function reaches<M extends Linked>(nodes: Map<string, NestedMission<M>>, from: M
   return false;
 }
 
+/** Launched work inside a mission, at any depth. Earlier versions are not launched work. */
 export function countNested<M>(node: NestedMission<M>, matches: (mission: M) => boolean = () => true): number {
-  return node.children.reduce((sum, child) => sum + Number(matches(child.mission)) + countNested(child, matches), 0);
+  return node.children.reduce((sum, child) => child.version ? sum : sum + Number(matches(child.mission)) + countNested(child, matches), 0);
 }
+
+export const countVersions = <M,>(node: NestedMission<M>): number => node.children.filter(child => child.version).length;
 
 export function holds<M extends Linked>(node: NestedMission<M>, id: string): boolean {
   return node.children.some(child => child.mission.id === id || holds(child, id));

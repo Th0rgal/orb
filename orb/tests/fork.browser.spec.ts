@@ -4,7 +4,7 @@ import { test, expect } from "@playwright/test";
 for (const target of [{ backend: "opencode", name: "OpenCode", model: "builtin/smart", label: "Smart (Default)" }, { backend: "antigravity", name: "Antigravity CLI", model: "node-argon", label: "Node Argon" }]) {
 test(`fork dialog uses ${target.name} on the source destination without mutating it`, async ({ page }) => {
   const source = { id: "original", title: "Original work", status: "active", backend: "grok", model_override: "grok-4.6", project: "test", remote_node_id: "dgx-spark", history: [], created_at: "", updated_at: "" };
-  const fork = { ...source, id: "forked", title: "Original work · fork", backend: target.backend, model_override: target.model };
+  const fork = { ...source, id: "forked", title: "Original work", tags: ["fork-of:original"], updated_at: "2099-01-01T00:00:00Z", backend: target.backend, model_override: target.model };
   let created = false;
   const mutations: { path: string; body: any }[] = [];
   await page.addInitScript(() => { localStorage.setItem("orb.apiUrl", location.origin); localStorage.setItem("orb.jwt", "test"); localStorage.setItem("orb-theme", "dark"); });
@@ -49,7 +49,9 @@ test(`fork dialog uses ${target.name} on the source destination without mutating
   await expect(menu).toHaveCount(0);
   await expect(page.locator(".under-harness")).toHaveText(target.name);
   await expect(page.locator(".row.agent.active")).toHaveCount(1);
-  await expect(page.locator(".row.agent.active")).toContainText("Original work · fork");
+  // The fork leads under the conversation's name; the original folds inside it as an earlier version.
+  await expect(page.locator(".row.agent.active .row-label")).toHaveText("Original work");
+  await expect(page.locator(".tree-entry:has(.row.agent.active) > .launched-toggle")).toHaveAttribute("title", "1 earlier version");
   expect(mutations).toHaveLength(1);
   expect(mutations[0]).toMatchObject({ path: "/api/control/missions/original/fork", body: { backend: target.backend, model_override: target.model } });
   if (target.backend === "antigravity") expect(mutations[0].body.model_effort).toBe("high");
