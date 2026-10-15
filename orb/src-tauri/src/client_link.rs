@@ -77,6 +77,21 @@ pub async fn flush(api_url: &str, token: &str, mission: &str, timeout: Duration)
     let Some(acc) = existing(api_url, token) else {
         return false;
     };
+    // Only a run this link actually carried can be "delivered" by it; for
+    // any other mission the caller must use the HTTP path.
+    let carried = acc
+        .attached
+        .lock()
+        .map(|a| a.contains(mission))
+        .unwrap_or(false)
+        || acc
+            .journals
+            .lock()
+            .map(|j| j.contains_key(mission))
+            .unwrap_or(false);
+    if !carried {
+        return false;
+    }
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         // Drained means: the converter has finished (the run's final output
@@ -291,8 +306,15 @@ impl Journal {
         self.next = self.next.max(seq + 1);
         self.pending = self.pending.split_off(&(seq + 1));
         let tmp = self.dir.join(format!("{}.acked.tmp", self.mission));
-        std::fs::write(&tmp, seq.to_string())?;
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(seq.to_string().as_bytes())?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp, self.ack_path())?;
+        // The cursor must be durable before the log it summarizes goes away,
+        // or a power loss could restart numbering below Core's cursor.
+        std::fs::File::open(&self.dir)?.sync_all()?;
         if self.pending.is_empty() {
             // Everything is on Core: the log can restart empty.
             let _ = std::fs::remove_file(self.log_path());
@@ -310,6 +332,8 @@ struct Account {
     accepted: std::sync::atomic::AtomicBool,
     /// Core refused the link (no transactional store): stop journaling.
     unsupported: std::sync::atomic::AtomicBool,
+    /// Missions attached in this session.
+    attached: Mutex<HashSet<String>>,
     /// Missions whose converter thread is still running.
     converting: Mutex<HashSet<String>>,
 }
@@ -352,6 +376,7 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
         wake: Notify::new(),
         accepted: Default::default(),
         unsupported: Default::default(),
+        attached: Default::default(),
         converting: Default::default(),
     });
     map.insert(key, acc.clone());
@@ -433,9 +458,15 @@ impl Converter {
     /// Returns true once the run is terminal.
     fn apply(&mut self, event: Event, out: &mut Vec<Value>) -> bool {
         if event.reset {
-            // A rewritten answer: live viewers catch up from the final message.
+            // A rewritten answer (snapshot-style harnesses publish every
+            // partial this way): send it whole, like any accumulated delta.
             self.pending.clear();
-            self.text = event.text;
+            if event.text != self.text {
+                self.text = event.text;
+                if !self.text.is_empty() {
+                    out.push(json!({"type":"text_delta","content":self.text}));
+                }
+            }
         } else {
             self.pending.push_str(&event.text);
         }
@@ -483,6 +514,9 @@ pub fn attach(mission: &str, permit: &crate::transfers::Permit) {
     );
     if let Ok(mut converting) = acc.converting.lock() {
         converting.insert(mission.clone());
+    }
+    if let Ok(mut attached) = acc.attached.lock() {
+        attached.insert(mission.clone());
     }
     std::thread::spawn(move || {
         struct Done(Arc<Account>, String);
@@ -539,9 +573,12 @@ async fn uplink(api: String, acc: Arc<Account>) {
             Ok(Stop::Unsupported) => {
                 acc.unsupported
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                // Nothing will ever acknowledge these: drop them.
+                // Nothing will ever acknowledge these. Keep them in memory as
+                // broken (flush reports false, and recovery can still read the
+                // answer for the HTTP fallback), but free the disk.
                 if let Ok(mut journals) = acc.journals.lock() {
-                    for (_, j) in journals.drain() {
+                    for j in journals.values_mut() {
+                        j.broken = true;
                         let _ = std::fs::remove_file(j.log_path());
                     }
                 }
@@ -870,6 +907,7 @@ mod tests {
                 wake: Notify::new(),
                 accepted: Default::default(),
                 unsupported: Default::default(),
+                attached: Default::default(),
                 converting: Default::default(),
             });
             acc.append(

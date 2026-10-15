@@ -19,8 +19,10 @@ export async function clientLinkActive(): Promise<boolean> {
  * Returns false when the link is not in use or could not drain in time.
  */
 export async function flushClientLink(id: string, timeoutMs = 15000): Promise<boolean> {
+  // Not gated on the handshake: a run can finish before `welcome` arrives.
+  // Native flush is false for any run the link did not carry.
   const invoke = nativeInvoke();
-  if (!invoke || !await clientLinkActive()) return false;
+  if (!invoke) return false;
   try { return await invoke("client_link_flush", { connection: connection(), mission: id, timeoutMs }) === true; }
   catch { return false; }
 }
