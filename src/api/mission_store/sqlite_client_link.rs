@@ -46,7 +46,7 @@ pub(super) async fn log(
     mission_id: Uuid,
     client_id: &str,
     seq: u64,
-    event: AgentEvent,
+    event: Option<AgentEvent>,
 ) -> Result<ClientIngest, String> {
     let conn = store.conn.clone();
     let content_dir = store.content_dir.clone();
@@ -61,7 +61,9 @@ pub(super) async fn log(
         if seq != last + 1 {
             return Ok(ClientIngest::Gap { expected: last + 1 });
         }
-        log_event_sync(&tx, &content_dir, mission_id, &event)?;
+        if let Some(event) = &event {
+            log_event_sync(&tx, &content_dir, mission_id, event)?;
+        }
         tx.execute(
             "INSERT INTO client_event_cursors (mission_id,client_id,last_seq,updated_at) VALUES (?1,?2,?3,?4)
              ON CONFLICT(mission_id,client_id) DO UPDATE SET last_seq=excluded.last_seq, updated_at=excluded.updated_at",
@@ -134,19 +136,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            log(&store, m, "a", 1, error(1)).await.unwrap(),
+            log(&store, m, "a", 1, Some(error(1))).await.unwrap(),
             ClientIngest::Stored
         );
         assert_eq!(
-            log(&store, m, "a", 1, error(1)).await.unwrap(),
+            log(&store, m, "a", 1, Some(error(1))).await.unwrap(),
             ClientIngest::Duplicate
         );
         assert_eq!(
-            log(&store, m, "a", 3, error(3)).await.unwrap(),
+            log(&store, m, "a", 3, Some(error(3))).await.unwrap(),
             ClientIngest::Gap { expected: 2 }
         );
         assert_eq!(
-            log(&store, m, "b", 1, error(1)).await.unwrap(),
+            log(&store, m, "b", 1, Some(error(1))).await.unwrap(),
             ClientIngest::Stored
         );
         assert_eq!(cursor(&store, m, "a").await.unwrap(), 1);

@@ -3146,7 +3146,7 @@ impl MissionStore for SqliteMissionStore {
         mission_id: Uuid,
         client_id: &str,
         seq: u64,
-        event: AgentEvent,
+        event: Option<AgentEvent>,
     ) -> Result<ClientIngest, String> {
         sqlite_client_link::log(self, mission_id, client_id, seq, event).await
     }

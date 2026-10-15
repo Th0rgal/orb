@@ -10,7 +10,8 @@
 //! - client → core: `hello {client_id}` (first frame), `event {mission_id,
 //!   run_id, generation, seq, event}`, `cursor {mission_id}`, `ping`.
 //! - core → client: `welcome`, `ack {mission_id, seq}`, `gap {mission_id,
-//!   expected}`, `rejected {mission_id, seq, reason}` (permanent),
+//!   expected}`, `rejected {mission_id, seq, reason}` (permanent; the
+//!   sequence is consumed so later events still flow),
 //!   `retry {mission_id, seq, reason}` (transient), `cursor {mission_id,
 //!   last_seq}`, `pong`.
 //!
@@ -337,18 +338,59 @@ pub async fn ingest(
     if seq == 0 {
         return reject("sequences start at 1");
     }
-    match worker_location::resolved_client_owner(store, mission_id).await {
-        Ok(Some(owner)) if owner == client_id => {}
-        Ok(_) => return reject("mission is not run by this computer"),
-        Err(e) => return retry(e),
-    }
-    let event: ClientEvent = match serde_json::from_value(event) {
-        Ok(event) => event,
-        Err(e) => return reject(&format!("unsupported event: {e}")),
-    };
     let lock = worker_location::dispatch_lock(&format!("client-link:{mission_id}"));
     let _guard = lock.lock().await;
-    // Fence under the lock: a stopped or transferred run cannot append.
+    // Decide under the lock (the fence must not race a stop), then commit.
+    // A refused frame still consumes its sequence, so later events of the
+    // client's current run are not wedged behind it.
+    let verdict = match admit(store, client_id, mission_id, run_id, generation, event).await {
+        Ok(verdict) => verdict,
+        Err(reason) => return retry(reason),
+    };
+    let (event, refusal) = match verdict {
+        Ok(event) => (Some(event), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    match store
+        .log_client_event(mission_id, client_id, seq, event.clone())
+        .await
+    {
+        Ok(ClientIngest::Stored) => match (event, refusal) {
+            (Some(event), _) => {
+                let _ = events_tx.send(event);
+                Reply::Ack { mission_id, seq }
+            }
+            (None, reason) => reject(&reason.unwrap_or_default()),
+        },
+        // Already resolved earlier (stored or refused); the client moves on.
+        Ok(ClientIngest::Duplicate) => Reply::Ack { mission_id, seq },
+        Ok(ClientIngest::Gap { expected }) => Reply::Gap {
+            mission_id,
+            expected,
+        },
+        Err(e) if e == CLIENT_LINK_UNSUPPORTED => reject(&e),
+        Err(e) => retry(e),
+    }
+}
+
+/// `Ok(Ok(event))` to store, `Ok(Err(reason))` to refuse permanently,
+/// `Err(reason)` for a transient failure the client should retry.
+async fn admit(
+    store: &Arc<dyn MissionStore>,
+    client_id: &str,
+    mission_id: Uuid,
+    run_id: Uuid,
+    generation: u64,
+    raw: serde_json::Value,
+) -> Result<Result<AgentEvent, String>, String> {
+    match worker_location::resolved_client_owner(store, mission_id).await? {
+        Some(owner) if owner == client_id => {}
+        _ => return Ok(Err("mission is not run by this computer".into())),
+    }
+    let event: ClientEvent = match serde_json::from_value(raw) {
+        Ok(event) => event,
+        Err(e) => return Ok(Err(format!("unsupported event: {e}"))),
+    };
     match machine_transfer::check_client_receipt_in(
         store,
         mission_id,
@@ -357,27 +399,10 @@ pub async fn ingest(
     )
     .await
     {
-        Ok(Some(_)) => {}
-        Ok(None) => return reject("mission has no active local run"),
-        Err((StatusCode::CONFLICT, reason)) => return reject(&reason),
-        Err((_, reason)) => return retry(reason),
-    }
-    let event = event.into_agent_event(mission_id, client_id);
-    match store
-        .log_client_event(mission_id, client_id, seq, event.clone())
-        .await
-    {
-        Ok(ClientIngest::Stored) => {
-            let _ = events_tx.send(event);
-            Reply::Ack { mission_id, seq }
-        }
-        Ok(ClientIngest::Duplicate) => Reply::Ack { mission_id, seq },
-        Ok(ClientIngest::Gap { expected }) => Reply::Gap {
-            mission_id,
-            expected,
-        },
-        Err(e) if e == CLIENT_LINK_UNSUPPORTED => reject(&e),
-        Err(e) => retry(e),
+        Ok(Some(_)) => Ok(Ok(event.into_agent_event(mission_id, client_id))),
+        Ok(None) => Ok(Err("mission has no active local run".into())),
+        Err((StatusCode::CONFLICT, reason)) => Ok(Err(reason)),
+        Err((_, reason)) => Err(reason),
     }
 }
 
@@ -639,13 +664,13 @@ mod tests {
             ingest(&f.store, &tx, &f.client, frame(&f, 1, status)).await,
             Reply::Rejected { .. }
         ));
-        let mut stale = frame(&f, 1, call("a"));
+        let mut stale = frame(&f, 2, call("a"));
         stale.run_id = Uuid::new_v4();
         assert!(matches!(
             ingest(&f.store, &tx, &f.client, stale).await,
             Reply::Rejected { .. }
         ));
-        let mut stale = frame(&f, 1, call("a"));
+        let mut stale = frame(&f, 3, call("a"));
         stale.generation = 2;
         assert!(matches!(
             ingest(&f.store, &tx, &f.client, stale).await,
@@ -657,9 +682,18 @@ mod tests {
             ingest(&f.store, &tx, &f.client, unknown).await,
             Reply::Rejected { .. }
         ));
+        // Each refusal consumed its sequence: the next valid event (seq 4,
+        // after the three refused frames of this client) is accepted.
         assert_eq!(
             f.store.client_event_cursor(f.id, &f.client).await.unwrap(),
-            0
+            3
+        );
+        assert_eq!(
+            ingest(&f.store, &tx, &f.client, frame(&f, 4, call("ok"))).await,
+            Reply::Ack {
+                mission_id: f.id,
+                seq: 4
+            }
         );
     }
 

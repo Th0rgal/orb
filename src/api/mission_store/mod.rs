@@ -2298,12 +2298,14 @@ pub trait MissionStore: Send + Sync {
     }
 
     /// Persist one client-link event together with its cursor, atomically.
+    /// `None` consumes the sequence without storing anything (a refused frame),
+    /// so one permanent refusal cannot wedge the client's stream.
     async fn log_client_event(
         &self,
         _mission_id: Uuid,
         _client_id: &str,
         _seq: u64,
-        _event: AgentEvent,
+        _event: Option<AgentEvent>,
     ) -> Result<ClientIngest, String> {
         Err(CLIENT_LINK_UNSUPPORTED.into())
     }
