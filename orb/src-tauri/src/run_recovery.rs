@@ -209,7 +209,13 @@ async fn settle(c: &Connection, id: &str, receipt: &Value) -> Result<(), String>
         // The link could not drain in time: deliver the journaled answer over
         // HTTP (same message id as the journal's, so Core upserts) before the
         // status closes the run.
-        if let Some(text) = crate::client_link::pending_answer(&c.api_url, &c.token, id) {
+        if let Some(text) = crate::client_link::pending_answer(
+            &c.api_url,
+            &c.token,
+            id,
+            receipt["run_id"].as_str().unwrap_or_default(),
+            receipt["generation"].as_u64().unwrap_or_default(),
+        ) {
             let response = post(c,id,"client-transcript",json!({"id":uuid::Uuid::new_v4(),"role":"assistant","content":text,"run_id":receipt["run_id"],"generation":receipt["generation"]})).await?;
             if !response.status().is_success() {
                 return Err(format!(

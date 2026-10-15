@@ -124,7 +124,13 @@ pub fn ensure(api_url: &str, token: &str) -> bool {
 
 /// The newest answer text still waiting in this mission's journal: the final
 /// `assistant_message` if journaled, else the latest accumulated `text_delta`.
-pub fn pending_answer(api_url: &str, token: &str, mission: &str) -> Option<String> {
+pub fn pending_answer(
+    api_url: &str,
+    token: &str,
+    mission: &str,
+    run_id: &str,
+    generation: u64,
+) -> Option<String> {
     let acc = existing(api_url, token)?;
     let journals = acc.journals.lock().ok()?;
     let pending = &journals.get(mission)?.pending;
@@ -132,7 +138,12 @@ pub fn pending_answer(api_url: &str, token: &str, mission: &str) -> Option<Strin
         pending
             .values()
             .rev()
-            .find(|f| f["event"]["type"] == kind)
+            // Only this run's frames: an older generation may linger.
+            .find(|f| {
+                f["event"]["type"] == kind
+                    && f["run_id"] == run_id
+                    && f["generation"].as_u64() == Some(generation)
+            })
             .and_then(|f| f["event"]["content"].as_str())
             .filter(|t| !t.trim().is_empty())
             .map(str::to_owned)
@@ -297,6 +308,8 @@ struct Account {
     journals: Mutex<HashMap<String, Journal>>,
     wake: Notify,
     accepted: std::sync::atomic::AtomicBool,
+    /// Core refused the link (no transactional store): stop journaling.
+    unsupported: std::sync::atomic::AtomicBool,
     /// Missions whose converter thread is still running.
     converting: Mutex<HashSet<String>>,
 }
@@ -338,6 +351,7 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
         journals: Mutex::new(journals),
         wake: Notify::new(),
         accepted: Default::default(),
+        unsupported: Default::default(),
         converting: Default::default(),
     });
     map.insert(key, acc.clone());
@@ -348,7 +362,7 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
 
 impl Account {
     fn append(&self, mission: &str, frames: Vec<Value>) {
-        if frames.is_empty() {
+        if frames.is_empty() || self.unsupported.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
         let Ok(mut journals) = self.journals.lock() else {
@@ -523,6 +537,14 @@ async fn uplink(api: String, acc: Arc<Account>) {
     loop {
         match session(&api, &acc).await {
             Ok(Stop::Unsupported) => {
+                acc.unsupported
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                // Nothing will ever acknowledge these: drop them.
+                if let Ok(mut journals) = acc.journals.lock() {
+                    for (_, j) in journals.drain() {
+                        let _ = std::fs::remove_file(j.log_path());
+                    }
+                }
                 acc.accepted
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 eprintln!("[client-link] Core does not support the client link; uplink stopped");
@@ -847,6 +869,7 @@ mod tests {
                 journals: Mutex::new(HashMap::new()),
                 wake: Notify::new(),
                 accepted: Default::default(),
+                unsupported: Default::default(),
                 converting: Default::default(),
             });
             acc.append(
