@@ -225,13 +225,32 @@ async fn start_worker(path: PathBuf, c: Connection) {
                     continue;
                 };
                 let generation = record.native_generation.clone();
+                // With the client link in use, the text travels in the event
+                // journal; the snapshot carries status only, and a terminal
+                // snapshot (which closes the run) waits for the journal first.
+                let mut snapshot = record.snapshot.clone();
+                if crate::client_link::owns(&c.api_url, &c.token) {
+                    // If the journal cannot drain in time, the snapshot keeps
+                    // the text: a rare duplicate beats a lost final answer.
+                    let delivered = snapshot.status == "active"
+                        || crate::client_link::flush(
+                            &c.api_url,
+                            &c.token,
+                            &id,
+                            std::time::Duration::from_secs(15),
+                        )
+                        .await;
+                    if delivered {
+                        snapshot.text.clear();
+                    }
+                }
                 let response = client
                     .post(format!(
                         "{}/api/control/local-origins",
                         c.api_url.trim_end_matches('/')
                     ))
                     .bearer_auth(&c.token)
-                    .json(&record.snapshot)
+                    .json(&snapshot)
                     .send()
                     .await;
                 match response {
@@ -527,6 +546,18 @@ pub async fn local_origin_launch(
     if started.is_ok() {
         record.native_generation = local_agents::native_generation(&id.to_string());
         write(&path, &record)?;
+        // The initial run is generation 1 of this origin's run receipt.
+        crate::client_link::attach(
+            &id.to_string(),
+            &crate::transfers::Permit {
+                legacy: false,
+                api_url: connection.api_url.clone(),
+                token: connection.token.clone(),
+                run_id: run_id.to_string(),
+                generation: 1,
+                client_id: record.snapshot.origin.client_id.to_string(),
+            },
+        );
     }
     if let Err(error) = started {
         if record.snapshot.status != "failed" {

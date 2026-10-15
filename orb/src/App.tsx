@@ -1,4 +1,4 @@
-import { clientLinkActive } from "./clientLink";
+import { deliverAssistantText } from "./clientLink";
 import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
 import type {CodexServiceTier} from './api';
 import { Picker } from "./Picker";
@@ -1739,7 +1739,7 @@ export default function App() {
   const finishLocal = async (id: string, run: ClientRunReceipt) => {
     try {
       const state = await followLocal(id, () => {});
-      if (state.text.trim() && !await clientLinkActive()) await appendClientTranscript(id, "assistant", state.text, undefined, run);
+      await deliverAssistantText(id, state.text, run);
       const failed = (state.exit_code != null && state.exit_code !== 0) || (!!state.error && !state.text.trim());
       if (failed) recordLocalFailure(id, state.error || `Local process exited with code ${state.exit_code}`);
       await setClientMissionStatus(id, failed ? "failed" : "awaiting_user", run);

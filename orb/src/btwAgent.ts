@@ -1,3 +1,4 @@
+import {deliverAssistantText} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
 import {btwConfig} from './btwSettings';
@@ -88,7 +89,7 @@ const finishing=new Map<string,Promise<unknown>>();
 function follow(id:string,receipt?:import('./clientRuns').ClientRunReceipt){
  if(finishing.has(id))return;
  const version=connectionVersion();
- const task=followLocal(id,()=>{}).then(async state=>{if(version!==connectionVersion())return;if(state.text.trim())await appendClientTranscript(id,'assistant',state.text,undefined,receipt);await setClientMissionStatus(id,state.exit_code||state.error||!state.text.trim()?'failed':'awaiting_user',receipt);}).finally(()=>finishing.delete(id));
+ const task=followLocal(id,()=>{}).then(async state=>{if(version!==connectionVersion())return;await deliverAssistantText(id,state.text,receipt);await setClientMissionStatus(id,state.exit_code||state.error||!state.text.trim()?'failed':'awaiting_user',receipt);}).finally(()=>finishing.delete(id));
  finishing.set(id,task);void task.catch(()=>{});
 }
 export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideEvent)=>void){

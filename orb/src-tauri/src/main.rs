@@ -255,6 +255,7 @@ fn main() {
             transfers::local_machine_transfer,
             transfers::local_machine_identity,
             client_link::client_link_active,
+            client_link::client_link_flush,
             local_agents::local_agents_poll,
             local_wakeups::local_wakeups_sync,
             local_wakeups::local_wakeups_cancel,

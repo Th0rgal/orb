@@ -37,17 +37,85 @@ pub fn enabled() -> bool {
         || home().is_some_and(|h| h.join("enabled").exists())
 }
 
-/// True once Core has accepted the link for this API in this session. Only
-/// then does the webview stop posting the assistant transcript itself (the
-/// journal delivers it instead, so the two never duplicate or both go missing).
-#[tauri::command]
-pub fn client_link_active(api_url: String) -> bool {
+/// The signed-in user of a Core token (JWT `sub`); accounts are keyed by
+/// Core *and* user so a different sign-in never rides another user's socket.
+fn subject(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice::<Value>(&bytes).ok()?["sub"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn key(api_url: &str, token: &str) -> Option<String> {
+    Some(format!(
+        "{}\n{}",
+        api_url.trim_end_matches('/'),
+        subject(token)?
+    ))
+}
+
+fn existing(api_url: &str, token: &str) -> Option<Arc<Account>> {
+    let key = key(api_url, token)?;
+    accounts().lock().ok()?.get(&key).cloned()
+}
+
+/// True once Core accepted the link for this account in this session: only
+/// then is the journal, not the webview, responsible for the assistant text.
+pub fn owns(api_url: &str, token: &str) -> bool {
     enabled()
-        && accounts()
-            .lock()
-            .ok()
-            .and_then(|map| map.get(api_url.trim_end_matches('/')).cloned())
+        && existing(api_url, token)
             .is_some_and(|acc| acc.accepted.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Wait until Core acknowledged every journaled event of `mission`. Callers
+/// close a run only after this, so the final text is never fenced out.
+pub async fn flush(api_url: &str, token: &str, mission: &str, timeout: Duration) -> bool {
+    let Some(acc) = existing(api_url, token) else {
+        return false;
+    };
+    // Let the converter turn the run's last output into journal entries.
+    tokio::time::sleep(COALESCE * 2).await;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let drained = acc
+            .journals
+            .lock()
+            .map(|j| j.get(mission).is_none_or(|j| j.pending.is_empty()))
+            .unwrap_or(false);
+        if drained {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct Connection {
+    pub api_url: String,
+    pub token: String,
+}
+
+#[tauri::command]
+pub fn client_link_active(connection: Connection) -> bool {
+    owns(&connection.api_url, &connection.token)
+}
+
+#[tauri::command]
+pub async fn client_link_flush(connection: Connection, mission: String, timeout_ms: u64) -> bool {
+    flush(
+        &connection.api_url,
+        &connection.token,
+        &mission,
+        Duration::from_millis(timeout_ms.min(60_000)),
+    )
+    .await
 }
 
 // === Journal ===
@@ -101,7 +169,7 @@ impl Journal {
         j
     }
 
-    /// Append a batch durably; returns the assigned sequences.
+    /// Append a batch durably.
     fn append(&mut self, frames: Vec<Value>) -> std::io::Result<()> {
         if frames.is_empty() {
             return Ok(());
@@ -113,16 +181,21 @@ impl Journal {
             .open(self.log_path())?;
         let mut buf = Vec::new();
         let mut staged = Vec::new();
-        for mut frame in frames {
-            let seq = self.next;
-            self.next += 1;
+        for (offset, mut frame) in frames.into_iter().enumerate() {
+            let seq = self.next + offset as u64;
             frame["seq"] = json!(seq);
             serde_json::to_writer(&mut buf, &frame)?;
             buf.push(b'\n');
             staged.push((seq, frame));
         }
-        file.write_all(&buf)?;
-        file.sync_data()?;
+        // Numbers are committed only once the batch is durable; a failed or
+        // partial write is truncated away so no sequence is skipped or reused.
+        let before = file.metadata()?.len();
+        if let Err(error) = file.write_all(&buf).and_then(|_| file.sync_data()) {
+            let _ = file.set_len(before);
+            return Err(error);
+        }
+        self.next += staged.len() as u64;
         self.pending.extend(staged);
         Ok(())
     }
@@ -164,12 +237,15 @@ fn accounts() -> &'static Mutex<HashMap<String, Arc<Account>>> {
 /// token. Leftover journals from a previous session are loaded for replay.
 fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> {
     let api = api_url.trim_end_matches('/').to_string();
+    let key = key(&api, token)?;
     let mut map = accounts().lock().ok()?;
-    if let Some(acc) = map.get(&api) {
+    if let Some(acc) = map.get(&key) {
+        // A refreshed token for the same user: the session reconnects with it.
         *acc.token.lock().ok()? = token.into();
+        acc.wake.notify_one();
         return Some(acc.clone());
     }
-    let dir = home()?.join(crate::project_context_store::digest(api.as_bytes()));
+    let dir = home()?.join(crate::project_context_store::digest(key.as_bytes()));
     let mut journals = HashMap::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -190,7 +266,7 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
         wake: Notify::new(),
         accepted: Default::default(),
     });
-    map.insert(api.clone(), acc.clone());
+    map.insert(key, acc.clone());
     let task = acc.clone();
     tauri::async_runtime::spawn(async move { uplink(api, task).await });
     Some(acc)
@@ -408,6 +484,10 @@ async fn session(api: &str, acc: &Arc<Account>) -> Result<Stop, String> {
     let mut sent: HashMap<String, Option<u64>> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
+        if acc.token.lock().map_err(|e| e.to_string())?.as_str() != token {
+            // Reconnect so Core authenticates the newest token.
+            return Ok(Stop::Closed);
+        }
         // Ask for the cursor of every journal not yet known in this session,
         // then send whatever the window allows.
         let mut frames = Vec::new();
@@ -723,6 +803,25 @@ mod tests {
             assert_eq!(journal.acked, 5);
             assert!(journal.pending.is_empty());
         });
+    }
+
+    #[test]
+    fn accounts_are_keyed_by_core_and_user() {
+        use base64::Engine;
+        let jwt = |sub: &str| {
+            let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(json!({ "sub": sub }).to_string());
+            format!("h.{body}.s")
+        };
+        assert_eq!(
+            key("https://core/", &jwt("a")),
+            key("https://core", &jwt("a"))
+        );
+        assert_ne!(
+            key("https://core", &jwt("a")),
+            key("https://core", &jwt("b"))
+        );
+        assert_eq!(key("https://core", "not-a-jwt"), None);
     }
 
     #[test]
