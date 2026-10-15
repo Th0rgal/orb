@@ -79,18 +79,27 @@ fn reveal_download(name: String) -> Result<(), String> {
     let file = downloads.join(&name);
     #[cfg(target_os = "macos")]
     let status = if file.exists() {
-        std::process::Command::new("open").arg("-R").arg(&file).status()
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&file)
+            .status()
     } else {
         std::process::Command::new("open").arg(&downloads).status()
     };
     #[cfg(target_os = "windows")]
     let status = if file.exists() {
-        std::process::Command::new("explorer").arg(format!("/select,{}", file.display())).status()
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", file.display()))
+            .status()
     } else {
-        std::process::Command::new("explorer").arg(&downloads).status()
+        std::process::Command::new("explorer")
+            .arg(&downloads)
+            .status()
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let status = std::process::Command::new("xdg-open").arg(&downloads).status();
+    let status = std::process::Command::new("xdg-open")
+        .arg(&downloads)
+        .status();
     match status {
         Ok(status) if status.success() => Ok(()),
         _ => Err("Could not open the Downloads folder".into()),
@@ -126,6 +135,7 @@ fn open_url(url: String) -> Result<(), String> {
 
 mod bindings;
 mod biometrics;
+mod client_link;
 mod diagnostics;
 use bindings::local_bindings;
 
@@ -244,6 +254,7 @@ fn main() {
             local_agents::local_agents_write,
             transfers::local_machine_transfer,
             transfers::local_machine_identity,
+            client_link::client_link_active,
             local_agents::local_agents_poll,
             local_wakeups::local_wakeups_sync,
             local_wakeups::local_wakeups_cancel,

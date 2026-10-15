@@ -1,5 +1,6 @@
 import {createSignal,batch} from 'solid-js';
 import {mergeById} from './poll';
+import {clientLinkActive} from './clientLink';
 import {connectionVersion,getMission,reopenMission,appendClientTranscript,setClientMissionStatus} from './api';
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
@@ -272,7 +273,7 @@ export function startLocalQueueWorker(){
   if(row.result){
    const trimmed=row.result.text.trim();
    if(trimmed&&trimmed!==row.lastSyncedText){
-    await appendClientTranscript(row.mission,'assistant',row.result.text,row.resultId,row.receipt);
+    if(!await clientLinkActive())await appendClientTranscript(row.mission,'assistant',row.result.text,row.resultId,row.receipt);
     row.lastSyncedText=trimmed;
     await update(key,row.id,stored=>{stored.lastSyncedText=trimmed;});
    }

@@ -552,6 +552,20 @@ pub fn local_agents_subscribe(
     run.text.subscribe(on_event)
 }
 
+/// In-process subscription (client link uplink); same atomic snapshot rule.
+pub fn subscribe_native(
+    id: &str,
+    sink: std::sync::mpsc::Sender<OutputEvent>,
+) -> Result<u64, String> {
+    let run = runs()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(id)
+        .cloned()
+        .ok_or("no local run")?;
+    run.text.subscribe_native(sink)
+}
+
 #[tauri::command]
 pub fn local_agents_unsubscribe(id: String, token: u64) -> Result<(), String> {
     if let Some(run) = runs().lock().map_err(|e| e.to_string())?.get(&id) {
