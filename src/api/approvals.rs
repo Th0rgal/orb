@@ -306,18 +306,43 @@ fn quoted(raw: &str) -> String {
     format!("\"{clean}\"")
 }
 
-/// Human description of a protected request, written by Core.
-async fn describe(state: &Arc<AppState>, method: &Method, path: &str, body: &str) -> String {
+fn typed<T: serde::de::DeserializeOwned>(body: &str) -> Result<T, String> {
+    // Parse exactly as the handler will (serde rejects duplicate fields), so the
+    // description cannot differ from what gets executed.
+    serde_json::from_str(if body.trim().is_empty() { "{}" } else { body })
+        .map_err(|e| format!("Body does not match this operation: {e}"))
+}
+
+fn no_body(body: &str) -> Result<(), String> {
+    if body.is_empty() {
+        Ok(())
+    } else {
+        Err("This operation takes no body".into())
+    }
+}
+
+/// Human description of a protected request, written by Core. Every value a
+/// client or mission controls is quoted; the body is parsed with the handler's
+/// own types, and a request that would not parse gets no challenge.
+async fn describe(
+    state: &Arc<AppState>,
+    method: &Method,
+    path: &str,
+    body: &str,
+) -> Result<String, String> {
+    use super::bitwarden::{
+        ApproveRequest, CreateBitwardenSecretRequest, DefaultAccessRequest,
+        UpdateBitwardenConfigRequest, UpdateBitwardenSecretRequest,
+    };
     let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
-    let body: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    match (method, seg.as_slice()) {
+    Ok(match (method, seg.as_slice()) {
         (&Method::POST, ["", "api", "bitwarden", "requests", id, action]) => {
             let snapshot = super::secret_broker::broker(state).snapshot().await;
             let r = snapshot["requests"]
                 .as_array()
                 .and_then(|a| a.iter().find(|r| r["id"].as_str() == Some(*id)))
                 .cloned()
-                .unwrap_or_default();
+                .ok_or("Unknown request")?;
             let project = match r["project_id"].as_str() {
                 Some(pid) => super::bitwarden::list_projects_raw(state)
                     .await
@@ -327,7 +352,6 @@ async fn describe(state: &Arc<AppState>, method: &Method, path: &str, body: &str
                     .unwrap_or_else(|| quoted(pid)),
                 None => "every project".into(),
             };
-            // Mission titles and secret names come from missions: quote them.
             let who = format!(
                 "mission {}",
                 quoted(r["mission_title"].as_str().unwrap_or("untitled"))
@@ -337,56 +361,88 @@ async fn describe(state: &Arc<AppState>, method: &Method, path: &str, body: &str
                 (_, Some(k)) => format!("read secret {} from {project}", quoted(k)),
                 _ => format!("read {project}"),
             };
-            if *action == "reject" {
-                format!("Decline: {who} wants to {what}")
-            } else if r["kind"].as_str() == Some("write") {
-                format!("Allow {who} to {what}")
-            } else {
-                let scope = match body["scope"].as_str() {
-                    Some("all") => "grant: ALL projects for 24 h".to_string(),
-                    Some("project") => format!("grant: whole project {project} for 24 h"),
-                    _ => "grant: this secret only for 24 h".to_string(),
-                };
-                format!("Allow {who} to {what}; {scope}")
+            match *action {
+                "reject" => {
+                    no_body(body)?;
+                    format!("Decline: {who} wants to {what}")
+                }
+                "approve" => {
+                    let req: ApproveRequest = typed(body)?;
+                    if r["kind"].as_str() == Some("write") {
+                        format!("Allow {who} to {what}")
+                    } else {
+                        let hours = req
+                            .ttl_hours
+                            .unwrap_or(super::secret_broker::DEFAULT_GRANT_TTL_HOURS)
+                            .clamp(1, 24 * 30);
+                        let scope = match req.scope.as_deref() {
+                            Some("all") => format!("grant: ALL projects for {hours} h"),
+                            Some("project") => {
+                                format!("grant: whole project {project} for {hours} h")
+                            }
+                            Some("secret") | None => {
+                                format!("grant: this secret only for {hours} h")
+                            }
+                            Some(other) => return Err(format!("Unknown scope {}", quoted(other))),
+                        };
+                        format!("Allow {who} to {what}; {scope}")
+                    }
+                }
+                _ => return Err("Unknown request action".into()),
             }
         }
         (&Method::PUT, ["", "api", "bitwarden", "default-access", slug]) => {
-            let n = body["project_ids"].as_array().map(|a| a.len()).unwrap_or(0);
-            format!("Set default secret access for {slug} to {n} Bitwarden project(s)")
+            let req: DefaultAccessRequest = typed(body)?;
+            format!(
+                "Set default secret access for {} to {} Bitwarden project(s)",
+                quoted(slug),
+                req.project_ids.len()
+            )
         }
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => {
+            let _: UpdateBitwardenConfigRequest = typed(body)?;
             "Change the Bitwarden connection".into()
         }
         (&Method::GET, ["", "api", "bitwarden", "secrets", _, "reveal"]) => {
+            no_body(body)?;
             "Reveal a secret value".into()
         }
         (&Method::POST, ["", "api", "bitwarden", "projects", _, "secrets"]) => {
-            format!("Create secret {}", body["key"].as_str().unwrap_or(""))
+            let req: CreateBitwardenSecretRequest = typed(body)?;
+            format!("Create secret {}", quoted(&req.key))
         }
         (&Method::PUT, ["", "api", "bitwarden", "secrets", _]) => {
-            format!("Edit secret {}", body["key"].as_str().unwrap_or(""))
+            let req: UpdateBitwardenSecretRequest = typed(body)?;
+            format!(
+                "Edit secret {}",
+                quoted(req.key.as_deref().unwrap_or("(name unchanged)"))
+            )
         }
-        (&Method::DELETE, ["", "api", "bitwarden", "secrets", _]) => "Delete a secret".into(),
+        (&Method::DELETE, ["", "api", "bitwarden", "secrets", _]) => {
+            no_body(body)?;
+            "Delete a secret".into()
+        }
         (&Method::DELETE, ["", "api", "approvals", "devices", _]) => {
+            no_body(body)?;
             "Remove an approval device".into()
         }
         (&Method::PUT, ["", "api", "approvals", "mode"]) => {
-            format!(
-                "Set approval mode to {}",
-                body["mode"].as_str().unwrap_or("?")
-            )
+            let req: ModeRequest = typed(body)?;
+            format!("Set approval mode to {:?}", req.mode).to_lowercase()
         }
         (&Method::POST, ["", "api", "approvals", "devices"]) => {
+            let req: EnrollRequest = typed(body)?;
             format!(
-                "Enroll approval device {}",
-                body["name"].as_str().unwrap_or("")
+                "Enroll approval device {} ({})",
+                quoted(&req.name),
+                quoted(&req.platform)
             )
         }
         (&Method::POST, ["", "api", "settings", "restore"]) => {
             "Restore backend settings from a backup".into()
         }
-        _ => format!("{method} {path}"),
-    }
+        _ => return Err("This request does not need a device approval".into()),
+    })
 }
 
 /// Operations that need a device signature.
@@ -533,7 +589,9 @@ async fn challenge(
         }
         None => sha256_hex(req.body.as_bytes()),
     };
-    let summary = describe(&state, &method_parsed, &path, &req.body).await;
+    let summary = describe(&state, &method_parsed, &path, &req.body)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let (id, c) = approvals(&state)
         .issue(&method, &path, &body_hash, &summary)
         .await;
