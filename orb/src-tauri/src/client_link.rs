@@ -122,6 +122,24 @@ pub fn ensure(api_url: &str, token: &str) -> bool {
     account(api_url, token, &client_id).is_some()
 }
 
+/// The newest answer text still waiting in this mission's journal: the final
+/// `assistant_message` if journaled, else the latest accumulated `text_delta`.
+pub fn pending_answer(api_url: &str, token: &str, mission: &str) -> Option<String> {
+    let acc = existing(api_url, token)?;
+    let journals = acc.journals.lock().ok()?;
+    let pending = &journals.get(mission)?.pending;
+    let newest = |kind: &str| {
+        pending
+            .values()
+            .rev()
+            .find(|f| f["event"]["type"] == kind)
+            .and_then(|f| f["event"]["content"].as_str())
+            .filter(|t| !t.trim().is_empty())
+            .map(str::to_owned)
+    };
+    newest("assistant_message").or_else(|| newest("text_delta"))
+}
+
 #[derive(serde::Deserialize)]
 pub struct Connection {
     pub api_url: String,
