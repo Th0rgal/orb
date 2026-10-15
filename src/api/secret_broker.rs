@@ -1,0 +1,1112 @@
+//! Mission secrets broker.
+//!
+//! Missions never hold the Bitwarden machine token. They ask Core through the
+//! `secret_*` MCP tools; Core reads Bitwarden on their behalf when the
+//! mission's Paloma project has default access to the secret's Bitwarden
+//! project, or when the operator approved a grant for that mission. Writes
+//! always wait for operator approval.
+//!
+//! Grants, pending requests and the read audit log persist in
+//! `<working_dir>/.sandboxed-sh/secret_broker.json`. Secret values are never
+//! stored there, except a pending write's value, which is encrypted with the
+//! backend's `env_crypto` key and dropped once the request is resolved.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+use super::bitwarden::{self, BitwardenSecretDetail, BitwardenSecretSummary};
+use super::routes::AppState;
+use crate::library::env_crypto;
+
+/// Default lifetime of an approved grant.
+pub const DEFAULT_GRANT_TTL_HOURS: i64 = 24;
+/// Pending requests nobody answered expire after this long.
+const REQUEST_TTL_HOURS: i64 = 24;
+/// How long a tool call waits for the operator before returning `pending`.
+/// Stays under the MCP client's 30 s HTTP timeout.
+const APPROVAL_WAIT: Duration = Duration::from_secs(20);
+const AUDIT_LIMIT: usize = 500;
+const LIST_CACHE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GrantScope {
+    Secret { key: String },
+    Project { project_id: String },
+    All,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Grant {
+    pub id: Uuid,
+    pub mission_id: Uuid,
+    #[serde(default)]
+    pub mission_title: Option<String>,
+    #[serde(default)]
+    pub paloma_project: Option<String>,
+    pub scope: GrantScope,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestKind {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretRequest {
+    pub id: Uuid,
+    pub kind: RequestKind,
+    pub status: RequestStatus,
+    pub mission_id: Uuid,
+    #[serde(default)]
+    pub mission_title: Option<String>,
+    #[serde(default)]
+    pub paloma_project: Option<String>,
+    /// Secret name asked for (read of one secret, or the write target).
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Bitwarden project asked for (project read, or write destination).
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// `true` when a read asks for every project.
+    #[serde(default)]
+    pub all_projects: bool,
+    pub reason: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// SHA-256 of a write's value, to tell a retry from a new value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_sha256: Option<String>,
+    /// Encrypted value of a pending write. Never serialized to clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_value: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub resolved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl SecretRequest {
+    /// Client view: the encrypted value of a write never leaves Core.
+    pub fn public(&self) -> Value {
+        let mut v = serde_json::to_value(self).unwrap_or_default();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("encrypted_value");
+            o.remove("value_sha256");
+        }
+        v
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub at: DateTime<Utc>,
+    pub mission_id: Uuid,
+    #[serde(default)]
+    pub paloma_project: Option<String>,
+    pub key: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// `default`, `grant`, or `write`.
+    pub via: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Persisted {
+    #[serde(default)]
+    grants: Vec<Grant>,
+    #[serde(default)]
+    requests: Vec<SecretRequest>,
+    #[serde(default)]
+    audit: Vec<AuditEntry>,
+}
+
+pub struct SecretBroker {
+    path: PathBuf,
+    data: Mutex<Persisted>,
+    list_cache: Mutex<Option<(Instant, Vec<BitwardenSecretSummary>)>>,
+    changed: tokio::sync::Notify,
+    /// One approve/reject at a time, so a request is never acted on twice.
+    resolving: Mutex<()>,
+}
+
+static BROKER: OnceLock<Arc<SecretBroker>> = OnceLock::new();
+
+pub fn broker(state: &AppState) -> Arc<SecretBroker> {
+    BROKER
+        .get_or_init(|| {
+            let path = state
+                .config
+                .working_dir
+                .join(".sandboxed-sh")
+                .join("secret_broker.json");
+            let data = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default();
+            Arc::new(SecretBroker {
+                path,
+                data: Mutex::new(data),
+                list_cache: Mutex::new(None),
+                changed: tokio::sync::Notify::new(),
+                resolving: Mutex::new(()),
+            })
+        })
+        .clone()
+}
+
+/// What a mission may read without asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Access {
+    pub all: bool,
+    pub projects: Vec<String>,
+    pub keys: Vec<String>,
+}
+
+impl Access {
+    pub fn allows(&self, key: &str, project_id: Option<&str>) -> bool {
+        self.all
+            || self.keys.iter().any(|k| k == key)
+            || project_id.is_some_and(|p| self.projects.iter().any(|x| x == p))
+    }
+}
+
+/// Default access of a Paloma project. Before `default_access` existed, the
+/// single `project_bindings` entry played that role; keep honoring it.
+pub fn default_projects(
+    bw: &crate::settings::BitwardenSettings,
+    slug: Option<&str>,
+) -> Vec<String> {
+    let Some(slug) = slug.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    if let Some(list) = bw.default_access.get(slug) {
+        return list.clone();
+    }
+    bw.project_bindings
+        .get(slug)
+        .map(|id| vec![id.clone()])
+        .unwrap_or_default()
+}
+
+fn grant_access(
+    defaults: Vec<String>,
+    grants: &[Grant],
+    mission: Uuid,
+    now: DateTime<Utc>,
+) -> Access {
+    let mut access = Access {
+        all: false,
+        projects: defaults,
+        keys: Vec::new(),
+    };
+    for g in grants
+        .iter()
+        .filter(|g| g.mission_id == mission && g.expires_at > now)
+    {
+        match &g.scope {
+            GrantScope::All => access.all = true,
+            GrantScope::Project { project_id } => access.projects.push(project_id.clone()),
+            GrantScope::Secret { key } => access.keys.push(key.clone()),
+        }
+    }
+    access
+}
+
+/// Identity of the calling mission, from the signed MCP session.
+#[derive(Debug, Clone)]
+pub struct Caller {
+    pub mission_id: Uuid,
+    pub mission_title: Option<String>,
+    pub paloma_project: Option<String>,
+}
+
+impl SecretBroker {
+    async fn save(&self, data: &Persisted) {
+        let Ok(text) = serde_json::to_string_pretty(data) else {
+            return;
+        };
+        if let Some(dir) = self.path.parent() {
+            let _ = tokio::fs::create_dir_all(dir).await;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        if tokio::fs::write(&tmp, text).await.is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+            }
+            let _ = tokio::fs::rename(&tmp, &self.path).await;
+        }
+    }
+
+    /// Drop expired grants and expire stale pending requests.
+    fn prune(data: &mut Persisted, now: DateTime<Utc>) {
+        data.grants.retain(|g| g.expires_at > now);
+        for r in data.requests.iter_mut() {
+            if r.status == RequestStatus::Pending
+                && now - r.created_at > chrono::Duration::hours(REQUEST_TTL_HOURS)
+            {
+                r.status = RequestStatus::Expired;
+                r.resolved_at = Some(now);
+                r.encrypted_value = None;
+            }
+        }
+        // Keep the last 200 resolved requests for the history view.
+        let resolved = data
+            .requests
+            .iter()
+            .filter(|r| r.status != RequestStatus::Pending)
+            .count();
+        if resolved > 200 {
+            let mut drop = resolved - 200;
+            data.requests.retain(|r| {
+                if drop > 0 && r.status != RequestStatus::Pending {
+                    drop -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
+    pub async fn access_for(&self, state: &AppState, caller: &Caller) -> Access {
+        let bw = state.settings.get_bitwarden().await;
+        let defaults = default_projects(&bw, caller.paloma_project.as_deref());
+        let data = self.data.lock().await;
+        grant_access(defaults, &data.grants, caller.mission_id, Utc::now())
+    }
+
+    pub async fn list_all(
+        &self,
+        state: &Arc<AppState>,
+        fresh: bool,
+    ) -> Result<Vec<BitwardenSecretSummary>, String> {
+        let mut cache = self.list_cache.lock().await;
+        if !fresh {
+            if let Some((at, list)) = cache.as_ref() {
+                if at.elapsed() < LIST_CACHE_TTL {
+                    return Ok(list.clone());
+                }
+            }
+        }
+        let list = bitwarden::list_all_secrets(state)
+            .await
+            .map_err(|(_, e)| e)?;
+        *cache = Some((Instant::now(), list.clone()));
+        Ok(list)
+    }
+
+    pub async fn invalidate_list(&self) {
+        *self.list_cache.lock().await = None;
+    }
+
+    async fn audit(&self, entry: AuditEntry) {
+        let mut data = self.data.lock().await;
+        data.audit.push(entry);
+        let len = data.audit.len();
+        if len > AUDIT_LIMIT {
+            data.audit.drain(..len - AUDIT_LIMIT);
+        }
+        self.save(&data).await;
+    }
+
+    /// Reuse an identical pending request instead of piling up duplicates.
+    async fn open_request(&self, mut request: SecretRequest) -> SecretRequest {
+        let mut data = self.data.lock().await;
+        Self::prune(&mut data, Utc::now());
+        if request.kind == RequestKind::Write {
+            if let Some(existing) = data.requests.iter_mut().find(|r| {
+                r.status == RequestStatus::Pending
+                    && r.kind == RequestKind::Write
+                    && r.mission_id == request.mission_id
+                    && r.key == request.key
+                    && r.project_id == request.project_id
+            }) {
+                existing.encrypted_value = request.encrypted_value.clone();
+                existing.value_sha256 = request.value_sha256.clone();
+                existing.note = request.note.clone();
+                let out = existing.clone();
+                self.save(&data).await;
+                return out;
+            }
+        }
+        if request.kind == RequestKind::Read {
+            if let Some(existing) = data.requests.iter().find(|r| {
+                r.status == RequestStatus::Pending
+                    && r.kind == RequestKind::Read
+                    && r.mission_id == request.mission_id
+                    && r.key == request.key
+                    && r.project_id == request.project_id
+                    && r.all_projects == request.all_projects
+            }) {
+                return existing.clone();
+            }
+        }
+        request.status = RequestStatus::Pending;
+        data.requests.push(request.clone());
+        self.save(&data).await;
+        drop(data);
+        self.changed.notify_waiters();
+        request
+    }
+
+    /// An approved write of this name by this mission in the last hour.
+    async fn recent_approved_write(
+        &self,
+        mission: Uuid,
+        key: &str,
+        project_id: &str,
+        value_sha256: &str,
+    ) -> Option<Uuid> {
+        let since = Utc::now() - chrono::Duration::hours(1);
+        self.data
+            .lock()
+            .await
+            .requests
+            .iter()
+            .rev()
+            .find(|r| {
+                r.kind == RequestKind::Write
+                    && r.status == RequestStatus::Approved
+                    && r.mission_id == mission
+                    && r.key.as_deref() == Some(key)
+                    && r.project_id.as_deref() == Some(project_id)
+                    && r.value_sha256.as_deref() == Some(value_sha256)
+                    && r.resolved_at.is_some_and(|t| t > since)
+            })
+            .map(|r| r.id)
+    }
+
+    async fn request(&self, id: Uuid) -> Option<SecretRequest> {
+        self.data
+            .lock()
+            .await
+            .requests
+            .iter()
+            .find(|r| r.id == id)
+            .cloned()
+    }
+
+    /// Wait until the request leaves `pending` or the wait elapses.
+    async fn wait_resolved(&self, id: Uuid, wait: Duration) -> Option<SecretRequest> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let notified = self.changed.notified();
+            let current = self.request(id).await?;
+            if current.status != RequestStatus::Pending {
+                return Some(current);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Some(current);
+            }
+            let _ = tokio::time::timeout(left, notified).await;
+        }
+    }
+
+    pub async fn snapshot(&self) -> Value {
+        let mut data = self.data.lock().await;
+        Self::prune(&mut data, Utc::now());
+        let mut requests: Vec<Value> = data
+            .requests
+            .iter()
+            .rev()
+            .map(SecretRequest::public)
+            .collect();
+        requests.truncate(100);
+        json!({
+            "requests": requests,
+            "grants": data.grants,
+            "audit": data.audit.iter().rev().take(200).collect::<Vec<_>>(),
+        })
+    }
+
+    pub async fn pending_count(&self) -> usize {
+        let mut data = self.data.lock().await;
+        Self::prune(&mut data, Utc::now());
+        data.requests
+            .iter()
+            .filter(|r| r.status == RequestStatus::Pending)
+            .count()
+    }
+
+    pub async fn revoke(&self, id: Uuid) -> bool {
+        let mut data = self.data.lock().await;
+        let before = data.grants.len();
+        data.grants.retain(|g| g.id != id);
+        let removed = data.grants.len() != before;
+        if removed {
+            self.save(&data).await;
+        }
+        removed
+    }
+
+    pub async fn reject(&self, id: Uuid) -> Result<SecretRequest, String> {
+        let _resolving = self.resolving.lock().await;
+        let mut data = self.data.lock().await;
+        let r = data
+            .requests
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or("Request not found")?;
+        if r.status != RequestStatus::Pending {
+            return Err("Request is no longer pending".into());
+        }
+        r.status = RequestStatus::Rejected;
+        r.resolved_at = Some(Utc::now());
+        r.encrypted_value = None;
+        let out = r.clone();
+        self.save(&data).await;
+        drop(data);
+        self.changed.notify_waiters();
+        Ok(out)
+    }
+
+    /// Approve a request. Reads become a grant of the chosen scope; writes are
+    /// applied to Bitwarden now.
+    pub async fn approve(
+        &self,
+        state: &Arc<AppState>,
+        id: Uuid,
+        scope: Option<&str>,
+        ttl_hours: Option<i64>,
+    ) -> Result<SecretRequest, String> {
+        let _resolving = self.resolving.lock().await;
+        let request = self.request(id).await.ok_or("Request not found")?;
+        if request.status != RequestStatus::Pending {
+            return Err("Request is no longer pending".into());
+        }
+        let now = Utc::now();
+        let mut error = None;
+        match request.kind {
+            RequestKind::Read => {
+                let scope = match scope.unwrap_or("") {
+                    "all" => GrantScope::All,
+                    "project" => GrantScope::Project {
+                        project_id: match &request.project_id {
+                            Some(p) => p.clone(),
+                            None => self
+                                .project_of(state, request.key.as_deref().unwrap_or(""))
+                                .await
+                                .ok_or(
+                                    "The secret's project is unknown; approve the secret only",
+                                )?,
+                        },
+                    },
+                    "secret" | "" if request.key.is_some() => GrantScope::Secret {
+                        key: request.key.clone().unwrap_or_default(),
+                    },
+                    "" if request.all_projects => GrantScope::All,
+                    "" if request.project_id.is_some() => GrantScope::Project {
+                        project_id: request.project_id.clone().unwrap_or_default(),
+                    },
+                    other => return Err(format!("Unsupported scope `{other}` for this request")),
+                };
+                let ttl = ttl_hours
+                    .unwrap_or(DEFAULT_GRANT_TTL_HOURS)
+                    .clamp(1, 24 * 30);
+                let grant = Grant {
+                    id: Uuid::new_v4(),
+                    mission_id: request.mission_id,
+                    mission_title: request.mission_title.clone(),
+                    paloma_project: request.paloma_project.clone(),
+                    scope,
+                    created_at: now,
+                    expires_at: now + chrono::Duration::hours(ttl),
+                };
+                self.data.lock().await.grants.push(grant);
+            }
+            RequestKind::Write => {
+                let key = request.key.clone().ok_or("Write request has no name")?;
+                let project_id = request
+                    .project_id
+                    .clone()
+                    .ok_or("Write request has no project")?;
+                let value =
+                    decrypt(state, request.encrypted_value.as_deref().unwrap_or("")).await?;
+                let existing =
+                    self.list_all(state, true).await?.into_iter().find(|s| {
+                        s.key == key && s.project_id.as_deref() == Some(project_id.as_str())
+                    });
+                let result = match existing {
+                    Some(s) => {
+                        bitwarden::edit_secret_value(state, &s.id, &value, request.note.as_deref())
+                            .await
+                    }
+                    None => {
+                        bitwarden::create_secret(
+                            state,
+                            &project_id,
+                            &key,
+                            &value,
+                            request.note.as_deref(),
+                        )
+                        .await
+                    }
+                };
+                if let Err((_, e)) = result {
+                    error = Some(e);
+                }
+                self.invalidate_list().await;
+            }
+        }
+        let mut data = self.data.lock().await;
+        let r = data
+            .requests
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or("Request not found")?;
+        r.resolved_at = Some(now);
+        r.encrypted_value = None;
+        r.status = if error.is_some() {
+            RequestStatus::Rejected
+        } else {
+            RequestStatus::Approved
+        };
+        r.error = error.clone();
+        let out = r.clone();
+        if out.kind == RequestKind::Write && error.is_none() {
+            data.audit.push(AuditEntry {
+                at: now,
+                mission_id: out.mission_id,
+                paloma_project: out.paloma_project.clone(),
+                key: out.key.clone().unwrap_or_default(),
+                project_id: out.project_id.clone(),
+                via: "write".into(),
+            });
+        }
+        self.save(&data).await;
+        drop(data);
+        self.changed.notify_waiters();
+        match error {
+            Some(e) => Err(format!("Bitwarden rejected the write: {e}")),
+            None => Ok(out),
+        }
+    }
+
+    async fn project_of(&self, state: &Arc<AppState>, key: &str) -> Option<String> {
+        self.list_all(state, false)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|s| s.key == key)
+            .and_then(|s| s.project_id)
+    }
+}
+
+async fn crypto_key(state: &AppState) -> Result<[u8; 32], String> {
+    bitwarden::load_encryption_key(&state.config.working_dir)
+        .await
+        .ok_or_else(|| "Encryption key unavailable".to_string())
+}
+
+async fn encrypt(state: &AppState, value: &str) -> Result<String, String> {
+    env_crypto::encrypt_value(&crypto_key(state).await?, value).map_err(|e| e.to_string())
+}
+
+async fn decrypt(state: &AppState, value: &str) -> Result<String, String> {
+    env_crypto::decrypt_value(&crypto_key(state).await?, value).map_err(|e| e.to_string())
+}
+
+fn project_names(projects: &[bitwarden::BitwardenProject]) -> BTreeMap<String, String> {
+    projects
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect()
+}
+
+/// Resolve a project given by name or id.
+fn resolve_project(projects: &[bitwarden::BitwardenProject], wanted: &str) -> Option<String> {
+    let wanted = wanted.trim();
+    projects
+        .iter()
+        .find(|p| p.id == wanted || p.name.eq_ignore_ascii_case(wanted))
+        .map(|p| p.id.clone())
+}
+
+fn pending_reply(request: &SecretRequest) -> Value {
+    json!({
+        "status": "pending",
+        "request_id": request.id,
+        "message": "Waiting for Thomas to approve this in Orb (Settings → Secrets, Touch ID / Face ID). \
+                    Continue other work and call the same tool again later; do not ask for the value in chat.",
+    })
+}
+
+/// The MCP client in the workspace replaces `secret_delivery` with a private
+/// file so the value never enters the transcript or Core's event log.
+fn delivery(detail: &BitwardenSecretDetail, project: Option<&str>) -> Value {
+    json!({
+        "status": "granted",
+        "name": detail.key,
+        "project": project,
+        "secret_delivery": { "name": detail.key, "value": detail.value },
+    })
+}
+
+async fn caller_for(
+    state: &Arc<AppState>,
+    p: &crate::control_mcp::gateway::Principal,
+) -> Result<Caller, String> {
+    let mission_id = p
+        .mission_id
+        .ok_or("Secrets are only available to mission-scoped sessions")?;
+    let control = state
+        .control
+        .get_or_spawn(&crate::api::auth::AuthUser {
+            id: p.sub.clone(),
+            username: p.username.clone(),
+        })
+        .await;
+    let mission = control
+        .mission_store
+        .get_mission(mission_id)
+        .await
+        .ok()
+        .flatten();
+    // The signed session's project decides default access; the mission record
+    // is only a fallback for sessions issued without one.
+    let paloma_project = p
+        .project
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| mission.as_ref().and_then(|m| m.project.project.clone()));
+    Ok(Caller {
+        mission_id,
+        mission_title: mission.and_then(|m| m.title),
+        paloma_project,
+    })
+}
+
+pub const TOOL_NAMES: [&str; 4] = ["secret_list", "secret_get", "secret_request", "secret_put"];
+
+/// Entry point for the `secret_*` MCP tools.
+pub async fn handle_tool(
+    state: &Arc<AppState>,
+    p: &crate::control_mcp::gateway::Principal,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let caller = caller_for(state, p).await?;
+    let broker = broker(state);
+    let str_arg = |k: &str| {
+        args.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let reason = str_arg("reason").unwrap_or("").to_string();
+    match name {
+        "secret_list" => {
+            let access = broker.access_for(state, &caller).await;
+            let projects = bitwarden::list_projects_raw(state)
+                .await
+                .map_err(|(_, e)| e)?;
+            let names = project_names(&projects);
+            let secrets = broker.list_all(state, false).await?;
+            let mut accessible = Vec::new();
+            let mut by_request = BTreeMap::<String, Vec<String>>::new();
+            for s in secrets {
+                let project = s
+                    .project_id
+                    .as_deref()
+                    .and_then(|id| names.get(id))
+                    .cloned();
+                if access.allows(&s.key, s.project_id.as_deref()) {
+                    accessible.push(json!({"name": s.key, "project": project}));
+                } else {
+                    by_request
+                        .entry(project.unwrap_or_else(|| "unknown".into()))
+                        .or_default()
+                        .push(s.key);
+                }
+            }
+            Ok(json!({
+                "paloma_project": caller.paloma_project,
+                "accessible": accessible,
+                "requires_approval": by_request,
+                "projects": projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+                "hint": "secret_get NAME returns accessible secrets immediately and asks Thomas for the others. \
+                         secret_request bitwarden_project asks for a whole Bitwarden project. secret_put stores a new secret after approval.",
+            }))
+        }
+        "secret_get" => {
+            let key = str_arg("name").ok_or("`name` is required")?.to_string();
+            let secrets = broker.list_all(state, false).await?;
+            let matches: Vec<_> = secrets.iter().filter(|s| s.key == key).collect();
+            let Some(summary) = matches.first().copied() else {
+                return Err(format!(
+                    "No secret named `{key}`. Use secret_list to see names."
+                ));
+            };
+            if matches.len() > 1 {
+                return Err(format!(
+                    "`{key}` exists in several projects; ask Thomas to remove the duplicate."
+                ));
+            }
+            let project_id = summary.project_id.clone();
+            let mut access = broker.access_for(state, &caller).await;
+            if !access.allows(&key, project_id.as_deref()) {
+                let request = broker
+                    .open_request(SecretRequest {
+                        id: Uuid::new_v4(),
+                        kind: RequestKind::Read,
+                        status: RequestStatus::Pending,
+                        mission_id: caller.mission_id,
+                        mission_title: caller.mission_title.clone(),
+                        paloma_project: caller.paloma_project.clone(),
+                        key: Some(key.clone()),
+                        project_id: project_id.clone(),
+                        all_projects: false,
+                        reason,
+                        note: None,
+                        value_sha256: None,
+                        encrypted_value: None,
+                        created_at: Utc::now(),
+                        resolved_at: None,
+                        error: None,
+                    })
+                    .await;
+                let resolved = broker.wait_resolved(request.id, APPROVAL_WAIT).await;
+                match resolved.map(|r| r.status) {
+                    Some(RequestStatus::Approved) => {}
+                    Some(RequestStatus::Rejected) => {
+                        return Err(format!("Thomas declined access to `{key}`."))
+                    }
+                    Some(RequestStatus::Expired) => {
+                        return Err("The request expired; ask again if still needed.".into())
+                    }
+                    _ => return Ok(pending_reply(&request)),
+                }
+                access = broker.access_for(state, &caller).await;
+                if !access.allows(&key, project_id.as_deref()) {
+                    return Err("Approval did not cover this secret.".into());
+                }
+            }
+            let via = if bitwarden_defaults_cover(state, &caller, project_id.as_deref()).await {
+                "default"
+            } else {
+                "grant"
+            };
+            let detail = bitwarden::get_secret(state, &summary.id)
+                .await
+                .map_err(|(_, e)| e)?;
+            broker
+                .audit(AuditEntry {
+                    at: Utc::now(),
+                    mission_id: caller.mission_id,
+                    paloma_project: caller.paloma_project.clone(),
+                    key: key.clone(),
+                    project_id: project_id.clone(),
+                    via: via.into(),
+                })
+                .await;
+            let projects = bitwarden::list_projects_raw(state)
+                .await
+                .unwrap_or_default();
+            let project_name = project_id
+                .as_deref()
+                .and_then(|id| project_names(&projects).get(id).cloned());
+            Ok(delivery(&detail, project_name.as_deref()))
+        }
+        "secret_request" => {
+            let projects = bitwarden::list_projects_raw(state)
+                .await
+                .map_err(|(_, e)| e)?;
+            let wanted = str_arg("bitwarden_project")
+                .ok_or("`bitwarden_project` is required (a Bitwarden project name, or `all`)")?;
+            let all = wanted.eq_ignore_ascii_case("all") || wanted == "*";
+            let project_id = if all {
+                None
+            } else {
+                Some(
+                    resolve_project(&projects, wanted)
+                        .ok_or_else(|| format!("Unknown Bitwarden project `{wanted}`"))?,
+                )
+            };
+            let access = broker.access_for(state, &caller).await;
+            if access.all
+                || project_id
+                    .as_ref()
+                    .is_some_and(|p| access.projects.contains(p))
+            {
+                return Ok(
+                    json!({"status":"granted","message":"Access already granted; use secret_get."}),
+                );
+            }
+            let request = broker
+                .open_request(SecretRequest {
+                    id: Uuid::new_v4(),
+                    kind: RequestKind::Read,
+                    status: RequestStatus::Pending,
+                    mission_id: caller.mission_id,
+                    mission_title: caller.mission_title.clone(),
+                    paloma_project: caller.paloma_project.clone(),
+                    key: None,
+                    project_id,
+                    all_projects: all,
+                    reason,
+                    note: None,
+                    value_sha256: None,
+                    encrypted_value: None,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                    error: None,
+                })
+                .await;
+            match broker
+                .wait_resolved(request.id, APPROVAL_WAIT)
+                .await
+                .map(|r| r.status)
+            {
+                Some(RequestStatus::Approved) => {
+                    Ok(json!({"status":"granted","message":"Approved; use secret_get."}))
+                }
+                Some(RequestStatus::Rejected) => Err("Thomas declined the request.".into()),
+                Some(RequestStatus::Expired) => Err("The request expired.".into()),
+                _ => Ok(pending_reply(&request)),
+            }
+        }
+        "secret_put" => {
+            let key = str_arg("name").ok_or("`name` is required")?.to_string();
+            if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err("Secret names use A-Z, 0-9 and _ (environment-variable style).".into());
+            }
+            let value = args
+                .get("value")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or("`value` is required")?;
+            let projects = bitwarden::list_projects_raw(state)
+                .await
+                .map_err(|(_, e)| e)?;
+            let wanted = str_arg("bitwarden_project").ok_or("`bitwarden_project` is required")?;
+            let project_id = resolve_project(&projects, wanted)
+                .ok_or_else(|| format!("Unknown Bitwarden project `{wanted}`"))?;
+            if let Some(dup) = broker
+                .list_all(state, false)
+                .await?
+                .into_iter()
+                .find(|s| s.key == key && s.project_id.as_deref() != Some(project_id.as_str()))
+            {
+                let other = dup
+                    .project_id
+                    .as_deref()
+                    .and_then(|id| project_names(&projects).get(id).cloned())
+                    .unwrap_or_default();
+                return Err(format!(
+                    "`{key}` already exists in project `{other}`; use that project."
+                ));
+            }
+            // A retry after the operator approved the earlier call: done already.
+            let value_sha256 =
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(value.as_bytes()));
+            if let Some(done) = broker
+                .recent_approved_write(caller.mission_id, &key, &project_id, &value_sha256)
+                .await
+            {
+                return Ok(json!({"status":"stored","request_id": done}));
+            }
+            let request = broker
+                .open_request(SecretRequest {
+                    id: Uuid::new_v4(),
+                    kind: RequestKind::Write,
+                    status: RequestStatus::Pending,
+                    mission_id: caller.mission_id,
+                    mission_title: caller.mission_title.clone(),
+                    paloma_project: caller.paloma_project.clone(),
+                    key: Some(key),
+                    project_id: Some(project_id),
+                    all_projects: false,
+                    reason,
+                    note: str_arg("note").map(str::to_string),
+                    value_sha256: Some(value_sha256),
+                    encrypted_value: Some(encrypt(state, value).await?),
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                    error: None,
+                })
+                .await;
+            match broker.wait_resolved(request.id, APPROVAL_WAIT).await {
+                Some(r) if r.status == RequestStatus::Approved => {
+                    Ok(json!({"status":"stored","request_id": r.id}))
+                }
+                Some(r) if r.status == RequestStatus::Rejected => Err(r
+                    .error
+                    .unwrap_or_else(|| "Thomas declined the write.".into())),
+                Some(r) if r.status == RequestStatus::Expired => Err("The request expired.".into()),
+                _ => Ok(pending_reply(&request)),
+            }
+        }
+        _ => Err("Unknown secret tool".into()),
+    }
+}
+
+async fn bitwarden_defaults_cover(
+    state: &AppState,
+    caller: &Caller,
+    project_id: Option<&str>,
+) -> bool {
+    let bw = state.settings.get_bitwarden().await;
+    project_id.is_some_and(|p| {
+        default_projects(&bw, caller.paloma_project.as_deref())
+            .iter()
+            .any(|d| d == p)
+    })
+}
+
+pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
+    use crate::control_mcp::ToolDefinition;
+    vec![
+        ToolDefinition {
+            name: "secret_list".into(),
+            description: "List the names (never values) of Thomas's secrets: which ones this mission can read now, \
+                          and which need his approval, grouped by Bitwarden project."
+                .into(),
+            input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+        },
+        ToolDefinition {
+            name: "secret_get".into(),
+            description: "Get one secret by name. Secrets in this project's default Bitwarden projects come back at once; \
+                          others ask Thomas (Touch ID / Face ID) and wait up to 20 s, then return `pending` — call again later. \
+                          The value is written to a private file; the result gives its path and an `export` line. \
+                          Never print the value or paste it into chat, commits or logs."
+                .into(),
+            input_schema: json!({"type":"object","required":["name"],"properties":{
+                "name":{"type":"string","minLength":1,"maxLength":200},
+                "reason":{"type":"string","maxLength":500,"description":"Why the mission needs it; shown to Thomas."}
+            },"additionalProperties":false}),
+        },
+        ToolDefinition {
+            name: "secret_request".into(),
+            description: "Ask Thomas for read access to a whole Bitwarden project (by name), or `all`, for this mission. \
+                          Waits up to 20 s for approval, then returns `pending`."
+                .into(),
+            input_schema: json!({"type":"object","required":["bitwarden_project","reason"],"properties":{
+                "bitwarden_project":{"type":"string","minLength":1,"maxLength":200},
+                "reason":{"type":"string","minLength":1,"maxLength":500}
+            },"additionalProperties":false}),
+        },
+        ToolDefinition {
+            name: "secret_put".into(),
+            description: "Store a secret (create, or update the value) in a Bitwarden project. Always needs Thomas's approval; \
+                          waits up to 20 s, then returns `pending`. Use UPPER_SNAKE_CASE names and the project that fits \
+                          (see secret_list for project names)."
+                .into(),
+            input_schema: json!({"type":"object","required":["name","value","bitwarden_project","reason"],"properties":{
+                "name":{"type":"string","minLength":1,"maxLength":200},
+                "value":{"type":"string","minLength":1,"maxLength":65536},
+                "bitwarden_project":{"type":"string","minLength":1,"maxLength":200},
+                "note":{"type":"string","maxLength":2000},
+                "reason":{"type":"string","minLength":1,"maxLength":500}
+            },"additionalProperties":false}),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::BitwardenSettings;
+
+    #[test]
+    fn default_access_falls_back_to_legacy_binding() {
+        let mut bw = BitwardenSettings::default();
+        bw.project_bindings
+            .insert("minecraft".into(), "p-mc".into());
+        assert_eq!(
+            default_projects(&bw, Some("minecraft")),
+            vec!["p-mc".to_string()]
+        );
+        bw.default_access
+            .insert("minecraft".into(), vec!["p-a".into(), "p-b".into()]);
+        assert_eq!(default_projects(&bw, Some("minecraft")).len(), 2);
+        assert!(default_projects(&bw, None).is_empty());
+        assert!(default_projects(&bw, Some("other")).is_empty());
+    }
+
+    #[test]
+    fn grants_only_apply_to_their_mission_until_expiry() {
+        let now = Utc::now();
+        let mission = Uuid::new_v4();
+        let grant = |m, scope, hours| Grant {
+            id: Uuid::new_v4(),
+            mission_id: m,
+            mission_title: None,
+            paloma_project: None,
+            scope,
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(hours),
+        };
+        let grants = vec![
+            grant(mission, GrantScope::Secret { key: "UXON".into() }, 1),
+            grant(
+                mission,
+                GrantScope::Project {
+                    project_id: "p-infra".into(),
+                },
+                -1,
+            ),
+            grant(Uuid::new_v4(), GrantScope::All, 1),
+        ];
+        let access = grant_access(vec!["p-mc".into()], &grants, mission, now);
+        assert!(access.allows("UXON", Some("p-core")));
+        assert!(access.allows("ANY", Some("p-mc")));
+        assert!(
+            !access.allows("CLOUDFLARE_API_TOKEN", Some("p-infra")),
+            "expired grant"
+        );
+        assert!(
+            !access.allows("JWT_SECRET", Some("p-core")),
+            "other mission's grant"
+        );
+    }
+
+    #[test]
+    fn public_request_view_hides_the_pending_value() {
+        let r = SecretRequest {
+            id: Uuid::new_v4(),
+            kind: RequestKind::Write,
+            status: RequestStatus::Pending,
+            mission_id: Uuid::new_v4(),
+            mission_title: None,
+            paloma_project: None,
+            key: Some("K".into()),
+            project_id: Some("p".into()),
+            all_projects: false,
+            reason: "r".into(),
+            note: None,
+            value_sha256: None,
+            encrypted_value: Some("<encrypted>".into()),
+            created_at: Utc::now(),
+            resolved_at: None,
+            error: None,
+        };
+        assert!(r.public().get("encrypted_value").is_none());
+    }
+}

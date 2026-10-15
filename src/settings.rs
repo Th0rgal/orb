@@ -105,6 +105,10 @@ pub struct BitwardenSettings {
     /// Mapping from Paloma project slug (e.g. `paloma`) to Bitwarden project UUID.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub project_bindings: std::collections::BTreeMap<String, String>,
+    /// Paloma project slug -> Bitwarden project UUIDs its missions may read
+    /// without asking. Anything else goes through an approved grant.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub default_access: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Global application settings.

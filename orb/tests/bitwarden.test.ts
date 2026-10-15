@@ -8,6 +8,10 @@ import {
   updateBitwardenSecret,
   deleteBitwardenSecret,
   updateBitwardenConfig,
+  approveSecretRequest,
+  groupSecrets,
+  listAllBitwardenSecrets,
+  setSecretDefaultAccess,
 } from "../src/bitwardenApi";
 
 const apiMock = vi.fn();
@@ -137,5 +141,33 @@ describe("bitwardenApi", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ default_project_id: projectId }),
     });
+  });
+
+  it("talks to the broker endpoints", async () => {
+    apiMock.mockResolvedValue({});
+    await listAllBitwardenSecrets();
+    expect(apiMock).toHaveBeenLastCalledWith("/api/bitwarden/secrets");
+    await approveSecretRequest("req-1", "project");
+    expect(apiMock.mock.lastCall?.[0]).toBe("/api/bitwarden/requests/req-1/approve");
+    expect(JSON.parse(apiMock.mock.lastCall?.[1].body)).toEqual({ scope: "project" });
+    await setSecretDefaultAccess("minecraft", ["p-mc"]);
+    expect(apiMock.mock.lastCall?.[0]).toBe("/api/bitwarden/default-access/minecraft");
+    expect(JSON.parse(apiMock.mock.lastCall?.[1].body)).toEqual({ project_ids: ["p-mc"] });
+  });
+});
+
+describe("groupSecrets", () => {
+  it("groups by project, then by name prefix, folding single prefixes into Other", () => {
+    const tree = groupSecrets([
+      { key: "CLOUDFLARE_API_TOKEN", projectId: "p-infra", projectName: "infra" },
+      { key: "CLOUDFLARE_ACCOUNT_ID", projectId: "p-infra", projectName: "infra" },
+      { key: "VERCEL_TOKEN", projectId: "p-infra", projectName: "infra" },
+      { key: "JWT_SECRET", projectId: "p-core", projectName: "paloma-core" },
+    ]);
+    expect(tree.map((p) => p.projectName)).toEqual(["infra", "paloma-core"]);
+    expect(tree[0].groups.map((g) => [g.prefix, g.items.map((i) => i.key)])).toEqual([
+      ["CLOUDFLARE", ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]],
+      ["Other", ["VERCEL_TOKEN"]],
+    ]);
   });
 });

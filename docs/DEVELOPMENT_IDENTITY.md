@@ -39,7 +39,7 @@ before enrollment. Core's private configuration is
 
 ```json
 {
-  "bitwarden_command": ["/var/lib/hermes-assistant/bin/bws", "secret", "list", "297f3106-758f-43d5-8a4b-b460007558c8"],
+  "bitwarden_command": ["/var/lib/hermes-assistant/bin/bws", "secret", "list"],
   "known_hosts": "/etc/sandboxed-sh/development-identity/known_hosts",
   "skill": "/root/.sandboxed-sh/library/skill/development-identity/SKILL.md",
   "library_revision": "<published-library-commit>",

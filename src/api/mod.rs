@@ -79,6 +79,7 @@ pub(crate) mod remote_build;
 pub(crate) mod routes;
 pub(crate) mod runners;
 pub mod scope_reaper;
+pub mod secret_broker;
 pub mod secrets;
 pub mod session_chain;
 pub mod settings;

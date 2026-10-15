@@ -74,7 +74,11 @@ fn policy(name: &str) -> Option<(Role, bool)> {
         | "list_cloud_models"
         | "list_cloud_accounts"
         | "get_cloud_execution"
-        | "get_workspace_job" => (Executor, false),
+        | "get_workspace_job"
+        | "secret_list"
+        | "secret_get"
+        | "secret_request"
+        | "secret_put" => (Executor, false),
         "schedule_wakeup"
         | "schedule_job_wakeup"
         | "ask_mission"
@@ -159,6 +163,17 @@ pub fn registry() -> Vec<Tool> {
         },"additionalProperties":false}),
     }, handler:Handler::Capabilities, minimum_role:Role::Operator, mutation:true });
     entries.extend(workspace_ops::tools());
+    // Secrets broker: Core reads Bitwarden for the mission; approval-gated.
+    entries.extend(
+        crate::api::secret_broker::tool_definitions()
+            .into_iter()
+            .map(|definition| Tool {
+                definition,
+                handler: Handler::Capabilities,
+                minimum_role: Role::Executor,
+                mutation: false,
+            }),
+    );
     for (handler, definitions) in [
         (Handler::Assistant, assistant::AssistantMcp::tools()),
         (

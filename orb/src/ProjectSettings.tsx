@@ -17,7 +17,15 @@ import {
   type Mission,
   type ProjectGrant,
 } from "./api";
-import { getBitwardenStatus, listBitwardenProjects, type BitwardenProject, type BitwardenStatus } from "./bitwardenApi";
+import {
+  authenticateBiometric,
+  getBitwardenStatus,
+  isBiometricCancelled,
+  listBitwardenProjects,
+  setSecretDefaultAccess,
+  type BitwardenProject,
+  type BitwardenStatus,
+} from "./bitwardenApi";
 import { ControllerSkeleton } from "./Skeleton";
 
 /** Shown for context, changed elsewhere. Saving the limit above leaves every
@@ -65,16 +73,39 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
     return value == null ? "" : String(value);
   };
 
-  const boundBitwardenProject = () => {
+  /** Bitwarden projects this project's missions read without asking. */
+  const defaultAccess = (): string[] => {
     const st = bwStatus();
-    if (!st) return null;
-    const boundId = st.project_bindings?.[p.slug] ?? (p.slug === "paloma" ? st.default_project_id : null);
-    if (!boundId) return null;
-    const found = bwProjects().find((proj) => proj.id === boundId);
-    return {
-      id: boundId,
-      name: found?.name ?? (boundId === "297f3106-758f-43d5-8a4b-b460007558c8" ? "paloma" : boundId),
-    };
+    if (!st) return [];
+    const explicit = st.default_access?.[p.slug];
+    if (explicit) return explicit;
+    const legacy = st.project_bindings?.[p.slug];
+    return legacy ? [legacy] : [];
+  };
+  const [savingAccess, setSavingAccess] = createSignal(false);
+  const toggleDefaultAccess = async (projectId: string, on: boolean) => {
+    if (savingAccess()) return;
+    const next = on
+      ? [...new Set([...defaultAccess(), projectId])]
+      : defaultAccess().filter((id) => id !== projectId);
+    const name = bwProjects().find((x) => x.id === projectId)?.name ?? projectId;
+    try {
+      await authenticateBiometric(
+        on ? `let ${p.slug} missions read ${name} secrets without asking` : `stop default access to ${name}`,
+      );
+    } catch (e) {
+      if (!isBiometricCancelled(e)) setSaveError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setSavingAccess(true);
+    try {
+      setBwStatus(await setSecretDefaultAccess(p.slug, next));
+      setSaveError(null);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingAccess(false);
+    }
   };
 
   const load = async () => {
@@ -225,18 +256,10 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
             <div class="s-card">
               <div class="s-row">
                 <div class="s-row-text">
-                  <div class="s-row-title">Bitwarden Secrets Manager</div>
+                  <div class="s-row-title">Allowed by default</div>
                   <div class="s-row-desc">
-                    <Show
-                      when={boundBitwardenProject()}
-                      fallback="Connect a Bitwarden project to manage secrets for this project."
-                    >
-                      {(bp) => (
-                        <>
-                          Connected to Bitwarden project <code>{bp().name}</code>
-                        </>
-                      )}
-                    </Show>
+                    Missions in this project read secrets from the checked Bitwarden projects without asking.
+                    Anything else waits for your approval in Settings → Secrets.
                   </div>
                 </div>
                 <div class="s-row-ctrl">
@@ -245,6 +268,39 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
                   </button>
                 </div>
               </div>
+              <Show
+                when={bwProjects().length > 0}
+                fallback={
+                  <div class="s-row">
+                    <div class="s-row-desc">
+                      {bwStatus()?.configured ? "No Bitwarden projects visible." : "Bitwarden is not connected."}
+                    </div>
+                  </div>
+                }
+              >
+                <For each={bwProjects()}>
+                  {(proj) => (
+                    <label class="s-row ps-secret-project">
+                      <div class="s-row-text">
+                        <div class="s-row-title">{proj.name}</div>
+                      </div>
+                      <div class="s-row-ctrl">
+                        <input
+                          type="checkbox"
+                          checked={defaultAccess().includes(proj.id)}
+                          disabled={savingAccess()}
+                          aria-label={`Allow ${proj.name} by default`}
+                          onChange={(e) => {
+                            const on = e.currentTarget.checked;
+                            e.currentTarget.checked = !on; // stays as-is until saved
+                            void toggleDefaultAccess(proj.id, on);
+                          }}
+                        />
+                      </div>
+                    </label>
+                  )}
+                </For>
+              </Show>
             </div>
           </section>
 

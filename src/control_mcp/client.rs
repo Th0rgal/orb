@@ -229,7 +229,7 @@ impl Client {
                     let payload = if failed {
                         json!({"error":reply["error"]})
                     } else {
-                        reply["result"].clone()
+                        deliver_secret(reply["result"].clone())
                     };
                     let structured = if payload.is_object() {
                         payload
@@ -250,6 +250,117 @@ impl Client {
             }
         }
     }
+}
+
+/// Directory for secrets handed to this mission, under a per-user base
+/// (never the shared temp dir, where another user could own a parent).
+fn secrets_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("SANDBOXED_SECRETS_DIR") {
+        return dir.into();
+    }
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|d| std::path::PathBuf::from(d).join("paloma-secrets"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".paloma-secrets"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(".paloma-secrets"));
+    let mission = std::env::var("SANDBOXED_SH_MISSION_ID")
+        .or_else(|_| std::env::var("MISSION_ID"))
+        .unwrap_or_else(|_| "session".into());
+    base.join(mission.replace(['/', '.'], "_"))
+}
+
+/// Create `dir` (and its parent) as 0700 and refuse anything that is a
+/// symlink or owned by another user.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let check = |d: &std::path::Path| -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(d)?;
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is not a private directory owned by this user",
+                    d.display()
+                ),
+            ));
+        }
+        Ok(())
+    };
+    for d in [dir.parent(), Some(dir)].into_iter().flatten() {
+        match std::fs::DirBuilder::new().mode(0o700).create(d) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        check(d)?;
+    }
+    Ok(())
+}
+
+/// Core returns a secret as `secret_delivery`; write it to a 0600 file and
+/// replace it with the path, so the value never enters the agent transcript,
+/// the harness logs or Core's event store.
+fn deliver_secret(result: Value) -> Value {
+    deliver_secret_in(&secrets_dir(), result)
+}
+
+fn deliver_secret_in(dir: &std::path::Path, mut result: Value) -> Value {
+    let Some(delivery) = result
+        .as_object_mut()
+        .and_then(|o| o.remove("secret_delivery"))
+    else {
+        return result;
+    };
+    let name = delivery["name"].as_str().unwrap_or("");
+    let value = delivery["value"].as_str().unwrap_or("");
+    let safe = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !safe {
+        result["error"] = json!("Secret name is not a safe file name; value withheld");
+        return result;
+    }
+    let dir = dir.to_path_buf();
+    let path = dir.join(name);
+    let written = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Some(parent) = dir.parent().and_then(|p| p.parent()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            ensure_private_dir(&dir)?;
+            let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&tmp)?;
+            std::io::Write::write_all(&mut f, value.as_bytes())?;
+            std::fs::rename(&tmp, &path)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::write(&path, value)?;
+        Ok(())
+    })();
+    match written {
+        Ok(()) => {
+            let shown = path.display().to_string();
+            result["path"] = json!(shown);
+            result["export"] = json!(format!("export {name}=\"$(cat '{shown}')\""));
+            result["message"] = json!("Value written to the private file at `path`. Load it with the `export` line; never print it.");
+        }
+        Err(e) => {
+            result["error"] = json!(format!("Could not write the secret file: {e}"));
+        }
+    }
+    result
 }
 
 pub async fn run() -> Result<(), String> {
@@ -407,5 +518,39 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn secret_delivery_is_written_to_a_private_file_and_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let target = dir.path().join("mission");
+        let out = super::deliver_secret_in(
+            &target,
+            json!({
+                "status": "granted",
+                "secret_delivery": {"name": "UXON_TOKEN", "value": "s3cret"}
+            }),
+        );
+        assert!(!out.to_string().contains("s3cret"));
+        let path = out["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no path in {out}"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "s3cret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let bad = super::deliver_secret_in(
+            &target,
+            json!({"secret_delivery": {"name": "../x", "value": "v"}}),
+        );
+        assert!(!bad.to_string().contains("\"v\""));
     }
 }

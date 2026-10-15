@@ -11,6 +11,8 @@ export interface BitwardenStatus {
   server_url: string | null;
   default_project_id: string;
   project_bindings: Record<string, string>;
+  default_access?: Record<string, string[]>;
+  pending_requests?: number;
 }
 
 export interface BitwardenProject {
@@ -138,3 +140,127 @@ export const deleteBitwardenSecret = (secretId: string) =>
 /** True when the user dismissed the Touch ID / password sheet. */
 export const isBiometricCancelled = (e: unknown) =>
   (e instanceof Error ? e.message : String(e)) === "biometric_cancelled";
+
+export interface BitwardenSecretWithProject extends BitwardenSecretSummary {
+  projectName?: string | null;
+}
+
+export type SecretGrantScope =
+  | { kind: "secret"; key: string }
+  | { kind: "project"; project_id: string }
+  | { kind: "all" };
+
+export interface SecretGrant {
+  id: string;
+  mission_id: string;
+  mission_title?: string | null;
+  paloma_project?: string | null;
+  scope: SecretGrantScope;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface SecretAccessRequest {
+  id: string;
+  kind: "read" | "write";
+  status: "pending" | "approved" | "rejected" | "expired";
+  mission_id: string;
+  mission_title?: string | null;
+  paloma_project?: string | null;
+  key?: string | null;
+  project_id?: string | null;
+  all_projects: boolean;
+  reason: string;
+  note?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
+  error?: string | null;
+}
+
+export interface SecretAuditEntry {
+  at: string;
+  mission_id: string;
+  paloma_project?: string | null;
+  key: string;
+  project_id?: string | null;
+  via: "default" | "grant" | "write" | string;
+}
+
+export interface SecretBrokerSnapshot {
+  requests: SecretAccessRequest[];
+  grants: SecretGrant[];
+  audit: SecretAuditEntry[];
+}
+
+export const listAllBitwardenSecrets = () =>
+  api<BitwardenSecretWithProject[]>("/api/bitwarden/secrets");
+
+export const getSecretBroker = () =>
+  api<SecretBrokerSnapshot>("/api/bitwarden/broker");
+
+export const approveSecretRequest = (
+  id: string,
+  scope?: "secret" | "project" | "all",
+  ttlHours?: number,
+) =>
+  api<SecretAccessRequest>(`/api/bitwarden/requests/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope, ttl_hours: ttlHours }),
+  });
+
+export const rejectSecretRequest = (id: string) =>
+  api<SecretAccessRequest>(`/api/bitwarden/requests/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+  });
+
+export const revokeSecretGrant = (id: string) =>
+  api<{ success: boolean }>(`/api/bitwarden/grants/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+export const setSecretDefaultAccess = (slug: string, projectIds: string[]) =>
+  api<BitwardenStatus>(`/api/bitwarden/default-access/${encodeURIComponent(slug)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_ids: projectIds }),
+  });
+
+/** Group secret names by their first `_` segment (`CLOUDFLARE_API_TOKEN` → `CLOUDFLARE`). */
+export function secretPrefix(key: string): string {
+  const i = key.indexOf("_");
+  return i > 0 ? key.slice(0, i) : key;
+}
+
+/**
+ * Project → prefix → secrets. A prefix shared by a single secret is folded
+ * into an "Other" group so the tree does not fill with one-item folders.
+ */
+export function groupSecrets<T extends { key: string; projectId?: string; projectName?: string | null }>(
+  secrets: T[],
+): { projectId: string; projectName: string; groups: { prefix: string; items: T[] }[] }[] {
+  const byProject = new Map<string, { name: string; items: T[] }>();
+  for (const s of secrets) {
+    const id = s.projectId ?? "";
+    const entry = byProject.get(id) ?? { name: s.projectName || (id ? id.slice(0, 8) : "No project"), items: [] };
+    entry.items.push(s);
+    byProject.set(id, entry);
+  }
+  return [...byProject.entries()]
+    .sort((a, b) => a[1].name.localeCompare(b[1].name))
+    .map(([projectId, { name, items }]) => {
+      const byPrefix = new Map<string, T[]>();
+      for (const s of items) {
+        const prefix = secretPrefix(s.key);
+        byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), s]);
+      }
+      const groups: { prefix: string; items: T[] }[] = [];
+      const other: T[] = [];
+      for (const [prefix, list] of [...byPrefix.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+        if (list.length > 1) groups.push({ prefix, items: list.sort((a, b) => a.key.localeCompare(b.key)) });
+        else other.push(...list);
+      }
+      if (other.length) groups.push({ prefix: "Other", items: other.sort((a, b) => a.key.localeCompare(b.key)) });
+      return { projectId, projectName: name, groups };
+    });
+}
