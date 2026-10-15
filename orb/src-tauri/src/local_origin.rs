@@ -229,20 +229,23 @@ async fn start_worker(path: PathBuf, c: Connection) {
                 // journal; the snapshot carries status only, and a terminal
                 // snapshot (which closes the run) waits for the journal first.
                 let mut snapshot = record.snapshot.clone();
-                if crate::client_link::owns(&c.api_url, &c.token) {
-                    // If the journal cannot drain in time, the snapshot keeps
-                    // the text: a rare duplicate beats a lost final answer.
-                    let delivered = snapshot.status == "active"
-                        || crate::client_link::flush(
-                            &c.api_url,
-                            &c.token,
-                            &id,
-                            std::time::Duration::from_secs(15),
-                        )
-                        .await;
-                    if delivered {
-                        snapshot.text.clear();
-                    }
+                // A terminal snapshot closes the run, so it always waits for
+                // the journal (even before the link's handshake completed);
+                // flush is false for runs the link did not carry. If the
+                // journal cannot drain, the snapshot keeps the text.
+                let delivered = if snapshot.status == "active" {
+                    crate::client_link::owns(&c.api_url, &c.token)
+                } else {
+                    crate::client_link::flush(
+                        &c.api_url,
+                        &c.token,
+                        &id,
+                        std::time::Duration::from_secs(15),
+                    )
+                    .await
+                };
+                if delivered {
+                    snapshot.text.clear();
                 }
                 let response = client
                     .post(format!(

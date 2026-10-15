@@ -89,7 +89,7 @@ pub async fn flush(api_url: &str, token: &str, mission: &str, timeout: Duration)
             .lock()
             .map(|j| j.contains_key(mission))
             .unwrap_or(false);
-    if !carried {
+    if !carried || acc.unsupported.load(std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
     let deadline = tokio::time::Instant::now() + timeout;
@@ -258,10 +258,15 @@ impl Journal {
             return Ok(());
         }
         std::fs::create_dir_all(&self.dir)?;
+        let created = !self.log_path().exists();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.log_path())?;
+        if created {
+            // Make the new log's directory entry durable too.
+            std::fs::File::open(&self.dir)?.sync_all()?;
+        }
         let mut buf = Vec::new();
         let mut staged = Vec::new();
         for (offset, mut frame) in frames.into_iter().enumerate() {
