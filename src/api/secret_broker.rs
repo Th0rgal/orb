@@ -699,7 +699,7 @@ pub async fn handle_tool(
                 "requires_approval": by_request,
                 "projects": projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
                 "hint": "secret_get NAME returns accessible secrets immediately and asks Thomas for the others. \
-                         secret_request PROJECT asks for a whole project. secret_put stores a new secret after approval.",
+                         secret_request bitwarden_project asks for a whole Bitwarden project. secret_put stores a new secret after approval.",
             }))
         }
         "secret_get" => {
@@ -784,8 +784,8 @@ pub async fn handle_tool(
             let projects = bitwarden::list_projects_raw(state)
                 .await
                 .map_err(|(_, e)| e)?;
-            let wanted =
-                str_arg("project").ok_or("`project` is required (a project name, or `all`)")?;
+            let wanted = str_arg("bitwarden_project")
+                .ok_or("`bitwarden_project` is required (a Bitwarden project name, or `all`)")?;
             let all = wanted.eq_ignore_ascii_case("all") || wanted == "*";
             let project_id = if all {
                 None
@@ -850,7 +850,7 @@ pub async fn handle_tool(
             let projects = bitwarden::list_projects_raw(state)
                 .await
                 .map_err(|(_, e)| e)?;
-            let wanted = str_arg("project").ok_or("`project` is required")?;
+            let wanted = str_arg("bitwarden_project").ok_or("`bitwarden_project` is required")?;
             let project_id = resolve_project(&projects, wanted)
                 .ok_or_else(|| format!("Unknown Bitwarden project `{wanted}`"))?;
             if let Some(dup) = broker
@@ -942,8 +942,8 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
             description: "Ask Thomas for read access to a whole Bitwarden project (by name), or `all`, for this mission. \
                           Waits up to 90 s for approval, then returns `pending`."
                 .into(),
-            input_schema: json!({"type":"object","required":["project","reason"],"properties":{
-                "project":{"type":"string","minLength":1,"maxLength":200},
+            input_schema: json!({"type":"object","required":["bitwarden_project","reason"],"properties":{
+                "bitwarden_project":{"type":"string","minLength":1,"maxLength":200},
                 "reason":{"type":"string","minLength":1,"maxLength":500}
             },"additionalProperties":false}),
         },
@@ -953,10 +953,10 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
                           waits up to 90 s, then returns `pending`. Use UPPER_SNAKE_CASE names and the project that fits \
                           (see secret_list for project names)."
                 .into(),
-            input_schema: json!({"type":"object","required":["name","value","project","reason"],"properties":{
+            input_schema: json!({"type":"object","required":["name","value","bitwarden_project","reason"],"properties":{
                 "name":{"type":"string","minLength":1,"maxLength":200},
                 "value":{"type":"string","minLength":1,"maxLength":65536},
-                "project":{"type":"string","minLength":1,"maxLength":200},
+                "bitwarden_project":{"type":"string","minLength":1,"maxLength":200},
                 "note":{"type":"string","maxLength":2000},
                 "reason":{"type":"string","minLength":1,"maxLength":500}
             },"additionalProperties":false}),
