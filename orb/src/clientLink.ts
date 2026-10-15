@@ -38,3 +38,44 @@ export async function deliverAssistantText(id: string, text: string, receipt?: C
   if (await flushClientLink(id)) return;
   if (text.trim()) await appendClientTranscript(id, "assistant", text, eventId, receipt);
 }
+
+/** A start requested from another device (iOS, Android, web) for this computer. */
+export interface RemoteStart {
+  request_id: string;
+  prompt: string;
+  backend: string;
+  title?: string | null;
+  project?: string | null;
+  model_override?: string | null;
+  model_effort?: string | null;
+  working_directory?: string | null;
+}
+
+let stopListening: (() => void) | undefined;
+/**
+ * Open the client link for the signed-in account (so this computer is listed
+ * as online) and handle remote starts. Each start is answered exactly once.
+ */
+export async function connectClientLink(start: (request: RemoteStart) => Promise<string>): Promise<void> {
+  const invoke = nativeInvoke();
+  if (!invoke) return;
+  try { if (await invoke("client_link_connect", { connection: connection() }) !== true) return; }
+  catch { return; }
+  const events = (window as unknown as { __TAURI__?: { event?: { listen: (name: string, handler: (event: { payload: RemoteStart }) => void) => Promise<() => void> } } }).__TAURI__?.event;
+  if (!events || stopListening) return;
+  const seen = new Set<string>();
+  stopListening = await events.listen("client-link-start", ({ payload }) => {
+    if (!payload?.request_id || seen.has(payload.request_id)) return;
+    seen.add(payload.request_id);
+    const answer = (ok: boolean, missionId?: string, error?: string) =>
+      invoke("client_link_start_result", { connection: connection(), requestId: payload.request_id, ok, missionId: missionId ?? null, error: error ?? null }).catch(() => {});
+    void start(payload).then(id => answer(true, id), (e: unknown) => answer(false, undefined, e instanceof Error ? e.message : String(e)));
+  });
+}
+
+/** Tell Core which harnesses (and models) this computer can run. */
+export async function reportClientHarnesses(harnesses: { backend: string; name: string; models: { value: string; label: string }[] }[]): Promise<void> {
+  const invoke = nativeInvoke();
+  if (!invoke || !harnesses.length) return;
+  try { await invoke("client_link_set_capabilities", { connection: connection(), harnesses }); } catch { /* best effort */ }
+}

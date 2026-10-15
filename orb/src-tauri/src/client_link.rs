@@ -172,6 +172,69 @@ pub struct Connection {
     pub token: String,
 }
 
+// === Remote start ===
+
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// Registered at startup: remote `start` requests are handed to the webview,
+/// which launches them through the same path as a local start.
+pub fn set_app(app: tauri::AppHandle) {
+    let _ = APP.set(app);
+}
+
+fn computer_name() -> String {
+    sysinfo::System::host_name()
+        .map(|h| h.trim_end_matches(".local").to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "Computer".into())
+}
+
+/// Open the link as soon as Orb is signed in, so this computer is listed as
+/// online (and can receive remote starts) before it runs anything.
+#[tauri::command]
+pub fn client_link_connect(connection: Connection) -> Result<bool, String> {
+    if !enabled() {
+        return Ok(false);
+    }
+    let client_id = crate::transfers::local_machine_identity()?;
+    Ok(account(&connection.api_url, &connection.token, &client_id).is_some())
+}
+
+/// Report the harnesses this computer can run (`[{backend, name, models}]`).
+#[tauri::command]
+pub fn client_link_set_capabilities(connection: Connection, harnesses: Value) {
+    if let Some(acc) = existing(&connection.api_url, &connection.token) {
+        if let Ok(mut current) = acc.harnesses.lock() {
+            *current = harnesses.clone();
+        }
+        acc.queue(json!({"type":"capabilities","harnesses":harnesses}));
+    }
+}
+
+/// The webview's answer to a remote `start`.
+#[tauri::command]
+pub fn client_link_start_result(
+    connection: Connection,
+    request_id: String,
+    ok: bool,
+    mission_id: Option<String>,
+    error: Option<String>,
+) {
+    if let Some(acc) = existing(&connection.api_url, &connection.token) {
+        acc.queue(json!({"type":"start_result","request_id":request_id,"ok":ok,"mission_id":mission_id,"error":error}));
+    }
+}
+
+fn hand_to_webview(acc: &Account, frame: Value) {
+    use tauri::Emitter;
+    let delivered = APP
+        .get()
+        .is_some_and(|app| app.emit("client-link-start", frame.clone()).is_ok());
+    if !delivered {
+        acc.queue(json!({"type":"start_result","request_id":frame["request_id"],"ok":false,"error":"Orb is not ready on this computer"}));
+    }
+}
+
 #[tauri::command]
 pub fn client_link_active(connection: Connection) -> bool {
     owns(&connection.api_url, &connection.token)
@@ -341,6 +404,10 @@ struct Account {
     attached: Mutex<HashSet<String>>,
     /// Missions whose converter thread is still running.
     converting: Mutex<HashSet<String>>,
+    /// Harnesses reported in `hello` / `capabilities`.
+    harnesses: Mutex<Value>,
+    /// Control frames (capabilities, start results) waiting for the socket.
+    outbound: Mutex<Vec<Value>>,
 }
 
 fn accounts() -> &'static Mutex<HashMap<String, Arc<Account>>> {
@@ -383,6 +450,8 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
         unsupported: Default::default(),
         attached: Default::default(),
         converting: Default::default(),
+        harnesses: Mutex::new(Value::Null),
+        outbound: Default::default(),
     });
     map.insert(key, acc.clone());
     let task = acc.clone();
@@ -391,6 +460,13 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
 }
 
 impl Account {
+    fn queue(&self, frame: Value) {
+        if let Ok(mut outbound) = self.outbound.lock() {
+            outbound.push(frame);
+        }
+        self.wake.notify_one();
+    }
+
     fn append(&self, mission: &str, frames: Vec<Value>) {
         if frames.is_empty() || self.unsupported.load(std::sync::atomic::Ordering::SeqCst) {
             return;
@@ -633,7 +709,8 @@ async fn session(api: &str, acc: &Arc<Account>) -> Result<Stop, String> {
         .map_err(|e| format!("connect failed: {e}"))?;
     let (mut tx, mut rx) = ws.split();
     let send = |v: Value| Message::Text(v.to_string());
-    tx.send(send(json!({"type":"hello","client_id":acc.client_id})))
+    let harnesses = acc.harnesses.lock().map(|h| h.clone()).unwrap_or_default();
+    tx.send(send(json!({"type":"hello","client_id":acc.client_id,"name":computer_name(),"harnesses":harnesses})))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -648,7 +725,11 @@ async fn session(api: &str, acc: &Arc<Account>) -> Result<Stop, String> {
         }
         // Ask for the cursor of every journal not yet known in this session,
         // then send whatever the window allows.
-        let mut frames = Vec::new();
+        let mut frames: Vec<Value> = acc
+            .outbound
+            .lock()
+            .map(|mut o| std::mem::take(&mut *o))
+            .unwrap_or_default();
         if let Ok(journals) = acc.journals.lock() {
             for (mission, journal) in journals.iter() {
                 match sent.get(mission).copied() {
@@ -688,6 +769,10 @@ async fn session(api: &str, acc: &Arc<Account>) -> Result<Stop, String> {
                 let reply: Value = serde_json::from_str(&text).unwrap_or_default();
                 if reply["type"] == "welcome" {
                     acc.accepted.store(true, std::sync::atomic::Ordering::SeqCst);
+                    continue;
+                }
+                if reply["type"] == "start" {
+                    hand_to_webview(acc, reply);
                     continue;
                 }
                 let mission = reply["mission_id"].as_str().unwrap_or_default().to_string();
@@ -914,6 +999,8 @@ mod tests {
                 unsupported: Default::default(),
                 attached: Default::default(),
                 converting: Default::default(),
+                harnesses: Mutex::new(Value::Null),
+                outbound: Default::default(),
             });
             acc.append(
                 "m",
@@ -996,6 +1083,59 @@ mod tests {
             key("https://core", &jwt("b"))
         );
         assert_eq!(key("https://core", "not-a-jwt"), None);
+    }
+
+    #[test]
+    fn remote_start_is_always_answered_and_hello_names_the_computer() {
+        use tokio_tungstenite::accept_async;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let acc = Arc::new(Account {
+                dir: dir.path().into(),
+                token: Mutex::new("t".into()),
+                client_id: "c".into(),
+                journals: Mutex::new(HashMap::new()),
+                wake: Notify::new(),
+                accepted: Default::default(),
+                converting: Default::default(),
+                harnesses: Mutex::new(json!([{"backend":"claudecode"}])),
+                outbound: Default::default(),
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = accept_async(tcp).await.unwrap();
+                let hello: Value = loop {
+                    if let Message::Text(t) = ws.next().await.unwrap().unwrap() {
+                        break serde_json::from_str(&t).unwrap();
+                    }
+                };
+                ws.send(Message::Text(
+                    json!({"type":"start","request_id":"r1","prompt":"hi","backend":"claudecode"})
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+                let answer: Value = loop {
+                    if let Message::Text(t) = ws.next().await.unwrap().unwrap() {
+                        break serde_json::from_str(&t).unwrap();
+                    }
+                };
+                ws.close(None).await.ok();
+                (hello, answer)
+            });
+            let _ = tokio::time::timeout(Duration::from_secs(5), session(&api, &acc)).await;
+            let (hello, answer) = server.await.unwrap();
+            assert_eq!(hello["type"], "hello");
+            assert!(hello["name"].as_str().is_some_and(|n| !n.is_empty()));
+            assert_eq!(hello["harnesses"][0]["backend"], "claudecode");
+            // No webview in tests: the start is refused, not left pending.
+            assert_eq!(answer["type"], "start_result");
+            assert_eq!(answer["request_id"], "r1");
+            assert_eq!(answer["ok"], false);
+        });
     }
 
     #[test]

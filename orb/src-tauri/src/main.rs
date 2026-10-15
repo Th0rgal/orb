@@ -172,6 +172,7 @@ fn main() {
             app.state::<voice::VoiceState>().start_idle_reaper();
             machine_metrics::start(app.state::<voice::VoiceState>().inner().clone());
             diagnostics::start(app.handle().clone());
+            client_link::set_app(app.handle().clone());
             // macOS vibrancy: the window is transparent and the sidebar
             // shows the desktop through a sidebar-material blur, like
             // Cursor/Xcode. The main pane paints an opaque background in
@@ -256,6 +257,9 @@ fn main() {
             transfers::local_machine_identity,
             client_link::client_link_active,
             client_link::client_link_flush,
+            client_link::client_link_connect,
+            client_link::client_link_set_capabilities,
+            client_link::client_link_start_result,
             local_agents::local_agents_poll,
             local_wakeups::local_wakeups_sync,
             local_wakeups::local_wakeups_cancel,
