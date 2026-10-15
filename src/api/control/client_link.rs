@@ -445,8 +445,10 @@ async fn admit(
 /// ticket left behind by logger lag expires instead of hiding a later event.
 const TICKET_TTL: Duration = Duration::from_secs(30);
 
-fn tickets() -> &'static StdMutex<HashMap<(Uuid, &'static str), Vec<Instant>>> {
-    static T: OnceLock<StdMutex<HashMap<(Uuid, &'static str), Vec<Instant>>>> = OnceLock::new();
+type Tickets = StdMutex<HashMap<(Uuid, &'static str), Vec<Instant>>>;
+
+fn tickets() -> &'static Tickets {
+    static T: OnceLock<Tickets> = OnceLock::new();
     T.get_or_init(Default::default)
 }
 
