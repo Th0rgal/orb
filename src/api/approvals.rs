@@ -375,15 +375,21 @@ async fn describe(
                             .ttl_hours
                             .unwrap_or(super::secret_broker::DEFAULT_GRANT_TTL_HOURS)
                             .clamp(1, 24 * 30);
-                        let scope = match req.scope.as_deref() {
-                            Some("all") => format!("grant: ALL projects for {hours} h"),
-                            Some("project") => {
-                                format!("grant: whole project {project} for {hours} h")
-                            }
-                            Some("secret") | None => {
+                        // Mirror SecretBroker::approve: an empty scope means the
+                        // secret if one was asked, else every project, else the project.
+                        let effective = match req.scope.as_deref().unwrap_or("") {
+                            "" if r["key"].is_string() => "secret",
+                            "" if r["all_projects"] == true => "all",
+                            "" if r["project_id"].is_string() => "project",
+                            other => other,
+                        };
+                        let scope = match effective {
+                            "all" => format!("grant: ALL projects for {hours} h"),
+                            "project" => format!("grant: whole project {project} for {hours} h"),
+                            "secret" if r["key"].is_string() => {
                                 format!("grant: this secret only for {hours} h")
                             }
-                            Some(other) => return Err(format!("Unknown scope {}", quoted(other))),
+                            other => return Err(format!("Unsupported scope {}", quoted(other))),
                         };
                         format!("Allow {who} to {what}; {scope}")
                     }
