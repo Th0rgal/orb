@@ -1541,8 +1541,16 @@ fun OrbMachinesSettingsPage(
     var isRefreshing by remember { mutableStateOf(false) }
     var errorBanner by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var computers by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
+    var computersReady by remember { mutableStateOf(false) }
 
     suspend fun loadMachines() {
+        // Computers are independent of the fleet: one failing never hides the other.
+        try {
+            computers = loadClientComputers(core)
+            computersReady = true
+        } catch (_: Throwable) {
+        }
         try {
             val remoteObj = core.fetchDict("/api/remote-nodes")
             nodes = OrbJSON.dictList(remoteObj["nodes"]).map { OrbRow(it) }
@@ -1664,6 +1672,8 @@ fun OrbMachinesSettingsPage(
                 errorBanner?.let { err ->
                     item { OrbNotice(title = err, log = core.lastErrorLog.value) }
                 }
+
+                item { OrbComputersBlock(core = core, computers = computers, ready = computersReady) }
 
                 // Section("Fleet") matching OrbMachinesSettings.swift
                 item {
