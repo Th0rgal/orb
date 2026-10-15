@@ -1301,9 +1301,17 @@ pub(crate) async fn check_client_receipt(
     run_id: Option<Uuid>,
     generation: Option<u64>,
 ) -> Result<Option<crate::api::mission_store::MissionRun>, Error> {
-    guard(&control.mission_store, id).await.map_err(conflict)?;
-    let active = control
-        .mission_store
+    check_client_receipt_in(&control.mission_store, id, run_id, generation).await
+}
+
+pub(crate) async fn check_client_receipt_in(
+    store: &Arc<dyn MissionStore>,
+    id: Uuid,
+    run_id: Option<Uuid>,
+    generation: Option<u64>,
+) -> Result<Option<crate::api::mission_store::MissionRun>, Error> {
+    guard(store, id).await.map_err(conflict)?;
+    let active = store
         .get_active_mission_run(id)
         .await
         .map_err(internal_error)?;
@@ -1316,7 +1324,7 @@ pub(crate) async fn check_client_receipt(
         }
         return Ok(Some(run));
     }
-    if committed(&control.mission_store, id)
+    if committed(store, id)
         .await
         .map_err(internal_error)?
         .is_some()

@@ -2006,6 +2006,21 @@ pub struct MissionImportOptions {
     pub keep_automations_active: bool,
 }
 
+/// Stores without a transactional event log refuse the client link outright.
+pub const CLIENT_LINK_UNSUPPORTED: &str = "Client link requires the SQLite mission store";
+
+/// Outcome of persisting one client-link event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientIngest {
+    Stored,
+    /// Already persisted (a replay); acknowledge without storing again.
+    Duplicate,
+    /// Out of order; the client must resend from `expected`.
+    Gap {
+        expected: u64,
+    },
+}
+
 /// Mission store trait - implemented by all storage backends.
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -2279,18 +2294,18 @@ pub trait MissionStore: Send + Sync {
         _mission_id: Uuid,
         _client_id: &str,
     ) -> Result<u64, String> {
-        Err("Client link is not supported by this store".into())
+        Err(CLIENT_LINK_UNSUPPORTED.into())
     }
 
-    /// Compare-and-set the client-link cursor; false when it no longer reads `from`.
-    async fn advance_client_event_cursor(
+    /// Persist one client-link event together with its cursor, atomically.
+    async fn log_client_event(
         &self,
         _mission_id: Uuid,
         _client_id: &str,
-        _from: u64,
-        _to: u64,
-    ) -> Result<bool, String> {
-        Err("Client link is not supported by this store".into())
+        _seq: u64,
+        _event: AgentEvent,
+    ) -> Result<ClientIngest, String> {
+        Err(CLIENT_LINK_UNSUPPORTED.into())
     }
 
     /// Create a new mission.

@@ -8,15 +8,17 @@
 //!
 //! Protocol (JSON text frames, tagged by `type`):
 //! - client → core: `hello {client_id}` (first frame), `event {mission_id,
-//!   seq, event}`, `cursor {mission_id}`, `ping`.
+//!   run_id, generation, seq, event}`, `cursor {mission_id}`, `ping`.
 //! - core → client: `welcome`, `ack {mission_id, seq}`, `gap {mission_id,
 //!   expected}`, `rejected {mission_id, seq, reason}` (permanent),
 //!   `retry {mission_id, seq, reason}` (transient), `cursor {mission_id,
 //!   last_seq}`, `pong`.
 //!
-//! Sequences start at 1 per (mission, client) and must be contiguous.
+//! Sequences start at 1 per (mission, client) and must be contiguous. Each
+//! event carries the run receipt it belongs to; events from a superseded run
+//! are rejected so a stale runner cannot write into the current transcript.
 use super::*;
-use crate::api::mission_store::MissionStore;
+use crate::api::mission_store::{ClientIngest, MissionStore, CLIENT_LINK_UNSUPPORTED};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -180,17 +182,9 @@ impl ClientEvent {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Inbound {
-    Hello {
-        client_id: String,
-    },
-    Event {
-        mission_id: Uuid,
-        seq: u64,
-        event: serde_json::Value,
-    },
-    Cursor {
-        mission_id: Uuid,
-    },
+    Hello { client_id: String },
+    Event(EventFrame),
+    Cursor { mission_id: Uuid },
     Ping,
 }
 
@@ -249,24 +243,31 @@ fn registry() -> &'static Registry {
     R.get_or_init(Default::default)
 }
 
-fn touch(user_id: &str, client_id: &str, conn_id: Uuid) {
+/// Register a new socket for this install; it replaces any older one.
+fn register(user_id: &str, client_id: &str, conn_id: Uuid) {
     let now = crate::api::mission_store::now_string();
-    let mut map = registry().lock().expect("client link registry");
-    let link = map
-        .entry((user_id.into(), client_id.into()))
-        .or_insert_with(|| Link {
+    registry().lock().expect("client link registry").insert(
+        (user_id.into(), client_id.into()),
+        Link {
             conn_id,
             connected_at: now.clone(),
-            last_seen_at: now.clone(),
+            last_seen_at: now,
             last_seen: Instant::now(),
-        });
-    if link.conn_id != conn_id {
-        // A newer socket from the same install replaces the old one.
-        link.conn_id = conn_id;
-        link.connected_at = now.clone();
+        },
+    );
+}
+
+/// Refresh liveness, but only for the current socket: a superseded socket
+/// that is still draining must not reclaim the registration.
+fn touch(user_id: &str, client_id: &str, conn_id: Uuid) {
+    let mut map = registry().lock().expect("client link registry");
+    if let Some(link) = map
+        .get_mut(&(user_id.to_string(), client_id.to_string()))
+        .filter(|link| link.conn_id == conn_id)
+    {
+        link.last_seen_at = crate::api::mission_store::now_string();
+        link.last_seen = Instant::now();
     }
-    link.last_seen_at = now;
-    link.last_seen = Instant::now();
 }
 
 fn drop_link(user_id: &str, client_id: &str, conn_id: Uuid) {
@@ -297,17 +298,32 @@ pub fn presence(user_id: &str, client_id: &str) -> Presence {
 
 // === Ingest ===
 
-/// Persist then publish one client event. Never acknowledges an event that
-/// is not durably stored; a crash between persisting and advancing the
-/// cursor can at worst replay one event (never lose one).
+/// One `event` frame from the client.
+#[derive(Debug, Deserialize)]
+pub struct EventFrame {
+    pub mission_id: Uuid,
+    pub run_id: Uuid,
+    pub generation: u64,
+    pub seq: u64,
+    pub event: serde_json::Value,
+}
+
+/// Persist then publish one client event. The event and its cursor commit in
+/// one transaction, so an acknowledged event is durable and a replay is never
+/// stored twice.
 pub async fn ingest(
     store: &Arc<dyn MissionStore>,
     events_tx: &broadcast::Sender<AgentEvent>,
     client_id: &str,
-    mission_id: Uuid,
-    seq: u64,
-    raw: serde_json::Value,
+    frame: EventFrame,
 ) -> Reply {
+    let EventFrame {
+        mission_id,
+        run_id,
+        generation,
+        seq,
+        event,
+    } = frame;
     let retry = |reason: String| Reply::Retry {
         mission_id,
         seq,
@@ -326,39 +342,43 @@ pub async fn ingest(
         Ok(_) => return reject("mission is not run by this computer"),
         Err(e) => return retry(e),
     }
-    let event: ClientEvent = match serde_json::from_value(raw) {
+    let event: ClientEvent = match serde_json::from_value(event) {
         Ok(event) => event,
         Err(e) => return reject(&format!("unsupported event: {e}")),
     };
     let lock = worker_location::dispatch_lock(&format!("client-link:{mission_id}"));
     let _guard = lock.lock().await;
-    let last = match store.client_event_cursor(mission_id, client_id).await {
-        Ok(last) => last,
-        Err(e) => return retry(e),
-    };
-    if seq <= last {
-        return Reply::Ack { mission_id, seq };
-    }
-    if seq != last + 1 {
-        return Reply::Gap {
-            mission_id,
-            expected: last + 1,
-        };
+    // Fence under the lock: a stopped or transferred run cannot append.
+    match machine_transfer::check_client_receipt_in(
+        store,
+        mission_id,
+        Some(run_id),
+        Some(generation),
+    )
+    .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return reject("mission has no active local run"),
+        Err((StatusCode::CONFLICT, reason)) => return reject(&reason),
+        Err((_, reason)) => return retry(reason),
     }
     let event = event.into_agent_event(mission_id, client_id);
-    if let Err(e) = store.log_event(mission_id, &event).await {
-        return retry(e);
-    }
     match store
-        .advance_client_event_cursor(mission_id, client_id, last, seq)
+        .log_client_event(mission_id, client_id, seq, event.clone())
         .await
     {
-        Ok(true) => {}
-        Ok(false) => return retry("cursor moved concurrently".into()),
-        Err(e) => return retry(e),
+        Ok(ClientIngest::Stored) => {
+            let _ = events_tx.send(event);
+            Reply::Ack { mission_id, seq }
+        }
+        Ok(ClientIngest::Duplicate) => Reply::Ack { mission_id, seq },
+        Ok(ClientIngest::Gap { expected }) => Reply::Gap {
+            mission_id,
+            expected,
+        },
+        Err(e) if e == CLIENT_LINK_UNSUPPORTED => reject(&e),
+        Err(e) => retry(e),
     }
-    let _ = events_tx.send(event);
-    Reply::Ack { mission_id, seq }
 }
 
 // === HTTP ===
@@ -415,7 +435,7 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
         },
         _ => return,
     };
-    touch(&user.id, &client_id, conn_id);
+    register(&user.id, &client_id, conn_id);
     tracing::info!(%conn_id, user_id = %user.id, %client_id, "Client link opened");
     if !send(
         &mut sender,
@@ -453,12 +473,13 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
                 };
                 touch(&user.id, &client_id, conn_id);
                 let reply = match serde_json::from_str::<Inbound>(&text) {
-                    Ok(Inbound::Event { mission_id, seq, event }) => {
-                        ingest(&control.mission_store, &control.events_tx, &client_id, mission_id, seq, event).await
+                    Ok(Inbound::Event(frame)) => {
+                        ingest(&control.mission_store, &control.events_tx, &client_id, frame).await
                     }
                     Ok(Inbound::Cursor { mission_id }) => {
                         match control.mission_store.client_event_cursor(mission_id, &client_id).await {
                             Ok(last_seq) => Reply::Cursor { mission_id, last_seq },
+                            Err(reason) if reason == CLIENT_LINK_UNSUPPORTED => Reply::Rejected { mission_id, seq: 0, reason },
                             Err(reason) => Reply::Retry { mission_id, seq: 0, reason },
                         }
                     }
@@ -481,20 +502,27 @@ mod tests {
     use crate::api::mission_store::{now_string, SqliteMissionStore};
     use crate::local_origin::{Origin, Snapshot};
 
-    async fn fixture() -> (tempfile::TempDir, Arc<dyn MissionStore>, Uuid, String) {
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        store: Arc<dyn MissionStore>,
+        id: Uuid,
+        run: Uuid,
+        client: String,
+    }
+
+    async fn fixture() -> Fixture {
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteMissionStore::new(temp.path().to_path_buf(), "client-link")
             .await
             .unwrap();
-        let client = Uuid::new_v4();
-        let id = Uuid::new_v4();
+        let (client, id, run) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         store
             .sync_local_origin(Snapshot {
                 origin: Origin {
                     service_tier: None,
                     cyber_access: None,
                     id,
-                    run_id: Uuid::new_v4(),
+                    run_id: run,
                     client_id: client,
                     title: "Local task".into(),
                     project: "test".into(),
@@ -513,20 +541,42 @@ mod tests {
             })
             .await
             .unwrap();
-        (temp, Arc::new(store), id, client.to_string())
+        Fixture {
+            _temp: temp,
+            store: Arc::new(store),
+            id,
+            run,
+            client: client.to_string(),
+        }
     }
 
-    fn delta(text: &str) -> serde_json::Value {
-        serde_json::json!({ "type": "tool_call", "tool_call_id": text, "name": "Bash", "args": {} })
+    fn frame(f: &Fixture, seq: u64, event: serde_json::Value) -> EventFrame {
+        EventFrame {
+            mission_id: f.id,
+            run_id: f.run,
+            generation: 1,
+            seq,
+            event,
+        }
+    }
+
+    fn call(id: &str) -> serde_json::Value {
+        serde_json::json!({ "type": "tool_call", "tool_call_id": id, "name": "Bash", "args": {} })
     }
 
     #[tokio::test]
     async fn persists_publishes_and_dedupes_contiguously() {
-        let (_t, store, id, client) = fixture().await;
+        let f = fixture().await;
         let (tx, mut rx) = broadcast::channel(16);
-        let before = store.get_events(id, None, None, None).await.unwrap().len();
+        let id = f.id;
+        let before = f
+            .store
+            .get_events(id, None, None, None)
+            .await
+            .unwrap()
+            .len();
 
-        let r = ingest(&store, &tx, &client, id, 1, delta("a")).await;
+        let r = ingest(&f.store, &tx, &f.client, frame(&f, 1, call("a"))).await;
         assert_eq!(
             r,
             Reply::Ack {
@@ -537,7 +587,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().mission_id(), Some(id));
 
         // Replay after reconnect: acknowledged again, not stored twice.
-        let r = ingest(&store, &tx, &client, id, 1, delta("a")).await;
+        let r = ingest(&f.store, &tx, &f.client, frame(&f, 1, call("a"))).await;
         assert_eq!(
             r,
             Reply::Ack {
@@ -548,7 +598,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         // A hole is refused so the client replays from the cursor.
-        let r = ingest(&store, &tx, &client, id, 3, delta("c")).await;
+        let r = ingest(&f.store, &tx, &f.client, frame(&f, 3, call("c"))).await;
         assert_eq!(
             r,
             Reply::Gap {
@@ -557,7 +607,7 @@ mod tests {
             }
         );
 
-        let r = ingest(&store, &tx, &client, id, 2, delta("b")).await;
+        let r = ingest(&f.store, &tx, &f.client, frame(&f, 2, call("b"))).await;
         assert_eq!(
             r,
             Reply::Ack {
@@ -565,44 +615,68 @@ mod tests {
                 seq: 2
             }
         );
-        let after = store.get_events(id, None, None, None).await.unwrap().len();
+        let after = f
+            .store
+            .get_events(id, None, None, None)
+            .await
+            .unwrap()
+            .len();
         assert_eq!(after - before, 2);
-        assert_eq!(store.client_event_cursor(id, &client).await.unwrap(), 2);
+        assert_eq!(f.store.client_event_cursor(id, &f.client).await.unwrap(), 2);
     }
 
     #[tokio::test]
-    async fn rejects_other_computers_and_core_owned_events() {
-        let (_t, store, id, client) = fixture().await;
+    async fn rejects_other_computers_stale_runs_and_core_owned_events() {
+        let f = fixture().await;
         let (tx, _rx) = broadcast::channel(16);
         let other = Uuid::new_v4().to_string();
         assert!(matches!(
-            ingest(&store, &tx, &other, id, 1, delta("a")).await,
+            ingest(&f.store, &tx, &other, frame(&f, 1, call("a"))).await,
             Reply::Rejected { .. }
         ));
         let status = serde_json::json!({ "type": "mission_status_changed", "status": "completed" });
         assert!(matches!(
-            ingest(&store, &tx, &client, id, 1, status).await,
+            ingest(&f.store, &tx, &f.client, frame(&f, 1, status)).await,
             Reply::Rejected { .. }
         ));
+        let mut stale = frame(&f, 1, call("a"));
+        stale.run_id = Uuid::new_v4();
         assert!(matches!(
-            ingest(&store, &tx, &client, Uuid::new_v4(), 1, delta("a")).await,
+            ingest(&f.store, &tx, &f.client, stale).await,
             Reply::Rejected { .. }
         ));
-        assert_eq!(store.client_event_cursor(id, &client).await.unwrap(), 0);
+        let mut stale = frame(&f, 1, call("a"));
+        stale.generation = 2;
+        assert!(matches!(
+            ingest(&f.store, &tx, &f.client, stale).await,
+            Reply::Rejected { .. }
+        ));
+        let mut unknown = frame(&f, 1, call("a"));
+        unknown.mission_id = Uuid::new_v4();
+        assert!(matches!(
+            ingest(&f.store, &tx, &f.client, unknown).await,
+            Reply::Rejected { .. }
+        ));
+        assert_eq!(
+            f.store.client_event_cursor(f.id, &f.client).await.unwrap(),
+            0
+        );
     }
 
     #[test]
-    fn presence_goes_offline_when_link_drops() {
-        let (user, client, conn) = ("u", Uuid::new_v4().to_string(), Uuid::new_v4());
+    fn presence_follows_the_current_socket_only() {
+        let (user, client, old) = ("u", Uuid::new_v4().to_string(), Uuid::new_v4());
         assert!(!presence(user, &client).online);
-        touch(user, &client, conn);
+        register(user, &client, old);
         assert!(presence(user, &client).online);
-        // A stale socket closing must not evict its replacement.
-        let newer = Uuid::new_v4();
-        touch(user, &client, newer);
-        drop_link(user, &client, conn);
+        // Reconnect overlap: the draining old socket must not reclaim the
+        // registration, and its close must not evict the replacement.
+        let new = Uuid::new_v4();
+        register(user, &client, new);
+        touch(user, &client, old);
+        drop_link(user, &client, old);
         assert!(presence(user, &client).online);
-        drop_link(user, &client, newer);
+        drop_link(user, &client, new);
         assert!(!presence(user, &client).online);
     }
 }

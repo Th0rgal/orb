@@ -10,8 +10,8 @@ mod sqlite_local_origin;
 
 use super::{
     now_string, sanitize_filename, Automation, AutomationExecution, AwaitingKind, BoardOutboxItem,
-    BoardTask, BoardTaskOutcome, BoardTaskRole, BoardTaskStatus, CommandSource, DailyUsageStats,
-    ExecutionStatus, FreshSession, HourlyUsageStats, Mission, MissionActivity,
+    BoardTask, BoardTaskOutcome, BoardTaskRole, BoardTaskStatus, ClientIngest, CommandSource,
+    DailyUsageStats, ExecutionStatus, FreshSession, HourlyUsageStats, Mission, MissionActivity,
     MissionExecutionState, MissionFilter, MissionHistoryEntry, MissionMode, MissionProject,
     MissionProjectPatch, MissionRun, MissionScheduling, MissionStatus, MissionStatusCounts,
     MissionStore, MissionSummary, MissionToolExecution, MissionToolExecutionState, ModelUsageStats,
@@ -2682,6 +2682,454 @@ fn read_project_columns(
     Ok((project, awaiting_kind, last_status_change_at))
 }
 
+/// Synchronous body of `log_event`, so callers can run it inside a larger
+/// transaction (the client link commits an event with its ingest cursor).
+pub(super) fn log_event_sync(
+    conn: &rusqlite::Connection,
+    content_dir: &std::path::Path,
+    mission_id: Uuid,
+    event: &AgentEvent,
+) -> Result<(), String> {
+    if matches!(event, AgentEvent::UserMessage { queued: true, .. }) {
+        // Keep queued messages out of persisted mission history until they actually start.
+        return Ok(());
+    }
+
+    let now = now_string();
+    let mid = mission_id.to_string();
+
+    if let AgentEvent::TextOp { bubble_id, ops, .. } = event {
+        let bubble_id = bubble_id.clone();
+        let ops = ops.clone();
+        let has_finalize = ops.iter().any(|op| matches!(op, TextOp::Finalize));
+        return (|| -> Result<(), String> {
+            // A finalized native step is immutable. A log reset may replay
+            // it; do not create duplicate canonical rows or reopen the step.
+            if bubble_id.starts_with("antigravity:") && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND event_type='assistant_message_canonical' AND event_id=?2)",
+                    params![&mid, &bubble_id], |row| row.get::<_, bool>(0)
+                ).unwrap_or(false) { return Ok(()); }
+            if has_finalize {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT content, content_file
+                             FROM mission_events
+                             WHERE mission_id = ?1
+                               AND event_type = 'text_op'
+                               AND json_extract(metadata, '$.bubble_id') = ?2
+                             ORDER BY sequence ASC",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![&mid, &bubble_id], |row| {
+                        let content: Option<String> = row.get(0)?;
+                        let content_file: Option<String> = row.get(1)?;
+                        Ok(SqliteMissionStore::load_content(
+                            content.as_deref(),
+                            content_file.as_deref(),
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                drop(stmt);
+
+                let mut content = String::new();
+                for row in rows {
+                    let row_ops: Vec<TextOp> = serde_json::from_str(&row).unwrap_or_default();
+                    apply_text_ops(&mut content, &row_ops);
+                }
+                apply_text_ops(&mut content, &ops);
+
+                conn.execute(
+                    "DELETE FROM mission_events
+                         WHERE mission_id = ?1
+                           AND event_type = 'text_op'
+                           AND json_extract(metadata, '$.bubble_id') = ?2",
+                    params![&mid, &bubble_id],
+                )
+                .map_err(|e| e.to_string())?;
+
+                let sequence: i64 = conn
+                        .query_row(
+                            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
+                            params![&mid],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(1);
+                let (content_inline, content_file) = SqliteMissionStore::store_content(
+                    &content_dir,
+                    mission_id,
+                    sequence,
+                    "assistant_message_canonical",
+                    &content,
+                );
+                conn.execute(
+                        "INSERT INTO mission_events
+                         (mission_id, sequence, event_type, timestamp, event_id, content, content_file, metadata)
+                         VALUES (?1, ?2, 'assistant_message_canonical', ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            &mid,
+                            sequence,
+                            &now,
+                            &bubble_id,
+                            content_inline,
+                            content_file,
+                            serde_json::json!({
+                                "bubble_id": bubble_id,
+                                "canonical_from": "text_op",
+                                "revision": ops.iter().filter_map(|op| if let TextOp::Snapshot { revision, .. } = op { Some(*revision) } else { None }).max()
+                            })
+                            .to_string(),
+                        ],
+                    )
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let sequence: i64 = conn
+                        .query_row(
+                            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
+                            params![&mid],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(1);
+                let content = serde_json::to_string(&ops).unwrap_or_else(|_| "[]".to_string());
+                let (content_inline, content_file) = SqliteMissionStore::store_content(
+                    &content_dir,
+                    mission_id,
+                    sequence,
+                    "text_op",
+                    &content,
+                );
+                conn.execute(
+                        "INSERT INTO mission_events
+                         (mission_id, sequence, event_type, timestamp, content, content_file, metadata)
+                         VALUES (?1, ?2, 'text_op', ?3, ?4, ?5, ?6)",
+                        params![
+                            &mid,
+                            sequence,
+                            &now,
+                            content_inline,
+                            content_file,
+                            serde_json::json!({ "bubble_id": bubble_id }).to_string(),
+                        ],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+
+            Ok(())
+        })();
+    }
+
+    // Extract event data
+    let (event_type, event_id, tool_call_id, tool_name, content, metadata) = match event {
+        AgentEvent::UserMessage {
+            id,
+            content,
+            queued,
+            source,
+            ..
+        } => (
+            "user_message",
+            Some(id.to_string()),
+            None,
+            None,
+            if source.as_deref() == Some("scheduler") {
+                crate::api::control::deferred_messages::strip(content)
+            } else {
+                content.clone()
+            },
+            {
+                // Always record `queued`; record `source` only when present so
+                // the persisted metadata is the forensic record of who/what
+                // posted this message (audit/attribution).
+                let mut meta = serde_json::Map::new();
+                meta.insert("queued".to_string(), serde_json::json!(queued));
+                if let Some(src) = source {
+                    meta.insert("source".to_string(), serde_json::json!(src));
+                    if src == "scheduler" {
+                        let messages = crate::api::control::deferred_messages::decode(content).1;
+                        if !messages.is_empty() {
+                            meta.insert("messages".into(), serde_json::json!(messages));
+                        }
+                    }
+                }
+                serde_json::Value::Object(meta)
+            },
+        ),
+        AgentEvent::AssistantMessage {
+            id,
+            content,
+            success,
+            cost_cents,
+            cost_source,
+            usage,
+            model,
+            model_normalized,
+            shared_files,
+            resumable,
+            completion_evidence,
+            ..
+        } => (
+            "assistant_message",
+            Some(id.to_string()),
+            None,
+            None,
+            content.clone(),
+            assistant_message_metadata(AssistantMessageMetadataInput {
+                success: *success,
+                cost_cents: *cost_cents,
+                cost_source: *cost_source,
+                usage,
+                model,
+                model_normalized,
+                shared_files,
+                resumable: *resumable,
+                completion_evidence,
+            }),
+        ),
+        AgentEvent::Thinking { content, done, .. } => (
+            "thinking",
+            None,
+            None,
+            None,
+            content.clone(),
+            serde_json::json!({ "done": done }),
+        ),
+        AgentEvent::ToolCall {
+            tool_call_id,
+            name,
+            args,
+            ..
+        } => (
+            "tool_call",
+            None,
+            Some(tool_call_id.clone()),
+            Some(name.clone()),
+            args.to_string(),
+            serde_json::json!({}),
+        ),
+        AgentEvent::ToolResult {
+            tool_call_id,
+            name,
+            result,
+            ..
+        } => (
+            "tool_result",
+            None,
+            Some(tool_call_id.clone()),
+            Some(name.clone()),
+            result.to_string(),
+            serde_json::json!({}),
+        ),
+        AgentEvent::Error {
+            message, resumable, ..
+        } => (
+            "error",
+            None,
+            None,
+            None,
+            message.clone(),
+            serde_json::json!({ "resumable": resumable }),
+        ),
+        AgentEvent::TextDelta { content, .. } => (
+            "text_delta",
+            Some("text_delta_latest".to_string()),
+            None,
+            None,
+            content.clone(),
+            serde_json::json!({}),
+        ),
+        AgentEvent::TextOp { .. } => return Ok(()),
+        AgentEvent::MissionStatusChanged {
+            status,
+            summary,
+            execution,
+            completion,
+            ..
+        } => (
+            "mission_status_changed",
+            None,
+            None,
+            None,
+            summary.clone().unwrap_or_default(),
+            serde_json::json!({ "status": status.to_string(), "execution": execution, "completion": completion }),
+        ),
+        AgentEvent::MissionMetadataUpdated {
+            title,
+            short_description,
+            metadata_updated_at,
+            updated_at,
+            metadata_source,
+            metadata_model,
+            metadata_version,
+            ..
+        } => (
+            "mission_metadata_updated",
+            None,
+            None,
+            None,
+            title.clone().unwrap_or_default(),
+            serde_json::json!({
+                "title": title,
+                "short_description": short_description,
+                "metadata_updated_at": metadata_updated_at,
+                "updated_at": updated_at,
+                "metadata_source": metadata_source,
+                "metadata_model": metadata_model,
+                "metadata_version": metadata_version
+            }),
+        ),
+        AgentEvent::MissionSettingsUpdated {
+            backend,
+            agent,
+            model_override,
+            model_effort,
+            config_profile,
+            session_id,
+            updated_at,
+            ..
+        } => (
+            "mission_settings_updated",
+            None,
+            None,
+            None,
+            backend.clone(),
+            serde_json::json!({
+                "backend": backend,
+                "agent": agent,
+                "model_override": model_override,
+                "model_effort": model_effort,
+                "config_profile": config_profile,
+                "session_id": session_id,
+                "updated_at": updated_at
+            }),
+        ),
+        AgentEvent::GoalIteration {
+            iteration,
+            objective,
+            ..
+        } => (
+            "goal_iteration",
+            None,
+            None,
+            None,
+            objective.clone(),
+            serde_json::json!({ "iteration": iteration }),
+        ),
+        AgentEvent::GoalStatus {
+            status, objective, ..
+        } => (
+            "goal_status",
+            None,
+            None,
+            None,
+            objective.clone(),
+            serde_json::json!({ "status": status }),
+        ),
+        // Skip events that are less important for debugging
+        AgentEvent::Status { .. }
+        | AgentEvent::AgentPhase { .. }
+        | AgentEvent::AgentTree { .. }
+        | AgentEvent::Progress { .. }
+        | AgentEvent::SessionIdUpdate { .. }
+        | AgentEvent::MissionActivity { .. }
+        | AgentEvent::MissionTitleChanged { .. }
+        | AgentEvent::FidoSignRequest { .. } => return Ok(()),
+    };
+
+    let event_type = event_type.to_string();
+    let metadata_str = metadata.to_string();
+
+    (|| -> Result<(), String> {
+        // If this event has an event_id that already exists for this mission,
+        // update the existing row's metadata instead of inserting a duplicate.
+        if let Some(ref eid) = event_id {
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM mission_events WHERE mission_id = ?1 AND event_id = ?2",
+                    params![&mid, eid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap_or(None);
+
+            if let Some(row_id) = existing {
+                let (content_inline, content_file) = SqliteMissionStore::store_content(
+                    &content_dir,
+                    mission_id,
+                    row_id,
+                    &event_type,
+                    &content,
+                );
+                if event_type == "text_delta" {
+                    let sequence: i64 = conn
+                            .query_row(
+                                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
+                                params![&mid],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(1);
+                    conn.execute(
+                            "UPDATE mission_events
+                             SET sequence = ?1, metadata = ?2, timestamp = ?3, content = ?4, content_file = ?5
+                             WHERE id = ?6",
+                            params![sequence, metadata_str, now, content_inline, content_file, row_id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    conn.execute(
+                        "UPDATE mission_events
+                             SET metadata = ?1, timestamp = ?2, content = ?3, content_file = ?4
+                             WHERE id = ?5",
+                        params![metadata_str, now, content_inline, content_file, row_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                return Ok(());
+            }
+        }
+
+        // Get next sequence
+        let sequence: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
+                params![&mid],
+                |row| row.get(0),
+            )
+            .unwrap_or(1);
+
+        // Store content
+        let (content_inline, content_file) = SqliteMissionStore::store_content(
+            &content_dir,
+            mission_id,
+            sequence,
+            &event_type,
+            &content,
+        );
+
+        conn.execute(
+                "INSERT INTO mission_events
+                 (mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    mid,
+                    sequence,
+                    event_type,
+                    now,
+                    event_id,
+                    tool_call_id,
+                    tool_name,
+                    content_inline,
+                    content_file,
+                    metadata_str,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    })()
+}
+
 #[async_trait]
 impl MissionStore for SqliteMissionStore {
     async fn sync_local_origin(
@@ -2693,14 +3141,14 @@ impl MissionStore for SqliteMissionStore {
     async fn client_event_cursor(&self, mission_id: Uuid, client_id: &str) -> Result<u64, String> {
         sqlite_client_link::cursor(self, mission_id, client_id).await
     }
-    async fn advance_client_event_cursor(
+    async fn log_client_event(
         &self,
         mission_id: Uuid,
         client_id: &str,
-        from: u64,
-        to: u64,
-    ) -> Result<bool, String> {
-        sqlite_client_link::advance(self, mission_id, client_id, from, to).await
+        seq: u64,
+        event: AgentEvent,
+    ) -> Result<ClientIngest, String> {
+        sqlite_client_link::log(self, mission_id, client_id, seq, event).await
     }
     fn is_persistent(&self) -> bool {
         true
@@ -5217,452 +5665,12 @@ impl MissionStore for SqliteMissionStore {
     // === Event logging methods ===
 
     async fn log_event(&self, mission_id: Uuid, event: &AgentEvent) -> Result<(), String> {
-        if matches!(event, AgentEvent::UserMessage { queued: true, .. }) {
-            // Keep queued messages out of persisted mission history until they actually start.
-            return Ok(());
-        }
-
         let conn = self.conn.clone();
         let content_dir = self.content_dir.clone();
-        let now = now_string();
-        let mid = mission_id.to_string();
-
-        if let AgentEvent::TextOp { bubble_id, ops, .. } = event {
-            let bubble_id = bubble_id.clone();
-            let ops = ops.clone();
-            let has_finalize = ops.iter().any(|op| matches!(op, TextOp::Finalize));
-            return tokio::task::spawn_blocking(move || {
-                let conn = conn.blocking_lock();
-
-                // A finalized native step is immutable. A log reset may replay
-                // it; do not create duplicate canonical rows or reopen the step.
-                if bubble_id.starts_with("antigravity:") && conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND event_type='assistant_message_canonical' AND event_id=?2)",
-                    params![&mid, &bubble_id], |row| row.get::<_, bool>(0)
-                ).unwrap_or(false) { return Ok(()); }
-                if has_finalize {
-                    let mut stmt = conn
-                        .prepare(
-                            "SELECT content, content_file
-                             FROM mission_events
-                             WHERE mission_id = ?1
-                               AND event_type = 'text_op'
-                               AND json_extract(metadata, '$.bubble_id') = ?2
-                             ORDER BY sequence ASC",
-                        )
-                        .map_err(|e| e.to_string())?;
-                    let rows = stmt
-                        .query_map(params![&mid, &bubble_id], |row| {
-                            let content: Option<String> = row.get(0)?;
-                            let content_file: Option<String> = row.get(1)?;
-                            Ok(SqliteMissionStore::load_content(
-                                content.as_deref(),
-                                content_file.as_deref(),
-                            ))
-                        })
-                        .map_err(|e| e.to_string())?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|e| e.to_string())?;
-                    drop(stmt);
-
-                    let mut content = String::new();
-                    for row in rows {
-                        let row_ops: Vec<TextOp> = serde_json::from_str(&row).unwrap_or_default();
-                        apply_text_ops(&mut content, &row_ops);
-                    }
-                    apply_text_ops(&mut content, &ops);
-
-                    conn.execute(
-                        "DELETE FROM mission_events
-                         WHERE mission_id = ?1
-                           AND event_type = 'text_op'
-                           AND json_extract(metadata, '$.bubble_id') = ?2",
-                        params![&mid, &bubble_id],
-                    )
-                    .map_err(|e| e.to_string())?;
-
-                    let sequence: i64 = conn
-                        .query_row(
-                            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
-                            params![&mid],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or(1);
-                    let (content_inline, content_file) = SqliteMissionStore::store_content(
-                        &content_dir,
-                        mission_id,
-                        sequence,
-                        "assistant_message_canonical",
-                        &content,
-                    );
-                    conn.execute(
-                        "INSERT INTO mission_events
-                         (mission_id, sequence, event_type, timestamp, event_id, content, content_file, metadata)
-                         VALUES (?1, ?2, 'assistant_message_canonical', ?3, ?4, ?5, ?6, ?7)",
-                        params![
-                            &mid,
-                            sequence,
-                            &now,
-                            &bubble_id,
-                            content_inline,
-                            content_file,
-                            serde_json::json!({
-                                "bubble_id": bubble_id,
-                                "canonical_from": "text_op",
-                                "revision": ops.iter().filter_map(|op| if let TextOp::Snapshot { revision, .. } = op { Some(*revision) } else { None }).max()
-                            })
-                            .to_string(),
-                        ],
-                    )
-                    .map_err(|e| e.to_string())?;
-                } else {
-                    let sequence: i64 = conn
-                        .query_row(
-                            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
-                            params![&mid],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or(1);
-                    let content = serde_json::to_string(&ops).unwrap_or_else(|_| "[]".to_string());
-                    let (content_inline, content_file) = SqliteMissionStore::store_content(
-                        &content_dir,
-                        mission_id,
-                        sequence,
-                        "text_op",
-                        &content,
-                    );
-                    conn.execute(
-                        "INSERT INTO mission_events
-                         (mission_id, sequence, event_type, timestamp, content, content_file, metadata)
-                         VALUES (?1, ?2, 'text_op', ?3, ?4, ?5, ?6)",
-                        params![
-                            &mid,
-                            sequence,
-                            &now,
-                            content_inline,
-                            content_file,
-                            serde_json::json!({ "bubble_id": bubble_id }).to_string(),
-                        ],
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-
-                Ok(())
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-        }
-
-        // Extract event data
-        let (event_type, event_id, tool_call_id, tool_name, content, metadata) = match event {
-            AgentEvent::UserMessage {
-                id,
-                content,
-                queued,
-                source,
-                ..
-            } => (
-                "user_message",
-                Some(id.to_string()),
-                None,
-                None,
-                if source.as_deref() == Some("scheduler") {
-                    crate::api::control::deferred_messages::strip(content)
-                } else {
-                    content.clone()
-                },
-                {
-                    // Always record `queued`; record `source` only when present so
-                    // the persisted metadata is the forensic record of who/what
-                    // posted this message (audit/attribution).
-                    let mut meta = serde_json::Map::new();
-                    meta.insert("queued".to_string(), serde_json::json!(queued));
-                    if let Some(src) = source {
-                        meta.insert("source".to_string(), serde_json::json!(src));
-                        if src == "scheduler" {
-                            let messages =
-                                crate::api::control::deferred_messages::decode(content).1;
-                            if !messages.is_empty() {
-                                meta.insert("messages".into(), serde_json::json!(messages));
-                            }
-                        }
-                    }
-                    serde_json::Value::Object(meta)
-                },
-            ),
-            AgentEvent::AssistantMessage {
-                id,
-                content,
-                success,
-                cost_cents,
-                cost_source,
-                usage,
-                model,
-                model_normalized,
-                shared_files,
-                resumable,
-                completion_evidence,
-                ..
-            } => (
-                "assistant_message",
-                Some(id.to_string()),
-                None,
-                None,
-                content.clone(),
-                assistant_message_metadata(AssistantMessageMetadataInput {
-                    success: *success,
-                    cost_cents: *cost_cents,
-                    cost_source: *cost_source,
-                    usage,
-                    model,
-                    model_normalized,
-                    shared_files,
-                    resumable: *resumable,
-                    completion_evidence,
-                }),
-            ),
-            AgentEvent::Thinking { content, done, .. } => (
-                "thinking",
-                None,
-                None,
-                None,
-                content.clone(),
-                serde_json::json!({ "done": done }),
-            ),
-            AgentEvent::ToolCall {
-                tool_call_id,
-                name,
-                args,
-                ..
-            } => (
-                "tool_call",
-                None,
-                Some(tool_call_id.clone()),
-                Some(name.clone()),
-                args.to_string(),
-                serde_json::json!({}),
-            ),
-            AgentEvent::ToolResult {
-                tool_call_id,
-                name,
-                result,
-                ..
-            } => (
-                "tool_result",
-                None,
-                Some(tool_call_id.clone()),
-                Some(name.clone()),
-                result.to_string(),
-                serde_json::json!({}),
-            ),
-            AgentEvent::Error {
-                message, resumable, ..
-            } => (
-                "error",
-                None,
-                None,
-                None,
-                message.clone(),
-                serde_json::json!({ "resumable": resumable }),
-            ),
-            AgentEvent::TextDelta { content, .. } => (
-                "text_delta",
-                Some("text_delta_latest".to_string()),
-                None,
-                None,
-                content.clone(),
-                serde_json::json!({}),
-            ),
-            AgentEvent::TextOp { .. } => return Ok(()),
-            AgentEvent::MissionStatusChanged {
-                status,
-                summary,
-                execution,
-                completion,
-                ..
-            } => (
-                "mission_status_changed",
-                None,
-                None,
-                None,
-                summary.clone().unwrap_or_default(),
-                serde_json::json!({ "status": status.to_string(), "execution": execution, "completion": completion }),
-            ),
-            AgentEvent::MissionMetadataUpdated {
-                title,
-                short_description,
-                metadata_updated_at,
-                updated_at,
-                metadata_source,
-                metadata_model,
-                metadata_version,
-                ..
-            } => (
-                "mission_metadata_updated",
-                None,
-                None,
-                None,
-                title.clone().unwrap_or_default(),
-                serde_json::json!({
-                    "title": title,
-                    "short_description": short_description,
-                    "metadata_updated_at": metadata_updated_at,
-                    "updated_at": updated_at,
-                    "metadata_source": metadata_source,
-                    "metadata_model": metadata_model,
-                    "metadata_version": metadata_version
-                }),
-            ),
-            AgentEvent::MissionSettingsUpdated {
-                backend,
-                agent,
-                model_override,
-                model_effort,
-                config_profile,
-                session_id,
-                updated_at,
-                ..
-            } => (
-                "mission_settings_updated",
-                None,
-                None,
-                None,
-                backend.clone(),
-                serde_json::json!({
-                    "backend": backend,
-                    "agent": agent,
-                    "model_override": model_override,
-                    "model_effort": model_effort,
-                    "config_profile": config_profile,
-                    "session_id": session_id,
-                    "updated_at": updated_at
-                }),
-            ),
-            AgentEvent::GoalIteration {
-                iteration,
-                objective,
-                ..
-            } => (
-                "goal_iteration",
-                None,
-                None,
-                None,
-                objective.clone(),
-                serde_json::json!({ "iteration": iteration }),
-            ),
-            AgentEvent::GoalStatus {
-                status, objective, ..
-            } => (
-                "goal_status",
-                None,
-                None,
-                None,
-                objective.clone(),
-                serde_json::json!({ "status": status }),
-            ),
-            // Skip events that are less important for debugging
-            AgentEvent::Status { .. }
-            | AgentEvent::AgentPhase { .. }
-            | AgentEvent::AgentTree { .. }
-            | AgentEvent::Progress { .. }
-            | AgentEvent::SessionIdUpdate { .. }
-            | AgentEvent::MissionActivity { .. }
-            | AgentEvent::MissionTitleChanged { .. }
-            | AgentEvent::FidoSignRequest { .. } => return Ok(()),
-        };
-
-        let event_type = event_type.to_string();
-        let metadata_str = metadata.to_string();
-
+        let event = event.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
-
-            // If this event has an event_id that already exists for this mission,
-            // update the existing row's metadata instead of inserting a duplicate.
-            if let Some(ref eid) = event_id {
-                let existing: Option<i64> = conn
-                    .query_row(
-                        "SELECT id FROM mission_events WHERE mission_id = ?1 AND event_id = ?2",
-                        params![&mid, eid],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .unwrap_or(None);
-
-                if let Some(row_id) = existing {
-                    let (content_inline, content_file) = SqliteMissionStore::store_content(
-                        &content_dir,
-                        mission_id,
-                        row_id,
-                        &event_type,
-                        &content,
-                    );
-                    if event_type == "text_delta" {
-                        let sequence: i64 = conn
-                            .query_row(
-                                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
-                                params![&mid],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or(1);
-                        conn.execute(
-                            "UPDATE mission_events
-                             SET sequence = ?1, metadata = ?2, timestamp = ?3, content = ?4, content_file = ?5
-                             WHERE id = ?6",
-                            params![sequence, metadata_str, now, content_inline, content_file, row_id],
-                        )
-                        .map_err(|e| e.to_string())?;
-                    } else {
-                        conn.execute(
-                            "UPDATE mission_events
-                             SET metadata = ?1, timestamp = ?2, content = ?3, content_file = ?4
-                             WHERE id = ?5",
-                            params![metadata_str, now, content_inline, content_file, row_id],
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
-                    return Ok(());
-                }
-            }
-
-            // Get next sequence
-            let sequence: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
-                    params![&mid],
-                    |row| row.get(0),
-                )
-                .unwrap_or(1);
-
-            // Store content
-            let (content_inline, content_file) = SqliteMissionStore::store_content(
-                &content_dir,
-                mission_id,
-                sequence,
-                &event_type,
-                &content,
-            );
-
-            conn.execute(
-                "INSERT INTO mission_events
-                 (mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    mid,
-                    sequence,
-                    event_type,
-                    now,
-                    event_id,
-                    tool_call_id,
-                    tool_name,
-                    content_inline,
-                    content_file,
-                    metadata_str,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-
-            Ok(())
+            log_event_sync(&conn, &content_dir, mission_id, &event)
         })
         .await
         .map_err(|e| e.to_string())?
