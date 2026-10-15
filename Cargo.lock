@@ -1953,6 +1953,7 @@ dependencies = [
  "regex",
  "reqwest",
  "reqwest-eventsource",
+ "ring",
  "rusqlite",
  "sd-notify",
  "serde",

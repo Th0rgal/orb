@@ -275,13 +275,16 @@ enum OrbKeychain {
 final class OrbCore {
     static let shared = OrbCore()
     var endpoint: String { APIService.shared.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-    func call(_ path: String, method: String = "GET", body: OrbJSON? = nil) async throws -> OrbJSON {
+    /// `rawBody` sends exact bytes (device-signed requests hash them); `headers` are added as-is.
+    func call(_ path: String, method: String = "GET", body: OrbJSON? = nil, rawBody: Data? = nil, headers: [String: String] = [:]) async throws -> OrbJSON {
         guard let url = URL(string: endpoint + path) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 45
         request.setValue("Bearer \(APIService.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
-        if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if let rawBody { request.httpBody = rawBody; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        else if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         if http.statusCode == 401 {

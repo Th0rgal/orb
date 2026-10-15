@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { signedApi } from "./deviceApproval";
 
 export const PALOMA_BITWARDEN_PROJECT_ID = "297f3106-758f-43d5-8a4b-b460007558c8";
 
@@ -84,11 +85,7 @@ export const getBitwardenStatus = () =>
   api<BitwardenStatus>("/api/bitwarden/status");
 
 export const updateBitwardenConfig = (payload: UpdateBitwardenConfigPayload) =>
-  api<BitwardenStatus>("/api/bitwarden/config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  signedApi<BitwardenStatus>("PUT", "/api/bitwarden/config", payload, "change the Bitwarden connection");
 
 export const listBitwardenProjects = () =>
   api<BitwardenProject[]>("/api/bitwarden/projects");
@@ -98,43 +95,42 @@ export const listBitwardenSecrets = (projectId: string) =>
     `/api/bitwarden/projects/${encodeURIComponent(projectId)}/secrets`,
   );
 
-export const revealBitwardenSecret = (secretId: string) =>
-  api<BitwardenSecretDetail>(
+export const revealBitwardenSecret = (secretId: string, name = "a secret") =>
+  signedApi<BitwardenSecretDetail>(
+    "GET",
     `/api/bitwarden/secrets/${encodeURIComponent(secretId)}/reveal`,
+    undefined,
+    `reveal ${name}`,
   );
 
 export const createBitwardenSecret = (
   projectId: string,
   payload: { key: string; value: string; note?: string },
 ) =>
-  api<BitwardenSecretDetail>(
+  signedApi<BitwardenSecretDetail>(
+    "POST",
     `/api/bitwarden/projects/${encodeURIComponent(projectId)}/secrets`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
+    payload,
+    `create secret ${payload.key}`,
   );
 
 export const updateBitwardenSecret = (
   secretId: string,
   payload: { key?: string; value?: string; note?: string; project_id?: string },
 ) =>
-  api<BitwardenSecretDetail>(
+  signedApi<BitwardenSecretDetail>(
+    "PUT",
     `/api/bitwarden/secrets/${encodeURIComponent(secretId)}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
+    payload,
+    `edit secret ${payload.key ?? ""}`.trim(),
   );
 
-export const deleteBitwardenSecret = (secretId: string) =>
-  api<{ success: boolean }>(
+export const deleteBitwardenSecret = (secretId: string, name = "a secret") =>
+  signedApi<{ success: boolean }>(
+    "DELETE",
     `/api/bitwarden/secrets/${encodeURIComponent(secretId)}`,
-    {
-      method: "DELETE",
-    },
+    undefined,
+    `delete ${name}`,
   );
 
 /** True when the user dismissed the Touch ID / password sheet. */
@@ -202,17 +198,22 @@ export const approveSecretRequest = (
   id: string,
   scope?: "secret" | "project" | "all",
   ttlHours?: number,
+  summary = "approve a mission's secret request",
 ) =>
-  api<SecretAccessRequest>(`/api/bitwarden/requests/${encodeURIComponent(id)}/approve`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scope, ttl_hours: ttlHours }),
-  });
+  signedApi<SecretAccessRequest>(
+    "POST",
+    `/api/bitwarden/requests/${encodeURIComponent(id)}/approve`,
+    { scope, ttl_hours: ttlHours },
+    summary,
+  );
 
 export const rejectSecretRequest = (id: string) =>
-  api<SecretAccessRequest>(`/api/bitwarden/requests/${encodeURIComponent(id)}/reject`, {
-    method: "POST",
-  });
+  signedApi<SecretAccessRequest>(
+    "POST",
+    `/api/bitwarden/requests/${encodeURIComponent(id)}/reject`,
+    undefined,
+    "decline a mission's secret request",
+  );
 
 export const revokeSecretGrant = (id: string) =>
   api<{ success: boolean }>(`/api/bitwarden/grants/${encodeURIComponent(id)}`, {
@@ -220,11 +221,12 @@ export const revokeSecretGrant = (id: string) =>
   });
 
 export const setSecretDefaultAccess = (slug: string, projectIds: string[]) =>
-  api<BitwardenStatus>(`/api/bitwarden/default-access/${encodeURIComponent(slug)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ project_ids: projectIds }),
-  });
+  signedApi<BitwardenStatus>(
+    "PUT",
+    `/api/bitwarden/default-access/${encodeURIComponent(slug)}`,
+    { project_ids: projectIds },
+    `change default secret access for ${slug}`,
+  );
 
 /** Group secret names by their first `_` segment (`CLOUDFLARE_API_TOKEN` → `CLOUDFLARE`). */
 export function secretPrefix(key: string): string {

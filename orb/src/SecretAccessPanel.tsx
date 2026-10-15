@@ -10,6 +10,7 @@ import {
   type SecretGrant,
 } from "./bitwardenApi";
 import * as Ic from "./icons";
+import { ApprovalCancelled } from "./deviceApproval";
 
 const POLL_MS = 5000;
 
@@ -84,7 +85,7 @@ export function SecretAccessPanel(p: {
       await load();
       if (secretsChanged) p.onSecretsChanged();
     } catch (e) {
-      p.onError(e instanceof Error ? e.message : String(e));
+      if (!(e instanceof ApprovalCancelled)) p.onError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -124,7 +125,7 @@ export function SecretAccessPanel(p: {
                         class="s-btn primary"
                         disabled={!!busy()}
                         onClick={() =>
-                          void act(r.id, `store secret ${r.key}`, () => approveSecretRequest(r.id), true)
+                          void act(r.id, `store secret ${r.key}`, () => approveSecretRequest(r.id, undefined, undefined, `let ${who(r)} ${describe(r).toLowerCase()}`), true)
                         }
                       >
                         Approve
@@ -136,7 +137,7 @@ export function SecretAccessPanel(p: {
                         class="s-btn primary"
                         disabled={!!busy()}
                         title="Allow only this secret for this mission (24 h)"
-                        onClick={() => void act(r.id, `give a mission ${r.key}`, () => approveSecretRequest(r.id, "secret"))}
+                        onClick={() => void act(r.id, `give a mission ${r.key}`, () => approveSecretRequest(r.id, "secret", undefined, `give ${who(r)} the secret ${r.key}`))}
                       >
                         Allow secret
                       </button>
@@ -148,7 +149,7 @@ export function SecretAccessPanel(p: {
                         title="Allow the whole Bitwarden project for this mission (24 h)"
                         onClick={() =>
                           void act(r.id, `give a mission project ${projectName(r.project_id)}`, () =>
-                            approveSecretRequest(r.id, "project"),
+                            approveSecretRequest(r.id, "project", undefined, `give ${who(r)} project ${projectName(r.project_id)}`),
                           )
                         }
                       >
@@ -160,7 +161,7 @@ export function SecretAccessPanel(p: {
                       disabled={!!busy()}
                       title="Allow every project for this mission (24 h)"
                       onClick={() =>
-                        void act(r.id, "give a mission every secret project", () => approveSecretRequest(r.id, "all"))
+                        void act(r.id, "give a mission every secret project", () => approveSecretRequest(r.id, "all", undefined, `give ${who(r)} every secret project`))
                       }
                     >
                       Allow all
