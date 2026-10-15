@@ -867,6 +867,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/control/client-link",
             get(control::client_link::client_link_ws),
         )
+        .route(
+            "/api/control/client-computers",
+            get(control::client_link::list_client_computers),
+        )
+        .route(
+            "/api/control/client-computers/:client_id/missions",
+            post(control::client_link::start_on_client_computer),
+        )
         .route("/api/control/cancel", post(control::post_cancel))
         // Queue management endpoints
         .route("/api/control/queue", get(control::get_queue))
