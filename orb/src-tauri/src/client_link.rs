@@ -86,12 +86,20 @@ pub async fn flush(api_url: &str, token: &str, mission: &str, timeout: Duration)
             .lock()
             .map(|c| c.contains(mission))
             .unwrap_or(true);
-        let drained = !converting
-            && acc
-                .journals
-                .lock()
-                .map(|j| j.get(mission).is_none_or(|j| j.pending.is_empty()))
-                .unwrap_or(false);
+        let (drained, broken) = acc
+            .journals
+            .lock()
+            .map(|j| match j.get(mission) {
+                Some(j) => (j.pending.is_empty(), j.broken),
+                None => (true, false),
+            })
+            .unwrap_or((false, false));
+        if broken {
+            // The journal stopped at a failed write: the caller must use the
+            // HTTP fallback for this run.
+            return false;
+        }
+        let drained = !converting && drained;
         if drained {
             return true;
         }
@@ -100,6 +108,18 @@ pub async fn flush(api_url: &str, token: &str, mission: &str, timeout: Duration)
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Open (or reuse) the uplink for this account, which also loads and replays
+/// journals left by a previous session. False when the link is disabled.
+pub fn ensure(api_url: &str, token: &str) -> bool {
+    if !enabled() {
+        return false;
+    }
+    let Ok(client_id) = crate::transfers::local_machine_identity() else {
+        return false;
+    };
+    account(api_url, token, &client_id).is_some()
 }
 
 #[derive(serde::Deserialize)]
@@ -133,6 +153,10 @@ struct Journal {
     acked: u64,
     next: u64,
     pending: BTreeMap<u64, Value>,
+    /// A durable write failed: nothing more is journaled for this mission in
+    /// this session (no sequence is ever skipped), and `flush` reports false
+    /// so the run's answer goes through the transcript fallback instead.
+    broken: bool,
 }
 
 impl Journal {
@@ -150,24 +174,25 @@ impl Journal {
             acked: 0,
             next: 1,
             pending: BTreeMap::new(),
+            broken: false,
         };
         j.acked = std::fs::read_to_string(j.ack_path())
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
         let mut last = j.acked;
-        if let Ok(text) = std::fs::read_to_string(j.log_path()) {
-            // Drop a torn final line (crash mid-write) from the file too, so
-            // the next append starts on a clean line.
-            if !text.is_empty() && !text.ends_with('\n') {
-                let keep = text.rfind('\n').map_or(0, |i| i + 1);
+        if let Ok(bytes) = std::fs::read(j.log_path()) {
+            // A torn final line (crash mid-write, possibly inside a UTF-8
+            // character) was never sent: drop it from the file too, as bytes,
+            // so the next append starts on a clean line.
+            let keep = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+            if keep < bytes.len() {
                 if let Ok(file) = std::fs::OpenOptions::new().write(true).open(j.log_path()) {
                     let _ = file.set_len(keep as u64);
                 }
             }
-            // A torn final line (crash mid-write) is ignored: it was never sent.
-            for line in text.lines() {
-                let Ok(frame) = serde_json::from_str::<Value>(line) else {
+            for line in bytes[..keep].split(|b| *b == b'\n') {
+                let Ok(frame) = serde_json::from_slice::<Value>(line) else {
                     continue;
                 };
                 let Some(seq) = frame["seq"].as_u64() else {
@@ -214,19 +239,16 @@ impl Journal {
         Ok(())
     }
 
-    /// Like `append`, but a batch whose disk write fails is still kept (in
-    /// memory) and sent: the converter has moved on, so dropping it would lose
-    /// it, and `flush` must see it as pending until Core acknowledges it.
-    fn append_or_keep(&mut self, frames: Vec<Value>) -> std::io::Result<()> {
-        let fallback = frames.clone();
+    /// `append`, unless the journal already failed. On failure it stops for
+    /// this session instead of keeping an in-memory batch that a restart
+    /// would turn into a permanent sequence gap.
+    fn append_or_stop(&mut self, frames: Vec<Value>) -> std::io::Result<()> {
+        if self.broken {
+            return Ok(());
+        }
         let result = self.append(frames);
         if result.is_err() {
-            for mut frame in fallback {
-                let seq = self.next;
-                self.next += 1;
-                frame["seq"] = json!(seq);
-                self.pending.insert(seq, frame);
-            }
+            self.broken = true;
         }
         result
     }
@@ -317,8 +339,10 @@ impl Account {
         let journal = journals
             .entry(mission.to_string())
             .or_insert_with(|| Journal::load(&self.dir, mission));
-        if let Err(error) = journal.append_or_keep(frames) {
-            eprintln!("[client-link] journal write failed for {mission}, kept in memory: {error}");
+        if let Err(error) = journal.append_or_stop(frames) {
+            eprintln!(
+                "[client-link] journal write failed for {mission}; falling back to HTTP: {error}"
+            );
         }
         drop(journals);
         self.wake.notify_one();
@@ -328,8 +352,8 @@ impl Account {
 // === Conversion: local output → Core client events ===
 
 /// Turns one run's output stream into Core client events, using only event
-/// shapes every client already renders: `text_delta` chunks while the run
-/// streams, tool calls/results from activities, and one `assistant_message`
+/// shapes every client already renders: `text_delta` (accumulated text, as
+/// Core's runners send it) while the run streams, tool calls/results from activities, and one `assistant_message`
 /// with the full answer at the end. That message is keyed by the run id, the
 /// same id the transcript fallback uses, so Core never stores it twice.
 struct Converter {
@@ -355,7 +379,9 @@ impl Converter {
         }
         let chunk = std::mem::take(&mut self.pending);
         self.text.push_str(&chunk);
-        out.push(json!({"type":"text_delta","content":chunk}));
+        // Like Core's own runners: `text_delta` carries the accumulated text,
+        // so a viewer joining mid-run (or the persisted latest row) is whole.
+        out.push(json!({"type":"text_delta","content":self.text}));
     }
 
     fn activities(&mut self, list: &[Activity], out: &mut Vec<Value>) {
@@ -629,7 +655,7 @@ async fn session(api: &str, acc: &Arc<Account>) -> Result<Stop, String> {
         if let Ok(mut journals) = acc.journals.lock() {
             let idle: HashSet<String> = journals
                 .iter()
-                .filter(|(_, j)| j.pending.is_empty())
+                .filter(|(_, j)| j.pending.is_empty() && !j.broken)
                 .map(|(m, _)| m.clone())
                 .collect();
             for mission in idle {
@@ -689,7 +715,9 @@ mod tests {
             .append(true)
             .open(j.log_path())
             .unwrap();
-        f.write_all(b"{\"seq\":2,\"ty").unwrap();
+        // Torn inside a multi-byte character: the file is not valid UTF-8.
+        f.write_all(&"{\"seq\":2,\"t\":\"é".as_bytes()[..13])
+            .unwrap();
         let mut reloaded = Journal::load(dir.path(), "m");
         assert_eq!(reloaded.pending.len(), 1);
         assert_eq!(reloaded.next, 2);
@@ -713,6 +741,12 @@ mod tests {
             out,
             [json!({"type":"text_delta","content":"Héllo"})],
             "coalesced"
+        );
+        c.apply(event(" w", false), &mut out);
+        c.flush(&mut out);
+        assert_eq!(
+            out[1]["content"], "Héllo w",
+            "accumulated, like Core's runners"
         );
 
         let mut activity = Activity {
@@ -773,6 +807,7 @@ mod tests {
         assert!(done);
         let types: Vec<_> = out.iter().map(|e| e["type"].as_str().unwrap()).collect();
         assert_eq!(types, ["text_delta", "error", "assistant_message"]);
+        assert_eq!(out[0]["content"], "Héllo w!");
         assert_eq!(
             out[2]["id"], run,
             "keyed by the run, like the transcript fallback"

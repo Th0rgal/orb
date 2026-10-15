@@ -200,6 +200,12 @@ async fn post(
         .map_err(|e| e.to_string())
 }
 async fn settle(c: &Connection, id: &str, receipt: &Value) -> Result<(), String> {
+    // A previous session may have left this run's journal unsent: replay it
+    // before the status below closes the run and fences those events out.
+    if crate::client_link::ensure(&c.api_url, &c.token) {
+        crate::client_link::flush(&c.api_url, &c.token, id, std::time::Duration::from_secs(15))
+            .await;
+    }
     let response = post(c,id,"client-status",json!({"status":"interrupted","run_id":receipt["run_id"],"generation":receipt["generation"]})).await?;
     if !response.status().is_success() {
         return Err(format!(
