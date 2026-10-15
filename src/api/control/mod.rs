@@ -9,6 +9,7 @@
 
 pub(crate) mod btw_context;
 mod callback_parent;
+pub mod client_link;
 pub(crate) mod client_placement;
 pub(crate) mod continuations;
 pub mod cyber;
@@ -21445,6 +21446,11 @@ fn spawn_control_session(
                         *processed_per_type.entry(ev_name).or_insert(0) += 1;
                         // Extract mission_id from event
                         if let Some(mid) = event.mission_id() {
+                            // Client-link events were persisted with their
+                            // ingest cursor before being broadcast.
+                            if client_link::take_prepersisted(mid, &event) {
+                                continue;
+                            }
                             if should_persist_event(&event) {
                                 processed_total += 1;
                                 if let Err(e) = store.log_event(mid, &event).await {

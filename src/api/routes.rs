@@ -863,6 +863,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/control/tool_result", post(control::post_tool_result))
         .route("/api/control/stream", get(control::stream))
         .route("/api/control/ws", get(control::control_ws))
+        .route(
+            "/api/control/client-link",
+            get(control::client_link::client_link_ws),
+        )
         .route("/api/control/cancel", post(control::post_cancel))
         // Queue management endpoints
         .route("/api/control/queue", get(control::get_queue))
@@ -1016,6 +1020,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/control/missions/:id/status",
             post(control::set_mission_status),
+        )
+        .route(
+            "/api/control/missions/:id/client-presence",
+            get(control::client_link::mission_client_presence),
         )
         .route(
             "/api/control/missions/:id/client-transcript",

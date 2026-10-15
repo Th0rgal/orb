@@ -2006,6 +2006,23 @@ pub struct MissionImportOptions {
     pub keep_automations_active: bool,
 }
 
+/// Stores without a transactional event log refuse the client link outright.
+pub const CLIENT_LINK_UNSUPPORTED: &str = "Client link requires the SQLite mission store";
+
+/// Outcome of persisting one client-link event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientIngest {
+    Stored,
+    /// Already persisted (a replay); acknowledge without storing again.
+    Duplicate,
+    /// Out of order; the client must resend from `expected`.
+    Gap {
+        expected: u64,
+    },
+    /// The run fence failed inside the transaction; the sequence is consumed.
+    Refused,
+}
+
 /// Mission store trait - implemented by all storage backends.
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -2271,6 +2288,31 @@ pub trait MissionStore: Send + Sync {
         _snapshot: crate::local_origin::Snapshot,
     ) -> Result<(), String> {
         Err("Local offline imports are not supported by this store".into())
+    }
+
+    /// Last contiguous client-link sequence persisted for (mission, client).
+    async fn client_event_cursor(
+        &self,
+        _mission_id: Uuid,
+        _client_id: &str,
+    ) -> Result<u64, String> {
+        Err(CLIENT_LINK_UNSUPPORTED.into())
+    }
+
+    /// Persist one client-link event together with its cursor, atomically.
+    /// `None` consumes the sequence without storing anything (a refused frame),
+    /// so one permanent refusal cannot wedge the client's stream. With `run`,
+    /// the event is stored only if that run is still the live client run,
+    /// checked inside the same transaction (otherwise `Refused`).
+    async fn log_client_event(
+        &self,
+        _mission_id: Uuid,
+        _client_id: &str,
+        _seq: u64,
+        _event: Option<AgentEvent>,
+        _run: Option<(Uuid, u64)>,
+    ) -> Result<ClientIngest, String> {
+        Err(CLIENT_LINK_UNSUPPORTED.into())
     }
 
     /// Create a new mission.
