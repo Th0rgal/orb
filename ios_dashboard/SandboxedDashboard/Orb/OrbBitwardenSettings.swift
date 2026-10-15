@@ -82,6 +82,13 @@ struct OrbBitwardenSettings: View {
             detectBiometry()
             await authenticate()
         }
+        .task(id: unlocked) {
+            // Missions can ask while the page is open: refresh requests every 10 s.
+            while unlocked && !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                if unlocked { await loadBroker() }
+            }
+        }
         .sheet(isPresented: $tokenSheet) {
             OrbBitwardenTokenSheet(
                 client: client,

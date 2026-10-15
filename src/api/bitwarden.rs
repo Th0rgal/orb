@@ -652,7 +652,7 @@ pub(crate) async fn list_projects_raw(
     )
     .await?;
     let mut projects: Vec<BitwardenProject> = parse_json(&stdout, "project list")?;
-    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    projects.sort_by_key(|p| p.name.to_lowercase());
     Ok(projects)
 }
 
@@ -669,7 +669,7 @@ pub(crate) async fn list_all_secrets(
     )
     .await?;
     let mut secrets: Vec<BitwardenSecretSummary> = parse_json(&stdout, "secret list")?;
-    secrets.sort_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
+    secrets.sort_by_key(|s| s.key.to_lowercase());
     Ok(secrets)
 }
 

@@ -144,6 +144,8 @@ pub struct SecretBroker {
     data: Mutex<Persisted>,
     list_cache: Mutex<Option<(Instant, Vec<BitwardenSecretSummary>)>>,
     changed: tokio::sync::Notify,
+    /// One approve/reject at a time, so a request is never acted on twice.
+    resolving: Mutex<()>,
 }
 
 static BROKER: OnceLock<Arc<SecretBroker>> = OnceLock::new();
@@ -165,6 +167,7 @@ pub fn broker(state: &AppState) -> Arc<SecretBroker> {
                 data: Mutex::new(data),
                 list_cache: Mutex::new(None),
                 changed: tokio::sync::Notify::new(),
+                resolving: Mutex::new(()),
             })
         })
         .clone()
@@ -332,6 +335,21 @@ impl SecretBroker {
     async fn open_request(&self, mut request: SecretRequest) -> SecretRequest {
         let mut data = self.data.lock().await;
         Self::prune(&mut data, Utc::now());
+        if request.kind == RequestKind::Write {
+            if let Some(existing) = data.requests.iter_mut().find(|r| {
+                r.status == RequestStatus::Pending
+                    && r.kind == RequestKind::Write
+                    && r.mission_id == request.mission_id
+                    && r.key == request.key
+                    && r.project_id == request.project_id
+            }) {
+                existing.encrypted_value = request.encrypted_value.clone();
+                existing.note = request.note.clone();
+                let out = existing.clone();
+                self.save(&data).await;
+                return out;
+            }
+        }
         if request.kind == RequestKind::Read {
             if let Some(existing) = data.requests.iter().find(|r| {
                 r.status == RequestStatus::Pending
@@ -350,6 +368,31 @@ impl SecretBroker {
         drop(data);
         self.changed.notify_waiters();
         request
+    }
+
+    /// An approved write of this name by this mission in the last hour.
+    async fn recent_approved_write(
+        &self,
+        mission: Uuid,
+        key: &str,
+        project_id: &str,
+    ) -> Option<Uuid> {
+        let since = Utc::now() - chrono::Duration::hours(1);
+        self.data
+            .lock()
+            .await
+            .requests
+            .iter()
+            .rev()
+            .find(|r| {
+                r.kind == RequestKind::Write
+                    && r.status == RequestStatus::Approved
+                    && r.mission_id == mission
+                    && r.key.as_deref() == Some(key)
+                    && r.project_id.as_deref() == Some(project_id)
+                    && r.resolved_at.is_some_and(|t| t > since)
+            })
+            .map(|r| r.id)
     }
 
     async fn request(&self, id: Uuid) -> Option<SecretRequest> {
@@ -417,6 +460,7 @@ impl SecretBroker {
     }
 
     pub async fn reject(&self, id: Uuid) -> Result<SecretRequest, String> {
+        let _resolving = self.resolving.lock().await;
         let mut data = self.data.lock().await;
         let r = data
             .requests
@@ -445,6 +489,7 @@ impl SecretBroker {
         scope: Option<&str>,
         ttl_hours: Option<i64>,
     ) -> Result<SecretRequest, String> {
+        let _resolving = self.resolving.lock().await;
         let request = self.request(id).await.ok_or("Request not found")?;
         if request.status != RequestStatus::Pending {
             return Err("Request is no longer pending".into());
@@ -868,6 +913,13 @@ pub async fn handle_tool(
                 return Err(format!(
                     "`{key}` already exists in project `{other}`; use that project."
                 ));
+            }
+            // A retry after the operator approved the earlier call: done already.
+            if let Some(done) = broker
+                .recent_approved_write(caller.mission_id, &key, &project_id)
+                .await
+            {
+                return Ok(json!({"status":"stored","request_id": done}));
             }
             let request = broker
                 .open_request(SecretRequest {

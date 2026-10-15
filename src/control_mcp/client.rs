@@ -304,7 +304,11 @@ fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 /// Core returns a secret as `secret_delivery`; write it to a 0600 file and
 /// replace it with the path, so the value never enters the agent transcript,
 /// the harness logs or Core's event store.
-fn deliver_secret(mut result: Value) -> Value {
+fn deliver_secret(result: Value) -> Value {
+    deliver_secret_in(&secrets_dir(), result)
+}
+
+fn deliver_secret_in(dir: &std::path::Path, mut result: Value) -> Value {
     let Some(delivery) = result
         .as_object_mut()
         .and_then(|o| o.remove("secret_delivery"))
@@ -321,7 +325,7 @@ fn deliver_secret(mut result: Value) -> Value {
         result["error"] = json!("Secret name is not a safe file name; value withheld");
         return result;
     }
-    let dir = secrets_dir();
+    let dir = dir.to_path_buf();
     let path = dir.join(name);
     let written = (|| -> std::io::Result<()> {
         #[cfg(unix)]
@@ -519,14 +523,23 @@ mod tests {
     #[test]
     fn secret_delivery_is_written_to_a_private_file_and_stripped() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SANDBOXED_SECRETS_DIR", dir.path().join("mission"));
-        let out = super::deliver_secret(json!({
-            "status": "granted",
-            "secret_delivery": {"name": "UXON_TOKEN", "value": "s3cret"}
-        }));
-        std::env::remove_var("SANDBOXED_SECRETS_DIR");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let target = dir.path().join("mission");
+        let out = super::deliver_secret_in(
+            &target,
+            json!({
+                "status": "granted",
+                "secret_delivery": {"name": "UXON_TOKEN", "value": "s3cret"}
+            }),
+        );
         assert!(!out.to_string().contains("s3cret"));
-        let path = out["path"].as_str().unwrap();
+        let path = out["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no path in {out}"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "s3cret");
         #[cfg(unix)]
         {
@@ -534,7 +547,10 @@ mod tests {
             let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
-        let bad = super::deliver_secret(json!({"secret_delivery": {"name": "../x", "value": "v"}}));
+        let bad = super::deliver_secret_in(
+            &target,
+            json!({"secret_delivery": {"name": "../x", "value": "v"}}),
+        );
         assert!(!bad.to_string().contains("\"v\""));
     }
 }
