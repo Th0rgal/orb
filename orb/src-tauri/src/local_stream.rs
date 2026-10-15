@@ -18,6 +18,15 @@ struct State {
     text: String,
     terminal: Option<crate::local_agents::PollState>,
     listeners: Vec<(u64, Channel<Event>)>,
+    /// In-process consumers (the client link uplink). Unlike webview
+    /// listeners they survive `clear_subscriptions` on window reloads.
+    sinks: Vec<(u64, std::sync::mpsc::Sender<Event>)>,
+}
+impl State {
+    fn sink(&mut self, event: &Event) {
+        self.sinks
+            .retain(|(_, sink)| sink.send(event.clone()).is_ok());
+    }
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Activity {
@@ -635,9 +644,9 @@ impl Output {
             state: None,
             activities: Some(activities),
         };
-        self.0
-            .lock()
-            .unwrap()
+        let mut state = self.0.lock().unwrap();
+        state.sink(&event);
+        state
             .listeners
             .retain(|(_, channel)| channel.send(event.clone()).is_ok());
     }
@@ -675,6 +684,7 @@ impl Output {
             state: None,
             activities: None,
         };
+        state.sink(&event);
         state
             .listeners
             .retain(|(_, channel)| channel.send(event.clone()).is_ok());
@@ -691,6 +701,7 @@ impl Output {
             state: None,
             activities: None,
         };
+        state.sink(&event);
         state
             .listeners
             .retain(|(_, channel)| channel.send(event.clone()).is_ok());
@@ -707,6 +718,8 @@ impl Output {
             state: Some(terminal),
             activities: None,
         };
+        state.sink(&event);
+        state.sinks.clear();
         for (_, channel) in state.listeners.drain(..) {
             let _ = channel.send(event.clone());
         }
@@ -725,6 +738,24 @@ impl Output {
         let token = NEXT.fetch_add(1, Ordering::Relaxed);
         if state.terminal.is_none() {
             state.listeners.push((token, channel));
+        }
+        Ok(token)
+    }
+    /// Like `subscribe`, for an in-process consumer: one snapshot, then
+    /// deltas, then the terminal state (after which the sender is dropped).
+    pub fn subscribe_native(&self, sink: std::sync::mpsc::Sender<Event>) -> Result<u64, String> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut state = self.0.lock().unwrap();
+        sink.send(Event {
+            text: state.text.clone(),
+            reset: true,
+            state: state.terminal.clone(),
+            activities: Some(self.activities()),
+        })
+        .map_err(|e| e.to_string())?;
+        let token = NEXT.fetch_add(1, Ordering::Relaxed);
+        if state.terminal.is_none() {
+            state.sinks.push((token, sink));
         }
         Ok(token)
     }

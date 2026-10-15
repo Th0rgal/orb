@@ -1,3 +1,4 @@
+import { deliverAssistantText, flushClientLink } from "./clientLink";
 import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
 import type {CodexServiceTier} from './api';
 import { Picker } from "./Picker";
@@ -1740,12 +1741,13 @@ export default function App() {
   const finishLocal = async (id: string, run: ClientRunReceipt) => {
     try {
       const state = await followLocal(id, () => {});
-      if (state.text.trim()) await appendClientTranscript(id, "assistant", state.text, undefined, run);
+      await deliverAssistantText(id, state.text, run);
       const failed = (state.exit_code != null && state.exit_code !== 0) || (!!state.error && !state.text.trim());
       if (failed) recordLocalFailure(id, state.error || `Local process exited with code ${state.exit_code}`);
       await setClientMissionStatus(id, failed ? "failed" : "awaiting_user", run);
     } catch (error) {
       recordLocalFailure(id, error);
+      await flushClientLink(id).catch(() => false);
       await setClientMissionStatus(id, "failed", run).catch(() => {});
     }
     void refreshMissions();
@@ -3280,7 +3282,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const targetMissionId = boundMissionId || p.id;
     if (!targetMissionId) return;
     if (clientPlaced()) {
-      void stopLocal(targetMissionId).then(() => setClientMissionStatus(targetMissionId, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
+      void stopLocal(targetMissionId).then(() => flushClientLink(targetMissionId)).then(() => setClientMissionStatus(targetMissionId, "interrupted")).then(() => refresh()).catch(e => setSendError(String(e)));
       return;
     }
     void cancelMission(targetMissionId)

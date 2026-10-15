@@ -11,6 +11,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 notify = "8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 sha2 = "0.10"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -37,3 +39,5 @@ strip = true
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

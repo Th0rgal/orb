@@ -1,3 +1,4 @@
+import {deliverAssistantText,flushClientLink} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
 import {btwConfig} from './btwSettings';
@@ -77,7 +78,7 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
 }
 const locks=new Map<string,Promise<void>>();
 export function btwLaunchPending(parent:string):Promise<void>|undefined{return locks.get(storageKey(parent));}
-export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
+export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await flushClientLink(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
  const paths:string[]=[];
@@ -88,7 +89,7 @@ const finishing=new Map<string,Promise<unknown>>();
 function follow(id:string,receipt?:import('./clientRuns').ClientRunReceipt){
  if(finishing.has(id))return;
  const version=connectionVersion();
- const task=followLocal(id,()=>{}).then(async state=>{if(version!==connectionVersion())return;if(state.text.trim())await appendClientTranscript(id,'assistant',state.text,undefined,receipt);await setClientMissionStatus(id,state.exit_code||state.error||!state.text.trim()?'failed':'awaiting_user',receipt);}).finally(()=>finishing.delete(id));
+ const task=followLocal(id,()=>{}).then(async state=>{if(version!==connectionVersion())return;await deliverAssistantText(id,state.text,receipt);await setClientMissionStatus(id,state.exit_code||state.error||!state.text.trim()?'failed':'awaiting_user',receipt);}).finally(()=>finishing.delete(id));
  finishing.set(id,task);void task.catch(()=>{});
 }
 export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideEvent)=>void){

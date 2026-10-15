@@ -1,5 +1,6 @@
 import {createSignal,batch} from 'solid-js';
 import {mergeById} from './poll';
+import {deliverAssistantText,flushClientLink} from './clientLink';
 import {connectionVersion,getMission,reopenMission,appendClientTranscript,setClientMissionStatus} from './api';
 import type {ClientRunReceipt} from './clientRuns';
 import {readSideThread,saveSideThread} from './composerDrafts';
@@ -271,8 +272,10 @@ export function startLocalQueueWorker(){
   }
   if(row.result){
    const trimmed=row.result.text.trim();
+   // An empty answer can still have journaled tool calls or an error.
+   if(!trimmed)await flushClientLink(row.mission);
    if(trimmed&&trimmed!==row.lastSyncedText){
-    await appendClientTranscript(row.mission,'assistant',row.result.text,row.resultId,row.receipt);
+    await deliverAssistantText(row.mission,row.result.text,row.receipt,row.resultId);
     row.lastSyncedText=trimmed;
     await update(key,row.id,stored=>{stored.lastSyncedText=trimmed;});
    }

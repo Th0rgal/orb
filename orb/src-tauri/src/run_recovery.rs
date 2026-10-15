@@ -200,6 +200,31 @@ async fn post(
         .map_err(|e| e.to_string())
 }
 async fn settle(c: &Connection, id: &str, receipt: &Value) -> Result<(), String> {
+    // A previous session may have left this run's journal unsent: replay it
+    // before the status below closes the run and fences those events out.
+    if crate::client_link::ensure(&c.api_url, &c.token)
+        && !crate::client_link::flush(&c.api_url, &c.token, id, std::time::Duration::from_secs(15))
+            .await
+    {
+        // The link could not drain in time: deliver the journaled answer over
+        // HTTP (same message id as the journal's, so Core upserts) before the
+        // status closes the run.
+        if let Some(text) = crate::client_link::pending_answer(
+            &c.api_url,
+            &c.token,
+            id,
+            receipt["run_id"].as_str().unwrap_or_default(),
+            receipt["generation"].as_u64().unwrap_or_default(),
+        ) {
+            let response = post(c,id,"client-transcript",json!({"id":uuid::Uuid::new_v4(),"role":"assistant","content":text,"run_id":receipt["run_id"],"generation":receipt["generation"]})).await?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Could not deliver the previous run's answer: {}",
+                    response.status()
+                ));
+            }
+        }
+    }
     let response = post(c,id,"client-status",json!({"status":"interrupted","run_id":receipt["run_id"],"generation":receipt["generation"]})).await?;
     if !response.status().is_success() {
         return Err(format!(

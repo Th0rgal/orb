@@ -106,6 +106,7 @@ pub async fn local_agents_start_authorized(
         permit.generation,
     )
     .await?;
+    crate::client_link::attach(&mission_id, &permit);
     if !permit.legacy {
         let generation = crate::local_agents::native_generation(&mission_id);
         tauri::async_runtime::spawn(async move {
