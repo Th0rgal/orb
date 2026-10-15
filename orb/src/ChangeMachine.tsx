@@ -9,7 +9,8 @@ import { ErrorNotice } from "./ErrorNotice";
 import { cancelMission, getMission, type HarnessChoice, type Mission } from "./api";
 import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, localRunActive, pollLocal, refreshLocalAgents, stopLocal } from "./localAgents";
-import { appendClientTranscript, setClientMissionStatus } from "./api";
+import { setClientMissionStatus } from "./api";
+import { deliverAssistantText } from "./clientLink";
 import { MachineLoadBadge, byLeastLoaded, machineLoadTitle } from "./machineLoad";
 import { TransferInventory, formatBytes } from "./TransferInventory";
 import { TransferSelection, selectionRequest, selectionTotals, type Choice } from "./TransferSelection";
@@ -115,7 +116,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       const latest = await getMission(p.mission.id);
       if (["active", "pending"].includes(latest.status)) {
         try {
-          if (result.text.trim()) await appendClientTranscript(p.mission.id, "assistant", result.text);
+          await deliverAssistantText(p.mission.id, result.text);
           await setClientMissionStatus(p.mission.id, "interrupted");
         } catch (error) {
           if (["active", "pending"].includes((await getMission(p.mission.id)).status)) throw error;

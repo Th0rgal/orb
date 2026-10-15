@@ -1,4 +1,4 @@
-import {deliverAssistantText} from './clientLink';
+import {deliverAssistantText,flushClientLink} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
 import {btwConfig} from './btwSettings';
@@ -78,7 +78,7 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
 }
 const locks=new Map<string,Promise<void>>();
 export function btwLaunchPending(parent:string):Promise<void>|undefined{return locks.get(storageKey(parent));}
-export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
+export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await flushClientLink(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
  const paths:string[]=[];

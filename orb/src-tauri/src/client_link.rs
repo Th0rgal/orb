@@ -77,15 +77,21 @@ pub async fn flush(api_url: &str, token: &str, mission: &str, timeout: Duration)
     let Some(acc) = existing(api_url, token) else {
         return false;
     };
-    // Let the converter turn the run's last output into journal entries.
-    tokio::time::sleep(COALESCE * 2).await;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let drained = acc
-            .journals
+        // Drained means: the converter has finished (the run's final output
+        // is journaled) and Core acknowledged every journaled event.
+        let converting = acc
+            .converting
             .lock()
-            .map(|j| j.get(mission).is_none_or(|j| j.pending.is_empty()))
-            .unwrap_or(false);
+            .map(|c| c.contains(mission))
+            .unwrap_or(true);
+        let drained = !converting
+            && acc
+                .journals
+                .lock()
+                .map(|j| j.get(mission).is_none_or(|j| j.pending.is_empty()))
+                .unwrap_or(false);
         if drained {
             return true;
         }
@@ -151,6 +157,14 @@ impl Journal {
             .unwrap_or(0);
         let mut last = j.acked;
         if let Ok(text) = std::fs::read_to_string(j.log_path()) {
+            // Drop a torn final line (crash mid-write) from the file too, so
+            // the next append starts on a clean line.
+            if !text.is_empty() && !text.ends_with('\n') {
+                let keep = text.rfind('\n').map_or(0, |i| i + 1);
+                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(j.log_path()) {
+                    let _ = file.set_len(keep as u64);
+                }
+            }
             // A torn final line (crash mid-write) is ignored: it was never sent.
             for line in text.lines() {
                 let Ok(frame) = serde_json::from_str::<Value>(line) else {
@@ -200,6 +214,23 @@ impl Journal {
         Ok(())
     }
 
+    /// Like `append`, but a batch whose disk write fails is still kept (in
+    /// memory) and sent: the converter has moved on, so dropping it would lose
+    /// it, and `flush` must see it as pending until Core acknowledges it.
+    fn append_or_keep(&mut self, frames: Vec<Value>) -> std::io::Result<()> {
+        let fallback = frames.clone();
+        let result = self.append(frames);
+        if result.is_err() {
+            for mut frame in fallback {
+                let seq = self.next;
+                self.next += 1;
+                frame["seq"] = json!(seq);
+                self.pending.insert(seq, frame);
+            }
+        }
+        result
+    }
+
     fn ack(&mut self, seq: u64) -> std::io::Result<()> {
         if seq <= self.acked {
             return Ok(());
@@ -226,6 +257,8 @@ struct Account {
     journals: Mutex<HashMap<String, Journal>>,
     wake: Notify,
     accepted: std::sync::atomic::AtomicBool,
+    /// Missions whose converter thread is still running.
+    converting: Mutex<HashSet<String>>,
 }
 
 fn accounts() -> &'static Mutex<HashMap<String, Arc<Account>>> {
@@ -265,6 +298,7 @@ fn account(api_url: &str, token: &str, client_id: &str) -> Option<Arc<Account>> 
         journals: Mutex::new(journals),
         wake: Notify::new(),
         accepted: Default::default(),
+        converting: Default::default(),
     });
     map.insert(key, acc.clone());
     let task = acc.clone();
@@ -283,8 +317,8 @@ impl Account {
         let journal = journals
             .entry(mission.to_string())
             .or_insert_with(|| Journal::load(&self.dir, mission));
-        if let Err(error) = journal.append(frames) {
-            eprintln!("[client-link] journal write failed for {mission}: {error}");
+        if let Err(error) = journal.append_or_keep(frames) {
+            eprintln!("[client-link] journal write failed for {mission}, kept in memory: {error}");
         }
         drop(journals);
         self.wake.notify_one();
@@ -385,7 +419,19 @@ pub fn attach(mission: &str, permit: &crate::transfers::Permit) {
         permit.run_id.clone(),
         permit.generation,
     );
+    if let Ok(mut converting) = acc.converting.lock() {
+        converting.insert(mission.clone());
+    }
     std::thread::spawn(move || {
+        struct Done(Arc<Account>, String);
+        impl Drop for Done {
+            fn drop(&mut self) {
+                if let Ok(mut converting) = self.0.converting.lock() {
+                    converting.remove(&self.1);
+                }
+            }
+        }
+        let _done = Done(acc.clone(), mission.clone());
         let mut conv = Converter::new(&run_id);
         let frame = |event: Value| json!({"type":"event","mission_id":mission,"run_id":run_id,"generation":generation,"event":event});
         loop {
@@ -640,9 +686,13 @@ mod tests {
             .open(j.log_path())
             .unwrap();
         f.write_all(b"{\"seq\":2,\"ty").unwrap();
-        let reloaded = Journal::load(dir.path(), "m");
+        let mut reloaded = Journal::load(dir.path(), "m");
         assert_eq!(reloaded.pending.len(), 1);
         assert_eq!(reloaded.next, 2);
+        // The torn bytes were truncated: a new entry lands on its own line.
+        reloaded.append(vec![json!({"type":"event"})]).unwrap();
+        let again = Journal::load(dir.path(), "m");
+        assert_eq!(again.pending.keys().copied().collect::<Vec<_>>(), [1, 2]);
     }
 
     #[test]
@@ -740,6 +790,7 @@ mod tests {
                 journals: Mutex::new(HashMap::new()),
                 wake: Notify::new(),
                 accepted: Default::default(),
+                converting: Default::default(),
             });
             acc.append(
                 "m",
