@@ -902,7 +902,9 @@ enum OrbApprovalKey {
     static func sign(_ payload: String, reason: String) async throws -> String {
         let context = LAContext()
         context.localizedCancelTitle = "Cancel"
-        _ = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
+        // Core writes the summary into the signed payload: show that, not caller text.
+        let shown = payload.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? reason
+        _ = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: shown)
         let blob = try Data(contentsOf: keyURL)
         let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: context)
         return try key.signature(for: Data(payload.utf8)).derRepresentation.base64EncodedString()

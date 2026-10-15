@@ -112,10 +112,25 @@ pub fn approvals(state: &AppState) -> Arc<Approvals> {
         .get_or_init(|| {
             let dir = state.config.working_dir.join(".sandboxed-sh");
             let path = dir.join("approval_devices.json");
-            let data = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or_default();
+            // Fail closed: an unreadable or corrupt device file means enforce
+            // (with no devices) rather than silently falling back to warn.
+            let data = match std::fs::read_to_string(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Persisted::default(),
+                Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+                    tracing::error!("approval_devices.json is corrupt ({e}); enforcing approvals");
+                    Persisted {
+                        mode: Mode::Enforce,
+                        devices: Vec::new(),
+                    }
+                }),
+                Err(e) => {
+                    tracing::error!("approval_devices.json unreadable ({e}); enforcing approvals");
+                    Persisted {
+                        mode: Mode::Enforce,
+                        devices: Vec::new(),
+                    }
+                }
+            };
             Arc::new(Approvals {
                 path,
                 code_path: dir.join("approval_enrollment_code"),
@@ -276,6 +291,76 @@ pub fn verify_signature(spki_b64: &str, message: &[u8], der_sig: &[u8]) -> Resul
         .map_err(|_| "Device signature does not verify".to_string())
 }
 
+/// Human description of a protected request, written by Core.
+async fn describe(state: &Arc<AppState>, method: &Method, path: &str, body: &str) -> String {
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    let body: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    match (method, seg.as_slice()) {
+        (&Method::POST, ["", "api", "bitwarden", "requests", id, action]) => {
+            let snapshot = super::secret_broker::broker(state).snapshot().await;
+            let r = snapshot["requests"]
+                .as_array()
+                .and_then(|a| a.iter().find(|r| r["id"].as_str() == Some(*id)))
+                .cloned()
+                .unwrap_or_default();
+            let who = r["mission_title"].as_str().unwrap_or("a mission");
+            let what = match (r["kind"].as_str(), r["key"].as_str()) {
+                (Some("write"), Some(k)) => format!("store {k}"),
+                (_, Some(k)) => format!("read {k}"),
+                _ if r["all_projects"] == true => "read every project".into(),
+                _ => "read a Bitwarden project".into(),
+            };
+            if *action == "reject" {
+                format!("Decline: {who} wants to {what}")
+            } else {
+                let scope = match body["scope"].as_str() {
+                    Some("all") => " (ALL projects, 24 h)",
+                    Some("project") => " (whole project, 24 h)",
+                    Some("secret") => " (this secret, 24 h)",
+                    _ => "",
+                };
+                format!("Allow {who} to {what}{scope}")
+            }
+        }
+        (&Method::PUT, ["", "api", "bitwarden", "default-access", slug]) => {
+            let n = body["project_ids"].as_array().map(|a| a.len()).unwrap_or(0);
+            format!("Set default secret access for {slug} to {n} Bitwarden project(s)")
+        }
+        (&Method::PUT, ["", "api", "bitwarden", "config"]) => {
+            "Change the Bitwarden connection".into()
+        }
+        (&Method::GET, ["", "api", "bitwarden", "secrets", _, "reveal"]) => {
+            "Reveal a secret value".into()
+        }
+        (&Method::POST, ["", "api", "bitwarden", "projects", _, "secrets"]) => {
+            format!("Create secret {}", body["key"].as_str().unwrap_or(""))
+        }
+        (&Method::PUT, ["", "api", "bitwarden", "secrets", _]) => {
+            format!("Edit secret {}", body["key"].as_str().unwrap_or(""))
+        }
+        (&Method::DELETE, ["", "api", "bitwarden", "secrets", _]) => "Delete a secret".into(),
+        (&Method::DELETE, ["", "api", "approvals", "devices", _]) => {
+            "Remove an approval device".into()
+        }
+        (&Method::PUT, ["", "api", "approvals", "mode"]) => {
+            format!(
+                "Set approval mode to {}",
+                body["mode"].as_str().unwrap_or("?")
+            )
+        }
+        (&Method::POST, ["", "api", "approvals", "devices"]) => {
+            format!(
+                "Enroll approval device {}",
+                body["name"].as_str().unwrap_or("")
+            )
+        }
+        (&Method::POST, ["", "api", "settings", "restore"]) => {
+            "Restore backend settings from a backup".into()
+        }
+        _ => format!("{method} {path}"),
+    }
+}
+
 /// Operations that need a device signature.
 pub fn is_protected(method: &Method, path: &str) -> bool {
     let p = path.trim_end_matches('/');
@@ -289,6 +374,8 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
         (&Method::PUT | &Method::DELETE, ["", "api", "bitwarden", "secrets", _]) => true,
         (&Method::DELETE, ["", "api", "approvals", "devices", _]) => true,
         (&Method::PUT, ["", "api", "approvals", "mode"]) => true,
+        // A backup restore can rewrite device, grant and access state on disk.
+        (&Method::POST, ["", "api", "settings", "restore"]) => true,
         _ => false,
     }
 }
@@ -301,6 +388,15 @@ pub async fn require_device_approval(
 ) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    let guarded_prefix = path.starts_with("/api/bitwarden") || path.starts_with("/api/approvals");
+    if guarded_prefix
+        && (path.contains("//")
+            || path.contains('%')
+            || path.contains("/./")
+            || path.contains("/../"))
+    {
+        return (StatusCode::BAD_REQUEST, "Unsupported path").into_response();
+    }
     if !is_protected(&method, &path) {
         return next.run(req).await;
     }
@@ -315,7 +411,12 @@ pub async fn require_device_approval(
         .and_then(|h| h.to_str().ok())
         .map(str::to_string);
     let (parts, body) = req.into_parts();
-    let Ok(bytes) = to_bytes(body, MAX_BODY).await else {
+    let limit = if path.starts_with("/api/settings/restore") {
+        512 * 1024 * 1024
+    } else {
+        MAX_BODY
+    };
+    let Ok(bytes) = to_bytes(body, limit).await else {
         return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
     };
     let verdict = match header {
@@ -364,7 +465,12 @@ struct ChallengeRequest {
     /// Exact body bytes the client will send (UTF-8); empty for none.
     #[serde(default)]
     body: String,
+    /// For binary bodies (backup archives): hex SHA-256 of the exact bytes.
     #[serde(default)]
+    body_sha256: Option<String>,
+    /// Ignored: Core writes the summary the device displays.
+    #[serde(default)]
+    #[allow(dead_code)]
     summary: String,
 }
 
@@ -385,13 +491,23 @@ async fn challenge(
             "This request does not need a device approval".into(),
         ));
     }
+    // The text the device shows comes from Core, not the client, so a
+    // compromised page cannot describe one action while asking to sign another.
+    let body_hash = match req.body_sha256.as_deref().map(str::trim) {
+        Some(h) if h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()) => {
+            h.to_ascii_lowercase()
+        }
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "body_sha256 must be 64 hex characters".into(),
+            ))
+        }
+        None => sha256_hex(req.body.as_bytes()),
+    };
+    let summary = describe(&state, &method_parsed, &path, &req.body).await;
     let (id, c) = approvals(&state)
-        .issue(
-            &method,
-            &path,
-            &sha256_hex(req.body.as_bytes()),
-            &req.summary,
-        )
+        .issue(&method, &path, &body_hash, &summary)
         .await;
     Ok(Json(
         json!({"challenge_id": id, "payload": c.payload, "expires_at": c.expires_at}),

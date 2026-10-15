@@ -149,7 +149,8 @@ object OrbApprovalKey {
             )
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("Approve")
-                .setSubtitle(summary.take(120))
+                // Core writes the summary into the signed payload: show that, not caller text.
+                .setSubtitle(payload.lines().lastOrNull()?.take(120) ?: summary.take(120))
                 .setNegativeButtonText("Cancel")
                 .setAllowedAuthenticators(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .build()

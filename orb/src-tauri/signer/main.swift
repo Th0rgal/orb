@@ -59,8 +59,13 @@ case "create":
 case "public":
     emit(["public_key": loadKey().publicKey.derRepresentation.base64EncodedString()])
 case "sign":
-    let reason = option("--reason") ?? "approve this action"
     let payload = FileHandle.standardInput.readDataToEndOfFile()
+    // Show the summary Core wrote into the signed payload (its last line), not
+    // text from the caller: what Touch ID describes is exactly what gets signed.
+    guard let text = String(data: payload, encoding: .utf8), text.hasPrefix("paloma-approval-v1\n"),
+          let summary = text.split(separator: "\n", omittingEmptySubsequences: false).last, !summary.isEmpty
+    else { fail("Not a Paloma approval payload") }
+    let reason = String(summary)
     let context = LAContext()
     context.localizedCancelTitle = "Cancel"
     let semaphore = DispatchSemaphore(value: 0)
