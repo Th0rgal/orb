@@ -84,6 +84,7 @@ async function upload(attachments:SideAttachment[],destination:string){
  for(const a of attachments){const bytes=Uint8Array.from(atob(a.data_base64),c=>c.charCodeAt(0));const file=new File([bytes],a.name,{type:a.media_type});const item=await transferFile({name:a.name,file},destination);paths.push(item.path);}
  return paths;
 }
+const NOT_LOCAL='This conversation no longer runs on this computer';
 const finishing=new Map<string,Promise<unknown>>();
 function follow(id:string,receipt?:import('./clientRuns').ClientRunReceipt){
  if(finishing.has(id))return;
@@ -193,8 +194,14 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    if(s.local&&s.launchPending){
     // Native recovery proves the prior attempt stopped before releasing Core.
     // Transport failures and live processes retain the fence.
-    await recoverLocalLaunch(s.id,parent);
-    await setClientMissionStatus(s.id,'interrupted');
+    try{
+     await recoverLocalLaunch(s.id,parent);
+     await setClientMissionStatus(s.id,'interrupted');
+    }catch(error){
+     // Core never placed this side session on a computer, so no native run can
+     // exist to recover. Retrying would fail identically forever.
+     if(!String(error).includes(NOT_LOCAL))throw error;
+    }
     s={...s,launchPending:false,active:false};save(parent,s);
    }
    try {
@@ -208,7 +215,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   }
   const source=await getMission(parent),config=btwConfig();
   const machine=source.machine_transfer?.destination;
-  const local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
+  let local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
   const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:source.remote_node_id??source.remote_job?.node_id;
   const destination=local?'local':node??'core';
   const placement=JSON.stringify([local,node,source.working_directory,source.workspace_id]);
@@ -238,6 +245,9 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     if(error instanceof ApiError&&error.status===409&&error.detail.startsWith('This side request key was already used for different launch content;')&&localStorage.getItem(attemptKey)===JSON.stringify(retained))localStorage.removeItem(attemptKey);
     throw error;
    });
+   // Core owns placement. A stale local view must not launch a native run for
+   // a side session Core already started elsewhere.
+   if(local&&!m.tags?.includes('placement:client'))local=false;
    s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0};save(parent,s);localStorage.removeItem(attemptKey);
   };
   if(!reuse)await createSide();
