@@ -13,7 +13,10 @@ struct OrbBitwardenSettings: View {
     @State private var error = ""
     @State private var status: OrbJSON = .null
     @State private var projects: [OrbJSON] = []
-    @State private var selectedProjectId = "297f3106-758f-43d5-8a4b-b460007558c8"
+    @State private var selectedProjectId = ""
+    @State private var requests: [OrbJSON] = []
+    @State private var grants: [OrbJSON] = []
+    @State private var actingOn: String?
     @State private var secrets: [OrbJSON] = []
     @State private var loadingSecrets = false
     @State private var searchQuery = ""
@@ -40,7 +43,7 @@ struct OrbBitwardenSettings: View {
             let name = found["name"].text
             if !name.isEmpty { return name }
         }
-        return selectedProjectId == "297f3106-758f-43d5-8a4b-b460007558c8" ? "paloma" : selectedProjectId
+        return selectedProjectId
     }
 
     var body: some View {
@@ -182,6 +185,8 @@ struct OrbBitwardenSettings: View {
         List {
             OrbSettingsError(message: error)
 
+            accessSection
+
             Section("Machine Account") {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
@@ -216,7 +221,7 @@ struct OrbBitwardenSettings: View {
                     HStack {
                         Text("Connected project")
                         Spacer()
-                        Text("paloma")
+                        Text("—")
                             .font(.subheadline.monospaced())
                             .foregroundStyle(.secondary)
                     }
@@ -397,7 +402,7 @@ struct OrbBitwardenSettings: View {
         do {
             let success = try await context.evaluatePolicy(
                 policy,
-                localizedReason: "Unlock Bitwarden Secrets Manager for project paloma"
+                localizedReason: "Unlock secrets and mission access requests"
             )
             if success {
                 unlocked = true
@@ -417,9 +422,8 @@ struct OrbBitwardenSettings: View {
         do {
             let st = try await client.call("/api/bitwarden/status")
             status = st
-            let boundPaloma = st["project_bindings"]["paloma"].text
-            let defaultProj = !boundPaloma.isEmpty ? boundPaloma : (!st["default_project_id"].text.isEmpty ? st["default_project_id"].text : "297f3106-758f-43d5-8a4b-b460007558c8")
-            selectedProjectId = defaultProj
+            let defaultProj = selectedProjectId.isEmpty ? st["default_project_id"].text : selectedProjectId
+            await loadBroker()
 
             if st["configured"] == .bool(true) && isBwsAvailable {
                 let projs = (try? await client.call("/api/bitwarden/projects").items) ?? []
@@ -453,16 +457,99 @@ struct OrbBitwardenSettings: View {
         }
     }
 
+    // Browsing a project must not change any binding: bindings grant missions access.
     private func selectProject(_ projectId: String) async {
         await loadSecrets(projectId: projectId)
-        _ = try? await client.call(
-            "/api/bitwarden/config",
-            method: "PUT",
-            body: .object([
-                "default_project_id": .string(projectId),
-                "project_bindings": .object(["paloma": .string(projectId)])
-            ])
-        )
+    }
+
+    private func loadBroker() async {
+        guard let snap = try? await client.call("/api/bitwarden/broker") else { return }
+        requests = snap["requests"].items.filter { $0["status"].text == "pending" }
+        grants = snap["grants"].items
+    }
+
+    private func projectName(_ id: String) -> String {
+        projects.first(where: { $0["id"].text == id })?["name"].text ?? String(id.prefix(8))
+    }
+
+    private func describe(_ r: OrbJSON) -> String {
+        let key = r["key"].text, project = r["project_id"].text
+        if r["kind"].text == "write" { return "Store \(key) in \(projectName(project))" }
+        if !key.isEmpty { return "Read \(key)" }
+        if r["all_projects"] == .bool(true) { return "Read every project" }
+        return "Read project \(projectName(project))"
+    }
+
+    private func respond(_ r: OrbJSON, scope: String?) async {
+        let id = r["id"].text
+        actingOn = id
+        defer { actingOn = nil }
+        do {
+            if let scope {
+                var body: [String: OrbJSON] = [:]
+                if !scope.isEmpty { body["scope"] = .string(scope) }
+                _ = try await client.call("/api/bitwarden/requests/\(id)/approve", method: "POST", body: .object(body))
+            } else {
+                _ = try await client.call("/api/bitwarden/requests/\(id)/reject", method: "POST")
+            }
+        } catch {
+            self.error = error.localizedDescription
+        }
+        await loadBroker()
+    }
+
+    @ViewBuilder
+    private var accessSection: some View {
+        if !requests.isEmpty || !grants.isEmpty {
+            Section("Mission access") {
+                ForEach(requests, id: \.selfID) { r in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(describe(r)).font(.subheadline.weight(.medium))
+                        Text([r["mission_title"].text, r["paloma_project"].text].filter { !$0.isEmpty }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary)
+                        if !r["reason"].text.isEmpty {
+                            Text("“\(r["reason"].text)”").font(.caption).italic()
+                        }
+                        HStack {
+                            if r["kind"].text == "write" {
+                                Button("Approve") { Task { await respond(r, scope: "") } }
+                            } else {
+                                if !r["key"].text.isEmpty {
+                                    Button("Secret") { Task { await respond(r, scope: "secret") } }
+                                }
+                                if !r["project_id"].text.isEmpty {
+                                    Button("Project") { Task { await respond(r, scope: "project") } }
+                                }
+                                Button("All") { Task { await respond(r, scope: "all") } }
+                            }
+                            Spacer()
+                            Button("Decline", role: .destructive) { Task { await respond(r, scope: nil) } }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(actingOn != nil)
+                    }
+                }
+                ForEach(grants, id: \.selfID) { g in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(g["scope"]["kind"].text == "all" ? "All projects"
+                                 : g["scope"]["kind"].text == "project" ? "Project \(projectName(g["scope"]["project_id"].text))"
+                                 : "Secret \(g["scope"]["key"].text)")
+                                .font(.subheadline)
+                            Text(g["mission_title"].text).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Revoke") {
+                            Task {
+                                _ = try? await client.call("/api/bitwarden/grants/\(g["id"].text)", method: "DELETE")
+                                await loadBroker()
+                            }
+                        }
+                        .font(.subheadline)
+                    }
+                }
+            }
+        }
     }
 
     private func toggleReveal(id: String) async {
