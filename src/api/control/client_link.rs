@@ -51,6 +51,10 @@ pub enum ClientEvent {
         cost_source: crate::agents::CostSource,
         #[serde(default)]
         usage: Option<crate::cost::TokenUsage>,
+        #[serde(default)]
+        model_normalized: Option<String>,
+        #[serde(default)]
+        resumable: bool,
     },
     Thinking {
         content: String,
@@ -125,6 +129,8 @@ impl ClientEvent {
                 cost_cents,
                 cost_source,
                 usage,
+                model_normalized,
+                resumable,
             } => AgentEvent::AssistantMessage {
                 id,
                 content,
@@ -133,10 +139,12 @@ impl ClientEvent {
                 cost_source,
                 usage,
                 model,
-                model_normalized: None,
+                model_normalized,
                 mission_id: mid,
+                // Local runs have no Core-side shared files or completion
+                // evidence; those are produced by Core runners only.
                 shared_files: None,
-                resumable: false,
+                resumable,
                 completion_evidence: None,
             },
             ClientEvent::Thinking { content, done } => AgentEvent::Thinking {
@@ -359,6 +367,18 @@ pub async fn ingest(
     client_id: &str,
     frame: EventFrame,
 ) -> Reply {
+    ingest_fenced(store, events_tx, client_id, frame, || true).await
+}
+
+/// `current` is re-checked under the mission lock, right before the commit,
+/// so a socket replaced while its frame waited cannot claim the sequence.
+async fn ingest_fenced(
+    store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    client_id: &str,
+    frame: EventFrame,
+    current: impl Fn() -> bool,
+) -> Reply {
     let EventFrame {
         mission_id,
         run_id,
@@ -388,6 +408,9 @@ pub async fn ingest(
         Ok(verdict) => verdict,
         Err(reason) => return retry(reason),
     };
+    if !current() {
+        return retry("superseded by a newer connection".into());
+    }
     let (event, refusal) = match verdict {
         Ok(event) => (Some(event), None),
         Err(reason) => (None, Some(reason)),
@@ -454,10 +477,12 @@ async fn admit(
 /// never on its type alone; there is no time expiry (a lagging logger still
 /// finds its ticket). A ticket whose broadcast the logger dropped can only
 /// ever match a byte-identical event; the per-mission cap bounds memory.
-const TICKETS_PER_MISSION: usize = 4096;
+/// Above the broadcast channel's capacity (8192), so a ticket outlives any
+/// broadcast that can still reach the logger.
+const TICKETS_PER_MISSION: usize = 16_384;
 /// Bound across all missions. Normally the logger consumes tickets as fast
 /// as they are made; only dropped broadcasts leave any behind.
-const TICKETS_TOTAL: usize = 65_536;
+const TICKETS_TOTAL: usize = 131_072;
 
 type Tickets = StdMutex<HashMap<Uuid, std::collections::VecDeque<String>>>;
 
@@ -606,7 +631,10 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
                 touch(&user.id, &client_id, conn_id);
                 let reply = match serde_json::from_str::<Inbound>(&text) {
                     Ok(Inbound::Event(frame)) => {
-                        ingest(&control.mission_store, &control.events_tx, &client_id, frame).await
+                        ingest_fenced(&control.mission_store, &control.events_tx, &client_id, frame, || {
+                            is_current(&user.id, &client_id, conn_id)
+                        })
+                        .await
                     }
                     Ok(Inbound::Cursor { mission_id }) => {
                         match control.mission_store.client_event_cursor(mission_id, &client_id).await {
