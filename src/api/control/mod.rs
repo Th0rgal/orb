@@ -21448,7 +21448,7 @@ fn spawn_control_session(
                         if let Some(mid) = event.mission_id() {
                             // Client-link events were persisted with their
                             // ingest cursor before being broadcast.
-                            if client_link::take_prepersisted(mid, ev_name) {
+                            if client_link::take_prepersisted(mid, &event) {
                                 continue;
                             }
                             if should_persist_event(&event) {

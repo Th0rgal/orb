@@ -45,6 +45,12 @@ pub enum ClientEvent {
         success: bool,
         #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        cost_cents: u64,
+        #[serde(default)]
+        cost_source: crate::agents::CostSource,
+        #[serde(default)]
+        usage: Option<crate::cost::TokenUsage>,
     },
     Thinking {
         content: String,
@@ -116,13 +122,16 @@ impl ClientEvent {
                 content,
                 success,
                 model,
+                cost_cents,
+                cost_source,
+                usage,
             } => AgentEvent::AssistantMessage {
                 id,
                 content,
                 success,
-                cost_cents: 0,
-                cost_source: crate::agents::CostSource::Unknown,
-                usage: None,
+                cost_cents,
+                cost_source,
+                usage,
                 model,
                 model_normalized: None,
                 mission_id: mid,
@@ -398,7 +407,7 @@ pub async fn ingest(
         Ok(ClientIngest::Stored) => match (event, refusal) {
             (Some(event), _) => {
                 if persist {
-                    prepersisted(mission_id, event.event_name());
+                    prepersisted(mission_id, &event);
                 }
                 let _ = events_tx.send(event);
                 Reply::Ack { mission_id, seq }
@@ -439,40 +448,51 @@ async fn admit(
 
 // === Logger handshake ===
 
-/// Tickets for events already persisted by ingest, so the global event
-/// logger (which persists everything broadcast on `events_tx`) skips them.
-/// The broadcast is ordered, so the logger consumes tickets in order; a
-/// ticket left behind by logger lag expires instead of hiding a later event.
-const TICKET_TTL: Duration = Duration::from_secs(30);
+/// Exact copies of events already persisted by ingest, so the global event
+/// logger (which persists everything broadcast on `events_tx`) skips exactly
+/// those broadcasts and nothing else. Matching is on the serialized event,
+/// never on its type alone; there is no time expiry (a lagging logger still
+/// finds its ticket). A ticket whose broadcast the logger dropped can only
+/// ever match a byte-identical event; the per-mission cap bounds memory.
+const TICKETS_PER_MISSION: usize = 4096;
 
-type Tickets = StdMutex<HashMap<(Uuid, &'static str), Vec<Instant>>>;
+type Tickets = StdMutex<HashMap<Uuid, std::collections::VecDeque<String>>>;
 
 fn tickets() -> &'static Tickets {
     static T: OnceLock<Tickets> = OnceLock::new();
     T.get_or_init(Default::default)
 }
 
-fn prepersisted(mission_id: Uuid, name: &'static str) {
+fn prepersisted(mission_id: Uuid, event: &AgentEvent) {
+    let Ok(text) = serde_json::to_string(event) else {
+        return;
+    };
     let mut map = tickets().lock().expect("client link tickets");
-    map.entry((mission_id, name))
-        .or_default()
-        .push(Instant::now());
+    let queue = map.entry(mission_id).or_default();
+    if queue.len() >= TICKETS_PER_MISSION {
+        queue.pop_front();
+    }
+    queue.push_back(text);
 }
 
-pub fn take_prepersisted(mission_id: Uuid, name: &'static str) -> bool {
+/// Called by the event logger for every broadcast; true means "already
+/// persisted by the client link, do not store again".
+pub fn take_prepersisted(mission_id: Uuid, event: &AgentEvent) -> bool {
     let mut map = tickets().lock().expect("client link tickets");
-    let Some(queue) = map.get_mut(&(mission_id, name)) else {
+    let Some(queue) = map.get_mut(&mission_id) else {
         return false;
     };
-    queue.retain(|at| at.elapsed() < TICKET_TTL);
-    let taken = !queue.is_empty();
-    if taken {
-        queue.remove(0);
-    }
+    let Ok(text) = serde_json::to_string(event) else {
+        return false;
+    };
+    let Some(index) = queue.iter().position(|t| *t == text) else {
+        return false;
+    };
+    queue.remove(index);
     if queue.is_empty() {
-        map.remove(&(mission_id, name));
+        map.remove(&mission_id);
     }
-    taken
+    true
 }
 
 // === HTTP ===
@@ -558,11 +578,14 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
             frame = receiver.next() => {
                 let text = match frame {
                     Some(Ok(WsMessage::Text(text))) => text,
-                    Some(Ok(WsMessage::Pong(_) | WsMessage::Ping(_))) => {
+                    Some(Ok(WsMessage::Pong(_) | WsMessage::Ping(_) | WsMessage::Binary(_))) => {
+                        // A superseded socket retires even if it only pongs.
+                        if !is_current(&user.id, &client_id, conn_id) {
+                            break;
+                        }
                         touch(&user.id, &client_id, conn_id);
                         continue;
                     }
-                    Some(Ok(WsMessage::Binary(_))) => continue,
                     _ => break,
                 };
                 if !is_current(&user.id, &client_id, conn_id) {
@@ -802,17 +825,19 @@ mod tests {
         let partial = serde_json::json!({ "type": "thinking", "content": "hm", "done": false });
         ingest(&f.store, &tx, &f.client, frame(&f, 1, partial)).await;
         let event = rx.try_recv().unwrap();
-        assert!(
-            !take_prepersisted(f.id, event.event_name()),
-            "not persisted, no ticket"
-        );
+        assert!(!take_prepersisted(f.id, &event), "not persisted, no ticket");
         ingest(&f.store, &tx, &f.client, frame(&f, 2, call("a"))).await;
         let event = rx.try_recv().unwrap();
-        assert!(take_prepersisted(f.id, event.event_name()));
-        assert!(
-            !take_prepersisted(f.id, event.event_name()),
-            "one ticket per event"
-        );
+        // An unrelated core event of the same type is never mistaken for it.
+        let other = AgentEvent::ToolCall {
+            tool_call_id: "core".into(),
+            name: "Bash".into(),
+            args: serde_json::json!({}),
+            mission_id: Some(f.id),
+        };
+        assert!(!take_prepersisted(f.id, &other));
+        assert!(take_prepersisted(f.id, &event));
+        assert!(!take_prepersisted(f.id, &event), "one ticket per event");
         let after = f
             .store
             .get_events(f.id, None, None, None)
