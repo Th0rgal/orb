@@ -428,7 +428,10 @@ async fn describe(
         }
         (&Method::PUT, ["", "api", "approvals", "mode"]) => {
             let req: ModeRequest = typed(body)?;
-            format!("Set approval mode to {:?}", req.mode).to_lowercase()
+            format!(
+                "Set approval mode to {}",
+                format!("{:?}", req.mode).to_lowercase()
+            )
         }
         (&Method::POST, ["", "api", "approvals", "devices"]) => {
             let req: EnrollRequest = typed(body)?;
