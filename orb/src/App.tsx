@@ -70,6 +70,7 @@ import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
 import { getSecretBroker } from "./bitwardenApi";
+import { syncSecretRequestNotices } from "./secretRequestNotices";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "./VoiceButton";
@@ -1938,7 +1939,11 @@ export default function App() {
       () =>
         isConnected()
           ? getSecretBroker()
-              .then((b) => setSecretRequests(b.requests.filter((r) => r.status === "pending").length))
+              .then((b) => {
+                const pending = b.requests.filter((r) => r.status === "pending");
+                setSecretRequests(pending.length);
+                syncSecretRequestNotices(pending, () => open("bitwarden-settings"));
+              })
               .catch(() => {})
           : undefined,
       10000,
@@ -2094,18 +2099,6 @@ export default function App() {
           </Show>
         </nav>
         <div class="sb-foot">
-          <Show when={secretRequests() > 0}>
-            <button
-              class="sb-secret-requests"
-              title="Missions are waiting for secrets"
-              onClick={() => open("bitwarden-settings")}
-            >
-              <Ic.KeyIcon />
-              <span>
-                {secretRequests()} secret request{secretRequests() === 1 ? "" : "s"}
-              </span>
-            </button>
-          </Show>
           <button
             class={`gear-btn ${onSettings() ? "on" : ""}`}
             title="Settings (⌘,)"
@@ -2114,6 +2107,9 @@ export default function App() {
           >
             <Ic.GearIcon />
             <span>Settings</span>
+            <Show when={secretRequests() > 0}>
+              <span class="gear-count" title={`${secretRequests()} secret request(s) waiting`}>{secretRequests()}</span>
+            </Show>
           </button>
         </div>
         <div class="sb-resize" onPointerDown={startResize} />

@@ -10,6 +10,7 @@ import {
   type SecretGrant,
 } from "./bitwardenApi";
 import * as Ic from "./icons";
+import { Select } from "./Select";
 import { ApprovalCancelled } from "./deviceApproval";
 
 const POLL_MS = 5000;
@@ -100,109 +101,96 @@ export function SecretAccessPanel(p: {
         </span>
       </div>
 
-      <Show when={pending().length > 0}>
-        <div class="s-card bw-requests" role="region" aria-label="Pending secret requests">
+      <Show
+        when={pending().length > 0}
+        fallback={<div class="bw-empty-line">No mission is waiting for a secret.</div>}
+      >
+        <div class="bw-requests" role="region" aria-label="Pending secret requests">
           <For each={pending()}>
-            {(r) => (
-              <div class="bw-request-row">
-                <div class="bw-request-main">
-                  <div class="bw-request-title">
-                    <span class={`bw-kind ${r.kind}`}>{r.kind === "write" ? "Store" : "Read"}</span>
-                    {describe(r)}
-                  </div>
-                  <div class="s-row-desc">
-                    {who(r)} · {ago(r.created_at)}
-                  </div>
-                  <Show when={r.reason}>
-                    <div class="bw-request-reason">“{r.reason}”</div>
-                  </Show>
-                </div>
-                <div class="bw-request-actions">
-                  <Show
-                    when={r.kind === "read"}
-                    fallback={
-                      <button
-                        class="s-btn primary"
-                        disabled={!!busy()}
-                        onClick={() =>
-                          void act(r.id, `store secret ${r.key}`, () => approveSecretRequest(r.id, undefined, undefined, `let ${who(r)} ${describe(r).toLowerCase()}`), true)
-                        }
-                      >
-                        Approve
-                      </button>
-                    }
-                  >
-                    <Show when={r.key}>
-                      <button
-                        class="s-btn primary"
-                        disabled={!!busy()}
-                        title="Allow only this secret for this mission (24 h)"
-                        onClick={() => void act(r.id, `give a mission ${r.key}`, () => approveSecretRequest(r.id, "secret", undefined, `give ${who(r)} the secret ${r.key}`))}
-                      >
-                        Allow secret
-                      </button>
+            {(r) => {
+              const [scope, setScope] = createSignal<"secret" | "project" | "all">(r.key ? "secret" : r.project_id ? "project" : "all");
+              const tier = () => projectName(r.project_id);
+              const decline = async () => {
+                if (busy()) return;
+                setBusy(r.id);
+                try {
+                  await rejectSecretRequest(r.id);
+                  await load();
+                } catch (e) {
+                  if (!(e instanceof ApprovalCancelled)) p.onError(e instanceof Error ? e.message : String(e));
+                } finally {
+                  setBusy(null);
+                }
+              };
+              return (
+                <article class="bw-request-card">
+                  <header class="bw-request-head">
+                    <span class="bw-request-mission">{r.mission_title || `Mission ${r.mission_id.slice(0, 8)}`}</span>
+                    <span class="bw-request-meta">
+                      {r.paloma_project ? `${r.paloma_project} · ` : ""}
+                      {ago(r.created_at)}
+                    </span>
+                  </header>
+                  <div class="bw-request-ask">
+                    {r.kind === "write" ? "wants to store " : "wants "}
+                    <Show when={r.key} fallback={<span>{r.all_projects ? "every project" : `project ${tier()}`}</span>}>
+                      <code class="bw-request-key">{r.key}</code>
                     </Show>
                     <Show when={r.project_id}>
-                      <button
-                        class="s-btn"
-                        disabled={!!busy()}
-                        title="Allow the whole Bitwarden project for this mission (24 h)"
-                        onClick={() =>
-                          void act(r.id, `give a mission project ${projectName(r.project_id)}`, () =>
-                            approveSecretRequest(r.id, "project", undefined, `give ${who(r)} project ${projectName(r.project_id)}`),
-                          )
-                        }
-                      >
-                        Allow project
-                      </button>
+                      <span class={`bw-tier bw-tier-${tier()}`}>{tier()}</span>
                     </Show>
-                    <button
-                      class="s-btn"
-                      disabled={!!busy()}
-                      title="Allow every project for this mission (24 h)"
-                      onClick={() =>
-                        void act(r.id, "give a mission every secret project", () => approveSecretRequest(r.id, "all", undefined, `give ${who(r)} every secret project`))
+                  </div>
+                  <Show when={r.reason}>
+                    <p class="bw-request-reason">{r.reason}</p>
+                  </Show>
+                  <footer class="bw-request-actions">
+                    <Show
+                      when={r.kind === "read"}
+                      fallback={
+                        <button
+                          class="s-btn primary"
+                          disabled={!!busy()}
+                          onClick={() => void act(r.id, `store secret ${r.key}`, () => approveSecretRequest(r.id), true)}
+                        >
+                          Allow write
+                        </button>
                       }
                     >
-                      Allow all
+                      <Select
+                        value={scope()}
+                        aria-label="What to allow"
+                        onChange={(e) => setScope(e.currentTarget.value as "secret" | "project" | "all")}
+                      >
+                        <Show when={r.key}><option value="secret">This secret</option></Show>
+                        <Show when={r.project_id}><option value="project">All of {tier()}</option></Show>
+                        <option value="all">Every project</option>
+                      </Select>
+                      <button
+                        class="s-btn primary"
+                        disabled={!!busy()}
+                        onClick={() => void act(r.id, `allow a mission secret access`, () => approveSecretRequest(r.id, scope()))}
+                      >
+                        Allow for 24 h
+                      </button>
+                    </Show>
+                    <button class="bw-link-btn bw-decline" disabled={!!busy()} onClick={() => void decline()}>
+                      Decline
                     </button>
-                  </Show>
-                  <button
-                    class="s-btn bw-danger-btn"
-                    disabled={!!busy()}
-                    onClick={async () => {
-                      setBusy(r.id);
-                      try {
-                        await rejectSecretRequest(r.id);
-                        await load();
-                      } catch (e) {
-                        p.onError(e instanceof Error ? e.message : String(e));
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                  >
-                    Decline
-                  </button>
-                </div>
-              </div>
-            )}
+                  </footer>
+                </article>
+              );
+            }}
           </For>
         </div>
       </Show>
 
+      <Show when={snap().grants.length > 0}>
+        <h4 class="bw-subhead">Active grants</h4>
+      </Show>
       <div class="s-card">
         <Show
           when={snap().grants.length > 0}
-          fallback={
-            <div class="s-row">
-              <div class="s-row-text">
-                <div class="s-row-desc">
-                  {pending().length ? "No grants yet." : "No pending requests and no extra grants."}
-                </div>
-              </div>
-            </div>
-          }
+          fallback={null}
         >
           <For each={snap().grants}>
             {(g) => (

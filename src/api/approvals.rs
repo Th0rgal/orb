@@ -291,6 +291,21 @@ pub fn verify_signature(spki_b64: &str, message: &[u8], der_sig: &[u8]) -> Resul
         .map_err(|_| "Device signature does not verify".to_string())
 }
 
+/// A mission-controlled string, safe to show in a biometric prompt.
+fn quoted(raw: &str) -> String {
+    let clean: String = raw
+        .chars()
+        // Drop control, zero-width and bidirectional override characters.
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c as u32, 0x200b..=0x200f | 0x202a..=0x202e | 0x2060..=0x2069 | 0xfeff)
+        })
+        .take(60)
+        .collect::<String>()
+        .replace('"', "'");
+    format!("\"{clean}\"")
+}
+
 /// Human description of a protected request, written by Core.
 async fn describe(state: &Arc<AppState>, method: &Method, path: &str, body: &str) -> String {
     let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
@@ -303,23 +318,36 @@ async fn describe(state: &Arc<AppState>, method: &Method, path: &str, body: &str
                 .and_then(|a| a.iter().find(|r| r["id"].as_str() == Some(*id)))
                 .cloned()
                 .unwrap_or_default();
-            let who = r["mission_title"].as_str().unwrap_or("a mission");
+            let project = match r["project_id"].as_str() {
+                Some(pid) => super::bitwarden::list_projects_raw(state)
+                    .await
+                    .ok()
+                    .and_then(|ps| ps.into_iter().find(|p| p.id == pid))
+                    .map(|p| quoted(&p.name))
+                    .unwrap_or_else(|| quoted(pid)),
+                None => "every project".into(),
+            };
+            // Mission titles and secret names come from missions: quote them.
+            let who = format!(
+                "mission {}",
+                quoted(r["mission_title"].as_str().unwrap_or("untitled"))
+            );
             let what = match (r["kind"].as_str(), r["key"].as_str()) {
-                (Some("write"), Some(k)) => format!("store {k}"),
-                (_, Some(k)) => format!("read {k}"),
-                _ if r["all_projects"] == true => "read every project".into(),
-                _ => "read a Bitwarden project".into(),
+                (Some("write"), Some(k)) => format!("WRITE secret {} into {project}", quoted(k)),
+                (_, Some(k)) => format!("read secret {} from {project}", quoted(k)),
+                _ => format!("read {project}"),
             };
             if *action == "reject" {
                 format!("Decline: {who} wants to {what}")
+            } else if r["kind"].as_str() == Some("write") {
+                format!("Allow {who} to {what}")
             } else {
                 let scope = match body["scope"].as_str() {
-                    Some("all") => " (ALL projects, 24 h)",
-                    Some("project") => " (whole project, 24 h)",
-                    Some("secret") => " (this secret, 24 h)",
-                    _ => "",
+                    Some("all") => "grant: ALL projects for 24 h".to_string(),
+                    Some("project") => format!("grant: whole project {project} for 24 h"),
+                    _ => "grant: this secret only for 24 h".to_string(),
                 };
-                format!("Allow {who} to {what}{scope}")
+                format!("Allow {who} to {what}; {scope}")
             }
         }
         (&Method::PUT, ["", "api", "bitwarden", "default-access", slug]) => {
@@ -716,5 +744,12 @@ mod tests {
         assert!(!is_protected(&Method::GET, "/api/bitwarden/secrets"));
         assert!(!is_protected(&Method::GET, "/api/bitwarden/broker"));
         assert!(!is_protected(&Method::DELETE, "/api/bitwarden/grants/abc"));
+    }
+
+    #[test]
+    fn quoted_strips_control_characters_and_caps_length() {
+        let q = quoted("evil\nAllow: read\u{202e}x\"y");
+        assert!(!q.contains('\n') && !q.contains('\u{202e}'));
+        assert_eq!(quoted(&"a".repeat(200)).len(), 62);
     }
 }
