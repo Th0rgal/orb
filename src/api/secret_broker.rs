@@ -95,6 +95,9 @@ pub struct SecretRequest {
     pub reason: String,
     #[serde(default)]
     pub note: Option<String>,
+    /// SHA-256 of a write's value, to tell a retry from a new value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_sha256: Option<String>,
     /// Encrypted value of a pending write. Never serialized to clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_value: Option<String>,
@@ -111,6 +114,7 @@ impl SecretRequest {
         let mut v = serde_json::to_value(self).unwrap_or_default();
         if let Some(o) = v.as_object_mut() {
             o.remove("encrypted_value");
+            o.remove("value_sha256");
         }
         v
     }
@@ -344,6 +348,7 @@ impl SecretBroker {
                     && r.project_id == request.project_id
             }) {
                 existing.encrypted_value = request.encrypted_value.clone();
+                existing.value_sha256 = request.value_sha256.clone();
                 existing.note = request.note.clone();
                 let out = existing.clone();
                 self.save(&data).await;
@@ -376,6 +381,7 @@ impl SecretBroker {
         mission: Uuid,
         key: &str,
         project_id: &str,
+        value_sha256: &str,
     ) -> Option<Uuid> {
         let since = Utc::now() - chrono::Duration::hours(1);
         self.data
@@ -390,6 +396,7 @@ impl SecretBroker {
                     && r.mission_id == mission
                     && r.key.as_deref() == Some(key)
                     && r.project_id.as_deref() == Some(project_id)
+                    && r.value_sha256.as_deref() == Some(value_sha256)
                     && r.resolved_at.is_some_and(|t| t > since)
             })
             .map(|r| r.id)
@@ -778,6 +785,7 @@ pub async fn handle_tool(
                         all_projects: false,
                         reason,
                         note: None,
+                        value_sha256: None,
                         encrypted_value: None,
                         created_at: Utc::now(),
                         resolved_at: None,
@@ -864,6 +872,7 @@ pub async fn handle_tool(
                     all_projects: all,
                     reason,
                     note: None,
+                    value_sha256: None,
                     encrypted_value: None,
                     created_at: Utc::now(),
                     resolved_at: None,
@@ -915,8 +924,10 @@ pub async fn handle_tool(
                 ));
             }
             // A retry after the operator approved the earlier call: done already.
+            let value_sha256 =
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(value.as_bytes()));
             if let Some(done) = broker
-                .recent_approved_write(caller.mission_id, &key, &project_id)
+                .recent_approved_write(caller.mission_id, &key, &project_id, &value_sha256)
                 .await
             {
                 return Ok(json!({"status":"stored","request_id": done}));
@@ -934,6 +945,7 @@ pub async fn handle_tool(
                     all_projects: false,
                     reason,
                     note: str_arg("note").map(str::to_string),
+                    value_sha256: Some(value_sha256),
                     encrypted_value: Some(encrypt(state, value).await?),
                     created_at: Utc::now(),
                     resolved_at: None,
@@ -1089,6 +1101,7 @@ mod tests {
             all_projects: false,
             reason: "r".into(),
             note: None,
+            value_sha256: None,
             encrypted_value: Some("<encrypted>".into()),
             created_at: Utc::now(),
             resolved_at: None,
