@@ -455,6 +455,9 @@ async fn admit(
 /// finds its ticket). A ticket whose broadcast the logger dropped can only
 /// ever match a byte-identical event; the per-mission cap bounds memory.
 const TICKETS_PER_MISSION: usize = 4096;
+/// Bound across all missions. Normally the logger consumes tickets as fast
+/// as they are made; only dropped broadcasts leave any behind.
+const TICKETS_TOTAL: usize = 65_536;
 
 type Tickets = StdMutex<HashMap<Uuid, std::collections::VecDeque<String>>>;
 
@@ -468,6 +471,14 @@ fn prepersisted(mission_id: Uuid, event: &AgentEvent) {
         return;
     };
     let mut map = tickets().lock().expect("client link tickets");
+    let total: usize = map.values().map(|q| q.len()).sum();
+    if total >= TICKETS_TOTAL {
+        // Shed the largest backlog first (it is the one the logger dropped).
+        if let Some(largest) = map.iter().max_by_key(|(_, q)| q.len()).map(|(id, _)| *id) {
+            tracing::warn!(mission_id = %largest, "client link: shedding unconsumed logger tickets");
+            map.remove(&largest);
+        }
+    }
     let queue = map.entry(mission_id).or_default();
     if queue.len() >= TICKETS_PER_MISSION {
         queue.pop_front();
