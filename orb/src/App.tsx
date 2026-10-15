@@ -71,6 +71,7 @@ import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
 import { getSecretBroker } from "./bitwardenApi";
 import { syncSecretRequestNotices } from "./secretRequestNotices";
+import { listApprovalDevices, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "./VoiceButton";
@@ -1935,6 +1936,8 @@ export default function App() {
     });
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000);
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000);
+    // Learn this Mac's approval device id so notifications sign approvals too.
+    if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(() => {});
     const stopSecretRequests = pollWhileVisible(
       () =>
         isConnected()
