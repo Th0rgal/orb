@@ -75,7 +75,7 @@ import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheR
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, holds, nestMissions, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants, type NestedMission } from "./missionTree";
+import { countNested, countVersions, forkTitle, versionLabel, holds, nestMissions, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants, type NestedMission } from "./missionTree";
 
 const [deletingIds, setDeletingIds] = createSignal<ReadonlySet<string>>(new Set());
 export const isMissionDeleting = (id: string): boolean => deletingIds().has(id);
@@ -1654,6 +1654,8 @@ export function LiveProjectsSection(p: {
     job?: import("./api").ControllerJob; controller?: boolean;
     /** Missions launched by this one, at any depth, and how many still run. */
     launched?: number; launchedLive?: number;
+    /** Earlier versions of this conversation (forks), listed inside it; `version` marks one of them. */
+    versions?: number; version?: boolean;
   };
   type Node = TreeNode<RowData>;
   const [cutId, setCutId] = createSignal<string | null>(null);
@@ -1791,11 +1793,11 @@ export function LiveProjectsSection(p: {
   const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
   const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
     const mission = nested.mission, id = `m:${mission.id}`;
-    const data: RowData = { kind: "mission", slug, mission, label: displayTitle(mission.title) || mission.id };
+    const data: RowData = { kind: "mission", slug, mission, label: nested.version ? versionLabel(mission) : displayTitle(forkTitle(mission.title)) || mission.id, ...(nested.version ? { version: true } : {}) };
     if (!nested.children.length) return { id, data };
     const selected = p.selected();
     const open = expanded[id] ?? (!!selected?.startsWith("m:") && holds(nested, selected.slice(2)));
-    return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, child => RUNNING.has(child.status)) },
+    return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, child => RUNNING.has(child.status)), versions: countVersions(nested) },
       expanded: open, children: open ? nested.children.map(child => missionNode(slug, child)) : [] };
   };
   const tree = (): Node[] => projects().map(project => {
@@ -1983,12 +1985,13 @@ export function LiveProjectsSection(p: {
     const [, parents] = JSON.parse(value) as [string, string[]];
     for (const id of parents) setExpanded(id, true);
   }));
-  const launchedToggle = (row: TreeRow<RowData>, d: RowData) => <Show when={d.launched}><button class={`launched-toggle ${d.launchedLive ? "live" : ""}`} tabindex={-1} aria-expanded={row.expanded}
+  const versionsText = (n: number) => `${n} earlier version${n === 1 ? "" : "s"}`;
+  const launchedToggle = (row: TreeRow<RowData>, d: RowData) => <Show when={d.launched || d.versions}><button class={`launched-toggle ${d.launchedLive ? "live" : ""}`} tabindex={-1} aria-expanded={row.expanded}
     disabled={d.mission ? deletingIds().has(d.mission.id) : false}
-    aria-label={`${row.expanded ? "Hide" : "Show"} the ${d.launched} mission${d.launched === 1 ? "" : "s"} launched by ${d.label}`}
-    title={`${d.launched} launched mission${d.launched === 1 ? "" : "s"}${d.launchedLive ? ` · ${d.launchedLive} running` : ""}`}
+    aria-label={d.launched ? `${row.expanded ? "Hide" : "Show"} the ${d.launched} mission${d.launched === 1 ? "" : "s"} launched by ${d.label}` : `${row.expanded ? "Hide" : "Show"} ${versionsText(d.versions!)} of ${d.label}`}
+    title={[d.launched ? `${d.launched} launched mission${d.launched === 1 ? "" : "s"}${d.launchedLive ? ` · ${d.launchedLive} running` : ""}` : "", d.versions ? versionsText(d.versions) : ""].filter(Boolean).join(" · ")}
     onClick={e => { e.stopPropagation(); setExpanded(row.id, !row.expanded); }}>
-    <span class="launched-count">{d.launchedLive ? `${d.launchedLive}/${d.launched}` : d.launched}</span>
+    <Show when={d.launched} fallback={<SidebarIcon.Clock size={12} class="launched-history" />}><span class="launched-count">{d.launchedLive ? `${d.launchedLive}/${d.launched}` : d.launched}</span></Show>
     <SidebarIcon.ChevronRight size={12} class={`launched-chevron ${row.expanded ? "open" : ""}`} />
   </button></Show>;
   const renderRow = (row: TreeRow<RowData>) => {
@@ -2059,8 +2062,8 @@ export function LiveProjectsSection(p: {
     }
     const deleting = () => d.mission ? deletingIds().has(d.mission.id) : false;
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined]));
-    return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched ? row.expanded : undefined}
-      onKeyDown={e => { if (deleting()) return; if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
+    return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
+      onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
       aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission ? (!deleting() && (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id)) ? "active" : "" : (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id) ? "active" : ""}`} {...tip}
       onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } onMissionContext(e, d.mission); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
@@ -2074,7 +2077,7 @@ export function LiveProjectsSection(p: {
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
       } }} onClick={e => { if (d.mission) { if (deleting()) return; clickAgent(e, d.mission.id); } else { clickSelectableRow(e, row.id, () => p.open(row.id)); } }}>
       <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} unread={isMissionUnread(m(), currentMission()?.id, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
-      <span class="row-label">{d.label}</span><Show when={!d.launched}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
+      <span class="row-label">{d.label}</span><Show when={d.version}><span class="row-version-tag">earlier</span></Show><Show when={!d.launched && !d.versions}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
     {launchedToggle(row, d)}</>;
   };

@@ -161,4 +161,17 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(sorted.map { $0["id"].text }, ["babylon", "ashur", "nippur", "dgx-spark-admin", "sepolia"])
         XCTAssertEqual(OrbSelection.firstAvailableNodeID(nodes), "babylon")
     }
+
+    func testLatestForkLeadsAndEarlierVersionsFoldInside() {
+        let original = OrbRow(.object(["id": .string("ev"), "title": .string("EV Bench"), "backend": .string("claudecode"), "updated_at": .string("2026-10-14T10:00:00Z")]))
+        let fork = OrbRow(.object(["id": .string("ev-fork"), "title": .string("EV Bench · fork"), "parent_mission_id": .string("ev"), "backend": .string("codex"), "updated_at": .string("2026-10-14T12:00:00Z")]))
+        let roots = OrbMissionTree.nest([original, fork])
+        XCTAssertEqual(roots.map(\.id), ["ev-fork"])
+        XCTAssertEqual(roots.first?.mission.name, "EV Bench")
+        XCTAssertEqual(roots.first?.children.map(\.id), ["ev"])
+        XCTAssertEqual(roots.first?.children.first?.version, true)
+        XCTAssertEqual(OrbMissionTree.countNested(roots[0]), 0)
+        XCTAssertNil(fork.parentMissionID)
+        XCTAssertFalse(OrbInboxModel.isSubagent(row: fork))
+    }
 }

@@ -260,19 +260,36 @@ data class OrbRow(
 data class OrbNestedMission(
     val mission: OrbRow,
     val children: List<OrbNestedMission>,
-    val depth: Int
+    val depth: Int,
+    /** An earlier version (fork) of the conversation it is listed in. */
+    val version: Boolean = false
 ) {
     val id: String get() = mission.id
-    val childCount: Int get() = children.size + children.sumOf { it.childCount }
+    private val launched: List<OrbNestedMission> get() = children.filterNot { it.version }
+    val childCount: Int get() = launched.size + launched.sumOf { it.childCount }
     val runningChildCount: Int
-        get() = children.count { OrbMissionTree.isLive(it.mission) } +
-            children.sumOf { it.runningChildCount }
+        get() = launched.count { OrbMissionTree.isLive(it.mission) } +
+            launched.sumOf { it.runningChildCount }
+    val versionCount: Int get() = children.count { it.version }
 }
 
 object OrbMissionTree {
+    private const val LEGACY_FORK_SUFFIX = " · fork"
+
+    /** The conversation this one was forked from (a `fork-of:` tag, or an older fork stored as a child). */
+    fun forkSource(mission: OrbRow): String? {
+        OrbJSON.strList(mission.raw, "tags").firstOrNull { it.startsWith("fork-of:") }?.let { return it.drop(8) }
+        val parent = mission.str("parent_mission_id")
+        return if (!parent.isNullOrEmpty() && (mission.str("title") ?: "").endsWith(LEGACY_FORK_SUFFIX)) parent else null
+    }
+
+    /** Forks share the conversation's name. */
+    fun forkTitle(title: String): String = title.removeSuffix(LEGACY_FORK_SUFFIX)
+
+    /** The mission that launched this one. A fork is another version, never launched work. */
     fun parentId(mission: OrbRow): String? {
+        mission.str("parent_mission_id")?.takeIf { it.isNotEmpty() && it != forkSource(mission) }?.let { return it }
         mission.str(
-            "parent_mission_id",
             "callback_parent_mission_id",
             "parentMissionId",
             "parent_id",
@@ -327,9 +344,18 @@ object OrbMissionTree {
         val byId = deduped.associateBy { it.id }
         val childrenByParent = mutableMapOf<String, MutableList<OrbRow>>()
         val roots = mutableListOf<OrbRow>()
+        val leaders = forkLeaders(deduped)
+        val versionsByLeader = mutableMapOf<String, MutableList<OrbRow>>()
 
         for (mission in deduped) {
-            val parent = parentId(mission)
+            val leader = leaders[mission.id]
+            if (leader != null && leader.id != mission.id) {
+                versionsByLeader.getOrPut(leader.id) { mutableListOf() }.add(mission)
+                continue
+            }
+            // A leading fork takes the place of the conversation it continues.
+            val place = leader?.let { l -> deduped.firstOrNull { leaders[it.id]?.id == l.id && forkSource(it) == null } } ?: mission
+            val parent = parentId(place)
             if (parent != null && parent != mission.id && byId.containsKey(parent)) {
                 childrenByParent.getOrPut(parent) { mutableListOf() }.add(mission)
             } else {
@@ -341,10 +367,38 @@ object OrbMissionTree {
             if (visited.contains(row.id)) return OrbNestedMission(row, emptyList(), depth)
             val nextVisited = visited + row.id
             val kids = (childrenByParent[row.id] ?: emptyList()).map { build(it, depth + 1, nextVisited) }
-            return OrbNestedMission(row, kids, depth)
+            val versions = (versionsByLeader[row.id] ?: emptyList())
+                .sortedByDescending { activity(it) }
+                .map { build(it, depth + 1, nextVisited).copy(version = true) }
+            return OrbNestedMission(row, kids + versions, depth)
         }
 
         return roots.map { build(it, 0, emptySet()) }
+    }
+
+    private fun activity(mission: OrbRow): String = mission.str("updated_at", "created_at") ?: ""
+
+    /** Maps each listed fork to the most recently active version of its conversation. */
+    fun forkLeaders(missions: List<OrbRow>): Map<String, OrbRow> {
+        val byId = missions.associateBy { it.id }
+        fun root(mission: OrbRow): String {
+            var current = mission
+            val seen = mutableSetOf<String>()
+            while (true) {
+                val source = forkSource(current) ?: break
+                val next = byId[source] ?: break
+                if (!seen.add(current.id)) break
+                current = next
+            }
+            return current.id
+        }
+        val leaders = mutableMapOf<String, OrbRow>()
+        for (group in missions.groupBy { root(it) }.values) {
+            if (group.size < 2) continue
+            val leader = group.maxBy { activity(it) }
+            for (mission in group) leaders[mission.id] = leader
+        }
+        return leaders
     }
 
     fun flatten(nodes: List<OrbNestedMission>, expandedIds: Set<String>): List<OrbNestedMission> {

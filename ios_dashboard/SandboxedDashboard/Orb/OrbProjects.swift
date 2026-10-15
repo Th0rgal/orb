@@ -1195,6 +1195,7 @@ struct OrbProjectPage: View {
         let depth: Int
         let launched: Int
         let launchedLive: Int
+        let versions: Int
         let isExpanded: Bool
         var id: String { node.id }
     }
@@ -1204,7 +1205,7 @@ struct OrbProjectPage: View {
             let isExpanded = expandedMissions.contains(node.id)
             let launched = OrbMissionTree.countNested(node)
             let launchedLive = OrbMissionTree.countNested(node, matches: \.active)
-            result.append(FlattenedMissionRow(node: node, depth: depth, launched: launched, launchedLive: launchedLive, isExpanded: isExpanded))
+            result.append(FlattenedMissionRow(node: node, depth: depth, launched: launched, launchedLive: launchedLive, versions: OrbMissionTree.countVersions(node), isExpanded: isExpanded))
             if isExpanded && !node.children.isEmpty {
                 result.append(contentsOf: flatten(node.children, depth: depth + 1))
             }
@@ -1448,7 +1449,7 @@ struct OrbProjectPage: View {
         }
     }
     private func missionRowView(_ item: FlattenedMissionRow) -> some View {
-        missionLink(item.node.mission, launched: item.launched, launchedLive: item.launchedLive, isExpanded: item.isExpanded) {
+        missionLink(item.node.mission, launched: item.launched, launchedLive: item.launchedLive, versions: item.versions, isVersion: item.node.version, isExpanded: item.isExpanded) {
             withAnimation(.snappy(duration: 0.18)) {
                 if !expandedMissions.insert(item.node.id).inserted {
                     expandedMissions.remove(item.node.id)
@@ -1475,9 +1476,13 @@ struct OrbProjectPage: View {
                 }
         }
     }
-    private func missionLink(_ row: OrbRow, launched: Int = 0, launchedLive: Int = 0, isExpanded: Bool = false, onToggleLaunched: (() -> Void)? = nil) -> some View {
-        let isGoal = OrbStyle.goalObjective(row.name) != nil || row.raw["goal_mode"].flag
-        let cleanTitle = OrbStyle.displayTitle(row.name)
+    private func missionLink(_ row: OrbRow, launched: Int = 0, launchedLive: Int = 0, versions: Int = 0, isVersion: Bool = false, isExpanded: Bool = false, onToggleLaunched: (() -> Void)? = nil) -> some View {
+        let isGoal = !isVersion && (OrbStyle.goalObjective(row.name) != nil || row.raw["goal_mode"].flag)
+        // An earlier version is told apart from the current one by harness and model.
+        let model = row.raw["model_override"].text
+        let cleanTitle = isVersion
+            ? ([OrbStyle.serviceName(row.backend), model].filter { !$0.isEmpty }.joined(separator: " · ") + " · earlier")
+            : OrbStyle.displayTitle(row.name)
         let rel = OrbStyle.relativeTime(row.updatedAt)
         return HStack(alignment: .top, spacing: 6) {
             NavigationLink { OrbConversation(missionID: row.id, project: project.id, folder: row.folder) } label: {
@@ -1527,15 +1532,20 @@ struct OrbProjectPage: View {
             .buttonStyle(OrbPressButtonStyle())
             .accessibilityIdentifier("mission.\(row.id)")
 
-            if launched > 0, let onToggleLaunched {
+            if launched > 0 || versions > 0, let onToggleLaunched {
                 let badgeColor = launchedLive > 0 ? OrbStyle.success : OrbStyle.textSecondary
                 Button(action: onToggleLaunched) {
                     HStack(alignment: .center, spacing: 6) {
                         HStack(spacing: 3) {
-                            Text(launchedLive > 0 ? "\(launchedLive)/\(launched)" : "\(launched)")
-                                .font(.caption2.weight(.medium).monospacedDigit())
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
+                            if launched > 0 {
+                                Text(launchedLive > 0 ? "\(launchedLive)/\(launched)" : "\(launched)")
+                                    .font(.caption2.weight(.medium).monospacedDigit())
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            } else {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.system(size: 9, weight: .semibold))
+                            }
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 8.5, weight: .bold))
                                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
@@ -1571,7 +1581,7 @@ struct OrbProjectPage: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(isExpanded ? "Hide" : "Show") \(launched) subagents for \(cleanTitle)")
+                .accessibilityLabel(launched > 0 ? "\(isExpanded ? "Hide" : "Show") \(launched) subagents for \(cleanTitle)" : "\(isExpanded ? "Hide" : "Show") \(versions) earlier versions of \(cleanTitle)")
                 .accessibilityIdentifier("mission.subagents.\(row.id)")
             }
         }

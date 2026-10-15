@@ -566,8 +566,8 @@ describe("classifyInboxMission & buildInboxSections", () => {
       "Implement a fully self-contained local-agent runner for Orb",
     );
     expect(item.allPeekTurns[1].markdown).toContain("All 10 PRs are merged");
-    expect(item.childSummary?.failedChildren[0]?.title).toBe("fork");
-    expect(item.childSummary?.running).toBe(1);
+    // Forks are versions of the conversation, not worker tracks under it.
+    expect(item.childSummary).toBeUndefined();
   });
 
   it("condenses long verbose mission titles and supports stale-while-revalidate AI digest goal & outcome", async () => {
