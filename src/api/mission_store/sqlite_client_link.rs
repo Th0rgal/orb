@@ -47,6 +47,7 @@ pub(super) async fn log(
     client_id: &str,
     seq: u64,
     event: Option<AgentEvent>,
+    run: Option<(Uuid, u64)>,
 ) -> Result<ClientIngest, String> {
     let conn = store.conn.clone();
     let content_dir = store.content_dir.clone();
@@ -61,7 +62,19 @@ pub(super) async fn log(
         if seq != last + 1 {
             return Ok(ClientIngest::Gap { expected: last + 1 });
         }
-        if let Some(event) = &event {
+        // The run fence lives in this transaction: a stop or restart that
+        // committed first wins, and the stale frame only consumes its number.
+        let live = match run {
+            Some((run_id, generation)) => tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE mission_id=?1 AND run_id=?2 AND generation=?3 AND execution_state<>'terminal' AND owner_actor_id LIKE 'orb-client:%')",
+                    params![mid, run_id.to_string(), generation as i64],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(err)?,
+            None => true,
+        };
+        if let Some(event) = event.as_ref().filter(|_| live) {
             log_event_sync(&tx, &content_dir, mission_id, event)?;
         }
         tx.execute(
@@ -71,7 +84,11 @@ pub(super) async fn log(
         )
         .map_err(err)?;
         tx.commit().map_err(err)?;
-        Ok(ClientIngest::Stored)
+        Ok(if live {
+            ClientIngest::Stored
+        } else {
+            ClientIngest::Refused
+        })
     })
     .await
     .map_err(err)?
@@ -136,22 +153,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            log(&store, m, "a", 1, Some(error(1))).await.unwrap(),
+            log(&store, m, "a", 1, Some(error(1)), None).await.unwrap(),
             ClientIngest::Stored
         );
         assert_eq!(
-            log(&store, m, "a", 1, Some(error(1))).await.unwrap(),
+            log(&store, m, "a", 1, Some(error(1)), None).await.unwrap(),
             ClientIngest::Duplicate
         );
         assert_eq!(
-            log(&store, m, "a", 3, Some(error(3))).await.unwrap(),
+            log(&store, m, "a", 3, Some(error(3)), None).await.unwrap(),
             ClientIngest::Gap { expected: 2 }
         );
         assert_eq!(
-            log(&store, m, "b", 1, Some(error(1))).await.unwrap(),
+            log(&store, m, "b", 1, Some(error(1)), None).await.unwrap(),
             ClientIngest::Stored
         );
         assert_eq!(cursor(&store, m, "a").await.unwrap(), 1);
+        // A run that is not live is refused inside the transaction, and the
+        // sequence is consumed without storing the event.
+        assert_eq!(
+            log(&store, m, "a", 2, Some(error(2)), Some((Uuid::new_v4(), 1)))
+                .await
+                .unwrap(),
+            ClientIngest::Refused
+        );
+        assert_eq!(cursor(&store, m, "a").await.unwrap(), 2);
         let s = store.clone();
         let after = tokio::task::spawn_blocking(move || count(&s))
             .await

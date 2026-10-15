@@ -86,6 +86,14 @@ pub enum ClientEvent {
         label: String,
         tool_name: String,
     },
+    GoalIteration {
+        iteration: u32,
+        objective: String,
+    },
+    GoalStatus {
+        status: String,
+        objective: String,
+    },
 }
 
 fn yes() -> bool {
@@ -169,6 +177,19 @@ impl ClientEvent {
                 phase,
                 detail,
                 agent,
+                mission_id: mid,
+            },
+            ClientEvent::GoalIteration {
+                iteration,
+                objective,
+            } => AgentEvent::GoalIteration {
+                iteration,
+                objective,
+                mission_id: mid,
+            },
+            ClientEvent::GoalStatus { status, objective } => AgentEvent::GoalStatus {
+                status,
+                objective,
                 mission_id: mid,
             },
             ClientEvent::MissionActivity { label, tool_name } => AgentEvent::MissionActivity {
@@ -352,7 +373,13 @@ pub async fn ingest(
         Err(reason) => (None, Some(reason)),
     };
     match store
-        .log_client_event(mission_id, client_id, seq, event.clone())
+        .log_client_event(
+            mission_id,
+            client_id,
+            seq,
+            event.clone(),
+            Some((run_id, generation)),
+        )
         .await
     {
         Ok(ClientIngest::Stored) => match (event, refusal) {
@@ -362,6 +389,7 @@ pub async fn ingest(
             }
             (None, reason) => reject(&reason.unwrap_or_default()),
         },
+        Ok(ClientIngest::Refused) => reject("Local execution receipt is stale"),
         // Already resolved earlier (stored or refused); the client moves on.
         Ok(ClientIngest::Duplicate) => Reply::Ack { mission_id, seq },
         Ok(ClientIngest::Gap { expected }) => Reply::Gap {
@@ -695,6 +723,25 @@ mod tests {
                 seq: 4
             }
         );
+    }
+
+    #[tokio::test]
+    async fn goal_events_from_local_runs_are_relayed() {
+        let f = fixture().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let goal =
+            serde_json::json!({ "type": "goal_iteration", "iteration": 2, "objective": "ship" });
+        assert_eq!(
+            ingest(&f.store, &tx, &f.client, frame(&f, 1, goal)).await,
+            Reply::Ack {
+                mission_id: f.id,
+                seq: 1
+            }
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentEvent::GoalIteration { iteration: 2, .. }
+        ));
     }
 
     #[test]

@@ -2019,6 +2019,8 @@ pub enum ClientIngest {
     Gap {
         expected: u64,
     },
+    /// The run fence failed inside the transaction; the sequence is consumed.
+    Refused,
 }
 
 /// Mission store trait - implemented by all storage backends.
@@ -2299,13 +2301,16 @@ pub trait MissionStore: Send + Sync {
 
     /// Persist one client-link event together with its cursor, atomically.
     /// `None` consumes the sequence without storing anything (a refused frame),
-    /// so one permanent refusal cannot wedge the client's stream.
+    /// so one permanent refusal cannot wedge the client's stream. With `run`,
+    /// the event is stored only if that run is still the live client run,
+    /// checked inside the same transaction (otherwise `Refused`).
     async fn log_client_event(
         &self,
         _mission_id: Uuid,
         _client_id: &str,
         _seq: u64,
         _event: Option<AgentEvent>,
+        _run: Option<(Uuid, u64)>,
     ) -> Result<ClientIngest, String> {
         Err(CLIENT_LINK_UNSUPPORTED.into())
     }

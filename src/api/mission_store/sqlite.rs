@@ -2758,7 +2758,7 @@ pub(super) fn log_event_sync(
                         )
                         .unwrap_or(1);
                 let (content_inline, content_file) = SqliteMissionStore::store_content(
-                    &content_dir,
+                    content_dir,
                     mission_id,
                     sequence,
                     "assistant_message_canonical",
@@ -2794,7 +2794,7 @@ pub(super) fn log_event_sync(
                         .unwrap_or(1);
                 let content = serde_json::to_string(&ops).unwrap_or_else(|_| "[]".to_string());
                 let (content_inline, content_file) = SqliteMissionStore::store_content(
-                    &content_dir,
+                    content_dir,
                     mission_id,
                     sequence,
                     "text_op",
@@ -3055,7 +3055,7 @@ pub(super) fn log_event_sync(
 
             if let Some(row_id) = existing {
                 let (content_inline, content_file) = SqliteMissionStore::store_content(
-                    &content_dir,
+                    content_dir,
                     mission_id,
                     row_id,
                     &event_type,
@@ -3100,7 +3100,7 @@ pub(super) fn log_event_sync(
 
         // Store content
         let (content_inline, content_file) = SqliteMissionStore::store_content(
-            &content_dir,
+            content_dir,
             mission_id,
             sequence,
             &event_type,
@@ -3147,8 +3147,9 @@ impl MissionStore for SqliteMissionStore {
         client_id: &str,
         seq: u64,
         event: Option<AgentEvent>,
+        run: Option<(Uuid, u64)>,
     ) -> Result<ClientIngest, String> {
-        sqlite_client_link::log(self, mission_id, client_id, seq, event).await
+        sqlite_client_link::log(self, mission_id, client_id, seq, event, run).await
     }
     fn is_persistent(&self) -> bool {
         true
