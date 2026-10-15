@@ -2273,6 +2273,26 @@ pub trait MissionStore: Send + Sync {
         Err("Local offline imports are not supported by this store".into())
     }
 
+    /// Last contiguous client-link sequence persisted for (mission, client).
+    async fn client_event_cursor(
+        &self,
+        _mission_id: Uuid,
+        _client_id: &str,
+    ) -> Result<u64, String> {
+        Err("Client link is not supported by this store".into())
+    }
+
+    /// Compare-and-set the client-link cursor; false when it no longer reads `from`.
+    async fn advance_client_event_cursor(
+        &self,
+        _mission_id: Uuid,
+        _client_id: &str,
+        _from: u64,
+        _to: u64,
+    ) -> Result<bool, String> {
+        Err("Client link is not supported by this store".into())
+    }
+
     /// Create a new mission.
     async fn create_mission(
         &self,

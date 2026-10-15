@@ -9,6 +9,7 @@
 
 pub(crate) mod btw_context;
 mod callback_parent;
+pub mod client_link;
 pub(crate) mod client_placement;
 pub(crate) mod continuations;
 pub mod cyber;

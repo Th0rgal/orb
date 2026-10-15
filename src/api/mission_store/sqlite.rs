@@ -3,6 +3,8 @@
 mod cloud;
 #[path = "sqlite_transfer.rs"]
 mod machine_transfer;
+#[path = "sqlite_client_link.rs"]
+mod sqlite_client_link;
 #[path = "sqlite_local_origin.rs"]
 mod sqlite_local_origin;
 
@@ -2687,6 +2689,18 @@ impl MissionStore for SqliteMissionStore {
         snapshot: crate::local_origin::Snapshot,
     ) -> Result<(), String> {
         sqlite_local_origin::sync(self, snapshot).await
+    }
+    async fn client_event_cursor(&self, mission_id: Uuid, client_id: &str) -> Result<u64, String> {
+        sqlite_client_link::cursor(self, mission_id, client_id).await
+    }
+    async fn advance_client_event_cursor(
+        &self,
+        mission_id: Uuid,
+        client_id: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<bool, String> {
+        sqlite_client_link::advance(self, mission_id, client_id, from, to).await
     }
     fn is_persistent(&self) -> bool {
         true
