@@ -2,6 +2,7 @@ vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:s
 import {it,expect,vi,afterEach} from 'vitest';
 import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
+import {sideQuestionKey} from '../src/sideQuestionStorage';
 vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),recoverLocalLaunch:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
 import {ApiError,api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
@@ -176,7 +177,7 @@ it('a missing agent endpoint fails without falling back to a normal fork',async(
 it('launches locally in the parent folder with a fresh session identity',async()=>{
  vi.mocked(localBinding).mockImplementation(id=>id==='local-parent'?{cwd:'/work/shared',harness:'claudecode',bin:'/bin/claude',sessionId:'never-reuse-parent'}:undefined);
  vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='local-parent'?'active':'awaiting_user',history:[],tags:id==='local-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'local-child'});
+ vi.mocked(api).mockResolvedValue({id:'local-child',tags:['placement:client']});
  await askBtwAgent('local-parent','Read this folder','context',[],new AbortController().signal,()=>{});
  expect(startLocal).toHaveBeenCalledWith(expect.objectContaining({id:'local-child',cwd:'/work/shared',harness:'opencode',model:'builtin/smart',sessionId:undefined,sharedCwdWith:'local-parent'}));
 });
@@ -292,7 +293,7 @@ it('replaces an explicitly refused side session only through the btw route and r
 it('finishes a local side response without waiting for Core to persist terminal status',async()=>{
  vi.mocked(localBinding).mockImplementation(id=>id==='native-parent'?{cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}:undefined);
  vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='native-parent'?['placement:client']:[],created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'native-child'});
+ vi.mocked(api).mockResolvedValue({id:'native-child',tags:['placement:client']});
  const receive=vi.fn();
  await askBtwAgent('native-parent','Q','context',[],new AbortController().signal,receive);
  expect(receive).toHaveBeenCalledWith({type:'done',answer:'Read fixture'});
@@ -304,7 +305,7 @@ it('reconciles a restored local side run before subscribing',async()=>{
  const {reconcileLocalRun,followLocal}=await import('../src/localAgents');
  vi.mocked(localBinding).mockImplementation(id=>id==='recovery-parent'?{cwd:'/work/shared',harness:'claudecode',bin:'/bin/claude'}:undefined);
  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='recovery-parent'?'active':'awaiting_user',history:[],tags:id==='recovery-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'recovery-child'});
+ vi.mocked(api).mockResolvedValue({id:'recovery-child',tags:['placement:client']});
  await askBtwAgent('recovery-parent','Check progress','context',[],new AbortController().signal,()=>{});
  expect(reconcileLocalRun).toHaveBeenCalledWith('recovery-child');
  expect(vi.mocked(reconcileLocalRun).mock.invocationCallOrder.at(-1)).toBeLessThan(vi.mocked(followLocal).mock.invocationCallOrder.at(-1)!);
@@ -392,7 +393,7 @@ it('waits for local completion synchronization before admitting a queued follow-
  vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
  vi.mocked(getMissionEvents).mockResolvedValue([]);
  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='sync-parent'?'active':synced?'awaiting_user':'pending',history:[],tags:id==='sync-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValue({id:'sync-child'});
+ vi.mocked(api).mockResolvedValue({id:'sync-child',tags:['placement:client']});
  await askBtwAgent('sync-parent','First','context',[],new AbortController().signal,()=>{});
  const starts=vi.mocked(startLocal).mock.calls.length;
  const next=askBtwAgent('sync-parent','Next','context',[],new AbortController().signal,()=>{});
@@ -424,7 +425,7 @@ it('recovers a failed native launch before retrying its pending Core mission',as
  let settled=false;
  vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'opencode',bin:'/bin/opencode'}));
  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='failed-launch-parent'?'active':settled?'interrupted':'pending',history:[],tags:id==='failed-launch-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
- vi.mocked(api).mockResolvedValueOnce({id:'failed-launch-child'}).mockResolvedValueOnce({id:'retry-launch-child'});
+ vi.mocked(api).mockResolvedValueOnce({id:'failed-launch-child',tags:['placement:client']}).mockResolvedValueOnce({id:'retry-launch-child',tags:['placement:client']});
  vi.mocked(startLocal).mockRejectedValueOnce(new Error('native launch failed'));
  const ask=()=>askBtwAgent('failed-launch-parent','Q','context',[],new AbortController().signal,()=>{});
  await expect(ask()).rejects.toThrow('native launch failed');
@@ -581,3 +582,28 @@ it('marks the session broken if a fresh side session also returns an empty compl
 
 
 
+
+it('follows Core placement when a stale local view of a moved parent claims this computer',async()=>{
+ const {rememberBinding}=await import('../src/localAgents');
+ vi.mocked(localBinding).mockImplementation(()=>({cwd:'/work/shared',harness:'codex',bin:'/bin/codex'}));
+ // Offline fallback: the local-origin journal always reports `placement:client`.
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='moved-parent'?'active':'awaiting_user',history:[],tags:id==='moved-parent'?['placement:client']:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(api).mockResolvedValueOnce({id:'node-side',tags:['btw-parent:moved-parent']});
+ await askBtwAgent('moved-parent','Q','context',[],new AbortController().signal,()=>{});
+ expect(startLocal).not.toHaveBeenCalled();
+ expect(rememberBinding).not.toHaveBeenCalled();
+ expect(btwSession('moved-parent')).toMatchObject({id:'node-side',local:false});
+});
+
+it('clears a pending native launch for a side session Core never placed on this computer',async()=>{
+ const {recoverLocalLaunch}=await import('../src/localAgents');
+ const {setClientMissionStatus}=await import('../src/api');
+ localStorage.setItem('agent:'+sideQuestionKey('stuck-parent'),JSON.stringify({id:'stuck-side',question:'old',harness:'opencode',model:'builtin/smart',local:true,active:false,baseline:0,launchPending:true}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='stuck-parent'?'active':id==='stuck-side'?'failed':'awaiting_user',history:[],tags:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(recoverLocalLaunch).mockRejectedValueOnce('Could not inspect previous run (409 Conflict): This conversation no longer runs on this computer');
+ vi.mocked(api).mockResolvedValueOnce({id:'fresh-side',tags:['btw-parent:stuck-parent']});
+ await askBtwAgent('stuck-parent','Q','context',[],new AbortController().signal,()=>{});
+ expect(setClientMissionStatus).not.toHaveBeenCalled();
+ expect(btwSession('stuck-parent')).toMatchObject({id:'fresh-side',local:false});
+ expect(btwSession('stuck-parent')?.launchPending).toBeFalsy();
+});
