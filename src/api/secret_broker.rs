@@ -31,7 +31,8 @@ pub const DEFAULT_GRANT_TTL_HOURS: i64 = 24;
 /// Pending requests nobody answered expire after this long.
 const REQUEST_TTL_HOURS: i64 = 24;
 /// How long a tool call waits for the operator before returning `pending`.
-const APPROVAL_WAIT: Duration = Duration::from_secs(90);
+/// Stays under the MCP client's 30 s HTTP timeout.
+const APPROVAL_WAIT: Duration = Duration::from_secs(20);
 const AUDIT_LIMIT: usize = 500;
 const LIST_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -928,7 +929,7 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
         ToolDefinition {
             name: "secret_get".into(),
             description: "Get one secret by name. Secrets in this project's default Bitwarden projects come back at once; \
-                          others ask Thomas (Touch ID / Face ID) and wait up to 90 s, then return `pending` — call again later. \
+                          others ask Thomas (Touch ID / Face ID) and wait up to 20 s, then return `pending` — call again later. \
                           The value is written to a private file; the result gives its path and an `export` line. \
                           Never print the value or paste it into chat, commits or logs."
                 .into(),
@@ -940,7 +941,7 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
         ToolDefinition {
             name: "secret_request".into(),
             description: "Ask Thomas for read access to a whole Bitwarden project (by name), or `all`, for this mission. \
-                          Waits up to 90 s for approval, then returns `pending`."
+                          Waits up to 20 s for approval, then returns `pending`."
                 .into(),
             input_schema: json!({"type":"object","required":["bitwarden_project","reason"],"properties":{
                 "bitwarden_project":{"type":"string","minLength":1,"maxLength":200},
@@ -950,7 +951,7 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
         ToolDefinition {
             name: "secret_put".into(),
             description: "Store a secret (create, or update the value) in a Bitwarden project. Always needs Thomas's approval; \
-                          waits up to 90 s, then returns `pending`. Use UPPER_SNAKE_CASE names and the project that fits \
+                          waits up to 20 s, then returns `pending`. Use UPPER_SNAKE_CASE names and the project that fits \
                           (see secret_list for project names)."
                 .into(),
             input_schema: json!({"type":"object","required":["name","value","bitwarden_project","reason"],"properties":{
