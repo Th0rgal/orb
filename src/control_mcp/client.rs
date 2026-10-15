@@ -291,14 +291,25 @@ fn deliver_secret(mut result: Value) -> Value {
         std::fs::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+            // A shared /tmp lets another user pre-create this path: refuse a
+            // symlink or a directory we do not own instead of writing into it.
+            let meta = std::fs::symlink_metadata(&dir)?;
+            // SAFETY: geteuid has no preconditions.
+            let uid = unsafe { libc::geteuid() };
+            if !meta.is_dir() || meta.uid() != uid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "secrets directory is not a private directory owned by this user",
+                ));
+            }
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-            let tmp = dir.join(format!(".{name}.tmp"));
+            let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(&tmp)?;
             std::io::Write::write_all(&mut f, value.as_bytes())?;
             std::fs::rename(&tmp, &path)?;

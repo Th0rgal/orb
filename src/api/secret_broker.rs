@@ -636,10 +636,13 @@ async fn caller_for(
         .await
         .ok()
         .flatten();
-    let paloma_project = mission
-        .as_ref()
-        .and_then(|m| m.project.project.clone())
-        .or_else(|| p.project.clone());
+    // The signed session's project decides default access; the mission record
+    // is only a fallback for sessions issued without one.
+    let paloma_project = p
+        .project
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| mission.as_ref().and_then(|m| m.project.project.clone()));
     Ok(Caller {
         mission_id,
         mission_title: mission.and_then(|m| m.title),
