@@ -383,18 +383,23 @@ pub async fn ingest(
         Ok(event) => (Some(event), None),
         Err(reason) => (None, Some(reason)),
     };
+    // Same rule as core's own logger: incremental thinking is live-only.
+    let persist = event.as_ref().is_some_and(super::should_persist_event);
     match store
         .log_client_event(
             mission_id,
             client_id,
             seq,
-            event.clone(),
+            event.clone().filter(|_| persist),
             Some((run_id, generation)),
         )
         .await
     {
         Ok(ClientIngest::Stored) => match (event, refusal) {
             (Some(event), _) => {
+                if persist {
+                    prepersisted(mission_id, event.event_name());
+                }
                 let _ = events_tx.send(event);
                 Reply::Ack { mission_id, seq }
             }
@@ -430,6 +435,42 @@ async fn admit(
         Ok(event) => Ok(Ok(event.into_agent_event(mission_id, client_id))),
         Err(e) => Ok(Err(format!("unsupported event: {e}"))),
     }
+}
+
+// === Logger handshake ===
+
+/// Tickets for events already persisted by ingest, so the global event
+/// logger (which persists everything broadcast on `events_tx`) skips them.
+/// The broadcast is ordered, so the logger consumes tickets in order; a
+/// ticket left behind by logger lag expires instead of hiding a later event.
+const TICKET_TTL: Duration = Duration::from_secs(30);
+
+fn tickets() -> &'static StdMutex<HashMap<(Uuid, &'static str), Vec<Instant>>> {
+    static T: OnceLock<StdMutex<HashMap<(Uuid, &'static str), Vec<Instant>>>> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+fn prepersisted(mission_id: Uuid, name: &'static str) {
+    let mut map = tickets().lock().expect("client link tickets");
+    map.entry((mission_id, name))
+        .or_default()
+        .push(Instant::now());
+}
+
+pub fn take_prepersisted(mission_id: Uuid, name: &'static str) -> bool {
+    let mut map = tickets().lock().expect("client link tickets");
+    let Some(queue) = map.get_mut(&(mission_id, name)) else {
+        return false;
+    };
+    queue.retain(|at| at.elapsed() < TICKET_TTL);
+    let taken = !queue.is_empty();
+    if taken {
+        queue.remove(0);
+    }
+    if queue.is_empty() {
+        map.remove(&(mission_id, name));
+    }
+    taken
 }
 
 // === HTTP ===
@@ -744,6 +785,39 @@ mod tests {
             rx.try_recv().unwrap(),
             AgentEvent::GoalIteration { iteration: 2, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn logger_skips_ingested_events_and_partial_thinking_is_live_only() {
+        let f = fixture().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let before = f
+            .store
+            .get_events(f.id, None, None, None)
+            .await
+            .unwrap()
+            .len();
+        let partial = serde_json::json!({ "type": "thinking", "content": "hm", "done": false });
+        ingest(&f.store, &tx, &f.client, frame(&f, 1, partial)).await;
+        let event = rx.try_recv().unwrap();
+        assert!(
+            !take_prepersisted(f.id, event.event_name()),
+            "not persisted, no ticket"
+        );
+        ingest(&f.store, &tx, &f.client, frame(&f, 2, call("a"))).await;
+        let event = rx.try_recv().unwrap();
+        assert!(take_prepersisted(f.id, event.event_name()));
+        assert!(
+            !take_prepersisted(f.id, event.event_name()),
+            "one ticket per event"
+        );
+        let after = f
+            .store
+            .get_events(f.id, None, None, None)
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(after - before, 1, "only the tool call is stored");
     }
 
     #[test]
