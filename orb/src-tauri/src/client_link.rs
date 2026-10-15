@@ -327,11 +327,14 @@ impl Account {
 
 // === Conversion: local output → Core client events ===
 
-/// Turns one run's output stream into Core client events.
+/// Turns one run's output stream into Core client events, using only event
+/// shapes every client already renders: `text_delta` chunks while the run
+/// streams, tool calls/results from activities, and one `assistant_message`
+/// with the full answer at the end. That message is keyed by the run id, the
+/// same id the transcript fallback uses, so Core never stores it twice.
 struct Converter {
-    bubble: String,
+    run_id: String,
     text: String,
-    revision: u64,
     pending: String,
     activities: HashMap<String, bool>,
 }
@@ -339,9 +342,8 @@ struct Converter {
 impl Converter {
     fn new(run_id: &str) -> Self {
         Converter {
-            bubble: format!("orb:{run_id}"),
+            run_id: run_id.into(),
             text: String::new(),
-            revision: 0,
             pending: String::new(),
             activities: HashMap::new(),
         }
@@ -351,10 +353,9 @@ impl Converter {
         if self.pending.is_empty() {
             return;
         }
-        let pos = self.text.chars().count();
-        let text = std::mem::take(&mut self.pending);
-        self.text.push_str(&text);
-        out.push(json!({"type":"text_op","bubble_id":self.bubble,"ops":[{"type":"insert","pos":pos,"text":text}]}));
+        let chunk = std::mem::take(&mut self.pending);
+        self.text.push_str(&chunk);
+        out.push(json!({"type":"text_delta","content":chunk}));
     }
 
     fn activities(&mut self, list: &[Activity], out: &mut Vec<Value>) {
@@ -374,12 +375,9 @@ impl Converter {
     /// Returns true once the run is terminal.
     fn apply(&mut self, event: Event, out: &mut Vec<Value>) -> bool {
         if event.reset {
+            // A rewritten answer: live viewers catch up from the final message.
             self.pending.clear();
-            if event.text != self.text {
-                self.text = event.text;
-                self.revision += 1;
-                out.push(json!({"type":"text_op","bubble_id":self.bubble,"ops":[{"type":"snapshot","text":self.text,"revision":self.revision}]}));
-            }
+            self.text = event.text;
         } else {
             self.pending.push_str(&event.text);
         }
@@ -390,10 +388,16 @@ impl Converter {
         if let Some(state) = event.state {
             self.flush(out);
             self.activities(&state.activities, out);
-            if let Some(error) = state.error.filter(|e| !e.trim().is_empty()) {
+            if !state.text.is_empty() {
+                self.text = state.text.clone();
+            }
+            let error = state.error.filter(|e| !e.trim().is_empty());
+            if let Some(error) = &error {
                 out.push(json!({"type":"error","message":error,"resumable":state.retryable}));
             }
-            out.push(json!({"type":"text_op","bubble_id":self.bubble,"ops":[{"type":"finalize"}]}));
+            if !self.text.trim().is_empty() {
+                out.push(json!({"type":"assistant_message","id":self.run_id,"content":self.text,"success":error.is_none()}));
+            }
             return true;
         }
         false
@@ -696,22 +700,20 @@ mod tests {
     }
 
     #[test]
-    fn converter_emits_text_ops_activities_and_finalize() {
-        let mut c = Converter::new("run");
+    fn converter_emits_deltas_activities_and_one_final_message() {
+        let run = "6f1c3e7a-0000-4000-8000-000000000001";
+        let mut c = Converter::new(run);
         let mut out = Vec::new();
         assert!(!c.apply(event("", true), &mut out));
         assert!(out.is_empty(), "an empty initial snapshot is not sent");
         c.apply(event("Hé", false), &mut out);
         c.apply(event("llo", false), &mut out);
         c.flush(&mut out);
-        assert_eq!(out.len(), 1);
         assert_eq!(
-            out[0]["ops"][0],
-            json!({"type":"insert","pos":0,"text":"Héllo"})
+            out,
+            [json!({"type":"text_delta","content":"Héllo"})],
+            "coalesced"
         );
-        c.apply(event(" world", false), &mut out);
-        c.flush(&mut out);
-        assert_eq!(out[1]["ops"][0]["pos"], 5, "positions count characters");
 
         let mut activity = Activity {
             id: "a1".into(),
@@ -755,7 +757,7 @@ mod tests {
             Event {
                 state: Some(crate::local_agents::PollState {
                     activities: vec![activity],
-                    text: String::new(),
+                    text: "Héllo!".into(),
                     done: true,
                     exit_code: Some(1),
                     session_id: None,
@@ -770,13 +772,15 @@ mod tests {
         );
         assert!(done);
         let types: Vec<_> = out.iter().map(|e| e["type"].as_str().unwrap()).collect();
-        assert_eq!(types, ["text_op", "error", "text_op"]);
-        assert_eq!(out[2]["ops"][0]["type"], "finalize");
+        assert_eq!(types, ["text_delta", "error", "assistant_message"]);
+        assert_eq!(
+            out[2]["id"], run,
+            "keyed by the run, like the transcript fallback"
+        );
+        assert_eq!(out[2]["content"], "Héllo!");
+        assert_eq!(out[2]["success"], false);
     }
 
-    /// Fake Core: acknowledges part of the stream, drops the connection, then
-    /// reports a cursor beyond the last ack (an ack lost in flight). Orb must
-    /// resend exactly the remainder.
     #[test]
     fn reconnect_replays_exactly_what_core_lacks() {
         use tokio_tungstenite::accept_async;
