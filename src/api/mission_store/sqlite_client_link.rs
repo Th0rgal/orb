@@ -62,13 +62,15 @@ pub(super) async fn log(
         if seq != last + 1 {
             return Ok(ClientIngest::Gap { expected: last + 1 });
         }
-        // The run fence lives in this transaction: a stop or restart that
-        // committed first wins, and the stale frame only consumes its number.
+        // Ownership and the run fence live in this transaction (one indexed
+        // row, no mission load): the frame is stored only while this computer
+        // owns the live run, so a stop, restart or transfer committed first
+        // wins and the stale frame only consumes its number.
         let live = match run {
             Some((run_id, generation)) => tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE mission_id=?1 AND run_id=?2 AND generation=?3 AND execution_state<>'terminal' AND owner_actor_id LIKE 'orb-client:%')",
-                    params![mid, run_id.to_string(), generation as i64],
+                    "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE mission_id=?1 AND run_id=?2 AND generation=?3 AND execution_state<>'terminal' AND owner_actor_id=?4)",
+                    params![mid, run_id.to_string(), generation as i64, format!("orb-client:{cid}")],
                     |r| r.get::<_, bool>(0),
                 )
                 .map_err(err)?,

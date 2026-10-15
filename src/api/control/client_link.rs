@@ -292,6 +292,17 @@ fn touch(user_id: &str, client_id: &str, conn_id: Uuid) {
     }
 }
 
+/// Whether `conn_id` is still the registered socket for this computer. A
+/// replaced socket must not ingest: it could win a sequence number that the
+/// replacement then sees acknowledged as a duplicate.
+fn is_current(user_id: &str, client_id: &str, conn_id: Uuid) -> bool {
+    registry()
+        .lock()
+        .expect("client link registry")
+        .get(&(user_id.to_string(), client_id.to_string()))
+        .is_some_and(|link| link.conn_id == conn_id)
+}
+
 fn drop_link(user_id: &str, client_id: &str, conn_id: Uuid) {
     let mut map = registry().lock().expect("client link registry");
     let key = (user_id.to_string(), client_id.to_string());
@@ -389,7 +400,9 @@ pub async fn ingest(
             }
             (None, reason) => reject(&reason.unwrap_or_default()),
         },
-        Ok(ClientIngest::Refused) => reject("Local execution receipt is stale"),
+        Ok(ClientIngest::Refused) => {
+            reject("Local execution receipt is stale or not owned by this computer")
+        }
         // Already resolved earlier (stored or refused); the client moves on.
         Ok(ClientIngest::Duplicate) => Reply::Ack { mission_id, seq },
         Ok(ClientIngest::Gap { expected }) => Reply::Gap {
@@ -403,34 +416,19 @@ pub async fn ingest(
 
 /// `Ok(Ok(event))` to store, `Ok(Err(reason))` to refuse permanently,
 /// `Err(reason)` for a transient failure the client should retry.
+/// Ownership and liveness are checked by the store inside the ingest
+/// transaction, so this hot path never loads the mission.
 async fn admit(
-    store: &Arc<dyn MissionStore>,
+    _store: &Arc<dyn MissionStore>,
     client_id: &str,
     mission_id: Uuid,
-    run_id: Uuid,
-    generation: u64,
+    _run_id: Uuid,
+    _generation: u64,
     raw: serde_json::Value,
 ) -> Result<Result<AgentEvent, String>, String> {
-    match worker_location::resolved_client_owner(store, mission_id).await? {
-        Some(owner) if owner == client_id => {}
-        _ => return Ok(Err("mission is not run by this computer".into())),
-    }
-    let event: ClientEvent = match serde_json::from_value(raw) {
-        Ok(event) => event,
-        Err(e) => return Ok(Err(format!("unsupported event: {e}"))),
-    };
-    match machine_transfer::check_client_receipt_in(
-        store,
-        mission_id,
-        Some(run_id),
-        Some(generation),
-    )
-    .await
-    {
-        Ok(Some(_)) => Ok(Ok(event.into_agent_event(mission_id, client_id))),
-        Ok(None) => Ok(Err("mission has no active local run".into())),
-        Err((StatusCode::CONFLICT, reason)) => Ok(Err(reason)),
-        Err((_, reason)) => Err(reason),
+    match serde_json::from_value::<ClientEvent>(raw) {
+        Ok(event) => Ok(Ok(event.into_agent_event(mission_id, client_id))),
+        Err(e) => Ok(Err(format!("unsupported event: {e}"))),
     }
 }
 
@@ -524,6 +522,10 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
                     Some(Ok(WsMessage::Binary(_))) => continue,
                     _ => break,
                 };
+                if !is_current(&user.id, &client_id, conn_id) {
+                    // Superseded by a newer socket from the same computer.
+                    break;
+                }
                 touch(&user.id, &client_id, conn_id);
                 let reply = match serde_json::from_str::<Inbound>(&text) {
                     Ok(Inbound::Event(frame)) => {
@@ -757,6 +759,8 @@ mod tests {
         touch(user, &client, old);
         drop_link(user, &client, old);
         assert!(presence(user, &client).online);
+        assert!(!is_current(user, &client, old));
+        assert!(is_current(user, &client, new));
         drop_link(user, &client, new);
         assert!(!presence(user, &client).online);
     }
