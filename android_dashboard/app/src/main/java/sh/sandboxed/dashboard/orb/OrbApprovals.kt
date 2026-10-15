@@ -118,8 +118,15 @@ object OrbApprovalKey {
             val signature = Signature.getInstance("SHA256withECDSA")
             try {
                 signature.initSign(key)
+            } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+                // Biometrics changed: the key can never sign again. Remove it so
+                // this phone shows "Enroll" and can get a fresh key and code.
+                keyStore().deleteEntry(ALIAS)
+                setDeviceId(activity, "", null)
+                cont.resumeWithException(IllegalStateException("Your fingerprints or face changed, so this phone's approval key was reset. Enroll it again with a new code."))
+                return@suspendCancellableCoroutine
             } catch (e: Exception) {
-                cont.resumeWithException(IllegalStateException("Approval key is no longer usable (biometrics changed?): ${e.message}"))
+                cont.resumeWithException(IllegalStateException("Approval key is not usable: ${e.message}"))
                 return@suspendCancellableCoroutine
             }
             val prompt = BiometricPrompt(

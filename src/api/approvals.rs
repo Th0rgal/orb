@@ -142,23 +142,27 @@ pub fn approvals(state: &AppState) -> Arc<Approvals> {
 }
 
 impl Approvals {
-    async fn save(&self, data: &Persisted) {
-        let Ok(text) = serde_json::to_string_pretty(data) else {
-            return;
-        };
+    async fn save(&self, data: &Persisted) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
         if let Some(dir) = self.path.parent() {
-            let _ = tokio::fs::create_dir_all(dir).await;
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         let tmp = self.path.with_extension("json.tmp");
-        if tokio::fs::write(&tmp, text).await.is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-            }
-            let _ = tokio::fs::rename(&tmp, &self.path).await;
+        tokio::fs::write(&tmp, text)
+            .await
+            .map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .await
+                .map_err(|e| e.to_string())?;
         }
+        tokio::fs::rename(&tmp, &self.path)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     pub async fn mode(&self) -> Mode {
@@ -238,7 +242,8 @@ impl Approvals {
         verify_signature(&device.public_key, challenge.payload.as_bytes(), &sig)?;
         device.last_used_at = Some(Utc::now());
         let id = device.id;
-        self.save(&data).await;
+        // Last-used is informational; a failed write must not fail the request.
+        let _ = self.save(&data).await;
         Ok(id)
     }
 
@@ -289,6 +294,41 @@ pub fn verify_signature(spki_b64: &str, message: &[u8], der_sig: &[u8]) -> Resul
     ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, point)
         .verify(message, der_sig)
         .map_err(|_| "Device signature does not verify".to_string())
+}
+
+/// Quoted Bitwarden project names for ids (unknown ids shown shortened).
+async fn project_names(state: &Arc<AppState>, ids: &[String]) -> Vec<String> {
+    let projects = super::bitwarden::list_projects_raw(state)
+        .await
+        .unwrap_or_default();
+    ids.iter()
+        .map(|id| {
+            projects
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| quoted(&p.name))
+                .unwrap_or_else(|| quoted(&id.chars().take(8).collect::<String>()))
+        })
+        .collect()
+}
+
+/// `secret "NAME" in "project"` for a secret id.
+async fn secret_label(state: &Arc<AppState>, id: &str) -> String {
+    let broker = super::secret_broker::broker(state);
+    let found = broker
+        .list_all(state, false)
+        .await
+        .ok()
+        .and_then(|all| all.into_iter().find(|s| s.id == id));
+    match found {
+        Some(s) => {
+            let project = project_names(state, &s.project_id.into_iter().collect::<Vec<_>>())
+                .await
+                .join("");
+            format!("secret {} in {project}", quoted(&s.key))
+        }
+        None => format!("unknown secret {}", quoted(id)),
+    }
 }
 
 /// A mission-controlled string, safe to show in a biometric prompt.
@@ -399,38 +439,77 @@ async fn describe(
         }
         (&Method::PUT, ["", "api", "bitwarden", "default-access", slug]) => {
             let req: DefaultAccessRequest = typed(body)?;
-            format!(
-                "Set default secret access for {} to {} Bitwarden project(s)",
-                quoted(slug),
-                req.project_ids.len()
-            )
+            let names = project_names(state, &req.project_ids).await;
+            if names.is_empty() {
+                format!("Remove all default secret access for {}", quoted(slug))
+            } else {
+                format!(
+                    "Let {} missions read {} without asking",
+                    quoted(slug),
+                    names.join(", ")
+                )
+            }
         }
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => {
-            let _: UpdateBitwardenConfigRequest = typed(body)?;
-            "Change the Bitwarden connection".into()
+            let req: UpdateBitwardenConfigRequest = typed(body)?;
+            let mut changes = Vec::new();
+            if req.access_token.is_some() {
+                changes.push("replace the machine token".to_string());
+            }
+            if req.server_url.is_some() {
+                changes.push("change the server URL".to_string());
+            }
+            if let Some(b) = &req.project_bindings {
+                let mut list = Vec::new();
+                for (slug, id) in b {
+                    let name = project_names(state, std::slice::from_ref(id))
+                        .await
+                        .join("");
+                    list.push(format!("{} → {name}", quoted(slug)));
+                }
+                changes.push(format!("set default access bindings {}", list.join(", ")));
+            }
+            if changes.is_empty() {
+                "Update Bitwarden settings".into()
+            } else {
+                format!("Bitwarden: {}", changes.join("; "))
+            }
         }
-        (&Method::GET, ["", "api", "bitwarden", "secrets", _, "reveal"]) => {
+        (&Method::GET, ["", "api", "bitwarden", "secrets", id, "reveal"]) => {
             no_body(body)?;
-            "Reveal a secret value".into()
+            format!("Reveal the value of {}", secret_label(state, id).await)
         }
-        (&Method::POST, ["", "api", "bitwarden", "projects", _, "secrets"]) => {
+        (&Method::POST, ["", "api", "bitwarden", "projects", pid, "secrets"]) => {
             let req: CreateBitwardenSecretRequest = typed(body)?;
-            format!("Create secret {}", quoted(&req.key))
+            let project = project_names(state, &[pid.to_string()]).await.join("");
+            format!("Create secret {} in {project}", quoted(&req.key))
         }
-        (&Method::PUT, ["", "api", "bitwarden", "secrets", _]) => {
+        (&Method::PUT, ["", "api", "bitwarden", "secrets", id]) => {
             let req: UpdateBitwardenSecretRequest = typed(body)?;
-            format!(
-                "Edit secret {}",
-                quoted(req.key.as_deref().unwrap_or("(name unchanged)"))
-            )
+            let current = secret_label(state, id).await;
+            match req.key.as_deref() {
+                Some(k) if !current.contains(&format!("\"{k}\"")) => {
+                    format!("Edit {current} (rename to {})", quoted(k))
+                }
+                _ => format!("Edit {current}"),
+            }
         }
-        (&Method::DELETE, ["", "api", "bitwarden", "secrets", _]) => {
+        (&Method::DELETE, ["", "api", "bitwarden", "secrets", id]) => {
             no_body(body)?;
-            "Delete a secret".into()
+            format!("Delete {}", secret_label(state, id).await)
         }
-        (&Method::DELETE, ["", "api", "approvals", "devices", _]) => {
+        (&Method::DELETE, ["", "api", "approvals", "devices", id]) => {
             no_body(body)?;
-            "Remove an approval device".into()
+            let name = approvals(state)
+                .data
+                .lock()
+                .await
+                .devices
+                .iter()
+                .find(|d| d.id.to_string() == *id)
+                .map(|d| format!("{} ({})", quoted(&d.name), quoted(&d.platform)))
+                .unwrap_or_else(|| "an unknown device".into());
+            format!("Remove approval device {name}")
         }
         (&Method::PUT, ["", "api", "approvals", "mode"]) => {
             let req: ModeRequest = typed(body)?;
@@ -446,6 +525,10 @@ async fn describe(
                 quoted(&req.name),
                 quoted(&req.platform)
             )
+        }
+        (&Method::GET, ["", "api", "settings", "backup"]) => {
+            no_body(body)?;
+            "Download a backup of backend settings and keys".into()
         }
         (&Method::POST, ["", "api", "settings", "restore"]) => {
             "Restore backend settings from a backup".into()
@@ -469,6 +552,8 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
         (&Method::PUT, ["", "api", "approvals", "mode"]) => true,
         // A backup restore can rewrite device, grant and access state on disk.
         (&Method::POST, ["", "api", "settings", "restore"]) => true,
+        // Backups contain the backend's private key and stored credentials.
+        (&Method::GET, ["", "api", "settings", "backup"]) => true,
         _ => false,
     }
 }
@@ -586,6 +671,12 @@ async fn challenge(
     }
     // The text the device shows comes from Core, not the client, so a
     // compromised page cannot describe one action while asking to sign another.
+    if req.body_sha256.is_some() && path.trim_end_matches('/') != "/api/settings/restore" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "body_sha256 is only for binary backup restores; send the JSON body".into(),
+        ));
+    }
     let body_hash = match req.body_sha256.as_deref().map(str::trim) {
         Some(h) if h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()) => {
             h.to_ascii_lowercase()
@@ -671,7 +762,13 @@ async fn enroll_device(
         return Err((StatusCode::CONFLICT, "This key is already enrolled".into()));
     }
     data.devices.push(device.clone());
-    store.save(&data).await;
+    if let Err(e) = store.save(&data).await {
+        data.devices.pop();
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save the device: {e}"),
+        ));
+    }
     Ok(Json(device))
 }
 
@@ -689,7 +786,15 @@ async fn revoke_device(
         .find(|d| d.id == id && d.revoked_at.is_none())
         .ok_or((StatusCode::NOT_FOUND, "Device not found".to_string()))?;
     d.revoked_at = Some(Utc::now());
-    store.save(&data).await;
+    if let Err(e) = store.save(&data).await {
+        if let Some(d) = data.devices.iter_mut().find(|d| d.id == id) {
+            d.revoked_at = None;
+        }
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save: {e}"),
+        ));
+    }
     Ok(Json(json!({"success": true})))
 }
 
@@ -710,8 +815,15 @@ async fn set_mode(
             "Enroll a device before enforcing".into(),
         ));
     }
+    let previous = data.mode;
     data.mode = req.mode;
-    store.save(&data).await;
+    if let Err(e) = store.save(&data).await {
+        data.mode = previous;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save: {e}"),
+        ));
+    }
     Ok(Json(json!({"mode": data.mode})))
 }
 

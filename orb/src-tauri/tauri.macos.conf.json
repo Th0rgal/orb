@@ -1,6 +1,7 @@
 {
   "build": {
-    "beforeBuildCommand": "python3 scripts/build-mcp.py && python3 scripts/build-signer.py && node scripts/build-macos-icon.mjs && pnpm build"
+    "beforeBuildCommand": "python3 scripts/build-mcp.py && python3 scripts/build-signer.py && node scripts/build-macos-icon.mjs && pnpm build",
+    "beforeDevCommand": "python3 scripts/build-mcp.py && python3 scripts/build-signer.py && pnpm dev"
   },
   "bundle": {
     "resources": {

@@ -815,6 +815,9 @@ private struct OrbBitwardenSecretEditorSheet: View {
                     defer { loadingValue = false }
                     if let detail = try? await OrbApprovalKey.signedCall("/api/bitwarden/secrets/\(existing["id"].text)/reveal", summary: "Reveal \(existing["key"].text)") {
                         value = detail["value"].text
+                    } else {
+                        // Without the current value, saving would overwrite it with an empty one.
+                        dismiss()
                     }
                 }
             }

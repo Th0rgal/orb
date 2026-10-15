@@ -87,6 +87,18 @@ export async function enrollThisDevice(name: string, enrollmentCode: string): Pr
   return device;
 }
 
+/** Make a new Secure Enclave key (the old one may be invalidated by Touch ID changes). */
+export async function replaceLocalKey(): Promise<void> {
+  const call = invoke();
+  if (!call) throw new Error("Device approval needs the Orb desktop app");
+  await call("approval_key_create");
+  try {
+    localStorage.removeItem(deviceKey());
+  } catch {
+    // ignore
+  }
+}
+
 export class ApprovalCancelled extends Error {
   constructor() {
     super("Approval cancelled");

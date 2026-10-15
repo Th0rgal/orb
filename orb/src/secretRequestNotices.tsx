@@ -39,10 +39,8 @@ export function syncSecretRequestNotices(pending: SecretAccessRequest[], openSec
               run: () => {
                 dismissToast(key);
                 void approveSecretRequest(r.id, "secret").catch((e) => {
-                  if (e instanceof ApprovalCancelled) {
-                    shown.delete(r.id); // ask again on the next poll
-                    return;
-                  }
+                  shown.delete(r.id); // still pending: show it again on the next poll
+                  if (e instanceof ApprovalCancelled) return;
                   notify({ kind: "error", title: "Could not approve the request", message: e instanceof Error ? e.message : String(e) });
                 });
               },

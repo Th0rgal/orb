@@ -4,6 +4,7 @@ import {
   enrollThisDevice,
   listApprovalDevices,
   localApprovalKey,
+  replaceLocalKey,
   signedApi,
   thisDeviceEnrollment,
   type ApprovalDevice,
@@ -96,6 +97,23 @@ export function ApprovalDevicesPanel(p: { onError: (message: string) => void }) 
             </div>
           )}
         </For>
+
+        <Show when={mine() && available()}>
+          <div class="s-row">
+            <div class="s-row-text">
+              <div class="s-row-title">Replace this Mac's key</div>
+              <div class="s-row-desc">
+                Needed if Touch ID fingers changed (the old key stops working). Creates a new key; enroll it again with a
+                one-time code, then remove the old entry.
+              </div>
+            </div>
+            <div class="s-row-ctrl">
+              <button class="s-btn" disabled={busy()} onClick={() => void run(async () => { await replaceLocalKey(); })}>
+                Replace key
+              </button>
+            </div>
+          </div>
+        </Show>
 
         <Show when={!mine() && available()}>
           <div class="s-row">
