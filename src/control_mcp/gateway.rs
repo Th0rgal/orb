@@ -589,6 +589,11 @@ async fn call_inner(
             .collect::<Vec<_>>());
         return Ok(value);
     }
+    if crate::api::secret_broker::TOOL_NAMES.contains(&call.name.as_str()) {
+        return crate::api::secret_broker::handle_tool(&state, p, &call.name, &call.arguments)
+            .await
+            .map_err(|e| ToolError::denied(&e));
+    }
     if call.name == "get_action" {
         let id = call.arguments["action_id"]
             .as_str()

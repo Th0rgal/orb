@@ -229,7 +229,7 @@ impl Client {
                     let payload = if failed {
                         json!({"error":reply["error"]})
                     } else {
-                        reply["result"].clone()
+                        deliver_secret(reply["result"].clone())
                     };
                     let structured = if payload.is_object() {
                         payload
@@ -250,6 +250,75 @@ impl Client {
             }
         }
     }
+}
+
+/// Directory for secrets handed to this mission. Private to the user.
+fn secrets_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("SANDBOXED_SECRETS_DIR") {
+        return dir.into();
+    }
+    let mission = std::env::var("SANDBOXED_SH_MISSION_ID")
+        .or_else(|_| std::env::var("MISSION_ID"))
+        .unwrap_or_else(|_| "session".into());
+    std::env::temp_dir()
+        .join("paloma-secrets")
+        .join(mission.replace(['/', '.'], "_"))
+}
+
+/// Core returns a secret as `secret_delivery`; write it to a 0600 file and
+/// replace it with the path, so the value never enters the agent transcript,
+/// the harness logs or Core's event store.
+fn deliver_secret(mut result: Value) -> Value {
+    let Some(delivery) = result
+        .as_object_mut()
+        .and_then(|o| o.remove("secret_delivery"))
+    else {
+        return result;
+    };
+    let name = delivery["name"].as_str().unwrap_or("");
+    let value = delivery["value"].as_str().unwrap_or("");
+    let safe = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !safe {
+        result["error"] = json!("Secret name is not a safe file name; value withheld");
+        return result;
+    }
+    let dir = secrets_dir();
+    let path = dir.join(name);
+    let written = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            let tmp = dir.join(format!(".{name}.tmp"));
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            std::io::Write::write_all(&mut f, value.as_bytes())?;
+            std::fs::rename(&tmp, &path)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::write(&path, value)?;
+        Ok(())
+    })();
+    match written {
+        Ok(()) => {
+            let shown = path.display().to_string();
+            result["path"] = json!(shown);
+            result["export"] = json!(format!("export {name}=\"$(cat '{shown}')\""));
+            result["message"] = json!("Value written to the private file at `path`. Load it with the `export` line; never print it.");
+        }
+        Err(e) => {
+            result["error"] = json!(format!("Could not write the secret file: {e}"));
+        }
+    }
+    result
 }
 
 pub async fn run() -> Result<(), String> {
@@ -407,5 +476,27 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn secret_delivery_is_written_to_a_private_file_and_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SANDBOXED_SECRETS_DIR", dir.path());
+        let out = super::deliver_secret(json!({
+            "status": "granted",
+            "secret_delivery": {"name": "UXON_TOKEN", "value": "s3cret"}
+        }));
+        std::env::remove_var("SANDBOXED_SECRETS_DIR");
+        assert!(!out.to_string().contains("s3cret"));
+        let path = out["path"].as_str().unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "s3cret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let bad = super::deliver_secret(json!({"secret_delivery": {"name": "../x", "value": "v"}}));
+        assert!(!bad.to_string().contains("\"v\""));
     }
 }

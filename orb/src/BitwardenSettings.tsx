@@ -7,9 +7,8 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { connectionVersion, isConnected, listProjects, type ProjectSummary } from "./api";
+import { connectionVersion, isConnected } from "./api";
 import {
-  PALOMA_BITWARDEN_PROJECT_ID,
   authenticateBiometric,
   isBiometricCancelled,
   createBitwardenSecret,
@@ -17,15 +16,18 @@ import {
   getBiometricStatus,
   getBitwardenStatus,
   listBitwardenProjects,
-  listBitwardenSecrets,
+  groupSecrets,
+  listAllBitwardenSecrets,
   revealBitwardenSecret,
   updateBitwardenConfig,
   updateBitwardenSecret,
   type BiometricStatus,
   type BitwardenProject,
   type BitwardenSecretSummary,
+  type BitwardenSecretWithProject,
   type BitwardenStatus,
 } from "./bitwardenApi";
+import { SecretAccessPanel } from "./SecretAccessPanel";
 import { copyText } from "./clipboard";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
@@ -80,11 +82,14 @@ function sourceLabel(src: string | null | undefined): string {
 export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
   const [status, setStatus] = createSignal<BitwardenStatus | null>(null);
   const [bwProjects, setBwProjects] = createSignal<BitwardenProject[]>([]);
-  const [palomaProjects, setPalomaProjects] = createSignal<ProjectSummary[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = createSignal<string>(
-    PALOMA_BITWARDEN_PROJECT_ID,
+  const [selectedProjectId, setSelectedProjectId] = createSignal<string>("");
+  const [allSecrets, setAllSecrets] = createSignal<BitwardenSecretWithProject[]>([]);
+  // "" shows every project.
+  const secrets = createMemo(() =>
+    selectedProjectId() ? allSecrets().filter((s) => s.projectId === selectedProjectId()) : allSecrets(),
   );
-  const [secrets, setSecrets] = createSignal<BitwardenSecretSummary[]>([]);
+  const projectCount = (id: string) => allSecrets().filter((s) => s.projectId === id).length;
+  const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
   const [revealed, setRevealed] = createSignal<Record<string, string>>({});
   const [revealingIds, setRevealingIds] = createSignal<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = createSignal<string | null>(null);
@@ -125,14 +130,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
   const [deleteTarget, setDeleteTarget] = createSignal<BitwardenSecretSummary | null>(null);
   const [deletingSecret, setDeletingSecret] = createSignal(false);
 
-  const [bindingPalomaSlug, setBindingPalomaSlug] = createSignal(
-    p.initialProjectSlug || "paloma",
-  );
-  const [savingBinding, setSavingBinding] = createSignal(false);
-
   const [managing, setManaging] = createSignal(false);
-  const isBound = () =>
-    !!selectedProjectId() && status()?.project_bindings?.[bindingPalomaSlug()] === selectedProjectId();
   const isUnlocked = () => unlockedUntil() > nowTick();
 
   const lockSession = () => {
@@ -179,12 +177,11 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     copyTimer = setTimeout(() => setCopiedId(null), 1800);
   };
 
-  const loadSecretsForProject = async (projectId: string) => {
-    if (!projectId || !isConnected()) return;
+  const loadSecretsForProject = async (_projectId?: string) => {
+    if (!isConnected()) return;
     setSecretsLoading(true);
     try {
-      const list = await listBitwardenSecrets(projectId);
-      setSecrets(list);
+      setAllSecrets(await listAllBitwardenSecrets());
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -201,28 +198,20 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     setLoading(true);
     setError(null);
     try {
-      const [st, projs] = await Promise.all([
-        getBitwardenStatus(),
-        listProjects().catch(() => [] as ProjectSummary[]),
-      ]);
+      const st = await getBitwardenStatus();
       setStatus(st);
-      setPalomaProjects(projs);
       setServerUrlDraft(st.server_url ?? "");
 
       if (st.configured && st.bws_installed) {
         const bwList = await listBitwardenProjects();
         setBwProjects(bwList);
-        const preferred =
-          (p.initialProjectSlug && st.project_bindings?.[p.initialProjectSlug]) ||
-          st.default_project_id ||
-          bwList.find((x) => x.name.toLowerCase() === "paloma")?.id ||
-          bwList[0]?.id ||
-          PALOMA_BITWARDEN_PROJECT_ID;
-        setSelectedProjectId(preferred);
-        await loadSecretsForProject(preferred);
+        if (selectedProjectId() && !bwList.some((x) => x.id === selectedProjectId())) {
+          setSelectedProjectId("");
+        }
+        await loadSecretsForProject();
       } else {
         setBwProjects([]);
-        setSecrets([]);
+        setAllSecrets([]);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -269,7 +258,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
   const currentProjectName = createMemo(
     () =>
       currentBwProject()?.name ??
-      (selectedProjectId() === PALOMA_BITWARDEN_PROJECT_ID ? "paloma" : selectedProjectId()),
+      (selectedProjectId() || bwProjects()[0]?.name || "paloma"),
   );
 
   const filteredSecrets = createMemo(() => {
@@ -283,11 +272,12 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     );
   });
 
-  const handleSelectBwProject = async (projectId: string) => {
+  const handleSelectBwProject = (projectId: string) => {
     setSelectedProjectId(projectId);
     setRevealed({});
-    await loadSecretsForProject(projectId);
   };
+  const groupedSecrets = createMemo(() => groupSecrets(filteredSecrets()));
+  const toggleGroup = (id: string) => setCollapsed((prev) => ({ ...prev, [id]: !prev[id] }));
 
   const handleToggleReveal = async (secret: BitwardenSecretSummary) => {
     const existing = revealed()[secret.id];
@@ -336,7 +326,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     setSecretKeyDraft("");
     setSecretValueDraft("");
     setSecretNoteDraft("");
-    setSecretProjectDraft(selectedProjectId());
+    setSecretProjectDraft(selectedProjectId() || bwProjects()[0]?.id || "");
     setShowDraftValue(false);
     setEditorMode("create");
   };
@@ -471,38 +461,6 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     }
   };
 
-  const handleBindProject = async (palomaSlug: string, bwProjectId: string) => {
-    if (savingBinding()) return;
-    setSavingBinding(true);
-    setToastError("");
-    try {
-      const currentBindings = { ...(status()?.project_bindings ?? {}) };
-      currentBindings[palomaSlug] = bwProjectId;
-      const next = await updateBitwardenConfig({
-        default_project_id: bwProjectId,
-        project_bindings: currentBindings,
-      });
-      setStatus(next);
-      setNotice(
-        `Connected Paloma project "${palomaSlug}" to Bitwarden project "${
-          bwProjects().find((x) => x.id === bwProjectId)?.name ?? bwProjectId
-        }".`,
-      );
-    } catch (e) {
-      setToastError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSavingBinding(false);
-    }
-  };
-
-  const palomaProjectOptions = createMemo(() => {
-    const slugs = new Set<string>(["paloma"]);
-    if (p.initialProjectSlug) slugs.add(p.initialProjectSlug);
-    for (const proj of palomaProjects()) slugs.add(proj.slug);
-    for (const k of Object.keys(status()?.project_bindings ?? {})) slugs.add(k);
-    return [...slugs];
-  });
-
   return (
     <div class="s-body settings-body bitwarden-settings-body" aria-label="Bitwarden Secrets settings">
       <div class="s-inner bitwarden-inner">
@@ -582,7 +540,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
             </section>
           }
         >
-          <Show when={status()?.configured && isBound() && !managing()}>
+          <Show when={status()?.configured && !managing()}>
             <section class="s-sec">
               <div class="s-card">
                 <div class="s-row">
@@ -594,8 +552,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                       </span>
                     </div>
                     <div class="s-row-desc">
-                      Project <strong>{currentProjectName()}</strong> ↔ Paloma{" "}
-                      <strong>{bindingPalomaSlug()}</strong> · {secrets().length} secrets
+                      {bwProjects().length} projects · {allSecrets().length} secrets
                     </div>
                   </div>
                   <div class="s-row-ctrl">
@@ -606,12 +563,11 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
             </section>
           </Show>
 
-          {/* Machine Account & Connected Project Card */}
-          <Show when={!status()?.configured || !isBound() || managing()}>
+          <Show when={!status()?.configured || managing()}>
           <section class="s-sec">
             <div class="bw-section-head">
               <h3>Bitwarden connection</h3>
-              <Show when={status()?.configured && isBound()}>
+              <Show when={status()?.configured}>
                 <button class="s-btn" onClick={() => setManaging(false)}>Done</button>
               </Show>
             </div>
@@ -650,75 +606,17 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                 </div>
               </div>
 
-              <Show when={bwProjects().length > 0}>
-                <div class="s-row">
-                  <div class="s-row-text">
-                    <div class="s-row-title">Bitwarden Project</div>
-                    <div class="s-row-desc">
-                      Active Bitwarden Secrets Manager project ({secrets().length} secrets) ·{" "}
-                      <code class="bw-mono">{selectedProjectId()}</code>
-                    </div>
-                  </div>
-                  <div class="s-row-ctrl">
-                    <Select
-                      value={selectedProjectId()}
-                      aria-label="Bitwarden Project"
-                      onChange={(e) => void handleSelectBwProject(e.currentTarget.value)}
-                    >
-                      <For each={bwProjects()}>
-                        {(proj) => <option value={proj.id}>{proj.name}</option>}
-                      </For>
-                    </Select>
-                  </div>
-                </div>
-
-                <div class="s-row">
-                  <div class="s-row-text">
-                    <div class="s-row-title">Connected Paloma Project</div>
-                    <div class="s-row-desc">
-                      Binds Paloma project{" "}
-                      <strong>{bindingPalomaSlug()}</strong> to Bitwarden project{" "}
-                      <strong>{currentProjectName()}</strong>.
-                    </div>
-                  </div>
-                  <div class="s-row-ctrl bw-binding-ctrl">
-                    <Select
-                      value={bindingPalomaSlug()}
-                      aria-label="Paloma Project"
-                      onChange={(e) => {
-                        const slug = e.currentTarget.value;
-                        setBindingPalomaSlug(slug);
-                        const boundId = status()?.project_bindings?.[slug];
-                        if (boundId && bwProjects().some((p) => p.id === boundId)) {
-                          void handleSelectBwProject(boundId);
-                        }
-                      }}
-                    >
-                      <For each={palomaProjectOptions()}>
-                        {(slug) => <option value={slug}>{slug}</option>}
-                      </For>
-                    </Select>
-                    <Show
-                      when={!isBound()}
-                      fallback={
-                        <span class="bw-connected-label" role="status">
-                          <Ic.CheckIcon size={12} /> Connected
-                        </span>
-                      }
-                    >
-                      <button
-                        class="s-btn primary"
-                        disabled={savingBinding()}
-                        onClick={() => void handleBindProject(bindingPalomaSlug(), selectedProjectId())}
-                      >
-                        {savingBinding() ? "Connecting…" : "Connect Project"}
-                      </button>
-                    </Show>
-                  </div>
-                </div>
-              </Show>
             </div>
           </section>
+          </Show>
+
+          <Show when={status()?.configured}>
+            <SecretAccessPanel
+              projects={bwProjects()}
+              requireBiometric={requireBiometric}
+              onError={(m) => setToastError(m)}
+              onSecretsChanged={() => void loadSecretsForProject()}
+            />
           </Show>
 
           {/* Secrets Table Section */}
@@ -731,6 +629,28 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                     {filteredSecrets().length}
                     <Show when={search().trim()}> / {secrets().length}</Show>
                   </span>
+                </div>
+                <div class="bw-project-chips" role="tablist" aria-label="Bitwarden projects">
+                  <button
+                    role="tab"
+                    class={`bw-chip ${selectedProjectId() === "" ? "active" : ""}`}
+                    aria-selected={selectedProjectId() === ""}
+                    onClick={() => handleSelectBwProject("")}
+                  >
+                    All <span class="bw-chip-count">{allSecrets().length}</span>
+                  </button>
+                  <For each={bwProjects()}>
+                    {(proj) => (
+                      <button
+                        role="tab"
+                        class={`bw-chip ${selectedProjectId() === proj.id ? "active" : ""}`}
+                        aria-selected={selectedProjectId() === proj.id}
+                        onClick={() => handleSelectBwProject(proj.id)}
+                      >
+                        {proj.name} <span class="bw-chip-count">{projectCount(proj.id)}</span>
+                      </button>
+                    )}
+                  </For>
                 </div>
                 <div class="bw-secrets-tools">
                   <div class="bw-search-wrap">
@@ -778,7 +698,44 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                       </div>
                     }
                   >
-                    <For each={filteredSecrets()}>
+                    <For each={groupedSecrets()}>
+                      {(proj) => (
+                        <div class="bw-project-group">
+                          <Show when={!selectedProjectId()}>
+                            <button
+                              type="button"
+                              class="bw-group-head project"
+                              onClick={() => toggleGroup(`p:${proj.projectId}`)}
+                            >
+                              <Show when={collapsed()[`p:${proj.projectId}`]} fallback={<Ic.ChevronDown size={11} />}>
+                                <Ic.ChevronRight size={11} />
+                              </Show>
+                              <span>{proj.projectName}</span>
+                              <span class="bw-count-badge">
+                                {proj.groups.reduce((n, g) => n + g.items.length, 0)}
+                              </span>
+                            </button>
+                          </Show>
+                          <Show when={!collapsed()[`p:${proj.projectId}`] || !!selectedProjectId()}>
+                            <For each={proj.groups}>
+                              {(group) => (
+                                <>
+                                  <button
+                                    type="button"
+                                    class="bw-group-head"
+                                    onClick={() => toggleGroup(`g:${proj.projectId}:${group.prefix}`)}
+                                  >
+                                    <Show
+                                      when={collapsed()[`g:${proj.projectId}:${group.prefix}`]}
+                                      fallback={<Ic.ChevronDown size={10} />}
+                                    >
+                                      <Ic.ChevronRight size={10} />
+                                    </Show>
+                                    <span>{group.prefix}</span>
+                                    <span class="bw-group-count">{group.items.length}</span>
+                                  </button>
+                                  <Show when={!collapsed()[`g:${proj.projectId}:${group.prefix}`]}>
+                    <For each={group.items}>
                       {(secret) => {
                         const isRev = () => revealed()[secret.id] !== undefined;
                         const isBusy = () => Boolean(revealingIds()[secret.id]);
@@ -878,6 +835,14 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                           </div>
                         );
                       }}
+                    </For>
+                                  </Show>
+                                </>
+                              )}
+                            </For>
+                          </Show>
+                        </div>
+                      )}
                     </For>
                   </Show>
                 </Show>

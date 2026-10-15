@@ -69,6 +69,7 @@ import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscrip
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
+import { getSecretBroker } from "./bitwardenApi";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "./VoiceButton";
@@ -1233,6 +1234,7 @@ export function floatingDock(el: HTMLDivElement) {
 }
 
 export default function App() {
+  const [secretRequests, setSecretRequests] = createSignal(0);
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
@@ -1932,9 +1934,19 @@ export default function App() {
     });
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000);
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000);
+    const stopSecretRequests = pollWhileVisible(
+      () =>
+        isConnected()
+          ? getSecretBroker()
+              .then((b) => setSecretRequests(b.requests.filter((r) => r.status === "pending").length))
+              .catch(() => {})
+          : undefined,
+      10000,
+    );
     onCleanup(() => {
       stopMissions();
       stopFleet();
+      stopSecretRequests();
     });
     toBottom();
   });
@@ -2076,12 +2088,24 @@ export default function App() {
             <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Side Questions</span></button>
             <div class="settings-nav-group-gap" />
             <button class={`row ${selected() === "skills-settings" ? "active" : ""}`} onClick={() => open("skills-settings")}><span class="row-ico"><Ic.SkillsIcon /></span><span class="row-label">Skills</span></button>
-            <button class={`row ${selected() === "bitwarden-settings" ? "active" : ""}`} onClick={() => open("bitwarden-settings")}><span class="row-ico"><Ic.KeyIcon /></span><span class="row-label">Secrets</span></button>
+            <button class={`row ${selected() === "bitwarden-settings" ? "active" : ""}`} onClick={() => open("bitwarden-settings")}><span class="row-ico"><Ic.KeyIcon /></span><span class="row-label">Secrets</span><Show when={secretRequests() > 0}><span class="row-badge">{secretRequests()}</span></Show></button>
             <div class="settings-nav-group-gap" />
             <button class={`row ${selected() === "inbox-settings" ? "active" : ""}`} onClick={() => open("inbox-settings")}><span class="row-ico"><Ic.BellIcon /></span><span class="row-label">Notifications</span></button>
           </Show>
         </nav>
         <div class="sb-foot">
+          <Show when={secretRequests() > 0}>
+            <button
+              class="sb-secret-requests"
+              title="Missions are waiting for secrets"
+              onClick={() => open("bitwarden-settings")}
+            >
+              <Ic.KeyIcon />
+              <span>
+                {secretRequests()} secret request{secretRequests() === 1 ? "" : "s"}
+              </span>
+            </button>
+          </Show>
           <button
             class={`gear-btn ${onSettings() ? "on" : ""}`}
             title="Settings (⌘,)"

@@ -13,7 +13,7 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::Json,
-    routing::{get, put},
+    routing::{get, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,12 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/secrets/:secret_id",
             put(update_secret).delete(delete_secret),
         )
+        .route("/secrets", get(list_every_secret))
+        .route("/broker", get(get_broker))
+        .route("/requests/:request_id/approve", post(approve_request))
+        .route("/requests/:request_id/reject", post(reject_request))
+        .route("/grants/:grant_id", axum::routing::delete(revoke_grant))
+        .route("/default-access/:slug", put(set_default_access))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +59,9 @@ pub struct BitwardenStatusResponse {
     pub server_url: Option<String>,
     pub default_project_id: String,
     pub project_bindings: BTreeMap<String, String>,
+    /// Paloma project slug -> Bitwarden projects readable without approval.
+    pub default_access: BTreeMap<String, Vec<String>>,
+    pub pending_requests: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,7 +152,7 @@ pub struct UpdateBitwardenSecretRequest {
 }
 
 /// Load the 32-byte AES-256-GCM key used for `env_crypto` values.
-async fn load_encryption_key(working_dir: &Path) -> Option<[u8; 32]> {
+pub(crate) async fn load_encryption_key(working_dir: &Path) -> Option<[u8; 32]> {
     if let Ok(Some(key)) = env_crypto::load_private_key_from_env() {
         return Some(key);
     }
@@ -188,7 +197,9 @@ fn mask_token_hint(token: &str) -> String {
 /// Resolve `(token, source_label)` from:
 /// 1. `settings.bitwarden.encrypted_access_token`
 /// 2. `BWS_ACCESS_TOKEN` environment variable
-/// 3. Encrypted `BWS_ACCESS_TOKEN` in library workspace templates (`~/.sandboxed-sh/library/workspace-template/*.json`)
+///
+/// Core is the only holder of the token: missions get secrets through the
+/// broker (`secret_broker.rs`), never the token itself.
 async fn resolve_access_token(state: &Arc<AppState>) -> Option<(String, &'static str)> {
     let bw = state.settings.get_bitwarden().await;
     let crypto_key = load_encryption_key(&state.config.working_dir).await;
@@ -212,53 +223,6 @@ async fn resolve_access_token(state: &Arc<AppState>) -> Option<(String, &'static
         let trimmed = env_token.trim();
         if !trimmed.is_empty() {
             return Some((trimmed.to_string(), "environment"));
-        }
-    }
-
-    // Fallback: inspect library workspace templates for `BWS_ACCESS_TOKEN`
-    let mut candidate_dirs = vec![state.config.library_path.join("workspace-template")];
-    let root_lib = std::path::PathBuf::from("/root/.sandboxed-sh/library/workspace-template");
-    if !candidate_dirs.contains(&root_lib) {
-        candidate_dirs.push(root_lib);
-    }
-
-    for dir in candidate_dirs {
-        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
-            continue;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(text) = tokio::fs::read_to_string(&path).await else {
-                continue;
-            };
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-                continue;
-            };
-            let Some(raw_val) = json
-                .get("env_vars")
-                .and_then(|v| v.get("BWS_ACCESS_TOKEN"))
-                .and_then(|v| v.as_str())
-            else {
-                continue;
-            };
-            let raw_trimmed = raw_val.trim();
-            if raw_trimmed.is_empty() {
-                continue;
-            }
-            if env_crypto::is_encrypted(raw_trimmed) {
-                if let Some(key) = crypto_key.as_ref() {
-                    if let Ok(decrypted) = env_crypto::decrypt_value(key, raw_trimmed) {
-                        if !decrypted.trim().is_empty() {
-                            return Some((decrypted.trim().to_string(), "library"));
-                        }
-                    }
-                }
-            } else {
-                return Some((raw_trimmed.to_string(), "library"));
-            }
         }
     }
 
@@ -376,6 +340,8 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<BitwardenStatusR
         server_url: bw.server_url,
         default_project_id,
         project_bindings,
+        default_access: bw.default_access,
+        pending_requests: super::secret_broker::broker(&state).pending_count().await,
     })
 }
 
@@ -567,6 +533,7 @@ async fn create_project_secret(
         ));
     }
     let (token, server_url) = require_token_and_url(&state).await?;
+    super::secret_broker::broker(&state).invalidate_list().await;
     // `--flag=value` keeps a user value that starts with `-` from becoming a flag.
     let note = req
         .note
@@ -608,6 +575,7 @@ async fn update_secret(
         ));
     }
     let (token, server_url) = require_token_and_url(&state).await?;
+    super::secret_broker::broker(&state).invalidate_list().await;
     let key = req
         .key
         .as_deref()
@@ -649,6 +617,7 @@ async fn delete_secret(
         return Err((StatusCode::BAD_REQUEST, "secret_id is required".to_string()));
     }
     let (token, server_url) = require_token_and_url(&state).await?;
+    super::secret_broker::broker(&state).invalidate_list().await;
     run_bws(
         &token,
         server_url.as_deref(),
@@ -657,6 +626,233 @@ async fn delete_secret(
     )
     .await?;
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+type ApiError = (StatusCode, String);
+
+fn parse_json<T: serde::de::DeserializeOwned>(stdout: &str, what: &str) -> Result<T, ApiError> {
+    serde_json::from_str(stdout).map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid JSON from `bws {what}`: {e}"),
+        )
+    })
+}
+
+/// Every Bitwarden project the machine account can read.
+pub(crate) async fn list_projects_raw(
+    state: &Arc<AppState>,
+) -> Result<Vec<BitwardenProject>, ApiError> {
+    let (token, server_url) = require_token_and_url(state).await?;
+    let stdout = run_bws(
+        &token,
+        server_url.as_deref(),
+        &["project", "list", "--output", "json"],
+        &[],
+    )
+    .await?;
+    let mut projects: Vec<BitwardenProject> = parse_json(&stdout, "project list")?;
+    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(projects)
+}
+
+/// Every secret (values stripped) across every readable project.
+pub(crate) async fn list_all_secrets(
+    state: &Arc<AppState>,
+) -> Result<Vec<BitwardenSecretSummary>, ApiError> {
+    let (token, server_url) = require_token_and_url(state).await?;
+    let stdout = run_bws(
+        &token,
+        server_url.as_deref(),
+        &["secret", "list", "--output", "json"],
+        &[],
+    )
+    .await?;
+    let mut secrets: Vec<BitwardenSecretSummary> = parse_json(&stdout, "secret list")?;
+    secrets.sort_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
+    Ok(secrets)
+}
+
+pub(crate) async fn get_secret(
+    state: &Arc<AppState>,
+    id: &str,
+) -> Result<BitwardenSecretDetail, ApiError> {
+    let (token, server_url) = require_token_and_url(state).await?;
+    let stdout = run_bws(
+        &token,
+        server_url.as_deref(),
+        &["secret", "get", "--output", "json"],
+        &[id],
+    )
+    .await?;
+    parse_json(&stdout, "secret get")
+}
+
+pub(crate) async fn create_secret(
+    state: &Arc<AppState>,
+    project_id: &str,
+    key: &str,
+    value: &str,
+    note: Option<&str>,
+) -> Result<BitwardenSecretDetail, ApiError> {
+    let (token, server_url) = require_token_and_url(state).await?;
+    let note = note
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("--note={n}"));
+    let mut args = vec!["secret", "create", "--output", "json"];
+    args.extend(note.as_deref());
+    let stdout = run_bws(
+        &token,
+        server_url.as_deref(),
+        &args,
+        &[key, value, project_id],
+    )
+    .await?;
+    super::secret_broker::broker(state).invalidate_list().await;
+    parse_json(&stdout, "secret create")
+}
+
+pub(crate) async fn edit_secret_value(
+    state: &Arc<AppState>,
+    id: &str,
+    value: &str,
+    note: Option<&str>,
+) -> Result<BitwardenSecretDetail, ApiError> {
+    let (token, server_url) = require_token_and_url(state).await?;
+    let value = format!("--value={value}");
+    let note = note.map(|n| format!("--note={n}"));
+    let mut args: Vec<&str> = vec!["secret", "edit", "--output", "json", &value];
+    args.extend(note.as_deref());
+    let stdout = run_bws(&token, server_url.as_deref(), &args, &[id]).await?;
+    super::secret_broker::broker(state).invalidate_list().await;
+    parse_json(&stdout, "secret edit")
+}
+
+#[derive(Debug, Serialize)]
+pub struct SecretWithProject {
+    #[serde(flatten)]
+    pub secret: BitwardenSecretSummary,
+    #[serde(rename = "projectName")]
+    pub project_name: Option<String>,
+}
+
+/// GET /api/bitwarden/secrets — names across every project, for the grouped view.
+async fn list_every_secret(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SecretWithProject>>, ApiError> {
+    let names: BTreeMap<String, String> = list_projects_raw(&state)
+        .await?
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+    let secrets = super::secret_broker::broker(&state)
+        .list_all(&state, true)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(
+        secrets
+            .into_iter()
+            .map(|s| SecretWithProject {
+                project_name: s.project_id.as_ref().and_then(|id| names.get(id).cloned()),
+                secret: s,
+            })
+            .collect(),
+    ))
+}
+
+/// GET /api/bitwarden/broker — pending/resolved requests, live grants, read log.
+async fn get_broker(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(super::secret_broker::broker(&state).snapshot().await)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveRequest {
+    /// `secret`, `project` or `all` (reads only).
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub ttl_hours: Option<i64>,
+}
+
+fn parse_uuid(raw: &str) -> Result<uuid::Uuid, ApiError> {
+    uuid::Uuid::parse_str(raw.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid id".to_string()))
+}
+
+/// POST /api/bitwarden/requests/:id/approve
+async fn approve_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(request_id): AxumPath<String>,
+    Json(req): Json<ApproveRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = parse_uuid(&request_id)?;
+    let r = super::secret_broker::broker(&state)
+        .approve(&state, id, req.scope.as_deref(), req.ttl_hours)
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(r.public()))
+}
+
+/// POST /api/bitwarden/requests/:id/reject
+async fn reject_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(request_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = parse_uuid(&request_id)?;
+    let r = super::secret_broker::broker(&state)
+        .reject(id)
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(r.public()))
+}
+
+/// DELETE /api/bitwarden/grants/:id
+async fn revoke_grant(
+    State(state): State<Arc<AppState>>,
+    AxumPath(grant_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = parse_uuid(&grant_id)?;
+    if super::secret_broker::broker(&state).revoke(id).await {
+        Ok(Json(serde_json::json!({ "success": true })))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Grant not found".into()))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DefaultAccessRequest {
+    pub project_ids: Vec<String>,
+}
+
+/// PUT /api/bitwarden/default-access/:slug
+async fn set_default_access(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<DefaultAccessRequest>,
+) -> Result<Json<BitwardenStatusResponse>, ApiError> {
+    let slug = slug.trim().to_string();
+    if slug.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "project slug is required".into()));
+    }
+    let mut ids: Vec<String> = req
+        .project_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let mut bw = state.settings.get_bitwarden().await;
+    // The explicit list supersedes the legacy single binding for this project.
+    bw.project_bindings.remove(&slug);
+    bw.default_access.insert(slug, ids);
+    state.settings.set_bitwarden(bw).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to save Bitwarden settings: {e}"),
+        )
+    })?;
+    Ok(get_status(State(state)).await)
 }
 
 #[cfg(test)]
