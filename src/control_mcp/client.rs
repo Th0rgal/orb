@@ -252,17 +252,53 @@ impl Client {
     }
 }
 
-/// Directory for secrets handed to this mission. Private to the user.
+/// Directory for secrets handed to this mission, under a per-user base
+/// (never the shared temp dir, where another user could own a parent).
 fn secrets_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("SANDBOXED_SECRETS_DIR") {
         return dir.into();
     }
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|d| std::path::PathBuf::from(d).join("paloma-secrets"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".paloma-secrets"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(".paloma-secrets"));
     let mission = std::env::var("SANDBOXED_SH_MISSION_ID")
         .or_else(|_| std::env::var("MISSION_ID"))
         .unwrap_or_else(|_| "session".into());
-    std::env::temp_dir()
-        .join("paloma-secrets")
-        .join(mission.replace(['/', '.'], "_"))
+    base.join(mission.replace(['/', '.'], "_"))
+}
+
+/// Create `dir` (and its parent) as 0700 and refuse anything that is a
+/// symlink or owned by another user.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let check = |d: &std::path::Path| -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(d)?;
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is not a private directory owned by this user",
+                    d.display()
+                ),
+            ));
+        }
+        Ok(())
+    };
+    for d in [dir.parent(), Some(dir)].into_iter().flatten() {
+        match std::fs::DirBuilder::new().mode(0o700).create(d) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        check(d)?;
+    }
+    Ok(())
 }
 
 /// Core returns a secret as `secret_delivery`; write it to a 0600 file and
@@ -288,22 +324,13 @@ fn deliver_secret(mut result: Value) -> Value {
     let dir = secrets_dir();
     let path = dir.join(name);
     let written = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-            // A shared /tmp lets another user pre-create this path: refuse a
-            // symlink or a directory we do not own instead of writing into it.
-            let meta = std::fs::symlink_metadata(&dir)?;
-            // SAFETY: geteuid has no preconditions.
-            let uid = unsafe { libc::geteuid() };
-            if !meta.is_dir() || meta.uid() != uid {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "secrets directory is not a private directory owned by this user",
-                ));
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Some(parent) = dir.parent().and_then(|p| p.parent()) {
+                std::fs::create_dir_all(parent)?;
             }
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            ensure_private_dir(&dir)?;
             let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
@@ -492,7 +519,7 @@ mod tests {
     #[test]
     fn secret_delivery_is_written_to_a_private_file_and_stripped() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SANDBOXED_SECRETS_DIR", dir.path());
+        std::env::set_var("SANDBOXED_SECRETS_DIR", dir.path().join("mission"));
         let out = super::deliver_secret(json!({
             "status": "granted",
             "secret_delivery": {"name": "UXON_TOKEN", "value": "s3cret"}
