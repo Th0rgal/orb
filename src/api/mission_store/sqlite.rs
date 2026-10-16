@@ -548,6 +548,12 @@ CREATE TABLE IF NOT EXISTS mission_harness_sessions (
     PRIMARY KEY (mission_id, backend)
 );
 
+CREATE TABLE IF NOT EXISTS remote_log_offsets (
+    job_id TEXT PRIMARY KEY NOT NULL,
+    published_offset INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mission_runs (
     run_id TEXT PRIMARY KEY NOT NULL,
     mission_id TEXT NOT NULL,
@@ -5664,6 +5670,44 @@ impl MissionStore for SqliteMissionStore {
     }
 
     // === Event logging methods ===
+
+    async fn get_remote_log_offset(&self, job_id: Uuid) -> Option<u64> {
+        let conn = self.reader();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.query_row(
+                "SELECT published_offset FROM remote_log_offsets WHERE job_id = ?1",
+                params![job_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+            .and_then(|v| u64::try_from(v).ok())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn set_remote_log_offset(&self, job_id: Uuid, offset: u64) {
+        let conn = self.conn.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let _ = conn.execute(
+                "INSERT INTO remote_log_offsets (job_id, published_offset, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(job_id) DO UPDATE SET
+                    published_offset = MAX(published_offset, excluded.published_offset),
+                    updated_at = excluded.updated_at",
+                params![job_id.to_string(), offset as i64, now_string()],
+            );
+            // Rows of long-finished jobs are useless; keep the table small.
+            let _ = conn.execute(
+                "DELETE FROM remote_log_offsets WHERE updated_at < ?1",
+                params![(chrono::Utc::now() - chrono::Duration::days(14)).to_rfc3339()],
+            );
+        })
+        .await;
+    }
 
     async fn log_event(&self, mission_id: Uuid, event: &AgentEvent) -> Result<(), String> {
         let conn = self.conn.clone();

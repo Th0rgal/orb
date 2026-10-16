@@ -2749,6 +2749,18 @@ pub trait MissionStore: Send + Sync {
 
     // === Event logging methods (default no-op for backward compatibility) ===
 
+    /// How far into a remote job's log Core has already published events.
+    /// After a restart the reader replays the log up to here silently, instead
+    /// of publishing (and saving) the job's whole history again.
+    async fn get_remote_log_offset(&self, job_id: Uuid) -> Option<u64> {
+        let _ = job_id;
+        None
+    }
+
+    async fn set_remote_log_offset(&self, job_id: Uuid, offset: u64) {
+        let _ = (job_id, offset);
+    }
+
     /// Log a streaming event. Called for every AgentEvent during execution.
     async fn log_event(&self, mission_id: Uuid, event: &AgentEvent) -> Result<(), String> {
         let _ = (mission_id, event);

@@ -793,6 +793,10 @@ pub(crate) struct NativeGrokObserver {
     startup_failure: Option<String>,
     /// The latest `pump` itself read the log to its current end.
     pumped_to_end: bool,
+    /// Log bytes whose events an earlier Core process already published. They
+    /// are fed to the parser (to rebuild its state) but not published again.
+    replay_until: u64,
+    offset_saved_at: Option<std::time::Instant>,
 }
 
 /// Jobs that allocated their Claude session (`--session-id`) rather than
@@ -874,6 +878,12 @@ impl NativeGrokObserver {
             running_since: None,
             startup_failure: None,
             pumped_to_end: false,
+            replay_until: owner
+                .mission_store
+                .get_remote_log_offset(job_id)
+                .await
+                .unwrap_or(0),
+            offset_saved_at: None,
         })
     }
 
@@ -996,6 +1006,32 @@ impl NativeGrokObserver {
         Some(recovered)
     }
 
+    /// Parse a chunk and return the updates to publish. After a Core restart,
+    /// bytes below `replay_until` were already published by the previous
+    /// process: they rebuild the parser state silently.
+    fn absorb(&mut self, chunk: &JobLogChunk) -> Vec<StreamUpdate> {
+        self.log_len = chunk.log_len;
+        let start = self.log_offset;
+        self.log_offset = chunk.next_offset;
+        let silent = self
+            .replay_until
+            .saturating_sub(start)
+            .min(chunk.data.len() as u64) as usize;
+        if silent == 0 {
+            self.stream.feed(&chunk.data)
+        } else if silent >= chunk.data.len() {
+            let _ = self.stream.feed(&chunk.data);
+            Vec::new()
+        } else if chunk.data.is_char_boundary(silent) {
+            let _ = self.stream.feed(&chunk.data[..silent]);
+            self.stream.feed(&chunk.data[silent..])
+        } else {
+            // Never split a character: skip this chunk's events to stay unique.
+            let _ = self.stream.feed(&chunk.data);
+            Vec::new()
+        }
+    }
+
     async fn apply_chunk(
         &mut self,
         chunk: &JobLogChunk,
@@ -1008,6 +1044,7 @@ impl NativeGrokObserver {
             // rather than parse from a stale offset.
             self.close_thinking();
             self.log_offset = 0;
+            self.replay_until = 0;
             self.log_len = chunk.log_len;
             self.stream = GrokStream {
                 claude: self.mission.backend == "claudecode",
@@ -1025,10 +1062,19 @@ impl NativeGrokObserver {
             };
             return;
         }
-        self.log_len = chunk.log_len;
-        self.log_offset = chunk.next_offset;
-        let updates = self.stream.feed(&chunk.data);
+        let updates = self.absorb(chunk);
         self.broadcast(updates).await;
+        if self.log_offset > self.replay_until
+            && self
+                .offset_saved_at
+                .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(3))
+        {
+            self.owner
+                .mission_store
+                .set_remote_log_offset(self.job_id, self.log_offset)
+                .await;
+            self.offset_saved_at = Some(std::time::Instant::now());
+        }
         if self.stream.requires_error_cancellation() && !self.auth_cancel_requested {
             // Stop interactive login or a non-retryable native failure instead
             // of burning the job timeout. Recoverable results keep the CLI alive.
@@ -2442,6 +2488,81 @@ mod tests {
         assert!(!verdict
             .content
             .contains("identity was not durably persisted"));
+    }
+
+    #[tokio::test]
+    async fn restart_replays_published_log_silently() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "replay")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(Some("r"), None, None, None, None, Some("antigravity"), None)
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: Arc::clone(&store),
+            events_tx: None,
+        };
+        let job_id = Uuid::new_v4();
+        let line = |i: u64| {
+            format!(
+                "{}\n",
+                serde_json::json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":i,
+                    "state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command"}}})
+            )
+        };
+        let first: String = (1..=5).map(line).collect();
+        let second: String = (6..=7).map(line).collect();
+        let chunk = |offset: u64, data: &str, len: u64| JobLogChunk {
+            job_id,
+            offset,
+            next_offset: offset + data.len() as u64,
+            log_len: len,
+            data: data.to_string(),
+            state: "running".into(),
+        };
+        let total = (first.len() + second.len()) as u64;
+
+        // First process: publishes steps 1-5 and records how far it got.
+        let mut before = NativeGrokObserver::attach(&owner, "node", mission.id, job_id)
+            .await
+            .unwrap();
+        assert!(!before
+            .absorb(&chunk(0, &first, first.len() as u64))
+            .is_empty());
+        store.set_remote_log_offset(job_id, before.log_offset).await;
+
+        // After a restart the whole log is read again in one chunk: only the
+        // new steps 6-7 are published.
+        let mut after = NativeGrokObserver::attach(&owner, "node", mission.id, job_id)
+            .await
+            .unwrap();
+        assert_eq!(after.replay_until, first.len() as u64);
+        let all = format!("{first}{second}");
+        let published = after.absorb(&chunk(0, &all, total));
+        let fresh = NativeGrokObserver::attach(
+            &RemoteMissionOwner {
+                mission_store: Arc::clone(&store),
+                events_tx: None,
+            },
+            "node",
+            mission.id,
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap()
+        .absorb(&chunk(0, &second, second.len() as u64));
+        // The resumed parser already knows the session; a fresh one reports it.
+        let fresh: Vec<_> = fresh
+            .into_iter()
+            .filter(|u| !matches!(u, StreamUpdate::SessionId(_)))
+            .collect();
+        assert_eq!(published, fresh, "only steps 6-7 are published again");
+        assert!(!published.is_empty());
     }
 
     const SPARK_STREAM: &str =
