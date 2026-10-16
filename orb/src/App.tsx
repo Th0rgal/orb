@@ -3275,7 +3275,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return false;
     }
   };
+  // A follow-up sent to a stopped mission: hide the stop notice until Core
+  // reports a change (its updated_at moves), then normal failure display resumes.
+  const [sentOverStop, setSentOverStop] = createSignal<string | null>(null);
   const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
+    setSentOverStop(mission()?.updated_at ?? null);
     const attemptId = explicitId ?? sendingIds.shift() ?? crypto.randomUUID();
     const run = sendChain.then(async () => {
       setOptimisticList(prev => prev.map(item => item.id === attemptId ? { ...item, failed: false } : item));
@@ -3494,7 +3498,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={busy() || localQueueActive() || pending() || visibleTranscript(viewItems()).at(-1)?.kind === "user" || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || pending() || (!!sentOverStop() && sentOverStop() === mission()?.updated_at) || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />
