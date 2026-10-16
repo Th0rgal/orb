@@ -453,34 +453,47 @@ async fn describe(
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => {
             let req: UpdateBitwardenConfigRequest = typed(body)?;
             let mut changes = Vec::new();
-            if req.access_token.is_some() {
-                changes.push("replace the machine token".to_string());
+            // Mirror update_config: empty strings clear, bindings replace the whole map.
+            match req.access_token.as_deref().map(str::trim) {
+                Some("") => changes.push("REMOVE the machine token".to_string()),
+                Some(_) => changes.push("replace the machine token".to_string()),
+                None => {}
             }
-            if req.server_url.is_some() {
-                changes.push("change the server URL".to_string());
+            match req.server_url.as_deref().map(str::trim) {
+                Some("") => changes.push("reset the server URL to Bitwarden Cloud".to_string()),
+                Some(u) => changes.push(format!("set the server URL to {}", quoted(u))),
+                None => {}
             }
-            if let Some(pid) = req
-                .default_project_id
-                .as_deref()
-                .filter(|p| !p.trim().is_empty())
-            {
-                let name = project_names(state, &[pid.trim().to_string()])
-                    .await
-                    .join("");
-                changes.push(format!("set the default project to {name}"));
-            }
-            if req.skip_validation {
-                changes.push("skip token validation".to_string());
+            match req.default_project_id.as_deref().map(str::trim) {
+                Some("") => changes.push("clear the default project".to_string()),
+                Some(pid) => {
+                    let name = project_names(state, &[pid.to_string()]).await.join("");
+                    changes.push(format!("set the default project to {name}"));
+                }
+                None => {}
             }
             if let Some(b) = &req.project_bindings {
                 let mut list = Vec::new();
-                for (slug, id) in b {
+                for (slug, id) in b
+                    .iter()
+                    .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+                {
                     let name = project_names(state, std::slice::from_ref(id))
                         .await
                         .join("");
                     list.push(format!("{} → {name}", quoted(slug)));
                 }
-                changes.push(format!("set default access bindings {}", list.join(", ")));
+                if list.is_empty() {
+                    changes.push("REMOVE all project bindings".to_string());
+                } else {
+                    changes.push(format!(
+                        "replace ALL project bindings with {}",
+                        list.join(", ")
+                    ));
+                }
+            }
+            if req.skip_validation {
+                changes.push("skip token validation".to_string());
             }
             if changes.is_empty() {
                 "Update Bitwarden settings".into()
