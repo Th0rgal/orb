@@ -8,8 +8,9 @@ export const [draftCyber, setDraftCyber] = createSignal<CyberMode>("standard");
 export const cyberLabels: Record<CyberMode,string> = {standard:"Standard",daybreak:"Daybreak",automatic:"Automatic"};
 export function cyberCompatibility(mode:CyberMode, model:string):string|undefined {
  const id=model.split('/').at(-1)??model;
+ if(id==='gpt-daybreak-blue-latest'||id==='gpt-daybreak-red-latest')return `OpenAI retired the ${id} alias on 2026-10-28. Choose a specific model ID such as ${id.includes('red')?'gpt-5.6-cyber':'gpt-6.1-sol'}.`;
  if(mode==='standard'&&(id.startsWith('gpt-daybreak-')||id==='gpt-5.6-cyber'))return 'This model requires Daybreak. Choose Daybreak or Automatic, or change the model.';
- if(mode==='daybreak'&&!['gpt-6.1-sol','gpt-6-astra','gpt-6-sol','gpt-5.6-sol','gpt-daybreak-blue-latest','gpt-daybreak-red-latest','gpt-5.6-cyber'].includes(id))return 'Daybreak support has not been established for this model.';
+ if(mode==='daybreak'&&!['gpt-6.1-sol','gpt-6-astra','gpt-6-sol','gpt-5.6-sol','gpt-5.6-cyber'].includes(id))return 'Daybreak support has not been established for this model.';
 }
 export function cyberError(error:unknown):string {
  const text=error instanceof Error?error.message:String(error);

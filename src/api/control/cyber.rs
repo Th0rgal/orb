@@ -323,7 +323,17 @@ mod tests {
             Mode::Daybreak.program("gpt-6-astra").unwrap(),
             Some("daybreak_blue")
         );
-        assert!(Mode::Standard.program("gpt-daybreak-blue-latest").is_err());
+        assert!(Mode::Standard.program("gpt-5.6-cyber").is_err());
+        assert_eq!(
+            Mode::Daybreak.program("gpt-5.6-cyber").unwrap(),
+            Some("daybreak_red")
+        );
+        for mode in [Mode::Standard, Mode::Daybreak, Mode::Automatic] {
+            assert!(mode
+                .program("gpt-daybreak-blue-latest")
+                .unwrap_err()
+                .contains("retired"));
+        }
         assert!(Mode::Daybreak.program("unrecognized-model").is_err());
         assert_eq!(Mode::Automatic.program("any-model").unwrap(), None);
     }

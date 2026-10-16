@@ -27,7 +27,7 @@ describe('cyber selection',()=>{
  });
  it('checks Daybreak independently for models requiring that program',async()=>{
   vi.mocked(api).mockImplementation(async path=>({version:2,route_supported:String(path).includes('mode=daybreak')}));
-  let selected='';render(()=><CyberPicker value="standard" model="gpt-daybreak-blue-latest" remote onChange={v=>selected=v}/>);
+  let selected='';render(()=><CyberPicker value="standard" model="gpt-5.6-cyber" remote onChange={v=>selected=v}/>);
   await fireEvent.click(screen.getByRole('button',{name:'Cyber program: Standard'}));
   await waitFor(()=>expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false));
   expect((screen.getByRole('menuitemradio',{name:/Standard/}) as HTMLButtonElement).disabled).toBe(true);
@@ -100,7 +100,9 @@ describe('cyber selection',()=>{
  });
  it('disables incompatible choices and explains why',()=>{
   expect(cyberCompatibility('daybreak','unknown-model')).toContain('not been established');
-  expect(cyberCompatibility('standard','gpt-daybreak-blue-latest')).toContain('requires Daybreak');
+  expect(cyberCompatibility('standard','gpt-5.6-cyber')).toContain('requires Daybreak');
+  expect(cyberCompatibility('daybreak','gpt-daybreak-blue-latest')).toContain('retired');
+  expect(cyberCompatibility('automatic','openai/gpt-daybreak-red-latest')).toContain('gpt-5.6-cyber');
   expect(cyberCompatibility('daybreak','gpt-6-astra')).toBeUndefined();
  });
  it('preserves access denial and cyber policy as distinct errors',()=>{

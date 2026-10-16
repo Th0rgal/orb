@@ -2690,6 +2690,9 @@ pub async fn validate_model_override(
 }
 
 fn reject_known_unsupported_codex_model(model_id: &str) -> Result<(), String> {
+    if let Some(error) = crate::cyber_access::retired_alias_error(model_id) {
+        return Err(error);
+    }
     if model_id == "gpt-5.5-sol" {
         return Err(
             "Model 'gpt-5.5-sol' is not supported by Codex with ChatGPT authentication. Use 'gpt-5.6-terra' (recommended with model_effort='medium') or select an account-supported model explicitly."
@@ -2704,7 +2707,7 @@ fn is_codex_backend_model_id(model_id: &str) -> bool {
         || model_id.contains("codex")
         || matches!(
             model_id,
-            "gpt-daybreak-blue-latest"
+            "gpt-6.1-sol"
                 | "gpt-6-astra"
                 | "gpt-6"
                 | "gpt-5.5"
@@ -3288,7 +3291,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         for id in [
-            "gpt-daybreak-blue-latest",
             "gpt-6-astra",
             "gpt-5.6",
             "gpt-5.6-sol",
@@ -3313,9 +3315,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_catalog_accepts_daybreak_blue() {
-        assert!(is_codex_backend_model_id("gpt-daybreak-blue-latest"));
-        assert!(!is_codex_backend_model_id("gpt-daybreak-red-latest"));
+    fn rejects_retired_daybreak_aliases_before_dispatch() {
+        for alias in ["gpt-daybreak-blue-latest", "openai/gpt-daybreak-red-latest"] {
+            let error = reject_known_unsupported_codex_model(alias).expect_err(alias);
+            assert!(error.contains("retired"), "{error}");
+        }
+        assert!(reject_known_unsupported_codex_model("gpt-6.1-sol").is_ok());
     }
 
     #[test]
