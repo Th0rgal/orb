@@ -5,6 +5,8 @@ mod agent_software;
 mod antigravity;
 #[path = "../../../shared/codex_speed.rs"]
 pub mod codex_speed;
+#[path = "../../../shared/harness_attribution.rs"]
+mod harness_attribution;
 #[path = "../../../shared/cyber_access.rs"]
 pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]

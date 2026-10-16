@@ -51,6 +51,8 @@ pub mod cyber_access;
 #[path = "../shared/file_notifications.rs"]
 pub mod file_notifications;
 pub mod github_connection;
+#[path = "../shared/harness_attribution.rs"]
+pub mod harness_attribution;
 pub mod hermes_tools;
 pub mod library;
 pub mod mcp;

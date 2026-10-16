@@ -1161,8 +1161,15 @@ pub fn run_claudecode_turn<'a>(
                         error = %e,
                         "Failed to read settings file for --settings flag"
                     );
+                    args.push("--settings".to_string());
+                    args.push(crate::harness_attribution::claude_settings_arg());
                 }
             }
+        } else {
+            // The generated settings carry the attribution override; without
+            // them, pass it directly.
+            args.push("--settings".to_string());
+            args.push(crate::harness_attribution::claude_settings_arg());
         }
         let mcp_config_path = work_dir.join(".claude").join("mcp.json");
         if mcp_config_path.exists() {

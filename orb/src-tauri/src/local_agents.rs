@@ -1426,6 +1426,10 @@ fn spawn_claude(
         "--permission-prompt-tool",
         "stdio",
     ]);
+    // Never stamp commits/PRs with Claude attribution, whatever the user's
+    // ~/.claude settings say (CLI settings outrank them).
+    cmd.arg("--settings")
+        .arg(crate::harness_attribution::claude_settings_arg());
     cmd.current_dir(&request.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1982,6 +1986,8 @@ fn spawn_codex(
     }
     let mut child = command
         .current_dir(&request.cwd)
+        .arg("-c")
+        .arg(crate::harness_attribution::CODEX_CONFIG_OVERRIDE)
         .arg("app-server")
         .args(["--enable", "goals"])
         .stdin(Stdio::piped())

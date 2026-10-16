@@ -13442,6 +13442,7 @@ pub(crate) fn remote_execution_for_plan(
                 ),
                 "model_providers.sandboxed.wire_api=\"responses\"".to_string(),
                 format!("model_providers.sandboxed.env_key=\"{REMOTE_PROXY_KEY_ENV}\""),
+                crate::harness_attribution::CODEX_CONFIG_OVERRIDE.to_string(),
             ];
             if let Some(effort) = effort {
                 settings.push(format!(
@@ -13539,6 +13540,10 @@ pub(crate) fn remote_execution_for_plan(
                 "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; \
                  claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages",
             );
+            command.push_str(" --settings ");
+            command.push_str(&shell_single_quote(
+                &crate::harness_attribution::claude_settings_arg(),
+            ));
             if plan_body.is_some() {
                 command.push_str(" --permission-mode plan");
             }
