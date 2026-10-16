@@ -76,15 +76,36 @@ for (const theme of ['dark','light']) test(`Mistral monthly usage uses a clear c
   await page.getByRole('button',{name:'Providers',exact:true}).click();
   await expect(page.getByRole('button',{name:'View Mistral monthly usage'})).toBeVisible();
   await page.getByRole('button',{name:/Mistral Vibe Connected/}).click();
-  await expect(page.getByText(/Its live counter is not available/)).toBeVisible();
+  await expect(page.getByText(/monthly Vibe allowance only in its console/)).toBeVisible();
+  await expect(page.getByRole('button',{name:'Show monthly usage'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Open console ↗'})).toBeVisible();
   await expect(page.getByRole('progressbar')).toHaveCount(0);
   await page.screenshot({path:`/tmp/orb-mistral-usage-${info.project.name}-${theme}.png`,fullPage:true});
   await page.getByRole("button",{name:"Toggle sidebar",exact:true}).click();
   await page.setViewportSize({width:390,height:844});
-  await expect(page.getByRole('button',{name:'View monthly usage ↗'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Show monthly usage'})).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({path:`/tmp/orb-mistral-usage-mobile-${info.project.name}-${theme}.png`,fullPage:true});
   await page.getByRole('button',{name:/Mistral Vibe Connected/}).click();
   await expect(page.getByRole('button',{name:'View Mistral monthly usage'})).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+test('Mistral monthly usage renders once the console session is connected', async ({page}) => {
+  await page.addInitScript(() => { localStorage.setItem('orb.apiUrl',location.origin); localStorage.setItem('orb.jwt','test'); });
+  const usage = {provider_type:'mistral',status:'connected',mistral_usage_session:'connected',mistral_plan:'Chat · Individual',mistral_monthly_used_percent:37,mistral_monthly_reset:1893456000};
+  await page.route('**/api/**',route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/ai/providers') return route.fulfill({json:[{id:'mistral',name:'Mistral Vibe',provider_type:'mistral',enabled:true,uses_oauth:true,status:{type:'connected'}}]});
+    if (path === '/api/ai/providers/usage') return route.fulfill({json:{entries:{mistral:usage}}});
+    if (path === '/api/ai/providers/mistral/usage') return route.fulfill({json:usage});
+    return route.fulfill({json:[]});
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Providers',exact:true}).click();
+  await expect(page.getByText('Chat · Individual')).toBeVisible();
+  await expect(page.getByRole('button',{name:'View Mistral monthly usage'})).toHaveCount(0);
+  await page.getByRole('button',{name:/Mistral Vibe Connected/}).click();
+  await expect(page.getByText('Monthly',{exact:true}).first()).toBeVisible();
+  await expect(page.getByRole('button',{name:'Disconnect usage'})).toBeVisible();
 });
