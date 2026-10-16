@@ -16,7 +16,7 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
         { id: 'google', name: 'Google Gemini', provider_type: 'google', uses_oauth: true, has_oauth: true, status: { type: 'connected' } },
         { id: 'google-key', name: 'Google key', provider_type: 'google', uses_oauth: true, has_oauth: false, has_api_key: true, status: { type: 'connected' } },
       ]
-      : url.pathname === '/api/remote-nodes' ? { enabled: true, nodes: [{ id: 'old-agent' }] }
+      : url.pathname === '/api/remote-nodes' ? { enabled: true, nodes: [{ id: 'old-agent', status: 'online', cordoned: false }] }
       : url.pathname === '/api/projects' ? { projects: [] } : [];
     return route.fulfill({ json: body });
   });
@@ -24,7 +24,8 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
   await page.getByRole('button', { name: 'Providers', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const native = page.getByRole('region', { name: 'Antigravity execution', exact: true });
-  await expect(native.getByLabel('Antigravity machine')).toBeVisible();
+  await expect(native.getByRole('status')).toHaveText('Available on Core, old-agent');
+  await expect(native.getByLabel('Antigravity machine')).toHaveCount(0);
   await expect(native.getByRole('button', { name: '21 models available' })).toBeVisible();
   await expect(native.getByRole('list')).toHaveCount(0);
   await expect(native.locator('.s-card')).toHaveCount(0);
@@ -37,9 +38,6 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
   await expect(list).toBeVisible();
   expect((await list.boundingBox())!.height).toBeLessThanOrEqual(200);
   await page.screenshot({ path: `/tmp/orb-providers-expanded-${browserName}-${theme}.png`, fullPage: true });
-  await native.getByLabel('Antigravity machine').selectOption('old-agent');
-  await expect(native.getByText('Gemini Flash', { exact: true })).toBeVisible();
-  await expect(native.getByText('Gemini model 1 with a long descriptive name', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: /Google Antigravity Connected/ }).click();
   await expect(native).toHaveCount(0);
 });

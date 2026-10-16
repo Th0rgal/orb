@@ -1,65 +1,67 @@
-import { Select } from "./Select";
 import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
 import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
 
-/** Native Google accounts live on the execution machine, outside the API-key store. */
+type Machine = { id: string; label: string; phase: "loading" | "ready" | "error" };
+
+/** Native runs use this Google sign-in on every machine; checking one also hands it the login. */
 export function AntigravityProvider() {
-  const [machine, setMachine] = createSignal("core");
-  const [nodes, setNodes] = createSignal<string[]>([]);
+  const [machines, setMachines] = createSignal<Machine[]>([{ id: "core", label: "Core", phase: "loading" }]);
   const [models, setModels] = createSignal<[string, string][]>([]);
-  const [phase, setPhase] = createSignal<"loading" | "ready" | "error">("loading");
   const [showModels, setShowModels] = createSignal(false);
   const modelsId = createUniqueId();
-  let generation = 0, inventoryGeneration = 0, disposed = false;
-  const refresh = async () => {
-    const request = ++generation, version = connectionVersion(), target = machine();
-    setModels([]); setPhase("loading");
+  let generation = 0, disposed = false;
+  const set = (id: string, phase: Machine["phase"]) => setMachines(list => list.map(m => m.id === id ? { ...m, phase } : m));
+  const check = async (request: number, version: number, id: string) => {
     try {
-      const result = await listNodeAntigravityModels(target);
+      const result = await listNodeAntigravityModels(id);
       if (disposed || request !== generation || version !== connectionVersion()) return;
-      setModels(result); setPhase("ready");
+      set(id, result.length ? "ready" : "error");
+      if (result.length && (id === "core" || !models().length)) setModels(result);
     } catch {
-      if (!disposed && request === generation && version === connectionVersion()) setPhase("error");
+      if (!disposed && request === generation && version === connectionVersion()) set(id, "error");
     }
   };
-  createEffect(() => { machine(); connectionVersion(); void refresh(); });
-  const refreshNodes = async () => {
-    const version = connectionVersion(), request = ++inventoryGeneration;
+  const refresh = async (only?: string) => {
+    if (only) { set(only, "loading"); return check(generation, connectionVersion(), only); }
+    const request = ++generation, version = connectionVersion();
+    setModels([]);
+    setMachines([{ id: "core", label: "Core", phase: "loading" }]);
+    void check(request, version, "core");
     try {
       const result = await getRemoteNodes();
-      if (disposed || version !== connectionVersion() || request !== inventoryGeneration) return;
-      const available = (result.nodes ?? []).map(node => node.id);
-      setNodes(available);
-      if (machine() !== "core" && !available.includes(machine())) setMachine("core");
-    } catch { /* Keep the current inventory; Refresh can recover a transient failure. */ }
+      if (disposed || request !== generation || version !== connectionVersion()) return;
+      const nodes = (result.nodes ?? []).filter(node => !node.cordoned && node.status !== "offline").map(node => node.id);
+      setMachines(list => [...list, ...nodes.map(id => ({ id, label: id, phase: "loading" as const }))]);
+      nodes.forEach(id => void check(request, version, id));
+    } catch { /* Core alone still answers; Refresh retries the inventory. */ }
   };
-  const reload = () => { void refreshNodes(); void refresh(); };
-  createEffect(on(connectionVersion, () => {
-    setMachine("core");
-    setNodes([]);
-    void refreshNodes();
-  }));
+  createEffect(on(connectionVersion, () => void refresh()));
   onMount(() => {
+    const reload = () => void refresh();
     window.addEventListener("orb:providers-refresh", reload);
     onCleanup(() => window.removeEventListener("orb:providers-refresh", reload));
   });
   onCleanup(() => { disposed = true; generation++; });
+  const ready = () => machines().filter(m => m.phase === "ready");
+  const failed = () => machines().filter(m => m.phase === "error");
+  const checking = () => machines().some(m => m.phase === "loading");
   return <section class="p-native" aria-label="Antigravity execution">
-      <h4>Execution machines</h4>
-      <p class="s-row-desc">Native runs use the Google sign-in on each machine, separate from the subscription used for model routing.</p>
+      <p class="s-row-desc">Native runs use this Google sign-in on every machine.</p>
       <div class="p-native-controls">
-        <label class="p-native-machine">Machine <Select class="s-input" aria-label="Antigravity machine" value={machine()} onChange={event => setMachine(event.currentTarget.value)}>
-          <option value="core">Core</option><For each={nodes()}>{node => <option value={node}>{node}</option>}</For>
-        </Select></label>
-        <span class="s-row-desc" role="status">{phase() === "loading" ? "Checking machine…" : phase() === "error" ? "Machine unavailable" : models().length ? "Ready" : "No models available"}</span>
-        <button class="s-btn" disabled={phase() === "loading"} onClick={reload}>Refresh machines</button>
+        <span class="s-row-desc" role="status">{ready().length ? `Available on ${ready().map(m => m.label).join(", ")}` : checking() ? "Checking machines…" : "Not available on any machine"}</span>
+        <Show when={checking() && ready().length}><span class="s-row-desc">Checking…</span></Show>
+        <button class="s-btn" disabled={checking()} onClick={() => void refresh()}>Refresh</button>
       </div>
-      <Show when={phase() === "ready" && models().length}>
+      <Show when={failed().length}>
+        <ul class="p-native-failed" aria-label="Unavailable machines">
+          <For each={failed()}>{m => <li><span>{m.label} unavailable</span> <button class="p-native-retry" onClick={() => void refresh(m.id)}>Retry</button></li>}</For>
+        </ul>
+      </Show>
+      <Show when={models().length}>
         <button class="p-native-models-toggle" aria-expanded={showModels()} aria-controls={modelsId} onClick={() => setShowModels(!showModels())}>
           {showModels() ? "Hide models" : `${models().length} ${models().length === 1 ? "model" : "models"} available`}<span class={`chev p-acc-chev ${showModels() ? "open" : ""}`}>›</span>
         </button>
         <Show when={showModels()}><ul id={modelsId} class="p-native-models" aria-label="Antigravity models"><For each={models()}>{model => <li>{model[1]}</li>}</For></ul></Show>
       </Show>
-      <Show when={phase() === "error"}><p class="s-row-desc">Check this machine’s connection and Antigravity sign-in, then refresh.</p></Show>
   </section>;
 }

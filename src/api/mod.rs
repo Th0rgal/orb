@@ -16,6 +16,8 @@
 //! - `POST /api/tools/{name}/toggle` - Enable/disable a tool
 
 pub mod ai_providers;
+pub(crate) mod antigravity_native;
+pub(crate) mod antigravity_usage;
 pub mod approvals;
 pub mod ask;
 pub(crate) mod auth;

@@ -2,74 +2,62 @@ import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import { AntigravityProvider } from "../src/AntigravityProvider";
 import * as api from "../src/api";
+import { codingPlanWindows } from "../src/providerUsage";
 afterEach(() => vi.restoreAllMocks());
-async function setup(models: [string,string][]) {
-  vi.spyOn(api, "getRemoteNodes").mockResolvedValue({enabled:true,nodes:[{id:"old-agent"}] as api.RemoteNodeView[]});
-  const discovery=vi.spyOn(api,"listNodeAntigravityModels").mockResolvedValue(models);
-  const ui=render(() => <AntigravityProvider/>);
-  if (models.length) fireEvent.click(await ui.findByRole("button",{name:/models? available/}));
-  return {ui,discovery};
-}
-it("shows Argon only when discovered for the selected native account",async()=>{
- const {ui,discovery}=await setup([["agy-demo","Gemini 4 Argon"]]);
- await waitFor(()=>expect(ui.getByRole("list",{name:"Antigravity models"}).textContent).toContain("Gemini 4 Argon"));
- expect(ui.queryByText("Gemini CLI")).toBeNull();
- discovery.mockResolvedValueOnce([["flash","Gemini Flash"]]);
- await waitFor(()=>expect(ui.getByRole("option",{name:"old-agent"})).toBeTruthy());
- fireEvent.change(ui.getByLabelText("Antigravity machine"),{target:{value:"old-agent"}});
- await waitFor(()=>expect(ui.getByText("Gemini Flash")).toBeTruthy());
- expect(ui.queryByText("Gemini 4 Argon")).toBeNull();
- expect(discovery).toHaveBeenLastCalledWith("old-agent");
-});
-it("clears account models when refreshed discovery fails",async()=>{
- const {ui,discovery}=await setup([["agy-demo","Gemini 4 Argon"]]);
- await waitFor(()=>expect(ui.getByText("Gemini 4 Argon")).toBeTruthy());
- discovery.mockRejectedValueOnce(new Error("unavailable"));
- fireEvent.click(ui.getByRole("button",{name:"Refresh machines"}));
- await waitFor(()=>expect(ui.getByText("Machine unavailable")).toBeTruthy());
- expect(ui.queryByText("Gemini 4 Argon")).toBeNull();
-});
-it("ignores a late response from the previous machine",async()=>{
- let finish!: (rows:[string,string][])=>void;
- const {ui,discovery}=await setup([]);
- await waitFor(()=>expect(ui.getByText("No models available")).toBeTruthy());
- discovery.mockReturnValueOnce(new Promise(resolve=>{finish=resolve;}));
- fireEvent.click(ui.getByRole("button",{name:"Refresh machines"}));
- discovery.mockResolvedValueOnce([["node-model","Node model"]]);
- fireEvent.change(ui.getByLabelText("Antigravity machine"),{target:{value:"old-agent"}});
- fireEvent.click(await ui.findByRole("button",{name:/models? available/}));
- await waitFor(()=>expect(ui.getByText("Node model")).toBeTruthy());
- finish([["agy-demo","Gemini 4 Argon"]]);
- await Promise.resolve();
- expect(ui.queryByText("Gemini 4 Argon")).toBeNull();
-});
-it("reloads the machine inventory when the backend changes",async()=>{
- const {ui}=await setup([["agy-demo","Gemini 4 Argon"]]);
- await waitFor(()=>expect(ui.getByRole("option",{name:"old-agent"})).toBeTruthy());
- fireEvent.change(ui.getByLabelText("Antigravity machine"),{target:{value:"old-agent"}});
- vi.mocked(api.getRemoteNodes).mockResolvedValueOnce({enabled:true,nodes:[{id:"new-node"}] as api.RemoteNodeView[]});
- api.bumpConnectionVersion(value=>value+1);
- await waitFor(()=>expect(ui.getByRole("option",{name:"new-node"})).toBeTruthy());
- expect(ui.queryByRole("option",{name:"old-agent"})).toBeNull();
- expect((ui.getByLabelText("Antigravity machine") as HTMLSelectElement).value).toBe("core");
+const node = (id: string, extra: Partial<api.RemoteNodeView> = {}) => ({ id, status: "online", cordoned: false, ...extra }) as api.RemoteNodeView;
+
+it("checks every machine with the one sign-in and lists where it runs", async () => {
+  vi.spyOn(api, "getRemoteNodes").mockResolvedValue({ enabled: true, nodes: [node("ashur"), node("nippur"), node("off", { status: "offline" }), node("held", { cordoned: true })] });
+  const discovery = vi.spyOn(api, "listNodeAntigravityModels").mockImplementation(async id => {
+    if (id === "nippur") throw new Error("unavailable");
+    return [["agy-demo", "Gemini 4 Argon"]];
+  });
+  const ui = render(() => <AntigravityProvider />);
+  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core, ashur"));
+  expect(ui.getByText("nippur unavailable")).toBeTruthy();
+  expect(ui.queryByLabelText("Antigravity machine")).toBeNull();
+  expect(discovery.mock.calls.map(c => c[0]).sort()).toEqual(["ashur", "core", "nippur"]);
+  fireEvent.click(ui.getByRole("button", { name: /1 model available/ }));
+  expect(ui.getByRole("list", { name: "Antigravity models" }).textContent).toContain("Gemini 4 Argon");
 });
 
-it("refreshes the machine inventory after an initial discovery failure",async()=>{
- vi.spyOn(api,"getRemoteNodes").mockRejectedValueOnce(new Error("offline")).mockResolvedValue({enabled:true,nodes:[{id:"new-node"}] as api.RemoteNodeView[]});
- vi.spyOn(api,"listNodeAntigravityModels").mockResolvedValue([]);
- const ui=render(()=><AntigravityProvider/>);
- await waitFor(()=>expect(ui.getByText("No models available")).toBeTruthy());
- expect(ui.queryByRole("option",{name:"new-node"})).toBeNull();
- window.dispatchEvent(new Event("orb:providers-refresh"));
- await waitFor(()=>expect(ui.getByRole("option",{name:"new-node"})).toBeTruthy());
+it("retries a single machine without rechecking the others", async () => {
+  vi.spyOn(api, "getRemoteNodes").mockResolvedValue({ enabled: true, nodes: [node("nippur")] });
+  const discovery = vi.spyOn(api, "listNodeAntigravityModels").mockImplementation(async id => {
+    if (id === "nippur") throw new Error("unavailable");
+    return [["agy-demo", "Gemini 4 Argon"]];
+  });
+  const ui = render(() => <AntigravityProvider />);
+  await waitFor(() => expect(ui.getByText("nippur unavailable")).toBeTruthy());
+  discovery.mockResolvedValueOnce([["agy-demo", "Gemini 4 Argon"]]);
+  fireEvent.click(ui.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core, nippur"));
+  expect(discovery.mock.calls.filter(c => c[0] === "core")).toHaveLength(1);
 });
 
-it("shows machine controls immediately without a second expandable card", async () => {
- vi.spyOn(api,"getRemoteNodes").mockResolvedValue({enabled:true,nodes:[]});
- vi.spyOn(api,"listNodeAntigravityModels").mockResolvedValue([]);
- const ui=render(()=><AntigravityProvider/>);
- expect(ui.getByRole("heading",{name:"Execution machines"})).toBeTruthy();
- expect(ui.getByLabelText("Antigravity machine")).toBeTruthy();
- expect(ui.queryByRole("button",{name:/Execution machines/})).toBeNull();
- expect(ui.getByText(/separate from the subscription/)).toBeTruthy();
+it("keeps Core when the machine inventory fails and reloads on refresh", async () => {
+  vi.spyOn(api, "getRemoteNodes").mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ enabled: true, nodes: [node("new-node")] });
+  vi.spyOn(api, "listNodeAntigravityModels").mockResolvedValue([["m", "Model"]]);
+  const ui = render(() => <AntigravityProvider />);
+  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core"));
+  window.dispatchEvent(new Event("orb:providers-refresh"));
+  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core, new-node"));
+});
+
+it("ignores late answers from a previous connection", async () => {
+  let finish!: (rows: [string, string][]) => void;
+  vi.spyOn(api, "getRemoteNodes").mockResolvedValue({ enabled: true, nodes: [] });
+  const discovery = vi.spyOn(api, "listNodeAntigravityModels").mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  const ui = render(() => <AntigravityProvider />);
+  discovery.mockResolvedValue([]);
+  api.bumpConnectionVersion(value => value + 1);
+  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Not available on any machine"));
+  finish([["late", "Late model"]]);
+  await Promise.resolve();
+  expect(ui.queryByText(/model available/)).toBeNull();
+});
+
+it("maps Google quota windows onto the plan bars", () => {
+  const windows = codingPlanWindows({ provider_type: "antigravity", antigravity_windows: [{ label: "Claude", used_percent: 60, reset_at: 1_800_000_000 }, { label: "Gemini Pro", used_percent: 0 }] } as api.ProviderUsage);
+  expect(windows).toEqual([{ label: "Claude", used: 0.6, reset: 1_800_000_000 }, { label: "Gemini Pro", used: 0, reset: undefined }]);
 });

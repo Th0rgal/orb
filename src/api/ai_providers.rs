@@ -9920,6 +9920,45 @@ async fn get_provider_usage(
             }
             info
         }
+        ProviderType::Antigravity => {
+            let account = if let Some(id) = provider_uuid {
+                state.ai_providers.get(id).await
+            } else {
+                None
+            };
+            // Read the live CLIProxyAPI file: the proxy keeps its access token
+            // fresh, the projected store copy may lag behind.
+            let login = account
+                .as_ref()
+                .filter(|p| !super::cli_proxy_accounts::needs_reconnect(p))
+                .and_then(super::cli_proxy_accounts::account_for);
+            let mut info = serde_json::json!({
+                "provider_type": "antigravity",
+                "provider_name": provider_name,
+                "account_email": account_email,
+                "status": if login.is_some() { "connected" } else { "needs_reauth" },
+            });
+            if let Some(login) = login {
+                match super::antigravity_usage::read(&client, &login.oauth.access_token).await {
+                    super::subscription_usage::Quota::Fields(fields) => {
+                        if let Some(obj) = info.as_object_mut() {
+                            obj.extend(fields);
+                        }
+                    }
+                    super::subscription_usage::Quota::Unauthorized => {
+                        info["usage_note"] = serde_json::json!(
+                            "Antigravity quota is unavailable until the Google login refreshes."
+                        );
+                    }
+                    super::subscription_usage::Quota::Unavailable(reason) => {
+                        info["usage_note"] = serde_json::json!(format!(
+                            "Antigravity quota is unavailable right now ({reason})."
+                        ));
+                    }
+                }
+            }
+            info
+        }
         ProviderType::Muse => serde_json::json!({
             "provider_type": "muse",
             "provider_name": provider_name,

@@ -31,6 +31,41 @@ async fn fresh_transfer_prompt(ctx: &TurnContext<'_>) -> Result<Option<String>, 
     .map(Some)
 }
 
+/// Host path of the `HOME` that `agy` runs with in `workspace`.
+pub(crate) fn native_home(workspace: &crate::workspace::Workspace) -> std::path::PathBuf {
+    match workspace.env_vars.get("HOME") {
+        Some(home)
+            if workspace.workspace_type == crate::workspace::WorkspaceType::Container
+                && !crate::workspace::is_container_fallback(workspace) =>
+        {
+            workspace.path.join(home.trim_start_matches('/'))
+        }
+        Some(home) => std::path::PathBuf::from(home),
+        None => crate::workspace::resolve_workspace_home_root(
+            &workspace.path,
+            workspace.workspace_type,
+            &workspace.env_vars,
+        ),
+    }
+}
+
+/// `native_home` when the Core may write the login there. A container home
+/// is mission-controlled: it must resolve inside the container root, so a
+/// symlinked home cannot redirect the root-owned write onto the host.
+pub(crate) fn projectable_home(
+    workspace: &crate::workspace::Workspace,
+) -> Option<std::path::PathBuf> {
+    let home = native_home(workspace);
+    let contained = workspace.workspace_type == crate::workspace::WorkspaceType::Container
+        && !crate::workspace::is_container_fallback(workspace);
+    if !contained {
+        return Some(home);
+    }
+    let root = std::fs::canonicalize(&workspace.path).ok()?;
+    let resolved = std::fs::canonicalize(&home).ok()?;
+    (resolved.starts_with(&root) && resolved != root).then_some(resolved)
+}
+
 pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let Some(store) = ctx.mission_store.as_ref() else {
         return AgentResult::failure("Antigravity requires durable native identity storage", 0);
@@ -89,20 +124,10 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         }
         Err(error) => return AgentResult::failure(error, 0),
     }
-    let thought_home = match ctx.workspace.env_vars.get("HOME") {
-        Some(home)
-            if ctx.workspace.workspace_type == crate::workspace::WorkspaceType::Container
-                && !crate::workspace::is_container_fallback(ctx.workspace) =>
-        {
-            ctx.workspace.path.join(home.trim_start_matches('/'))
-        }
-        Some(home) => std::path::PathBuf::from(home),
-        None => crate::workspace::resolve_workspace_home_root(
-            &ctx.workspace.path,
-            ctx.workspace.workspace_type,
-            &ctx.workspace.env_vars,
-        ),
-    };
+    let thought_home = native_home(ctx.workspace);
+    if let Some(home) = projectable_home(ctx.workspace) {
+        crate::api::antigravity_native::install_in_home(&home);
+    }
     crate::antigravity::clear_historical_error_steps(&thought_home, ctx.session_id);
     let mut child = match exec
         .spawn_streaming(&cwd, &cli, &args, Default::default())

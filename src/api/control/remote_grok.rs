@@ -171,6 +171,20 @@ pub(crate) async fn require_node_managed_auth(
     let Some(node) = state.config.remote_nodes.node(node_id) else {
         return Ok(());
     };
+    if profile == "antigravity" {
+        // One Google sign-in: hand the node the routing login first. Older
+        // nodes and nodes keeping their own sign-in fall back to the heartbeat.
+        match crate::api::antigravity_native::sync_node(state, node_id).await {
+            Ok(crate::api::antigravity_native::NodeSync::Ready) => {
+                let client = RemoteNodeClient::default();
+                remote_node::probe_node(&state.fleet, &client, node).await;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(node = %node_id, "Antigravity sign-in not pushed: {error}")
+            }
+        }
+    }
     if state
         .fleet
         .get(node_id)

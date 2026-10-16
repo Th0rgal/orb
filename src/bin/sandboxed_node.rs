@@ -115,7 +115,8 @@ async fn main() -> anyhow::Result<()> {
     // Managed auth: profiles raw jobs may request by name. The path is the
     // node's own configuration; payloads never carry it. Advertised in the
     // heartbeat only while the credential file is actually readable.
-    let managed_auth = sandboxed_sh::node::ManagedAuth::from_env();
+    let managed_auth = sandboxed_sh::node::ManagedAuth::from_env()
+        .with_core_antigravity(work_root.join("managed-auth").join("antigravity"));
     match managed_auth.advertised().as_slice() {
         [] => info!(
             "managed auth: no profiles ready (SANDBOXED_NODE_GROK_HOME unset or not logged in)"
@@ -155,6 +156,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/project-context/prepare", post(prepare_project_context))
         .route("/heartbeat", get(heartbeat))
         .route("/antigravity/models", get(antigravity_models))
+        .route(
+            "/managed-auth/antigravity",
+            axum::routing::put(install_antigravity_auth),
+        )
         .route("/software", get(software_inventory))
         .route("/software/updates", post(software_update))
         .route("/software/updates/cancel", post(software_cancel))
@@ -229,6 +234,36 @@ async fn antigravity_models(
     })?
     .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
     Ok(Json(models))
+}
+
+/// Receive the Core's Antigravity login so native runs use the same Google
+/// sign-in as model routing. The body is never logged or stored in a job.
+async fn install_antigravity_auth(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    Json(credential): Json<sandboxed_sh::antigravity_auth::Credential>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    if !state.managed_auth.accepts_core_antigravity() {
+        return Err((
+            StatusCode::CONFLICT,
+            "This node keeps its own Antigravity sign-in".into(),
+        ));
+    }
+    let auth = state.managed_auth.clone();
+    let changed = tokio::task::spawn_blocking(move || auth.install_antigravity(&credential))
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Antigravity sign-in failed".to_string(),
+            )
+        })?
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(serde_json::json!({
+        "changed": changed,
+        "managed_auth": state.managed_auth.advertised(),
+    })))
 }
 
 fn check_auth(headers: &HeaderMap, state: &NodeState) -> Result<(), (StatusCode, String)> {
