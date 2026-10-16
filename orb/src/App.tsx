@@ -3275,7 +3275,29 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return false;
     }
   };
+  // A follow-up sent to a stopped mission: hide the stop notice until Core
+  // reports a change (its updated_at moves), then normal failure display resumes.
+  const [sentOverStop, setSentOverStop] = createSignal<string | null>(null);
+  // A rejected send changed nothing: show the stop notice again.
+  createEffect(() => { if (sendError()) setSentOverStop(null); });
+  // Once the follow-up is queued, the queue itself keeps the notice hidden; when
+  // that queue empties again (sent or cancelled) the suppression is no longer needed.
+  let sawQueued = false;
+  createEffect(() => {
+    if (!sentOverStop()) { sawQueued = false; return; }
+    const queued = localQueueActive() || remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued);
+    if (queued) sawQueued = true;
+    else if (sawQueued) setSentOverStop(null);
+  });
+  // Any status or update after the follow-up ends the suppression for good,
+  // so a failure reported later (stream or poll) shows normally.
+  createEffect(() => {
+    const m = mission();
+    const snap = sentOverStop();
+    if (snap && m && `${m.status}|${m.updated_at}` !== snap) setSentOverStop(null);
+  });
   const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
+    setSentOverStop(mission() ? `${mission()!.status}|${mission()!.updated_at}` : null);
     const attemptId = explicitId ?? sendingIds.shift() ?? crypto.randomUUID();
     const run = sendChain.then(async () => {
       setOptimisticList(prev => prev.map(item => item.id === attemptId ? { ...item, failed: false } : item));
@@ -3494,7 +3516,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={busy() || localQueueActive() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || pending() || !!sentOverStop() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
             <Show when={pending()}>
               <MissionPending destination={missionDestination(mission(), receipt)} label={phaseLabel()} />
