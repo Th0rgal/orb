@@ -11428,6 +11428,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         Extension(h.user.clone()),
         Path(parent.id),
         Json(super::fork::ForkRequest {
+            service_tier: None,
             backend: "opencode".into(),
             model_override: "builtin/smart".into(),
             model_effort: None,
@@ -11458,6 +11459,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         Extension(h.user.clone()),
         Path(parent.id),
         Json(super::fork::ForkRequest {
+            service_tier: None,
             backend: "opencode".into(),
             model_override: "builtin/smart".into(),
             model_effort: None,
@@ -11478,6 +11480,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         Extension(h.user.clone()),
         Path(parent.id),
         Json(super::fork::ForkRequest {
+            service_tier: None,
             backend: "opencode".into(),
             model_override: "builtin/smart".into(),
             model_effort: None,
@@ -11502,6 +11505,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         Extension(h.user.clone()),
         Path(parent.id),
         Json(super::fork::ForkRequest {
+            service_tier: None,
             backend: "opencode".into(),
             model_override: "builtin/smart".into(),
             model_effort: None,
@@ -11518,6 +11522,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
         Extension(h.user.clone()),
         Path(parent.id),
         Json(super::fork::ForkRequest {
+            service_tier: None,
             backend: "opencode".into(),
             model_override: "builtin/smart".into(),
             model_effort: None,
@@ -11543,6 +11548,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
             Extension(h.user.clone()),
             Path(parent.id),
             Json(super::fork::ForkRequest {
+                service_tier: None,
                 backend: "opencode".into(),
                 model_override: "builtin/smart".into(),
                 model_effort: None,
@@ -11580,6 +11586,7 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
             Extension(h.user.clone()),
             Path(parent.id),
             Json(super::fork::ForkRequest {
+                service_tier: None,
                 backend: "opencode".into(),
                 model_override: "builtin/smart".into(),
                 model_effort: None,

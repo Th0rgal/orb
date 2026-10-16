@@ -6,6 +6,9 @@ pub struct ForkRequest {
     pub backend: String,
     pub model_override: String,
     pub model_effort: Option<String>,
+    /// Codex speed for the fork; creation validates it like a new mission.
+    #[serde(default)]
+    pub service_tier: Option<crate::codex_speed::Tier>,
     pub idempotency_key: String,
     #[serde(default)]
     pub side_question: Option<String>,
@@ -221,6 +224,7 @@ pub async fn fork_mission(
         "model_override": req.model_override,
         "model_effort": req.model_effort,
         "fast_mode": false,
+        "service_tier": if req.backend == "codex" { req.service_tier } else { None },
         "parent_mission_id": None::<Uuid>,
         "project": source.project.project,
         "tags": tags,
