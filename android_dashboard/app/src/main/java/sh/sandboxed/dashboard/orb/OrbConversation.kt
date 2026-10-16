@@ -865,31 +865,41 @@ fun OrbConversationPage(
         }
     }
 
-    // Project context files for `@` mentions
-    var projectFiles by remember(project.id, selectedWorkspaceId) { mutableStateOf<List<String>>(emptyList()) }
-    LaunchedEffect(project.id, selectedWorkspaceId) {
-        val slug = project.str("slug", "id") ?: project.id
+    // Project context files for `@` mentions. Mirrors iOS OrbAttachments: the context
+    // manifest (entries keyed by path) first, then a shallow walk of /files.
+    var projectFiles by remember(project.id) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(project.id) {
+        val slug = core.encodeComponent(project.str("slug", "id") ?: project.id)
         val loaded = mutableListOf<String>()
         runCatching {
-            val rows = core.fetchRows("/api/projects/${core.encodeComponent(slug)}/documents", "entries")
-            for (r in rows) {
-                val p = r.str("path", "name") ?: continue
-                if (r.str("kind", "type") != "dir") loaded.add(p)
+            val manifest = core.fetchDict("/api/projects/$slug/context/manifest")
+            val entries = OrbJSON.dict(manifest["entries"]) ?: emptyMap()
+            for ((path, meta) in entries) {
+                if (OrbJSON.bool(OrbJSON.dict(meta), "directory") != true) loaded.add(path)
             }
         }
-        if (selectedWorkspaceId.isNotEmpty()) {
+        if (loaded.isEmpty()) {
             runCatching {
-                val wsRows = core.fetchRows(
-                    "/api/control/workspaces/${core.encodeComponent(selectedWorkspaceId)}/files",
-                    "entries"
-                )
-                for (r in wsRows) {
-                    val p = r.str("path", "name") ?: continue
-                    if (r.str("kind", "type") != "dir") loaded.add(p)
+                val queue = ArrayDeque(listOf("" to 0))
+                while (queue.isNotEmpty() && loaded.size < 160) {
+                    val (dir, depth) = queue.removeFirst()
+                    val rows = core.fetchRows(
+                        "/api/projects/$slug/files?path=${core.encodeComponent(dir)}",
+                        "entries"
+                    )
+                    for (r in rows) {
+                        val name = r.str("name") ?: continue
+                        val rel = if (dir.isEmpty()) name else "$dir/$name"
+                        if (r.str("kind") == "dir") {
+                            if (depth < 1) queue.addLast(rel to depth + 1)
+                        } else {
+                            loaded.add(rel)
+                        }
+                    }
                 }
             }
         }
-        projectFiles = loaded.distinct()
+        projectFiles = loaded.distinct().sorted()
     }
 
     val activeAtMentionQuery = remember(inputText) {

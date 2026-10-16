@@ -103,7 +103,6 @@ class ControlViewModel(private val container: AppContainer) : ViewModel() {
     private var foreground = true
     // Some deployments lack /api/control/parallel/config; remember the 404
     // instead of re-probing it on every poll tick.
-    private var parallelConfigSupported = true
 
     init {
         viewModelScope.launch {
@@ -515,11 +514,6 @@ class ControlViewModel(private val container: AppContainer) : ViewModel() {
 
     private suspend fun refreshRunning() {
         val running = container.api.running()
-        if (parallelConfigSupported) {
-            runCatching { container.api.parallelConfig() }
-                .onSuccess { cfg -> _state.update { it.copy(maxParallel = cfg.maxParallel) } }
-                .onFailure { e -> if ((e as? HttpException)?.status == 404) parallelConfigSupported = false }
-        }
         _state.update { it.copy(parallel = running) }
         // Only refetch the (large) mission list for child workers when the
         // current mission plausibly has any — mirrors the iOS fix for the

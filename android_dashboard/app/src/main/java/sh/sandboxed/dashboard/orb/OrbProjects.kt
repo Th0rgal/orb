@@ -28,6 +28,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
@@ -963,6 +965,7 @@ fun OrbProjectPage(
     var moveFolderTarget by remember { mutableStateOf<String?>(null) }
     var moveFolderDraft by remember { mutableStateOf("") }
     var deleteFolderTarget by remember { mutableStateOf<String?>(null) }
+    var deleteMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
     var renameMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
     var renameMissionDraft by remember { mutableStateOf("") }
 
@@ -1162,6 +1165,50 @@ fun OrbProjectPage(
                 loadProjectData()
                 core.refreshMissionsQuietly()
             }
+        }
+    }
+
+    fun pauseOrResumeMission(mission: OrbRow) {
+        val paused = (mission.str("status", "state") ?: "").lowercase() == "paused"
+        scope.launch {
+            runCatching {
+                core.request(
+                    path = "/api/control/missions/${core.encodeComponent(mission.id)}/${if (paused) "resume" else "pause"}",
+                    method = "POST"
+                )
+                loadProjectData()
+                core.refreshMissionsQuietly()
+            }.onFailure { folderActionError = it.message ?: "Couldn’t update the agent." }
+        }
+    }
+
+    // Same guard rails as iOS deleteMissions: a working agent is refused, a paused
+    // one is archived first, and a 404 means it is already gone.
+    fun performDeleteMission(mission: OrbRow) {
+        scope.launch {
+            runCatching {
+                val path = "/api/control/missions/${core.encodeComponent(mission.id)}"
+                val latest = runCatching { core.fetchDict(path) }.getOrElse { e ->
+                    if ((e as? OrbError)?.status == 404) emptyMap() else throw e
+                }
+                val status = (OrbJSON.str(latest, "status") ?: "").lowercase()
+                if (status == "active" || status == "waiting_background") {
+                    throw OrbError("Stop or finish this agent before deleting it.")
+                }
+                if (latest.isNotEmpty()) {
+                    if (status == "paused") {
+                        core.request("$path/status", method = "POST", body = mapOf("status" to "acknowledged"))
+                    }
+                    try {
+                        core.request(path, method = "DELETE")
+                    } catch (e: OrbError) {
+                        if (e.status != 404) throw e
+                    }
+                }
+                OrbReadCache.saveRowsMemoryOnly("mission_msgs_${mission.id}", emptyList())
+                loadProjectData()
+                core.refreshMissionsQuietly()
+            }.onFailure { folderActionError = it.message ?: "Couldn’t delete the agent." }
         }
     }
 
@@ -1537,6 +1584,14 @@ fun OrbProjectPage(
                             onArchive = {
                                 contextMenuMission = null
                                 toggleArchiveMission(node.mission)
+                            },
+                            onPause = {
+                                contextMenuMission = null
+                                pauseOrResumeMission(node.mission)
+                            },
+                            onDelete = {
+                                contextMenuMission = null
+                                deleteMissionTarget = node.mission
                             }
                         )
                     }
@@ -1711,6 +1766,14 @@ fun OrbProjectPage(
                                         contextMenuMission = null
                                         toggleArchiveMission(node.mission)
                                     },
+                                    onPause = {
+                                        contextMenuMission = null
+                                        pauseOrResumeMission(node.mission)
+                                    },
+                                    onDelete = {
+                                        contextMenuMission = null
+                                        deleteMissionTarget = node.mission
+                                    },
                                     extraIndentDp = 16
                                 )
                             }
@@ -1877,6 +1940,32 @@ fun OrbProjectPage(
                         newFolderParent = ""
                     }
                 ) {
+                    Text("Cancel", color = OrbStyle.textSecondary)
+                }
+            }
+        )
+    }
+
+    deleteMissionTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteMissionTarget = null },
+            containerColor = OrbStyle.elevated,
+            titleContentColor = Color.White,
+            textContentColor = OrbStyle.textSecondary,
+            title = { Text("Delete agent?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text("This permanently deletes \u201c${OrbJSON.cleanTitle(target.str("title", "name") ?: "this conversation")}\u201d, its child agents and associated workspace files.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteMissionTarget = null
+                    performDeleteMission(target)
+                }) {
+                    Text("Delete", color = OrbStyle.error, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteMissionTarget = null }) {
                     Text("Cancel", color = OrbStyle.textSecondary)
                 }
             }
@@ -2074,6 +2163,8 @@ private fun OrbMissionListItem(
     onRename: () -> Unit,
     onMove: () -> Unit,
     onArchive: () -> Unit,
+    onPause: () -> Unit,
+    onDelete: () -> Unit,
     extraIndentDp: Int = 0
 ) {
     val mission = node.mission
@@ -2295,6 +2386,26 @@ private fun OrbMissionListItem(
                     )
                 },
                 onClick = onArchive
+            )
+            val isPaused = stateRaw == "paused"
+            if (isLive || isPaused) {
+                DropdownMenuItem(
+                    text = { Text(if (isPaused) "Resume" else "Pause", color = Color.White) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            contentDescription = null,
+                            tint = Color.White
+                        )
+                    },
+                    onClick = onPause
+                )
+            }
+            HorizontalDivider(color = OrbStyle.border)
+            DropdownMenuItem(
+                text = { Text("Delete…", color = OrbStyle.error) },
+                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = OrbStyle.error) },
+                onClick = onDelete
             )
         }
     }

@@ -573,6 +573,8 @@ fun OrbProvidersSettingsPage(
     var oauthCallbackInput by remember { mutableStateOf("") }
     var oauthStatusMessage by remember { mutableStateOf<String?>(null) }
     var oauthLoading by remember { mutableStateOf(false) }
+    var oauthSessionId by remember { mutableStateOf<String?>(null) }
+    var oauthUsesProxy by remember { mutableStateOf(false) }
 
     val oauthPresets = remember {
         listOf(
@@ -580,9 +582,7 @@ fun OrbProvidersSettingsPage(
             "openai" to "OpenAI (ChatGPT Plus / Pro)",
             "google" to "Google (Gemini / Antigravity)",
             "xai" to "xAI (Grok)",
-            "kimi" to "Kimi",
-            "minimax" to "MiniMax",
-            "zai" to "Z.AI (GLM)"
+            "kimi" to "Kimi"
         )
     }
 
@@ -633,7 +633,54 @@ fun OrbProvidersSettingsPage(
         }
     }
 
+    // Mirrors iOS OrbProviderLoginView / Orb Providers.tsx: subscriptions other than
+    // Google sign in through the CLIProxyAPI session flow; Google (and providers owned
+    // by sandboxed.sh) use the native flow, where the server accepts the provider type
+    // in place of a provider UUID.
+    fun usesCliProxyLogin(providerType: String, existingProvider: OrbRow?): Boolean {
+        if (providerType == "google") return false
+        if (existingProvider == null) return true
+        val owner = existingProvider.str("credential_owner") ?: ""
+        return owner == "cli_proxy" || (owner.isEmpty() && providerType in OrbProviderLoginFlow.subscriptionTypes)
+    }
+
+    fun finishOauth(pType: String) {
+        oauthProviderType = null
+        oauthReauthProvider = null
+        oauthSessionId = null
+        statusBanner = "Connected $pType"
+        scope.launch {
+            loadProvidersAndUsage()
+            core.refreshAll()
+        }
+    }
+
+    fun applyProxyState(pType: String, dict: OrbDict?) {
+        when (OrbJSON.str(dict, "status")) {
+            "completed" -> finishOauth(pType)
+            "failed" -> {
+                oauthSessionId = null
+                oauthStatusMessage = OrbJSON.str(dict, "message") ?: "Sign-in failed. Close and try again."
+            }
+            else -> OrbJSON.str(dict, "auth_url")?.let { oauthAuthUrl = it }
+        }
+    }
+
+    fun cancelOauthFlow() {
+        oauthSessionId?.let { sid ->
+            scope.launch {
+                runCatching {
+                    core.request("/api/ai/providers/cli-proxy-login/${core.encodeComponent(sid)}", method = "DELETE")
+                }
+            }
+        }
+        oauthSessionId = null
+        oauthProviderType = null
+        oauthReauthProvider = null
+    }
+
     fun startOauthFlow(providerType: String, existingProvider: OrbRow? = null) {
+        oauthSessionId?.let { cancelOauthFlow() }
         oauthProviderType = providerType
         oauthReauthProvider = existingProvider
         oauthAuthUrl = null
@@ -642,32 +689,32 @@ fun OrbProvidersSettingsPage(
         oauthCallbackInput = ""
         oauthStatusMessage = "Starting authentication…"
         oauthLoading = true
+        val proxy = usesCliProxyLogin(providerType, existingProvider)
+        oauthUsesProxy = proxy
         scope.launch {
             try {
-                val path = if (existingProvider != null) {
-                    "/api/ai/providers/${core.encodeComponent(existingProvider.id)}/oauth/authorize"
+                val resp = if (proxy) {
+                    val body = mutableMapOf<String, Any?>("provider" to providerType)
+                    existingProvider?.id?.let { body["provider_id"] = it }
+                    val path = if (providerType == "mistral") "/api/ai/providers/mistral-login" else "/api/ai/providers/cli-proxy-login"
+                    core.request(path = path, method = "POST", body = body)
                 } else {
-                    "/api/ai/providers/oauth/authorize"
-                }
-                val body = if (existingProvider != null) {
-                    emptyMap<String, Any?>()
-                } else {
-                    mapOf(
-                        "provider_type" to providerType,
-                        "name" to (oauthPresets.firstOrNull { it.first == providerType }?.second ?: providerType)
+                    val idOrType = existingProvider?.id ?: providerType
+                    core.request(
+                        path = "/api/ai/providers/${core.encodeComponent(idOrType)}/oauth/authorize",
+                        method = "POST",
+                        body = mapOf("method_index" to 0)
                     )
                 }
-                val resp = core.request(path = path, method = "POST", body = body)
                 val dict = OrbJSON.dict(resp)
-                val url = OrbJSON.str(dict, "authorize_url", "auth_url", "url")
-                val userCode = OrbJSON.str(dict, "user_code")
-                val verifyUri = OrbJSON.str(dict, "verification_uri", "verification_uri_complete")
+                if (proxy) oauthSessionId = OrbJSON.str(dict, "session_id")
+                val url = OrbJSON.str(dict, "auth_url", "url", "authorize_url")
                 oauthAuthUrl = url
-                oauthUserCode = userCode
-                oauthVerificationUri = verifyUri
-                oauthStatusMessage = OrbJSON.str(dict, "message", "instructions")
+                oauthUserCode = OrbJSON.str(dict, "user_code")
+                oauthVerificationUri = OrbJSON.str(dict, "verification_uri", "verification_uri_complete")
+                oauthStatusMessage = OrbJSON.str(dict, "instructions", "message")
                     ?: "Open the sign-in page in your browser, then paste the callback URL or code if prompted."
-                val targetOpenUrl = url ?: verifyUri
+                val targetOpenUrl = url ?: oauthVerificationUri
                 if (!targetOpenUrl.isNullOrEmpty()) {
                     runCatching {
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetOpenUrl)))
@@ -681,33 +728,47 @@ fun OrbProvidersSettingsPage(
         }
     }
 
+    // Poll the CLIProxyAPI login session every 2 s, like iOS and Orb.
+    LaunchedEffect(oauthSessionId) {
+        val sid = oauthSessionId ?: return@LaunchedEffect
+        val pType = oauthProviderType ?: return@LaunchedEffect
+        while (isActive && oauthSessionId == sid) {
+            delay(2000)
+            val state = runCatching {
+                OrbJSON.dict(core.request("/api/ai/providers/cli-proxy-login/${core.encodeComponent(sid)}"))
+            }.getOrNull() ?: continue
+            if (oauthSessionId == sid) applyProxyState(pType, state)
+        }
+    }
+
     fun completeOauthCallback() {
         val pType = oauthProviderType ?: return
         val existing = oauthReauthProvider
         val trimmed = oauthCallbackInput.trim()
-        if (trimmed.isEmpty()) return
+        val sid = oauthSessionId
+        if (trimmed.isEmpty() && pType != "kimi") return
         oauthLoading = true
         scope.launch {
             try {
-                val path = if (existing != null) {
-                    "/api/ai/providers/${core.encodeComponent(existing.id)}/oauth/callback"
-                } else {
-                    "/api/ai/providers/oauth/callback"
-                }
-                core.request(
-                    path = path,
-                    method = "POST",
-                    body = mapOf(
-                        "provider_type" to pType,
-                        "code" to trimmed,
-                        "callback_url" to trimmed
+                if (oauthUsesProxy) {
+                    if (sid == null) throw OrbError("The sign-in session expired. Start again.")
+                    val state = core.request(
+                        path = "/api/ai/providers/cli-proxy-login/${core.encodeComponent(sid)}/callback",
+                        method = "POST",
+                        body = mapOf("url" to trimmed)
                     )
-                )
-                oauthProviderType = null
-                oauthReauthProvider = null
-                statusBanner = "Connected $pType"
-                loadProvidersAndUsage()
-                core.refreshAll()
+                    applyProxyState(pType, OrbJSON.dict(state))
+                } else {
+                    val idOrType = existing?.id ?: pType
+                    val body = mutableMapOf<String, Any?>("method_index" to 0)
+                    if (trimmed.isNotEmpty()) body["code"] = trimmed
+                    core.request(
+                        path = "/api/ai/providers/${core.encodeComponent(idOrType)}/oauth/callback",
+                        method = "POST",
+                        body = body
+                    )
+                    finishOauth(pType)
+                }
             } catch (e: Throwable) {
                 oauthStatusMessage = e.message ?: "Callback failed"
             } finally {
@@ -1430,7 +1491,7 @@ fun OrbProvidersSettingsPage(
                                         modifier = Modifier
                                             .clip(CircleShape)
                                             .background(Color.White)
-                                            .orbPressClickable(enabled = !oauthLoading && oauthCallbackInput.trim().isNotEmpty()) {
+                                            .orbPressClickable(enabled = !oauthLoading && (oauthCallbackInput.trim().isNotEmpty() || oauthProviderType == "kimi")) {
                                                 completeOauthCallback()
                                             }
                                             .padding(horizontal = 14.dp, vertical = 7.dp)
@@ -1447,10 +1508,7 @@ fun OrbProvidersSettingsPage(
                                             .clip(CircleShape)
                                             .background(OrbStyle.card)
                                             .border(1.dp, OrbStyle.border, CircleShape)
-                                            .orbPressClickable {
-                                                oauthProviderType = null
-                                                oauthReauthProvider = null
-                                            }
+                                            .orbPressClickable { cancelOauthFlow() }
                                             .padding(horizontal = 14.dp, vertical = 7.dp)
                                     ) {
                                         Text("Cancel", color = OrbStyle.textSecondary, fontSize = 13.sp)
@@ -2036,3 +2094,8 @@ fun OrbInboxSettingsPage(
     }
 }
 
+
+object OrbProviderLoginFlow {
+    /** Subscription types offered by iOS `OrbProvidersSettingsView.subscriptionTypes`. */
+    val subscriptionTypes = setOf("anthropic", "openai", "google", "xai", "kimi")
+}
