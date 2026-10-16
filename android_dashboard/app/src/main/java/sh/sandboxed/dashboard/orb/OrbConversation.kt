@@ -932,7 +932,7 @@ fun OrbConversationPage(
 
     // Spark dictation (iOS OrbDictation): record 16 kHz WAV, transcribe on Core,
     // and fall back to the system recognizer if recording or transcription fails.
-    remember(context) { OrbDictationSettings.init(context); true }
+    remember(context) { OrbDictationSettings.init(context); OrbBtwSettings.init(context); true }
     val sparkRecorder = remember { OrbSparkRecorder() }
     var dictationElapsed by remember { mutableIntStateOf(0) }
     var showDictationLanguages by remember { mutableStateOf(false) }

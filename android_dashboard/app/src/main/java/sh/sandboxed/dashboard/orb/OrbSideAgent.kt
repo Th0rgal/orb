@@ -94,8 +94,8 @@ object OrbSideAgent {
 
     suspend fun launch(core: OrbCore, parentId: String, question: String, turns: List<OrbTurn>): OrbRow {
         val body = mapOf(
-            "backend" to DEFAULT_HARNESS,
-            "model_override" to DEFAULT_MODEL,
+            "backend" to OrbBtwSettings.harness,
+            "model_override" to OrbBtwSettings.model,
             "model_effort" to null,
             "idempotency_key" to UUID.randomUUID().toString(),
             "side_question" to prompt(context(turns), question),
@@ -183,6 +183,7 @@ fun OrbSideAgentSheet(
                 )
             }
             Text(session.question, color = OrbStyle.textSecondary, fontSize = 13.sp)
+            Text("${serviceName(OrbBtwSettings.harness)} · ${OrbBtwSettings.model}", color = OrbStyle.textMuted, fontSize = 11.sp)
             error?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
             Box(
                 modifier = Modifier
@@ -213,5 +214,38 @@ fun OrbSideAgentSheet(
                 }
             }
         }
+    }
+}
+
+/** Harness and model of the /btw side agent, stored locally like iOS `OrbBtwConfig`. */
+object OrbBtwSettings {
+    private const val PREFS = "orb.btw"
+    private const val HARNESS_KEY = "orb.btw.harness"
+    private const val MODEL_KEY = "orb.btw.model"
+
+    val harnesses: List<Pair<String, String>> = listOf(
+        "opencode" to "OpenCode", "claudecode" to "Claude Code", "codex" to "Codex", "grok" to "Grok"
+    )
+
+    private var prefs: android.content.SharedPreferences? = null
+    var harness by mutableStateOf(OrbSideAgent.DEFAULT_HARNESS)
+        private set
+    var model by mutableStateOf(OrbSideAgent.DEFAULT_MODEL)
+        private set
+
+    fun init(context: android.content.Context) {
+        if (prefs != null) return
+        val p = context.applicationContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        prefs = p
+        harness = p.getString(HARNESS_KEY, null)?.takeIf { it.isNotBlank() } ?: OrbSideAgent.DEFAULT_HARNESS
+        model = p.getString(MODEL_KEY, null)?.takeIf { it.isNotBlank() } ?: OrbSideAgent.DEFAULT_MODEL
+    }
+
+    fun save(newHarness: String, newModel: String) {
+        val m = newModel.trim()
+        if (m.isEmpty()) return
+        harness = newHarness
+        model = m
+        prefs?.edit()?.putString(HARNESS_KEY, newHarness)?.putString(MODEL_KEY, m)?.apply()
     }
 }
