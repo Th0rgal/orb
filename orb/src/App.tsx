@@ -3278,6 +3278,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // A follow-up sent to a stopped mission: hide the stop notice until Core
   // reports a change (its updated_at moves), then normal failure display resumes.
   const [sentOverStop, setSentOverStop] = createSignal<string | null>(null);
+  // A rejected send changed nothing: show the stop notice again.
+  createEffect(() => { if (sendError()) setSentOverStop(null); });
   const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     setSentOverStop(mission()?.updated_at ?? null);
     const attemptId = explicitId ?? sendingIds.shift() ?? crypto.randomUUID();
