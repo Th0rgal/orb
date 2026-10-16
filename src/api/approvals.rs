@@ -478,10 +478,10 @@ async fn describe(
                     .iter()
                     .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
                 {
-                    let name = project_names(state, std::slice::from_ref(id))
+                    let name = project_names(state, &[id.trim().to_string()])
                         .await
                         .join("");
-                    list.push(format!("{} → {name}", quoted(slug)));
+                    list.push(format!("{} → {name}", quoted(slug.trim())));
                 }
                 if list.is_empty() {
                     changes.push("REMOVE all project bindings".to_string());
