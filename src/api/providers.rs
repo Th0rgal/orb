@@ -2132,6 +2132,9 @@ pub async fn node_antigravity_models(
             "Node credential unavailable".into(),
         )
     })?;
+    if let Err(error) = crate::api::antigravity_native::sync_node(&state, &node_id).await {
+        tracing::warn!(node = %node_id, "Antigravity sign-in not pushed: {error}");
+    }
     crate::remote_node::RemoteNodeClient::default()
         .antigravity_models(node, &token)
         .await
@@ -2412,6 +2415,9 @@ async fn discover_workspace_antigravity_models(
 ) -> Result<Vec<(String, String)>, String> {
     use tokio::io::AsyncReadExt;
     let cwd = crate::workspace::configured_project_dir(&workspace, work_dir);
+    crate::api::antigravity_native::install_in_home(
+        &crate::api::runners::antigravity::native_home(&workspace),
+    );
     let exec = crate::workspace_exec::WorkspaceExec::new(workspace);
     let mut child = exec
         .spawn_streaming(&cwd, cli, &["models".into()], Default::default())

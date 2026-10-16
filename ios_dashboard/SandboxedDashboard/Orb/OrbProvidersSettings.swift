@@ -239,6 +239,7 @@ struct OrbProviderQuota: View {
         if value["zai_5h_used_percent"] == .null && value["zai_weekly_used_percent"] == .null { add("Tokens", "zai_tokens_percentage") }
         add("5h", "muse_5h_used_percent"); add("Weekly", "muse_weekly_used_percent")
         add("Monthly", "mistral_monthly_used_percent")
+        for window in value["antigravity_windows"].items { if let percent = window["used_percent"].number, percent.isFinite { result.append((window["label"].text, min(1, max(0, percent / 100)))) } }
         return result
     }
     var body: some View {

@@ -71,6 +71,32 @@ impl RemoteNodeClient {
             .map_err(transport_error)
     }
 
+    /// Hand the node the Core's Antigravity login. `Ok(false)` when the node
+    /// predates the endpoint (404) or keeps its own sign-in (409).
+    pub async fn push_antigravity_credential(
+        &self,
+        node: &RemoteNodeConfig,
+        token: &str,
+        credential: &crate::antigravity_auth::Credential,
+    ) -> Result<bool, RemoteNodeError> {
+        let response = self
+            .http
+            .put(format!("{}/managed-auth/antigravity", node.base_url))
+            .bearer_auth(token)
+            .json(credential)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        match response.status().as_u16() {
+            200..=299 => Ok(true),
+            404 | 405 | 409 => Ok(false),
+            status => Err(RemoteNodeError::Rejected {
+                status,
+                body: response.text().await.unwrap_or_default(),
+            }),
+        }
+    }
+
     pub async fn heartbeat(
         &self,
         node: &RemoteNodeConfig,

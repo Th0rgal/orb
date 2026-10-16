@@ -655,6 +655,11 @@ async fn validate_destination(
             if !state.config.remote_nodes.enabled {
                 return Err(conflict("Remote nodes are disabled"));
             }
+            if backend == "antigravity" {
+                if let Err(error) = crate::api::antigravity_native::sync_node(state, id).await {
+                    tracing::warn!(node = %id, "Antigravity sign-in not pushed: {error}");
+                }
+            }
             let c = node_transfer_capabilities(state, id).await?;
             if !c["harnesses"]
                 .as_array()

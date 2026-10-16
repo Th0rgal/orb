@@ -1040,7 +1040,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onUsage?: (usage: Pr
           </div>
           <div class="s-row-desc">
             <span class={`p-st ${stClass()}`}>{stLabel()}</span>
-            <Show when={a.provider_type === "antigravity"}><span class="p-dot">·</span><span>Subscription account</span></Show>
+            <Show when={a.provider_type === "antigravity"}><span class="p-dot">·</span><span>{p.usage?.antigravity_plan || "Subscription account"}</span></Show>
             <Show when={a.provider_type === "google"}><span class="p-dot">·</span><span>{a.has_api_key && !a.has_oauth ? "API key" : "Model routing"}</span></Show>
             <Show when={p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan}>
               <span class="p-dot">·</span><span>{p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan} plan</span>

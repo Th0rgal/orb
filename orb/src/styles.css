@@ -955,10 +955,12 @@ button.under-model { color: inherit; }
 .p-native h4 { margin: 0 0 4px; color: var(--fg-2); font-size: 12.5px; font-weight: 500; }
 .p-native > .s-row-desc { margin: 0 0 10px; max-width: 64ch; }
 .p-native-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
-.p-native-machine { display: flex; align-items: center; gap: 10px; color: var(--fg-3); font-size: 12px; }
-.p-native-machine .s-input { width: min(220px, 40vw); margin: 0; }
 .p-native-controls > .s-row-desc { margin: 0; }
 .p-native-controls > .s-btn { margin-left: auto; }
+.p-native-failed { margin: 6px 0 0; padding: 0; list-style: none; color: var(--fg-3); font-size: 12px; }
+.p-native-failed li { display: flex; align-items: center; gap: 8px; }
+.p-native-retry { padding: 0; color: var(--fg-2); font-size: 12px; text-decoration: underline; }
+.p-native-retry:hover { color: var(--fg); }
 .p-native-models-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 4px 0; color: var(--fg-3); font-size: 12px; }
 .p-native-models-toggle:hover { color: var(--fg); }
 .p-native-models { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 6px 20px; max-height: 200px; overflow-y: auto; margin: 8px 0 0; padding: 0; list-style: none; color: var(--fg-2); font-size: 12px; line-height: 18px; }
@@ -2490,7 +2492,8 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-composer-dock { margin:0 16px 12px; }
 .btw-panel .btw-composer-dock form { margin-left:0; margin-right:0; }
 .btw-sidebar .btw-panel header { display:none; }
-.btw-sidebar .btw-thread { padding-top:max(12px, var(--tb-h, 35px)); -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 14px); mask-image:linear-gradient(to bottom, transparent 0, #000 14px); }
+/* Same soft fade as the main transcript above its composer; padding keeps the last line clear of it. */
+.btw-sidebar .btw-thread { padding-top:max(12px, var(--tb-h, 35px)); padding-bottom:28px; -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 28px), transparent 100%); mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 28px), transparent 100%); }
 .btw-sidebar .btw-composer-dock { margin:0 24px; padding-bottom:max(16px, calc(var(--composer-bottom-space, 44px) - 28px)); }
 @media(max-width:720px) { .btw-sidebar .btw-composer-dock { margin-left:16px; margin-right:16px; } }
 @media(max-width:1150px) {

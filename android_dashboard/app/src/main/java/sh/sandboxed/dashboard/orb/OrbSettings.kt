@@ -599,6 +599,10 @@ private fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> {
     add("5h", "muse_5h_used_percent")
     add("Weekly", "muse_weekly_used_percent")
     add("Monthly", "mistral_monthly_used_percent")
+    for (w in OrbJSON.dictList(detail["antigravity_windows"])) {
+        val pct = OrbJSON.double(w, "used_percent") ?: continue
+        if (pct.isFinite()) result.add((OrbJSON.str(w, "label") ?: "Window") to (pct / 100.0).coerceIn(0.0, 1.0))
+    }
     return result
 }
 

@@ -4,8 +4,26 @@ Sandboxed.sh and Orb run Google's native `agy` CLI with backend ID
 `antigravity`. It replaces the retired Gemini CLI harness and does not route
 through an API-key proxy. Historical Gemini CLI session IDs cannot be resumed
 with Antigravity. Install the official CLI from
-https://antigravity.google/docs/cli/install/ and sign in by running `agy`
-as the account that executes missions.
+https://antigravity.google/docs/cli/install/ on each machine.
+
+## One Google sign-in
+
+Connect **Google Antigravity** once in Providers. That login (stored by
+CLIProxyAPI for model routing) is also the login of every native run: both use
+the same Google OAuth client, so Core copies it into the native CLI file
+`$HOME/.gemini/antigravity-cli/antigravity-oauth-token` before `agy` starts in
+a Core workspace, and pushes it to a node over the node's authenticated
+`PUT /managed-auth/antigravity` before model discovery, transfer, or dispatch.
+The refresh token travels with it, so `agy` refreshes long runs itself. A token
+the CLI already refreshed for the same login is kept; a different login
+replaces it. With no Antigravity login connected, an existing `agy` sign-in on
+the machine is left alone.
+
+The Providers card shows the Google plan (`paidTier`, e.g. Google AI Ultra) and
+one quota bar per model family from Cloud Code `retrieveUserQuota`, each with
+its reported reset. Google sets the window length per plan (5 hours, weekly…);
+it is read from the reset time, never hard-coded. Reading the quota costs no
+request.
 
 Run `agy models` to see the signed-in account's available model IDs. Orb's
 local agent scan and Core's model endpoint use that command rather than a
@@ -15,11 +33,11 @@ with CLI 1.2.16, Gemini 4 Argon was reported as `agy-demo`.
 
 ## Remote nodes
 
-Install `agy` on the node's service PATH, then run it interactively as the
-`sandboxed-node` service user and complete Google's native sign-in. Keep OAuth
-codes and tokens out of mission messages, repositories, and deployment logs.
-
-Configure the node service with:
+Install `agy` on the node's service PATH. No sign-in on the node is needed:
+the Core's login lands in `<work root>/managed-auth/antigravity` (mode 0600),
+or in `SANDBOXED_NODE_ANTIGRAVITY_HOME` when set. To keep a node on its own
+`agy` sign-in instead, set `SANDBOXED_NODE_ANTIGRAVITY_LOCAL_ONLY=1`, run `agy`
+interactively as the `sandboxed-node` service user, and configure:
 
 ```ini
 SANDBOXED_NODE_ANTIGRAVITY_HOME=/var/lib/sandboxed-node/.gemini/antigravity-cli
@@ -36,7 +54,8 @@ Jobs retain their isolated HOME. The node binds only
 `$HOME/.gemini/antigravity-cli` to the operator-configured profile. Existing
 workspace symlinks or conflicting destinations are rejected. The profile holds
 both native authentication and conversations; it must stay on the same node
-for continuation. No credential value travels in a Core job payload.
+for continuation. No credential value travels in a Core job payload or the
+node job database.
 
 Upgrade both `sandboxed-node` and its `sandboxed-mcp` companion before enabling
 this backend. Existing production deployment and draining rules apply.

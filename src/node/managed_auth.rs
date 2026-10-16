@@ -41,6 +41,8 @@ pub const GROK_AUTH_FILE: &str = "auth.json";
 pub struct ManagedAuth {
     grok_home: Option<PathBuf>,
     antigravity_home: Option<PathBuf>,
+    /// The Core may replace the Antigravity login with its routing login.
+    antigravity_core_sync: bool,
 }
 
 impl ManagedAuth {
@@ -76,6 +78,7 @@ impl ManagedAuth {
         Self {
             grok_home,
             antigravity_home: None,
+            antigravity_core_sync: false,
         }
     }
 
@@ -84,6 +87,38 @@ impl ManagedAuth {
         Self {
             grok_home: Some(path.into()),
             antigravity_home: None,
+            antigravity_core_sync: false,
+        }
+    }
+
+    /// Accept the Core's Antigravity login (one Google sign-in for routing
+    /// and native runs). Without `SANDBOXED_NODE_ANTIGRAVITY_HOME` the login
+    /// lives in `default_home`, a private directory under the node work root.
+    /// `SANDBOXED_NODE_ANTIGRAVITY_LOCAL_ONLY=1` keeps the node's own sign-in.
+    pub fn with_core_antigravity(mut self, default_home: PathBuf) -> Self {
+        let local_only = std::env::var("SANDBOXED_NODE_ANTIGRAVITY_LOCAL_ONLY")
+            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+        self.antigravity_core_sync = !local_only;
+        if self.antigravity_home.is_none() && !local_only {
+            self.antigravity_home = Some(default_home);
+        }
+        self
+    }
+
+    pub fn accepts_core_antigravity(&self) -> bool {
+        self.antigravity_core_sync && self.antigravity_home.is_some()
+    }
+
+    /// Store the Core's Antigravity login in this node's profile.
+    pub fn install_antigravity(
+        &self,
+        credential: &crate::antigravity_auth::Credential,
+    ) -> Result<bool, String> {
+        match &self.antigravity_home {
+            Some(home) if self.accepts_core_antigravity() => {
+                crate::antigravity_auth::install(home, credential)
+            }
+            _ => Err("This node keeps its own Antigravity sign-in".into()),
         }
     }
 
@@ -135,7 +170,7 @@ impl ManagedAuth {
                         .as_ref()
                         .is_some_and(|p| private_file_readable(&p.join("antigravity-oauth-token")))
                     {
-                        return Err("Antigravity requires SANDBOXED_NODE_ANTIGRAVITY_HOME pointing to the execution user's native CLI profile with a private OAuth login; sign in with agy".into());
+                        return Err("Antigravity requires SANDBOXED_NODE_ANTIGRAVITY_HOME pointing to the execution user's native CLI profile with a private OAuth login; connect Google Antigravity in Core or sign in with agy".into());
                     }
                 }
                 other => {
@@ -239,6 +274,32 @@ mod tests {
             .unwrap_err()
             .contains("unknown"));
         assert!(!auth.advertised().iter().any(|profile| profile == "gemini"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn core_antigravity_login_makes_the_profile_ready_unless_local_only() {
+        let root = tempfile::tempdir().unwrap();
+        let credential = crate::antigravity_auth::Credential {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: 1_800_000_000_000,
+        };
+        let synced = ManagedAuth {
+            antigravity_home: Some(root.path().join("managed-auth/antigravity")),
+            antigravity_core_sync: true,
+            ..Default::default()
+        };
+        assert!(synced.advertised().is_empty());
+        assert!(synced.install_antigravity(&credential).unwrap());
+        assert_eq!(synced.advertised(), vec!["antigravity".to_string()]);
+        let local = ManagedAuth {
+            antigravity_home: Some(root.path().join("local")),
+            ..Default::default()
+        };
+        assert!(!local.accepts_core_antigravity());
+        assert!(local.install_antigravity(&credential).is_err());
+        assert!(!root.path().join("local").exists());
     }
 
     #[test]

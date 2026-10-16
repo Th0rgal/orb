@@ -31,6 +31,7 @@ export function codingPlanWindows(u: ProviderUsage) {
     add("5h", u.muse_5h_used_percent, u.muse_5h_reset);
     add("Weekly", u.muse_weekly_used_percent, u.muse_weekly_reset);
   }
+  if (u.provider_type === "antigravity") for (const w of u.antigravity_windows ?? []) add(w.label, w.used_percent, w.reset_at);
   if (u.provider_type === "mistral") add("Monthly", u.mistral_monthly_used_percent, u.mistral_monthly_reset);
   if (u.provider_type === "zai") {
     add("5h", u.zai_5h_used_percent, u.zai_5h_reset);
