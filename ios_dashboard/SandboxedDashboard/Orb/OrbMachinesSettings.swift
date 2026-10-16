@@ -8,9 +8,13 @@ struct OrbMachinesSettings: View {
     @State private var loading = false
     @State private var fleetError = ""
     @State private var busy = false
+    @State private var computers: [OrbJSON] = []
+    @State private var computersReady = false
+    @State private var startedMission: String?
     var body: some View {
         List {
             OrbSettingsError(message: fleetError)
+            OrbComputersSection(computers: computers, ready: computersReady) { startedMission = $0 }
             Section("Fleet") {
                 if loading && nodes.isEmpty { ProgressView() }
                 if fleetReady && nodes.isEmpty { Text("No remote nodes registered.").foregroundStyle(.secondary) }
@@ -37,6 +41,7 @@ struct OrbMachinesSettings: View {
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Machines").navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $startedMission) { OrbConversation(missionID: $0, project: "", folder: "") }
         .refreshable { await load() }
         .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.disabled(loading) }
         .task {
@@ -56,6 +61,10 @@ struct OrbMachinesSettings: View {
     private func load() async {
         guard !loading, client.current else { return }; loading = true
         defer { loading = false }
+        // Computers are independent of the fleet: one failing never hides the other.
+        if let value = try? await client.call("/api/control/client-computers") {
+            computers = value["computers"].items; computersReady = true
+        }
         do {
             let value = try await client.call("/api/remote-nodes")
             nodes = value["nodes"].items; fleetReady = true; fleetError = ""
