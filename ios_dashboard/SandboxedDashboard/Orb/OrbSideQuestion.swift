@@ -61,8 +61,13 @@ struct OrbSideQuestionSheet: View {
     @FocusState private var focused: Bool
     private static let live: Set<String> = ["active", "running", "pending", "queued", "starting", "resuming", "waiting_background", "paused"]
 
+    /// Turns from earlier side sessions of this conversation (any device).
+    @State private var earlier: [(role: String, text: String)] = []
+    @State private var earlierLoaded = false
+
     private var running: Bool { Self.live.contains(side["status"].text) }
-    private var exchanges: [(role: String, text: String)] {
+    private var exchanges: [(role: String, text: String)] { earlier + current }
+    private var current: [(role: String, text: String)] {
         side["history"].items.compactMap { h in
             let role = h["role"].text
             guard role == "user" || role == "assistant" else { return nil }
@@ -153,10 +158,71 @@ struct OrbSideQuestionSheet: View {
 
     private func reset() {
         UserDefaults.standard.removeObject(forKey: OrbBtwConfig.sessionKey(parentID))
-        sideID = nil; side = .null; error = ""
+        sideID = nil; side = .null; error = ""; earlier = []; earlierLoaded = true
+    }
+
+    /// Same rules as Orb desktop (`reconcileBtwServerHistory`): every side
+    /// mission tagged with this conversation, oldest first, rebuilt from events.
+    static func question(_ content: String) -> String {
+        var text = content
+        if let range = text.range(of: "\nCurrent request:\n", options: .backwards) { text = String(text[range.upperBound...]) }
+        let lines = text.components(separatedBy: "\n")
+        let kept = lines.reversed().drop(while: { $0.hasPrefix("Attachment: ") || $0.trimmingCharacters(in: .whitespaces).isEmpty }).reversed()
+        return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func synthetic(_ text: String) -> Bool {
+        text.range(of: #"^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} (?:on node '[^']+' )?(?:finished with(?:out assistant text| state)|reached state) "#, options: .regularExpression) != nil
+            || text.hasPrefix("Native Codex goal stopped with status ")
+    }
+
+    private func loadEarlier() async {
+        guard !earlierLoaded else { return }
+        let tag = "btw-parent:\(parentID)"
+        guard let rows = try? await OrbCore.shared.call("/api/control/missions?tag=\(OrbCore.escape(tag))&all=true&limit=50") else { return }
+        let list = (rows["missions"].items.isEmpty ? rows.items : rows["missions"].items)
+            .filter { m in
+                let tags = m["tags"].items.map(\.text)
+                return tags.contains(tag) && !tags.contains("superseded")
+            }
+            .sorted { $0["created_at"].text < $1["created_at"].text }
+        // Continue the newest session when this device has none yet.
+        if sideID == nil, let latest = list.last {
+            sideID = latest["id"].text
+            UserDefaults.standard.set(sideID, forKey: OrbBtwConfig.sessionKey(parentID))
+        }
+        var turns: [(role: String, text: String)] = []
+        for m in list where m["id"].text != sideID {
+            guard let events = try? await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(m["id"].text))/events") else { continue }
+            // Like Orb desktop: only answered turns, one entry per question.
+            var question = ""
+            var answers: [String] = []
+            func flush() {
+                let answer = answers.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !question.isEmpty && !answer.isEmpty { turns.append(("user", question)); turns.append(("assistant", answer)) }
+                question = ""; answers = []
+            }
+            for e in events.items.sorted(by: { ($0["sequence"].doubleValue ?? 0) < ($1["sequence"].doubleValue ?? 0) }) {
+                let content = e["content"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                switch e["event_type"].text {
+                case "user_message":
+                    flush()
+                    question = Self.question(content)
+                case "assistant_message", "assistant_message_canonical":
+                    if !content.isEmpty, answers.last != content, !Self.synthetic(content) { answers.append(content) }
+                default: break
+                }
+            }
+            flush()
+        }
+        earlier = turns
+        earlierLoaded = true
+        // Show the history instead of covering it with the keyboard.
+        if !turns.isEmpty && question.isEmpty { focused = false }
     }
 
     private func load() async throws {
+        await loadEarlier()
         guard let id = sideID else { return }
         do {
             side = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))")
