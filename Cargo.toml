@@ -67,6 +67,7 @@ sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"
 hex = "0.4"
+ring = "0.17"
 
 # Remote console / file manager
 base64 = "0.22"

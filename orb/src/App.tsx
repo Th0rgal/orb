@@ -1,4 +1,4 @@
-import { deliverAssistantText, flushClientLink } from "./clientLink";
+import { deliverAssistantText, flushClientLink, connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
 import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
 import type {CodexServiceTier} from './api';
 import { Picker } from "./Picker";
@@ -71,6 +71,8 @@ import { ConversationSkeleton, DelayedTranscriptSkeleton } from "./Skeleton";
 import { visibleTranscript } from "./transcriptModel";
 import { mergeById, pollWhileVisible } from "./poll";
 import { getSecretBroker } from "./bitwardenApi";
+import { syncSecretRequestNotices } from "./secretRequestNotices";
+import { listApprovalDevices, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 import { VoiceButton, ensureVoiceProbe, voiceAvailable } from "./VoiceButton";
@@ -1752,20 +1754,30 @@ export default function App() {
     }
     void refreshMissions();
   };
-  const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number) => {
-    const selectedCyber = draftCyber();
+  /** `remote`: a start requested from another device over the client link.
+   * It never reads or clears this window's draft and never navigates. */
+  const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number, remote?: { key: string; cwd?: string | null }) => {
+    const selectedCyber = remote ? "standard" : draftCyber();
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
     if (pick.backend === "codex") await requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true);
     const row = await localAgentForLaunch(pick.backend);
     if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Local agents. Your draft is kept.");
-    const plan = await materializeMentions(projectSlug, prompt, attachChips());
-    const root = workingDirectory().trim() ? await localDirectory(workingDirectory()) : await localWorkspace(projectSlug);
+    const plan = await materializeMentions(projectSlug, prompt, remote ? [] : attachChips());
+    const chosenDirectory = remote ? (remote.cwd ?? "") : workingDirectory();
+    const root = chosenDirectory.trim() ? await localDirectory(chosenDirectory) : await localWorkspace(projectSlug);
     if (plan.files.length) await writeLocalFiles(root, plan.files);
     const imagePaths = await stageLocalImages(root, images);
     const sent = imagePrompt(bindWorkspace(plan.prompt, root), imagePaths, images);
     const effort = normalizeEffort(pick.effort, pick.backend);
     const body = { title, prompt: imagePrompt(typed, imagePaths, images), project: projectSlug, tags: folderTags(projectSlug), backend: pick.backend, model_override: pick.model, placement: "client" as const, working_directory: root, ...(effort ? { model_effort: effort } : {}) };
     const signature = JSON.stringify({...body, cyber_access:selectedCyber});
+    if (remote) {
+      // The request id makes a retried remote start idempotent.
+      const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:remote.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
+      setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
+      void refreshMissions();
+      return m.id;
+    }
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
     const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
@@ -1776,7 +1788,36 @@ export default function App() {
     setMissions(prev=>[m,...prev.filter(old=>old.id!==m.id)]);
     if (selected() === null && navigationVersion === launchNavigation) open(`m:${m.id}`);
     void refreshMissions();
+    return m.id;
   };
+
+  // Remote start: another device asked this computer, over the client link,
+  // to begin a mission. It runs exactly like a local start.
+  const startFromRemote = async (f: RemoteStart) => {
+    const choice = harnessChoices("local").find(c => c.backend.id === f.backend);
+    if (!choice) throw new Error(`${f.backend} is not available on this computer.`);
+    const model = f.model_override && choice.models.some(m => m.value === f.model_override) ? f.model_override : choice.models[0]?.value;
+    if (!model) throw new Error(`No model is available for ${f.backend} on this computer.`);
+    let projectSlug = f.project || DEFAULT_PROJECT.slug;
+    if (projectSlug === DEFAULT_PROJECT.slug && !liveProjects().some(project => project.slug === projectSlug)) {
+      const project = await ensureDefaultProject();
+      setLiveProjects(current => [...current.filter(item => item.slug !== projectSlug), { ...DEFAULT_PROJECT, ...project } as ProjectSummary]);
+      bumpProjects();
+      projectSlug = DEFAULT_PROJECT.slug;
+    }
+    const goal = goalDraft(f.prompt);
+    if (goal.kind === "empty") throw new Error(EMPTY_GOAL_ERROR);
+    const prompt = goal.kind === "goal" ? goalPrompt(goal.objective) : f.prompt;
+    const pick: HarnessPick = { backend: f.backend, model, ...(f.model_effort ? { effort: f.model_effort } : {}), ...(f.backend === "codex" ? { service_tier: "standard" as const } : {}) };
+    return launchLocal(f.prompt, prompt, f.title?.trim() || missionTitle(f.prompt), projectSlug, pick, [], navigationVersion, { key: f.request_id, cwd: f.working_directory });
+  };
+  createEffect(on(isConnected, connected => {
+    if (connected) void connectClientLink((f) => startFromRemote(f));
+  }));
+  createEffect(() => {
+    if (!isConnected()) return;
+    void reportClientHarnesses(harnessChoices("local").map(c => ({ backend: c.backend.id, name: c.backend.name, models: c.models.map(m => ({ value: m.value, label: m.label })) })));
+  });
 
   const create = async (text: string, images: DraftImage[] = []) => {
     if (isConnected()) {
@@ -1936,11 +1977,17 @@ export default function App() {
     });
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000);
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000);
+    // Learn this Mac's approval device id so notifications sign approvals too.
+    if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(() => {});
     const stopSecretRequests = pollWhileVisible(
       () =>
         isConnected()
           ? getSecretBroker()
-              .then((b) => setSecretRequests(b.requests.filter((r) => r.status === "pending").length))
+              .then((b) => {
+                const pending = b.requests.filter((r) => r.status === "pending");
+                setSecretRequests(pending.length);
+                syncSecretRequestNotices(pending, () => open("bitwarden-settings"));
+              })
               .catch(() => {})
           : undefined,
       10000,
@@ -2096,18 +2143,6 @@ export default function App() {
           </Show>
         </nav>
         <div class="sb-foot">
-          <Show when={secretRequests() > 0}>
-            <button
-              class="sb-secret-requests"
-              title="Missions are waiting for secrets"
-              onClick={() => open("bitwarden-settings")}
-            >
-              <Ic.KeyIcon />
-              <span>
-                {secretRequests()} secret request{secretRequests() === 1 ? "" : "s"}
-              </span>
-            </button>
-          </Show>
           <button
             class={`gear-btn ${onSettings() ? "on" : ""}`}
             title="Settings (⌘,)"
@@ -2116,6 +2151,9 @@ export default function App() {
           >
             <Ic.GearIcon />
             <span>Settings</span>
+            <Show when={secretRequests() > 0}>
+              <span class="gear-count" title={`${secretRequests()} secret request(s) waiting`}>{secretRequests()}</span>
+            </Show>
           </button>
         </div>
         <div class="sb-resize" onPointerDown={startResize} />

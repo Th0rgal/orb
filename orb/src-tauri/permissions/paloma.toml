@@ -16,4 +16,4 @@ commands.allow = ["open_url", "reveal_download"]
 [[permission]]
 identifier = "allow-biometrics"
 description = "Check and request Touch ID / Mac password authentication"
-commands.allow = ["biometric_status", "biometric_authenticate"]
+commands.allow = ["biometric_status", "biometric_authenticate", "approval_key_status", "approval_key_create", "approval_sign"]

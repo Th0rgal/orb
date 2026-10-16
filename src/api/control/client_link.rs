@@ -15,6 +15,11 @@
 //!   `retry {mission_id, seq, reason}` (transient), `cursor {mission_id,
 //!   last_seq}`, `pong`.
 //!
+//! Remote start (core → client): `start {request_id, prompt, backend, …}`
+//! asks an online computer to begin a new local mission; it answers
+//! `start_result {request_id, ok, mission_id?, error?}`. `hello` may carry the
+//! computer's `name` and `harnesses`, refreshed later with `capabilities`.
+//!
 //! Sequences start at 1 per (mission, client) and must be contiguous. Each
 //! event carries the run receipt it belongs to; events from a superseded run
 //! are rejected so a stale runner cannot write into the current transcript.
@@ -221,10 +226,34 @@ impl ClientEvent {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Inbound {
-    Hello { client_id: String },
+    Hello {
+        client_id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        harnesses: serde_json::Value,
+    },
     Event(EventFrame),
-    Cursor { mission_id: Uuid },
+    Cursor {
+        mission_id: Uuid,
+    },
+    Capabilities {
+        #[serde(default)]
+        harnesses: serde_json::Value,
+    },
+    StartResult(StartResult),
     Ping,
+}
+
+/// A computer's answer to a remote `start`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StartResult {
+    pub request_id: Uuid,
+    pub ok: bool,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -273,6 +302,22 @@ struct Link {
     connected_at: String,
     last_seen_at: String,
     last_seen: Instant,
+    name: String,
+    /// Opaque harness list reported by Orb: `[{backend, name?, models?}]`.
+    harnesses: serde_json::Value,
+    /// Frames for this socket (remote start).
+    outbox: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+/// One known computer, as listed to other clients.
+#[derive(Debug, Clone, Serialize)]
+pub struct Computer {
+    pub client_id: String,
+    pub name: String,
+    pub online: bool,
+    pub connected_at: String,
+    pub last_seen_at: String,
+    pub harnesses: serde_json::Value,
 }
 
 type Registry = StdMutex<HashMap<(String, String), Link>>;
@@ -283,8 +328,19 @@ fn registry() -> &'static Registry {
 }
 
 /// Register a new socket for this install; it replaces any older one.
-fn register(user_id: &str, client_id: &str, conn_id: Uuid) {
+fn register(
+    user_id: &str,
+    client_id: &str,
+    conn_id: Uuid,
+    name: Option<String>,
+    harnesses: serde_json::Value,
+    outbox: tokio::sync::mpsc::UnboundedSender<String>,
+) {
     let now = crate::api::mission_store::now_string();
+    let name = name
+        .map(|n| n.trim().chars().take(80).collect::<String>())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Computer".into());
     registry().lock().expect("client link registry").insert(
         (user_id.into(), client_id.into()),
         Link {
@@ -292,8 +348,55 @@ fn register(user_id: &str, client_id: &str, conn_id: Uuid) {
             connected_at: now.clone(),
             last_seen_at: now,
             last_seen: Instant::now(),
+            name,
+            harnesses,
+            outbox,
         },
     );
+}
+
+fn set_harnesses(user_id: &str, client_id: &str, conn_id: Uuid, harnesses: serde_json::Value) {
+    let mut map = registry().lock().expect("client link registry");
+    if let Some(link) = map
+        .get_mut(&(user_id.to_string(), client_id.to_string()))
+        .filter(|link| link.conn_id == conn_id)
+    {
+        link.harnesses = harnesses;
+    }
+}
+
+/// Computers of this user with a live link, most recently seen first.
+pub fn computers(user_id: &str) -> Vec<Computer> {
+    let map = registry().lock().expect("client link registry");
+    let mut list: Vec<Computer> = map
+        .iter()
+        .filter(|((user, _), _)| user == user_id)
+        .map(|((_, client_id), l)| Computer {
+            client_id: client_id.clone(),
+            name: l.name.clone(),
+            online: l.last_seen.elapsed() < OFFLINE_AFTER,
+            connected_at: l.connected_at.clone(),
+            last_seen_at: l.last_seen_at.clone(),
+            harnesses: l.harnesses.clone(),
+        })
+        .collect();
+    list.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+    list
+}
+
+type PendingStarts = StdMutex<HashMap<Uuid, tokio::sync::oneshot::Sender<StartResult>>>;
+
+fn pending_starts() -> &'static PendingStarts {
+    static P: OnceLock<PendingStarts> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// Push `frame` to the computer's current socket, if it is online.
+fn push(user_id: &str, client_id: &str, frame: &serde_json::Value) -> bool {
+    let map = registry().lock().expect("client link registry");
+    map.get(&(user_id.to_string(), client_id.to_string()))
+        .filter(|l| l.last_seen.elapsed() < OFFLINE_AFTER)
+        .is_some_and(|l| l.outbox.send(frame.to_string()).is_ok())
 }
 
 /// Refresh liveness, but only for the current socket: a superseded socket
@@ -562,6 +665,98 @@ pub async fn mission_client_presence(
     ))
 }
 
+/// Computers of this user that hold (or recently held) a client link.
+pub async fn list_client_computers(
+    Extension(user): Extension<AuthUser>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "computers": computers(&user.id) }))
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RemoteStartRequest {
+    pub prompt: String,
+    pub backend: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub model_override: Option<String>,
+    #[serde(default)]
+    pub model_effort: Option<String>,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+}
+
+const START_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Start a new mission on one of the user's online computers. Orb runs it
+/// locally, exactly as if it had been started there, and streams it back
+/// over the link; this returns once that computer accepted or refused it.
+pub async fn start_on_client_computer(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(client_id): Path<String>,
+    Json(req): Json<RemoteStartRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if req.prompt.trim().is_empty() || req.backend.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "prompt and backend are required".into(),
+        ));
+    }
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    pending_starts()
+        .lock()
+        .expect("client link starts")
+        .insert(request_id, tx);
+    let mut frame = serde_json::to_value(&req).map_err(internal_error)?;
+    frame["type"] = "start".into();
+    frame["request_id"] = request_id.to_string().into();
+    if !push(&user.id, &client_id, &frame) {
+        pending_starts()
+            .lock()
+            .expect("client link starts")
+            .remove(&request_id);
+        return Err((
+            StatusCode::CONFLICT,
+            "That computer is offline. Open Orb on it and try again.".into(),
+        ));
+    }
+    let result = tokio::time::timeout(START_TIMEOUT, rx).await;
+    pending_starts()
+        .lock()
+        .expect("client link starts")
+        .remove(&request_id);
+    let result = match result {
+        Ok(Ok(result)) => result,
+        _ => {
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                "The computer did not confirm the start in time. Check it before retrying.".into(),
+            ))
+        }
+    };
+    let Some(mission_id) = result.mission_id.filter(|_| result.ok) else {
+        return Err((
+            StatusCode::CONFLICT,
+            result
+                .error
+                .unwrap_or_else(|| "The computer refused to start the mission".into()),
+        ));
+    };
+    let control = control_for_user(&state, &user).await;
+    let mission = control
+        .mission_store
+        .get_mission(mission_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(
+        serde_json::json!({ "mission_id": mission_id, "mission": mission }),
+    ))
+}
+
 async fn send(
     sender: &mut futures::stream::SplitSink<WebSocket, WsMessage>,
     reply: &Reply,
@@ -580,12 +775,18 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
     // The first frame must identify the computer.
     let client_id = match tokio::time::timeout(Duration::from_secs(10), receiver.next()).await {
         Ok(Some(Ok(WsMessage::Text(text)))) => match serde_json::from_str::<Inbound>(&text) {
-            Ok(Inbound::Hello { client_id }) if Uuid::parse_str(&client_id).is_ok() => client_id,
+            Ok(Inbound::Hello {
+                client_id,
+                name,
+                harnesses,
+            }) if Uuid::parse_str(&client_id).is_ok() => (client_id, name, harnesses),
             _ => return,
         },
         _ => return,
     };
-    register(&user.id, &client_id, conn_id);
+    let (client_id, name, harnesses) = client_id;
+    let (outbox, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<String>();
+    register(&user.id, &client_id, conn_id, name, harnesses, outbox);
     tracing::info!(%conn_id, user_id = %user.id, %client_id, "Client link opened");
     if !send(
         &mut sender,
@@ -608,6 +809,11 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
                     break;
                 }
                 if sender.send(WsMessage::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
+            Some(text) = outgoing.recv() => {
+                if sender.send(WsMessage::Text(text)).await.is_err() {
                     break;
                 }
             }
@@ -642,6 +848,20 @@ async fn link_loop(state: Arc<AppState>, user: AuthUser, socket: WebSocket) {
                             Err(reason) if reason == CLIENT_LINK_UNSUPPORTED => Reply::Rejected { mission_id, seq: 0, reason },
                             Err(reason) => Reply::Retry { mission_id, seq: 0, reason },
                         }
+                    }
+                    Ok(Inbound::Capabilities { harnesses }) => {
+                        set_harnesses(&user.id, &client_id, conn_id, harnesses);
+                        continue;
+                    }
+                    Ok(Inbound::StartResult(result)) => {
+                        if let Some(waiter) = pending_starts()
+                            .lock()
+                            .expect("client link starts")
+                            .remove(&result.request_id)
+                        {
+                            let _ = waiter.send(result);
+                        }
+                        continue;
                     }
                     Ok(Inbound::Ping) => Reply::Pong,
                     Ok(Inbound::Hello { .. }) | Err(_) => continue,
@@ -886,16 +1106,52 @@ mod tests {
         assert_eq!(after - before, 1, "only the tool call is stored");
     }
 
+    #[tokio::test]
+    async fn remote_start_reaches_the_current_socket_and_lists_the_computer() {
+        let (user, client) = ("start-user", Uuid::new_v4().to_string());
+        assert!(!push(user, &client, &serde_json::json!({})), "offline");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        register(
+            user,
+            &client,
+            Uuid::new_v4(),
+            Some("  Thomas's MacBook  ".into()),
+            serde_json::json!([{ "backend": "claudecode" }]),
+            tx,
+        );
+        let listed = computers(user);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Thomas's MacBook");
+        assert!(listed[0].online);
+        assert!(computers("someone-else").is_empty());
+        assert!(push(user, &client, &serde_json::json!({ "type": "start" })));
+        assert_eq!(rx.recv().await.unwrap(), r#"{"type":"start"}"#);
+    }
+
     #[test]
     fn presence_follows_the_current_socket_only() {
         let (user, client, old) = ("u", Uuid::new_v4().to_string(), Uuid::new_v4());
         assert!(!presence(user, &client).online);
-        register(user, &client, old);
+        register(
+            user,
+            &client,
+            old,
+            None,
+            serde_json::Value::Null,
+            tokio::sync::mpsc::unbounded_channel().0,
+        );
         assert!(presence(user, &client).online);
         // Reconnect overlap: the draining old socket must not reclaim the
         // registration, and its close must not evict the replacement.
         let new = Uuid::new_v4();
-        register(user, &client, new);
+        register(
+            user,
+            &client,
+            new,
+            None,
+            serde_json::Value::Null,
+            tokio::sync::mpsc::unbounded_channel().0,
+        );
         touch(user, &client, old);
         drop_link(user, &client, old);
         assert!(presence(user, &client).online);

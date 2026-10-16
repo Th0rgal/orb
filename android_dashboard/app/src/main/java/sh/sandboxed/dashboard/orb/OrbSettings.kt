@@ -84,6 +84,7 @@ enum class OrbSettingsRoute {
     Machines,
     Inbox,
     Secrets,
+    Bitwarden,
     Dictation
 }
 
@@ -205,7 +206,7 @@ fun OrbSettingsSheet(
                                 subtitle = if (pendingSecrets > 0) {
                                     "$pendingSecrets access request${if (pendingSecrets == 1) "" else "s"} waiting"
                                 } else {
-                                    "Bitwarden"
+                                    "Mission requests and approval devices"
                                 },
                                 onClick = { route = OrbSettingsRoute.Secrets }
                             )
@@ -214,9 +215,19 @@ fun OrbSettingsSheet(
                                 modifier = Modifier.padding(start = 52.dp)
                             )
                             OrbSettingsRow(
+                                icon = Icons.Default.Key,
+                                title = "Bitwarden vault",
+                                subtitle = "Token, default project, secrets, default access",
+                                onClick = { route = OrbSettingsRoute.Bitwarden }
+                            )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            OrbSettingsRow(
                                 icon = Icons.Default.Mic,
                                 title = "Dictation",
-                                subtitle = OrbDictationSettings.stored.ifEmpty { "" }.let {
+                                subtitle = OrbDictationSettings.stored.let {
                                     if (it.isEmpty()) "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})"
                                     else OrbDictationSettings.name(it)
                                 },
@@ -239,6 +250,12 @@ fun OrbSettingsSheet(
                         onBack = { route = OrbSettingsRoute.Root }
                     )
                 }
+                OrbSettingsRoute.Secrets -> {
+                    OrbSecretsSettingsPage(
+                        core = core,
+                        onBack = { route = OrbSettingsRoute.Root }
+                    )
+                }
                 OrbSettingsRoute.Machines -> {
                     OrbMachinesSettingsPage(
                         core = core,
@@ -250,10 +267,11 @@ fun OrbSettingsSheet(
                         onBack = { route = OrbSettingsRoute.Root }
                     )
                 }
-                OrbSettingsRoute.Secrets -> {
+                OrbSettingsRoute.Bitwarden -> {
                     OrbBitwardenSettingsPage(
                         core = core,
-                        onBack = { route = OrbSettingsRoute.Root }
+                        onBack = { route = OrbSettingsRoute.Root },
+                        onOpenRequests = { route = OrbSettingsRoute.Secrets }
                     )
                 }
                 OrbSettingsRoute.Dictation -> {
@@ -1641,8 +1659,16 @@ fun OrbMachinesSettingsPage(
     var isRefreshing by remember { mutableStateOf(false) }
     var errorBanner by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var computers by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
+    var computersReady by remember { mutableStateOf(false) }
 
     suspend fun loadMachines() {
+        // Computers are independent of the fleet: one failing never hides the other.
+        try {
+            computers = loadClientComputers(core)
+            computersReady = true
+        } catch (_: Throwable) {
+        }
         try {
             val remoteObj = core.fetchDict("/api/remote-nodes")
             nodes = OrbJSON.dictList(remoteObj["nodes"]).map { OrbRow(it) }
@@ -1764,6 +1790,8 @@ fun OrbMachinesSettingsPage(
                 errorBanner?.let { err ->
                     item { OrbNotice(title = err, log = core.lastErrorLog.value) }
                 }
+
+                item { OrbComputersBlock(core = core, computers = computers, ready = computersReady) }
 
                 // Section("Fleet") matching OrbMachinesSettings.swift
                 item {

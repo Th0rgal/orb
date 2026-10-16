@@ -1,3 +1,4 @@
+import CryptoKit
 import LocalAuthentication
 import SwiftUI
 import UIKit
@@ -193,6 +194,8 @@ struct OrbBitwardenSettings: View {
             OrbSettingsError(message: error)
 
             accessSection
+
+            devicesSection
 
             Section("Machine Account") {
                 HStack {
@@ -464,6 +467,72 @@ struct OrbBitwardenSettings: View {
         }
     }
 
+    @State private var devices: [OrbJSON] = []
+    @State private var approvalMode = ""
+    @State private var enrollmentCode = ""
+    @State private var enrolledHere = false
+
+    private func loadDevices() async {
+        guard let d = try? await client.call("/api/approvals/devices") else { return }
+        devices = d["devices"].items
+        approvalMode = d["mode"].text
+        let mine = OrbApprovalKey.publicKey
+        let match = devices.first { mine != nil && $0["public_key"].text == mine }
+        OrbApprovalKey.deviceId = match?["id"].text
+        enrolledHere = match != nil
+    }
+
+    private func enroll() async {
+        do {
+            let pub = try OrbApprovalKey.publicKey ?? OrbApprovalKey.create()
+            let device = try await client.call("/api/approvals/devices", method: "POST", body: .object([
+                "name": .string("Orb on \(UIDevice.current.name)"),
+                "platform": .string("ios"),
+                "public_key": .string(pub),
+                "enrollment_code": .string(enrollmentCode.trimmingCharacters(in: .whitespacesAndNewlines))
+            ]))
+            OrbApprovalKey.deviceId = device["id"].text
+            enrollmentCode = ""
+        } catch {
+            self.error = error.localizedDescription
+        }
+        await loadDevices()
+    }
+
+    @ViewBuilder
+    private var devicesSection: some View {
+        Section("Approval devices · \(approvalMode)") {
+            ForEach(devices, id: \.selfID) { d in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(d["name"].text + (d["public_key"].text == OrbApprovalKey.publicKey ? " (this iPhone)" : ""))
+                            .font(.subheadline)
+                        Text(d["platform"].text).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Remove", role: .destructive) {
+                        Task {
+                            do {
+                                _ = try await OrbApprovalKey.signedCall(
+                                    "/api/approvals/devices/\(d["id"].text)", method: "DELETE",
+                                    summary: "Remove approval device \(d["name"].text)")
+                            } catch { self.error = error.localizedDescription }
+                            await loadDevices()
+                        }
+                    }
+                    .font(.subheadline)
+                }
+            }
+            if !enrolledHere {
+                TextField("One-time code from the Core host", text: $enrollmentCode)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Enroll this iPhone (Face ID)") { Task { await enroll() } }
+                    .disabled(enrollmentCode.trimmingCharacters(in: .whitespaces).count < 8)
+            }
+        }
+    }
+
     // Browsing a project must not change any binding: bindings grant missions access.
     private func selectProject(_ projectId: String) async {
         await loadSecrets(projectId: projectId)
@@ -472,6 +541,7 @@ struct OrbBitwardenSettings: View {
     private func loadBroker() async {
         guard let snap = try? await client.call("/api/bitwarden/broker") else { return }
         requests = snap["requests"].items.filter { $0["status"].text == "pending" }
+        await loadDevices()
         grants = snap["grants"].items
     }
 
@@ -495,9 +565,9 @@ struct OrbBitwardenSettings: View {
             if let scope {
                 var body: [String: OrbJSON] = [:]
                 if !scope.isEmpty { body["scope"] = .string(scope) }
-                _ = try await client.call("/api/bitwarden/requests/\(id)/approve", method: "POST", body: .object(body))
+                _ = try await OrbApprovalKey.signedCall("/api/bitwarden/requests/\(id)/approve", method: "POST", body: .object(body), summary: "Approve: \(describe(r))")
             } else {
-                _ = try await client.call("/api/bitwarden/requests/\(id)/reject", method: "POST")
+                _ = try await OrbApprovalKey.signedCall("/api/bitwarden/requests/\(id)/reject", method: "POST", summary: "Decline: \(describe(r))")
             }
         } catch {
             self.error = error.localizedDescription
@@ -567,7 +637,7 @@ struct OrbBitwardenSettings: View {
         revealingIds.insert(id)
         defer { revealingIds.remove(id) }
         do {
-            let detail = try await client.call("/api/bitwarden/secrets/\(id)/reveal")
+            let detail = try await OrbApprovalKey.signedCall("/api/bitwarden/secrets/\(id)/reveal", summary: "Reveal a secret")
             revealedValues[id] = detail["value"].text
         } catch is CancellationError {
         } catch {
@@ -581,7 +651,7 @@ struct OrbBitwardenSettings: View {
             if let cached = revealedValues[id] {
                 val = cached
             } else {
-                let detail = try await client.call("/api/bitwarden/secrets/\(id)/reveal")
+                let detail = try await OrbApprovalKey.signedCall("/api/bitwarden/secrets/\(id)/reveal", summary: "Reveal a secret")
                 val = detail["value"].text
             }
             UIPasteboard.general.string = val
@@ -596,7 +666,7 @@ struct OrbBitwardenSettings: View {
 
     private func deleteSecret(id: String) async {
         do {
-            _ = try await client.call("/api/bitwarden/secrets/\(id)", method: "DELETE")
+            _ = try await OrbApprovalKey.signedCall("/api/bitwarden/secrets/\(id)", method: "DELETE", summary: "Delete a secret")
             secrets.removeAll { $0["id"].text == id }
             revealedValues.removeValue(forKey: id)
         } catch is CancellationError {
@@ -663,7 +733,8 @@ private struct OrbBitwardenTokenSheet: View {
         error = ""
         defer { saving = false }
         do {
-            _ = try await client.call(
+            _ = try await OrbApprovalKey.signedCall(
+                summary: "Change the Bitwarden connection",
                 "/api/bitwarden/config",
                 method: "PUT",
                 body: .object([
@@ -742,8 +813,11 @@ private struct OrbBitwardenSecretEditorSheet: View {
                     note = existing["note"].text
                     loadingValue = true
                     defer { loadingValue = false }
-                    if let detail = try? await client.call("/api/bitwarden/secrets/\(existing["id"].text)/reveal") {
+                    if let detail = try? await OrbApprovalKey.signedCall("/api/bitwarden/secrets/\(existing["id"].text)/reveal", summary: "Reveal \(existing["key"].text)") {
                         value = detail["value"].text
+                    } else {
+                        // Without the current value, saving would overwrite it with an empty one.
+                        dismiss()
                     }
                 }
             }
@@ -757,7 +831,8 @@ private struct OrbBitwardenSecretEditorSheet: View {
         let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             if let existing {
-                _ = try await client.call(
+                _ = try await OrbApprovalKey.signedCall(
+                    summary: "Edit \(trimmedKey)",
                     "/api/bitwarden/secrets/\(existing["id"].text)",
                     method: "PUT",
                     body: .object([
@@ -768,7 +843,8 @@ private struct OrbBitwardenSecretEditorSheet: View {
                     ])
                 )
             } else {
-                _ = try await client.call(
+                _ = try await OrbApprovalKey.signedCall(
+                    summary: "Create \(trimmedKey)",
                     "/api/bitwarden/projects/\(projectId)/secrets",
                     method: "POST",
                     body: .object([
@@ -790,4 +866,77 @@ private struct OrbBitwardenSecretEditorSheet: View {
 struct OrbEditingSecret: Identifiable {
     let secret: OrbJSON
     var id: String { secret["id"].text }
+}
+
+
+/// Device-signed approvals: Core accepts sensitive secret operations only with a
+/// signature from an enrolled device key. Here the key lives in the Secure
+/// Enclave, only works with the currently enrolled Face ID, and signs one
+/// request after a fresh Face ID check.
+@MainActor
+enum OrbApprovalKey {
+    private static var keyURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("approval-key.bin")
+    }
+    private static var deviceKey: String { "orb.approvalDevice.\(OrbCore.shared.endpoint)" }
+    static var deviceId: String? {
+        get { UserDefaults.standard.string(forKey: deviceKey) }
+        set { UserDefaults.standard.set(newValue, forKey: deviceKey) }
+    }
+
+    static var publicKey: String? {
+        guard let blob = try? Data(contentsOf: keyURL),
+              let key = try? SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob) else { return nil }
+        return key.publicKey.derRepresentation.base64EncodedString()
+    }
+
+    static func create() throws -> String {
+        var cfError: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet], &cfError
+        ) else { throw OrbHTTPError(status: 0, detail: "Secure Enclave access control unavailable") }
+        let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
+        try FileManager.default.createDirectory(at: keyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try key.dataRepresentation.write(to: keyURL, options: [.atomic, .completeFileProtection])
+        return key.publicKey.derRepresentation.base64EncodedString()
+    }
+
+    static func sign(_ payload: String, reason: String) async throws -> String {
+        let context = LAContext()
+        context.localizedCancelTitle = "Cancel"
+        // Core writes the summary into the signed payload: show that, not caller text.
+        let shown = payload.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? reason
+        _ = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: shown)
+        let blob = try Data(contentsOf: keyURL)
+        let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: context)
+        return try key.signature(for: Data(payload.utf8)).derRepresentation.base64EncodedString()
+    }
+
+    /// Send a protected request, signed when this phone is enrolled.
+    @MainActor
+    static func signedCall(summary: String, _ path: String, method: String = "GET", body: OrbJSON? = nil) async throws -> OrbJSON {
+        try await signedCall(path, method: method, body: body, summary: summary)
+    }
+
+    @MainActor
+    static func signedCall(_ path: String, method: String = "GET", body: OrbJSON? = nil, summary: String) async throws -> OrbJSON {
+        let raw = try body.map { try JSONEncoder().encode($0) }
+        var headers: [String: String] = [:]
+        if let device = deviceId, publicKey != nil {
+            let challenge = try await OrbCore.shared.call(
+                "/api/approvals/challenge",
+                method: "POST",
+                body: .object([
+                    "method": .string(method),
+                    "path": .string(path),
+                    "body": .string(raw.flatMap { String(data: $0, encoding: .utf8) } ?? ""),
+                    "summary": .string(summary)
+                ])
+            )
+            let signature = try await sign(challenge["payload"].text, reason: summary)
+            headers["X-Paloma-Approval"] = "\(challenge["challenge_id"].text).\(device).\(signature)"
+        }
+        return try await OrbCore.shared.call(path, method: method, rawBody: raw, headers: headers)
+    }
 }

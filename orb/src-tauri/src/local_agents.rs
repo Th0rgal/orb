@@ -3498,7 +3498,7 @@ mod tests {
         assert_eq!(session.lock().unwrap().as_deref(), Some("thread"));
         let sent = String::from_utf8(sent).unwrap();
         assert!(!sent.contains("turn/start"));
-        assert!(!sent.contains("gpt-daybreak-blue-latest"));
+        assert!(!sent.contains("gpt-daybreak-"));
     }
 
     #[test]

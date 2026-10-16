@@ -145,12 +145,12 @@ private fun authenticateOwner(context: Context, onResult: (Boolean, String?) -> 
     )
 }
 
-private val ttlChoices = listOf(1 to "1 h", 24 to "24 h", 168 to "7 d", 720 to "30 d")
 
 @Composable
 fun OrbBitwardenSettingsPage(
     core: OrbCore,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenRequests: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -165,12 +165,10 @@ fun OrbBitwardenSettingsPage(
     var projects by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var secrets by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
-    var requests by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
-    var grants by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
+    val pendingCount by core.pendingSecretRequests.collectAsState()
     val revealed = remember { mutableStateMapOf<String, String>() }
     var filter by remember { mutableStateOf("") }
     var tokenDraft by remember { mutableStateOf("") }
-    var ttlHours by remember { mutableStateOf(24) }
     var busy by remember { mutableStateOf(false) }
 
     var editorTarget by remember { mutableStateOf<OrbRow?>(null) }
@@ -190,14 +188,6 @@ fun OrbBitwardenSettingsPage(
         authenticateOwner(context) { ok, message ->
             unlocked = ok
             if (!ok) authError = message ?: "Authentication failed"
-        }
-    }
-
-    suspend fun loadBroker() {
-        runCatching { OrbBitwardenApi.broker(core) }.onSuccess { b ->
-            requests = OrbBitwardenApi.pending(b)
-            grants = OrbJSON.dictList(b["grants"]).map { OrbRow(it) }
-            core.updatePendingSecretRequests(requests.size)
         }
     }
 
@@ -226,7 +216,7 @@ fun OrbBitwardenSettingsPage(
         } catch (e: Throwable) {
             error = e.message
         }
-        loadBroker()
+        core.refreshSecretRequests()
     }
 
     fun act(block: suspend () -> Unit) {
@@ -262,10 +252,6 @@ fun OrbBitwardenSettingsPage(
     LaunchedEffect(unlocked) {
         if (!unlocked) return@LaunchedEffect
         loadAll()
-        while (isActive) {
-            delay(10_000)
-            loadBroker()
-        }
     }
     LaunchedEffect(notice) {
         if (notice != null) {
@@ -326,69 +312,16 @@ fun OrbBitwardenSettingsPage(
         }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.weight(1f)) {
-            if (requests.isNotEmpty() || grants.isNotEmpty()) {
+            if (pendingCount > 0) {
                 item(key = "access") {
+                    // Approvals are device-signed on the Secrets page (OrbApprovals); this vault page has no approval path.
                     OrbBwSection("MISSION ACCESS") {
-                        if (requests.isNotEmpty()) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("Grant for", color = OrbStyle.textMuted, fontSize = 12.sp)
-                                ttlChoices.forEach { (hours, label) ->
-                                    OrbBwChip(label, selected = ttlHours == hours) { ttlHours = hours }
-                                }
-                            }
-                        }
-                        requests.forEach { req ->
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(OrbBitwardenApi.describe(req, ::projectName), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                val origin = listOfNotNull(req.str("mission_title"), req.str("paloma_project")).joinToString(" · ")
-                                if (origin.isNotEmpty()) Text(origin, color = OrbStyle.textMuted, fontSize = 12.sp)
-                                req.str("reason")?.let { Text(it, color = OrbStyle.textSecondary, fontSize = 12.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic) }
-                                fun approve(scopeValue: String) = act {
-                                    val body = mutableMapOf<String, Any?>()
-                                    if (req.str("kind") != "write") {
-                                        if (scopeValue.isNotEmpty()) body["scope"] = scopeValue
-                                        body["ttl_hours"] = ttlHours
-                                    }
-                                    core.request("${OrbBitwardenApi.BASE}/requests/${core.encodeComponent(req.id)}/approve", method = "POST", body = body)
-                                    loadBroker()
-                                }
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    if (req.str("kind") == "write") {
-                                        OrbBwPill("Approve", primary = true) { approve("") }
-                                    } else {
-                                        if (req.str("key") != null) OrbBwPill("Secret", primary = true) { approve("secret") }
-                                        if (req.str("project_id") != null) OrbBwPill("Project") { approve("project") }
-                                        OrbBwPill("All") { approve("all") }
-                                    }
-                                    OrbBwPill("Decline", destructive = true) {
-                                        act {
-                                            core.request("${OrbBitwardenApi.BASE}/requests/${core.encodeComponent(req.id)}/reject", method = "POST")
-                                            loadBroker()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        grants.forEach { grant ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(OrbBitwardenApi.describeGrant(grant, ::projectName), color = Color.White, fontSize = 13.sp)
-                                    Text(
-                                        listOfNotNull(grant.str("mission_title"), grant.str("expires_at")?.let { "until ${it.take(16).replace('T', ' ')}" }).joinToString(" · "),
-                                        color = OrbStyle.textMuted,
-                                        fontSize = 11.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                OrbBwPill("Revoke", destructive = true) {
-                                    act {
-                                        core.request("${OrbBitwardenApi.BASE}/grants/${core.encodeComponent(grant.id)}", method = "DELETE")
-                                        loadBroker()
-                                    }
-                                }
-                            }
-                        }
+                        Text(
+                            "$pendingCount request${if (pendingCount == 1) "" else "s"} waiting for a signed approval.",
+                            color = Color.White,
+                            fontSize = 13.sp
+                        )
+                        OrbBwPill("Open Secrets", primary = true) { onOpenRequests() }
                     }
                 }
             }
