@@ -109,7 +109,7 @@ private fun Context.findFragmentActivity(): FragmentActivity? {
     return null
 }
 
-/** Device-owner gate, like iOS `LAContext` with passcode fallback; unlocks if no lock is set. */
+/** Device-owner gate (biometric or device credential). Unlocks only in onAuthenticationSucceeded. */
 private fun authenticateOwner(context: Context, onResult: (Boolean, String?) -> Unit) {
     val activity = context.findFragmentActivity()
     val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
@@ -118,8 +118,9 @@ private fun authenticateOwner(context: Context, onResult: (Boolean, String?) -> 
         onResult(false, "Biometric prompt unavailable")
         return
     }
+    // Fail closed: without an enrolled biometric or device credential the page stays locked.
     if (BiometricManager.from(activity).canAuthenticate(authenticators) != BiometricManager.BIOMETRIC_SUCCESS) {
-        onResult(true, null)
+        onResult(false, "Set up a screen lock or biometric to use Secrets.")
         return
     }
     val prompt = BiometricPrompt(
@@ -229,7 +230,7 @@ fun OrbBitwardenSettingsPage(
     }
 
     fun act(block: suspend () -> Unit) {
-        if (busy) return
+        if (busy || !unlocked) return
         busy = true
         scope.launch {
             try {
@@ -243,6 +244,21 @@ fun OrbBitwardenSettingsPage(
     }
 
     LaunchedEffect(Unit) { unlock() }
+    // Never keep secrets unlocked across backgrounding.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                unlocked = false
+                revealed.clear()
+                editorOpen = false
+                editorValue = ""
+                tokenDraft = ""
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     LaunchedEffect(unlocked) {
         if (!unlocked) return@LaunchedEffect
         loadAll()
