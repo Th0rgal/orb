@@ -347,12 +347,15 @@ impl SecretBroker {
                     && r.key == request.key
                     && r.project_id == request.project_id
             }) {
-                existing.encrypted_value = request.encrypted_value.clone();
-                existing.value_sha256 = request.value_sha256.clone();
-                existing.note = request.note.clone();
-                let out = existing.clone();
-                self.save(&data).await;
-                return out;
+                // A pending request never changes after the operator may have
+                // seen it: the same value reuses it, a new value replaces it.
+                if existing.value_sha256 == request.value_sha256 && existing.note == request.note {
+                    return existing.clone();
+                }
+                existing.status = RequestStatus::Expired;
+                existing.resolved_at = Some(Utc::now());
+                existing.encrypted_value = None;
+                existing.error = Some("Superseded by a newer value from the mission".into());
             }
         }
         if request.kind == RequestKind::Read {
