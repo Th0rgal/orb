@@ -6206,6 +6206,15 @@ pub struct QueueQuery {
 
 /// Get the current message queue, including durable scheduled/capacity deferrals
 /// when requesting a mission. The control store is scoped to the authenticated user.
+const QUEUE_ACTOR_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+fn queue_unavailable() -> (StatusCode, String) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "failed to get queue".to_string(),
+    )
+}
+
 pub async fn get_queue(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -6218,12 +6227,22 @@ pub async fn get_queue(
         .send(ControlCommand::GetQueue { respond: tx })
         .await
         .map_err(session_unavailable)?;
-    let mut queue = rx.await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to get queue".to_string(),
-        )
-    })?;
+    // A busy actor can hold this read for longer than clients wait (Orb aborts
+    // at 30 s). A mission-scoped read is answered from the durable snapshot
+    // below, which the actor persists after every change; the live queue only
+    // adds entries enqueued since its last persist, so a short wait suffices.
+    let mut queue = if query.mission_id.is_some() {
+        match tokio::time::timeout(QUEUE_ACTOR_WAIT, rx).await {
+            Ok(Ok(queue)) => queue,
+            Ok(Err(_)) => return Err(queue_unavailable()),
+            Err(_) => {
+                tracing::debug!("control actor busy; answering queue read from durable snapshot");
+                Vec::new()
+            }
+        }
+    } else {
+        rx.await.map_err(|_| queue_unavailable())?
+    };
     queue.extend(
         remote_queue::waiting(&state.projects, Some(&user.id))
             .map_err(internal_error)?
