@@ -10,13 +10,17 @@ import { CheckIcon, CloseIcon, CopyIcon } from "./icons";
  * mission in the transcript, a panel that couldn't load, a form field) stay
  * inline with ErrorNotice.
  */
-export type ToastAction = { label: string; run: () => void; kbd?: string };
+export type ToastAction = { label: string; run: () => void; kbd?: string; primary?: boolean };
 export type Toast = {
   id: number;
   /** Toasts with the same key replace each other instead of stacking. */
   key: string;
   kind: "error" | "info";
   title: JSX.Element;
+  /** Leading glyph for info toasts; errors always show the alert icon. */
+  icon?: JSX.Element;
+  /** Extra class for a specialised layout (e.g. "secret"). */
+  variant?: string;
   message?: string;
   /** Extra technical text, shown under "Details". */
   details?: string;
@@ -147,10 +151,11 @@ function ToastItem(p: { toast: Toast }) {
   const copy = async () => {
     try { await copyText(t().copy ?? ""); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
   };
-  return <div class={`toast ${t().kind}`} role={t().kind === "error" ? "alert" : "status"} onMouseEnter={pause} onMouseLeave={resume} onFocusIn={pause} onFocusOut={resume}>
+  return <div class={`toast ${t().kind}${t().variant ? ` ${t().variant}` : ""}`} role={t().kind === "error" ? "alert" : "status"} onMouseEnter={pause} onMouseLeave={resume} onFocusIn={pause} onFocusOut={resume}>
     <Show when={t().kind === "error"}>
       <svg class="toast-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     </Show>
+    <Show when={t().kind !== "error" && t().icon}><span class="toast-glyph" aria-hidden="true">{t().icon}</span></Show>
     <div class="toast-body">
       <span class="toast-title">{t().title}</span>
       <Show when={t().message}><span class="toast-message">{t().message}</span></Show>
@@ -158,7 +163,7 @@ function ToastItem(p: { toast: Toast }) {
         <details class="toast-details"><summary>Details</summary><pre>{t().details}</pre></details>
       </Show>
     </div>
-    <For each={t().actions}>{a => <button type="button" class="toast-btn" onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}<Show when={a.kbd}><kbd>{a.kbd}</kbd></Show></button>}</For>
+    <For each={t().actions}>{a => <button type="button" class={a.primary ? "toast-btn primary" : "toast-btn"} onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}<Show when={a.kbd}><kbd>{a.kbd}</kbd></Show></button>}</For>
     <Show when={t().copy}>
       <button type="button" class="icon-btn toast-icon-btn" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}>
         <Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show>

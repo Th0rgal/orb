@@ -3404,6 +3404,14 @@ select.orb-select-native:disabled { cursor: default; }
 .toast-details pre { margin: 6px 0 0; max-height: 160px; overflow: auto; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; }
 .toast-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
 .toast-btn:hover { background: var(--overlay-hover); }
+.toast-btn.primary { background: var(--fg); color: var(--bg); }
+.toast-btn.primary:hover { background: var(--fg); opacity: .88; }
+.toast-glyph { flex: none; align-self: flex-start; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--bg-active); color: var(--fg-2); }
+.toast-sub { color: var(--fg-3); font-weight: 400; }
+.toast.secret .toast-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.toast.secret .toast-title strong { flex: none; white-space: nowrap; font: 500 12px/1.4 var(--mono); color: var(--fg); }
+.toast.secret .toast-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.toast.secret .toast-message { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .toast-btn kbd { display: inline-grid; place-items: center; min-width: 15px; height: 16px; padding: 0 3px; border-radius: 3px; color: var(--fg-3); font: 10px/1 var(--sans); }
 .toast-icon-btn { flex: none; width: 24px; height: 24px; align-self: flex-start; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
