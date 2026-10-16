@@ -54,7 +54,11 @@ data class OrbQuestion(
     val title: String,
     val prompt: String,
     val options: List<String>,
-    val kind: Kind
+    val kind: Kind,
+    /** Set for native interaction requests (`ui_native_request`) answered via /api/control/tool_result. */
+    val toolCallId: String? = null,
+    val toolName: String? = null,
+    val command: String? = null
 ) {
     enum class Kind {
         Permission,
@@ -87,6 +91,9 @@ object OrbQuestionExtractor {
         for (ev in tail.asReversed()) {
             val type = (ev.str("type", "event_type", "kind") ?: "").lowercase()
             val data = ev.dict("data") ?: ev.raw
+
+            // Native plan/permission requests (iOS OrbQuestion, Orb NativeInteraction).
+            nativeReviewRequest(ev, type)?.let { return it }
 
             if (type.contains("permission") || type.contains("approval") || OrbJSON.str(data, "permission", "approval_id") != null) {
                 val cmd = OrbJSON.str(data, "command", "tool", "name", "action") ?: "Action"
@@ -153,6 +160,30 @@ object OrbQuestionExtractor {
             }
         }
         return null
+    }
+
+    fun nativeReviewRequest(ev: OrbRow, type: String): OrbQuestion? {
+        if (type != "tool_call") return null
+        val toolName = ev.str("tool_name") ?: return null
+        if (toolName != "ui_native_request") return null
+        val callId = ev.str("tool_call_id") ?: return null
+        val content = ev.raw["content"]
+        val request = (content as? String)?.let { OrbJSON.dict(OrbJSON.parse(it)) } ?: OrbJSON.dict(content) ?: return null
+        val method = OrbJSON.str(request, "method") ?: return null
+        if (method != "plan" && method != "permission") return null
+        val params = OrbJSON.dict(request["params"]) ?: request
+        val input = OrbJSON.dict(params["input"])
+        val detail = OrbJSON.str(params, "plan") ?: OrbJSON.str(input, "description")
+        return OrbQuestion(
+            id = "native-$callId",
+            title = if (method == "plan") "Plan ready for review" else "Review request",
+            prompt = detail ?: if (method == "plan") "Review the plan." else "The agent is asking for approval.",
+            options = listOf("Approve", "Decline"),
+            kind = if (method == "plan") OrbQuestion.Kind.Plan else OrbQuestion.Kind.Permission,
+            toolCallId = callId,
+            toolName = toolName,
+            command = OrbJSON.str(input, "command") ?: OrbJSON.str(input, "file_path")
+        )
     }
 
     private fun parseTrailingChoices(text: String): Pair<String, List<String>>? {
@@ -241,13 +272,31 @@ fun OrbQuestionCard(
             }
         }
 
-        Text(
-            text = question.prompt,
-            color = OrbStyle.textSecondary,
-            fontSize = 14.sp,
-            maxLines = 6,
-            overflow = TextOverflow.Ellipsis
-        )
+        if (question.toolCallId != null && question.kind == OrbQuestion.Kind.Plan) {
+            OrbRichText(markdown = question.prompt, tone = OrbRichTextTone.Secondary)
+        } else {
+            Text(
+                text = question.prompt,
+                color = OrbStyle.textSecondary,
+                fontSize = 14.sp,
+                maxLines = if (question.toolCallId != null) 20 else 6,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        question.command?.takeIf { it.isNotBlank() }?.let { cmd ->
+            Text(
+                text = cmd,
+                color = OrbStyle.textSecondary,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.28f))
+                    .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                    .padding(10.dp)
+            )
+        }
 
         if (question.options.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -408,6 +408,7 @@ fun OrbProviderLogo(
 
 enum class OrbAndroidDictationPhase {
     Idle,
+    Recording,
     Listening,
     Transcribing,
     Failed
@@ -422,9 +423,10 @@ fun OrbAndroidDictationCapsule(
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isListening = phase == OrbAndroidDictationPhase.Listening
+    val isListening = phase == OrbAndroidDictationPhase.Listening || phase == OrbAndroidDictationPhase.Recording
     val statusText = when (phase) {
         OrbAndroidDictationPhase.Listening -> "Microphone"
+        OrbAndroidDictationPhase.Recording -> "Listening"
         OrbAndroidDictationPhase.Transcribing -> "Transcribing"
         OrbAndroidDictationPhase.Failed -> "Try again"
         OrbAndroidDictationPhase.Idle -> "Microphone"
@@ -491,7 +493,7 @@ fun OrbAndroidDictationCapsule(
                 contentAlignment = Alignment.Center
             ) {
                 when (phase) {
-                    OrbAndroidDictationPhase.Listening -> {
+                    OrbAndroidDictationPhase.Listening, OrbAndroidDictationPhase.Recording -> {
                         Icon(
                             imageVector = Icons.Default.Stop,
                             contentDescription = "Stop",

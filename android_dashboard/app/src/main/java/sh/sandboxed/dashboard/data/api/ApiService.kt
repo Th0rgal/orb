@@ -33,7 +33,6 @@ import sh.sandboxed.dashboard.data.HealthResponse
 import sh.sandboxed.dashboard.data.LoginRequest
 import sh.sandboxed.dashboard.data.LoginResponse
 import sh.sandboxed.dashboard.data.Mission
-import sh.sandboxed.dashboard.data.ParallelConfig
 import sh.sandboxed.dashboard.data.ParallelMessageRequest
 import sh.sandboxed.dashboard.data.QueuedMessage
 import sh.sandboxed.dashboard.data.RunningMissionInfo
@@ -178,7 +177,6 @@ class ApiService(
     }
 
     suspend fun running(): List<RunningMissionInfo> = getList("/api/control/running")
-    suspend fun parallelConfig(): ParallelConfig = getJson("/api/control/parallel/config")
     suspend fun parallelSend(missionId: String, content: String, model: String? = null): GenericOk =
         postJson("/api/control/missions/$missionId/parallel", ParallelMessageRequest(content, model))
 

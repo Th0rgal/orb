@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -41,6 +42,8 @@ import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
@@ -444,7 +447,7 @@ object OrbTimelineBuilder {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun OrbConversationPage(
     core: OrbCore,
@@ -495,6 +498,8 @@ fun OrbConversationPage(
     var previewFilePath by remember { mutableStateOf<String?>(null) }
     var showAgentPicker by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
+    var sideAgentSession by remember(initialMission?.id) { mutableStateOf<OrbSideAgentSession?>(null) }
+    var commandBanner by remember { mutableStateOf<String?>(null) }
 
     // Agent configuration state
     var selectedBackend by remember(currentMission?.id, backends) {
@@ -676,9 +681,80 @@ fun OrbConversationPage(
         }
     }
 
+    var latestTurns by remember { mutableStateOf<List<OrbTurn>>(emptyList()) }
+
+    // Client-side slash commands (/btw, /fork, /clone, /pause), mirroring Orb.
+    fun runMissionCommand(command: OrbMissionCommand, argument: String) {
+        val id = missionId
+        if (id == null) {
+            errorMessage = "${command.trigger} needs an existing conversation."
+            return
+        }
+        inputText = ""
+        errorMessage = null
+        isSending = true
+        scope.launch {
+            try {
+                val base = "/api/control/missions/${core.encodeComponent(id)}"
+                when (command) {
+                    OrbMissionCommand.Btw -> {
+                        val question = argument.ifEmpty {
+                            if (pendingAttachments.isNotEmpty()) "Please look at the attachments." else ""
+                        }
+                        if (question.isEmpty()) throw OrbError("Type a question after /btw.")
+                        val child = OrbSideAgent.launch(core, id, question, latestTurns)
+                        sideAgentSession = OrbSideAgentSession(child.id, question)
+                    }
+                    OrbMissionCommand.Fork -> {
+                        val body = mutableMapOf<String, Any?>(
+                            "backend" to selectedBackend,
+                            "model_override" to selectedModel,
+                            "model_effort" to null,
+                            "idempotency_key" to UUID.randomUUID().toString()
+                        )
+                        val created = OrbJSON.dict(core.request("$base/fork", method = "POST", body = body))
+                            ?: throw OrbError("Fork failed.")
+                        core.refreshMissionsQuietly()
+                        currentMission = OrbRow(created)
+                        commandBanner = "Forked into a new conversation"
+                    }
+                    OrbMissionCommand.Clone -> {
+                        val body = mutableMapOf<String, Any?>(
+                            "backend" to selectedBackend,
+                            "clone_messages" to false
+                        )
+                        if (selectedModel.isNotEmpty()) body["model_override"] = selectedModel
+                        if (argument.isNotEmpty()) body["title"] = argument
+                        val created = OrbJSON.dict(core.request("$base/clone", method = "POST", body = body))
+                            ?: throw OrbError("Clone failed.")
+                        core.refreshMissionsQuietly()
+                        currentMission = OrbRow(created)
+                        commandBanner = "Cloned into a new conversation"
+                    }
+                    OrbMissionCommand.Pause -> {
+                        core.request("$base/pause", method = "POST", body = mapOf("actor" to "orb-android"))
+                        core.refreshMissionsQuietly()
+                        loadHistory(id)
+                        commandBanner = "Agent paused"
+                    }
+                }
+            } catch (e: Throwable) {
+                errorMessage = e.message ?: "${command.trigger} failed"
+            } finally {
+                isSending = false
+            }
+        }
+    }
+
     fun sendTurn(rawInput: String? = null) {
         val baseText = (rawInput ?: inputText).trim()
         if (baseText.isEmpty() && pendingAttachments.isEmpty()) return
+        if (rawInput == null) {
+            OrbMissionCommand.parse(baseText)?.let { (command, arg) ->
+                runMissionCommand(command, arg)
+                return
+            }
+        }
         if (isLive && rawInput == null && missionId != null) {
             queuedMessages.add(baseText)
             inputText = ""
@@ -797,6 +873,8 @@ fun OrbConversationPage(
         )
     }
 
+    LaunchedEffect(allTurns) { latestTurns = allTurns }
+
     var visibleTurnLimit by remember(missionId) { mutableIntStateOf(24) }
     val turns = remember(allTurns, visibleTurnLimit) {
         if (allTurns.size > visibleTurnLimit) allTurns.takeLast(visibleTurnLimit) else allTurns
@@ -852,10 +930,22 @@ fun OrbConversationPage(
         }
     }
 
-    fun launchSpeech() {
+    // Spark dictation (iOS OrbDictation): record 16 kHz WAV, transcribe on Core,
+    // and fall back to the system recognizer if recording or transcription fails.
+    remember(context) { OrbDictationSettings.init(context); true }
+    val sparkRecorder = remember { OrbSparkRecorder() }
+    var dictationElapsed by remember { mutableIntStateOf(0) }
+    var showDictationLanguages by remember { mutableStateOf(false) }
+
+    fun appendTranscript(spoken: String) {
+        inputText = if (inputText.trim().isEmpty()) spoken else "${inputText.trimEnd()} $spoken"
+    }
+
+    fun launchSystemSpeech() {
         dictationPhase = OrbAndroidDictationPhase.Listening
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, OrbDictationSettings.resolve())
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Microphone")
         }
         runCatching {
@@ -865,31 +955,95 @@ fun OrbConversationPage(
         }
     }
 
-    // Project context files for `@` mentions
-    var projectFiles by remember(project.id, selectedWorkspaceId) { mutableStateOf<List<String>>(emptyList()) }
-    LaunchedEffect(project.id, selectedWorkspaceId) {
-        val slug = project.str("slug", "id") ?: project.id
-        val loaded = mutableListOf<String>()
-        runCatching {
-            val rows = core.fetchRows("/api/projects/${core.encodeComponent(slug)}/documents", "entries")
-            for (r in rows) {
-                val p = r.str("path", "name") ?: continue
-                if (r.str("kind", "type") != "dir") loaded.add(p)
+    fun startSparkRecording() {
+        if (!sparkRecorder.start()) {
+            launchSystemSpeech()
+            return
+        }
+        dictationElapsed = 0
+        dictationPhase = OrbAndroidDictationPhase.Recording
+    }
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startSparkRecording() else launchSystemSpeech()
+    }
+
+    fun launchSpeech() {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) startSparkRecording() else micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+
+    fun finishSparkRecording() {
+        val wav = sparkRecorder.stop()
+        if (wav == null) {
+            dictationPhase = OrbAndroidDictationPhase.Idle
+            return
+        }
+        dictationPhase = OrbAndroidDictationPhase.Transcribing
+        scope.launch {
+            val text = runCatching {
+                OrbSparkTranscriber.transcribe(core, wav, OrbDictationSettings.resolve())
+            }.getOrNull()
+            if (dictationPhase != OrbAndroidDictationPhase.Transcribing) return@launch
+            if (!text.isNullOrEmpty()) {
+                appendTranscript(text)
+                dictationPhase = OrbAndroidDictationPhase.Idle
+            } else {
+                // Spark unavailable or returned nothing: let the on-device recognizer try.
+                launchSystemSpeech()
             }
         }
-        if (selectedWorkspaceId.isNotEmpty()) {
+    }
+
+    LaunchedEffect(dictationPhase) {
+        while (dictationPhase == OrbAndroidDictationPhase.Recording) {
+            delay(250)
+            dictationElapsed = sparkRecorder.elapsedSeconds
+            if (dictationElapsed >= OrbSparkRecorder.MAX_SECONDS) finishSparkRecording()
+        }
+    }
+
+    DisposableEffect(Unit) { onDispose { sparkRecorder.cancel() } }
+
+    // Project context files for `@` mentions. Mirrors iOS OrbAttachments: the context
+    // manifest (entries keyed by path) first, then a shallow walk of /files.
+    var projectFiles by remember(project.id) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(project.id) {
+        val slug = core.encodeComponent(project.str("slug", "id") ?: project.id)
+        val loaded = mutableListOf<String>()
+        runCatching {
+            val manifest = core.fetchDict("/api/projects/$slug/context/manifest")
+            val entries = OrbJSON.dict(manifest["entries"]) ?: emptyMap()
+            for ((path, meta) in entries) {
+                if (OrbJSON.bool(OrbJSON.dict(meta), "directory") != true) loaded.add(path)
+            }
+        }
+        if (loaded.isEmpty()) {
             runCatching {
-                val wsRows = core.fetchRows(
-                    "/api/control/workspaces/${core.encodeComponent(selectedWorkspaceId)}/files",
-                    "entries"
-                )
-                for (r in wsRows) {
-                    val p = r.str("path", "name") ?: continue
-                    if (r.str("kind", "type") != "dir") loaded.add(p)
+                val queue = ArrayDeque(listOf("" to 0))
+                while (queue.isNotEmpty() && loaded.size < 160) {
+                    val (dir, depth) = queue.removeFirst()
+                    val rows = core.fetchRows(
+                        "/api/projects/$slug/files?path=${core.encodeComponent(dir)}",
+                        "entries"
+                    )
+                    for (r in rows) {
+                        val name = r.str("name") ?: continue
+                        val rel = if (dir.isEmpty()) name else "$dir/$name"
+                        if (r.str("kind") == "dir") {
+                            if (depth < 1) queue.addLast(rel to depth + 1)
+                        } else {
+                            loaded.add(rel)
+                        }
+                    }
                 }
             }
         }
-        projectFiles = loaded.distinct()
+        projectFiles = loaded.distinct().sorted()
     }
 
     val activeAtMentionQuery = remember(inputText) {
@@ -1181,6 +1335,9 @@ fun OrbConversationPage(
                     is OrbTurn.Assistant -> {
                         OrbAssistantTurnView(
                             turn = turn,
+                            core = core,
+                            missionId = missionId,
+                            workspaceId = selectedWorkspaceId.takeIf { it.isNotEmpty() },
                             onSendAnswer = { ans -> sendTurn(ans) }
                         )
                     }
@@ -1201,7 +1358,39 @@ fun OrbConversationPage(
                     OrbQuestionCard(
                         question = activeQuestion,
                         isSending = isSending,
-                        onSelect = { answer -> sendTurn(answer) },
+                        onSelect = { answer ->
+                            val callId = activeQuestion.toolCallId
+                            if (callId != null) {
+                                // Native plan/permission request: reply through tool_result like iOS/Orb.
+                                val accept = answer == "Approve"
+                                val result = mutableMapOf<String, Any?>("action" to if (accept) "accept" else "revise")
+                                if (!accept && answer != "Decline") result["feedback"] = answer
+                                scope.launch {
+                                    try {
+                                        val res = OrbJSON.dict(
+                                            core.request(
+                                                "/api/control/tool_result",
+                                                method = "POST",
+                                                body = mapOf(
+                                                    "tool_call_id" to callId,
+                                                    "name" to (activeQuestion.toolName ?: "ui_native_request"),
+                                                    "result" to result
+                                                )
+                                            )
+                                        )
+                                        if (OrbJSON.bool(res, "delivered") != true) {
+                                            throw OrbError("This request has expired. Refresh the conversation.")
+                                        }
+                                        dismissedQuestionId = activeQuestion.id
+                                        missionId?.let { loadHistory(it) }
+                                    } catch (e: Throwable) {
+                                        errorMessage = e.message
+                                    }
+                                }
+                            } else {
+                                sendTurn(answer)
+                            }
+                        },
                         onDismiss = { dismissedQuestionId = activeQuestion.id }
                     )
                 }
@@ -1267,7 +1456,7 @@ fun OrbConversationPage(
                                         dismissedPlanReviewKeys = dismissedPlanReviewKeys + completedPlanTurnKey
                                         isEditingPlanFeedback = false
                                         composeMode = OrbComposeMode.Message
-                                        sendTurn("Approved — go ahead and implement the plan.")
+                                        sendTurn("Proceed with implementing the plan.")
                                     }
                                     .padding(horizontal = 14.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -1346,7 +1535,7 @@ fun OrbConversationPage(
                                             planFeedbackDraft = ""
                                             isEditingPlanFeedback = false
                                             dismissedPlanReviewKeys = dismissedPlanReviewKeys + completedPlanTurnKey
-                                            sendTurn("/plan Revise the plan: $feedback")
+                                            sendTurn("/plan $feedback")
                                         }
                                         .padding(horizontal = 12.dp, vertical = 8.dp)
                                 ) {
@@ -1428,7 +1617,7 @@ fun OrbConversationPage(
             }
 
             // Slash mode menu popup
-            if (showModePicker || inputText.startsWith("/")) {
+            if (showModePicker || (inputText.startsWith("/") && !inputText.contains(' '))) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1497,7 +1686,75 @@ fun OrbConversationPage(
                             )
                         }
                     }
+                    if (missionId != null) {
+                        val typed = inputText.trim().lowercase()
+                        val commands = OrbMissionCommand.entries.filter {
+                            typed.length <= 1 || it.trigger.startsWith(typed)
+                        }
+                        if (commands.isNotEmpty()) {
+                            Text(
+                                text = "COMMANDS",
+                                color = OrbStyle.textMuted,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.7.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                        commands.forEach { command ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .orbPressClickable {
+                                        showModePicker = false
+                                        when (command) {
+                                            OrbMissionCommand.Btw -> inputText = "/btw "
+                                            OrbMissionCommand.Clone -> inputText = "/clone "
+                                            else -> runMissionCommand(command, "")
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = when (command) {
+                                        OrbMissionCommand.Btw -> Icons.Default.Psychology
+                                        OrbMissionCommand.Fork -> Icons.Default.CallSplit
+                                        OrbMissionCommand.Clone -> Icons.Default.ContentCopy
+                                        OrbMissionCommand.Pause -> Icons.Default.Pause
+                                    },
+                                    contentDescription = null,
+                                    tint = OrbStyle.icon,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(command.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(command.subtitle, color = OrbStyle.textMuted, fontSize = 11.sp)
+                                }
+                                Text(
+                                    text = command.trigger,
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
                 }
+            }
+
+            commandBanner?.let { msg ->
+                Text(
+                    text = msg,
+                    color = OrbStyle.success,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 6.dp)
+                )
             }
 
             // Queued messages drawer
@@ -1580,9 +1837,15 @@ fun OrbConversationPage(
             if (dictationPhase != OrbAndroidDictationPhase.Idle) {
                 OrbAndroidDictationCapsule(
                     phase = dictationPhase,
-                    elapsedSeconds = 0,
-                    onCancel = { dictationPhase = OrbAndroidDictationPhase.Idle },
-                    onFinish = { dictationPhase = OrbAndroidDictationPhase.Idle },
+                    elapsedSeconds = dictationElapsed,
+                    onCancel = {
+                        sparkRecorder.cancel()
+                        dictationPhase = OrbAndroidDictationPhase.Idle
+                    },
+                    onFinish = {
+                        if (dictationPhase == OrbAndroidDictationPhase.Recording) finishSparkRecording()
+                        else if (dictationPhase != OrbAndroidDictationPhase.Transcribing) dictationPhase = OrbAndroidDictationPhase.Idle
+                    },
                     onRetry = { launchSpeech() }
                 )
             } else {
@@ -1778,22 +2041,57 @@ fun OrbConversationPage(
                         }
 
                         // Microphone dictation button
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .orbPressClickable { launchSpeech() }
-                                .padding(7.dp)
-                                .clip(CircleShape)
-                                .background(OrbStyle.card)
-                                .border(1.dp, OrbStyle.border, CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Mic,
-                                contentDescription = "Microphone",
-                                tint = OrbStyle.textSecondary,
-                                modifier = Modifier.size(16.dp)
-                            )
+                        Box {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .combinedClickable(
+                                        onClick = { launchSpeech() },
+                                        onLongClick = { showDictationLanguages = true }
+                                    )
+                                    .padding(7.dp)
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.card)
+                                    .border(1.dp, OrbStyle.border, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Mic,
+                                    contentDescription = "Dictate message (hold to choose language: ${OrbDictationSettings.name(OrbDictationSettings.resolve())})",
+                                    tint = OrbStyle.textSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showDictationLanguages,
+                                onDismissRequest = { showDictationLanguages = false },
+                                containerColor = OrbStyle.elevated
+                            ) {
+                                val current = OrbDictationSettings.stored
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})",
+                                            color = Color.White
+                                        )
+                                    },
+                                    trailingIcon = { if (current.isEmpty()) Icon(Icons.Default.Check, null, tint = Color.White) },
+                                    onClick = {
+                                        OrbDictationSettings.update("")
+                                        showDictationLanguages = false
+                                    }
+                                )
+                                OrbDictationSettings.languages.forEach { (code, label) ->
+                                    DropdownMenuItem(
+                                        text = { Text(label, color = Color.White) },
+                                        trailingIcon = { if (current == code) Icon(Icons.Default.Check, null, tint = Color.White) },
+                                        onClick = {
+                                            OrbDictationSettings.update(code)
+                                            showDictationLanguages = false
+                                        }
+                                    )
+                                }
+                            }
                         }
 
                         if (isLive && missionId != null) {
@@ -1861,6 +2159,25 @@ fun OrbConversationPage(
             onSelectConfigProfile = { selectedConfigProfile = it },
             onDismiss = { showAgentPicker = false }
         )
+    }
+
+    sideAgentSession?.let { session ->
+        OrbSideAgentSheet(
+            core = core,
+            session = session,
+            onOpen = { child ->
+                sideAgentSession = null
+                currentMission = child
+            },
+            onDismiss = { sideAgentSession = null }
+        )
+    }
+
+    commandBanner?.let { msg ->
+        LaunchedEffect(msg) {
+            delay(2500)
+            commandBanner = null
+        }
     }
 
     previewFilePath?.let { path ->
@@ -1979,11 +2296,16 @@ private fun OrbUserBubble(
 @Composable
 private fun OrbAssistantTurnView(
     turn: OrbTurn.Assistant,
+    core: OrbCore,
+    missionId: String?,
+    workspaceId: String?,
     onSendAnswer: (String) -> Unit
 ) {
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
-    val segments = remember(turn.text) { OrbQuizParser.split(turn.text) }
+    val messageImages = remember(turn.text) { OrbMessageImages.parse(turn.text) }
+    val imageRefs = remember(messageImages, missionId) { messageImages.refs(core, missionId) }
+    val segments = remember(messageImages.text) { OrbQuizParser.split(messageImages.text) }
 
     LaunchedEffect(copied) {
         if (copied) {
@@ -2008,6 +2330,10 @@ private fun OrbAssistantTurnView(
                     )
                 }
             }
+        }
+
+        if (imageRefs.isNotEmpty()) {
+            OrbImageStrip(images = imageRefs, workspaceId = workspaceId, core = core)
         }
 
         if (!turn.isStreaming && turn.text.isNotEmpty()) {

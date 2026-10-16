@@ -718,6 +718,20 @@ class OrbCore private constructor(context: Context) {
     private val _fleetSummary = MutableStateFlow<OrbDict>(emptyMap())
     val fleetSummary: StateFlow<OrbDict> = _fleetSummary.asStateFlow()
 
+    private val _pendingSecretRequests = MutableStateFlow(0)
+    /** Pending Bitwarden broker requests; a mission is blocked until one is answered. */
+    val pendingSecretRequests: StateFlow<Int> = _pendingSecretRequests.asStateFlow()
+
+    fun updatePendingSecretRequests(count: Int) {
+        _pendingSecretRequests.value = count
+    }
+
+    suspend fun refreshSecretRequests() {
+        if (!isConfigured) return
+        runCatching { OrbBitwardenApi.pending(OrbBitwardenApi.broker(this)).size }
+            .onSuccess { _pendingSecretRequests.value = it }
+    }
+
     private val _assistantStatus = MutableStateFlow<OrbDict>(emptyMap())
     val assistantStatus: StateFlow<OrbDict> = _assistantStatus.asStateFlow()
 
@@ -991,13 +1005,11 @@ class OrbCore private constructor(context: Context) {
         coroutineScope {
             val pTask = async { runCatching { fetchRows("/api/projects", "projects") } }
             val mTask = async { runCatching { fetchRows("/api/control/missions?limit=100&all=true", null) } }
-            val hTask = async { runCatching { fetchRows("/api/assistant/hermes/sessions?limit=100", "sessions") } }
             val wTask = async { runCatching { fetchRows("/api/workspaces", null) } }
             val bTask = async { runCatching { fetchRows("/api/backends", null) } }
-            val rTask = async { runCatching { fetchRows("/api/repos", null) } }
             val prTask = async { runCatching { fetchRows("/api/ai/providers", "providers") } }
             val nTask = async { runCatching { fetchDict("/api/remote-nodes") } }
-            val aTask = async { runCatching { fetchDict("/api/assistant/status") } }
+            val aTask = async { runCatching { fetchDict("/api/system/hermes-assistant/status") } }
 
             val pResult = pTask.await()
             val mResult = mTask.await()
@@ -1027,11 +1039,6 @@ class OrbCore private constructor(context: Context) {
                     }
                 }
             }
-            hTask.await().onSuccess { h ->
-                _hermesSessions.value = h
-                anyCoreSuccess = true
-                launch(Dispatchers.IO) { OrbDisk.write("hermes_sessions", h.map { it.raw }) }
-            }
             wTask.await().onSuccess { w ->
                 _workspaces.value = w
                 launch(Dispatchers.IO) { OrbDisk.write("workspaces", w.map { it.raw }) }
@@ -1039,10 +1046,6 @@ class OrbCore private constructor(context: Context) {
             bTask.await().onSuccess { b ->
                 _backends.value = b
                 launch(Dispatchers.IO) { OrbDisk.write("backends", b.map { it.raw }) }
-            }
-            rTask.await().onSuccess { r ->
-                _repositories.value = r
-                launch(Dispatchers.IO) { OrbDisk.write("repositories", r.map { it.raw }) }
             }
             prTask.await().onSuccess { rows ->
                 _providers.value = rows
