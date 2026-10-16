@@ -180,7 +180,18 @@ struct OrbSideQuestionSheet: View {
         guard !earlierLoaded else { return }
         let tag = "btw-parent:\(parentID)"
         guard let rows = try? await OrbCore.shared.call("/api/control/missions?tag=\(OrbCore.escape(tag))&all=true&limit=50") else { return }
-        let list = (rows["missions"].items.isEmpty ? rows.items : rows["missions"].items)
+        let all = rows["missions"].items.isEmpty ? rows.items : rows["missions"].items
+        // A stored session may have been replaced: follow superseded_by first,
+        // so the replacement is the current session, not an "earlier" one.
+        var hops = 0
+        while let id = sideID, hops < 10,
+              let next = all.first(where: { $0["id"].text == id })?["tags"].items.map(\.text)
+                  .first(where: { $0.hasPrefix("superseded_by:") }) {
+            sideID = String(next.dropFirst("superseded_by:".count))
+            UserDefaults.standard.set(sideID, forKey: OrbBtwConfig.sessionKey(parentID))
+            hops += 1
+        }
+        let list = all
             .filter { m in
                 let tags = m["tags"].items.map(\.text)
                 return tags.contains(tag) && !tags.contains("superseded")

@@ -515,8 +515,9 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
 
         nonisolated(unsafe) let done = completionHandler
         Task { @MainActor in
-            // Hand control back to the system first (on main), then do the work.
-            done()
+            // Finish the action (e.g. Done/Approve while backgrounded) before
+            // telling iOS we're done, which may suspend the app; still on main.
+            defer { done() }
             await self.handleNotificationAction(
                 actionID: actionID,
                 missionID: missionID,
