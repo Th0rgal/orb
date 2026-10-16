@@ -40508,9 +40508,14 @@ Investigate <service/> failures.
             "{}",
             exec.command
         );
-        assert!(exec.command.contains(" --model 'claude-opus-5' "), "{}", exec.command);
         assert!(
-            exec.command.contains(r#""attribution":{"commit":"","pr":""}"#),
+            exec.command.contains(" --model 'claude-opus-5' "),
+            "{}",
+            exec.command
+        );
+        assert!(
+            exec.command
+                .contains(r#""attribution":{"commit":"","pr":""}"#),
             "remote Claude never adds commit attribution: {}",
             exec.command
         );
