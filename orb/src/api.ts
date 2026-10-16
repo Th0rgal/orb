@@ -409,6 +409,16 @@ export async function listProviders(signal?: AbortSignal): Promise<AIProvider[]>
 }
 
 export interface ProviderUsage {
+  muse_plan?: string;
+  muse_5h_used_percent?: number;
+  muse_5h_reset?: number;
+  muse_weekly_used_percent?: number;
+  muse_weekly_reset?: number;
+  mistral_plan?: string;
+  mistral_monthly_used_percent?: number;
+  mistral_monthly_reset?: number;
+  /** Console session that reads the Vibe plan's monthly usage. */
+  mistral_usage_session?: "connected" | "missing" | "expired";
   kimi_plan?: string;
   kimi_windows?: {label: string; used_percent?: number; reset_at?: number}[];
   kimi_5h_used_percent?: number;
@@ -475,6 +485,19 @@ export interface ProviderUsage {
 
 export async function getProviderUsage(id: string, force = false): Promise<ProviderUsage> {
   return api(`/api/ai/providers/${encodeURIComponent(id)}/usage${force ? "?force=true" : ""}`);
+}
+
+/** Connect the Mistral console session that reads the monthly Vibe usage. */
+export async function setMistralUsageSession(id: string, cookie: string): Promise<ProviderUsage> {
+  return api(`/api/ai/providers/${encodeURIComponent(id)}/mistral-usage-session`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cookie }),
+  });
+}
+
+export async function clearMistralUsageSession(id: string): Promise<ProviderUsage> {
+  return api(`/api/ai/providers/${encodeURIComponent(id)}/mistral-usage-session`, { method: "DELETE" });
 }
 
 export async function getAllProviderUsage(): Promise<Record<string, ProviderUsage>> {

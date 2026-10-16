@@ -536,6 +536,9 @@ private fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> {
     if (detail["zai_5h_used_percent"] == null && detail["zai_weekly_used_percent"] == null) {
         add("Tokens", "zai_tokens_percentage")
     }
+    add("5h", "muse_5h_used_percent")
+    add("Weekly", "muse_weekly_used_percent")
+    add("Monthly", "mistral_monthly_used_percent")
     return result
 }
 

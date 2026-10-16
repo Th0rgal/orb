@@ -86,6 +86,7 @@ pub mod session_chain;
 pub mod settings;
 pub mod situation;
 pub(crate) mod spark;
+pub(crate) mod subscription_usage;
 pub(crate) mod supervision;
 pub mod system;
 pub mod telegram;

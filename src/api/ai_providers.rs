@@ -2544,6 +2544,10 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/default", post(set_default))
         .route("/:id/health", post(check_provider_health))
         .route("/:id/usage", get(get_provider_usage_cached))
+        .route(
+            "/:id/mistral-usage-session",
+            put(set_mistral_usage_session).delete(clear_mistral_usage_session),
+        )
         // UI-drivable OAuth login for CLIProxyAPI-owned providers (claude /
         // codex / grok / kimi): spawn the CLI login, hand the auth URL to the
         // UI, replay the pasted localhost callback against the process.
@@ -9827,13 +9831,94 @@ async fn get_provider_usage(
             let connected = account
                 .as_ref()
                 .is_some_and(|p| !super::cli_proxy_accounts::needs_reconnect(p));
-            serde_json::json!({
+            let mut info = serde_json::json!({
                 "provider_type": "muse-code",
                 "provider_name": provider_name,
                 "account_email": account_email,
                 "status": if connected { "connected" } else { "needs_reauth" },
-                "usage_note": "Muse Code subscription via CLIProxyAPI. Remaining quota is not reported by this connection. No fallback to the Meta API account.",
-            })
+            });
+            // The CLI device credential (projected as the refresh token) reads
+            // the live 5-hour and weekly windows.
+            let device = account
+                .as_ref()
+                .and_then(|p| p.oauth.as_ref())
+                .map(|o| o.refresh_token.clone())
+                .filter(|t| !t.trim().is_empty());
+            let quota = match device {
+                Some(device) if connected => {
+                    super::subscription_usage::muse_code(&client, &device).await
+                }
+                _ => super::subscription_usage::Quota::Unavailable(String::new()),
+            };
+            match quota {
+                super::subscription_usage::Quota::Fields(fields) => {
+                    let idle = !fields.contains_key("muse_5h_used_percent")
+                        && !fields.contains_key("muse_weekly_used_percent");
+                    if let Some(obj) = info.as_object_mut() {
+                        obj.extend(fields);
+                        if idle {
+                            obj.insert(
+                                "usage_note".into(),
+                                serde_json::json!("No Muse Code usage in the current window."),
+                            );
+                        }
+                    }
+                }
+                super::subscription_usage::Quota::Unauthorized => {
+                    info["status"] = serde_json::json!("needs_reauth");
+                    info["error"] = serde_json::json!("Muse Code rejected the saved login");
+                }
+                super::subscription_usage::Quota::Unavailable(reason) => {
+                    info["usage_note"] = serde_json::json!(if reason.is_empty() {
+                        "Muse Code subscription via CLIProxyAPI. No fallback to the Meta API account.".to_string()
+                    } else {
+                        format!("Muse Code quota is unavailable right now ({reason}).")
+                    });
+                }
+            }
+            info
+        }
+        ProviderType::Mistral => {
+            let account = if let Some(id) = provider_uuid {
+                state.ai_providers.get(id).await
+            } else {
+                None
+            };
+            let mut info = serde_json::json!({
+                "provider_type": "mistral",
+                "provider_name": provider_name,
+                "account_email": account_email,
+                "status": if api_key_opt.is_some() || oauth.is_some() { "connected" } else { "no_credentials" },
+            });
+            if let Some(key) = api_key_opt.as_deref() {
+                if let Some(plan) = super::subscription_usage::mistral_plan(&client, key).await {
+                    info["mistral_plan"] = serde_json::json!(plan);
+                }
+            }
+            // The monthly Vibe counter needs a signed-in console session.
+            match account.and_then(|p| p.mistral_usage_session) {
+                Some(session) => {
+                    match super::subscription_usage::mistral_vibe(&client, &session).await {
+                        super::subscription_usage::Quota::Fields(fields) => {
+                            info["mistral_usage_session"] = serde_json::json!("connected");
+                            if let Some(obj) = info.as_object_mut() {
+                                obj.extend(fields);
+                            }
+                        }
+                        super::subscription_usage::Quota::Unauthorized => {
+                            info["mistral_usage_session"] = serde_json::json!("expired");
+                        }
+                        super::subscription_usage::Quota::Unavailable(reason) => {
+                            info["mistral_usage_session"] = serde_json::json!("connected");
+                            info["usage_note"] = serde_json::json!(format!(
+                                "Mistral usage is unavailable right now ({reason})."
+                            ));
+                        }
+                    }
+                }
+                None => info["mistral_usage_session"] = serde_json::json!("missing"),
+            }
+            info
         }
         ProviderType::Muse => serde_json::json!({
             "provider_type": "muse",
@@ -9911,6 +9996,71 @@ async fn live_fetch_and_cache(
 
     state.provider_usage_cache.insert(id, value.clone()).await;
     Ok(value)
+}
+
+#[derive(Deserialize)]
+struct MistralUsageSessionRequest {
+    /// `Cookie` header (or `name=value; …` list) from a signed-in Mistral
+    /// console session. Only `ory_session_*` and `csrftoken` are kept.
+    cookie: String,
+}
+
+/// PUT /api/ai/providers/:id/mistral-usage-session — connect the Mistral
+/// console session that reads the Vibe plan's monthly usage. Verified before
+/// it is stored; returns the refreshed usage card.
+async fn set_mistral_usage_session(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+    Json(req): Json<MistralUsageSessionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let provider = state
+        .ai_providers
+        .get(id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Provider not found".into()))?;
+    if provider.provider_type != ProviderType::Mistral {
+        return Err((StatusCode::BAD_REQUEST, "Not a Mistral provider".into()));
+    }
+    let (cookie, _) = super::subscription_usage::mistral_session(&req.cookie).ok_or((
+        StatusCode::BAD_REQUEST,
+        "The Mistral session is incomplete; sign in to the console again".into(),
+    ))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(internal_error)?;
+    match super::subscription_usage::mistral_vibe(&client, &cookie).await {
+        super::subscription_usage::Quota::Unauthorized => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Mistral did not accept this session; sign in to the console again".into(),
+            ))
+        }
+        super::subscription_usage::Quota::Unavailable(reason) => {
+            tracing::warn!(%reason, "Mistral usage check failed while connecting; storing session");
+        }
+        super::subscription_usage::Quota::Fields(_) => {}
+    }
+    state
+        .ai_providers
+        .set_mistral_usage_session(id, Some(cookie))
+        .await;
+    let value = live_fetch_and_cache(state, id.to_string()).await?;
+    Ok(Json(value))
+}
+
+/// DELETE /api/ai/providers/:id/mistral-usage-session
+async fn clear_mistral_usage_session(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .ai_providers
+        .set_mistral_usage_session(id, None)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Provider not found".into()))?;
+    let value = live_fetch_and_cache(state, id.to_string()).await?;
+    Ok(Json(value))
 }
 
 /// GET /api/ai/providers/:id/usage — cache-aware variant of get_provider_usage.
