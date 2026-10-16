@@ -796,7 +796,9 @@ pub(crate) struct NativeGrokObserver {
     /// Log bytes whose events an earlier Core process already published. They
     /// are fed to the parser (to rebuild its state) but not published again.
     replay_until: u64,
-    offset_saved_at: Option<std::time::Instant>,
+    /// Offset reached at a past instant, saved once it is old enough that the
+    /// event logger has stored everything below it.
+    offset_checkpoint: Option<(u64, std::time::Instant)>,
 }
 
 /// Jobs that allocated their Claude session (`--session-id`) rather than
@@ -883,7 +885,7 @@ impl NativeGrokObserver {
                 .get_remote_log_offset(job_id)
                 .await
                 .unwrap_or(0),
-            offset_saved_at: None,
+            offset_checkpoint: None,
         })
     }
 
@@ -1020,15 +1022,40 @@ impl NativeGrokObserver {
         if silent == 0 {
             self.stream.feed(&chunk.data)
         } else if silent >= chunk.data.len() {
-            let _ = self.stream.feed(&chunk.data);
+            let replayed = self.stream.feed(&chunk.data);
+            self.restore_state(&replayed);
             Vec::new()
         } else if chunk.data.is_char_boundary(silent) {
-            let _ = self.stream.feed(&chunk.data[..silent]);
+            let replayed = self.stream.feed(&chunk.data[..silent]);
+            self.restore_state(&replayed);
             self.stream.feed(&chunk.data[silent..])
         } else {
             // Never split a character: skip this chunk's events to stay unique.
-            let _ = self.stream.feed(&chunk.data);
+            let replayed = self.stream.feed(&chunk.data);
+            self.restore_state(&replayed);
             Vec::new()
+        }
+    }
+
+    /// Apply already-published updates to the observer's own state without
+    /// publishing them: an open thinking block must still be closed (and
+    /// persisted) by the next boundary after a restart.
+    fn restore_state(&mut self, replayed: &[StreamUpdate]) {
+        for update in replayed {
+            match update {
+                StreamUpdate::ThinkingSnapshot(content) => {
+                    self.thinking_open = true;
+                    self.thinking_snapshot = content.clone();
+                }
+                StreamUpdate::Tool { .. }
+                | StreamUpdate::NativeText(_)
+                | StreamUpdate::TextSnapshot(_)
+                | StreamUpdate::End => {
+                    self.thinking_open = false;
+                    self.thinking_snapshot.clear();
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1064,16 +1091,23 @@ impl NativeGrokObserver {
         }
         let updates = self.absorb(chunk);
         self.broadcast(updates).await;
-        if self.log_offset > self.replay_until
-            && self
-                .offset_saved_at
-                .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(3))
-        {
-            self.owner
-                .mission_store
-                .set_remote_log_offset(self.job_id, self.log_offset)
-                .await;
-            self.offset_saved_at = Some(std::time::Instant::now());
+        // Publishing only queues events for the logger, which stores them a
+        // moment later. Save an offset reached at least 3 s ago, never the
+        // current one, so a crash cannot skip events that were not stored.
+        match self.offset_checkpoint {
+            Some((offset, at)) if at.elapsed() >= std::time::Duration::from_secs(3) => {
+                if offset > self.replay_until {
+                    self.owner
+                        .mission_store
+                        .set_remote_log_offset(self.job_id, offset)
+                        .await;
+                }
+                self.offset_checkpoint = Some((self.log_offset, std::time::Instant::now()));
+            }
+            None => {
+                self.offset_checkpoint = Some((self.log_offset, std::time::Instant::now()));
+            }
+            Some(_) => {}
         }
         if self.stream.requires_error_cancellation() && !self.auth_cancel_requested {
             // Stop interactive login or a non-retryable native failure instead
@@ -2556,6 +2590,7 @@ mod tests {
         .await
         .unwrap()
         .absorb(&chunk(0, &second, second.len() as u64));
+        assert!(!after.thinking_open, "tool steps close thinking");
         // The resumed parser already knows the session; a fresh one reports it.
         let fresh: Vec<_> = fresh
             .into_iter()
