@@ -486,17 +486,24 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
 }
 
 extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
+    // Completion-handler forms, finished on the main thread: with the async
+    // forms iOS calls the hidden completion on a background thread, and
+    // UIKit's snapshot update then aborts with "Call must be made on main thread".
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound, .badge]
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        // Called once, on main: safe to carry across despite not being Sendable.
+        nonisolated(unsafe) let done = completionHandler
+        DispatchQueue.main.async { done([.banner, .list, .sound, .badge]) }
     }
 
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse
-    ) async {
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         let userInfo = response.notification.request.content.userInfo
         let missionID = (userInfo["mission_id"] as? String) ?? ""
         let callID = userInfo["call_id"] as? String
@@ -506,18 +513,19 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         let actionID = response.actionIdentifier
         let replyText = (response as? UNTextInputNotificationResponse)?.userText
 
-        await MainActor.run {
-            Task { @MainActor in
-                await self.handleNotificationAction(
-                    actionID: actionID,
-                    missionID: missionID,
-                    callID: callID,
-                    toolName: toolName,
-                    primaryJSON: primaryJSON,
-                    secondaryJSON: secondaryJSON,
-                    replyText: replyText
-                )
-            }
+        nonisolated(unsafe) let done = completionHandler
+        Task { @MainActor in
+            // Hand control back to the system first (on main), then do the work.
+            done()
+            await self.handleNotificationAction(
+                actionID: actionID,
+                missionID: missionID,
+                callID: callID,
+                toolName: toolName,
+                primaryJSON: primaryJSON,
+                secondaryJSON: secondaryJSON,
+                replyText: replyText
+            )
         }
     }
 
