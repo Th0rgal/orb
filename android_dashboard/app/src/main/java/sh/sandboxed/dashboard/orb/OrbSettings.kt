@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Pause
@@ -85,7 +86,8 @@ enum class OrbSettingsRoute {
     Inbox,
     Secrets,
     Bitwarden,
-    Dictation
+    Dictation,
+    SideQuestions
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,6 +100,8 @@ fun OrbSettingsSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var route by remember { mutableStateOf(initialRoute) }
     val pendingSecrets by core.pendingSecretRequests.collectAsState()
+    val settingsContext = LocalContext.current
+    remember(settingsContext) { OrbBtwSettings.init(settingsContext); true }
     val baseURL by core.baseURLFlow.collectAsState()
     val providers by core.providers.collectAsState()
     val nodes by core.nodes.collectAsState()
@@ -233,6 +237,16 @@ fun OrbSettingsSheet(
                                 },
                                 onClick = { route = OrbSettingsRoute.Dictation }
                             )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            OrbSettingsRow(
+                                icon = Icons.Default.Psychology,
+                                title = "Side questions",
+                                subtitle = "${serviceName(OrbBtwSettings.harness)} · ${OrbBtwSettings.model}",
+                                onClick = { route = OrbSettingsRoute.SideQuestions }
+                            )
                         }
                     }
                 }
@@ -276,6 +290,9 @@ fun OrbSettingsSheet(
                 }
                 OrbSettingsRoute.Dictation -> {
                     OrbDictationSettingsPage(onBack = { route = OrbSettingsRoute.Root })
+                }
+                OrbSettingsRoute.SideQuestions -> {
+                    OrbBtwSettingsPage(onBack = { route = OrbSettingsRoute.Root })
                 }
             }
         }
@@ -2234,6 +2251,91 @@ fun OrbDictationSettingsPage(onBack: () -> Unit) {
                     if (current == code) Icon(Icons.Default.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(16.dp))
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun OrbBtwSettingsPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    remember(context) { OrbBtwSettings.init(context); true }
+    var harness by remember { mutableStateOf(OrbBtwSettings.harness) }
+    var model by remember { mutableStateOf(OrbBtwSettings.model) }
+    var saved by remember { mutableStateOf(false) }
+    LaunchedEffect(saved) {
+        if (saved) {
+            delay(1500)
+            saved = false
+        }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .orbPressClickable { onBack() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(17.dp))
+            }
+            Text(
+                text = "Side questions",
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.width(38.dp))
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(OrbStyle.surface)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+        ) {
+            OrbBtwSettings.harnesses.forEach { (id, label) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .orbPressClickable { harness = id }
+                        .padding(horizontal = 16.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(label, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                    if (harness == id) Icon(Icons.Default.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+        OrbMiniField("Model", model) { model = it }
+        Text(
+            "An independent agent in the main agent's folder, with the normal harness tools and permissions. Files are shared with the main agent.",
+            color = OrbStyle.textMuted,
+            fontSize = 12.sp
+        )
+        val canSave = model.trim().isNotEmpty()
+        Box(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(if (canSave) Color.White else OrbStyle.card)
+                .orbPressClickable(enabled = canSave) {
+                    OrbBtwSettings.save(harness, model)
+                    model = OrbBtwSettings.model
+                    saved = true
+                }
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Text(if (saved) "Saved" else "Save", color = if (canSave) Color.Black else OrbStyle.textMuted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }
