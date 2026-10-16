@@ -1098,6 +1098,8 @@ mod tests {
                 journals: Mutex::new(HashMap::new()),
                 wake: Notify::new(),
                 accepted: Default::default(),
+                unsupported: Default::default(),
+                attached: Default::default(),
                 converting: Default::default(),
                 harnesses: Mutex::new(json!([{"backend":"claudecode"}])),
                 outbound: Default::default(),
