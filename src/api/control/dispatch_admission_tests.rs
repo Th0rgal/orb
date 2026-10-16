@@ -10602,7 +10602,7 @@ async fn cyber_transfer_and_client_admission_reject_incompatible_models_before_m
         .await
         .unwrap();
     cyber::write(&h.state.config.working_dir, m.id, cyber::Mode::Standard).unwrap();
-    let request = serde_json::from_value(json!({"op":"prepare","destination":{"kind":"client","id":Uuid::new_v4().to_string()},"idempotency_key":"incompatible-cyber-model","model":"gpt-daybreak-blue-latest"})).unwrap();
+    let request = serde_json::from_value(json!({"op":"prepare","destination":{"kind":"client","id":Uuid::new_v4().to_string()},"idempotency_key":"incompatible-cyber-model","model":"gpt-5.6-cyber"})).unwrap();
     let error = machine_transfer::operate(
         State(h.state.clone()),
         Extension(h.user.clone()),
@@ -10643,7 +10643,7 @@ async fn cyber_transfer_and_client_admission_reject_incompatible_models_before_m
         .await
         .unwrap();
     let saved = cyber::read(&h.state.config.working_dir, m.id).unwrap();
-    let stale = serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","model":"gpt-daybreak-blue-latest","cyber_access":"standard","cyber_revision":saved.revision})).unwrap();
+    let stale = serde_json::from_value(json!({"op":"begin","client_id":Uuid::new_v4().to_string(),"prompt":"hello","model":"gpt-5.6-cyber","cyber_access":"standard","cyber_revision":saved.revision})).unwrap();
     let error = machine_transfer::client_run(
         State(h.state.clone()),
         Extension(h.user.clone()),
@@ -10673,7 +10673,7 @@ async fn cyber_transfer_and_client_admission_reject_incompatible_models_before_m
             None,
             None,
             None,
-            Some("gpt-daybreak-blue-latest"),
+            Some("gpt-5.6-cyber"),
             None,
             Some("codex"),
             None,
