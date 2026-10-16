@@ -1491,6 +1491,15 @@ export default function App() {
     const id = selected();
     return id && id.startsWith("m:") ? id.slice(2) : null;
   });
+  /** The open mission for files and side questions. While the view reloads
+   * it (openMission briefly null, mission not in the loaded list) keep the
+   * last known record for the same id instead of dropping the scope. */
+  const fileScopeMission = createMemo<Mission | null>(previous => {
+    const id = currentMissionId();
+    if (!id) return null;
+    const found = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
+    return found ?? (previous?.id === id ? previous : null);
+  }, null);
   const inboxCount = createMemo(() => {
     transcriptVersion();
     unreadVersion();
@@ -2020,7 +2029,7 @@ export default function App() {
   return (
     <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
-      <FilePanelProvider scope={{ mission: currentMissionId() ? (openMission()?.id === currentMissionId() ? openMission() : missions().find(m => m.id === currentMissionId())) : undefined, project: currentController()?.slug, controller: currentController()?.id }}>
+      <FilePanelProvider scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
         <div class="sb-top" data-tauri-drag-region />
