@@ -64,6 +64,8 @@ struct OrbSideQuestionSheet: View {
     /// Turns from earlier side sessions of this conversation (any device).
     @State private var earlier: [(role: String, text: String)] = []
     @State private var earlierLoaded = false
+    /// "New side session": keep showing history, but don't continue the old session.
+    @State private var freshSession = false
 
     private var running: Bool { Self.live.contains(side["status"].text) }
     private var exchanges: [(role: String, text: String)] { earlier + current }
@@ -158,7 +160,8 @@ struct OrbSideQuestionSheet: View {
 
     private func reset() {
         UserDefaults.standard.removeObject(forKey: OrbBtwConfig.sessionKey(parentID))
-        sideID = nil; side = .null; error = ""; earlier = []; earlierLoaded = true
+        sideID = nil; side = .null; error = ""
+        freshSession = true; earlierLoaded = false
     }
 
     /// Same rules as Orb desktop (`reconcileBtwServerHistory`): every side
@@ -200,7 +203,7 @@ struct OrbSideQuestionSheet: View {
         // Continue the newest session when this device has none yet, or when
         // its stored one no longer exists (deleted), instead of losing history.
         if let id = sideID, !list.contains(where: { $0["id"].text == id }) { sideID = nil }
-        if sideID == nil, let latest = list.last {
+        if sideID == nil, !freshSession, let latest = list.last {
             sideID = latest["id"].text
             UserDefaults.standard.set(sideID, forKey: OrbBtwConfig.sessionKey(parentID))
         }
@@ -228,6 +231,8 @@ struct OrbSideQuestionSheet: View {
             }
             flush()
         }
+        // Backgrounding cancels the requests: keep it unloaded so it retries.
+        if Task.isCancelled { return }
         earlier = turns
         earlierLoaded = true
         // Show the history instead of covering it with the keyboard.
