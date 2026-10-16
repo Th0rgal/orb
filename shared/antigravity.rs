@@ -354,10 +354,24 @@ fn mark_error_details_benign(buf: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Minimum time between two snapshots of the same streamed response.
+const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Snapshots carry the whole text, so space them out as the text grows:
+/// 250 ms for a short reply, about 1.75 s at 15 KB. Bytes per second stay
+/// bounded instead of growing with the square of the reply length.
+fn snapshot_interval(text_len: usize) -> std::time::Duration {
+    SNAPSHOT_INTERVAL + std::time::Duration::from_micros(text_len as u64 * 100)
+}
+
 #[derive(Debug, Default)]
 pub struct Stream {
     pub turn_id: String,
     responses: BTreeMap<u64, (String, u64, bool)>,
+    /// When each response step last emitted a snapshot, and steps whose newer
+    /// text is still waiting for the next one (see `SNAPSHOT_INTERVAL`).
+    last_snapshot: BTreeMap<u64, std::time::Instant>,
+    unsent: BTreeSet<u64>,
     pub session: Option<String>,
     pub expected_session: Option<String>,
     pub text: String,
@@ -459,18 +473,57 @@ impl Stream {
                 response.0 = cleaned.trim_end().to_owned();
             }
         }
+        // Each event carries the whole text so far. The CLI streams a long
+        // reply as a thousand tiny deltas; one snapshot per delta pushed
+        // megabytes through the event bus and stalled Core for minutes.
+        let interval = snapshot_interval(response.0.len());
+        if !done
+            && self
+                .last_snapshot
+                .get(&step)
+                .is_some_and(|at| at.elapsed() < interval)
+        {
+            self.unsent.insert(step);
+            return None;
+        }
+        self.snapshot_event(step, done)
+    }
+
+    fn snapshot_event(&mut self, step: u64, done: bool) -> Option<Value> {
+        let response = self.responses.get_mut(&step)?;
         response.1 += 1;
         response.2 = done;
+        let (text, revision) = (response.0.clone(), response.1);
+        self.unsent.remove(&step);
+        self.last_snapshot.insert(step, std::time::Instant::now());
         if self.turn_id.is_empty() {
             self.turn_id = uuid::Uuid::new_v4().to_string();
         }
-        let mut ops = vec![json!({"type":"snapshot","text":response.0,"revision":response.1})];
+        let mut ops = vec![json!({"type":"snapshot","text":text,"revision":revision})];
         if done {
             ops.push(json!({"type":"finalize"}));
         }
         Some(
             json!({"type":"text_op","bubble_id":format!("antigravity:{}:{}:{step}",self.session.as_deref().unwrap_or("unknown"),self.turn_id),"ops":ops}),
         )
+    }
+
+    /// Text held back by the interval goes out once the interval has passed.
+    fn due_snapshots(&mut self) -> Vec<Value> {
+        let due: Vec<u64> = self
+            .unsent
+            .iter()
+            .copied()
+            .filter(|step| {
+                let len = self.responses.get(step).map_or(0, |r| r.0.len());
+                self.last_snapshot
+                    .get(step)
+                    .is_none_or(|at| at.elapsed() >= snapshot_interval(len))
+            })
+            .collect();
+        due.into_iter()
+            .filter_map(|step| self.snapshot_event(step, false))
+            .collect()
     }
 
     fn close_responses(&mut self) -> Vec<Value> {
@@ -488,6 +541,12 @@ impl Stream {
 
     /// Returns ordered response snapshots and tool events. Each native step is durable.
     pub fn feed(&mut self, value: &Value) -> Vec<Value> {
+        let mut due = self.due_snapshots();
+        due.extend(self.feed_inner(value));
+        due
+    }
+
+    fn feed_inner(&mut self, value: &Value) -> Vec<Value> {
         let kind = value["event"].as_str().unwrap_or_default();
         let body = match kind {
             "init" => value.get("init").unwrap_or(value),
@@ -1161,6 +1220,82 @@ pub fn group_models(models: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Replays a real node job log: `ANTIGRAVITY_REPLAY_LOG=<path> cargo test -- --ignored replay`.
+    #[test]
+    #[ignore]
+    fn replay_real_job_log() {
+        let Ok(path) = std::env::var("ANTIGRAVITY_REPLAY_LOG") else {
+            return;
+        };
+        let mut stream = Stream::default();
+        let (mut events, mut bytes, mut result) = (0usize, 0usize, String::new());
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if value["event"] == "result" {
+                result = value["result"]["response"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            for event in stream.feed(&value) {
+                events += 1;
+                bytes += event.to_string().len();
+            }
+        }
+        eprintln!(
+            "replay: {events} events, {bytes} bytes, final text {} chars",
+            stream.text.len()
+        );
+        assert_eq!(stream.text, result);
+        assert!(events < 100, "{events} events");
+    }
+
+    #[test]
+    fn long_streamed_reply_is_coalesced_and_ends_with_the_full_text() {
+        let mut stream = Stream::default();
+        let piece = "word ".repeat(3);
+        let mut events = vec![];
+        for _ in 0..1000 {
+            events.extend(stream.feed(&json!({"event":"step_update","step_update":{
+                "conversation_id":"c","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":piece}})));
+        }
+        events.extend(stream.feed(&json!({"event":"step_update","step_update":{
+            "conversation_id":"c","step_index":5,"state":"DONE","step_type":"agent_response","text_delta":"end"}})));
+        // 1,001 deltas arrive within one interval: one opening snapshot plus the final one.
+        assert!(events.len() <= 3, "{} events", events.len());
+        let last = events.last().unwrap();
+        let expected = format!("{}end", piece.repeat(1000));
+        assert_eq!(last["ops"][0]["text"], expected);
+        assert_eq!(last["ops"][1]["type"], "finalize");
+        let revisions: Vec<u64> = events
+            .iter()
+            .map(|e| e["ops"][0]["revision"].as_u64().unwrap())
+            .collect();
+        assert!(
+            revisions.windows(2).all(|w| w[0] < w[1]),
+            "revisions increase: {revisions:?}"
+        );
+        assert_eq!(stream.text, expected);
+    }
+
+    #[test]
+    fn held_back_text_is_sent_after_the_interval() {
+        let mut stream = Stream::default();
+        let delta = |d: &str| {
+            json!({"event":"step_update","step_update":{
+            "conversation_id":"c","step_index":7,"state":"ACTIVE","step_type":"agent_response","text_delta":d}})
+        };
+        assert_eq!(stream.feed(&delta("a")).len(), 1);
+        assert!(stream.feed(&delta("b")).is_empty(), "within the interval");
+        std::thread::sleep(SNAPSHOT_INTERVAL + std::time::Duration::from_millis(20));
+        // Any later event flushes the held-back text first.
+        let out = stream.feed(&json!({"event":"step_update","step_update":{
+            "conversation_id":"c","step_index":8,"state":"ACTIVE","step_type":"tool","tool_name":"x"}}));
+        assert_eq!(out[0]["ops"][0]["text"], "ab");
+    }
+
     #[test]
     fn responses_have_stable_step_ids_and_survive_tool_boundaries_and_short_final_receipts() {
         let mut stream = Stream::default();
