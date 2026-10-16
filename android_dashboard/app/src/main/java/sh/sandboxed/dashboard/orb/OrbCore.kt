@@ -718,6 +718,20 @@ class OrbCore private constructor(context: Context) {
     private val _fleetSummary = MutableStateFlow<OrbDict>(emptyMap())
     val fleetSummary: StateFlow<OrbDict> = _fleetSummary.asStateFlow()
 
+    private val _pendingSecretRequests = MutableStateFlow(0)
+    /** Pending Bitwarden broker requests; a mission is blocked until one is answered. */
+    val pendingSecretRequests: StateFlow<Int> = _pendingSecretRequests.asStateFlow()
+
+    fun updatePendingSecretRequests(count: Int) {
+        _pendingSecretRequests.value = count
+    }
+
+    suspend fun refreshSecretRequests() {
+        if (!isConfigured) return
+        runCatching { OrbBitwardenApi.pending(OrbBitwardenApi.broker(this)).size }
+            .onSuccess { _pendingSecretRequests.value = it }
+    }
+
     private val _assistantStatus = MutableStateFlow<OrbDict>(emptyMap())
     val assistantStatus: StateFlow<OrbDict> = _assistantStatus.asStateFlow()
 

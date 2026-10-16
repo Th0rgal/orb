@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -446,7 +447,7 @@ object OrbTimelineBuilder {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun OrbConversationPage(
     core: OrbCore,
@@ -929,10 +930,22 @@ fun OrbConversationPage(
         }
     }
 
-    fun launchSpeech() {
+    // Spark dictation (iOS OrbDictation): record 16 kHz WAV, transcribe on Core,
+    // and fall back to the system recognizer if recording or transcription fails.
+    remember(context) { OrbDictationSettings.init(context); true }
+    val sparkRecorder = remember { OrbSparkRecorder() }
+    var dictationElapsed by remember { mutableIntStateOf(0) }
+    var showDictationLanguages by remember { mutableStateOf(false) }
+
+    fun appendTranscript(spoken: String) {
+        inputText = if (inputText.trim().isEmpty()) spoken else "${inputText.trimEnd()} $spoken"
+    }
+
+    fun launchSystemSpeech() {
         dictationPhase = OrbAndroidDictationPhase.Listening
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, OrbDictationSettings.resolve())
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Microphone")
         }
         runCatching {
@@ -941,6 +954,60 @@ fun OrbConversationPage(
             dictationPhase = OrbAndroidDictationPhase.Failed
         }
     }
+
+    fun startSparkRecording() {
+        if (!sparkRecorder.start()) {
+            launchSystemSpeech()
+            return
+        }
+        dictationElapsed = 0
+        dictationPhase = OrbAndroidDictationPhase.Recording
+    }
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startSparkRecording() else launchSystemSpeech()
+    }
+
+    fun launchSpeech() {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) startSparkRecording() else micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+
+    fun finishSparkRecording() {
+        val wav = sparkRecorder.stop()
+        if (wav == null) {
+            dictationPhase = OrbAndroidDictationPhase.Idle
+            return
+        }
+        dictationPhase = OrbAndroidDictationPhase.Transcribing
+        scope.launch {
+            val text = runCatching {
+                OrbSparkTranscriber.transcribe(core, wav, OrbDictationSettings.resolve())
+            }.getOrNull()
+            if (dictationPhase != OrbAndroidDictationPhase.Transcribing) return@launch
+            if (!text.isNullOrEmpty()) {
+                appendTranscript(text)
+                dictationPhase = OrbAndroidDictationPhase.Idle
+            } else {
+                // Spark unavailable or returned nothing: let the on-device recognizer try.
+                launchSystemSpeech()
+            }
+        }
+    }
+
+    LaunchedEffect(dictationPhase) {
+        while (dictationPhase == OrbAndroidDictationPhase.Recording) {
+            delay(250)
+            dictationElapsed = sparkRecorder.elapsedSeconds
+            if (dictationElapsed >= OrbSparkRecorder.MAX_SECONDS) finishSparkRecording()
+        }
+    }
+
+    DisposableEffect(Unit) { onDispose { sparkRecorder.cancel() } }
 
     // Project context files for `@` mentions. Mirrors iOS OrbAttachments: the context
     // manifest (entries keyed by path) first, then a shallow walk of /files.
@@ -1770,9 +1837,15 @@ fun OrbConversationPage(
             if (dictationPhase != OrbAndroidDictationPhase.Idle) {
                 OrbAndroidDictationCapsule(
                     phase = dictationPhase,
-                    elapsedSeconds = 0,
-                    onCancel = { dictationPhase = OrbAndroidDictationPhase.Idle },
-                    onFinish = { dictationPhase = OrbAndroidDictationPhase.Idle },
+                    elapsedSeconds = dictationElapsed,
+                    onCancel = {
+                        sparkRecorder.cancel()
+                        dictationPhase = OrbAndroidDictationPhase.Idle
+                    },
+                    onFinish = {
+                        if (dictationPhase == OrbAndroidDictationPhase.Recording) finishSparkRecording()
+                        else if (dictationPhase != OrbAndroidDictationPhase.Transcribing) dictationPhase = OrbAndroidDictationPhase.Idle
+                    },
                     onRetry = { launchSpeech() }
                 )
             } else {
@@ -1968,22 +2041,57 @@ fun OrbConversationPage(
                         }
 
                         // Microphone dictation button
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .orbPressClickable { launchSpeech() }
-                                .padding(7.dp)
-                                .clip(CircleShape)
-                                .background(OrbStyle.card)
-                                .border(1.dp, OrbStyle.border, CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Mic,
-                                contentDescription = "Microphone",
-                                tint = OrbStyle.textSecondary,
-                                modifier = Modifier.size(16.dp)
-                            )
+                        Box {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .combinedClickable(
+                                        onClick = { launchSpeech() },
+                                        onLongClick = { showDictationLanguages = true }
+                                    )
+                                    .padding(7.dp)
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.card)
+                                    .border(1.dp, OrbStyle.border, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Mic,
+                                    contentDescription = "Dictate message (hold to choose language: ${OrbDictationSettings.name(OrbDictationSettings.resolve())})",
+                                    tint = OrbStyle.textSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showDictationLanguages,
+                                onDismissRequest = { showDictationLanguages = false },
+                                containerColor = OrbStyle.elevated
+                            ) {
+                                val current = OrbDictationSettings.stored
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})",
+                                            color = Color.White
+                                        )
+                                    },
+                                    trailingIcon = { if (current.isEmpty()) Icon(Icons.Default.Check, null, tint = Color.White) },
+                                    onClick = {
+                                        OrbDictationSettings.update("")
+                                        showDictationLanguages = false
+                                    }
+                                )
+                                OrbDictationSettings.languages.forEach { (code, label) ->
+                                    DropdownMenuItem(
+                                        text = { Text(label, color = Color.White) },
+                                        trailingIcon = { if (current == code) Icon(Icons.Default.Check, null, tint = Color.White) },
+                                        onClick = {
+                                            OrbDictationSettings.update(code)
+                                            showDictationLanguages = false
+                                        }
+                                    )
+                                }
+                            }
                         }
 
                         if (isLive && missionId != null) {

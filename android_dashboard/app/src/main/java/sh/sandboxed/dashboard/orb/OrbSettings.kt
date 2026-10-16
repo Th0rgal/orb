@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
@@ -80,17 +82,21 @@ enum class OrbSettingsRoute {
     Backend,
     Providers,
     Machines,
-    Inbox
+    Inbox,
+    Secrets,
+    Dictation
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrbSettingsSheet(
     core: OrbCore,
+    initialRoute: OrbSettingsRoute = OrbSettingsRoute.Root,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var route by remember { mutableStateOf(OrbSettingsRoute.Root) }
+    var route by remember { mutableStateOf(initialRoute) }
+    val pendingSecrets by core.pendingSecretRequests.collectAsState()
     val baseURL by core.baseURLFlow.collectAsState()
     val providers by core.providers.collectAsState()
     val nodes by core.nodes.collectAsState()
@@ -189,6 +195,33 @@ fun OrbSettingsSheet(
                                 subtitle = inboxSubtitle,
                                 onClick = { route = OrbSettingsRoute.Inbox }
                             )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            OrbSettingsRow(
+                                icon = Icons.Default.Lock,
+                                title = "Secrets",
+                                subtitle = if (pendingSecrets > 0) {
+                                    "$pendingSecrets access request${if (pendingSecrets == 1) "" else "s"} waiting"
+                                } else {
+                                    "Bitwarden"
+                                },
+                                onClick = { route = OrbSettingsRoute.Secrets }
+                            )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            OrbSettingsRow(
+                                icon = Icons.Default.Mic,
+                                title = "Dictation",
+                                subtitle = OrbDictationSettings.stored.ifEmpty { "" }.let {
+                                    if (it.isEmpty()) "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})"
+                                    else OrbDictationSettings.name(it)
+                                },
+                                onClick = { route = OrbSettingsRoute.Dictation }
+                            )
                         }
                     }
                 }
@@ -216,6 +249,15 @@ fun OrbSettingsSheet(
                     OrbInboxSettingsPage(
                         onBack = { route = OrbSettingsRoute.Root }
                     )
+                }
+                OrbSettingsRoute.Secrets -> {
+                    OrbBitwardenSettingsPage(
+                        core = core,
+                        onBack = { route = OrbSettingsRoute.Root }
+                    )
+                }
+                OrbSettingsRoute.Dictation -> {
+                    OrbDictationSettingsPage(onBack = { route = OrbSettingsRoute.Root })
                 }
             }
         }
@@ -2098,4 +2140,69 @@ fun OrbInboxSettingsPage(
 object OrbProviderLoginFlow {
     /** Subscription types offered by iOS `OrbProvidersSettingsView.subscriptionTypes`. */
     val subscriptionTypes = setOf("anthropic", "openai", "google", "xai", "kimi")
+}
+
+@Composable
+fun OrbDictationSettingsPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    remember(context) { OrbDictationSettings.init(context); true }
+    val current = OrbDictationSettings.stored
+    val options = listOf("" to "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})") +
+        OrbDictationSettings.languages
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .orbPressClickable { onBack() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(17.dp))
+            }
+            Text(
+                text = "Dictation",
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.width(38.dp))
+        }
+        Text(
+            "Speech is transcribed on Spark in this language, with the on-device recognizer as a fallback. You can also change it by touching and holding the microphone.",
+            color = OrbStyle.textMuted,
+            fontSize = 12.sp
+        )
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(OrbStyle.surface)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+        ) {
+            items(options.size) { idx ->
+                val (code, label) = options[idx]
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .orbPressClickable { OrbDictationSettings.update(code) }
+                        .padding(horizontal = 16.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(label, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                    if (current == code) Icon(Icons.Default.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+    }
 }

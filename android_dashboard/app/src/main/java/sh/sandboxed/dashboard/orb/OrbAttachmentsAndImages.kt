@@ -1,6 +1,7 @@
 package sh.sandboxed.dashboard.orb
 
 import android.content.Context
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -356,9 +357,19 @@ object OrbUserPromptParser {
 }
 
 object OrbRemoteImageLoader {
-    private val cache = mutableStateMapOf<String, Bitmap>()
+    /** Hard cap on bytes read per image (download or inline data URI). */
+    const val MAX_IMAGE_BYTES = 20 * 1024 * 1024
+    /** Decoded bitmaps are downsampled so neither side exceeds this. */
+    private const val MAX_DIMENSION = 2048
+    private const val MAX_CONCURRENT_LOADS = 3
 
-    fun cached(key: String): Bitmap? = cache[key]
+    /** LRU cache bounded by decoded byte size (32 MB). */
+    private val cache = object : android.util.LruCache<String, Bitmap>(32 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+    }
+    private val loadGate = kotlinx.coroutines.sync.Semaphore(MAX_CONCURRENT_LOADS)
+
+    fun cached(key: String): Bitmap? = cache.get(key)
 
     suspend fun load(
         ref: OrbImageAttachmentRef,
@@ -366,30 +377,47 @@ object OrbRemoteImageLoader {
         core: OrbCore
     ): Bitmap? = withContext(Dispatchers.IO) {
         val cacheKey = "${ref.path}|${ref.url ?: ""}"
-        cache[cacheKey]?.let { return@withContext it }
+        cache.get(cacheKey)?.let { return@withContext it }
 
-        // Inline data URIs from replies are decoded locally, never sent to the server.
-        val inline = ref.url ?: ref.path
-        if (inline.startsWith("data:image/", ignoreCase = true)) {
-            val bytes = runCatching {
-                android.util.Base64.decode(inline.substringAfter(','), android.util.Base64.DEFAULT)
-            }.getOrNull() ?: return@withContext null
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withContext null
-            withContext(Dispatchers.Main) { cache[cacheKey] = bmp }
-            return@withContext bmp
-        }
-
-        for (endpoint in candidateEndpoints(ref, workspaceId, core)) {
-            val bytes = fetchBytes(endpoint, core) ?: continue
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            if (bmp != null) {
-                withContext(Dispatchers.Main) {
-                    cache[cacheKey] = bmp
-                }
+        loadGate.acquire()
+        try {
+            // Inline data URIs from replies are decoded locally, never sent to the server.
+            val inline = ref.url ?: ref.path
+            if (inline.startsWith("data:image/", ignoreCase = true)) {
+                val payload = inline.substringAfter(',')
+                // base64 expands 3 bytes to 4 chars; reject anything that would exceed the cap.
+                if (payload.length.toLong() * 3 / 4 > MAX_IMAGE_BYTES) return@withContext null
+                val bytes = runCatching {
+                    android.util.Base64.decode(payload, android.util.Base64.DEFAULT)
+                }.getOrNull() ?: return@withContext null
+                val bmp = decodeBounded(bytes) ?: return@withContext null
+                cache.put(cacheKey, bmp)
                 return@withContext bmp
             }
+
+            for (endpoint in candidateEndpoints(ref, workspaceId, core)) {
+                val bytes = fetchBytes(endpoint, core) ?: continue
+                val bmp = decodeBounded(bytes)
+                if (bmp != null) {
+                    cache.put(cacheKey, bmp)
+                    return@withContext bmp
+                }
+            }
+            null
+        } finally {
+            loadGate.release()
         }
-        null
+    }
+
+    /** Decodes with inSampleSize so the result fits within [MAX_DIMENSION]. */
+    fun decodeBounded(bytes: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / sample > MAX_DIMENSION || bounds.outHeight / sample > MAX_DIMENSION) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        return runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) }.getOrNull()
     }
 
     private fun candidateEndpoints(
@@ -412,6 +440,13 @@ object OrbRemoteImageLoader {
         return list
     }
 
+    /** True when [url] points at the configured backend (scheme, host and port match). */
+    fun isBackendUrl(url: String, core: OrbCore): Boolean {
+        val target = url.toHttpUrlOrNull() ?: return false
+        val backend = runCatching { core.makeURL("/").toHttpUrlOrNull() }.getOrNull() ?: return false
+        return target.scheme == backend.scheme && target.host == backend.host && target.port == backend.port
+    }
+
     private fun fetchBytes(endpoint: String, core: OrbCore): ByteArray? {
         return try {
             val url = if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
@@ -423,19 +458,36 @@ object OrbRemoteImageLoader {
                 .url(url)
                 .get()
                 .apply {
-                    core.token?.trim()?.takeIf { it.isNotEmpty() }?.let {
-                        header("Authorization", "Bearer $it")
+                    // Never send the JWT to a host other than the configured backend.
+                    if (isBackendUrl(url, core)) {
+                        core.token?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                            header("Authorization", "Bearer $it")
+                        }
                     }
                 }
                 .build()
-            val resp = core.httpClient.newCall(req).execute()
-            val code = resp.code
-            val bytes = resp.body?.bytes()
-            resp.close()
-            if (code in 200..299 && bytes != null && bytes.isNotEmpty() && bytes.size <= 20 * 1024 * 1024) bytes else null
+            core.httpClient.newCall(req).execute().use { resp ->
+                if (resp.code !in 200..299) return null
+                val body = resp.body ?: return null
+                if (body.contentLength() > MAX_IMAGE_BYTES) return null
+                readBounded(body.byteStream(), MAX_IMAGE_BYTES)?.takeIf { it.isNotEmpty() }
+            }
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /** Reads at most [limit] bytes; returns null if the stream is longer. */
+    fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(64 * 1024)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            if (out.size() + n > limit) return null
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 }
 

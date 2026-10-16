@@ -1,6 +1,7 @@
 package sh.sandboxed.dashboard.orb
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Check
@@ -134,6 +136,21 @@ fun OrbAppRoot(
     val backStack = remember { mutableStateOf<List<OrbNavScreen>>(listOf(OrbNavScreen.Home)) }
     var topTab by remember { mutableStateOf(OrbTopTab.Projects) }
     var showSettingsSheet by remember { mutableStateOf(false) }
+    var settingsInitialRoute by remember { mutableStateOf(OrbSettingsRoute.Root) }
+    val pendingSecrets by core.pendingSecretRequests.collectAsState()
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    // Poll the Bitwarden broker every 10 s while the app is visible (Orb App.tsx),
+    // so a mission blocked on a secret request is noticed from the main screen.
+    LaunchedEffect(baseURL, lifecycleOwner) {
+        if (baseURL.trim().isEmpty()) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                core.refreshSecretRequests()
+                kotlinx.coroutines.delay(10_000)
+            }
+        }
+    }
 
     fun push(screen: OrbNavScreen) {
         backStack.value = backStack.value + screen
@@ -293,12 +310,42 @@ fun OrbAppRoot(
                 )
             }
         }
+
+        if (pendingSecrets > 0) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 88.dp)
+                    .clip(CircleShape)
+                    .background(OrbStyle.warning)
+                    .orbPressClickable {
+                        settingsInitialRoute = OrbSettingsRoute.Secrets
+                        showSettingsSheet = true
+                    }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.Lock, contentDescription = null, tint = Color.Black, modifier = Modifier.size(15.dp))
+                Text(
+                    text = "$pendingSecrets secret request${if (pendingSecrets == 1) "" else "s"} waiting",
+                    color = Color.Black,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
     }
 
     if (showSettingsSheet) {
         OrbSettingsSheet(
             core = core,
-            onDismiss = { showSettingsSheet = false }
+            initialRoute = settingsInitialRoute,
+            onDismiss = {
+                showSettingsSheet = false
+                settingsInitialRoute = OrbSettingsRoute.Root
+            }
         )
     }
 }
