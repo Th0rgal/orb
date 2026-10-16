@@ -1445,6 +1445,10 @@ impl NativeGrokObserver {
                     "Native Codex goal stopped with status '{}'; the objective and counters are preserved. Resume after resolving that stop.",
                     self.stream.native_goal_status.as_deref().unwrap_or("unconfirmed")
                 ));
+            } else if exit == Some(super::btw_context::SNAPSHOT_MISSING_EXIT) {
+                report.push_str(&format!(
+                    "The /btw conversation snapshot is not on node '{node_id}'. Ask the side question again so Orb uploads a fresh one there."
+                ));
             } else if auth_required {
                 report.push_str(
                     "The selected CLI could not authenticate on the node. Reconnect its account in Providers or repair the node's managed credentials, then resume this mission.",

@@ -14,6 +14,8 @@ it('creates a distinct side agent and never sends to the parent',async()=>{
  const events:any[]=[];
  await askBtwAgent('parent','Inspect the repo','Main context',[],new AbortController().signal,e=>events.push(e));
  expect(api).toHaveBeenCalledWith('/api/control/missions/parent/btw/agent',expect.objectContaining({body:expect.stringContaining('builtin/smart')}));
+ // Placement must come from Core, never a pre-transfer local-origin row.
+ expect(getMission).toHaveBeenCalledWith('parent',{coreOnly:true});
  expect(btwSession('parent')?.id).toBe('child');expect(events.at(-1).type).toBe('done');expect(sendMissionMessage).not.toHaveBeenCalled();
  const {getMissionEvents}=await import('../src/stream');
  vi.mocked(getMissionEvents).mockResolvedValueOnce([]);

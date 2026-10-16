@@ -1,6 +1,8 @@
 //! Stage operator-provided conversation archives inside the side-agent workspace.
 use super::*;
 const STAGE: &str = include_str!("../../../scripts/orb_stage_conversation.py");
+/// Distinct from the managed-auth exit (78): the /btw snapshot is not on the node.
+pub(crate) const SNAPSHOT_MISSING_EXIT: i32 = 79;
 
 pub(super) fn snapshot_id(prompt: &str) -> Option<Uuid> {
     if let Some(id) = prompt.lines().find_map(|line| {
@@ -34,9 +36,10 @@ pub(super) fn remote_prefix(mission: &Mission, prompt: &str) -> String {
     };
     // Capture the node's upload root before the fork prefix changes directory.
     format!(
-        "python3 -c {} \"$btw_upload_root\" {} || exit 78; ",
+        "python3 -c {} \"$btw_upload_root\" {} || exit {}; ",
         shell_single_quote(STAGE),
-        shell_single_quote(&id.to_string())
+        shell_single_quote(&id.to_string()),
+        SNAPSHOT_MISSING_EXIT
     )
 }
 
