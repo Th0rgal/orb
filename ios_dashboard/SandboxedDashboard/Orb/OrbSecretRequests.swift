@@ -189,7 +189,10 @@ struct OrbSecretRequestsSheet: View {
     private func act(_ r: OrbJSON, scope: String?, reason: String) {
         Task {
             let id = r["id"].text
-            if scope != nil, let message = await OrbBiometric.authenticate(reason: reason) {
+            // An enrolled phone signs the approval, which prompts for Face ID /
+            // Touch ID itself; otherwise ask for it here.
+            let enrolled = OrbApprovalKey.deviceId != nil && OrbApprovalKey.publicKey != nil
+            if scope != nil, !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
                 if !message.isEmpty { error = message }
                 return
             }
@@ -199,7 +202,11 @@ struct OrbSecretRequestsSheet: View {
                 if let scope {
                     var body: [String: OrbJSON] = ["ttl_hours": .number(Double(ttlHours))]
                     if !scope.isEmpty { body["scope"] = .string(scope) }
-                    _ = try await OrbCore.shared.call("/api/bitwarden/requests/\(OrbCore.escape(id))/approve", method: "POST", body: .object(body))
+                    // Signed with this device's Secure Enclave key, which also
+                    // prompts for Face ID / Touch ID, like the Settings page.
+                    _ = try await OrbApprovalKey.signedCall(
+                        "/api/bitwarden/requests/\(OrbCore.escape(id))/approve",
+                        method: "POST", body: .object(body), summary: reason)
                 } else {
                     _ = try await OrbCore.shared.call("/api/bitwarden/requests/\(OrbCore.escape(id))/reject", method: "POST")
                 }
