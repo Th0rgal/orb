@@ -3280,6 +3280,15 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [sentOverStop, setSentOverStop] = createSignal<string | null>(null);
   // A rejected send changed nothing: show the stop notice again.
   createEffect(() => { if (sendError()) setSentOverStop(null); });
+  // Once the follow-up is queued, the queue itself keeps the notice hidden; when
+  // that queue empties again (sent or cancelled) the suppression is no longer needed.
+  let sawQueued = false;
+  createEffect(() => {
+    if (!sentOverStop()) { sawQueued = false; return; }
+    const queued = localQueueActive() || remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued);
+    if (queued) sawQueued = true;
+    else if (sawQueued) setSentOverStop(null);
+  });
   // Any status or update after the follow-up ends the suppression for good,
   // so a failure reported later (stream or poll) shows normally.
   createEffect(() => {
