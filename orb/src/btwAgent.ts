@@ -214,7 +214,10 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
     localStorage.removeItem(key);s=undefined;current=undefined;
    }
   }
-  const source=await getMission(parent),config=btwConfig();
+  // Placement decides where the snapshot is written. getMission falls back to
+  // this computer's origin journal when Core is slow, and that journal still
+  // says placement:client after a transfer, so read Core's record directly.
+  const source=await getMission(parent,{coreOnly:true}),config=btwConfig();
   const machine=source.machine_transfer?.destination;
   let local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
   const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:source.remote_node_id??source.remote_job?.node_id;
