@@ -200,6 +200,10 @@ export function FilePanelProvider(p: {
     }
     return rootPromise;
   }
+  // What the side pane belongs to: the mission (or project/controller), not
+  // its machine or connection details. Refreshing the same mission must not
+  // close an open side question.
+  let shownFor: string | undefined;
   createEffect(
     on([scopeKey, connectionVersion], ([key]) => {
       generation++;
@@ -215,7 +219,10 @@ export function FilePanelProvider(p: {
       setTabs(saved.tabs);
       setActive(saved.active);
       setExpanded(saved.expanded);
-      setOpened(saved.open);
+      const owner = untrack(() => p.scope.mission?.id ?? `project:${p.scope.project ?? ""}:${p.scope.controller ?? ""}`);
+      if (owner === shownFor) setFilesOpened(saved.open);
+      else setOpened(saved.open);
+      shownFor = owner;
       setDirectories({});
       setSources([]);
       setContent(undefined);
@@ -827,7 +834,10 @@ export function FilePanelProvider(p: {
       hide: () => setSideVisible(false),
       register: fn => {
         setOpenSide(() => fn);
-        if (!fn) setSideVisible(false);
+        // A side question that unmounts and immediately mounts again (a
+        // re-render of the mission view) keeps the pane open; only a real
+        // removal hides it.
+        if (!fn) queueMicrotask(() => { if (!openSide()) setSideVisible(false); });
       },
     }}>
     <PanelContext.Provider

@@ -22,3 +22,5 @@
 .cloud-working-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-2); animation: cloud-working-pulse 1.2s ease-in-out infinite; }
 @keyframes cloud-working-pulse { 0%, 100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .cloud-working-dot { animation: none; } }
+
+.cloud-conversation-meta{align-items:center}.cloud-conversation-meta .cloud-meta-picks{height:20px;margin:-2px 0}

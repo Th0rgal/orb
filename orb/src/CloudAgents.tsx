@@ -320,11 +320,16 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     </>}</Show>
   </div></div><div class="dock" ref={floatingDock}><div class="col">
     <Show when={execution()}>{e => <>
-      <Show when={account()?.capabilities.follow_up}><Composer textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments) && e().selection.provider !== 'hermes'} directFileUpload={e().selection.provider === 'hermes'} picker={false} scope={`cloud:${p.id}`} placeholder="Continue this conversation…" busy={active()} disabled={busy() || !cloudCanSend(e())} onSend={send} controls={<Show when={account()?.capabilities.models}><div class="picks"><CloudModelPicker provider={e().selection.provider} model={model()} params={modelParams()} disabled={busy()} onChange={(model,params)=>{setModel(model);setModelParams(params);}} onError={setError}/></div></Show>}
+      <Show when={account()?.capabilities.follow_up}><Composer textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments) && e().selection.provider !== 'hermes'} directFileUpload={e().selection.provider === 'hermes'} picker={false} scope={`cloud:${p.id}`} placeholder="Continue this conversation…" busy={active()} disabled={busy() || !cloudCanSend(e())} onSend={send}
         onStop={account()?.capabilities.cancel && e().turns.some(t => t.external_id && ['running','submitting','waiting_user'].includes(t.phase)) ? () => void cancel() : undefined}/></Show>
       <div class="cloud-conversation-meta"><ProviderLogo type={e().selection.provider}/><span title={account()?.label}>{cloudNames[e().selection.provider]}<Show when={!account() || cloudAccountLabel(account()!) !== cloudNames[e().selection.provider]}> · {account() ? cloudAccountLabel(account()!) : e().selection.account}</Show></span>
-        <Show when={model() || (e().turns.at(-1)?.model ?? e().selection.model)}><span> · {model() || e().turns.at(-1)?.model || e().selection.model}</span></Show>
-        <Show when={(modelParams().find(x => x.id === 'effort')?.value ?? (e().turns.at(-1)?.model_params ?? e().selection.model_params)?.find(x => x.id === 'effort')?.value)}>{eff => <span> · {eff()}</span>}</Show>
+        {/* Like the agent composer: model and effort are chosen below the field, not inside it. */}
+        <Show when={account()?.capabilities.models} fallback={<>
+          <Show when={model() || (e().turns.at(-1)?.model ?? e().selection.model)}><span> · {model() || e().turns.at(-1)?.model || e().selection.model}</span></Show>
+          <Show when={(modelParams().find(x => x.id === 'effort')?.value ?? (e().turns.at(-1)?.model_params ?? e().selection.model_params)?.find(x => x.id === 'effort')?.value)}>{eff => <span> · {eff()}</span>}</Show>
+        </>}>
+          <div class="picks cloud-meta-picks"><CloudModelPicker provider={e().selection.provider} model={model()} params={modelParams()} disabled={busy()} onChange={(model,params)=>{setModel(model);setModelParams(params);}} onError={setError}/></div>
+        </Show>
         <span role="status">{cloudPhase(e().turns.at(-1)?.phase ?? '')}</span>
         <Show when={safeCloudUrl(e().external_url)}>{url => <a href={url()} onClick={event => {event.preventDefault(); void openExternalUrl(url());}}>Open in {cloudNames[e().selection.provider]}</a>}</Show>
       </div>
