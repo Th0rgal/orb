@@ -1151,8 +1151,17 @@ pub fn run_claudecode_turn<'a>(
         if settings_path.exists() {
             match std::fs::read_to_string(&settings_path) {
                 Ok(json_content) => {
+                    // Re-apply the attribution override: the file may predate
+                    // it (reused workspace) or have been edited since.
+                    let content = match serde_json::from_str::<serde_json::Value>(&json_content) {
+                        Ok(mut settings) => {
+                            crate::harness_attribution::apply_claude(&mut settings);
+                            settings.to_string()
+                        }
+                        Err(_) => json_content,
+                    };
                     args.push("--settings".to_string());
-                    args.push(json_content);
+                    args.push(content);
                 }
                 Err(e) => {
                     tracing::warn!(
