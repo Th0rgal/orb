@@ -137,6 +137,7 @@ mod bindings;
 mod biometrics;
 mod client_link;
 mod diagnostics;
+mod mistral_usage;
 use bindings::local_bindings;
 
 fn main() {
@@ -255,6 +256,7 @@ fn main() {
             local_agents::local_agents_write,
             transfers::local_machine_transfer,
             transfers::local_machine_identity,
+            mistral_usage::mistral_usage_sign_in,
             client_link::client_link_active,
             client_link::client_link_flush,
             client_link::client_link_connect,

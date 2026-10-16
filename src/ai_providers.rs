@@ -368,6 +368,10 @@ pub struct AIProvider {
     /// Credential provisioned by Mistral Vibe browser sign-in, billed to its plan.
     #[serde(default)]
     pub mistral_subscription: bool,
+    /// Mistral console session (`ory_session_*` + `csrftoken` cookies only),
+    /// used solely to read the Vibe plan's monthly usage. Never sent to clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mistral_usage_session: Option<String>,
     /// OAuth credentials (if using OAuth auth)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthCredentials>,
@@ -447,6 +451,7 @@ impl AIProvider {
             google_project_id: None,
             api_key: None,
             mistral_subscription: false,
+            mistral_usage_session: None,
             oauth: None,
             cli_proxy_auth_file: None,
             base_url: None,
@@ -832,6 +837,24 @@ impl AIProviderStore {
         } else {
             None
         }
+    }
+
+    /// Store (Some) or clear (None) the Mistral console usage session.
+    pub async fn set_mistral_usage_session(
+        &self,
+        id: Uuid,
+        session: Option<String>,
+    ) -> Option<AIProvider> {
+        let mut providers = self.providers.write().await;
+        let provider = providers.get_mut(&id)?;
+        provider.mistral_usage_session = session;
+        provider.updated_at = chrono::Utc::now();
+        let updated = provider.clone();
+        drop(providers);
+        if let Err(e) = self.save_to_disk().await {
+            tracing::error!("Failed to save AI providers to disk: {}", e);
+        }
+        Some(updated)
     }
 
     /// Update a provider with an API key.

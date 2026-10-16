@@ -237,6 +237,8 @@ struct OrbProviderQuota: View {
         add("5h", "minimax_interval_remaining_percent", remaining: true); add("Weekly", "minimax_weekly_remaining_percent", remaining: true)
         add("5h", "zai_5h_used_percent"); add("Weekly", "zai_weekly_used_percent")
         if value["zai_5h_used_percent"] == .null && value["zai_weekly_used_percent"] == .null { add("Tokens", "zai_tokens_percentage") }
+        add("5h", "muse_5h_used_percent"); add("Weekly", "muse_weekly_used_percent")
+        add("Monthly", "mistral_monthly_used_percent")
         return result
     }
     var body: some View {

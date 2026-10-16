@@ -27,6 +27,11 @@ export function codingPlanWindows(u: ProviderUsage) {
     add("5h", u.minimax_interval_remaining_percent, u.minimax_interval_reset, true);
     add("Weekly", u.minimax_weekly_remaining_percent, u.minimax_weekly_reset, true);
   }
+  if (u.provider_type === "muse-code") {
+    add("5h", u.muse_5h_used_percent, u.muse_5h_reset);
+    add("Weekly", u.muse_weekly_used_percent, u.muse_weekly_reset);
+  }
+  if (u.provider_type === "mistral") add("Monthly", u.mistral_monthly_used_percent, u.mistral_monthly_reset);
   if (u.provider_type === "zai") {
     add("5h", u.zai_5h_used_percent, u.zai_5h_reset);
     add("Weekly", u.zai_weekly_used_percent, u.zai_weekly_reset);

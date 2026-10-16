@@ -17,6 +17,8 @@ import {
   connectionVersion,
   getAllProviderUsage,
   getProviderUsage,
+  setMistralUsageSession,
+  clearMistralUsageSession,
   getSubscriptionLogin,
   startProviderOAuth,
   completeProviderOAuth,
@@ -30,6 +32,7 @@ import {
   type AIProvider,
   type ProviderUsage,
 } from "./api";
+import { nativeInvoke } from "./clientRuns";
 
 type AuthKind = "oauth" | "api";
 type Owner = "cliproxy" | "sandboxed";
@@ -396,7 +399,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
       if (!disposed) setUsage(snapshot);
       // The bulk endpoint returns its cache before starting background probes.
       // Await subscription accounts so the first visit receives their result too.
-      await Promise.allSettled(p.list.filter(a => ["kimi", "minimax", "zai"].includes(a.provider_type) || (a.uses_oauth && (a.provider_type === "openai" || a.provider_type === "xai"))).map(async a => {
+      await Promise.allSettled(p.list.filter(a => ["kimi", "minimax", "zai", "muse-code", "mistral"].includes(a.provider_type) || (a.uses_oauth && (a.provider_type === "openai" || a.provider_type === "xai"))).map(async a => {
         const value = await getProviderUsage(a.id);
         if (!disposed) setUsage(previous => ({ ...previous, [a.id]: value }));
       }));
@@ -443,7 +446,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No OAuth providers configured.</div></div>
@@ -467,7 +470,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API key providers configured.</div></div>
@@ -971,7 +974,48 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
   );
 }
 
-function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
+/** Mistral exposes the Vibe plan's monthly counter only to a signed-in
+ * console session. Orb captures that session once, in its own sign-in
+ * window, and hands it to Core, which then reads the counter for every client. */
+function MistralUsageConnect(p: { a: AIProvider; usage?: ProviderUsage; onUsage?: (usage: ProviderUsage) => void }) {
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const state = () => p.usage?.mistral_usage_session;
+  const connect = async () => {
+    const invoke = nativeInvoke();
+    if (!invoke) { void openExternalUrl("https://admin.mistral.ai/subscription"); return; }
+    setBusy(true); setError(null);
+    try {
+      const cookie = await invoke("mistral_usage_sign_in") as string | null;
+      if (!cookie) return;
+      p.onUsage?.(await setMistralUsageSession(p.a.id, cookie));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally { setBusy(false); }
+  };
+  const disconnect = async () => {
+    setBusy(true); setError(null);
+    try { p.onUsage?.(await clearMistralUsageSession(p.a.id)); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+  return <div class="p-detail">
+    <Show when={state() !== "connected"}>
+      <p class="s-row-desc">{state() === "expired"
+        ? "The Mistral console session expired. Sign in again to keep the monthly usage up to date."
+        : "Mistral shows the monthly Vibe allowance only in its console. Sign in once with the same account to show it here, on every device."}</p>
+    </Show>
+    <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>
+    <div class="p-acc-actions">
+      <Show when={state() !== "connected"} fallback={<button class="s-btn quiet" disabled={busy()} onClick={() => void disconnect()}>Disconnect usage</button>}>
+        <button class="s-btn" disabled={busy()} onClick={() => void connect()}>{busy() ? "Waiting for sign-in…" : state() === "expired" ? "Sign in again" : "Show monthly usage"}</button>
+        <button class="s-btn quiet" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>Open console ↗</button>
+      </Show>
+    </div>
+  </div>;
+}
+
+function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage);
   const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted"].includes(status()) ? "needs_reauth" : "not_configured";
@@ -1001,6 +1045,9 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
             <Show when={p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan}>
               <span class="p-dot">·</span><span>{p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan} plan</span>
             </Show>
+            <Show when={p.usage?.muse_plan || p.usage?.mistral_plan}>
+              <span class="p-dot">·</span><span>{p.usage!.muse_plan || p.usage!.mistral_plan}</span>
+            </Show>
 
           </div>
         </div>
@@ -1009,7 +1056,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
         </Show>
         <Show when={expandable()}><span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span></Show>
       </Dynamic>
-      <Show when={mistralSubscription() && !open()}>
+      <Show when={mistralSubscription() && !open() && p.usage?.mistral_usage_session !== "connected"}>
         <button class="s-btn quiet" aria-label="View Mistral monthly usage" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>Monthly usage ↗</button>
       </Show>
       <Show when={true}><button class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={!!menu()} onClick={e => { const r=e.currentTarget.getBoundingClientRect(); setMenu({x:r.right-170,y:r.bottom+4}); }}><span aria-hidden="true">···</span></button></Show>
@@ -1023,10 +1070,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onReconnect: () => v
         <div class="p-acc-body">
           <Show when={a.provider_type === "antigravity"}><AntigravityProvider /></Show>
           <Show when={mistralSubscription()}>
-            <div class="p-detail">
-              <p class="s-row-desc">Mistral provides a monthly allowance. Its live counter is not available through this Vibe connection. Sign in to the Mistral console with the same account to view usage and the reset date.</p>
-              <div class="p-acc-actions"><button class="s-btn quiet" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>View monthly usage ↗</button></div>
-            </div>
+            <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
           </Show>
           <Show when={hasProviderUsageDetails(p.usage)}>
             <UsageDetail usage={p.usage!} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
