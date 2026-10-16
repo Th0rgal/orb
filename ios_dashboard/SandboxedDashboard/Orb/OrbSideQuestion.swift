@@ -197,14 +197,16 @@ struct OrbSideQuestionSheet: View {
                 return tags.contains(tag) && !tags.contains("superseded")
             }
             .sorted { $0["created_at"].text < $1["created_at"].text }
-        // Continue the newest session when this device has none yet.
+        // Continue the newest session when this device has none yet, or when
+        // its stored one no longer exists (deleted), instead of losing history.
+        if let id = sideID, !list.contains(where: { $0["id"].text == id }) { sideID = nil }
         if sideID == nil, let latest = list.last {
             sideID = latest["id"].text
             UserDefaults.standard.set(sideID, forKey: OrbBtwConfig.sessionKey(parentID))
         }
         var turns: [(role: String, text: String)] = []
         for m in list where m["id"].text != sideID {
-            guard let events = try? await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(m["id"].text))/events") else { continue }
+            guard let events = try? await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(m["id"].text))/events?types=user_message,assistant_message,assistant_message_canonical") else { continue }
             // Like Orb desktop: only answered turns, one entry per question.
             var question = ""
             var answers: [String] = []
