@@ -40504,8 +40504,14 @@ Investigate <service/> failures.
         let exec = remote_execution_for_plan(&plan, "https://core.example", "sk-proxy-abc");
         assert!(
             exec.command
-                .contains("claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --model 'claude-opus-5' "),
+                .contains("claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --settings "),
             "{}",
+            exec.command
+        );
+        assert!(exec.command.contains(" --model 'claude-opus-5' "), "{}", exec.command);
+        assert!(
+            exec.command.contains(r#""attribution":{"commit":"","pr":""}"#),
+            "remote Claude never adds commit attribution: {}",
             exec.command
         );
         // Single quotes inside the prompt are shell-escaped.
