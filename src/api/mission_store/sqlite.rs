@@ -5677,6 +5677,42 @@ impl MissionStore for SqliteMissionStore {
         .map_err(|e| e.to_string())?
     }
 
+    async fn log_events(&self, events: Vec<(Uuid, AgentEvent)>) -> Vec<Result<(), String>> {
+        let count = events.len();
+        let conn = self.conn.clone();
+        let content_dir = self.content_dir.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            // One commit (one fsync) for the whole batch. A failing event only
+            // rolls back its own statement; the others are still committed.
+            if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE") {
+                return events
+                    .iter()
+                    .map(|(mid, ev)| log_event_sync(&conn, &content_dir, *mid, ev))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|r| r.map_err(|inner| format!("{inner} (no batch transaction: {e})")))
+                    .collect();
+            }
+            let results: Vec<Result<(), String>> = events
+                .iter()
+                .map(|(mid, ev)| log_event_sync(&conn, &content_dir, *mid, ev))
+                .collect();
+            match conn.execute_batch("COMMIT") {
+                Ok(()) => results,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    results
+                        .into_iter()
+                        .map(|_| Err(format!("batch commit failed: {e}")))
+                        .collect()
+                }
+            }
+        })
+        .await;
+        outcome.unwrap_or_else(|e| (0..count).map(|_| Err(e.to_string())).collect())
+    }
+
     async fn get_latest_events(
         &self,
         mission_id: Uuid,
@@ -12491,6 +12527,54 @@ mod tests {
             .await
             .expect("disable fast mode");
         assert!(!updated.fast_mode);
+    }
+
+    #[tokio::test]
+    async fn log_events_batch_keeps_order_and_sequences() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let a = store
+            .create_mission(Some("A"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let b = store
+            .create_mission(Some("B"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let title = |id, t: &str| AgentEvent::MissionStatusChanged {
+            completion: None,
+            execution: None,
+            mission_id: id,
+            status: MissionStatus::Active,
+            summary: Some(t.into()),
+        };
+        let batch: Vec<(Uuid, AgentEvent)> = (0..300)
+            .map(|i| {
+                if i % 3 == 0 {
+                    (b.id, title(b.id, &format!("b{i}")))
+                } else {
+                    (a.id, title(a.id, &format!("a{i}")))
+                }
+            })
+            .collect();
+        let results = store.log_events(batch).await;
+        assert_eq!(results.len(), 300);
+        assert!(results.iter().all(Result::is_ok));
+        let events = store.get_events(a.id, None, None, None).await.unwrap();
+        assert_eq!(events.len(), 200);
+        let seqs: Vec<i64> = events.iter().map(|e| e.sequence).collect();
+        assert!(seqs.windows(2).all(|w| w[1] > w[0]), "increasing sequences");
+        assert!(events[0].content.contains("a1") && events[199].content.contains("a299"));
+        assert_eq!(
+            store
+                .get_events(b.id, None, None, None)
+                .await
+                .unwrap()
+                .len(),
+            100
+        );
     }
 
     #[tokio::test]

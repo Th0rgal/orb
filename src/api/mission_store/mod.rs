@@ -2755,6 +2755,17 @@ pub trait MissionStore: Send + Sync {
         Ok(())
     }
 
+    /// Log several events in order. Stores that can should write them in one
+    /// transaction: the event logger falls behind (and drops events) when
+    /// each one costs its own commit. Returns one result per event.
+    async fn log_events(&self, events: Vec<(Uuid, AgentEvent)>) -> Vec<Result<(), String>> {
+        let mut results = Vec::with_capacity(events.len());
+        for (mission_id, event) in events {
+            results.push(self.log_event(mission_id, &event).await);
+        }
+        results
+    }
+
     /// Get all events for a mission (for replay/debugging).
     async fn get_events(
         &self,

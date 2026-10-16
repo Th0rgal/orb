@@ -92,6 +92,9 @@ use super::mission_store::{
 };
 use super::routes::AppState;
 
+/// Most events the event logger writes in one SQLite transaction.
+const EVENT_LOG_BATCH: usize = 512;
+
 pub(crate) const SERVER_SHUTDOWN_AUTO_RESUME_MAX_AGE_HOURS: u64 = 48;
 const INTERRUPTED_RESUME_PROMPT: &str =
     "[Resume interrupted work] Continue the existing task from its current state. Check the workspace and any background jobs before taking action. Do not redo completed work or duplicate running jobs; preserve the original objective, deadline, and any later user instructions.";
@@ -21446,11 +21449,35 @@ fn spawn_control_session(
             let stats_interval = std::time::Duration::from_secs(60);
             loop {
                 match event_rx.recv().await {
-                    Ok(event) => {
-                        let ev_name = event.event_name();
-                        *processed_per_type.entry(ev_name).or_insert(0) += 1;
-                        // Extract mission_id from event
-                        if let Some(mid) = event.mission_id() {
+                    Ok(first) => {
+                        // Drain what is already queued and write it in one
+                        // transaction: one commit per event could not keep up
+                        // with busy remote jobs, and the broadcast channel then
+                        // dropped events before they were saved.
+                        let mut received = vec![first];
+                        while received.len() < EVENT_LOG_BATCH {
+                            match event_rx.try_recv() {
+                                Ok(event) => received.push(event),
+                                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                    lag_total = lag_total.saturating_add(n);
+                                    tracing::warn!(
+                                        dropped = n,
+                                        lag_total = lag_total,
+                                        processed_total = processed_total,
+                                        "Event logger lagged by {} events (next recv() resumes after the gap)",
+                                        n
+                                    );
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let mut batch = Vec::with_capacity(received.len());
+                        for event in received {
+                            let ev_name = event.event_name();
+                            *processed_per_type.entry(ev_name).or_insert(0) += 1;
+                            let Some(mid) = event.mission_id() else {
+                                continue;
+                            };
                             // Client-link events were persisted with their
                             // ingest cursor before being broadcast.
                             if client_link::take_prepersisted(mid, &event) {
@@ -21458,7 +21485,16 @@ fn spawn_control_session(
                             }
                             if should_persist_event(&event) {
                                 processed_total += 1;
-                                if let Err(e) = store.log_event(mid, &event).await {
+                                batch.push((mid, event));
+                            }
+                        }
+                        if !batch.is_empty() {
+                            let meta: Vec<(Uuid, &'static str)> =
+                                batch.iter().map(|(m, e)| (*m, e.event_name())).collect();
+                            for ((mid, ev_name), result) in
+                                meta.into_iter().zip(store.log_events(batch).await)
+                            {
+                                if let Err(e) = result {
                                     tracing::warn!(
                                         mission_id = %mid,
                                         event_type = ev_name,
