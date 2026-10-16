@@ -368,6 +368,17 @@ object OrbRemoteImageLoader {
         val cacheKey = "${ref.path}|${ref.url ?: ""}"
         cache[cacheKey]?.let { return@withContext it }
 
+        // Inline data URIs from replies are decoded locally, never sent to the server.
+        val inline = ref.url ?: ref.path
+        if (inline.startsWith("data:image/", ignoreCase = true)) {
+            val bytes = runCatching {
+                android.util.Base64.decode(inline.substringAfter(','), android.util.Base64.DEFAULT)
+            }.getOrNull() ?: return@withContext null
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withContext null
+            withContext(Dispatchers.Main) { cache[cacheKey] = bmp }
+            return@withContext bmp
+        }
+
         for (endpoint in candidateEndpoints(ref, workspaceId, core)) {
             val bytes = fetchBytes(endpoint, core) ?: continue
             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
@@ -421,7 +432,7 @@ object OrbRemoteImageLoader {
             val code = resp.code
             val bytes = resp.body?.bytes()
             resp.close()
-            if (code in 200..299 && bytes != null && bytes.isNotEmpty()) bytes else null
+            if (code in 200..299 && bytes != null && bytes.isNotEmpty() && bytes.size <= 20 * 1024 * 1024) bytes else null
         } catch (_: Throwable) {
             null
         }
