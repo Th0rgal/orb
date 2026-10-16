@@ -459,6 +459,19 @@ async fn describe(
             if req.server_url.is_some() {
                 changes.push("change the server URL".to_string());
             }
+            if let Some(pid) = req
+                .default_project_id
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+            {
+                let name = project_names(state, &[pid.trim().to_string()])
+                    .await
+                    .join("");
+                changes.push(format!("set the default project to {name}"));
+            }
+            if req.skip_validation {
+                changes.push("skip token validation".to_string());
+            }
             if let Some(b) = &req.project_bindings {
                 let mut list = Vec::new();
                 for (slug, id) in b {
@@ -486,13 +499,30 @@ async fn describe(
         }
         (&Method::PUT, ["", "api", "bitwarden", "secrets", id]) => {
             let req: UpdateBitwardenSecretRequest = typed(body)?;
-            let current = secret_label(state, id).await;
-            match req.key.as_deref() {
-                Some(k) if !current.contains(&format!("\"{k}\"")) => {
-                    format!("Edit {current} (rename to {})", quoted(k))
-                }
-                _ => format!("Edit {current}"),
+            let mut changes = Vec::new();
+            if let Some(k) = req.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+                changes.push(format!("name {}", quoted(k)));
             }
+            if req.value.is_some() {
+                changes.push("value".to_string());
+            }
+            if req.note.is_some() {
+                changes.push("note".to_string());
+            }
+            if let Some(pid) = req
+                .project_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                let name = project_names(state, &[pid.to_string()]).await.join("");
+                changes.push(format!("MOVE to project {name}"));
+            }
+            format!(
+                "Edit {}: {}",
+                secret_label(state, id).await,
+                changes.join(", ")
+            )
         }
         (&Method::DELETE, ["", "api", "bitwarden", "secrets", id]) => {
             no_body(body)?;
