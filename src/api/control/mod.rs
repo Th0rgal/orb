@@ -13442,6 +13442,7 @@ pub(crate) fn remote_execution_for_plan(
                 ),
                 "model_providers.sandboxed.wire_api=\"responses\"".to_string(),
                 format!("model_providers.sandboxed.env_key=\"{REMOTE_PROXY_KEY_ENV}\""),
+                crate::harness_attribution::CODEX_CONFIG_OVERRIDE.to_string(),
             ];
             if let Some(effort) = effort {
                 settings.push(format!(
@@ -13539,6 +13540,10 @@ pub(crate) fn remote_execution_for_plan(
                 "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; \
                  claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages",
             );
+            command.push_str(" --settings ");
+            command.push_str(&shell_single_quote(
+                &crate::harness_attribution::claude_settings_arg(),
+            ));
             if plan_body.is_some() {
                 command.push_str(" --permission-mode plan");
             }
@@ -40499,8 +40504,19 @@ Investigate <service/> failures.
         let exec = remote_execution_for_plan(&plan, "https://core.example", "sk-proxy-abc");
         assert!(
             exec.command
-                .contains("claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --model 'claude-opus-5' "),
+                .contains("claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages --settings "),
             "{}",
+            exec.command
+        );
+        assert!(
+            exec.command.contains(" --model 'claude-opus-5' "),
+            "{}",
+            exec.command
+        );
+        assert!(
+            exec.command
+                .contains(r#""attribution":{"commit":"","pr":""}"#),
+            "remote Claude never adds commit attribution: {}",
             exec.command
         );
         // Single quotes inside the prompt are shell-escaped.

@@ -1151,8 +1151,17 @@ pub fn run_claudecode_turn<'a>(
         if settings_path.exists() {
             match std::fs::read_to_string(&settings_path) {
                 Ok(json_content) => {
+                    // Re-apply the attribution override: the file may predate
+                    // it (reused workspace) or have been edited since.
+                    let content = match serde_json::from_str::<serde_json::Value>(&json_content) {
+                        Ok(mut settings) => {
+                            crate::harness_attribution::apply_claude(&mut settings);
+                            settings.to_string()
+                        }
+                        Err(_) => json_content,
+                    };
                     args.push("--settings".to_string());
-                    args.push(json_content);
+                    args.push(content);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1161,8 +1170,15 @@ pub fn run_claudecode_turn<'a>(
                         error = %e,
                         "Failed to read settings file for --settings flag"
                     );
+                    args.push("--settings".to_string());
+                    args.push(crate::harness_attribution::claude_settings_arg());
                 }
             }
+        } else {
+            // The generated settings carry the attribution override; without
+            // them, pass it directly.
+            args.push("--settings".to_string());
+            args.push(crate::harness_attribution::claude_settings_arg());
         }
         let mcp_config_path = work_dir.join(".claude").join("mcp.json");
         if mcp_config_path.exists() {

@@ -72,7 +72,9 @@ impl ClaudeCodeClient {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose")
-            .arg("--include-partial-messages");
+            .arg("--include-partial-messages")
+            .arg("--settings")
+            .arg(crate::harness_attribution::claude_settings_arg());
         // Note: --dangerously-skip-permissions cannot be used when running as root
 
         // Set API key or OAuth token if configured

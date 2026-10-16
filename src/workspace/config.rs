@@ -895,6 +895,8 @@ async fn write_claudecode_config(
         merge_json(&mut merged, &settings);
         settings = merged;
     }
+    // Never let a harness stamp commits/PRs with its own attribution.
+    crate::harness_attribution::apply_claude(&mut settings);
 
     let settings_path = claude_dir.join("settings.local.json");
     let settings_content = serde_json::to_string_pretty(&settings)?;
@@ -1051,6 +1053,8 @@ async fn write_codex_config(
     // emitted, and the Thoughts panel has nothing to persist or replay.
     // Pin "detailed" unless the profile/operator already set a value.
     let config_payload = ensure_codex_reasoning_summary(&config_payload);
+    // No `Co-authored-by: Codex` trailer, whatever the profile says.
+    let config_payload = crate::harness_attribution::apply_codex_config(&config_payload);
     // When CLIProxyAPI owns the ChatGPT OAuth credential, Codex must send its
     // Responses traffic to the proxy instead of chatgpt.com.
     let config_payload = match crate::api::oauth_owner::codex_via_cli_proxy() {
