@@ -2415,9 +2415,9 @@ async fn discover_workspace_antigravity_models(
 ) -> Result<Vec<(String, String)>, String> {
     use tokio::io::AsyncReadExt;
     let cwd = crate::workspace::configured_project_dir(&workspace, work_dir);
-    crate::api::antigravity_native::install_in_home(
-        &crate::api::runners::antigravity::native_home(&workspace),
-    );
+    if let Some(home) = crate::api::runners::antigravity::projectable_home(&workspace) {
+        crate::api::antigravity_native::install_in_home(&home);
+    }
     let exec = crate::workspace_exec::WorkspaceExec::new(workspace);
     let mut child = exec
         .spawn_streaming(&cwd, cli, &["models".into()], Default::default())

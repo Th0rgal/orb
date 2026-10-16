@@ -49,6 +49,23 @@ pub(crate) fn native_home(workspace: &crate::workspace::Workspace) -> std::path:
     }
 }
 
+/// `native_home` when the Core may write the login there. A container home
+/// is mission-controlled: it must resolve inside the container root, so a
+/// symlinked home cannot redirect the root-owned write onto the host.
+pub(crate) fn projectable_home(
+    workspace: &crate::workspace::Workspace,
+) -> Option<std::path::PathBuf> {
+    let home = native_home(workspace);
+    let contained = workspace.workspace_type == crate::workspace::WorkspaceType::Container
+        && !crate::workspace::is_container_fallback(workspace);
+    if !contained {
+        return Some(home);
+    }
+    let root = std::fs::canonicalize(&workspace.path).ok()?;
+    let resolved = std::fs::canonicalize(&home).ok()?;
+    (resolved.starts_with(&root) && resolved != root).then_some(resolved)
+}
+
 pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     let Some(store) = ctx.mission_store.as_ref() else {
         return AgentResult::failure("Antigravity requires durable native identity storage", 0);
@@ -108,7 +125,9 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         Err(error) => return AgentResult::failure(error, 0),
     }
     let thought_home = native_home(ctx.workspace);
-    crate::api::antigravity_native::install_in_home(&thought_home);
+    if let Some(home) = projectable_home(ctx.workspace) {
+        crate::api::antigravity_native::install_in_home(&home);
+    }
     crate::antigravity::clear_historical_error_steps(&thought_home, ctx.session_id);
     let mut child = match exec
         .spawn_streaming(&cwd, &cli, &args, Default::default())

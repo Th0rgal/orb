@@ -134,7 +134,7 @@ fn set_home_owner(profile: &Path, file: &Path) {
         let Some(home) = gemini.and_then(Path::parent) else {
             return;
         };
-        let Ok(owner) = std::fs::metadata(home) else {
+        let Ok(owner) = std::fs::symlink_metadata(home) else {
             return;
         };
         let _ = std::fs::set_permissions(profile, std::fs::Permissions::from_mode(0o700));
@@ -142,7 +142,7 @@ fn set_home_owner(profile: &Path, file: &Path) {
             return;
         }
         for path in [gemini, Some(profile), Some(file)].into_iter().flatten() {
-            let _ = std::os::unix::fs::chown(path, Some(owner.uid()), Some(owner.gid()));
+            let _ = std::os::unix::fs::lchown(path, Some(owner.uid()), Some(owner.gid()));
         }
     }
 }
@@ -228,7 +228,10 @@ mod tests {
         assert!(!models.is_empty());
         let (refresh, expiry) = existing(&home.path().join(PROFILE_DIR).join(TOKEN_FILE)).unwrap();
         assert_eq!(refresh, credential.refresh_token);
-        assert!(expiry > chrono::Utc::now().timestamp_millis(), "agy refreshed and wrote back");
+        assert!(
+            expiry > chrono::Utc::now().timestamp_millis(),
+            "agy refreshed and wrote back"
+        );
     }
 
     #[test]
