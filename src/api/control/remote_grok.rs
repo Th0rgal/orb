@@ -1023,26 +1023,29 @@ impl NativeGrokObserver {
             self.stream.feed(&chunk.data)
         } else if silent >= chunk.data.len() {
             let replayed = self.stream.feed(&chunk.data);
-            self.restore_state(&replayed);
-            Vec::new()
+            self.restore_state(replayed)
         } else if chunk.data.is_char_boundary(silent) {
             let replayed = self.stream.feed(&chunk.data[..silent]);
-            self.restore_state(&replayed);
-            self.stream.feed(&chunk.data[silent..])
+            let mut out = self.restore_state(replayed);
+            out.extend(self.stream.feed(&chunk.data[silent..]));
+            out
         } else {
             // Never split a character: skip this chunk's events to stay unique.
             let replayed = self.stream.feed(&chunk.data);
-            self.restore_state(&replayed);
-            Vec::new()
+            self.restore_state(replayed)
         }
     }
 
     /// Apply already-published updates to the observer's own state without
     /// publishing them: an open thinking block must still be closed (and
     /// persisted) by the next boundary after a restart.
-    fn restore_state(&mut self, replayed: &[StreamUpdate]) {
+    /// Session IDs are returned to go through the normal (idempotent) path:
+    /// a save that failed before the restart must still happen.
+    fn restore_state(&mut self, replayed: Vec<StreamUpdate>) -> Vec<StreamUpdate> {
+        let mut keep = Vec::new();
         for update in replayed {
-            match update {
+            match &update {
+                StreamUpdate::SessionId(_) => keep.push(update),
                 StreamUpdate::ThinkingSnapshot(content) => {
                     self.thinking_open = true;
                     self.thinking_snapshot = content.clone();
@@ -1057,6 +1060,7 @@ impl NativeGrokObserver {
                 _ => {}
             }
         }
+        keep
     }
 
     async fn apply_chunk(
@@ -2591,12 +2595,20 @@ mod tests {
         .unwrap()
         .absorb(&chunk(0, &second, second.len() as u64));
         assert!(!after.thinking_open, "tool steps close thinking");
-        // The resumed parser already knows the session; a fresh one reports it.
-        let fresh: Vec<_> = fresh
-            .into_iter()
-            .filter(|u| !matches!(u, StreamUpdate::SessionId(_)))
-            .collect();
-        assert_eq!(published, fresh, "only steps 6-7 are published again");
+        // Session IDs are re-applied (idempotently); events are not repeated.
+        let without_session = |v: Vec<StreamUpdate>| -> Vec<StreamUpdate> {
+            v.into_iter()
+                .filter(|u| !matches!(u, StreamUpdate::SessionId(_)))
+                .collect()
+        };
+        assert!(published
+            .iter()
+            .any(|u| matches!(u, StreamUpdate::SessionId(_))));
+        assert_eq!(
+            without_session(published.clone()),
+            without_session(fresh),
+            "only steps 6-7 are published again"
+        );
         assert!(!published.is_empty());
     }
 
