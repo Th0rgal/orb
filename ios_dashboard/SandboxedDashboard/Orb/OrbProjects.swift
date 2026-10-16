@@ -352,6 +352,9 @@ struct OrbHome: View {
     @State private var deletingArchiveIDs: Set<String> = []
     @State private var deleteTargets: [String] = []
     @State private var deleteConfirmBusy = false
+    @State private var secretRequests = OrbSecretRequestMonitor.shared
+    @State private var secretSheet = false
+    @Environment(\.scenePhase) private var scenePhase
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
     private static let archiveDaySeconds: TimeInterval = 24 * 60 * 60
@@ -390,6 +393,13 @@ struct OrbHome: View {
             ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
         }
         .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
+        .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
+        .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
+        .task(id: scenePhase) { if scenePhase == .active { await secretRequests.poll() } }
+    }
+
+    private var secretBanner: some View {
+        OrbSecretRequestBanner(count: secretRequests.pending.count) { secretSheet = true }
     }
 
     var body: some View {
@@ -1276,6 +1286,7 @@ struct OrbProjectPage: View {
             Button { newFolderParent = ""; folderName = ""; newFolder = true } label: { Label("New folder", systemImage: "folder.badge.plus") }
             OrbProjectColorMenu(project: project.id)
             NavigationLink { OrbDocuments(project: project.id, path: "") } label: { Label("Project context", systemImage: "doc.text") }
+            NavigationLink { OrbProjectSecretAccess(slug: project.id) } label: { Label("Secret access", systemImage: "lock.shield") }
         } label: {
             OrbCircle(symbol: "ellipsis")
         }
