@@ -30,6 +30,16 @@ struct OrbSettingsHome: View {
                     .accessibilityIdentifier("settings.providers")
                 NavigationLink { OrbBitwardenSettings() } label: { Label("Secrets", systemImage: "lock.shield") }
                     .accessibilityIdentifier("settings.secrets")
+                NavigationLink { OrbRoutingSettings() } label: { Label("Models & Routing", systemImage: "arrow.triangle.swap") }
+                    .accessibilityIdentifier("settings.routing")
+                NavigationLink { OrbProxyKeysSettings() } label: { Label("Proxy API keys", systemImage: "key") }
+                    .accessibilityIdentifier("settings.proxy-keys")
+                NavigationLink { OrbSkillsSettings() } label: { Label("Skills", systemImage: "book.closed") }
+                    .accessibilityIdentifier("settings.skills")
+                NavigationLink { OrbHermesSettings() } label: { Label("Hermes", systemImage: "bubble.left.and.bubble.right") }
+                    .accessibilityIdentifier("settings.hermes")
+                NavigationLink { OrbBtwSettingsView() } label: { Label("Side questions", systemImage: "bubble.left.and.text.bubble.right") }
+                    .accessibilityIdentifier("settings.btw")
                 NavigationLink { OrbMachinesSettings() } label: { Label("Machines", systemImage: "desktopcomputer") }
                     .accessibilityIdentifier("settings.machines")
                 NavigationLink { OrbInboxSettingsView() } label: { Label("Inbox", systemImage: "tray.full") }

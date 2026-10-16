@@ -50,6 +50,10 @@ struct OrbConversation: View {
     @State private var contextItems: [OrbContextItem] = []
     @State private var contextBrowseFolder = ""
     @State private var dismissedAtToken: String?
+    @State private var forking = false
+    @State private var cloning = false
+    @State private var forkedMission: String?
+    @State private var sideQuestion: OrbSideQuestionRequest?
     @FocusState private var composerFocused: Bool
     @Environment(\.scenePhase) private var phase
     private let api = OrbCore.shared
@@ -249,6 +253,10 @@ struct OrbConversation: View {
                 .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
                 .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
                 .sheet(isPresented: $moving) { moveConversationSheet }
+                .sheet(isPresented: $forking) { OrbForkSheet(mission: mission) { forkedMission = $0["id"].text } }
+                .sheet(item: $sideQuestion) { OrbSideQuestionSheet(parentID: $0.parent, question: $0.question) }
+                .confirmationDialog("Clone conversation", isPresented: $cloning, titleVisibility: .visible) { cloneActions }
+                .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
                 .task {
                     OrbWebViewPool.shared.warmUp(count: 2)
                     id = missionID
@@ -279,6 +287,7 @@ struct OrbConversation: View {
                             selection.backend = mission["backend"].text
                             selection.node = mission["remote_node_id"].text
                             selection.model = mission["model_override"].text
+                            selection.serviceTier = OrbCodexSpeed.of(mission)
                         }
                         if mission != .null { loading = false }
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
@@ -994,12 +1003,33 @@ struct OrbConversation: View {
                 if let url = safeURL(execution["external_url"].text) {
                     Link("Open in service", destination: url)
                 }
+                if !isCloud {
+                    Divider()
+                    Button { sideQuestion = OrbSideQuestionRequest(parent: id ?? "", question: "") } label: { Label("Side question (/btw)", systemImage: "bubble.left.and.text.bubble.right") }
+                    Button { forking = true } label: { Label("Fork conversation", systemImage: "arrow.triangle.branch") }
+                    Button { cloning = true } label: { Label("Clone", systemImage: "plus.square.on.square") }
+                }
             }
             if !effectiveProjectSlug.isEmpty { Button("Project context") { showContext = true } }
         } label: {
             Image(systemName: "ellipsis")
         }
         .accessibilityLabel("Conversation actions")
+    }
+
+    @ViewBuilder private var cloneActions: some View {
+        Button("Clone settings (fresh start)") { Task { await clone(messages: false) } }
+        Button("Clone with conversation history") { Task { await clone(messages: true) } }
+        Button("Cancel", role: .cancel) {}
+    }
+
+    private func clone(messages: Bool) async {
+        guard let id else { return }
+        do {
+            let cloned = try await api.call("/api/control/missions/\(OrbCore.escape(id))/clone", method: "POST", body: .object(["clone_messages": .bool(messages)]))
+            OrbHaptics.success()
+            forkedMission = cloned["id"].text
+        } catch { self.error = error.localizedDescription }
     }
 
     private var moveConversationSheet: some View {
@@ -1656,7 +1686,7 @@ struct OrbConversation: View {
                 if !working { liveText = "" }
                 selection.backend = value["backend"].text
                 selection.node = value["remote_node_id"].text
-                if selection.model.isEmpty { selection.model = value["model_override"].text }
+                if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }
                 if let batch = await batchTask, (!batch.events.isEmpty || events.isEmpty) {
                     let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
                     events = unique.values.sorted { $0.sequence < $1.sequence }
@@ -1696,7 +1726,13 @@ struct OrbConversation: View {
 
     /// True once Core accepted the request, even if the refresh that follows fails.
     @discardableResult private func send() async -> Bool {
-        guard !busy, !cloudBlocked else { return false }; busy = true; defer { busy = false }
+        guard !busy, !cloudBlocked else { return false }
+        if let id, !isCloud, let question = Self.btwQuestion(text) {
+            sideQuestion = OrbSideQuestionRequest(parent: id, question: question)
+            text = ""
+            return true
+        }
+        busy = true; defer { busy = false }
         let savedDraft = text
         let savedAttachments = attachments
         let savedMode = mode
@@ -1743,13 +1779,18 @@ struct OrbConversation: View {
                         guard !working || optimisticPrompt != nil else { throw OrbHTTPError(status: 409, detail: "Wait for this turn to finish before changing its model.") }
                         _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["model_override": .string(selection.model)]))
                     }
+                    if !isCloud && selection.backend == "codex" && selection.serviceTier != OrbCodexSpeed.of(mission) {
+                        try await OrbCodexSpeed.require(model: selection.model.isEmpty ? mission["model_override"].text : selection.model, tier: selection.serviceTier, missionID: id)
+                        _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["service_tier": .string(selection.serviceTier)]))
+                    }
                     pending = OrbPending(path: "/api/control/message", body: .object(body))
                 } else {
                     try selection.validate()
                     body = ["title": .string(OrbStyle.missionTitle(prompt)), "prompt": .string(prompt), "project": .string(project), "tags": .array(folder.isEmpty ? [] : [.string("orb-folder:\(folder)")]), "idempotency_key": .string(UUID().uuidString)]
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if selection.cloud { body["cloud"] = selection.wire }
-                    else { body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model); if !selection.node.isEmpty && selection.node != "core" { body["remote_node_id"] = .string(selection.node) } }
+                    else if selection.backend == "codex" { try await OrbCodexSpeed.require(model: selection.model, tier: selection.serviceTier); body["service_tier"] = .string(selection.serviceTier) }
+                    if !selection.cloud { body["backend"] = .string(selection.backend); body["model_override"] = .string(selection.model); if !selection.node.isEmpty && selection.node != "core" { body["remote_node_id"] = .string(selection.node) } }
                     pending = OrbPending(path: "/api/control/missions", body: .object(body))
                 }
                 try OrbDisk.save(pending, key: pendingKey)
@@ -2492,6 +2533,7 @@ private struct OrbMissionTasksCard: View {
 
 struct OrbSelection {
     var provider = "agent", account = "", backend = "", model = "", node = "", repository = "", gitRef = ""
+    var serviceTier = "standard"
     var params: OrbJSON = .array([])
     var canCancel = false
     var cloud: Bool { provider != "agent" }
@@ -2652,6 +2694,9 @@ struct OrbAgentPicker: View {
                             Text(variants[index]["displayName"].text.isEmpty ? variants[index]["params"].items.map { $0["value"].text }.joined(separator: " · ") : variants[index]["displayName"].text).tag(index)
                         }
                     }
+                }
+                if !selection.cloud && selection.backend == "codex" && !selection.model.isEmpty {
+                    OrbCodexSpeedSection(model: selection.model, tier: $selection.serviceTier)
                 }
                 if loadingOptions && models.isEmpty {
                     HStack(spacing: 8) {
