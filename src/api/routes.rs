@@ -1506,6 +1506,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/secrets", secrets_api::routes())
         // Bitwarden Secrets Manager (`bws`) integration endpoints
         .nest("/api/bitwarden", super::bitwarden::routes())
+        // Device-signed approvals (Secure Enclave / Android Keystore keys)
+        .nest("/api/approvals", super::approvals::routes())
         // Global settings endpoints
         .nest("/api/settings", settings_api::routes())
         // Desktop session management endpoints
@@ -1549,6 +1551,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/backends/:id/config",
             axum::routing::put(backends_api::update_backend_config),
         )
+        // Inner layer: runs after require_auth, on protected operations only.
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            super::approvals::require_device_approval,
+        ))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,

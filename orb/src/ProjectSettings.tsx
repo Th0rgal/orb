@@ -26,6 +26,7 @@ import {
   type BitwardenProject,
   type BitwardenStatus,
 } from "./bitwardenApi";
+import { ApprovalCancelled, enrolledDeviceId } from "./deviceApproval";
 import { ControllerSkeleton } from "./Skeleton";
 
 /** Shown for context, changed elsewhere. Saving the limit above leaves every
@@ -89,20 +90,23 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
       ? [...new Set([...defaultAccess(), projectId])]
       : defaultAccess().filter((id) => id !== projectId);
     const name = bwProjects().find((x) => x.id === projectId)?.name ?? projectId;
-    try {
-      await authenticateBiometric(
-        on ? `let ${p.slug} missions read ${name} secrets without asking` : `stop default access to ${name}`,
-      );
-    } catch (e) {
-      if (!isBiometricCancelled(e)) setSaveError(e instanceof Error ? e.message : String(e));
-      return;
+    // An enrolled Mac signs the change with Touch ID; otherwise ask here.
+    if (!enrolledDeviceId()) {
+      try {
+        await authenticateBiometric(
+          on ? `let ${p.slug} missions read ${name} secrets without asking` : `stop default access to ${name}`,
+        );
+      } catch (e) {
+        if (!isBiometricCancelled(e)) setSaveError(e instanceof Error ? e.message : String(e));
+        return;
+      }
     }
     setSavingAccess(true);
     try {
       setBwStatus(await setSecretDefaultAccess(p.slug, next));
       setSaveError(null);
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : String(e));
+      if (!(e instanceof ApprovalCancelled)) setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
       setSavingAccess(false);
     }

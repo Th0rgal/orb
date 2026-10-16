@@ -28,6 +28,8 @@ import {
   type BitwardenStatus,
 } from "./bitwardenApi";
 import { SecretAccessPanel } from "./SecretAccessPanel";
+import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
+import { enrolledDeviceId } from "./deviceApproval";
 import { copyText } from "./clipboard";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
@@ -139,6 +141,8 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
   };
 
   const requireBiometric = async (reason: string): Promise<boolean> => {
+    // An enrolled Mac signs each protected request with Touch ID already.
+    if (enrolledDeviceId()) return true;
     if (isUnlocked()) {
       setUnlockedUntil(Date.now() + UNLOCK_TTL_MS);
       setNowTick(Date.now());
@@ -292,7 +296,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     if (!(await requireBiometric(`reveal secret ${secret.key}`))) return;
     setRevealingIds((prev) => ({ ...prev, [secret.id]: true }));
     try {
-      const detail = await revealBitwardenSecret(secret.id);
+      const detail = await revealBitwardenSecret(secret.id, secret.key);
       setRevealed((prev) => ({ ...prev, [secret.id]: detail.value }));
     } catch (e) {
       setToastError(e instanceof Error ? e.message : String(e));
@@ -307,7 +311,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     if (val === undefined) {
       setRevealingIds((prev) => ({ ...prev, [secret.id]: true }));
       try {
-        const detail = await revealBitwardenSecret(secret.id);
+        const detail = await revealBitwardenSecret(secret.id, secret.key);
         val = detail.value;
       } catch (e) {
         setToastError(e instanceof Error ? e.message : String(e));
@@ -349,7 +353,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     setSecretValueLoading(true);
     setEditorMode("edit");
     try {
-      const detail = await revealBitwardenSecret(secret.id);
+      const detail = await revealBitwardenSecret(secret.id, secret.key);
       setSecretValueDraft(detail.value);
     } catch (e) {
       setToastError(e instanceof Error ? e.message : String(e));
@@ -407,7 +411,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
     if (!(await requireBiometric(`delete secret ${target.key}`))) return;
     setDeletingSecret(true);
     try {
-      await deleteBitwardenSecret(target.id);
+      await deleteBitwardenSecret(target.id, target.key);
       setDeleteTarget(null);
       setRevealed((prev) => {
         const next = { ...prev };
@@ -617,6 +621,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
               onError={(m) => setToastError(m)}
               onSecretsChanged={() => void loadSecretsForProject()}
             />
+            <ApprovalDevicesPanel onError={(m) => setToastError(m)} />
           </Show>
 
           {/* Secrets Table Section */}

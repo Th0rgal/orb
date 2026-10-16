@@ -18,6 +18,8 @@ const apiMock = vi.fn();
 
 vi.mock("../src/api", () => ({
   api: (...args: unknown[]) => apiMock(...args),
+  getApiUrl: () => "https://core.test",
+  ApiError: class extends Error {},
 }));
 
 describe("bitwardenApi", () => {
@@ -83,7 +85,7 @@ describe("bitwardenApi", () => {
       revisionDate: "2026-03-04T02:27:09.64Z",
     });
     const revealed = await revealBitwardenSecret("sec-1");
-    expect(apiMock).toHaveBeenCalledWith("/api/bitwarden/secrets/sec-1/reveal");
+    expect(apiMock).toHaveBeenCalledWith("/api/bitwarden/secrets/sec-1/reveal", { method: "GET", headers: {} });
     expect(revealed.value).toBe("sk-live-123");
 
     apiMock.mockResolvedValueOnce({
@@ -124,6 +126,7 @@ describe("bitwardenApi", () => {
     await deleteBitwardenSecret("sec-2");
     expect(apiMock).toHaveBeenCalledWith("/api/bitwarden/secrets/sec-2", {
       method: "DELETE",
+      headers: {},
     });
 
     apiMock.mockResolvedValueOnce({
@@ -169,5 +172,31 @@ describe("groupSecrets", () => {
       ["CLOUDFLARE", ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]],
       ["Other", ["VERCEL_TOKEN"]],
     ]);
+  });
+});
+
+describe("signedApi", () => {
+  it("signs the exact request with the enrolled device key", async () => {
+    const invoke = vi.fn().mockResolvedValue("c2lnbmF0dXJl");
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = { invoke };
+    localStorage.setItem("orb.approvalDevice.https://core.test", "dev-1");
+    apiMock.mockReset();
+    apiMock.mockResolvedValueOnce({ challenge_id: "ch-1", payload: "paloma-approval-v1\n..." });
+    apiMock.mockResolvedValueOnce({ status: "approved" });
+    await approveSecretRequest("req-9", "secret", undefined, "give mission X the secret K");
+    expect(JSON.parse(apiMock.mock.calls[0][1].body)).toEqual({
+      method: "POST",
+      path: "/api/bitwarden/requests/req-9/approve",
+      body: JSON.stringify({ scope: "secret" }),
+      summary: "give mission X the secret K",
+    });
+    expect(invoke).toHaveBeenCalledWith("approval_sign", {
+      payload: "paloma-approval-v1\n...",
+      reason: "give mission X the secret K",
+    });
+    const sent = apiMock.mock.calls[1][1];
+    expect(sent.headers["X-Paloma-Approval"]).toBe("ch-1.dev-1.c2lnbmF0dXJl");
+    expect(sent.body).toBe(JSON.stringify({ scope: "secret" }));
+    localStorage.clear();
   });
 });

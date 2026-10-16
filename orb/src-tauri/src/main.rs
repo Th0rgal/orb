@@ -134,6 +134,7 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 mod bindings;
+mod approval_key;
 mod biometrics;
 mod client_link;
 mod diagnostics;
@@ -196,6 +197,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             diagnostics::diagnostics_append,
+            approval_key::approval_key_status,
+            approval_key::approval_key_create,
+            approval_key::approval_sign,
             biometrics::biometric_status,
             biometrics::biometric_authenticate,
             bindings::local_binding_set,

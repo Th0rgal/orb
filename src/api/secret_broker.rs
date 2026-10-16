@@ -95,7 +95,7 @@ pub struct SecretRequest {
     pub reason: String,
     #[serde(default)]
     pub note: Option<String>,
-    /// SHA-256 of a write's value, to tell a retry from a new value.
+    /// HMAC-SHA256 (backend key) of a write's value, to tell a retry from a new value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_sha256: Option<String>,
     /// Encrypted value of a pending write. Never serialized to clients.
@@ -347,12 +347,15 @@ impl SecretBroker {
                     && r.key == request.key
                     && r.project_id == request.project_id
             }) {
-                existing.encrypted_value = request.encrypted_value.clone();
-                existing.value_sha256 = request.value_sha256.clone();
-                existing.note = request.note.clone();
-                let out = existing.clone();
-                self.save(&data).await;
-                return out;
+                // A pending request never changes after the operator may have
+                // seen it: the same value reuses it, a new value replaces it.
+                if existing.value_sha256 == request.value_sha256 && existing.note == request.note {
+                    return existing.clone();
+                }
+                existing.status = RequestStatus::Expired;
+                existing.resolved_at = Some(Utc::now());
+                existing.encrypted_value = None;
+                existing.error = Some("Superseded by a newer value from the mission".into());
             }
         }
         if request.kind == RequestKind::Read {
@@ -623,6 +626,15 @@ async fn crypto_key(state: &AppState) -> Result<[u8; 32], String> {
     bitwarden::load_encryption_key(&state.config.working_dir)
         .await
         .ok_or_else(|| "Encryption key unavailable".to_string())
+}
+
+/// Keyed digest of a written value, so a retry can be recognized without
+/// storing anything that allows offline guessing of the secret.
+async fn value_digest(state: &AppState, value: &str) -> Result<String, String> {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &crypto_key(state).await?);
+    Ok(hex::encode(
+        ring::hmac::sign(&key, value.as_bytes()).as_ref(),
+    ))
 }
 
 async fn encrypt(state: &AppState, value: &str) -> Result<String, String> {
@@ -924,8 +936,7 @@ pub async fn handle_tool(
                 ));
             }
             // A retry after the operator approved the earlier call: done already.
-            let value_sha256 =
-                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(value.as_bytes()));
+            let value_sha256 = value_digest(state, value).await?;
             if let Some(done) = broker
                 .recent_approved_write(caller.mission_id, &key, &project_id, &value_sha256)
                 .await

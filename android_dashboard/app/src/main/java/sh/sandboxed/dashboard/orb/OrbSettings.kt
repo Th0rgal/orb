@@ -80,7 +80,8 @@ enum class OrbSettingsRoute {
     Backend,
     Providers,
     Machines,
-    Inbox
+    Inbox,
+    Secrets
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -189,6 +190,16 @@ fun OrbSettingsSheet(
                                 subtitle = inboxSubtitle,
                                 onClick = { route = OrbSettingsRoute.Inbox }
                             )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            OrbSettingsRow(
+                                icon = Icons.Default.Lock,
+                                title = "Secrets",
+                                subtitle = "Mission requests and approval devices",
+                                onClick = { route = OrbSettingsRoute.Secrets }
+                            )
                         }
                     }
                 }
@@ -202,6 +213,12 @@ fun OrbSettingsSheet(
                 }
                 OrbSettingsRoute.Providers -> {
                     OrbProvidersSettingsPage(
+                        core = core,
+                        onBack = { route = OrbSettingsRoute.Root }
+                    )
+                }
+                OrbSettingsRoute.Secrets -> {
+                    OrbSecretsSettingsPage(
                         core = core,
                         onBack = { route = OrbSettingsRoute.Root }
                     )

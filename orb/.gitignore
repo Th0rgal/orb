@@ -7,3 +7,4 @@ src-tauri/gen
 artifacts/
 
 /src-tauri/binaries/sandboxed-mcp-*
+/src-tauri/binaries/orb-signer-*

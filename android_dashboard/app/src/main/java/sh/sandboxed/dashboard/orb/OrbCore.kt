@@ -1085,7 +1085,9 @@ class OrbCore private constructor(context: Context) {
         method: String = "GET",
         body: Any? = null,
         headers: Map<String, String> = emptyMap(),
-        allowAuthRetry: Boolean = true
+        allowAuthRetry: Boolean = true,
+        /** Exact JSON text to send (device-signed requests hash these bytes). */
+        rawBody: String? = null
     ): Any? = withContext(Dispatchers.IO) {
         val url = makeURL(path)
         val reqBuilder = Request.Builder().url(url)
@@ -1098,6 +1100,7 @@ class OrbCore private constructor(context: Context) {
             reqBuilder.header(k, v)
         }
         val requestBody = when {
+            rawBody != null -> rawBody.toRequestBody("application/json; charset=utf-8".toMediaType())
             body != null -> {
                 val jsonText = OrbJSON.stringify(body)
                 jsonText.toRequestBody("application/json; charset=utf-8".toMediaType())
@@ -1121,7 +1124,8 @@ class OrbCore private constructor(context: Context) {
                     method = method,
                     body = body,
                     headers = headers,
-                    allowAuthRetry = false
+                    allowAuthRetry = false,
+                    rawBody = rawBody
                 )
             }
         }
