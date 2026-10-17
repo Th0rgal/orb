@@ -8,6 +8,12 @@
 //   orb-signer create --key PATH          -> {"public_key": "<base64 SPKI DER>"}
 //   orb-signer public --key PATH          -> {"public_key": ...}
 //   orb-signer sign --key PATH --reason R -> stdin payload, {"signature": "<base64 DER>"}
+//   orb-signer serve --key PATH           -> one base64 payload per stdin line,
+//                                            one JSON reply per line
+//
+// `serve` keeps a Touch ID-authenticated context for GRACE seconds, so
+// approvals in quick succession need one fingerprint. The context is
+// invalidated when the grace ends; the key still never leaves the enclave.
 import CryptoKit
 import Foundation
 import LocalAuthentication
@@ -42,6 +48,41 @@ func loadKey(context: LAContext? = nil) -> SecureEnclave.P256.Signing.PrivateKey
     }
 }
 
+struct SignError: Error { let message: String; let code: Int32 }
+
+/// Sign one Paloma approval payload. A held, already-authenticated context
+/// signs without prompting; otherwise Touch ID shows the payload's summary.
+func sign(_ payload: Data, context held: LAContext?) -> Result<(String, LAContext), SignError> {
+    // Show the summary Core wrote into the signed payload (its last line), not
+    // text from the caller: what Touch ID describes is exactly what gets signed.
+    guard let text = String(data: payload, encoding: .utf8), text.hasPrefix("paloma-approval-v1\n"),
+          let summary = text.split(separator: "\n", omittingEmptySubsequences: false).last, !summary.isEmpty
+    else { return .failure(SignError(message: "Not a Paloma approval payload", code: 1)) }
+    let context = held ?? LAContext()
+    if held == nil {
+        context.localizedCancelTitle = "Cancel"
+        let semaphore = DispatchSemaphore(value: 0)
+        var authError: Error?
+        context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: String(summary)) { ok, error in
+            if !ok { authError = error ?? NSError(domain: "orb-signer", code: 1) }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        if let authError {
+            let code = (authError as? LAError)?.code
+            return .failure(SignError(message: "Touch ID: \(authError.localizedDescription)", code: code == .userCancel || code == .appCancel ? 2 : 1))
+        }
+    }
+    guard let blob = try? Data(contentsOf: keyURL),
+          let key = try? SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: context)
+    else { return .failure(SignError(message: "Approval key is unusable (Touch ID fingers changed?)", code: 5)) }
+    do {
+        return .success((try key.signature(for: payload).derRepresentation.base64EncodedString(), context))
+    } catch {
+        return .failure(SignError(message: "Signing failed: \(error)", code: 1))
+    }
+}
+
 switch command {
 case "create":
     var cfError: Unmanaged<CFError>?
@@ -60,30 +101,29 @@ case "public":
     emit(["public_key": loadKey().publicKey.derRepresentation.base64EncodedString()])
 case "sign":
     let payload = FileHandle.standardInput.readDataToEndOfFile()
-    // Show the summary Core wrote into the signed payload (its last line), not
-    // text from the caller: what Touch ID describes is exactly what gets signed.
-    guard let text = String(data: payload, encoding: .utf8), text.hasPrefix("paloma-approval-v1\n"),
-          let summary = text.split(separator: "\n", omittingEmptySubsequences: false).last, !summary.isEmpty
-    else { fail("Not a Paloma approval payload") }
-    let reason = String(summary)
-    let context = LAContext()
-    context.localizedCancelTitle = "Cancel"
-    let semaphore = DispatchSemaphore(value: 0)
-    var authError: Error?
-    context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { ok, error in
-        if !ok { authError = error ?? NSError(domain: "orb-signer", code: 1) }
-        semaphore.signal()
+    switch sign(payload, context: nil) {
+    case .success(let (signature, _)): emit(["signature": signature])
+    case .failure(let error): fail(error.message, code: error.code)
     }
-    semaphore.wait()
-    if let authError {
-        let cancelled = (authError as? LAError)?.code == .userCancel || (authError as? LAError)?.code == .appCancel
-        fail("Touch ID: \(authError.localizedDescription)", code: cancelled ? 2 : 1)
-    }
-    do {
-        let signature = try loadKey(context: context).signature(for: payload)
-        emit(["signature": signature.derRepresentation.base64EncodedString()])
-    } catch {
-        fail("Signing failed: \(error)")
+case "serve":
+    let grace: TimeInterval = 300
+    var held: (context: LAContext, at: Date)?
+    while let line = readLine() {
+        if let current = held, Date().timeIntervalSince(current.at) > grace {
+            current.context.invalidate()
+            held = nil
+        }
+        guard let payload = Data(base64Encoded: line.trimmingCharacters(in: .whitespaces)) else {
+            emit(["error": "Invalid request", "code": "1"]); continue
+        }
+        switch sign(payload, context: held?.context) {
+        case .success(let (signature, context)):
+            if held == nil { held = (context, Date()) }
+            emit(["signature": signature])
+        case .failure(let error):
+            held?.context.invalidate(); held = nil
+            emit(["error": error.message, "code": String(error.code)])
+        }
     }
 default:
     fail("unknown command \(command)")

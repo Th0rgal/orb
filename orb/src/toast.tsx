@@ -10,7 +10,7 @@ import { CheckIcon, CloseIcon, CopyIcon } from "./icons";
  * mission in the transcript, a panel that couldn't load, a form field) stay
  * inline with ErrorNotice.
  */
-export type ToastAction = { label: string; run: () => void; kbd?: string; primary?: boolean };
+export type ToastAction = { label: string; run: () => void; kbd?: string; primary?: boolean; /** Rendered as a quiet text link under the message. */ link?: boolean };
 export type Toast = {
   id: number;
   /** Toasts with the same key replace each other instead of stacking. */
@@ -159,11 +159,14 @@ function ToastItem(p: { toast: Toast }) {
     <div class="toast-body">
       <span class="toast-title">{t().title}</span>
       <Show when={t().message}><span class="toast-message">{t().message}</span></Show>
+      <For each={t().actions?.filter(a => a.link)}>{a => <button type="button" class="toast-link" onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}</button>}</For>
       <Show when={t().details}>
         <details class="toast-details"><summary>Details</summary><pre>{t().details}</pre></details>
       </Show>
     </div>
-    <For each={t().actions}>{a => <button type="button" class={a.primary ? "toast-btn primary" : "toast-btn"} onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}<Show when={a.kbd}><kbd>{a.kbd}</kbd></Show></button>}</For>
+    <div class="toast-actions">
+      <For each={t().actions?.filter(a => !a.link)}>{a => <button type="button" class={a.primary ? "toast-btn primary" : "toast-btn"} onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}<Show when={a.kbd}><kbd>{a.kbd}</kbd></Show></button>}</For>
+    </div>
     <Show when={t().copy}>
       <button type="button" class="icon-btn toast-icon-btn" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}>
         <Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show>
