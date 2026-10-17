@@ -4,8 +4,9 @@ import { dismissToast, notify } from "./toast";
 
 /**
  * Pending mission secret requests appear as the app's usual bottom
- * notifications, once each: Allow (this secret, signed with Touch ID when the
- * Mac is enrolled) or Review on the Secrets page.
+ * notifications, once each. The fingerprint is the approve button (this
+ * secret, or the requested write, signed with Touch ID when the Mac is
+ * enrolled); Deny and Review are links under the reason.
  */
 const shown = new Set<string>();
 
@@ -34,23 +35,24 @@ export function syncSecretRequestNotices(pending: SecretAccessRequest[], openSec
       icon: <FingerprintIcon />,
       title: <>{what}<span class="toast-sub" title={mission}>{mission}</span></>,
       message: r.reason || undefined,
+      glyphAction: r.kind === "write" || r.key ? {
+        label: r.kind === "write" ? "Store" : "Allow",
+        run: () => {
+          dismissToast(key);
+          // Reads grant this one secret (eligible for the Touch ID grace);
+          // writes are signed individually.
+          const approval = r.kind === "write" ? approveSecretRequest(r.id) : approveSecretRequest(r.id, "secret");
+          void approval.catch((e) => {
+            shown.delete(r.id); // still pending: show it again on the next poll
+            if (e instanceof ApprovalCancelled) return;
+            notify({ kind: "error", title: "Could not approve the request", message: e instanceof Error ? e.message : String(e) });
+          });
+        },
+      } : undefined,
       actions: [
-        ...(r.kind === "read" && r.key
-          ? [{
-              label: "Allow",
-              primary: true,
-              run: () => {
-                dismissToast(key);
-                void approveSecretRequest(r.id, "secret").catch((e) => {
-                  shown.delete(r.id); // still pending: show it again on the next poll
-                  if (e instanceof ApprovalCancelled) return;
-                  notify({ kind: "error", title: "Could not approve the request", message: e instanceof Error ? e.message : String(e) });
-                });
-              },
-            }]
-          : []),
         {
           label: "Deny",
+          link: true,
           run: () => {
             dismissToast(key);
             void rejectSecretRequest(r.id).catch((e) => {
