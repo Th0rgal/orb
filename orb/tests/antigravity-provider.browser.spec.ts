@@ -131,4 +131,14 @@ for (const theme of ['dark','light']) test(`Antigravity quota groups show shared
   await expect(groups.nth(0).getByText('Resets in 6d')).toBeVisible();
   await groups.nth(0).scrollIntoViewIfNeeded();
   await page.screenshot({path:`test-results/antigravity-quota-${info.project.name}-${theme}.png`,fullPage:true});
+  // Collapsed: one chip per group, and the title keeps its width.
+  await page.getByRole('button',{name:/Google Antigravity Connected/}).click();
+  const chips = page.locator('.p-usage.compact .p-usage-chip');
+  await expect(chips).toHaveCount(2);
+  await expect(chips.nth(1)).toHaveText(/Claude & GPT\s*91%/);
+  const title = page.locator('.s-row-title').filter({hasText:'Google Antigravity'});
+  expect((await title.boundingBox())!.height).toBeLessThan(40);
+  await page.setViewportSize({width:780,height:700});
+  expect((await title.boundingBox())!.height).toBeLessThan(40);
+  await page.screenshot({path:`test-results/antigravity-collapsed-${info.project.name}-${theme}.png`,fullPage:true});
 });
