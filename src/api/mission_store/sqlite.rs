@@ -4195,6 +4195,24 @@ impl MissionStore for SqliteMissionStore {
         .await
     }
 
+    async fn reparent_child_missions(&self, from: Uuid, to: Uuid) -> Result<Vec<Uuid>, String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare("UPDATE missions SET parent_mission_id = ?2 WHERE parent_mission_id = ?1 RETURNING id")
+                .map_err(|e| e.to_string())?;
+            let moved = stmt
+                .query_map(params![from.to_string(), to.to_string()], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|id| id.ok().and_then(|id| Uuid::parse_str(&id).ok()))
+                .collect();
+            Ok(moved)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     async fn get_child_missions(&self, parent_id: Uuid) -> Result<Vec<Mission>, String> {
         let conn = self.conn.clone();
         let parent_id_str = parent_id.to_string();
@@ -12524,6 +12542,49 @@ mod tests {
             .native_prompt_attempted(m.id, "grok")
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn reparent_child_missions_moves_only_direct_children() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let create = |title: &'static str, parent: Option<Uuid>| {
+            let store = &store;
+            async move {
+                store
+                    .create_mission_with_parent(
+                        Some(title),
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        parent,
+                        None,
+                    )
+                    .await
+                    .expect("create")
+            }
+        };
+        let old = create("old", None).await;
+        let new = create("new", None).await;
+        let worker = create("worker", Some(old.id)).await;
+        let grandchild = create("grandchild", Some(worker.id)).await;
+        let moved = store.reparent_child_missions(old.id, new.id).await.unwrap();
+        assert_eq!(moved, vec![worker.id]);
+        assert!(store.get_child_missions(old.id).await.unwrap().is_empty());
+        assert_eq!(
+            store.get_child_missions(new.id).await.unwrap()[0].id,
+            worker.id
+        );
+        assert_eq!(
+            store.get_child_missions(worker.id).await.unwrap()[0].id,
+            grandchild.id
+        );
     }
 
     #[tokio::test]

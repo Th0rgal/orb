@@ -2630,6 +2630,12 @@ pub trait MissionStore: Send + Sync {
         Ok(vec![])
     }
 
+    /// Move every child of `from` under `to`; returns the moved ids.
+    async fn reparent_child_missions(&self, from: Uuid, to: Uuid) -> Result<Vec<Uuid>, String> {
+        let _ = (from, to);
+        Ok(vec![])
+    }
+
     /// Delete a mission.
     async fn delete_mission(&self, id: Uuid) -> Result<bool, String>;
 

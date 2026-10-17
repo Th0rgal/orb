@@ -56,8 +56,9 @@ pub fn superseded_by(mission: &Mission) -> Option<Uuid> {
 }
 
 /// Mark `prior` as replaced by `successor`: tag it (`superseded` +
-/// `superseded_by:<id>`) and, when no run is live, acknowledge it so it leaves
-/// the attention horizon. Idempotent.
+/// `superseded_by:<id>`), move its child missions under the successor and,
+/// when no run is live, acknowledge it so it leaves the attention horizon.
+/// Idempotent.
 async fn absorb(store: &dyn MissionStore, prior: &Mission, successor: Uuid) -> Result<(), String> {
     let mut tags = prior.project.tags.clone();
     if !tags.iter().any(|tag| tag == SUPERSEDED_TAG) {
@@ -80,6 +81,12 @@ async fn absorb(store: &dyn MissionStore, prior: &Mission, successor: Uuid) -> R
             },
         )
         .await?;
+    // Workers follow the coordinator that replaced theirs: their completions
+    // reach the live attempt, and the superseded one stays deletable.
+    let moved = store.reparent_child_missions(prior.id, successor).await?;
+    if !moved.is_empty() {
+        tracing::info!(prior = %prior.id, %successor, count = moved.len(), "moved workers to the superseding mission");
+    }
     if store.get_active_mission_run(prior.id).await?.is_none() {
         if let Err(error) = store
             .update_mission_status(prior.id, MissionStatus::Acknowledged)
@@ -709,6 +716,50 @@ mod tests {
         assert!(supersede_explicit(store.as_ref(), &relay, other.id)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_relay_takes_over_the_superseded_coordinators_workers() {
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let old = seed(
+            &store,
+            "coordinator",
+            "verity-core",
+            "solidity-import",
+            MissionStatus::Completed,
+            &["pr-writer"],
+        )
+        .await;
+        let worker = store
+            .create_mission_with_parent(
+                Some("worker"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(old.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let relay = seed(
+            &store,
+            "relay",
+            "verity-core",
+            "solidity-import",
+            MissionStatus::Pending,
+            &["pr-writer"],
+        )
+        .await;
+        supersede_explicit(store.as_ref(), &relay, old.id)
+            .await
+            .unwrap();
+        assert!(store.get_child_missions(old.id).await.unwrap().is_empty());
+        let moved = store.get_mission(worker.id).await.unwrap().unwrap();
+        assert_eq!(moved.parent_mission_id, Some(relay.id));
     }
 
     #[tokio::test]
