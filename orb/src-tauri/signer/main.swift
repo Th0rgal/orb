@@ -12,8 +12,11 @@
 //                                            one JSON reply per line
 //
 // `serve` keeps a Touch ID-authenticated context for GRACE seconds, so
-// approvals in quick succession need one fingerprint. The context is
-// invalidated when the grace ends; the key still never leaves the enclave.
+// approvals in quick succession need one fingerprint. Only low-risk payloads
+// use or start that grace: allowing one secret for a mission, or declining a
+// request. Wider grants, writes and every other action always ask Touch ID.
+// The context is invalidated when the grace ends; the key never leaves the
+// enclave.
 import CryptoKit
 import Foundation
 import LocalAuthentication
@@ -49,6 +52,26 @@ func loadKey(context: LAContext? = nil) -> SecureEnclave.P256.Signing.PrivateKey
 }
 
 struct SignError: Error { let message: String; let code: Int32 }
+
+/// Whether a payload may reuse the Touch ID grace. The route and summary are
+/// written by Core into the signed payload, so they describe what is signed.
+func graceEligible(_ payload: Data) -> Bool {
+    guard let text = String(data: payload, encoding: .utf8) else { return false }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+    guard lines.count >= 6 else { return false }
+    let route = lines[2].split(separator: " ")
+    guard route.count == 2, route[0] == "POST" else { return false }
+    let parts = route[1].split(separator: "/")
+    guard parts.count == 5, parts[0] == "api", parts[1] == "bitwarden", parts[2] == "requests",
+          UUID(uuidString: String(parts[3])) != nil else { return false }
+    let summary = String(lines[lines.count - 1])
+    switch parts[4] {
+    case "reject": return summary.hasPrefix("Decline: ")
+    case "approve":
+        return summary.hasPrefix("Allow ") && summary.range(of: #"; grant: this secret only for \d+ h$"#, options: .regularExpression) != nil
+    default: return false
+    }
+}
 
 /// Sign one Paloma approval payload. A held, already-authenticated context
 /// signs without prompting; otherwise Touch ID shows the payload's summary.
@@ -116,9 +139,11 @@ case "serve":
         guard let payload = Data(base64Encoded: line.trimmingCharacters(in: .whitespaces)) else {
             emit(["error": "Invalid request", "code": "1"]); continue
         }
-        switch sign(payload, context: held?.context) {
+        let eligible = graceEligible(payload)
+        switch sign(payload, context: eligible ? held?.context : nil) {
         case .success(let (signature, context)):
-            if held == nil { held = (context, Date()) }
+            if eligible && held == nil { held = (context, Date()) }
+            else if !eligible { context.invalidate() }
             emit(["signature": signature])
         case .failure(let error):
             held?.context.invalidate(); held = nil
