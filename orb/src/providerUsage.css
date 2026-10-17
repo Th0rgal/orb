@@ -19,3 +19,7 @@
 
 .cloud-usage-breakdown { margin:8px 0;padding:12px 16px;background:var(--stroke-soft);border-radius:10px; }
 .cloud-usage-breakdown summary { cursor:pointer;color:var(--fg-3);font-size:12px; }
+.provider-usage-group { padding-top:8px; }
+.provider-usage-group + .provider-usage-group { border-top:1px solid var(--stroke-soft); margin-top:4px; }
+.provider-usage-group-title { color:var(--fg);font-size:13px;font-weight:500;padding-top:4px; }
+.provider-usage-group-bars { display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));column-gap:24px; }

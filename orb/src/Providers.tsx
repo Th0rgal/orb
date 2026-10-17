@@ -895,6 +895,19 @@ function fmtResetEpoch(sec: number): string {
 
 const DetailBar = ProviderUsageMeter;
 
+/** "Gemini · 5h" windows share one heading per model group; plain labels stay ungrouped. */
+function windowGroups<W extends { label: string }>(windows: W[]) {
+  const groups: { name?: string; windows: W[] }[] = [];
+  for (const w of windows) {
+    const [name, window] = w.label.includes(" · ") ? w.label.split(" · ", 2) : [undefined, w.label];
+    const last = groups[groups.length - 1];
+    const item = { ...w, label: window };
+    if (last && last.name === name) last.windows.push(item);
+    else groups.push({ name, windows: [item] });
+  }
+  return groups;
+}
+
 function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHeader?: boolean }) {
   const u = () => p.usage;
   const type = () => u().provider_type;
@@ -960,7 +973,14 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
         <Show when={u().zai_plan && !p.planInHeader}>
           <div class="p-detail-meta"><span>plan: {u().zai_plan}</span></div>
         </Show>
-        <For each={codingPlanWindows(u())}>{w => <DetailBar label={w.label} usedPct={w.used * 100} reset={w.reset ? `reset ${fmtResetEpoch(w.reset)}` : undefined} />}</For>
+        <For each={windowGroups(codingPlanWindows(u()))}>{g => g.name
+          ? <div class="provider-usage-group">
+              <div class="provider-usage-group-title">{g.name}</div>
+              <div class="provider-usage-group-bars">
+                <For each={g.windows}>{w => <DetailBar label={w.label} usedPct={w.used * 100} reset={w.reset ? `reset ${fmtResetEpoch(w.reset)}` : undefined} />}</For>
+              </div>
+            </div>
+          : <For each={g.windows}>{w => <DetailBar label={w.label} usedPct={w.used * 100} reset={w.reset ? `reset ${fmtResetEpoch(w.reset)}` : undefined} />}</For>}</For>
         <Show when={u().zai_mcp_percentage != null}>
           <DetailBar label="MCP" usedPct={u().zai_mcp_percentage ?? 0} reset={u().zai_mcp_reset ? `reset ${fmtResetEpoch(u().zai_mcp_reset!)}` : undefined} />
         </Show>
