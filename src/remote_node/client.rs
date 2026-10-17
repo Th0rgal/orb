@@ -377,6 +377,7 @@ mod tests {
             lease_token: "unused".to_string(),
             payload: crate::remote_node::protocol::JobPayload::RawCommand {
                 side_question: false,
+                companion_of: None,
                 long_running: false,
                 command: "true".to_string(),
                 timeout_secs: None,

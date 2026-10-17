@@ -4,6 +4,16 @@ use crate::remote_node::{
     JobPayload, LeaseClaims, RemoteNodeClient, SubmitJobRequest, SCOPE_JOB_SUBMIT,
 };
 
+/// Node work directory owner: forks share their source mission's workspace.
+pub fn workspace_mission_id(tags: &[String], mission_id: Uuid) -> Uuid {
+    tags.iter()
+        .find_map(|s| {
+            s.strip_prefix("fork-workspace:")
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
+        .unwrap_or(mission_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Placement {
     pub node_id: String,
@@ -73,15 +83,7 @@ pub(super) async fn start(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Mission unavailable"))?;
     let placement = Placement {
         node_id,
-        workspace_mission_id: mission
-            .project
-            .tags
-            .iter()
-            .find_map(|s| {
-                s.strip_prefix("fork-workspace:")
-                    .and_then(|s| Uuid::parse_str(s).ok())
-            })
-            .unwrap_or(mission_id),
+        workspace_mission_id: workspace_mission_id(&mission.project.tags, mission_id),
     };
     let (node, secret) = node_auth(state, &placement)?;
     let key = validated_idempotency_key(req.idempotency_key.as_deref())
@@ -201,6 +203,7 @@ pub(super) async fn start(
         lease_token,
         payload: JobPayload::RawCommand {
             side_question: false,
+            companion_of: None,
             long_running: false,
             command: format!(
                 "exec python3 -c {} {}",

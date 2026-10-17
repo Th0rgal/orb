@@ -15106,13 +15106,18 @@ async fn submit_leased_remote_job(
             _ => execution.command,
         };
     }
+    let side_question = fork::side_launch_receipt(&state.config.working_dir, mission.id)?.is_some();
     let request = crate::remote_node::SubmitJobRequest {
         job_id,
         mission_id: mission.id,
         lease_token,
         payload: crate::remote_node::JobPayload::RawCommand {
-            side_question: fork::side_launch_receipt(&state.config.working_dir, mission.id)?
-                .is_some(),
+            side_question,
+            // An ordinary turn may run beside its own workspace's background
+            // jobs instead of queueing behind them on a full node.
+            companion_of: (!side_question).then(|| {
+                crate::api::durable_jobs::workspace_mission_id(&mission.project.tags, mission.id)
+            }),
             long_running,
             command: format!("{workspace_prefix}{}", execution.command),
             timeout_secs: None,

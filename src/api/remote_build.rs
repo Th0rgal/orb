@@ -2501,6 +2501,7 @@ printf '%s' "$REMOTE_BUILD_TEST_HTTP_STATUS"
             lease_token: String::new(),
             payload: JobPayload::RawCommand {
                 side_question: false,
+                companion_of: None,
                 long_running: false,
                 command: "true".into(),
                 timeout_secs: None,
