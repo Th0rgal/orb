@@ -282,6 +282,12 @@ pub enum JobPayload {
         /// Core-authorized side agent; uses the bounded side-question lane.
         #[serde(default, skip_serializing_if = "is_false")]
         side_question: bool,
+        /// Conversation turn for this workspace mission. While that workspace
+        /// already owns queued or running background work on the node, the
+        /// turn runs in one separate companion permit instead of queueing
+        /// behind its own jobs. Nodes that predate the field ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        companion_of: Option<uuid::Uuid>,
         /// Native goal owns its lifetime; cancellation and containment still apply.
         /// Requires protocol 5. Ordinary jobs remain bounded by the node ceiling.
         #[serde(default)]
@@ -664,6 +670,7 @@ mod tests {
     fn job_payload_round_trips_with_kind_tag() {
         let payload = JobPayload::RawCommand {
             side_question: false,
+            companion_of: None,
             long_running: false,
             managed_auth: Vec::new(),
             command: "cargo test".to_string(),
@@ -691,6 +698,7 @@ mod tests {
             minimal,
             JobPayload::RawCommand {
                 side_question: false,
+                companion_of: None,
                 long_running: false,
                 managed_auth: Vec::new(),
                 command: "true".to_string(),

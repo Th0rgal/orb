@@ -2,7 +2,8 @@
 //!
 //! Jobs are submitted to an mpsc queue and executed under a capacity
 //! semaphore (`SANDBOXED_NODE_CAPACITY`), with one separate side-question
-//! permit. Each job runs `bash -lc <command>`
+//! permit and one companion permit for a conversation turn whose workspace
+//! already owns the node's background work. Each job runs `bash -lc <command>`
 //! in `<workdir>/<mission-id>/` with combined stdout+stderr captured to
 //! `<workdir>/logs/<job-id>.log`. Every terminal path cleans up the process
 //! cgroup when systemd scopes are available, with process-group cleanup as a
@@ -81,6 +82,43 @@ struct SystemdScope {
     user_runtime_dir: Option<PathBuf>,
 }
 
+/// Counts one ordinary job against its workspace until the job task ends.
+struct BackgroundGuard {
+    runner: Arc<JobRunner>,
+    workspace: Uuid,
+}
+
+impl BackgroundGuard {
+    fn new(runner: &Arc<JobRunner>, workspace: Uuid) -> Self {
+        *runner
+            .background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(workspace)
+            .or_insert(0) += 1;
+        Self {
+            runner: Arc::clone(runner),
+            workspace,
+        }
+    }
+}
+
+impl Drop for BackgroundGuard {
+    fn drop(&mut self) {
+        let mut background = self
+            .runner
+            .background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = background.get_mut(&self.workspace) {
+            *count -= 1;
+            if *count == 0 {
+                background.remove(&self.workspace);
+            }
+        }
+    }
+}
+
 struct QueuedJob {
     id: Uuid,
     mission_id: Uuid,
@@ -107,6 +145,9 @@ pub struct JobRunner {
     max_queued: u32,
     cancels: Mutex<HashMap<Uuid, CancellationToken>>,
     side_jobs: Mutex<HashSet<Uuid>>,
+    /// Queued or running ordinary jobs per workspace mission. A companion
+    /// turn is eligible only while its workspace has an entry here.
+    background: Mutex<HashMap<Uuid, u32>>,
     queued: AtomicU32,
     active: AtomicU32,
     /// External slot provider (`SANDBOXED_NODE_SLOT_PROVIDER`); `None` means
@@ -178,6 +219,7 @@ impl JobRunner {
             max_queued: u32::try_from(max_queued).unwrap_or(u32::MAX),
             cancels: Mutex::new(HashMap::new()),
             side_jobs: Mutex::new(HashSet::new()),
+            background: Mutex::new(HashMap::new()),
             queued: AtomicU32::new(0),
             active: AtomicU32::new(0),
             slot_provider: match super::slot::SlotProvider::from_env() {
@@ -192,22 +234,35 @@ impl JobRunner {
         // Side questions must be able to inspect a busy main mission. They
         // share one extra permit, never an unbounded bypass of node admission.
         let side_admission = Arc::new(Semaphore::new(1));
+        // A mission that launched long background jobs must still be able to
+        // answer its operator. One extra permit, shared by all workspaces.
+        let companion_admission = Arc::new(Semaphore::new(1));
         let dispatcher = Arc::clone(&runner);
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
                 let runner = Arc::clone(&dispatcher);
-                let admission = if matches!(
-                    &job.payload,
+                let (admission, background) = match &job.payload {
                     JobPayload::RawCommand {
                         side_question: true,
                         ..
+                    } => (Arc::clone(&side_admission), None),
+                    JobPayload::RawCommand {
+                        companion_of: Some(workspace),
+                        ..
+                    } if runner.has_background(*workspace) => {
+                        (Arc::clone(&companion_admission), None)
                     }
-                ) {
-                    Arc::clone(&side_admission)
-                } else {
-                    Arc::clone(&admission)
+                    JobPayload::RawCommand {
+                        companion_of: Some(_),
+                        ..
+                    } => (Arc::clone(&admission), None),
+                    _ => (
+                        Arc::clone(&admission),
+                        Some(BackgroundGuard::new(&runner, job.mission_id)),
+                    ),
                 };
                 tokio::spawn(async move {
+                    let _background = background;
                     let permit = match admission.acquire_owned().await {
                         Ok(permit) => permit,
                         Err(_) => {
@@ -238,6 +293,13 @@ impl JobRunner {
             }
         });
         runner
+    }
+
+    fn has_background(&self, workspace: Uuid) -> bool {
+        self.background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&workspace)
     }
 
     pub fn queued_count(&self) -> u32 {
@@ -461,6 +523,7 @@ impl JobRunner {
                 env,
                 managed_auth,
                 side_question,
+                companion_of: _,
             } => {
                 // Resolve managed-auth profiles before anything runs; a
                 // profile this node cannot honour fails the job with a clear
@@ -1600,6 +1663,7 @@ mod tests {
         let job_id = Uuid::new_v4();
         runner.submit(job_id, Uuid::new_v4(), JobPayload::RawCommand {
             side_question: false,
+            companion_of: None,
             long_running: false,
             command: format!("test \"$HOME\" = \"$PWD\" && test \"$GROK_HOME\" = '{}' && test -r \"$GROK_HOME/auth.json\" && printf managed-ok", auth_home.display()),
             timeout_secs: Some(30),
@@ -1630,6 +1694,7 @@ mod tests {
                 mission_id,
                 JobPayload::RawCommand {
                     side_question: false,
+                    companion_of: None,
                     long_running: false,
                     command: "echo hello-from-job && pwd".to_string(),
                     timeout_secs: Some(30),
@@ -1670,6 +1735,7 @@ mod tests {
                     JobPayload::RawCommand {
                         command: "sleep 2; printf finished".into(),
                         side_question,
+                        companion_of: None,
                         long_running,
                         timeout_secs,
                         env: None,
@@ -1703,6 +1769,7 @@ mod tests {
                 Uuid::new_v4(),
                 JobPayload::RawCommand {
                     side_question: false,
+                    companion_of: None,
                     long_running: true,
                     command: "sleep 30".to_string(),
                     timeout_secs: None,
@@ -1750,6 +1817,7 @@ mod tests {
                     Uuid::new_v4(),
                     JobPayload::RawCommand {
                         side_question: false,
+                        companion_of: None,
                         long_running: false,
                         command: "sleep 30".to_string(),
                         timeout_secs: None,
@@ -1809,6 +1877,7 @@ mod tests {
                 Uuid::new_v4(),
                 JobPayload::RawCommand {
                     side_question: false,
+                    companion_of: None,
                     long_running: false,
                     command: "sleep 20".to_string(),
                     timeout_secs: Some(600),
@@ -2079,6 +2148,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversation_turn_runs_beside_its_own_background_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn_with_admission(
+            store.clone(),
+            dir.path().into(),
+            1,
+            30,
+            Arc::new(Semaphore::new(1)),
+        );
+        let raw = |command: &str, companion_of| JobPayload::RawCommand {
+            command: command.into(),
+            side_question: false,
+            companion_of,
+            long_running: false,
+            timeout_secs: None,
+            env: None,
+            managed_auth: vec![],
+        };
+        let workspace = Uuid::new_v4();
+        let background = Uuid::new_v4();
+        runner
+            .submit(background, workspace, raw("sleep 30", None))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.get(background).await.unwrap().unwrap().state != JobState::Running {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Another workspace's turn still waits for ordinary capacity.
+        let foreign = Uuid::new_v4();
+        runner
+            .submit(foreign, Uuid::new_v4(), raw("true", Some(Uuid::new_v4())))
+            .await
+            .unwrap();
+        // The fork's turn names the owning workspace and is admitted.
+        let turn = Uuid::new_v4();
+        runner
+            .submit(turn, Uuid::new_v4(), raw("true", Some(workspace)))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_for_terminal(&store, turn).await.state,
+            JobState::Succeeded
+        );
+        assert_eq!(
+            store.get(foreign).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+
+        assert!(runner.cancel(background).await.unwrap());
+        assert_eq!(
+            wait_for_terminal(&store, foreign).await.state,
+            JobState::Succeeded
+        );
+        assert!(!runner.has_background(workspace));
+    }
+
+    #[tokio::test]
     async fn side_questions_have_one_independent_cancellable_slot() {
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::open(dir.path()).await.unwrap();
@@ -2101,6 +2233,7 @@ mod tests {
                     JobPayload::RawCommand {
                         command: command.into(),
                         side_question,
+                        companion_of: None,
                         long_running: false,
                         timeout_secs: None,
                         env: None,
@@ -2137,6 +2270,7 @@ mod tests {
                 JobPayload::RawCommand {
                     command: "true".into(),
                     side_question: true,
+                    companion_of: None,
                     long_running: false,
                     timeout_secs: None,
                     env: None,
@@ -2190,6 +2324,7 @@ mod tests {
         let payload = JobPayload::RawCommand {
             command: "sleep 30".into(),
             side_question: false,
+            companion_of: None,
             long_running: false,
             timeout_secs: None,
             env: None,

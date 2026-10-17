@@ -31,7 +31,7 @@ use crate::workspace_exec::WorkspaceExec;
 const PIDLESS_START_GRACE_SECS: i64 = 30;
 #[path = "durable_jobs_remote.rs"]
 mod remote;
-pub use remote::Placement as RemoteJobPlacement;
+pub use remote::{workspace_mission_id, Placement as RemoteJobPlacement};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

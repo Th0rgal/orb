@@ -983,6 +983,7 @@ mod tests {
                     .expect("lease token"),
                 payload: sandboxed_sh::remote_node::JobPayload::RawCommand {
                     side_question: false,
+                    companion_of: None,
                     long_running: false,
                     command: "while [ ! -e release ]; do sleep 0.01; done".to_string(),
                     timeout_secs: Some(30),
@@ -1051,6 +1052,7 @@ mod tests {
         let job_id = Uuid::new_v4();
         let payload = sandboxed_sh::remote_node::JobPayload::RawCommand {
             side_question: false,
+            companion_of: None,
             long_running: false,
             command: "echo job-ok".to_string(),
             timeout_secs: Some(30),
