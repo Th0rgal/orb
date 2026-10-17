@@ -414,15 +414,32 @@ async fn authorize(
             }
         }
     }
+    // A native child may leave its parent's machine: `remote_node_id` set to
+    // "auto" (fleet scheduler) or to another registered node. It then starts
+    // in that node's default workspace, never in the parent's.
+    let elsewhere = tool.definition.name == "start_mission"
+        && args.get("cloud").is_none_or(Value::is_null)
+        && match args.get("remote_node_id").and_then(Value::as_str) {
+            Some(r) if r.eq_ignore_ascii_case("auto") => true,
+            Some(r) => {
+                if state.config.remote_nodes.node(r).is_none() {
+                    return Err(ToolError::denied("Unknown remote node"));
+                }
+                true
+            }
+            None => false,
+        };
     if let Some(raw) = args.get("workspace_id") {
-        if raw.as_str() != Some(owner.workspace_id.to_string().as_str()) {
+        if elsewhere || raw.as_str() != Some(owner.workspace_id.to_string().as_str()) {
             return Err(ToolError::denied(
                 "Workspace is outside this session's scope",
             ));
         }
     }
     if tool.definition.name == "start_workspace_job"
-        || (tool.definition.name == "start_mission" && args.get("cloud").is_none_or(Value::is_null))
+        || (tool.definition.name == "start_mission"
+            && args.get("cloud").is_none_or(Value::is_null)
+            && !elsewhere)
     {
         args["workspace_id"] = json!(owner.workspace_id);
     }
@@ -452,15 +469,10 @@ async fn authorize(
                 "Parent machine is unknown; resolve placement before delegating",
             ));
         }
-        if let Some(requested) = args.get("remote_node_id").and_then(Value::as_str) {
-            if Some(requested) != node {
-                return Err(ToolError::denied(
-                    "Native child must remain on its parent's machine",
-                ));
+        if !elsewhere {
+            if let Some(node) = node {
+                args["remote_node_id"] = json!(node);
             }
-        }
-        if let Some(node) = node {
-            args["remote_node_id"] = json!(node);
         }
     }
     if tool.definition.name == "start_mission" {

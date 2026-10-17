@@ -216,6 +216,17 @@ it('does not report an unattached run as a mission failure',async()=>{
  expect(mocks.failure).toHaveBeenCalledWith('mission',null);
  expect(queuedLocalMessages('mission')[0]).toMatchObject({interrupted:true,error:expect.stringContaining('another Orb window')});
 });
+it('archives and drops an interrupted send once its mission runs on another machine',async()=>{
+ const id=await enqueueLocalMessage(request,'saved');
+ const rows=mocks.store.get('followups:account:1') as any[];
+ Object.assign(rows[0],{state:'accepted',interrupted:true,error:'no local run',receipt:{run_id:'old',generation:1}});
+ mocks.poll.mockRejectedValue(new Error('no local run'));
+ mocks.recover.mockRejectedValue(new Error('Could not inspect previous run (409 Conflict): This conversation no longer runs on this computer'));
+ stop=startLocalQueueWorker();await vi.advanceTimersByTimeAsync(1500);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+ expect(mocks.store.get(`followups:account:1:recovered:${id}:old`)).toMatchObject({text:'saved'});
+ expect(mocks.launch).not.toHaveBeenCalled();
+});
 // IndexedDB returns fresh object identities on every read. An unchanged poll
 // must not rebuild the transcript, markdown, plan and token estimates.
 it('does not invalidate conversation subscribers when idle polls are unchanged',async()=>{

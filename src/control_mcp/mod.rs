@@ -193,7 +193,7 @@ pub fn registry() -> Vec<Tool> {
                 "duplicate MCP tool"
             );
             if definition.name == "start_mission" {
-                definition.input_schema["properties"]["remote_node_id"] = json!({"type":"string","description":"Native node placement. Executors inherit their parent node; coordinators may select a registered node."});
+                definition.input_schema["properties"]["remote_node_id"] = json!({"type":"string","description":"Native node placement: a registered node id, or \"auto\" for the fleet scheduler (least-loaded eligible node). Omit to inherit the parent's node and workspace. A child placed elsewhere starts in that node's default workspace and must clone what it needs."});
                 definition.description="Launch one native or cloud mission. Native launches select a backend/workspace/model; cloud launches select cloud.provider/account and optional repository/model. Discover cloud availability with list_cloud_accounts and list_cloud_models. Every role can use owner cloud accounts within quotas. Core supplies the parent identity for executors. Pass project/track and acceptance criteria for governed work; reviewers use writer=false. Mission completion and accepted project evidence remain separate.".into();
             }
             if definition.name == "send_message_to_mission" {

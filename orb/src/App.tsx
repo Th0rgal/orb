@@ -2915,7 +2915,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     scroller.addEventListener('scroll',older,{passive:true});onCleanup(()=>scroller?.removeEventListener('scroll',older));
     const observer = new ResizeObserver(() => { if (nearBottom) scrollIfPinned(); });
     const content = scroller.querySelector(".col");
-    if (content) observer.observe(content);
+    // Border box: the dock height is bottom padding, which a content-box observer misses.
+    if (content) observer.observe(content, { box: "border-box" });
+    const dock = scroller.nextElementSibling;
+    if (dock) observer.observe(dock);
     onCleanup(() => observer.disconnect());
   });
 
