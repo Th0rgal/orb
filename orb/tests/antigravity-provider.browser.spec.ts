@@ -107,3 +107,28 @@ test('Mistral monthly usage renders once the console session is connected', asyn
   await expect(page.getByText('Monthly',{exact:true}).first()).toBeVisible();
   await expect(page.getByRole('button',{name:'Disconnect usage'})).toBeVisible();
 });
+
+for (const theme of ['dark','light']) test(`Antigravity quota groups show shared 5h and weekly limits: ${theme}`, async ({page}, info) => {
+  await page.addInitScript(theme => { localStorage.setItem('orb.apiUrl',location.origin); localStorage.setItem('orb.jwt','test'); localStorage.setItem('orb-theme',theme); }, theme);
+  const soon = Math.floor(Date.now()/1000);
+  const usage = {provider_type:'antigravity',status:'connected',antigravity_plan:'Google AI Ultra',antigravity_windows:[
+    {label:'Gemini · 5h',used_percent:12,reset_at:soon+5*3600},{label:'Gemini · Weekly',used_percent:0.3,reset_at:soon+6*86400},
+    {label:'Claude & GPT · 5h',used_percent:48,reset_at:soon+2*3600},{label:'Claude & GPT · Weekly',used_percent:91,reset_at:soon+7*86400}]};
+  await page.route('**/api/**',route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/ai/providers') return route.fulfill({json:[{id:'antigravity',name:'Antigravity subscription',provider_type:'antigravity',uses_oauth:true,has_oauth:true,credential_owner:'cli_proxy',status:{type:'connected'}}]});
+    if (path === '/api/ai/providers/usage') return route.fulfill({json:{entries:{antigravity:usage}}});
+    if (path === '/api/ai/providers/antigravity/usage') return route.fulfill({json:usage});
+    if (path === '/api/remote-nodes') return route.fulfill({json:{enabled:true,nodes:[]}});
+    return route.fulfill({json:[]});
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Providers',exact:true}).click();
+  const groups = page.locator('.provider-usage-group');
+  await expect(groups).toHaveCount(2);
+  await expect(groups.locator('.provider-usage-group-title')).toHaveText(['Gemini','Claude & GPT']);
+  await expect(groups.nth(1).getByRole('progressbar',{name:'Weekly usage'})).toHaveAttribute('aria-valuenow','91');
+  await expect(groups.nth(0).getByText('Resets in 6d')).toBeVisible();
+  await groups.nth(0).scrollIntoViewIfNeeded();
+  await page.screenshot({path:`test-results/antigravity-quota-${info.project.name}-${theme}.png`,fullPage:true});
+});
