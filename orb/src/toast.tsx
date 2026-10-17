@@ -19,6 +19,8 @@ export type Toast = {
   title: JSX.Element;
   /** Leading glyph for info toasts; errors always show the alert icon. */
   icon?: JSX.Element;
+  /** Makes the leading glyph the toast's main button, labelled under the glyph. */
+  glyphAction?: ToastAction;
   /** Extra class for a specialised layout (e.g. "secret"). */
   variant?: string;
   message?: string;
@@ -155,11 +157,19 @@ function ToastItem(p: { toast: Toast }) {
     <Show when={t().kind === "error"}>
       <svg class="toast-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     </Show>
-    <Show when={t().kind !== "error" && t().icon}><span class="toast-glyph" aria-hidden="true">{t().icon}</span></Show>
+    <Show when={t().kind !== "error" && t().icon}>
+      <Show when={t().glyphAction} fallback={<span class="toast-glyph" aria-hidden="true">{t().icon}</span>}>
+        {a => <button type="button" class="toast-glyph toast-glyph-btn" title={a().label} onClick={() => { a().run(); dismissToast(t().id); }}>{t().icon}<span>{a().label}</span></button>}
+      </Show>
+    </Show>
     <div class="toast-body">
       <span class="toast-title">{t().title}</span>
       <Show when={t().message}><span class="toast-message">{t().message}</span></Show>
-      <For each={t().actions?.filter(a => a.link)}>{a => <button type="button" class="toast-link" onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}</button>}</For>
+      <Show when={t().actions?.some(a => a.link)}>
+        <div class="toast-links">
+          <For each={t().actions?.filter(a => a.link)}>{a => <button type="button" class="toast-link" onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}</button>}</For>
+        </div>
+      </Show>
       <Show when={t().details}>
         <details class="toast-details"><summary>Details</summary><pre>{t().details}</pre></details>
       </Show>
