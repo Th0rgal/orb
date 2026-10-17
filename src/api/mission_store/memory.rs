@@ -430,6 +430,18 @@ impl MissionStore for InMemoryMissionStore {
             .collect())
     }
 
+    async fn reparent_child_missions(&self, from: Uuid, to: Uuid) -> Result<Vec<Uuid>, String> {
+        let mut missions = self.missions.write().await;
+        let mut moved = Vec::new();
+        for mission in missions.values_mut() {
+            if mission.parent_mission_id == Some(from) {
+                mission.parent_mission_id = Some(to);
+                moved.push(mission.id);
+            }
+        }
+        Ok(moved)
+    }
+
     async fn set_mission_requires_local_disk(
         &self,
         id: Uuid,
