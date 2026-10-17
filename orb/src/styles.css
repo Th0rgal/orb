@@ -3408,12 +3408,18 @@ select.orb-select-native:disabled { cursor: default; }
 .toast.secret { align-items: flex-start; }
 .toast.secret .toast-actions { display: flex; flex-direction: column; gap: 4px; flex: none; }
 .toast.secret .toast-btn { min-height: 24px; padding: 0 10px; justify-content: center; font-size: 11.5px; }
-.toast-link { align-self: flex-start; padding: 0; margin-top: 2px; background: none; color: var(--fg-3); font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px; }
+.toast-links { display: flex; gap: 12px; margin-top: 2px; }
+.toast-link { align-self: flex-start; padding: 0; background: none; color: var(--fg-3); font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px; }
 .toast-link:hover { color: var(--fg-2); }
 .toast-btn.primary { background: var(--fg); color: var(--bg); }
 .toast-btn.primary:hover { background: var(--fg); opacity: .88; }
 .toast-glyph { flex: none; align-self: flex-start; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--bg-active); color: var(--fg-2); }
 .toast-sub { color: var(--fg-3); font-weight: 400; }
+.toast-glyph-btn { align-self: stretch; width: 52px; height: auto; min-height: 52px; flex-direction: column; gap: 3px; align-content: center; color: var(--fg); border: 1px solid var(--overlay-border); transition: background 120ms, color 120ms; }
+.toast-glyph-btn svg { width: 20px; height: 20px; }
+.toast-glyph-btn span { font-size: 10.5px; font-weight: 500; }
+.toast-glyph-btn:hover { background: var(--fg); color: var(--bg); }
+.toast.secret { padding-left: 8px; }
 .toast.secret .toast-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .toast.secret .toast-title strong { flex: none; white-space: nowrap; font: 500 12px/1.4 var(--mono); color: var(--fg); }
 .toast.secret .toast-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
