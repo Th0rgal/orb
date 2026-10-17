@@ -22,6 +22,19 @@ export function forgetAcceptedLocalMessages(ids:Set<string>){setAccepted(rows=>r
 const storageKey=()=>`followups:${sideQuestionKey('queue')}`;
 const wakeEvent='orb:queue-wake';
 const lostRun='Orb lost the local run. Your message is saved. Retry to resume it.';
+// The mission moved to another machine: there is no local run left to recover.
+const NOT_LOCAL='This conversation no longer runs on this computer';
+const movedAway=(error:unknown)=>String(error).includes(NOT_LOCAL);
+/** Archive a row whose mission now runs elsewhere and take it off the queue. */
+async function forgetMoved(key:string,id:string){
+ await locked(key,async()=>{
+  const rows=await read(key),row=rows.find(row=>row.id===id);
+  if(!row)return;
+  await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'moved'}`,row);
+  await write(key,rows.filter(row=>row.id!==id));
+ });
+ publishEntries(rows=>rows.filter(r=>r.id!==id));
+}
 /** The agent keeps its session: it is told what happened instead of being handed the request as new work. */
 export const resumedPrompt=(prompt:string,cut:'restart'|'connection'|'background'='restart')=>{
  const note=cut==='background'
@@ -212,6 +225,7 @@ export async function retryQueuedMessage(id:string){
  if(row.interrupted||(row.state==='dispatching'&&row.error)){
   try{await recoverLocalLaunch(row.mission);}
   catch(recovery){
+   if(movedAway(recovery)){await forgetMoved(key,id);wake();return;}
    const detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;
    if(key===storageKey())await update(key,id,stored=>{stored.error=detail;});
    throw recovery;
@@ -332,7 +346,10 @@ export function startLocalQueueWorker(){
      let recovered=false;
      let detail=lostRun;
      try{await recoverLocalLaunch(row.mission);recovered=true;}
-     catch(recovery){detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;}
+     catch(recovery){
+      if(movedAway(recovery)){if(valid())await forgetMoved(key,row.id);return;}
+      detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;
+     }
      if(!valid())return;
      // A missing attachment or a held recovery lock is not evidence of mission failure.
      recordLocalFailure(row.mission,null);
@@ -386,6 +403,7 @@ export function startLocalQueueWorker(){
       await update(key,row.id,stored=>{if(stored.state==='accepted'&&stored.interrupted){stored.state='error';stored.error=lostRun;}});
       again=true;
      }catch(recovery){
+      if(movedAway(recovery)){if(valid())await forgetMoved(key,row.id);continue;}
       const detail=`Orb lost the local run. Retry will check that the previous agent stopped. ${String(recovery)}`;
       if(valid()&&row.error!==detail)await update(key,row.id,stored=>{if(stored.state==='accepted'&&stored.interrupted)stored.error=detail;});
      }
