@@ -864,7 +864,7 @@ button.under-model { color: inherit; }
 
 /* ---------- settings / pages ---------- */
 .s-body, .page { flex: 1; overflow-y: auto; min-width: 0; min-height: 0; }
-.s-body { display: flex; justify-content: center; }
+.s-body { display: flex; justify-content: center; align-items: flex-start; }
 .s-inner {
   width: 100%; max-width: 560px; margin: 0 auto;
   padding: 40px 28px 80px;

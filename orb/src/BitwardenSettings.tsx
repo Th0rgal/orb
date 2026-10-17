@@ -807,20 +807,6 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                               <button
                                 type="button"
                                 class="s-btn bw-act-btn"
-                                title={`Copy ID ${secret.id}`}
-                                aria-label="Copy secret ID"
-                                onClick={() => {
-                                  copyText(secret.id);
-                                  flashCopied(`id:${secret.id}`);
-                                }}
-                              >
-                                <Show when={copiedId() === `id:${secret.id}`} fallback={<Ic.CopyIcon size={12} />}>
-                                  <Ic.CheckIcon size={12} />
-                                </Show>
-                              </button>
-                              <button
-                                type="button"
-                                class="s-btn bw-act-btn"
                                 onClick={() => void handleOpenEditSecret(secret)}
                                 title="Edit secret"
                                 aria-label="Edit secret"
