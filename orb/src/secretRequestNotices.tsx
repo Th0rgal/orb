@@ -1,4 +1,4 @@
-import { approveSecretRequest, type SecretAccessRequest } from "./bitwardenApi";
+import { approveSecretRequest, rejectSecretRequest, type SecretAccessRequest } from "./bitwardenApi";
 import { ApprovalCancelled } from "./deviceApproval";
 import { dismissToast, notify } from "./toast";
 
@@ -49,7 +49,17 @@ export function syncSecretRequestNotices(pending: SecretAccessRequest[], openSec
               },
             }]
           : []),
-        { label: "Review", run: () => { dismissToast(key); openSecrets(); } },
+        {
+          label: "Deny",
+          run: () => {
+            dismissToast(key);
+            void rejectSecretRequest(r.id).catch((e) => {
+              shown.delete(r.id);
+              notify({ kind: "error", title: "Could not deny the request", message: e instanceof Error ? e.message : String(e) });
+            });
+          },
+        },
+        { label: "Review in Secrets", link: true, run: () => { dismissToast(key); openSecrets(); } },
       ],
     });
   }

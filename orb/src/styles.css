@@ -974,8 +974,8 @@ button.under-model { color: inherit; }
 .p-model-name { font-size: 12px; color: var(--fg-2); font-weight: 500; }
 .p-usage { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; max-width: 260px; }
 /* Collapsed row: windows side by side, 3px bars, no wrapping. */
-.p-usage.compact { flex-direction: row; align-items: center; gap: 14px; margin-top: 4px; max-width: none; }
-.p-usage-chip { display: inline-flex; align-items: center; gap: 6px; }
+.p-usage.compact { flex-direction: row; align-items: center; gap: 14px; margin-top: 4px; max-width: none; min-width: 0; overflow: hidden; flex-wrap: nowrap; }
+.p-usage-chip { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
 .p-usage-chip .p-bar { width: 56px; flex: none; height: 3px; display: inline-block; }
 .p-usage-chip .p-bar-fill { display: block; }
 .p-usage-chip .p-usage-pct { width: auto; min-width: 26px; }
@@ -3404,6 +3404,12 @@ select.orb-select-native:disabled { cursor: default; }
 .toast-details pre { margin: 6px 0 0; max-height: 160px; overflow: auto; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; }
 .toast-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
 .toast-btn:hover { background: var(--overlay-hover); }
+.toast-actions { display: contents; }
+.toast.secret { align-items: flex-start; }
+.toast.secret .toast-actions { display: flex; flex-direction: column; gap: 4px; flex: none; }
+.toast.secret .toast-btn { min-height: 24px; padding: 0 10px; justify-content: center; font-size: 11.5px; }
+.toast-link { align-self: flex-start; padding: 0; margin-top: 2px; background: none; color: var(--fg-3); font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px; }
+.toast-link:hover { color: var(--fg-2); }
 .toast-btn.primary { background: var(--fg); color: var(--bg); }
 .toast-btn.primary:hover { background: var(--fg); opacity: .88; }
 .toast-glyph { flex: none; align-self: flex-start; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--bg-active); color: var(--fg-2); }
@@ -3562,3 +3568,5 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-decline { margin-left: auto; color: var(--fg-3); }
 .bw-decline:hover { color: var(--red); }
 .bw-subhead { font-size: 12px; font-weight: 500; color: var(--fg-3); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.p-acc > .s-row-text { flex: 1 1 auto; min-width: 160px; }
+.p-acc > .p-usage.compact { flex: 0 1 auto; }

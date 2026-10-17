@@ -684,14 +684,28 @@ function cliProxyReconnectable(a: AIProvider): boolean {
 }
 
 function UsageSummary(p: { usage: ProviderUsage }) {
-  const windows = createMemo(() => usageWindows(p.usage));
   // Keep the account summary compact; detailed meters live in the expansion.
+  // Grouped windows ("Gemini · 5h", "Gemini · Weekly") collapse to one chip
+  // per group showing the tighter limit.
+  const windows = createMemo(() => {
+    const out: { label: string; used: number; detail?: string }[] = [];
+    for (const w of usageWindows(p.usage)) {
+      const [group, window] = w.label.includes(" · ") ? w.label.split(" · ", 2) : [undefined, w.label];
+      const pct = `${window} ${Math.round(w.used * 100)}%`;
+      const existing = group ? out.find(o => o.label === group) : undefined;
+      if (existing) {
+        existing.used = Math.max(existing.used, w.used);
+        existing.detail = `${existing.detail} · ${pct}`;
+      } else out.push({ label: group ?? w.label, used: w.used, detail: group ? `${group}: ${pct}` : undefined });
+    }
+    return out;
+  });
   return (
     <Show when={windows().length > 0}>
       <div class="p-usage compact">
         <For each={windows()}>
           {(w) => (
-            <span class="p-usage-chip" title={`${w.label} window: ${Math.round(w.used * 100)}% used`}>
+            <span class="p-usage-chip" title={w.detail ?? `${w.label} window: ${Math.round(w.used * 100)}% used`}>
               <span class="p-usage-label">{w.label === "7d" ? "Weekly" : w.label}</span>
               <span class="p-usage-pct">{Math.round(w.used * 100)}%</span>
             </span>

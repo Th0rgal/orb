@@ -3158,7 +3158,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const phase = missionPhase(mission(), activity());
     return (optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
-  const phaseLabel = () => mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
+  const phaseLabel = () => sendingImmediate() ? "Stopping the current turn…" : mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
@@ -3402,6 +3402,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const wasBusy = busy();
     setSendingImmediate(true);
     setSendError(null);
+    // Show the messages as sent right away: stopping a remote turn can take
+    // several seconds, and the queue row has already disappeared.
+    const projected = ordered.map(row => row.id as ReturnType<typeof crypto.randomUUID>);
+    setOptimisticList(prev => [...prev.filter(item => !projected.includes(item.id)), ...ordered.map(row => ({ id: row.id as ReturnType<typeof crypto.randomUUID>, text: messagePresentation(row.content).text, images: [], waiting: false }))]);
+    nearBottom = true;
+    queueMicrotask(scrollIfPinned);
     try {
       if (wasBusy) {
         await cancelMission(targetMissionId).catch(() => {});
@@ -3457,6 +3463,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               await new Promise(r => setTimeout(r, 250));
               continue;
             }
+            setOptimisticList(prev => prev.filter(item => item.id !== row.id));
             const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: cleanText, queued: result.queued, receipt: true, attached: Boolean(row.attached || presented.attached || attachments.length > 0) } };
             if (replaying) held.push(event);
             else applyLive(event);
@@ -3476,9 +3483,12 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       if (!staleMission()) await refresh();
     } catch (e) {
       if (!staleMission()) setSendError(launchError(e));
+      // Keep what was not delivered visible as failed rather than losing it.
+      setOptimisticList(prev => prev.map(item => projected.includes(item.id) ? { ...item, failed: true } : item));
       throw e;
     } finally {
       setSendingImmediate(false);
+      setOptimisticList(prev => prev.filter(item => !projected.includes(item.id) || item.failed));
     }
   };
 
