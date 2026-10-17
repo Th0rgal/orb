@@ -1852,7 +1852,7 @@ button.fork-trigger:hover { color: var(--fg); }
 /* Response actions reveal on hover inside the turn's right edge, avoiding a permanent floating gutter column. */
 .st-text { position:relative;overflow:visible; }
 .st-text .md { min-width:0; }
-.response-actions { position:absolute;right:-4px;bottom:2px;margin:0;min-height:0;opacity:0;transition:opacity .14s ease; }
+.response-actions { position:absolute;right:0;bottom:2px;margin:0;min-height:0;opacity:0;transition:opacity .14s ease; }
 .st-text:hover .response-actions, .st-text:focus-within .response-actions, .response-actions:has(.response-copy[aria-label="Response copied"]), .response-actions:has(.response-copy-error) { opacity:1; }
 .response-actions .response-copy { width:24px;height:24px;padding:0;background:var(--bg-elev);border:1px solid var(--stroke-soft);box-shadow:0 2px 8px rgb(0 0 0 / 12%); }
 .response-actions .response-copy:hover { background:var(--bg-active);border-color:var(--stroke); }
@@ -2493,7 +2493,11 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-panel .btw-composer-dock form { margin-left:0; margin-right:0; }
 .btw-sidebar .btw-panel header { display:none; }
 /* Same soft fade as the main transcript above its composer; padding keeps the last line clear of it. */
-.btw-sidebar .btw-thread { padding-top:max(12px, var(--tb-h, 35px)); padding-bottom:28px; -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 28px), transparent 100%); mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 28px), transparent 100%); }
+.btw-sidebar .btw-thread { padding-top:max(12px, var(--tb-h, 35px)); padding-bottom:calc(var(--btw-dock-height, 96px) + 24px); -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - var(--btw-dock-height, 96px) - 16px), transparent calc(100% - var(--btw-dock-height, 96px) + 10px)); mask-image:linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - var(--btw-dock-height, 96px) - 16px), transparent calc(100% - var(--btw-dock-height, 96px) + 10px)); }
+/* The side composer floats over its thread like the main dock, so the transcript fades out behind it. */
+.btw-sidebar .btw-panel .btw-composer-dock { position:relative; z-index:1; margin-top:calc(-1 * var(--btw-dock-height, 96px)); min-height:var(--btw-dock-height, 96px); display:flex; flex-direction:column; justify-content:flex-end; pointer-events:none; }
+.btw-sidebar .btw-composer-dock > * { pointer-events:auto; }
+.btw-sidebar .btw-panel .btw-composer-dock form { box-shadow:0 4px 18px rgb(0 0 0 / 8%); }
 .btw-sidebar .btw-composer-dock { margin:0 24px; padding-bottom:max(16px, calc(var(--composer-bottom-space, 44px) - 28px)); }
 @media(max-width:720px) { .btw-sidebar .btw-composer-dock { margin-left:16px; margin-right:16px; } }
 @media(max-width:1150px) {
