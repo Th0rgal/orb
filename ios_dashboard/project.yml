@@ -25,6 +25,7 @@ targets:
       - path: SandboxedDashboard/Orb/MathAssets
         type: folder
         buildPhase: resources
+      - path: OrbLiveActivity/Shared
     settings:
       base:
         INFOPLIST_FILE: SandboxedDashboard/Info.plist
@@ -38,6 +39,26 @@ targets:
     entitlements:
       path: SandboxedDashboard/SandboxedDashboard.entitlements
       properties: {}
+    dependencies:
+      - target: OrbLiveActivity
+
+  OrbLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: OrbLiveActivity
+        excludes:
+          - "**/.DS_Store"
+          - "Info.plist"
+    settings:
+      base:
+        INFOPLIST_FILE: OrbLiveActivity/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: md.thomas.openagent.dashboard.liveactivity
+        PRODUCT_NAME: OrbLiveActivity
+        GENERATE_INFOPLIST_FILE: "NO"
+        SKIP_INSTALL: "YES"
+        TARGETED_DEVICE_FAMILY: "1,2"
 
   SandboxedDashboardTests:
     type: bundle.unit-test

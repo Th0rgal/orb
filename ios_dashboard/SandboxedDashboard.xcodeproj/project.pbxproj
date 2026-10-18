@@ -8,8 +8,10 @@
 
 /* Begin PBXBuildFile section */
 		0530E5793E17B5BFB15E808A /* Automation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BF62094FF29193B33EC7009 /* Automation.swift */; };
+		061FAD94D1FD6DB4854BC51C /* OrbFleetActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9331F1134F0091DB717302CC /* OrbFleetActivity.swift */; };
 		078E5F28B7022DCD1BC721FD /* HermesConversationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13A79A00CA8E2F1246E970A8 /* HermesConversationTests.swift */; };
 		07985F241B3185EF35CA3281 /* OrbSideQuestion.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0FC617748B4C068829D9F3D /* OrbSideQuestion.swift */; };
+		07E4DA4A4886502016F1ED67 /* OrbFleetActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9331F1134F0091DB717302CC /* OrbFleetActivity.swift */; };
 		07ED817585C2EE9A5E11C851 /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C433FADB27AED6165D3EE2E4 /* HistoryView.swift */; };
 		08D9C00F453EE16A24DC9C84 /* FilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D9C3868787C973C5B65DFCD /* FilesView.swift */; };
 		094CD000ADB23893099CC839 /* WorkerPillView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A514C239AAC192BD2AE8038 /* WorkerPillView.swift */; };
@@ -22,12 +24,14 @@
 		226AFC0BA710210493AF4569 /* OrbAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = C623C7A6712001F7E32CA623 /* OrbAttachments.swift */; };
 		277C491E1B1B5E9673DF1CD8 /* MessageBubbles.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1EF1D3FCDDC536A1D824359 /* MessageBubbles.swift */; };
 		284053CC23619D1645909FFC /* OrbFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44B11EBF7D649DC57B826888 /* OrbFlowUITests.swift */; };
+		29584642ECAE60630F2EA849 /* OrbFleetLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C56C02CD1D4A5276DBD3EB7F /* OrbFleetLiveActivity.swift */; };
 		2BBA61051DFCB7A780604B87 /* NetworkResilienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1828D2FC9160FC8677E10502 /* NetworkResilienceTests.swift */; };
 		2BF91FF226E55712A9B5C080 /* OrbQuestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B053370536BB82FE142FF2E5 /* OrbQuestions.swift */; };
 		2CDCE8E0A95E85009EC43B51 /* TaskBoardViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF933753B68F0B468D9F3864 /* TaskBoardViews.swift */; };
 		2FB3063E55707CF751D817F9 /* OrbAdminSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 555F14279E1F8E312FB9231C /* OrbAdminSettings.swift */; };
 		3481363ED532A70935FA6B9E /* ChatHistoryReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F77025B7F25E968FE5757E18 /* ChatHistoryReducer.swift */; };
 		382AC983DA8881DF18A6F5A6 /* OrbDictationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98CD2374A807C1FF479EFE74 /* OrbDictationTests.swift */; };
+		3855275E2A973B28F44C1C30 /* OrbLiveActivityBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = E252454398E17C81E0936682 /* OrbLiveActivityBundle.swift */; };
 		3A706E457E3E27DA1B69E152 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 750C4C8090EAD0168794EEE4 /* Assets.xcassets */; };
 		3C7BD46FB1BA888A750CA564 /* OrbBitwardenSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3B499BE2EC4EB4545CB79EC /* OrbBitwardenSettings.swift */; };
 		40C09530EC6F9C083B5474C4 /* GlassButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = D81DFFD4B67ABE07FB546B2B /* GlassButton.swift */; };
@@ -54,6 +58,7 @@
 		6846AB79778CDF4CC216B7D1 /* SandboxedDashboardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8080D5ADF84794AFE484FE17 /* SandboxedDashboardApp.swift */; };
 		692C694570F45D74CCBAC75B /* TerminalState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6922E2F0E17EDB3A8400D473 /* TerminalState.swift */; };
 		6A15DF1CBD6B0A3716B9FE94 /* WorkerSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081ACA60E04DBCB6E7313072 /* WorkerSheetView.swift */; };
+		6DC6CC0049892748B787B5A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F47BD46D6393291DC560EA07 /* Assets.xcassets */; };
 		6EC32F7CE8BFDB84428DFF4A /* Project.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08C648C1D5FC7491563EE824 /* Project.swift */; };
 		708B491B7A83A6648C03CA8A /* WorkerPeekView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF9A2A12846A5FFB3FC7497 /* WorkerPeekView.swift */; };
 		71559C7052796FED7EBACF3F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018CEF52A93FCF430A128017 /* Theme.swift */; };
@@ -80,6 +85,7 @@
 		A9B4F30DDAD9DBAEB009F77B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8600F588B036A2D57AEC9FC6 /* SettingsView.swift */; };
 		AA2F722EE90CC2C4E182861E /* OrbConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E2A5583F19E1A058C7F0C73 /* OrbConversation.swift */; };
 		AA652180F4784273CC4B4BBF /* OrbForkSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FF9EF2372E04C65A688DF58 /* OrbForkSheet.swift */; };
+		AC1BFAA77BFF45A70AE7453D /* OrbFleetActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 728F8E4967094E618F0B595B /* OrbFleetActivityController.swift */; };
 		B12C86DF039026D6FFFD2B52 /* HermesConversationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F0AD1E30FB3F3BC08A39FB /* HermesConversationUITests.swift */; };
 		B2C28CDD378203A229D62B9B /* PhosphorIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = D17889CB07B4A4285DD87C30 /* PhosphorIcon.swift */; };
 		B3680EB29951C459A8C8A35A /* DesktopStreamService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BE62F9666647C1F41F15251 /* DesktopStreamService.swift */; };
@@ -87,6 +93,7 @@
 		B5F362452171D8F33FE32B9F /* ProjectDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B668E3312C606018F59C5835 /* ProjectDetailView.swift */; };
 		B6263AC356BE51962E2D0145 /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 370F364BA05D1236D9B630AB /* ChatMessage.swift */; };
 		BAA09895377937393FF864A7 /* Mission.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C6DBBABC4AE0FD4368A185C /* Mission.swift */; };
+		BB5DB1F08C030B1179CC282F /* OrbLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 056EA2099041C13447B4B6C0 /* OrbLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BFD7D29C1F46E9F130A05F34 /* BackendAgentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6993AD59CA0D7392AAACDC2 /* BackendAgentService.swift */; };
 		C159E476E057E6691D1E0E85 /* GlassCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27F5D3EB21B6FF298AF5CD32 /* GlassCard.swift */; };
 		C565A0819B851735DAA71172 /* OrbMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD651E846151C5070BA0765 /* OrbMath.swift */; };
@@ -126,10 +133,32 @@
 			remoteGlobalIDString = AAACA90456A4A22561940B6B;
 			remoteInfo = SandboxedDashboard;
 		};
+		DA8CC95AC3CA298FECF84E39 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 89907ABAA4D1648BF3F7ADB0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 14C19B3219EFE4065FBC9952;
+			remoteInfo = OrbLiveActivity;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		618C2BB6D2C1B2F45F9B04B7 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				BB5DB1F08C030B1179CC282F /* OrbLiveActivity.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		018CEF52A93FCF430A128017 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		056EA2099041C13447B4B6C0 /* OrbLiveActivity.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = OrbLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		081ACA60E04DBCB6E7313072 /* WorkerSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerSheetView.swift; sourceTree = "<group>"; };
 		0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjectAppearanceTests.swift; sourceTree = "<group>"; };
 		08C648C1D5FC7491563EE824 /* Project.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Project.swift; sourceTree = "<group>"; };
@@ -174,6 +203,7 @@
 		6922E2F0E17EDB3A8400D473 /* TerminalState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalState.swift; sourceTree = "<group>"; };
 		6E793D17A373009D35033D9E /* OrbMessageImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMessageImages.swift; sourceTree = "<group>"; };
 		717FFF091D1EDB3F27D08712 /* OrbCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbCore.swift; sourceTree = "<group>"; };
+		728F8E4967094E618F0B595B /* OrbFleetActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFleetActivityController.swift; sourceTree = "<group>"; };
 		750C4C8090EAD0168794EEE4 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7559F3F4553AD74130B1BC34 /* ModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelTests.swift; sourceTree = "<group>"; };
 		76082CCC47D9D91308F4AE10 /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
@@ -189,6 +219,7 @@
 		8D9C3868787C973C5B65DFCD /* FilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilesView.swift; sourceTree = "<group>"; };
 		8EAAE29E81F160F8E8409B7D /* QueueSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueSheet.swift; sourceTree = "<group>"; };
 		8EB13B92B70F6884D323E5FF /* FidoApprovalState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FidoApprovalState.swift; sourceTree = "<group>"; };
+		9331F1134F0091DB717302CC /* OrbFleetActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFleetActivity.swift; sourceTree = "<group>"; };
 		94B98C32C31466233A2EFB2B /* OrbDictation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDictation.swift; sourceTree = "<group>"; };
 		97D6534BE4C1B5E0BEA90A5A /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		98CD2374A807C1FF479EFE74 /* OrbDictationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDictationTests.swift; sourceTree = "<group>"; };
@@ -210,6 +241,7 @@
 		C0E02066E781D088A194C232 /* ControlPerformanceDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlPerformanceDiagnostics.swift; sourceTree = "<group>"; };
 		C433FADB27AED6165D3EE2E4 /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		C4B973A9078E4E085D489E93 /* SlashCommandSuggestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandSuggestions.swift; sourceTree = "<group>"; };
+		C56C02CD1D4A5276DBD3EB7F /* OrbFleetLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFleetLiveActivity.swift; sourceTree = "<group>"; };
 		C623C7A6712001F7E32CA623 /* OrbAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbAttachments.swift; sourceTree = "<group>"; };
 		CAC389FA8B9B5C969E606A22 /* Backend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Backend.swift; sourceTree = "<group>"; };
 		CB1276147AB3D26931AC35DA /* OrbDocuments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDocuments.swift; sourceTree = "<group>"; };
@@ -221,6 +253,7 @@
 		D4015786D778B76973EA06D5 /* ProjectsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsView.swift; sourceTree = "<group>"; };
 		D81DFFD4B67ABE07FB546B2B /* GlassButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassButton.swift; sourceTree = "<group>"; };
 		D9E023EEFFFA9B1092B66006 /* ANSIParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANSIParser.swift; sourceTree = "<group>"; };
+		E252454398E17C81E0936682 /* OrbLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbLiveActivityBundle.swift; sourceTree = "<group>"; };
 		E26C0B52815B686DE4AE0804 /* OrbProjectAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjectAppearance.swift; sourceTree = "<group>"; };
 		E387E6A01D00EAD668074CCC /* WorkerBuckets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerBuckets.swift; sourceTree = "<group>"; };
 		E4CA8C69928B3838868EE34A /* AnyCodable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnyCodable.swift; sourceTree = "<group>"; };
@@ -230,6 +263,7 @@
 		ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSettings.swift; sourceTree = "<group>"; };
 		EFD2C112534D498211B26C38 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		F2F0AD1E30FB3F3BC08A39FB /* HermesConversationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesConversationUITests.swift; sourceTree = "<group>"; };
+		F47BD46D6393291DC560EA07 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F53686D00374BEDA33228269 /* ToolUIDataTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolUIDataTableView.swift; sourceTree = "<group>"; };
 		F6993AD59CA0D7392AAACDC2 /* BackendAgentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendAgentService.swift; sourceTree = "<group>"; };
 		F77025B7F25E968FE5757E18 /* ChatHistoryReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatHistoryReducer.swift; sourceTree = "<group>"; };
@@ -250,6 +284,7 @@
 		057719CAD3366030137C44B3 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				056EA2099041C13447B4B6C0 /* OrbLiveActivity.appex */,
 				1C19E1741AE5E4A19BDAAB98 /* SandboxedDashboard.app */,
 				4802677F01F1504267EC2BE2 /* SandboxedDashboardTests.xctest */,
 				8BF8C369AA9AEE45087D99CB /* SandboxedDashboardUITests.xctest */,
@@ -265,6 +300,15 @@
 			path = Desktop;
 			sourceTree = "<group>";
 		};
+		35EE4E34BE8C2BF15EEDF6F8 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				9331F1134F0091DB717302CC /* OrbFleetActivity.swift */,
+			);
+			name = Shared;
+			path = OrbLiveActivity/Shared;
+			sourceTree = "<group>";
+		};
 		39B9469E602F8BD41799B337 /* FidoApproval */ = {
 			isa = PBXGroup;
 			children = (
@@ -272,6 +316,17 @@
 				62B73495CB5FE8A01851005A /* FidoApprovalOverlay.swift */,
 			);
 			path = FidoApproval;
+			sourceTree = "<group>";
+		};
+		483C1FA7AD3A618854BB5B14 /* OrbLiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				F47BD46D6393291DC560EA07 /* Assets.xcassets */,
+				C56C02CD1D4A5276DBD3EB7F /* OrbFleetLiveActivity.swift */,
+				E252454398E17C81E0936682 /* OrbLiveActivityBundle.swift */,
+				35EE4E34BE8C2BF15EEDF6F8 /* Shared */,
+			);
+			path = OrbLiveActivity;
 			sourceTree = "<group>";
 		};
 		50FE02040F839BB2D8F3184B /* Views */ = {
@@ -350,6 +405,7 @@
 				717FFF091D1EDB3F27D08712 /* OrbCore.swift */,
 				94B98C32C31466233A2EFB2B /* OrbDictation.swift */,
 				CB1276147AB3D26931AC35DA /* OrbDocuments.swift */,
+				728F8E4967094E618F0B595B /* OrbFleetActivityController.swift */,
 				7FF9EF2372E04C65A688DF58 /* OrbForkSheet.swift */,
 				56259348FCD0E21FC531D8E9 /* OrbInbox.swift */,
 				2D5BB808D250AF7F06FD9AC7 /* OrbMachinesSettings.swift */,
@@ -398,9 +454,11 @@
 			isa = PBXGroup;
 			children = (
 				1698950E343FC7A6715F842A /* MathAssets */,
+				483C1FA7AD3A618854BB5B14 /* OrbLiveActivity */,
 				6DBC9AF3F2EFD0B5057A2EB6 /* SandboxedDashboard */,
 				A5A307A24CE6E469C4A2FA0D /* SandboxedDashboardTests */,
 				69E84F6BBDAEC47870846B46 /* SandboxedDashboardUITests */,
+				35EE4E34BE8C2BF15EEDF6F8 /* Shared */,
 				057719CAD3366030137C44B3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -515,6 +573,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		14C19B3219EFE4065FBC9952 /* OrbLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4D2E5C977219B69ABFBF4B58 /* Build configuration list for PBXNativeTarget "OrbLiveActivity" */;
+			buildPhases = (
+				CD84A84BA368EE0F3E7386A7 /* Sources */,
+				36752A7281163F3AFE73DAF3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OrbLiveActivity;
+			packageProductDependencies = (
+			);
+			productName = OrbLiveActivity;
+			productReference = 056EA2099041C13447B4B6C0 /* OrbLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		8A8DCA11CAC3A5FFA56DC86C /* SandboxedDashboardUITests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = E6D8F0304264974ECA11ADE5 /* Build configuration list for PBXNativeTarget "SandboxedDashboardUITests" */;
@@ -539,10 +615,12 @@
 			buildPhases = (
 				0BDFA08AE981DAA650DC8A0F /* Sources */,
 				51B6144C323B887343527263 /* Resources */,
+				618C2BB6D2C1B2F45F9B04B7 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				5FE4730940C8599FEC772D05 /* PBXTargetDependency */,
 			);
 			name = SandboxedDashboard;
 			packageProductDependencies = (
@@ -578,6 +656,9 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
+					14C19B3219EFE4065FBC9952 = {
+						ProvisioningStyle = Automatic;
+					};
 					8A8DCA11CAC3A5FFA56DC86C = {
 						ProvisioningStyle = Automatic;
 						TestTargetID = AAACA90456A4A22561940B6B;
@@ -605,6 +686,7 @@
 			projectRoot = "";
 			targets = (
 				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
+				14C19B3219EFE4065FBC9952 /* OrbLiveActivity */,
 				C50B6EE186DD640BD408EEA7 /* SandboxedDashboardTests */,
 				8A8DCA11CAC3A5FFA56DC86C /* SandboxedDashboardUITests */,
 			);
@@ -612,6 +694,14 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		36752A7281163F3AFE73DAF3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6DC6CC0049892748B787B5A9 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		51B6144C323B887343527263 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -674,6 +764,8 @@
 				86C9D56D2E0A4F576734B3F1 /* OrbCore.swift in Sources */,
 				FA899996474B9DD43915EC48 /* OrbDictation.swift in Sources */,
 				A302B87C0F47502BF4719F5F /* OrbDocuments.swift in Sources */,
+				061FAD94D1FD6DB4854BC51C /* OrbFleetActivity.swift in Sources */,
+				AC1BFAA77BFF45A70AE7453D /* OrbFleetActivityController.swift in Sources */,
 				AA652180F4784273CC4B4BBF /* OrbForkSheet.swift in Sources */,
 				F25A7DDE190D5186F9A67316 /* OrbInbox.swift in Sources */,
 				50AD3F51FCD5F045B1715B24 /* OrbMachinesSettings.swift in Sources */,
@@ -745,9 +837,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CD84A84BA368EE0F3E7386A7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				07E4DA4A4886502016F1ED67 /* OrbFleetActivity.swift in Sources */,
+				29584642ECAE60630F2EA849 /* OrbFleetLiveActivity.swift in Sources */,
+				3855275E2A973B28F44C1C30 /* OrbLiveActivityBundle.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		5FE4730940C8599FEC772D05 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 14C19B3219EFE4065FBC9952 /* OrbLiveActivity */;
+			targetProxy = DA8CC95AC3CA298FECF84E39 /* PBXContainerItemProxy */;
+		};
 		67E18B6A61C28B344B3B9868 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = AAACA90456A4A22561940B6B /* SandboxedDashboard */;
@@ -823,6 +930,25 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		3D4A34FB9953F387E749A260 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OrbLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = md.thomas.openagent.dashboard.liveactivity;
+				PRODUCT_NAME = OrbLiveActivity;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -968,6 +1094,25 @@
 			};
 			name = Release;
 		};
+		E40254F3A2364C654D9E0415 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OrbLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = md.thomas.openagent.dashboard.liveactivity;
+				PRODUCT_NAME = OrbLiveActivity;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		F266DC6E627F502AB5AA0977 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1023,6 +1168,15 @@
 			buildConfigurations = (
 				82D460974130C682A3E1E34E /* Debug */,
 				F2D4B4EF1E0822D4A7B99DD4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		4D2E5C977219B69ABFBF4B58 /* Build configuration list for PBXNativeTarget "OrbLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3D4A34FB9953F387E749A260 /* Debug */,
+				E40254F3A2364C654D9E0415 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

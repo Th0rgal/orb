@@ -18,5 +18,8 @@ BASE="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "${PLIST}")"
 BASE="${BASE%%.*}"
 BUILD="${BASE}.${CI_BUILD_NUMBER:?Xcode Cloud build number is required}"
 
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD}" "${PLIST}"
+# The Live Activity extension must carry the same version as the app.
+for plist in "${PLIST}" "${PLIST%/SandboxedDashboard/Info.plist}/OrbLiveActivity/Info.plist"; do
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD}" "${plist}"
+done
 echo "=== CFBundleVersion ${BUILD} ==="

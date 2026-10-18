@@ -528,3 +528,52 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "ORB_TEST_OK")).firstMatch.waitForExistence(timeout: 20))
     }
 }
+
+/// Tapping a mission notification opens the Inbox with that card peeked.
+/// Run with the fixture server on 18778; the harness pushes the notification
+/// with `xcrun simctl push` once the app is in the background.
+final class OrbNotificationTapUITests: XCTestCase {
+    @MainActor func testTappingNotificationOpensInboxPeek() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18778", "-orb_test_reset", "YES"]
+        app.launch()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if springboard.buttons["Allow"].waitForExistence(timeout: 8) { springboard.buttons["Allow"].tap() }
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.terminate()
+        // Banners are tapped by position: deep SpringBoard queries crash its automation server.
+        let bannerSpot = springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.075))
+        var opened = false
+        for _ in 0..<60 where !opened {
+            sleep(2)
+            bannerSpot.tap()
+            opened = app.wait(for: .runningForeground, timeout: 2)
+        }
+        XCTAssertTrue(opened, "no notification opened the app")
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
+        sleep(4)
+        XCTAssertEqual(app.state, .runningForeground, "app crashed after tapping the notification")
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "after-notification-tap"; shot.lifetime = .keepAlways; add(shot)
+    }
+}
+
+/// Fleet Live Activity: visible in the Dynamic Island and on the Lock Screen
+/// / Notification Center once missions are running or waiting.
+final class OrbFleetLiveActivityUITests: XCTestCase {
+    @MainActor func testFleetLiveActivityAppears() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18778", "-orb_test_reset", "YES"]
+        app.launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Inbox'")).firstMatch.tap()
+        sleep(8)
+        XCUIDevice.shared.press(.home)
+        sleep(3)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let home = XCTAttachment(screenshot: springboard.screenshot()); home.name = "home-dynamic-island"; home.lifetime = .keepAlways; add(home)
+        let top = springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.005))
+        top.press(forDuration: 0.1, thenDragTo: springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.7)))
+        sleep(3)
+        let lock = XCTAttachment(screenshot: springboard.screenshot()); lock.name = "lock-screen"; lock.lifetime = .keepAlways; add(lock)
+    }
+}
