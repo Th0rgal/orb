@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,6 +46,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
@@ -483,6 +485,9 @@ fun OrbConversationPage(
         mutableStateOf(if (missionId != null) OrbReadCache.loadRows(eventsCacheKey) else emptyList())
     }
     var streamingText by remember(missionId) { mutableStateOf("") }
+    // False until the first history fetch for this mission settles, so an existing
+    // conversation shows a loading row instead of the "Start a conversation" empty state.
+    var historySettled by remember(missionId) { mutableStateOf(missionId == null) }
     var dismissedQuestionId by remember(missionId) { mutableStateOf<String?>(null) }
 
     var inputText by remember { mutableStateOf("") }
@@ -567,6 +572,7 @@ fun OrbConversationPage(
     }
 
     suspend fun loadHistory(targetId: String) {
+        var anyFetchOk = false
         try {
             val idsToLoad = if (chainIds.size > 1) chainIds.takeLast(3) else listOf(targetId)
             val allMsgs = mutableListOf<OrbRow>()
@@ -589,6 +595,7 @@ fun OrbConversationPage(
                             runCatching { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
                         }
                         val detail = detailDef.await()
+                        if (detail != null) anyFetchOk = true
                         val histRows = if (detail != null) {
                             OrbRow(cid, detail).rows("history")
                         } else {
@@ -633,6 +640,14 @@ fun OrbConversationPage(
             }
             liveRow?.let { OrbMissionUnreadStore.markSeen(it) }
         } catch (_: Throwable) {
+        }
+        // Surface a failed first load instead of a silent empty screen; later polls
+        // keep failing quietly while cached turns are on screen.
+        if (!historySettled) {
+            historySettled = true
+            if (!anyFetchOk && messages.isEmpty() && events.isEmpty()) {
+                errorMessage = "Couldn't load this conversation."
+            }
         }
     }
 
@@ -880,6 +895,8 @@ fun OrbConversationPage(
         if (allTurns.size > visibleTurnLimit) allTurns.takeLast(visibleTurnLimit) else allTurns
     }
 
+    val changedFiles = remember(allTurns) { OrbTurnRecap.changedFiles(allTurns) }
+
     val todos = remember(events, liveRow) {
         OrbTimelineBuilder.extractTodos(events, liveRow)
     }
@@ -1094,11 +1111,12 @@ fun OrbConversationPage(
             if (nearBottom) {
                 scrollToAbsoluteBottom()
                 if (!hasAnchoredInitial) {
-                    hasAnchoredInitial = true
+                    // Settle tall rows (markdown, images) for a couple of frames before revealing.
                     withFrameNanos { }
                     scrollToAbsoluteBottom()
-                    delay(90)
+                    withFrameNanos { }
                     scrollToAbsoluteBottom()
+                    hasAnchoredInitial = true
                     delay(220)
                     scrollToAbsoluteBottom()
                 }
@@ -1251,7 +1269,10 @@ fun OrbConversationPage(
             state = listState,
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                // Keep the list invisible until it has been anchored at the bottom, so
+                // opening a conversation lands there without showing the top first.
+                .graphicsLayer { alpha = if (hasAnchoredInitial || turns.isEmpty()) 1f else 0f },
             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -1274,7 +1295,21 @@ fun OrbConversationPage(
                 }
             }
 
-            if (turns.isEmpty() && !isLive) {
+            if (OrbConversationLoadState.showLoading(turns.isEmpty(), historySettled, errorMessage != null)) {
+                item(key = "loading_conv") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 72.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OrbRunningDots(color = OrbStyle.icon, dotSize = 3.dp, spacing = 3.dp)
+                        Spacer(Modifier.size(10.dp))
+                        Text("Loading conversation…", color = OrbStyle.textSecondary, fontSize = 13.sp)
+                    }
+                }
+            } else if (turns.isEmpty() && !isLive && historySettled) {
                 item(key = "empty_conv") {
                     Column(
                         modifier = Modifier
@@ -1350,6 +1385,19 @@ fun OrbConversationPage(
                     is OrbTurn.Wake -> {
                         OrbBackgroundWakeRow(turn = turn)
                     }
+                }
+            }
+
+            if (!isLive && changedFiles.isNotEmpty()) {
+                item(key = "turn_changes") {
+                    OrbTurnChangesCard(
+                        files = changedFiles,
+                        prUrl = prUrl,
+                        onPreviewFile = { previewFilePath = it },
+                        onOpenPr = { url ->
+                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                        }
+                    )
                 }
             }
 
@@ -2533,9 +2581,8 @@ fun OrbWorkFoldView(
 @Composable
 private fun OrbMissionTasksCard(todos: List<OrbTodoEntry>) {
     var expanded by remember { mutableStateOf(false) }
-    val completedCount = remember(todos) {
-        todos.count { it.status in setOf("completed", "done", "succeeded") }
-    }
+    val completedCount = remember(todos) { OrbTurnRecap.completedCount(todos) }
+    val currentTask = remember(todos) { OrbTurnRecap.currentTask(todos) }
 
     Column(
         modifier = Modifier
@@ -2562,6 +2609,15 @@ private fun OrbMissionTasksCard(todos: List<OrbTodoEntry>) {
                 color = Color.White,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false
+            )
+            Text(
+                text = if (!expanded && currentTask != null) currentTask.content else "",
+                color = OrbStyle.textSecondary,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
             Icon(
@@ -2575,20 +2631,25 @@ private fun OrbMissionTasksCard(todos: List<OrbTodoEntry>) {
         if (expanded) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 todos.forEach { todo ->
-                    val done = todo.status in setOf("completed", "done", "succeeded")
+                    val done = OrbTurnRecap.isDone(todo.status)
+                    val active = OrbTurnRecap.isActive(todo.status)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(
-                            imageVector = if (done) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                            imageVector = when {
+                                done -> Icons.Default.CheckCircle
+                                active -> Icons.Default.Autorenew
+                                else -> Icons.Default.RadioButtonUnchecked
+                            },
                             contentDescription = null,
-                            tint = if (done) OrbStyle.success else OrbStyle.textMuted,
+                            tint = if (done) OrbStyle.success else if (active) Color.White else OrbStyle.textMuted,
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
                             text = todo.content,
-                            color = if (done) OrbStyle.textMuted else OrbStyle.textSecondary,
+                            color = if (done) OrbStyle.textMuted else if (active) Color.White else OrbStyle.textSecondary,
                             fontSize = 12.sp
                         )
                     }
@@ -2901,6 +2962,106 @@ fun OrbAgentPickerSheet(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+/** Pure rule for the conversation's first-load row; unit-tested. */
+object OrbConversationLoadState {
+    fun showLoading(turnsEmpty: Boolean, historySettled: Boolean, hasError: Boolean): Boolean =
+        turnsEmpty && !historySettled && !hasError
+}
+
+/** End-of-turn recap rules (tasks progress, Changes), matching desktop Orb; unit-tested. */
+object OrbTurnRecap {
+    private val doneStatuses = setOf("completed", "done", "succeeded")
+    private val activeStatuses = setOf("in_progress", "running", "active")
+
+    fun isDone(status: String) = status.lowercase() in doneStatuses
+    fun isActive(status: String) = status.lowercase() in activeStatuses
+    fun completedCount(todos: List<OrbTodoEntry>) = todos.count { isDone(it.status) }
+
+    /** The task in progress, else the first one not done yet. */
+    fun currentTask(todos: List<OrbTodoEntry>): OrbTodoEntry? =
+        todos.firstOrNull { isActive(it.status) } ?: todos.firstOrNull { !isDone(it.status) }
+
+    /** Files edited since the last user message, in first-edit order. */
+    fun changedFiles(turns: List<OrbTurn>): List<String> {
+        val lastUser = turns.indexOfLast { it is OrbTurn.User }
+        return turns.drop(lastUser + 1)
+            .filterIsInstance<OrbTurn.WorkFold>()
+            .flatMap { it.steps }
+            .filter { it.kind == OrbWorkStep.Kind.Edit }
+            .mapNotNull { it.filePath?.takeIf { p -> p.isNotBlank() } }
+            .distinct()
+    }
+}
+
+@Composable
+private fun OrbTurnChangesCard(
+    files: List<String>,
+    prUrl: String?,
+    onPreviewFile: (String) -> Unit,
+    onOpenPr: (String) -> Unit
+) {
+    var expanded by remember(files) { mutableStateOf(files.size <= 3) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(OrbStyle.surface)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().orbPressClickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(Icons.Default.Edit, contentDescription = null, tint = OrbStyle.icon, modifier = Modifier.size(14.dp))
+            Text(
+                text = "Changes · ${files.size} ${if (files.size == 1) "file" else "files"}",
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            if (!prUrl.isNullOrEmpty()) {
+                Text(
+                    text = "Open PR",
+                    color = OrbStyle.success,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.orbPressClickable { onOpenPr(prUrl) }
+                )
+            }
+            Icon(
+                imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = null,
+                tint = OrbStyle.textMuted,
+                modifier = Modifier.size(15.dp)
+            )
+        }
+        if (expanded) {
+            files.forEach { path ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().orbPressClickable { onPreviewFile(path) },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = path.substringAfterLast('/'),
+                        color = OrbStyle.textSecondary,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(Icons.Default.ChevronRight, contentDescription = null, tint = OrbStyle.textMuted, modifier = Modifier.size(12.dp))
+                }
+            }
         }
     }
 }
