@@ -5,12 +5,12 @@ mod agent_software;
 mod antigravity;
 #[path = "../../../shared/codex_speed.rs"]
 pub mod codex_speed;
-#[path = "../../../shared/harness_attribution.rs"]
-mod harness_attribution;
 #[path = "../../../shared/cyber_access.rs"]
 pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
+#[path = "../../../shared/harness_attribution.rs"]
+mod harness_attribution;
 #[path = "../../../shared/vibe.rs"]
 mod vibe;
 
@@ -135,8 +135,8 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-mod bindings;
 mod approval_key;
+mod bindings;
 mod biometrics;
 mod client_link;
 mod diagnostics;
@@ -204,6 +204,7 @@ fn main() {
             approval_key::approval_key_create,
             approval_key::approval_sign,
             approval_key::approval_grace_until,
+            approval_key::set_approval_grace,
             biometrics::biometric_status,
             biometrics::biometric_authenticate,
             bindings::local_binding_set,

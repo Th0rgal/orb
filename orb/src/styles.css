@@ -3438,7 +3438,7 @@ select.orb-select-native:disabled { cursor: default; }
 .secret-row-reason { color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast.secret .secret-row-ok { width: 26px; padding: 0; }
 .secret-bar { display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px; border-top: 1px solid var(--overlay-border); background: var(--bg-active); }
-.secret-bar .toast-link { margin: 0; flex: none; align-self: center; line-height: 24px; }
+.secret-bar .toast-link { margin: 0; flex: none; align-self: center; display: inline-flex; align-items: center; height: 24px; line-height: 1; text-underline-offset: 3px; }
 .secret-bar .toast-btn { min-height: 24px; }
 .secret-bar .toast-btn:not(.primary) { background: var(--overlay-surface); border: 1px solid var(--overlay-border); }
 .secret-bar .toast-btn.primary { gap: 6px; }
@@ -3594,3 +3594,14 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-subhead { font-size: 12px; font-weight: 500; color: var(--fg-3); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
 .p-acc > .s-row-text { flex: 1 1 auto; min-width: 160px; }
 .p-acc > .p-usage.compact { flex: 0 1 auto; }
+
+/* Secrets page: pending requests in the notification card's shape. */
+.bw-requests { display: block; border: 1px solid var(--overlay-border); border-radius: 10px; overflow: hidden; background: var(--overlay-surface); margin-bottom: 10px; }
+.bw-requests .secret-row.bw-request-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; }
+.bw-request-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12px; }
+.bw-request-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.bw-request-line .bw-request-meta { min-width: 0; margin-left: auto; color: var(--fg-3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bw-request-row .s-btn { min-height: 26px; padding: 0 10px; font-size: 12px; }
+.bw-request-ok { display: inline-flex; align-items: center; gap: 6px; }
+.bw-requests .secret-bar { padding: 6px 10px 6px 14px; }
+.bw-grace-setting { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-3); font-size: 11px; white-space: nowrap; }

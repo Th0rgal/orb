@@ -124,6 +124,7 @@ export async function signedApi<T>(method: string, path: string, body: unknown, 
     });
     let signature: string;
     try {
+      await call("set_approval_grace", { secs: approvalGraceSecs() }).catch(() => undefined);
       signature = (await call("approval_sign", { payload: challenge.payload, reason: summary })) as string;
     } catch (e) {
       void refreshGrace(call);
@@ -143,8 +144,31 @@ export async function signedApi<T>(method: string, path: string, body: unknown, 
   }
 }
 
+const GRACE_KEY = "orb.approvalGraceSecs";
+function storedGrace(): number {
+  try {
+    const v = Number(localStorage.getItem(GRACE_KEY));
+    return localStorage.getItem(GRACE_KEY) !== null && Number.isFinite(v) ? v : 300;
+  } catch {
+    return 300;
+  }
+}
+const [approvalGraceSecs, setGraceSecs] = createSignal(storedGrace());
+/** How long one Touch ID covers further secret-request decisions (0: always ask). */
+export { approvalGraceSecs };
+export function setApprovalGraceSecs(secs: number) {
+  setGraceSecs(secs);
+  try {
+    localStorage.setItem(GRACE_KEY, String(secs));
+  } catch {
+    /* per-device convenience only */
+  }
+  const call = invoke();
+  if (call) void call("set_approval_grace", { secs }).then(() => refreshGrace(call)).catch(() => undefined);
+}
+
 const [graceUntilSecs, setGraceUntil] = createSignal(0);
-/** Unix seconds until which single-secret approvals skip Touch ID (0: none). */
+/** Unix seconds until which secret-request decisions skip Touch ID (0: none). */
 export const graceUntil = graceUntilSecs;
 async function refreshGrace(call: Invoke) {
   try {

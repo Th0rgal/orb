@@ -139,15 +139,15 @@ function SecretRequestsCard() {
   </div>;
 }
 
-function EyeIcon() {
+export function EyeIcon() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle cx="8" cy="8" r="2" /></svg>;
 }
 
-function PencilIcon() {
+export function PencilIcon() {
   return <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z" /></svg>;
 }
 
-function FingerprintIcon(p: { size?: number }) {
+export function FingerprintIcon(p: { size?: number }) {
   const size = p.size ?? 16;
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
     <path d="M6.8 5.2A8 8 0 0 1 20 11.5c0 1.5-.1 3-.4 4.4" />

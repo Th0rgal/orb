@@ -13,8 +13,8 @@
 //
 // `serve` keeps a Touch ID-authenticated context for GRACE seconds, so
 // approvals in quick succession need one fingerprint. Only low-risk payloads
-// use or start that grace: allowing one secret for a mission, or declining a
-// request. Wider grants, writes and every other action always ask Touch ID.
+// use or start that grace: any decision on a mission's secret request
+// (--grace seconds, default 300, 0 disables). Every other action asks Touch ID.
 // The context is invalidated when the grace ends; the key never leaves the
 // enclave.
 import CryptoKit
@@ -64,13 +64,9 @@ func graceEligible(_ payload: Data) -> Bool {
     let parts = route[1].split(separator: "/")
     guard parts.count == 5, parts[0] == "api", parts[1] == "bitwarden", parts[2] == "requests",
           UUID(uuidString: String(parts[3])) != nil else { return false }
-    let summary = String(lines[lines.count - 1])
-    switch parts[4] {
-    case "reject": return summary.hasPrefix("Decline: ")
-    case "approve":
-        return summary.hasPrefix("Allow ") && summary.range(of: #"; grant: this secret only for \d+ h$"#, options: .regularExpression) != nil
-    default: return false
-    }
+    // Any decision on a mission's secret request: allowing it (one secret, a
+    // project, a write) or declining it. Nothing else reuses the grace.
+    return parts[4] == "approve" || parts[4] == "reject"
 }
 
 /// Sign one Paloma approval payload. A held, already-authenticated context
@@ -129,7 +125,7 @@ case "sign":
     case .failure(let error): fail(error.message, code: error.code)
     }
 case "serve":
-    let grace: TimeInterval = 300
+    let grace = TimeInterval(min(max(Int(option("--grace") ?? "") ?? 300, 0), 3600))
     var held: (context: LAContext, at: Date)?
     while let line = readLine() {
         if let current = held, Date().timeIntervalSince(current.at) > grace {
@@ -142,7 +138,7 @@ case "serve":
         let eligible = graceEligible(payload)
         switch sign(payload, context: eligible ? held?.context : nil) {
         case .success(let (signature, context)):
-            if eligible && held == nil { held = (context, Date()) }
+            if eligible && held == nil && grace > 0 { held = (context, Date()) }
             else if !eligible { context.invalidate() }
             var reply = ["signature": signature]
             // Lets Orb show how long approvals stay fingerprint-free.

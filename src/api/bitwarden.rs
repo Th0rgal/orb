@@ -283,18 +283,33 @@ fn bws_command(
     cmd
 }
 
+fn is_rate_limited(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr);
+    text.contains("429") || text.contains("Too Many Requests") || text.contains("Slow down")
+}
+
 async fn run_bws(
     token: &str,
     server_url: Option<&str>,
     args: &[&str],
     positionals: &[&str],
 ) -> Result<String, (StatusCode, String)> {
-    let output = bws_command(token, server_url, args, positionals).output().await.map_err(|e| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Failed to execute `bws` CLI: {e}. Ensure Bitwarden Secrets CLI (`bws`) is installed on the backend host."),
-        )
-    })?;
+    // Bitwarden answers bursts (e.g. "Approve all") with 429 "Slow down"; a
+    // rate-limited call was not applied, so retrying it is safe.
+    let mut attempt = 0u32;
+    let output = loop {
+        let output = bws_command(token, server_url, args, positionals).output().await.map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Failed to execute `bws` CLI: {e}. Ensure Bitwarden Secrets CLI (`bws`) is installed on the backend host."),
+            )
+        })?;
+        if output.status.success() || attempt >= 4 || !is_rate_limited(&output.stderr) {
+            break output;
+        }
+        attempt += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(1000 << (attempt - 1))).await;
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
