@@ -1315,7 +1315,7 @@ export function LiveProjectsSection(p: {
     );
     if (cutId()) items.push(
       { kind: "sep" },
-      { kind: "item", label: pendingMoves().length > 1 ? `Move ${pendingMoves().length} agents here` : "Move here", icon: Ic.PasteIcon, onClick: () => pasteMission(slug, path, true) },
+      { kind: "item", label: pendingMoves().length > 1 ? `Move ${pendingMoves().length} agents here` : "Move here", icon: Ic.PasteIcon, onClick: () => pasteMission(slug, path) },
     );
     if (path) items.push(
       { kind: "sep" },
@@ -1670,7 +1670,8 @@ export function LiveProjectsSection(p: {
       cutClipboard = text; setCutId(id); setActionError(null);
     }).catch(e => setActionError(String(e)));
   };
-  const pasteMission = (slug: string, path: string, fromMenu = false) => {
+  /** `clipboardText` is what Cmd+V already read; without it the in-app cut is used. */
+  const pasteMission = (slug: string, path: string, clipboardText?: string) => {
     if (moving) return;
     if (pendingMoves().length) {
       moving = true;
@@ -1695,9 +1696,10 @@ export function LiveProjectsSection(p: {
     moving = true;
     const version = connectionVersion();
     void (async () => {
-      const clipboard = fromMenu ? cutClipboard : await navigator.clipboard.readText();
-      if (clipboard === consumedCut) return;
-      const missionId = readCutMission(clipboard, getApiUrl());
+      // A second clipboard read in the same gesture is refused by WebKit (NotAllowedError).
+      let clipboard = clipboardText ?? cutClipboard;
+      let missionId = clipboard === consumedCut ? null : readCutMission(clipboard, getApiUrl());
+      if (!missionId && cutClipboard && clipboard !== cutClipboard) { clipboard = cutClipboard; missionId = readCutMission(clipboard, getApiUrl()); }
       if (!missionId || version !== connectionVersion()) return;
       await moveMission(missionId, slug, path);
       if (version !== connectionVersion()) return;
@@ -1744,7 +1746,7 @@ export function LiveProjectsSection(p: {
     } else if (key === "v" && (row.kind === "project" || row.kind === "folder")) {
       event.preventDefault(); event.stopPropagation();
       const destSlug = row.slug, destPath = row.path ?? "";
-      if (pendingMoves().length > 1) { pasteMission(destSlug, destPath, true); return; }
+      if (pendingMoves().length > 1) { pasteMission(destSlug, destPath); return; }
       const version = connectionVersion();
       void navigator.clipboard.readText().then(text => {
         if (version !== connectionVersion()) return;
@@ -1752,8 +1754,14 @@ export function LiveProjectsSection(p: {
         else if (readFileReference(text)) void pasteFile(destSlug, destPath, text);
         else if (readCronReference(text)) void pasteCron(destSlug, destPath, text);
         else if (cutCron()) void pasteCron(destSlug, destPath);
-        else pasteMission(destSlug, destPath);
-      }).catch(e => setActionError(String(e)));
+        else pasteMission(destSlug, destPath, text);
+      }, () => {
+        // Clipboard read refused (no permission or gesture): fall back to in-app cuts.
+        if (version !== connectionVersion()) return;
+        if (cutCron()) void pasteCron(destSlug, destPath);
+        else if (cutClipboard) pasteMission(destSlug, destPath);
+        else setActionError("Clipboard access was refused. Use Move here from the menu.");
+      });
     }
   };
   const missionFolder = (mission: Mission) => mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice("orb-folder:".length) ?? "";
