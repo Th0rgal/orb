@@ -3786,8 +3786,10 @@ select.orb-select-native:disabled { cursor: default; }
 .skills-aud.aud-project { color: var(--fg-2); }
 
 /* Shared tab row for the right-hand panel (side question / files). */
-.panel-switch { display: flex; gap: 2px; padding: 8px 12px 0; margin-top: var(--tb-h, 0px); }
-.file-panel > .panel-switch { margin-top: 0; }
+.panel-switch { display: flex; align-items: center; gap: 2px; flex: none; }
+/* In the side question pane it sits in the title-bar strip, so it takes no vertical space. */
+.btw-sidebar > .panel-switch { position: absolute; top: 0; left: 12px; height: var(--tb-h, 35px); z-index: 3; }
+.file-header > .panel-switch { margin-right: 6px; }
 .panel-switch button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; color: var(--fg-3); }
 .panel-switch button:hover { color: var(--fg); background: var(--hover-1); }
 .panel-switch button.on { color: var(--fg); background: var(--hover-2, var(--hover-1)); font-weight: 500; }

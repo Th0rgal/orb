@@ -179,7 +179,11 @@ async function refreshNodeAntigravityModels(machine: string) {
   try {
     const models = await listNodeAntigravityModels(machine);
     if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:models}));
-  } catch { if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:[]})); }
+  } catch {
+    // A slow or failed lookup must not hide Antigravity on this machine for the whole
+    // session: keep whatever was known and retry shortly instead of caching [].
+    if (version === connectionVersion()) setTimeout(() => void refreshNodeAntigravityModels(machine), 15_000);
+  }
   finally { nodeModelRequests.delete(key); }
 }
 const harnessChoices = (machine = "core"): HarnessChoice[] => {
@@ -2013,8 +2017,7 @@ export default function App() {
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000);
     // Learn this Mac's approval device id so notifications sign approvals too.
     if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(() => {});
-    const stopSecretRequests = pollWhileVisible(
-      () =>
+    const loadSecretRequests = () =>
         isConnected()
           ? getSecretBroker()
               .then((b) => {
@@ -2023,9 +2026,14 @@ export default function App() {
                 syncSecretRequestNotices(pending, () => open("bitwarden-settings"));
               })
               .catch(() => {})
-          : undefined,
-      10000,
-    );
+          : undefined;
+    const stopSecretRequests = pollWhileVisible(loadSecretRequests, 10000);
+    // Answering from a notification or the Secrets page updates the badge at once, then confirms.
+    const onSecretAnswered = () => { setSecretRequests((n) => Math.max(0, n - 1)); void loadSecretRequests(); };
+    const onFocus = () => void loadSecretRequests();
+    window.addEventListener("orb:secret-request-answered", onSecretAnswered);
+    window.addEventListener("focus", onFocus);
+    onCleanup(() => { window.removeEventListener("orb:secret-request-answered", onSecretAnswered); window.removeEventListener("focus", onFocus); });
     onCleanup(() => {
       stopMissions();
       stopFleet();
@@ -2938,7 +2946,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     landedFor = p.id;
     const el = scroller;
     el.classList.add("landing");
-    const land = () => el.scrollTo({ top: el.scrollHeight });
+    const land = () => { if (nearBottom) el.scrollTo({ top: el.scrollHeight }); };
+    // Stop following the moment the reader (or a test) scrolls away during the landing frames.
     land();
     // rAF can be throttled (background window, headless WebKit): never leave the thread hidden.
     let shown = false;

@@ -201,26 +201,30 @@ export const listAllBitwardenSecrets = () =>
 export const getSecretBroker = () =>
   api<SecretBrokerSnapshot>("/api/bitwarden/broker");
 
+/** Tell the app a request was answered, so badges update now (the poll pauses in the background). */
+const answered = <T,>(id: string, result: Promise<T>) =>
+  result.then((value) => { window.dispatchEvent(new CustomEvent("orb:secret-request-answered", { detail: { id } })); return value; });
+
 export const approveSecretRequest = (
   id: string,
   scope?: "secret" | "project" | "all",
   ttlHours?: number,
   summary = "approve a mission's secret request",
 ) =>
-  signedApi<SecretAccessRequest>(
+  answered(id, signedApi<SecretAccessRequest>(
     "POST",
     `/api/bitwarden/requests/${encodeURIComponent(id)}/approve`,
     { scope, ttl_hours: ttlHours },
     summary,
-  );
+  ));
 
 export const rejectSecretRequest = (id: string) =>
-  signedApi<SecretAccessRequest>(
+  answered(id, signedApi<SecretAccessRequest>(
     "POST",
     `/api/bitwarden/requests/${encodeURIComponent(id)}/reject`,
     undefined,
     "decline a mission's secret request",
-  );
+  ));
 
 export const revokeSecretGrant = (id: string) =>
   api<{ success: boolean }>(`/api/bitwarden/grants/${encodeURIComponent(id)}`, {

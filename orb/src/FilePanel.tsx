@@ -874,8 +874,8 @@ export function FilePanelProvider(p: {
               aria-label="Resize file panel"
               onPointerDown={(e) => resize(e)}
             />
-            <Show when={openSide()}><PanelSwitch active="files" files side onFiles={() => undefined} onSide={() => { setFilesOpened(false); setSideVisible(true); openSide()?.(); }} /></Show>
             <div class="file-tabs file-header" data-tauri-drag-region>
+              <Show when={openSide()}><PanelSwitch active="files" files side onFiles={() => undefined} onSide={() => { setFilesOpened(false); setSideVisible(true); openSide()?.(); }} /></Show>
               <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?"Restore conversation (⌘⇧F)":"Expand file editor (⌘⇧F)"} aria-keyshortcuts="Meta+Shift+F" aria-pressed={maximized()} onClick={()=>setMaximized(v=>!v)}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d={maximized()?"M4 9h5V4m6 0v5h5M4 15h5v5m6 0v-5h5":"M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"}/></svg>
               </button>

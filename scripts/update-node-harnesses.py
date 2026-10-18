@@ -206,9 +206,30 @@ def prune_versions(root, current):
             print(f"Removed inactive harness version {version.name}")
 
 
+AGY = Path('/usr/local/bin/agy')
+
+
+def update_agy():
+    """Antigravity ships its own verified self-updater; nodes fell behind (1.2.16 lacked
+    Gemini 4 Argon) because it was copied once and never reconciled."""
+    if not AGY.exists():
+        return {'skipped': 'not installed'}
+    version = lambda: subprocess.run([str(AGY), '--version'], capture_output=True, text=True, timeout=30).stdout.strip().splitlines()[:1]
+    before = version()
+    shutil.copy2(AGY, AGY.with_name('agy.previous'))
+    out = subprocess.run([str(AGY), 'update'], capture_output=True, text=True, timeout=600, env={**os.environ, 'HOME': '/root'})
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout).strip()[-250:])
+    after = version()
+    if not after:
+        shutil.copy2(AGY.with_name('agy.previous'), AGY)
+        raise RuntimeError('updated agy does not report a version; restored previous binary')
+    return {'version': after[0], 'previous': before[0] if before else None, 'path': str(AGY)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--only', choices=['opencode', 'claude', 'codex', 'grok'])
+    parser.add_argument('--only', choices=['opencode', 'claude', 'codex', 'grok', 'agy'])
     parser.add_argument('--probe-user', default='sandboxed-node')
     parser.add_argument('--version', type=stable, help='Exact stable version; requires --only')
     args = parser.parse_args()
@@ -222,8 +243,12 @@ def main():
     with (ROOT / '.harness-update.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         results = {}
-        for name in ([args.only] if args.only else ['opencode', 'claude', 'codex', 'grok']):
+        for name in ([args.only] if args.only else ['opencode', 'claude', 'codex', 'grok', 'agy']):
             try:
+                if name == 'agy':
+                    results[name] = {'ok': True, **update_agy()}
+                    print(json.dumps({name: results[name]}), flush=True)
+                    continue
                 version = args.version or resolve(name, pins)
                 results[name] = {'ok': True, **reconcile(name, version, args.probe_user)}
             except Exception as error:
