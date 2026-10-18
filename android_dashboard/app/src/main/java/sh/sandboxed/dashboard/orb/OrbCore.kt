@@ -903,7 +903,9 @@ class OrbCore private constructor(context: Context) {
         _lastErrorLog.value = null
     }
 
-    private fun seedMissionAndProjectCaches(missionsList: List<OrbRow>) {
+    /** [fresh] = rows just fetched from Core: they replace whatever a project screen cached,
+     * otherwise a week-old disk cache kept showing finished missions as "Working". */
+    private fun seedMissionAndProjectCaches(missionsList: List<OrbRow>, fresh: Boolean = false) {
         val byProject = mutableMapOf<String, MutableList<OrbRow>>()
         for (m in missionsList) {
             val tags = OrbJSON.strList(m.raw, "tags")
@@ -919,7 +921,7 @@ class OrbCore private constructor(context: Context) {
             }
         }
         for ((proj, rows) in byProject) {
-            if (!OrbReadCache.hasRowsInMemory("project_missions_$proj")) {
+            if (fresh || !OrbReadCache.hasRowsInMemory("project_missions_$proj")) {
                 OrbReadCache.saveRowsMemoryOnly("project_missions_$proj", rows)
             }
         }
@@ -987,7 +989,7 @@ class OrbCore private constructor(context: Context) {
                 _projects.value = p
                 _hasLoadedSuccessfully.value = true
                 withContext(Dispatchers.IO) {
-                    seedMissionAndProjectCaches(m)
+                    seedMissionAndProjectCaches(m, fresh = true)
                     OrbDisk.write("missions", m.map { it.raw })
                     OrbDisk.write("projects", p.map { it.raw })
                 }
@@ -1024,7 +1026,7 @@ class OrbCore private constructor(context: Context) {
                 _missions.value = m
                 anyCoreSuccess = true
                 launch(Dispatchers.IO) {
-                    seedMissionAndProjectCaches(m)
+                    seedMissionAndProjectCaches(m, fresh = true)
                     OrbDisk.write("missions", m.map { it.raw })
                     for (row in m.take(5)) {
                         val evKey = "mission_events_${row.id}"
