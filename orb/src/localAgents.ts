@@ -652,6 +652,10 @@ export interface HarnessSkillTarget {
   synced_count: number;
   canonical_total: number;
   missing_skills: string[];
+  /** Desired skills installed with different content. */
+  outdated_skills?: string[];
+  /** Orb-managed entries no longer desired; a pruning sync removes them. */
+  stale_managed?: string[];
 }
 
 export interface SkillSourceInfo {
@@ -660,6 +664,28 @@ export interface SkillSourceInfo {
   path: string;
   exists: boolean;
   skill_count: number;
+  /** Legacy folders are reported but never synced; import their skills to the Library. */
+  legacy?: boolean;
+}
+
+export interface SkillSourceRef {
+  id: string;
+  label: string;
+  path?: string | null;
+  legacy: boolean;
+  hash: string;
+  lines: number;
+  content?: string | null;
+  /** Importable reference files (allowlisted; paths and sizes only). */
+  files?: Array<{ rel: string; size: number }>;
+}
+
+/** Read selected allowlisted reference files of a legacy skill, for an explicit import. */
+export async function readLegacySkillFiles(sourceId: string, name: string, rels: string[]): Promise<Array<{ rel: string; content: string }>> {
+  if (!rels.length) return [];
+  const invoke = tauriInvoke();
+  if (!invoke) throw new Error("Importing legacy skill files requires the Orb desktop app.");
+  return (await invoke("local_skill_source_files", { sourceId, name, rels })) as Array<{ rel: string; content: string }>;
 }
 
 export interface DiscoveredSkill {
@@ -670,6 +696,15 @@ export interface DiscoveredSkill {
   harnesses: string[];
   managed: boolean;
   content_preview?: string | null;
+  sources?: SkillSourceRef[];
+  divergent?: boolean;
+  desired?: boolean;
+  in_library?: boolean;
+  legacy_only?: boolean;
+  audience?: string[];
+  scope?: string | null;
+  stale_harnesses?: string[];
+  lines?: number;
 }
 
 export interface LocalSkillsReport {
@@ -679,25 +714,30 @@ export interface LocalSkillsReport {
   sources: SkillSourceInfo[];
   harnesses: HarnessSkillTarget[];
   skills: DiscoveredSkill[];
+  library_known?: boolean;
 }
 
 export interface SyncSkillPayload {
   name: string;
   content: string;
   files?: Array<{ rel: string; content: string }>;
+  audience?: string[] | null;
+  scope?: string | null;
 }
 
 export interface SyncSkillsResult {
   synced_skills: number;
   harnesses_updated: number;
   skipped_unmanaged: string[];
+  pruned?: string[];
   report: LocalSkillsReport;
 }
 
-export async function localSkillsStatus(): Promise<LocalSkillsReport | null> {
+/** Inspect local harnesses against the given Library snapshot (canonical source). */
+export async function localSkillsStatus(librarySkills?: SyncSkillPayload[]): Promise<LocalSkillsReport | null> {
   const invoke = tauriInvoke();
   if (!invoke) return null;
-  return (await invoke("local_skills_status")) as LocalSkillsReport;
+  return (await invoke("local_skills_status", { request: { library_skills: librarySkills ?? [] } })) as LocalSkillsReport;
 }
 
 export async function localSkillsSync(options: { librarySkills?: SyncSkillPayload[]; pruneRemoved?: boolean } = {}): Promise<SyncSkillsResult> {

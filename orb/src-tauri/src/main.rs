@@ -255,6 +255,7 @@ fn main() {
             software::software_cancel,
             skills::local_skills_status,
             skills::local_skills_sync,
+            skills::local_skill_source_files,
             local_agents::local_agents_cyber_capabilities,
             local_agents::local_codex_speed_options,
             local_agents::local_agents_scan,

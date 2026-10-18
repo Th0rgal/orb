@@ -18,16 +18,40 @@ test("skills settings displays harness matrix, resolves drift with one click, an
   await expect(agyRow).toContainText("Missing 5 canonical skills in ~/.agents/skills");
   await expect(agyRow.locator(".skills-mini-chip").first()).toBeVisible();
 
-  // Expand a skill in the catalog to preview SKILL.md
+  // Unified catalog: badges for audience, scope, sources and problems.
   const catalogSection = page.getByRole("region", { name: "Global and Library skills catalog" });
   const policyItem = catalogSection.locator('[data-skill="controllers-policy"]');
-  await policyItem.getByRole("button").first().click();
-  await expect(policyItem.locator(".skills-md-preview")).toContainText("STATE_SIGNATURE");
+  await expect(policyItem).toContainText("coordinator");
+  await expect(policyItem).toContainText("global");
+  await expect(policyItem).toContainText("Divergent");
+  await expect(catalogSection.locator('[data-skill="spark-lean-offload"]')).toContainText("Only in legacy folder");
 
-  // Verify project skills section
-  const projectSection = page.getByRole("region", { name: "Project skills" });
-  await expect(projectSection).toContainText("Erdos 647 Formalization");
-  await expect(projectSection).toContainText("aristotle-lean");
+  // Delivery preview with project selection and reasons.
+  const delivery = page.getByRole("region", { name: "Skill delivery preview" });
+  await delivery.getByLabel("Preview project").selectOption("erdos-647");
+  await expect(delivery).toContainText("Resolved delivery (4)");
+  await expect(delivery).toContainText("Missing from the Library: lean-blueprint");
+  await delivery.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/skills-delivery-dark.png" });
+
+  // Detail panel: editor, audience controls, copies with diff.
+  await policyItem.getByRole("button").first().click();
+  const dialog = page.getByRole("dialog");
+  // Divergent skills open on their copies; the editor is one tab away.
+  await dialog.getByRole("tab", { name: "SKILL.md" }).click();
+  await expect(dialog.locator(".skills-editor")).toContainText("STATE_SIGNATURE");
+  await expect(dialog.getByLabel("Scope")).toHaveValue("global");
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: "test-results/skills-detail-dark.png" });
+  await dialog.getByRole("tab", { name: /Copies/ }).click();
+  await dialog.getByRole("button", { name: "Compare" }).click();
+  await expect(dialog.locator(".skills-diff")).toBeVisible();
+  await page.screenshot({ path: "test-results/skills-detail-diff-dark.png" });
+  await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
+  await expect(dialog).toHaveCount(0);
+
+  // Verify project skills appear as project-sourced rows.
+  await expect(catalogSection).toContainText("aristotle-lean");
 
   await page.evaluate(() => {
     document.querySelector(".s-body")?.scrollTo(0, 0);
@@ -48,7 +72,7 @@ test("skills settings displays harness matrix, resolves drift with one click, an
   const syncBtn = page.getByRole("button", { name: /Sync all harnesses \(2 drifted\)/ });
   await syncBtn.click();
   await expect(page.getByRole("status")).toContainText(
-    "Synchronized 37 skills across all 5 local harness directories",
+    "Synchronized 37 skills across all 6 local harness directories",
   );
   await expect(agyRow).toContainText("Synced · 37 skills");
 

@@ -10,6 +10,7 @@ commands.allow = [
   "software_cancel",
   "local_skills_status",
   "local_skills_sync",
+  "local_skill_source_files",
   "local_origin_launch",
   "local_origin_list",
   "local_origin_confirm",

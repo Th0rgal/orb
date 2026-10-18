@@ -6,8 +6,8 @@ import type { LocalSkillsReport } from "../src/localAgents";
 
 function sampleLocalReport(syncedAntigravity = false): LocalSkillsReport {
   const allHarnesses = syncedAntigravity
-    ? ["claudecode", "codex", "antigravity", "opencode", "grok"]
-    : ["claudecode", "codex", "grok"];
+    ? ["claudecode", "codex", "antigravity", "opencode", "grok", "vibe"]
+    : ["claudecode", "codex", "grok", "vibe"];
   return {
     checked_at: Math.floor(Date.now() / 1000),
     home_dir: "/Users/thomas",
@@ -97,6 +97,18 @@ function sampleLocalReport(syncedAntigravity = false): LocalSkillsReport {
         canonical_total: 37,
         missing_skills: [],
       },
+      {
+        id: "vibe",
+        name: "Mistral Vibe",
+        global_rel: "~/.vibe/skills",
+        global_path: "/Users/thomas/.vibe/skills",
+        project_rel: ".vibe/skills",
+        exists: true,
+        skill_count: 37,
+        synced_count: 37,
+        canonical_total: 37,
+        missing_skills: [],
+      },
     ],
     skills: [
       {
@@ -180,7 +192,7 @@ describe("SkillsSettings", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("status").textContent).toContain(
-        "Synchronized 37 skills across all 5 local harness directories",
+        "Synchronized 37 skills across all 6 local harness directories",
       );
     });
 
@@ -262,5 +274,71 @@ describe("SkillsSettings", () => {
 
     fireEvent.click(screen.getByText("aristotle-tactics"));
     expect(opened).toEqual(["pf:erdos-647:skills/aristotle-tactics/SKILL.md"]);
+  });
+  it("edits, deletes and previews delivery against the Library", async () => {
+    setConnection("https://agent-backend.thomas.md", "test-jwt");
+    const syncCalls: Array<{ library_skills: Array<{ name: string }>; prune_removed: boolean }> = [];
+    const statusCalls: unknown[] = [];
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") { statusCalls.push(args); return sampleLocalReport(true); }
+          if (cmd === "local_skills_sync") {
+            syncCalls.push(args.request);
+            return { synced_skills: 1, harnesses_updated: 6, skipped_unmanaged: [], pruned: [], report: sampleLocalReport(true) };
+          }
+          if (cmd === "local_agents_scan") return [];
+          return null;
+        },
+      },
+    };
+    let content = "---\nname: spark-lean-offload\ndescription: Offload Lean 4 builds to the DGX Spark arbiter safely.\n---\n# Spark\n";
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input), method = init?.method ?? "GET";
+      requests.push(`${method} ${url.replace("https://agent-backend.thomas.md", "")}`);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok([{ name: "spark-lean-offload", path: "skill/spark-lean-offload", audience: ["mission", "local"] }]);
+      if (url.endsWith("/api/library/skill/spark-lean-offload")) {
+        if (method === "PUT") { content = JSON.parse(String(init?.body)).content; return new Response("Skill saved successfully", { status: 200 }); }
+        if (method === "DELETE") return new Response("Skill deleted successfully", { status: 200 });
+        return ok({ name: "spark-lean-offload", path: "skill/spark-lean-offload", content, files: [], references: [] });
+      }
+      if (url.endsWith("/api/projects")) return ok({ projects: [{ slug: "erdos-647", title: "Erdos 647 Proof", status: "active", updated_at: "2026-10-08T12:00:00Z" }] });
+      if (url.includes("/api/projects/erdos-647/skills")) return new Response("", { status: 404 });
+      if (url.includes("/api/library/skill-delivery")) return ok({ skills: [{ name: "spark-lean-offload", reasons: ["base", "project"] }], missing: [] });
+      return ok({});
+    });
+
+    render(() => <SkillsSettings />);
+    await waitFor(() => expect(statusCalls.some((c: any) => c?.request?.library_skills?.length === 1)).toBe(true));
+    fireEvent.click(await screen.findByText("spark-lean-offload"));
+    const dialog = await screen.findByRole("dialog");
+    // Lint: missing metadata.sandboxed.
+    expect(dialog.textContent).toContain("No metadata.sandboxed block");
+    // Toggle coordinator audience and save.
+    fireEvent.click(screen.getByRole("checkbox", { name: "coordinator" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save & sync" }));
+    await waitFor(() => expect(syncCalls.length).toBe(1));
+    expect(content).toContain("audience: [mission, coordinator, local]");
+    expect(syncCalls[0].prune_removed).toBe(false);
+    expect(syncCalls[0].library_skills.map((s) => s.name)).toEqual(["spark-lean-offload"]);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("across all 6 local harness directories"));
+
+    // Delete through the in-app confirmation; sync prunes.
+    await waitFor(() => expect((screen.getByRole("button", { name: "Delete…" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete skill" }));
+    await waitFor(() => expect(syncCalls.length).toBe(2));
+    expect(requests).toContain("DELETE /api/library/skill/spark-lean-offload");
+    expect(syncCalls[1]).toMatchObject({ prune_removed: true, library_skills: [] });
+
+    // Delivery preview degrades when project skills are unsupported.
+    const select = screen.getByLabelText("Preview project") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "erdos-647" } });
+    await waitFor(() => {
+      expect(screen.getByText("This backend does not support project skill selection yet.")).toBeTruthy();
+      expect(screen.getByText("Resolved delivery (1)")).toBeTruthy();
+    });
   });
 });

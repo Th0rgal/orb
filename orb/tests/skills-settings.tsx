@@ -10,8 +10,8 @@ setConnection(location.origin, "fixture-jwt");
 let synced = false;
 
 function buildReport(): LocalSkillsReport {
-  const fullHarnesses = ["claudecode", "codex", "antigravity", "opencode", "grok"];
-  const preSyncHarnesses = ["claudecode", "codex", "grok"];
+  const fullHarnesses = ["claudecode", "codex", "antigravity", "opencode", "grok", "vibe"];
+  const preSyncHarnesses = ["claudecode", "codex", "grok", "vibe"];
   const activeHarnesses = synced ? fullHarnesses : preSyncHarnesses;
 
   return {
@@ -118,12 +118,32 @@ function buildReport(): LocalSkillsReport {
         canonical_total: 37,
         missing_skills: [],
       },
+      {
+        id: "vibe",
+        name: "Mistral Vibe",
+        global_rel: "~/.vibe/skills",
+        global_path: "/Users/thomas/.vibe/skills",
+        project_rel: ".vibe/skills",
+        exists: true,
+        skill_count: 37,
+        synced_count: 37,
+        canonical_total: 37,
+        missing_skills: [],
+      },
     ],
     skills: [
       {
         name: "controllers-policy",
         description: "Autonomous controller loop discipline, state signature trailers, and mission delegation rules.",
-        origin: "Paloma Skills",
+        origin: "Library",
+        in_library: true,
+        divergent: true,
+        audience: ["coordinator"],
+        sources: [
+          { id: "library", label: "Library", legacy: false, hash: "aa11", lines: 9 },
+          { id: "paloma-skills", label: "Paloma Skills", path: "~/work/paloma/skills/controllers-policy", legacy: true, hash: "bb22", lines: 7,
+            content: "---\nname: controllers-policy\ndescription: Autonomous controller loop discipline.\n---\n\n# Controllers Policy\n\nEmit a state signature.\n" },
+        ],
         source_path: "~/work/paloma/skills/controllers-policy",
         harnesses: activeHarnesses,
         managed: true,
@@ -164,6 +184,13 @@ function buildReport(): LocalSkillsReport {
         name: "spark-lean-offload",
         description: "Offload heavy Lean 4 and Mathlib builds to the 128 GB DGX Spark arbiter.",
         origin: "Agent Skills Repo",
+        legacy_only: true,
+        audience: ["mission", "local"],
+        lines: 6,
+        sources: [
+          { id: "agent-skills-repo", label: "Agent Skills Repo", path: "~/work/skills/skills/spark-lean-offload", legacy: true, hash: "cc33", lines: 6,
+            content: "---\nname: spark-lean-offload\ndescription: Offload Lean 4 builds.\n---\n\n# Spark Build Offload\n\nssh 100.77.4.93\n" },
+        ],
         source_path: "~/work/skills/skills/spark-lean-offload",
         harnesses: activeHarnesses,
         managed: true,
@@ -184,18 +211,50 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
           name: "controllers-policy",
           description: "Autonomous controller loop discipline, state signature trailers, and mission delegation rules.",
           path: "skill/controllers-policy",
+          audience: ["coordinator"],
+          scope: "global",
         },
         {
           name: "sandboxed-sh-missions",
           description: "Dispatch, monitor, and steer isolated coding missions over MCP.",
           path: "skill/sandboxed-sh-missions",
+          audience: ["mission", "coordinator", "local"],
         },
       ]),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
   }
+  if (url.includes("/api/library/skill-delivery")) {
+    return new Response(
+      JSON.stringify({
+        skills: [
+          { name: "controllers-policy", reasons: ["global"] },
+          { name: "development-identity", reasons: ["base"] },
+          { name: "sandboxed-sh-missions", reasons: ["base", "project"] },
+          { name: "aristotle-lean", reasons: ["project"] },
+        ],
+        missing: ["lean-blueprint"],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  if (/\/api\/projects\/[^/]+\/skills$/.test(url)) {
+    return new Response(JSON.stringify({ skills: ["sandboxed-sh-missions", "lean-blueprint"], missing: ["lean-blueprint"] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (url.includes("/api/library/skill/")) {
     const name = decodeURIComponent(url.split("/api/library/skill/")[1]);
+    if (name === "controllers-policy") {
+      return new Response(
+        JSON.stringify({
+          name,
+          path: `skill/${name}`,
+          content: "---\nname: controllers-policy\ndescription: Autonomous controller loop discipline, state signature trailers, and mission delegation rules.\nmetadata:\n  sandboxed:\n    audience: [coordinator]\n    scope: global\n---\n\n# Controllers Policy\n\nAlways emit [STATE_SIGNATURE: ...] at the end of a controller tick.\n",
+          files: [{ name: "checklist.md", path: "references/checklist.md", content: "# Checklist\n" }],
+          references: ["scripts/tick.sh"],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
     return new Response(
       JSON.stringify({
         name,
