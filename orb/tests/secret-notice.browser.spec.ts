@@ -1,25 +1,33 @@
 import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
-test('secret request notice: the fingerprint approves, Deny and Review are links',async({page})=>{
+test('secret requests share one card: D for one, rows for several',async({page})=>{
  await page.goto('/tests/secret-notice.html');
- const read=page.locator('.toast.secret').filter({hasText:'VERCEL_TOKEN'});
- await expect(read.locator('.toast-title strong')).toHaveText('VERCEL_TOKEN');
- await expect(read.locator('.toast-sub')).toHaveAttribute('title',/autoresearch/);
- const allow=read.getByRole('button',{name:'Allow'});
- await expect(allow.locator('svg')).toBeVisible();
- // The fingerprint button spans the notice's height on the left.
- const box=(await allow.boundingBox())!, toastBox=(await read.boundingBox())!;
- expect(box.x-toastBox.x).toBeLessThan(12);
- expect(box.height).toBeGreaterThan(toastBox.height-20);
- await expect(read.locator('.toast-link')).toHaveText(['Deny','Review in Secrets']);
- await expect(read.locator('.toast-btn')).toHaveCount(0);
- const lineHeight=await read.locator('.toast-message').evaluate(e=>parseFloat(getComputedStyle(e).lineHeight));
- expect((await read.locator('.toast-message').boundingBox())!.height).toBeLessThanOrEqual(lineHeight*2+1);
- // Writes are approvable from the notice too.
- const write=page.locator('.toast.secret').filter({hasText:'SPARK_ROUTER_API_KEY'});
- await expect(write.getByRole('button',{name:'Store'})).toBeVisible();
- await read.screenshot({path:'test-results/secret-notice.png'});
- await write.screenshot({path:'test-results/secret-notice-write.png'});
+ const card=page.locator('.secret-card');
+ await expect(card.locator('.toast-title strong')).toHaveText('SPARK_ROUTER_API_KEY');
+ await expect(card.locator('.toast-sub')).toHaveText('DGX Spark');
+ await expect(card.locator('.secret-rows')).toHaveCount(0);
+ const bar=card.locator('.secret-bar');
+ await expect(bar.getByRole('button',{name:'Store'})).toBeVisible();
+ await expect(bar.getByRole('button',{name:'Deny'})).toBeVisible();
+ await expect(bar.locator('.secret-grace')).toHaveText('Touch ID required');
+ await card.screenshot({path:'test-results/secret-card-one.png'});
+
+ await page.evaluate(()=>(window as any).showMany());
+ await expect(card.locator('.toast-title')).toContainText('3 secret requests');
+ await expect(card.locator('.secret-row')).toHaveCount(3);
+ await expect(card.locator('.secret-kind[aria-label="Write"]')).toHaveCount(1);
+ await expect(card.locator('.secret-kind[aria-label="Read"]')).toHaveCount(2);
+ await expect(bar.getByRole('button',{name:'Approve all'})).toBeVisible();
+ await expect(bar.getByRole('button',{name:'Deny all'})).toBeVisible();
+ // The action bar and every row stay on one line.
+ const lineBox=(await bar.boundingBox())!;
+ expect(lineBox.height).toBeLessThan(40);
+ for(const row of await card.locator('.secret-row').all()) expect((await row.boundingBox())!.height).toBeLessThan(48);
+ await card.screenshot({path:'test-results/secret-card-many.png'});
  await page.emulateMedia({colorScheme:'dark'});
- await write.screenshot({path:'test-results/secret-notice-dark.png'});
+ await card.screenshot({path:'test-results/secret-card-many-dark.png'});
+
+ await bar.getByRole('button',{name:'Review'}).click();
+ expect(await page.evaluate(()=>(window as any).opened)).toBe(true);
+ await expect(card).toHaveCount(0);
 });

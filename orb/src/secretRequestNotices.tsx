@@ -1,74 +1,144 @@
+import { For, Show, createSignal, onCleanup } from "solid-js";
 import { approveSecretRequest, rejectSecretRequest, type SecretAccessRequest } from "./bitwardenApi";
-import { ApprovalCancelled } from "./deviceApproval";
+import { ApprovalCancelled, graceUntil } from "./deviceApproval";
+import { CloseIcon } from "./icons";
 import { dismissToast, notify } from "./toast";
 
 /**
- * Pending mission secret requests appear as the app's usual bottom
- * notifications, once each. The fingerprint is the approve button (this
- * secret, or the requested write, signed with Touch ID when the Mac is
- * enrolled); Deny and Review are links under the reason.
+ * Pending mission secret requests share one bottom card. With one request it
+ * shows the key and the reason; with several, one row each. The action bar
+ * approves (one Touch ID, then fingerprint-free for the grace shown there) or
+ * denies everything visible; rows act on their own request.
  */
-const shown = new Set<string>();
+const KEY = "secret-requests";
+const [pending, setPending] = createSignal<SecretAccessRequest[]>([]);
+/** Closed with the X, or being approved/denied right now. */
+const [hidden, setHidden] = createSignal<ReadonlySet<string>>(new Set());
+let openSecretsPage = () => {};
 
-export function syncSecretRequestNotices(pending: SecretAccessRequest[], openSecrets: () => void) {
-  const live = new Set(pending.map((r) => r.id));
-  for (const id of [...shown]) {
-    if (!live.has(id)) {
-      dismissToast(`secret-request-${id}`);
-      shown.delete(id);
-    }
-  }
-  for (const r of pending) {
-    if (shown.has(r.id)) continue;
-    shown.add(r.id);
-    const mission = r.mission_title || `Mission ${r.mission_id.slice(0, 8)}`;
-    const what =
-      r.kind === "write" ? <>Store <strong>{r.key}</strong></>
-      : r.key ? <strong>{r.key}</strong>
-      : r.all_projects ? <>Every secret project</>
-      : <>A whole secret project</>;
-    const key = `secret-request-${r.id}`;
-    notify({
-      key,
-      kind: "info",
-      variant: "secret",
-      icon: <FingerprintIcon />,
-      title: <>{what}<span class="toast-sub" title={mission}>{mission}</span></>,
-      message: r.reason || undefined,
-      glyphAction: r.kind === "write" || r.key ? {
-        label: r.kind === "write" ? "Store" : "Allow",
-        run: () => {
-          dismissToast(key);
-          // Reads grant this one secret (eligible for the Touch ID grace);
-          // writes are signed individually.
-          const approval = r.kind === "write" ? approveSecretRequest(r.id) : approveSecretRequest(r.id, "secret");
-          void approval.catch((e) => {
-            shown.delete(r.id); // still pending: show it again on the next poll
-            if (e instanceof ApprovalCancelled) return;
-            notify({ kind: "error", title: "Could not approve the request", message: e instanceof Error ? e.message : String(e) });
-          });
-        },
-      } : undefined,
-      actions: [
-        {
-          label: "Deny",
-          link: true,
-          run: () => {
-            dismissToast(key);
-            void rejectSecretRequest(r.id).catch((e) => {
-              shown.delete(r.id);
-              notify({ kind: "error", title: "Could not deny the request", message: e instanceof Error ? e.message : String(e) });
-            });
-          },
-        },
-        { label: "Review in Secrets", link: true, run: () => { dismissToast(key); openSecrets(); } },
-      ],
-    });
-  }
+const visible = () => pending().filter((r) => !hidden().has(r.id));
+const hide = (ids: string[], on: boolean) =>
+  setHidden((prev) => {
+    const next = new Set(prev);
+    for (const id of ids) on ? next.add(id) : next.delete(id);
+    return next;
+  });
+
+export function syncSecretRequestNotices(list: SecretAccessRequest[], openSecrets: () => void) {
+  openSecretsPage = openSecrets;
+  setPending(list);
+  const live = new Set(list.map((r) => r.id));
+  setHidden((prev) => new Set([...prev].filter((id) => live.has(id))));
+  if (!visible().length) return dismissToast(KEY);
+  notify({ key: KEY, kind: "info", variant: "secret", title: "", content: () => <SecretRequestsCard /> });
 }
 
-function FingerprintIcon() {
-  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+/** Reads of one named secret and writes are approvable here; whole-project reads need a scope (Secrets page). */
+const approvable = (r: SecretAccessRequest) => r.kind === "write" || !!r.key;
+
+function act(requests: SecretAccessRequest[], approve: boolean) {
+  const ids = requests.map((r) => r.id);
+  hide(ids, true);
+  if (!visible().length) dismissToast(KEY);
+  void (async () => {
+    // Sequential: the first approval asks for Touch ID and opens the grace
+    // window the others then use.
+    for (const r of requests) {
+      try {
+        if (!approve) await rejectSecretRequest(r.id);
+        else if (r.kind === "write") await approveSecretRequest(r.id);
+        else await approveSecretRequest(r.id, "secret");
+      } catch (e) {
+        hide([r.id], false); // still pending: show it again
+        syncSecretRequestNotices(pending(), openSecretsPage);
+        if (e instanceof ApprovalCancelled) return;
+        notify({
+          kind: "error",
+          title: approve ? "Could not approve the request" : "Could not deny the request",
+          message: e instanceof Error ? e.message : String(e),
+        });
+        return;
+      }
+    }
+  })();
+}
+
+function label(r: SecretAccessRequest) {
+  if (r.key) return r.key;
+  return r.all_projects ? "Every secret project" : "A whole secret project";
+}
+
+function SecretRequestsCard() {
+  const [now, setNow] = createSignal(Date.now());
+  const tick = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(tick));
+  const list = visible;
+  const one = () => list().length === 1 ? list()[0] : undefined;
+  const missions = () => [...new Set(list().map((r) => r.mission_title || `Mission ${r.mission_id.slice(0, 8)}`))];
+  const ready = () => list().filter(approvable);
+  const graceLeft = () => Math.max(0, Math.floor(graceUntil() - now() / 1000));
+  const graceText = () => {
+    const s = graceLeft();
+    return s ? `Touch ID · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} left` : "Touch ID required";
+  };
+  const close = () => { hide(list().map((r) => r.id), true); dismissToast(KEY); };
+  return <div class="secret-card">
+    <div class="secret-card-top">
+      <span class="toast-glyph" aria-hidden="true"><FingerprintIcon /></span>
+      <div class="toast-body">
+        <span class="toast-title">
+          <Show when={one()} fallback={<>{list().length} secret requests</>}>
+            {(r) => <>{r().kind === "write" ? "Store " : ""}<strong>{label(r())}</strong></>}
+          </Show>
+          <span class="toast-sub" title={missions().join(", ")}>{missions().length === 1 ? missions()[0] : `${missions().length} missions`}</span>
+        </span>
+        <Show when={one()?.reason}><span class="toast-message">{one()!.reason}</span></Show>
+      </div>
+      <button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss" onClick={close}><CloseIcon size={13} /></button>
+    </div>
+    <Show when={!one()}>
+      <div class="secret-rows">
+        <For each={list()}>{(r) =>
+          <div class="secret-row">
+            <span class="secret-kind" title={r.kind === "write" ? "Write" : "Read"} aria-label={r.kind === "write" ? "Write" : "Read"}>
+              {r.kind === "write" ? <PencilIcon /> : <EyeIcon />}
+            </span>
+            <div class="toast-body">
+              <strong class="secret-row-key">{label(r)}</strong>
+              <Show when={r.reason}><span class="secret-row-reason" title={r.reason}>{r.reason}</span></Show>
+            </div>
+            <button type="button" class="toast-btn" onClick={() => act([r], false)}>Deny</button>
+            <Show when={approvable(r)}>
+              <button type="button" class="toast-btn primary secret-row-ok" title={r.kind === "write" ? "Store" : "Allow"} aria-label={r.kind === "write" ? "Store" : "Allow"} onClick={() => act([r], true)}><FingerprintIcon size={14} /></button>
+            </Show>
+          </div>}
+        </For>
+      </div>
+    </Show>
+    <div class="secret-bar">
+      <span class="secret-grace" title="Approvals of a single secret skip the fingerprint until this runs out">{graceText()}</span>
+      <button type="button" class="toast-link" onClick={() => { close(); openSecretsPage(); }}>Review</button>
+      <button type="button" class="toast-btn" onClick={() => act(list(), false)}>{one() ? "Deny" : "Deny all"}</button>
+      <Show when={ready().length}>
+        <button type="button" class="toast-btn primary" onClick={() => act(ready(), true)}>
+          <FingerprintIcon size={14} />{one() ? (one()!.kind === "write" ? "Store" : "Allow") : "Approve all"}
+        </button>
+      </Show>
+    </div>
+  </div>;
+}
+
+function EyeIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle cx="8" cy="8" r="2" /></svg>;
+}
+
+function PencilIcon() {
+  return <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z" /></svg>;
+}
+
+function FingerprintIcon(p: { size?: number }) {
+  const size = p.size ?? 16;
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
     <path d="M6.8 5.2A8 8 0 0 1 20 11.5c0 1.5-.1 3-.4 4.4" />
     <path d="M4 15.5a8 8 0 0 1-.1-4.1 8 8 0 0 1 1-2.6" />
     <path d="M8.2 18.6A12 12 0 0 0 9.5 12a2.5 2.5 0 0 1 5 0c0 2.6-.4 5-1.2 7.3" />

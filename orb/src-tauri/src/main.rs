@@ -203,6 +203,7 @@ fn main() {
             approval_key::approval_key_status,
             approval_key::approval_key_create,
             approval_key::approval_sign,
+            approval_key::approval_grace_until,
             biometrics::biometric_status,
             biometrics::biometric_authenticate,
             bindings::local_binding_set,

@@ -144,7 +144,10 @@ case "serve":
         case .success(let (signature, context)):
             if eligible && held == nil { held = (context, Date()) }
             else if !eligible { context.invalidate() }
-            emit(["signature": signature])
+            var reply = ["signature": signature]
+            // Lets Orb show how long approvals stay fingerprint-free.
+            if let current = held { reply["grace_until"] = String(Int(current.at.addingTimeInterval(grace).timeIntervalSince1970)) }
+            emit(reply)
         case .failure(let error):
             held?.context.invalidate(); held = nil
             emit(["error": error.message, "code": String(error.code)])

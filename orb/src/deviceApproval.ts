@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { api, ApiError, getApiUrl } from "./api";
 
 /**
@@ -125,9 +126,11 @@ export async function signedApi<T>(method: string, path: string, body: unknown, 
     try {
       signature = (await call("approval_sign", { payload: challenge.payload, reason: summary })) as string;
     } catch (e) {
+      void refreshGrace(call);
       if (String(e).includes("cancelled")) throw new ApprovalCancelled();
       throw e instanceof Error ? e : new Error(String(e));
     }
+    void refreshGrace(call);
     headers["X-Paloma-Approval"] = `${challenge.challenge_id}.${device}.${signature}`;
   }
   try {
@@ -137,5 +140,16 @@ export async function signedApi<T>(method: string, path: string, body: unknown, 
       throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Secrets → Approval devices.");
     }
     throw e;
+  }
+}
+
+const [graceUntilSecs, setGraceUntil] = createSignal(0);
+/** Unix seconds until which single-secret approvals skip Touch ID (0: none). */
+export const graceUntil = graceUntilSecs;
+async function refreshGrace(call: Invoke) {
+  try {
+    setGraceUntil(Number(await call("approval_grace_until")) || 0);
+  } catch {
+    setGraceUntil(0);
   }
 }

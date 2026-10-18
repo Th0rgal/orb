@@ -19,8 +19,8 @@ export type Toast = {
   title: JSX.Element;
   /** Leading glyph for info toasts; errors always show the alert icon. */
   icon?: JSX.Element;
-  /** Makes the leading glyph the toast's main button, labelled under the glyph. */
-  glyphAction?: ToastAction;
+  /** Replaces the whole layout; the content owns its own close control. */
+  content?: () => JSX.Element;
   /** Extra class for a specialised layout (e.g. "secret"). */
   variant?: string;
   message?: string;
@@ -153,15 +153,13 @@ function ToastItem(p: { toast: Toast }) {
   const copy = async () => {
     try { await copyText(t().copy ?? ""); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
   };
+  const content = t().content;
+  if (content) return <div class={`toast ${t().kind} custom${t().variant ? ` ${t().variant}` : ""}`} role="status">{content()}</div>;
   return <div class={`toast ${t().kind}${t().variant ? ` ${t().variant}` : ""}`} role={t().kind === "error" ? "alert" : "status"} onMouseEnter={pause} onMouseLeave={resume} onFocusIn={pause} onFocusOut={resume}>
     <Show when={t().kind === "error"}>
       <svg class="toast-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     </Show>
-    <Show when={t().kind !== "error" && t().icon}>
-      <Show when={t().glyphAction} fallback={<span class="toast-glyph" aria-hidden="true">{t().icon}</span>}>
-        {a => <button type="button" class="toast-glyph toast-glyph-btn" title={a().label} onClick={() => { a().run(); dismissToast(t().id); }}>{t().icon}<span>{a().label}</span></button>}
-      </Show>
-    </Show>
+    <Show when={t().kind !== "error" && t().icon}><span class="toast-glyph" aria-hidden="true">{t().icon}</span></Show>
     <div class="toast-body">
       <span class="toast-title">{t().title}</span>
       <Show when={t().message}><span class="toast-message">{t().message}</span></Show>
