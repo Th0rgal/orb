@@ -40,8 +40,9 @@ export function syncSecretRequestNotices(list: SecretAccessRequest[], openSecret
   notify({ key: KEY, kind: "info", variant: "secret", title: "", content: () => <SecretRequestsCard /> });
 }
 
-/** Reads of one named secret and writes are approvable here; whole-project reads need a scope (Secrets page). */
-const approvable = (r: SecretAccessRequest) => r.kind === "write" || !!r.key;
+/** Every request is approvable here, with the Secrets page's default scope. */
+const approvable = (_r: SecretAccessRequest) => true;
+const readScope = (r: SecretAccessRequest) => (r.key ? "secret" : r.project_id ? "project" : "all");
 
 function act(requests: SecretAccessRequest[], approve: boolean) {
   const ids = requests.map((r) => r.id);
@@ -54,7 +55,7 @@ function act(requests: SecretAccessRequest[], approve: boolean) {
       try {
         if (!approve) await rejectSecretRequest(r.id);
         else if (r.kind === "write") await approveSecretRequest(r.id);
-        else await approveSecretRequest(r.id, "secret");
+        else await approveSecretRequest(r.id, readScope(r));
       } catch (e) {
         hide([r.id], false); // still pending: show it again
         syncSecretRequestNotices(pending(), openSecretsPage);
@@ -138,15 +139,15 @@ function SecretRequestsCard() {
   </div>;
 }
 
-function EyeIcon() {
+export function EyeIcon() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle cx="8" cy="8" r="2" /></svg>;
 }
 
-function PencilIcon() {
+export function PencilIcon() {
   return <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z" /></svg>;
 }
 
-function FingerprintIcon(p: { size?: number }) {
+export function FingerprintIcon(p: { size?: number }) {
   const size = p.size ?? 16;
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
     <path d="M6.8 5.2A8 8 0 0 1 20 11.5c0 1.5-.1 3-.4 4.4" />

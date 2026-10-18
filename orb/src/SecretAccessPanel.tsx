@@ -11,7 +11,8 @@ import {
 } from "./bitwardenApi";
 import * as Ic from "./icons";
 import { Select } from "./Select";
-import { ApprovalCancelled } from "./deviceApproval";
+import { ApprovalCancelled, approvalGraceSecs, graceUntil, setApprovalGraceSecs } from "./deviceApproval";
+import { EyeIcon, FingerprintIcon, PencilIcon } from "./secretRequestNotices";
 
 const POLL_MS = 5000;
 
@@ -58,6 +59,18 @@ export function SecretAccessPanel(p: {
     const t = setInterval(() => void load(), POLL_MS);
     onCleanup(() => clearInterval(t));
   });
+
+  const [now, setNow] = createSignal(Date.now());
+  onMount(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    onCleanup(() => clearInterval(t));
+  });
+  const graceText = () => {
+    const left = Math.max(0, graceUntil() * 1000 - now());
+    if (!left) return "Touch ID required";
+    const sec = Math.ceil(left / 1000);
+    return `Touch ID · ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")} left`;
+  };
 
   const pending = createMemo(() => snap().requests.filter((r) => r.status === "pending"));
   const recent = createMemo(() => snap().requests.filter((r) => r.status !== "pending").slice(0, 8));
@@ -110,77 +123,75 @@ export function SecretAccessPanel(p: {
             {(r) => {
               const [scope, setScope] = createSignal<"secret" | "project" | "all">(r.key ? "secret" : r.project_id ? "project" : "all");
               const tier = () => projectName(r.project_id);
-              const decline = async () => {
-                if (busy()) return;
-                setBusy(r.id);
-                try {
-                  await rejectSecretRequest(r.id);
-                  await load();
-                } catch (e) {
-                  if (!(e instanceof ApprovalCancelled)) p.onError(e instanceof Error ? e.message : String(e));
-                } finally {
-                  setBusy(null);
-                }
-              };
+              const write = r.kind === "write";
               return (
-                <article class="bw-request-card">
-                  <header class="bw-request-head">
-                    <span class="bw-request-mission">{r.mission_title || `Mission ${r.mission_id.slice(0, 8)}`}</span>
-                    <span class="bw-request-meta">
-                      {r.paloma_project ? `${r.paloma_project} · ` : ""}
-                      {ago(r.created_at)}
-                    </span>
-                  </header>
-                  <div class="bw-request-ask">
-                    {r.kind === "write" ? "wants to store " : "wants "}
-                    <Show when={r.key} fallback={<span>{r.all_projects ? "every project" : `project ${tier()}`}</span>}>
-                      <code class="bw-request-key">{r.key}</code>
-                    </Show>
-                    <Show when={r.project_id}>
-                      <span class={`bw-tier bw-tier-${tier()}`}>{tier()}</span>
+                <div class="secret-row bw-request-row">
+                  <span class="secret-kind" title={write ? "Write" : "Read"} aria-label={write ? "Write" : "Read"}>
+                    {write ? <PencilIcon /> : <EyeIcon />}
+                  </span>
+                  <div class="bw-request-body">
+                    <div class="bw-request-line">
+                      <strong class="secret-row-key">{r.key || (r.all_projects ? "Every secret project" : `Project ${tier()}`)}</strong>
+                      <Show when={r.project_id && r.key}>
+                        <span class={`bw-tier bw-tier-${tier()}`}>{tier()}</span>
+                      </Show>
+                      <span class="bw-request-meta" title={who(r)}>{who(r)} · {ago(r.created_at)}</span>
+                    </div>
+                    <Show when={r.reason}>
+                      <span class="secret-row-reason" title={r.reason!}>{r.reason}</span>
                     </Show>
                   </div>
-                  <Show when={r.reason}>
-                    <p class="bw-request-reason">{r.reason}</p>
-                  </Show>
-                  <footer class="bw-request-actions">
-                    <Show
-                      when={r.kind === "read"}
-                      fallback={
-                        <button
-                          class="s-btn primary"
-                          disabled={!!busy()}
-                          onClick={() => void act(r.id, `store secret ${r.key}`, () => approveSecretRequest(r.id), true)}
-                        >
-                          Allow write
-                        </button>
-                      }
+                  <Show when={!write}>
+                    <Select
+                      value={scope()}
+                      aria-label="What to allow"
+                      onChange={(e) => setScope(e.currentTarget.value as "secret" | "project" | "all")}
                     >
-                      <Select
-                        value={scope()}
-                        aria-label="What to allow"
-                        onChange={(e) => setScope(e.currentTarget.value as "secret" | "project" | "all")}
-                      >
-                        <Show when={r.key}><option value="secret">This secret</option></Show>
-                        <Show when={r.project_id}><option value="project">All of {tier()}</option></Show>
-                        <option value="all">Every project</option>
-                      </Select>
-                      <button
-                        class="s-btn primary"
-                        disabled={!!busy()}
-                        onClick={() => void act(r.id, `allow a mission secret access`, () => approveSecretRequest(r.id, scope()))}
-                      >
-                        Allow for 24 h
-                      </button>
-                    </Show>
-                    <button class="bw-link-btn bw-decline" disabled={!!busy()} onClick={() => void decline()}>
-                      Decline
-                    </button>
-                  </footer>
-                </article>
+                      <Show when={r.key}><option value="secret">This secret</option></Show>
+                      <Show when={r.project_id}><option value="project">All of {tier()}</option></Show>
+                      <option value="all">Every project</option>
+                    </Select>
+                  </Show>
+                  <button
+                    class="s-btn"
+                    disabled={!!busy()}
+                    onClick={() => void act(r.id, "decline a mission secret request", () => rejectSecretRequest(r.id))}
+                  >
+                    Deny
+                  </button>
+                  <button
+                    class="s-btn primary bw-request-ok"
+                    disabled={!!busy()}
+                    title={write ? "Store" : "Allow for 24 h"}
+                    onClick={() =>
+                      void (write
+                        ? act(r.id, `store secret ${r.key}`, () => approveSecretRequest(r.id), true)
+                        : act(r.id, "allow a mission secret access", () => approveSecretRequest(r.id, scope())))
+                    }
+                  >
+                    <FingerprintIcon size={14} />
+                    {write ? "Store" : "Allow"}
+                  </button>
+                </div>
               );
             }}
           </For>
+          <div class="secret-bar">
+            <span class="secret-grace">{graceText()}</span>
+            <label class="bw-grace-setting">
+              One Touch ID covers
+              <Select
+                value={String(approvalGraceSecs())}
+                aria-label="Touch ID grace"
+                onChange={(e) => setApprovalGraceSecs(Number(e.currentTarget.value))}
+              >
+                <option value="0">nothing</option>
+                <option value="60">1 min</option>
+                <option value="300">5 min</option>
+                <option value="900">15 min</option>
+              </Select>
+            </label>
+          </div>
         </div>
       </Show>
 
