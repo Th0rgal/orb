@@ -1,3 +1,4 @@
+import BackgroundTasks
 import Foundation
 @preconcurrency import UserNotifications
 import SwiftUI
@@ -72,33 +73,38 @@ struct OrbNotificationPayload: Equatable, Sendable {
         "orb.inbox.mission.\(missionID)"
     }
 
+    /// "Verity / Verity · Done": skip the project when the conversation has its name.
+    static func lead(project: String, headline: String, status: String) -> [String] {
+        let sameName = project.caseInsensitiveCompare(headline) == .orderedSame || project.isEmpty
+        return sameName ? [status] : [project, status]
+    }
+
     @MainActor
     static func build(from item: OrbInboxItem) -> OrbNotificationPayload? {
         guard item.unread, item.category == .needsYou || item.category == .ready else { return nil }
 
-        let statusIcon: String = {
+        // Like ChatGPT and Claude: the conversation is the title, why it needs you is the
+        // second line. No emoji or internal labels ("AI Summary") competing for the 2 lines a banner shows.
+        let status: String = {
             if let interaction = item.interaction {
                 switch interaction.kind {
-                case "permission": return "⚡"
-                case "plan": return "📋"
-                default: return "❓"
+                case "permission": return "Needs approval"
+                case "plan": return "Plan to review"
+                default: return "Question for you"
                 }
             }
             switch item.row.state {
-            case "blocked": return "⚠️"
-            case "failed", "not_feasible": return "⛔"
-            case "awaiting_user", "waiting_user": return "💬"
-            case "completed", "succeeded": return "✅"
-            default: return "•"
+            case "blocked": return "Blocked"
+            case "failed", "not_feasible": return "Failed"
+            case "awaiting_user", "waiting_user": return "Waiting for you"
+            case "completed", "succeeded": return "Done"
+            default: return item.badge
             }
         }()
 
-        let title = "\(statusIcon) \(item.projectTitle) · \(item.headline)"
+        let title = item.headline
 
-        var subtitleParts: [String] = [item.badge]
-        if let digest = item.aiOverview, !digest.outcome.isEmpty {
-            subtitleParts.append("AI Summary")
-        }
+        var subtitleParts = lead(project: item.projectTitle, headline: item.headline, status: status)
         if !item.machine.isEmpty {
             subtitleParts.append(item.machine)
         }
@@ -189,6 +195,9 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     private let seededAccountsKey = "orb.notifications.seededAccounts.v1"
 
     var pendingFocus: OrbInboxFocusRequest?
+    /// Unread "needs you" + "ready" items from the last reconcile: the same number as
+    /// the app icon badge and the Inbox, so the home tab can't disagree (it showed 0 vs 5).
+    var unreadCount: Int?
     var authorizationStatus: UNAuthorizationStatus = .notDetermined
 
     var notificationsEnabled: Bool {
@@ -323,6 +332,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         let actionable = needsYou + ready
         let unreadItems = actionable.filter(\.unread)
         UNUserNotificationCenter.current().setBadgeCount(unreadItems.count) { _ in }
+        if unreadCount != unreadItems.count { unreadCount = unreadItems.count }
         OrbFleetActivityController.shared.reconcile(
             account: OrbInboxAccount.current,
             needsYou: needsYou,
@@ -401,10 +411,13 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         content.body = payload.body
         content.categoryIdentifier = payload.categoryIdentifier
         content.threadIdentifier = "orb.project.\(payload.projectSlug)"
+        content.summaryArgument = payload.projectTitle
         if !silentUpdate {
             content.sound = .default
         }
-        content.interruptionLevel = payload.isUrgent ? .timeSensitive : .active
+        // A summary landing on an already-announced turn updates the card without
+        // presenting it again. (.timeSensitive needs an entitlement Orb doesn't have yet.)
+        content.interruptionLevel = silentUpdate ? .passive : (payload.isUrgent ? .timeSensitive : .active)
 
         var userInfo: [String: Any] = [
             "mission_id": payload.missionID,
@@ -437,8 +450,11 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     private func startMonitorLoop() {
         backgroundLoopTask?.cancel()
         backgroundLoopTask = Task { @MainActor in
+            var first = true
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
+                // Poll at launch too: a finished mission shouldn't wait 15 s to show up.
+                if !first { try? await Task.sleep(for: .seconds(15)) }
+                first = false
                 guard !Task.isCancelled,
                       APIService.shared.isConfigured,
                       APIService.shared.isAuthenticated,
@@ -658,5 +674,27 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
     static func presentation(missionID: String) -> UNNotificationPresentationOptions {
         let visible = inboxVisible || (!missionID.isEmpty && openMissions[missionID] != nil)
         return visible ? [.list, .badge] : [.banner, .list, .sound, .badge]
+    }
+}
+
+/// The Inbox poll only runs while Orb is on screen, so "done" and "needs you"
+/// alerts and the fleet Live Activity froze as soon as the phone locked. iOS
+/// grants opportunistic refreshes (roughly every 15 min or more, at its
+/// discretion); each one runs the same poll, then asks for the next.
+enum OrbBackgroundRefresh {
+    static let identifier = "md.thomas.openagent.dashboard.inbox-refresh"
+    static let interval: TimeInterval = 15 * 60
+
+    static func schedule() {
+        let request = BGAppRefreshTaskRequest(identifier: identifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: interval)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    @MainActor static func run() async {
+        schedule()
+        guard APIService.shared.isConfigured, APIService.shared.isAuthenticated,
+              !APIService.shared.authSessionExpired else { return }
+        await OrbNotificationCenter.shared.pollHybridMissionsOnce()
     }
 }

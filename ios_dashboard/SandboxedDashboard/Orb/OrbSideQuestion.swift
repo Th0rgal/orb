@@ -174,11 +174,17 @@ struct OrbSideQuestionSheet: View {
     private func exchangeRow(_ role: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(role == "user" ? "You" : "Side agent").font(.caption.weight(.semibold)).foregroundStyle(OrbStyle.textSecondary)
-            Text(text).font(.subheadline).textSelection(.enabled)
+            Text(Self.markdown(text)).font(.subheadline).textSelection(.enabled)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(role == "user" ? OrbStyle.elevated : OrbStyle.card, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+    }
+
+    /// Side answers are Markdown (bold, `code`, links); showing `**40/45**` raw was noise.
+    static func markdown(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
     }
 
     private var composer: some View {

@@ -28,10 +28,13 @@ enum OrbTurnSummary {
         return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
     }
 
+    /// Desktop `formatElapsed`: "20:12" read as a time of day next to the status bar clock.
     static func clock(_ seconds: Int) -> String {
         let s = max(0, seconds)
-        if s >= 3600 { return "\(s / 3600):\(String(format: "%02d", s / 60 % 60)):\(String(format: "%02d", s % 60))" }
-        return "\(s / 60):\(String(format: "%02d", s % 60))"
+        if s < 60 { return "\(s) s" }
+        let m = s / 60
+        if m < 60 { return "\(m) min \(String(format: "%02d", s % 60)) s" }
+        return "\(m / 60) h \(String(format: "%02d", m % 60))"
     }
 
     struct FileChange: Equatable, Identifiable {

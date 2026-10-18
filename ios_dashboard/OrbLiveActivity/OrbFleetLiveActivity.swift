@@ -38,7 +38,10 @@ struct OrbFleetLiveActivity: Widget {
                         .monospacedDigit()
                         .foregroundStyle(FleetTone.waiting)
                 } else {
-                    Text("\(state.running)")
+                    // A bare "2" next to the Orb mark didn't say what it counted.
+                    Label("\(state.running)", systemImage: state.allDone ? "checkmark" : "circle.dotted")
+                        .labelStyle(.titleAndIcon)
+                        .accessibilityLabel("\(state.running) running")
                         .font(.system(.caption, design: .rounded).weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(FleetTone.running)

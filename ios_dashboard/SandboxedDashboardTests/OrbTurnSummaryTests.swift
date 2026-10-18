@@ -46,8 +46,9 @@ final class OrbTurnSummaryTests: XCTestCase {
         let start = OrbTurnSummary.turnStart(events)
         XCTAssertEqual(start?.timeIntervalSince1970 ?? 0, ISO8601DateFormatter().date(from: "2026-10-18T12:00:00Z")!.timeIntervalSince1970 + 0.25, accuracy: 0.001)
         XCTAssertNil(OrbTurnSummary.turnStart([]))
-        XCTAssertEqual(OrbTurnSummary.clock(65), "1:05")
-        XCTAssertEqual(OrbTurnSummary.clock(3_725), "1:02:05")
+        XCTAssertEqual(OrbTurnSummary.clock(65), "1 min 05 s")
+        XCTAssertEqual(OrbTurnSummary.clock(9), "9 s")
+        XCTAssertEqual(OrbTurnSummary.clock(3_725), "1 h 02")
     }
 
     func testChangedFilesAggregatesFinishedEditsPerFile() {
@@ -95,5 +96,15 @@ final class OrbTurnSummaryTests: XCTestCase {
         XCTAssertFalse(OrbOnScreen.presentation(missionID: "m2").contains(.banner))
         OrbOnScreen.inboxVisible = false
         XCTAssertTrue(OrbOnScreen.presentation(missionID: "m1").contains(.list))
+    }
+
+    @MainActor func testSideAnswersRenderInlineMarkdown() {
+        let rendered = OrbSideQuestionSheet.markdown("cible **40/45** et `b223122a`\n- next")
+        XCTAssertEqual(String(rendered.characters), "cible 40/45 et b223122a\n- next")
+    }
+
+    func testNotificationSubtitleDoesNotRepeatTheProject() {
+        XCTAssertEqual(OrbNotificationPayload.lead(project: "Verity", headline: "Verity", status: "Done"), ["Done"])
+        XCTAssertEqual(OrbNotificationPayload.lead(project: "Default", headline: "DGX Spark", status: "Needs approval"), ["Default", "Needs approval"])
     }
 }

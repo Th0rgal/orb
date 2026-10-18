@@ -26,8 +26,8 @@ final class OrbTurnStatusUITests: XCTestCase {
         let app = open("agent-work")
         XCTAssertTrue(app.staticTexts["1/4 tasks"].waitForExistence(timeout: 10), "a task marked done must count")
         XCTAssertTrue(app.staticTexts["· Fix the type-check timeout"].exists, "the in-progress task is the active one")
-        // The fixture's turn started 95 s before the request: never 0:0x.
-        let clock = app.staticTexts.matching(NSPredicate(format: "label MATCHES '^[1-9]:[0-9]{2}$'")).firstMatch
+        // The fixture's turn started 95 s before the request: never "3 s".
+        let clock = app.staticTexts.matching(NSPredicate(format: "label MATCHES '^[1-9] min [0-9]{2} s$'")).firstMatch
         XCTAssertTrue(clock.waitForExistence(timeout: 5), "elapsed time must come from the turn start")
         capture(app, "turn-working-status")
     }

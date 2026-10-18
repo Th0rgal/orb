@@ -338,6 +338,8 @@ struct OrbHome: View {
     @State private var renamedTitle = ""
     @State private var homeTab = ProcessInfo.processInfo.arguments.contains("-orb_open_inbox") ? "inbox" : "projects"
     @State private var inboxCount = 0
+    /// The Inbox's own count once it has reconciled; the cached estimate before that.
+    private var tabInboxCount: Int { OrbNotificationCenter.shared.unreadCount ?? inboxCount }
     @State private var workingByProject: [String: Int] = [:]
     @State private var linkedProjectObj: OrbRow?
     @State private var archivesOpen = false
@@ -475,7 +477,7 @@ struct OrbHome: View {
                     homeTab = "inbox"
                 }
             }
-        }.tint(.primary).preferredColorScheme(.dark)
+        }.tint(.primary).toggleStyle(OrbSwitchStyle()).preferredColorScheme(.dark)
     }
 
     private var homeModePicker: some View {
@@ -508,8 +510,8 @@ struct OrbHome: View {
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(homeTab == "inbox" ? .primary : OrbStyle.textSecondary)
                         .fixedSize()
-                    if inboxCount > 0 {
-                        Text("\(inboxCount)")
+                    if tabInboxCount > 0 {
+                        Text("\(tabInboxCount)")
                             .font(.system(size: 10.5, weight: .bold))
                             .foregroundStyle(homeTab == "inbox" ? OrbStyle.background : .primary)
                             .monospacedDigit()
@@ -1842,5 +1844,13 @@ struct OrbMoveBanner: View {
             .padding(.horizontal, 14).padding(.bottom, 6)
             .accessibilityIdentifier("move.banner")
         }
+    }
+}
+
+/// The root tint is `.primary` (white in dark mode) for navigation; a switch with that
+/// tint is a white track under a white knob, so on and off looked the same.
+struct OrbSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Toggle(configuration).toggleStyle(.switch).tint(OrbStyle.success)
     }
 }
