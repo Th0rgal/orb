@@ -19,6 +19,7 @@ import type { SkillRow } from "./skillRows";
 type Tab = "skill" | "files" | "versions";
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const formatSize = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
 
 export function DiffView(p: { before: string; after: string; beforeLabel: string; afterLabel: string }) {
   const lines = createMemo(() => compactDiff(lineDiff(p.before, p.after)));
@@ -49,7 +50,7 @@ export interface SkillDetailProps {
   /** Persist SKILL.md in the Library, then sync local harnesses. */
   onSave: (name: string, content: string) => Promise<void>;
   /** Import a legacy/divergent copy (SKILL.md + reference files) into the Library. */
-  onImport: (name: string, source: SkillSourceRef) => Promise<void>;
+  onImport: (name: string, source: SkillSourceRef, rels: string[]) => Promise<void>;
   onDelete: (name: string) => Promise<void>;
   /** Reference file changed in the Library; refresh and sync. */
   onFilesChanged: (name: string) => Promise<void>;
@@ -65,7 +66,10 @@ export function SkillDetail(p: SkillDetailProps) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
-  const [confirmImport, setConfirmImport] = createSignal<SkillSourceRef | null>(null);
+  const [confirmImport, setConfirmImportRaw] = createSignal<SkillSourceRef | null>(null);
+  const [importRels, setImportRels] = createSignal<string[]>([]);
+  // Allowed files start checked; the user can deselect any before the PUT.
+  const setConfirmImport = (src: SkillSourceRef | null) => { setImportRels(src?.files?.map((f) => f.rel) ?? []); setConfirmImportRaw(src); };
   const dirty = () => editable() && draft() !== original();
   const meta = createMemo(() => parseSkillMeta(draft()));
   const audience = createMemo(() => effectiveAudience(meta()));
@@ -265,11 +269,27 @@ export function SkillDetail(p: SkillDetailProps) {
           onConfirm={() => void run(async () => { await p.onDelete(p.row.name); setConfirmDelete(false); p.onClose(); })} />
       </Show>
       <Show when={confirmImport()}>{(src) => (
-        <ConfirmDialog title={p.row.inLibrary ? `Replace the Library version of ${p.row.name}?` : `Import ${p.row.name} to the Library?`} destructive={false}
-          action={p.row.inLibrary ? "Use this version" : "Import"} busy={busy()} error={error()}
-          description={`Writes SKILL.md${src().files?.length ? ` and ${src().files!.length} reference file(s)` : ""} from ${src().label} to the Library, then syncs local harnesses.`}
-          onClose={() => setConfirmImport(null)}
-          onConfirm={() => void run(async () => { await p.onImport(p.row.name, src()); setConfirmImport(null); p.onClose(); })} />
+        <Dialog size="compact" class="skills-import" title={p.row.inLibrary ? `Replace the Library version of ${p.row.name}?` : `Import ${p.row.name} to the Library?`}
+          description={`Writes SKILL.md and the checked reference files from ${src().label} to the Library, then syncs local harnesses.`}
+          busy={busy()} onClose={() => setConfirmImport(null)}
+          footer={(close) => <>
+            <DialogButton disabled={busy()} onClick={close}>Cancel</DialogButton>
+            <DialogButton variant="primary" disabled={busy()} onClick={() => void run(async () => { await p.onImport(p.row.name, src(), importRels()); setConfirmImport(null); p.onClose(); })}>
+              {busy() ? "Working…" : p.row.inLibrary ? "Use this version" : "Import"}
+            </DialogButton>
+          </>}>
+          <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()}</p>}</Show>
+          <Show when={src().files?.length} fallback={<p class="skills-sub-note">No importable reference files: only SKILL.md is imported.</p>}>
+            <fieldset class="skills-import-files">
+              <legend>Reference files (text under references/, scripts/, assets/, templates/; secrets and dotfiles are never offered)</legend>
+              <For each={src().files}>{(f) => (
+                <label class="skills-check"><input type="checkbox" checked={importRels().includes(f.rel)} disabled={busy()}
+                  onChange={(e) => setImportRels(e.currentTarget.checked ? [...importRels(), f.rel] : importRels().filter((r) => r !== f.rel))} />
+                  <code>{f.rel}</code><span class="skills-sub-note">{formatSize(f.size)}</span></label>
+              )}</For>
+            </fieldset>
+          </Show>
+        </Dialog>
       )}</Show>
       <Show when={confirmFileDelete()}>{(rel) => (
         <ConfirmDialog title={`Delete ${rel()}?`} destructive action="Delete file" busy={busy()} error={error()}

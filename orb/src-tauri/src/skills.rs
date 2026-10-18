@@ -33,7 +33,6 @@ use std::process::Command;
 const ORB_MANAGED_MARKER: &str = ".managed-by-orb-skills";
 const LEGACY_MANAGED_MARKER: &str = ".managed-by-agent-skills-repo";
 const IDENTITY_SKILL: &str = "development-identity";
-const MAX_SOURCE_FILE_BYTES: u64 = 512 * 1024;
 
 const HARNESS_TARGETS: &[(&str, &str, &str, &str)] = &[
     (
@@ -105,6 +104,12 @@ pub struct SkillSourceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillFileInfo {
+    pub rel: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillFileContent {
     pub rel: String,
     pub content: String,
@@ -122,9 +127,10 @@ pub struct SkillSourceRef {
     pub lines: usize,
     /// Full SKILL.md for local sources (the frontend already holds Library content).
     pub content: Option<String>,
-    /// Text reference files of local sources, for "import to Library".
+    /// Importable reference files of local sources (paths and sizes only; contents
+    /// are read on explicit import via `local_skill_source_files`).
     #[serde(default)]
-    pub files: Vec<SkillFileContent>,
+    pub files: Vec<SkillFileInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,9 +555,47 @@ fn line_count(content: &str) -> usize {
     content.lines().count()
 }
 
-/// Read text reference files of a local skill directory (excluding SKILL.md and markers).
-fn read_skill_files(dir: &Path) -> Vec<SkillFileContent> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<SkillFileContent>) {
+const IMPORT_DIRS: &[&str] = &["references", "scripts", "assets", "templates"];
+const IMPORT_EXTS: &[&str] = &[
+    "md", "txt", "py", "sh", "js", "ts", "json", "yaml", "yml", "toml",
+];
+const MAX_IMPORT_FILE_BYTES: u64 = 200 * 1024;
+const MAX_IMPORT_FILES: usize = 50;
+
+/// Whether a legacy reference file may be imported into the git-backed Library.
+/// Only text files under known skill folders; never dotfiles or secret-looking names.
+pub fn import_path_allowed(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    if parts.len() < 2 || !IMPORT_DIRS.contains(&parts[0]) {
+        return false;
+    }
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || p.starts_with('.') || *p == "..")
+    {
+        return false;
+    }
+    let name = parts[parts.len() - 1].to_ascii_lowercase();
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if !IMPORT_EXTS.contains(&ext) {
+        return false;
+    }
+    let secretish = name.starts_with(".env")
+        || name.starts_with("id_")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".p12")
+        || ["secret", "credential", "token"]
+            .iter()
+            .any(|w| name.contains(w));
+    !secretish
+}
+
+/// Allowlisted reference files of a local skill directory: paths and sizes only.
+fn list_import_files(dir: &Path) -> Vec<SkillFileInfo> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<SkillFileInfo>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
@@ -560,11 +604,7 @@ fn read_skill_files(dir: &Path) -> Vec<SkillFileContent> {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name == ".git"
-                || name == ".DS_Store"
-                || name == ORB_MANAGED_MARKER
-                || name == LEGACY_MANAGED_MARKER
-            {
+            if name.starts_with('.') {
                 continue;
             }
             let Ok(ft) = entry.file_type() else { continue };
@@ -575,18 +615,12 @@ fn read_skill_files(dir: &Path) -> Vec<SkillFileContent> {
                     continue;
                 };
                 let rel = rel.to_string_lossy().replace('\\', "/");
-                if rel == "SKILL.md" {
-                    continue;
-                }
-                if entry
-                    .metadata()
-                    .map(|m| m.len() > MAX_SOURCE_FILE_BYTES)
-                    .unwrap_or(true)
-                {
-                    continue;
-                }
-                if let Ok(content) = fs::read_to_string(&path) {
-                    out.push(SkillFileContent { rel, content });
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.len() <= MAX_IMPORT_FILE_BYTES && import_path_allowed(&rel) {
+                    out.push(SkillFileInfo {
+                        rel,
+                        size: meta.len(),
+                    });
                 }
             }
         }
@@ -594,7 +628,39 @@ fn read_skill_files(dir: &Path) -> Vec<SkillFileContent> {
     let mut out = Vec::new();
     walk(dir, dir, &mut out);
     out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    out.truncate(MAX_IMPORT_FILES);
     out
+}
+
+/// Read selected allowlisted files of a legacy skill for an explicit import.
+pub fn read_legacy_skill_files_in(
+    home: &Path,
+    source_id: &str,
+    name: &str,
+    rels: &[String],
+) -> Result<Vec<SkillFileContent>, String> {
+    if !valid_skill_name(name) {
+        return Err("Invalid skill name".to_string());
+    }
+    let (_, _, root) = legacy_sources(home)
+        .into_iter()
+        .find(|(id, _, _)| id == source_id)
+        .ok_or_else(|| format!("Unknown legacy source {source_id}"))?;
+    let dir = root.join(name);
+    let allowed = list_import_files(&dir);
+    let mut out = Vec::new();
+    for rel in rels {
+        if !allowed.iter().any(|f| &f.rel == rel) {
+            return Err(format!("{rel} is not importable"));
+        }
+        let content =
+            fs::read_to_string(dir.join(rel)).map_err(|e| format!("Failed to read {rel}: {e}"))?;
+        out.push(SkillFileContent {
+            rel: rel.clone(),
+            content,
+        });
+    }
+    Ok(out)
 }
 
 /// Legacy local folders: scanned and reported, never synced.
@@ -763,7 +829,7 @@ fn build_catalog(home: &Path, library: &[SyncSkillPayload]) -> Catalog {
                 legacy: true,
                 hash: content_hash(&content),
                 lines: line_count(&content),
-                files: read_skill_files(&dir_path),
+                files: list_import_files(&dir_path),
                 content: Some(content),
             });
         }
@@ -1150,6 +1216,20 @@ pub async fn local_skills_sync(request: SyncSkillsRequest) -> Result<SyncSkillsR
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn local_skill_source_files(
+    source_id: String,
+    name: String,
+    rels: Vec<String>,
+) -> Result<Vec<SkillFileContent>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = home_dir()?;
+        read_legacy_skill_files_in(&home, &source_id, &name, &rels)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1405,6 +1485,90 @@ mod tests {
             legacy.content.as_deref(),
             Some("---\nname: split\n---\nOld body\n")
         );
+    }
+
+    #[test]
+    fn import_filter_allows_only_safe_reference_files() {
+        for ok in [
+            "references/notes.md",
+            "scripts/run.sh",
+            "assets/data.json",
+            "templates/a/b.yaml",
+            "scripts/tool.py",
+        ] {
+            assert!(import_path_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "notes.md",
+            "src/main.ts",
+            "references/.env",
+            "references/.env.local.md",
+            "references/.hidden/a.md",
+            "scripts/deploy.pem",
+            "assets/server.key",
+            "assets/cert.p12",
+            "references/id_rsa.txt",
+            "references/my-secret.md",
+            "scripts/credentials.json",
+            "scripts/github_token.txt",
+            "assets/logo.png",
+            "references/binary",
+            "references/../x.md",
+        ] {
+            assert!(!import_path_allowed(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn legacy_report_lists_paths_only_and_reads_on_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let dir = home.join("work/paloma/skills/s");
+        write_skill(&dir, "---\nname: s\n---\n");
+        fs::create_dir_all(dir.join("references")).unwrap();
+        fs::write(dir.join("references/a.md"), "A").unwrap();
+        fs::write(dir.join("references/big.md"), "x".repeat(200 * 1024 + 1)).unwrap();
+        fs::write(dir.join(".env"), "SECRET=1").unwrap();
+        fs::write(dir.join("app.ts"), "code").unwrap();
+        fs::write(dir.join("references/api_token.md"), "t").unwrap();
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        for i in 0..60 {
+            fs::write(dir.join(format!("scripts/s{i:02}.sh")), "echo").unwrap();
+        }
+        let report = inspect_local_skills_in(home, &[]).unwrap();
+        let src = &report
+            .skills
+            .iter()
+            .find(|s| s.name == "s")
+            .unwrap()
+            .sources[0];
+        assert_eq!(src.files.len(), 50);
+        assert_eq!(src.files[0].rel, "references/a.md");
+        assert_eq!(src.files[0].size, 1);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("SECRET") && !json.contains("echo"));
+
+        let read = read_legacy_skill_files_in(
+            home,
+            "paloma-skills",
+            "s",
+            &["references/a.md".to_string()],
+        )
+        .unwrap();
+        assert_eq!(read[0].content, "A");
+        for rel in [
+            ".env",
+            "app.ts",
+            "references/big.md",
+            "references/api_token.md",
+            "../s/SKILL.md",
+        ] {
+            assert!(
+                read_legacy_skill_files_in(home, "paloma-skills", "s", &[rel.to_string()]).is_err(),
+                "{rel}"
+            );
+        }
+        assert!(read_legacy_skill_files_in(home, "nope", "s", &[]).is_err());
     }
 
     #[test]

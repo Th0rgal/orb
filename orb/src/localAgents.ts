@@ -676,7 +676,16 @@ export interface SkillSourceRef {
   hash: string;
   lines: number;
   content?: string | null;
-  files?: Array<{ rel: string; content: string }>;
+  /** Importable reference files (allowlisted; paths and sizes only). */
+  files?: Array<{ rel: string; size: number }>;
+}
+
+/** Read selected allowlisted reference files of a legacy skill, for an explicit import. */
+export async function readLegacySkillFiles(sourceId: string, name: string, rels: string[]): Promise<Array<{ rel: string; content: string }>> {
+  if (!rels.length) return [];
+  const invoke = tauriInvoke();
+  if (!invoke) throw new Error("Importing legacy skill files requires the Orb desktop app.");
+  return (await invoke("local_skill_source_files", { sourceId, name, rels })) as Array<{ rel: string; content: string }>;
 }
 
 export interface DiscoveredSkill {

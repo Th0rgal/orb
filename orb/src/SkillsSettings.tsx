@@ -19,6 +19,7 @@ import {
   localInstalled,
   localSkillsStatus,
   localSkillsSync,
+  readLegacySkillFiles,
   refreshLocalAgents,
   type HarnessSkillTarget,
   type LocalSkillsReport,
@@ -505,10 +506,12 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     await syncNow(false, `Saved "${name}".`);
   };
 
-  const importSkill = async (name: string, src: SkillSourceRef) => {
+  const importSkill = async (name: string, src: SkillSourceRef, rels: string[]) => {
     if (!src.content) throw new Error("This copy has no readable SKILL.md.");
+    // Read only the files the user kept checked; the native side re-applies the allowlist.
+    const files = await readLegacySkillFiles(src.id, name, rels);
     await putLibrarySkill(name, src.content);
-    for (const f of src.files ?? []) await putSkillFile(name, f.rel, f.content);
+    for (const f of files) await putSkillFile(name, f.rel, f.content);
     setLibrarySkills(await listLibrarySkills());
     await refetchSkill(name);
     await syncNow(false, `Imported "${name}" from ${src.label}.`);
