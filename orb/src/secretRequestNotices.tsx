@@ -1,7 +1,7 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
-import { approveSecretRequest, rejectSecretRequest, type SecretAccessRequest } from "./bitwardenApi";
+import { approveSecretRequest, rejectSecretRequest, secretChangeVerb, type SecretAccessRequest } from "./bitwardenApi";
 import { ApprovalCancelled, graceUntil } from "./deviceApproval";
-import { CloseIcon } from "./icons";
+import { CloseIcon, TrashIcon } from "./icons";
 import { dismissToast, notify } from "./toast";
 
 /**
@@ -54,7 +54,7 @@ function act(requests: SecretAccessRequest[], approve: boolean) {
     for (const r of requests) {
       try {
         if (!approve) await rejectSecretRequest(r.id);
-        else if (r.kind === "write") await approveSecretRequest(r.id);
+        else if (secretChangeVerb(r)) await approveSecretRequest(r.id);
         else await approveSecretRequest(r.id, readScope(r));
       } catch (e) {
         hide([r.id], false); // still pending: show it again
@@ -96,7 +96,7 @@ function SecretRequestsCard() {
       <div class="toast-body">
         <span class="toast-title">
           <Show when={one()} fallback={<>{list().length} secret requests</>}>
-            {(r) => <>{r().kind === "write" ? "Store " : ""}<strong>{label(r())}</strong></>}
+            {(r) => <>{secretChangeVerb(r()) ? `${secretChangeVerb(r())} ` : ""}<strong>{label(r())}</strong></>}
           </Show>
           <span class="toast-sub" title={missions().join(", ")}>{missions().length === 1 ? missions()[0] : `${missions().length} missions`}</span>
         </span>
@@ -108,16 +108,14 @@ function SecretRequestsCard() {
       <div class="secret-rows">
         <For each={list()}>{(r) =>
           <div class="secret-row">
-            <span class="secret-kind" title={r.kind === "write" ? "Write" : "Read"} aria-label={r.kind === "write" ? "Write" : "Read"}>
-              {r.kind === "write" ? <PencilIcon /> : <EyeIcon />}
-            </span>
+            <SecretKindIcon request={r} />
             <div class="toast-body">
               <strong class="secret-row-key">{label(r)}</strong>
               <Show when={r.reason}><span class="secret-row-reason" title={r.reason}>{r.reason}</span></Show>
             </div>
             <button type="button" class="toast-btn" onClick={() => act([r], false)}>Deny</button>
             <Show when={approvable(r)}>
-              <button type="button" class="toast-btn primary secret-row-ok" title={r.kind === "write" ? "Store" : "Allow"} aria-label={r.kind === "write" ? "Store" : "Allow"} onClick={() => act([r], true)}><FingerprintIcon size={14} /></button>
+              <button type="button" class="toast-btn primary secret-row-ok" title={secretChangeVerb(r) ?? "Allow"} aria-label={secretChangeVerb(r) ?? "Allow"} onClick={() => act([r], true)}><FingerprintIcon size={14} /></button>
             </Show>
           </div>}
         </For>
@@ -132,7 +130,7 @@ function SecretRequestsCard() {
           // Approve exactly what was on screen when the button became active.
           if (Date.now() - changedAt() >= SETTLE_MS) act(ready(), true);
         }}>
-          <FingerprintIcon size={14} />{one() ? (one()!.kind === "write" ? "Store" : "Allow") : "Approve all"}
+          <FingerprintIcon size={14} />{one() ? (secretChangeVerb(one()!) ?? "Allow") : "Approve all"}
         </button>
       </Show>
     </div>
@@ -141,6 +139,14 @@ function SecretRequestsCard() {
 
 export function EyeIcon() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle cx="8" cy="8" r="2" /></svg>;
+}
+
+/** Read, write, delete or move, as an icon with its label. */
+export function SecretKindIcon(p: { request: SecretAccessRequest }) {
+  const title = () => ({ write: "Write", delete: "Delete", move: "Move" } as Record<string, string>)[p.request.kind] ?? "Read";
+  return <span class="secret-kind" title={title()} aria-label={title()}>
+    {p.request.kind === "delete" ? <TrashIcon /> : p.request.kind === "read" ? <EyeIcon /> : <PencilIcon />}
+  </span>;
 }
 
 export function PencilIcon() {

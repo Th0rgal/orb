@@ -78,7 +78,9 @@ fn policy(name: &str) -> Option<(Role, bool)> {
         | "secret_list"
         | "secret_get"
         | "secret_request"
-        | "secret_put" => (Executor, false),
+        | "secret_put"
+        | "secret_delete"
+        | "secret_move" => (Executor, false),
         "schedule_wakeup"
         | "schedule_job_wakeup"
         | "ask_mission"

@@ -72,6 +72,10 @@ final class OrbSecretRequestMonitor {
     func describe(_ r: OrbJSON) -> String {
         let key = r["key"].text, project = r["project_id"].text
         if r["kind"].text == "write" { return "Store \(key) in \(projectName(project))" }
+        if r["kind"].text == "delete" { return "Delete \(key) from \(projectName(project))" }
+        if r["kind"].text == "move" {
+            return "Move \(key) from \(projectName(project)) to \(projectName(r["target_project_id"].text))"
+        }
         if !key.isEmpty { return "Read \(key)" + (project.isEmpty ? "" : " (\(projectName(project)))") }
         if r["all_projects"].flag { return "Read every project" }
         return "Read project \(projectName(project))"
@@ -150,13 +154,17 @@ struct OrbSecretRequestsSheet: View {
         return [title, r["paloma_project"].text, OrbStyle.relativeTime(r["created_at"].text)].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
+    static func kindBadge(_ r: OrbJSON) -> String {
+        ["write": "STORE", "delete": "DELETE", "move": "MOVE"][r["kind"].text] ?? "READ"
+    }
+
     private func requestRow(_ r: OrbJSON) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text(r["kind"].text == "write" ? "STORE" : "READ")
+                Text(Self.kindBadge(r))
                     .font(.system(size: 10, weight: .bold))
                     .padding(.horizontal, 5).padding(.vertical, 2)
-                    .background((r["kind"].text == "write" ? OrbStyle.warning : OrbStyle.success).opacity(0.22), in: RoundedRectangle(cornerRadius: 4))
+                    .background((r["kind"].text == "read" ? OrbStyle.success : OrbStyle.warning).opacity(0.22), in: RoundedRectangle(cornerRadius: 4))
                 Text(monitor.describe(r)).font(.subheadline.weight(.medium))
             }
             Text(who(r)).font(.caption).foregroundStyle(.secondary)
@@ -168,8 +176,8 @@ struct OrbSecretRequestsSheet: View {
 
     private func requestActions(_ r: OrbJSON) -> some View {
         HStack {
-            if r["kind"].text == "write" {
-                Button("Approve") { act(r, scope: "", reason: "Store secret \(r["key"].text)") }
+            if r["kind"].text != "read" {
+                Button("Approve") { act(r, scope: "", reason: monitor.describe(r)) }
             } else {
                 if !r["key"].text.isEmpty {
                     Button("Secret") { act(r, scope: "secret", reason: "Give a mission \(r["key"].text)") }

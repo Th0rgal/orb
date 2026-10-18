@@ -743,6 +743,37 @@ pub(crate) async fn edit_secret_value(
     parse_json(&stdout, "secret edit")
 }
 
+pub(crate) async fn delete_secret_by_id(state: &Arc<AppState>, id: &str) -> Result<(), ApiError> {
+    let (token, server_url) = require_token_and_url(state).await?;
+    run_bws(
+        &token,
+        server_url.as_deref(),
+        &["secret", "delete", "--output", "none"],
+        &[id],
+    )
+    .await?;
+    super::secret_broker::broker(state).invalidate_list().await;
+    Ok(())
+}
+
+pub(crate) async fn move_secret(
+    state: &Arc<AppState>,
+    id: &str,
+    project_id: &str,
+) -> Result<BitwardenSecretDetail, ApiError> {
+    let (token, server_url) = require_token_and_url(state).await?;
+    let project = format!("--project-id={project_id}");
+    let stdout = run_bws(
+        &token,
+        server_url.as_deref(),
+        &["secret", "edit", "--output", "json", &project],
+        &[id],
+    )
+    .await?;
+    super::secret_broker::broker(state).invalidate_list().await;
+    parse_json(&stdout, "secret edit")
+}
+
 #[derive(Debug, Serialize)]
 pub struct SecretWithProject {
     #[serde(flatten)]

@@ -62,6 +62,8 @@ pub struct Grant {
 pub enum RequestKind {
     Read,
     Write,
+    Delete,
+    Move,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +103,9 @@ pub struct SecretRequest {
     /// Encrypted value of a pending write. Never serialized to clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_value: Option<String>,
+    /// Destination project of a move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_project_id: Option<String>,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub resolved_at: Option<DateTime<Utc>>,
@@ -129,7 +134,7 @@ pub struct AuditEntry {
     pub key: String,
     #[serde(default)]
     pub project_id: Option<String>,
-    /// `default`, `grant`, or `write`.
+    /// `default`, `grant`, `write`, `delete`, or `move`.
     pub via: String,
 }
 
@@ -358,6 +363,18 @@ impl SecretBroker {
                 existing.error = Some("Superseded by a newer value from the mission".into());
             }
         }
+        if matches!(request.kind, RequestKind::Delete | RequestKind::Move) {
+            if let Some(existing) = data.requests.iter().find(|r| {
+                r.status == RequestStatus::Pending
+                    && r.kind == request.kind
+                    && r.mission_id == request.mission_id
+                    && r.key == request.key
+                    && r.project_id == request.project_id
+                    && r.target_project_id == request.target_project_id
+            }) {
+                return existing.clone();
+            }
+        }
         if request.kind == RequestKind::Read {
             if let Some(existing) = data.requests.iter().find(|r| {
                 r.status == RequestStatus::Pending
@@ -400,6 +417,25 @@ impl SecretBroker {
                     && r.key.as_deref() == Some(key)
                     && r.project_id.as_deref() == Some(project_id)
                     && r.value_sha256.as_deref() == Some(value_sha256)
+                    && r.resolved_at.is_some_and(|t| t > since)
+            })
+            .map(|r| r.id)
+    }
+
+    /// An approved delete or move of this name by this mission in the last hour.
+    async fn recent_approved(&self, kind: RequestKind, mission: Uuid, key: &str) -> Option<Uuid> {
+        let since = Utc::now() - chrono::Duration::hours(1);
+        self.data
+            .lock()
+            .await
+            .requests
+            .iter()
+            .rev()
+            .find(|r| {
+                r.kind == kind
+                    && r.status == RequestStatus::Approved
+                    && r.mission_id == mission
+                    && r.key.as_deref() == Some(key)
                     && r.resolved_at.is_some_and(|t| t > since)
             })
             .map(|r| r.id)
@@ -577,6 +613,32 @@ impl SecretBroker {
                 }
                 self.invalidate_list().await;
             }
+            RequestKind::Delete | RequestKind::Move => {
+                let key = request.key.clone().ok_or("Request has no name")?;
+                let found = self.list_all(state, true).await?.into_iter().find(|s| {
+                    s.key == key && s.project_id.as_deref() == request.project_id.as_deref()
+                });
+                let result = match (found, request.kind) {
+                    (None, _) => Err(format!("`{key}` no longer exists in that project")),
+                    (Some(s), RequestKind::Delete) => bitwarden::delete_secret_by_id(state, &s.id)
+                        .await
+                        .map_err(|(_, e)| e),
+                    (Some(s), _) => {
+                        let target = request
+                            .target_project_id
+                            .as_deref()
+                            .ok_or("Move request has no destination")?;
+                        bitwarden::move_secret(state, &s.id, target)
+                            .await
+                            .map(|_| ())
+                            .map_err(|(_, e)| e)
+                    }
+                };
+                if let Err(e) = result {
+                    error = Some(e);
+                }
+                self.invalidate_list().await;
+            }
         }
         let mut data = self.data.lock().await;
         let r = data
@@ -593,21 +655,27 @@ impl SecretBroker {
         };
         r.error = error.clone();
         let out = r.clone();
-        if out.kind == RequestKind::Write && error.is_none() {
+        let via = match out.kind {
+            RequestKind::Read => None,
+            RequestKind::Write => Some("write"),
+            RequestKind::Delete => Some("delete"),
+            RequestKind::Move => Some("move"),
+        };
+        if let (Some(via), None) = (via, &error) {
             data.audit.push(AuditEntry {
                 at: now,
                 mission_id: out.mission_id,
                 paloma_project: out.paloma_project.clone(),
                 key: out.key.clone().unwrap_or_default(),
                 project_id: out.project_id.clone(),
-                via: "write".into(),
+                via: via.into(),
             });
         }
         self.save(&data).await;
         drop(data);
         self.changed.notify_waiters();
         match error {
-            Some(e) => Err(format!("Bitwarden rejected the write: {e}")),
+            Some(e) => Err(format!("Bitwarden rejected the change: {e}")),
             None => Ok(out),
         }
     }
@@ -715,7 +783,14 @@ async fn caller_for(
     })
 }
 
-pub const TOOL_NAMES: [&str; 4] = ["secret_list", "secret_get", "secret_request", "secret_put"];
+pub const TOOL_NAMES: [&str; 6] = [
+    "secret_list",
+    "secret_get",
+    "secret_request",
+    "secret_put",
+    "secret_delete",
+    "secret_move",
+];
 
 /// Entry point for the `secret_*` MCP tools.
 pub async fn handle_tool(
@@ -764,7 +839,8 @@ pub async fn handle_tool(
                 "requires_approval": by_request,
                 "projects": projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
                 "hint": "secret_get NAME returns accessible secrets immediately and asks Thomas for the others. \
-                         secret_request bitwarden_project asks for a whole Bitwarden project. secret_put stores a new secret after approval.",
+                         secret_request bitwarden_project asks for a whole Bitwarden project. secret_put stores a new secret after approval; \
+                         secret_delete and secret_move remove or relocate one after approval.",
             }))
         }
         "secret_get" => {
@@ -799,6 +875,7 @@ pub async fn handle_tool(
                         note: None,
                         value_sha256: None,
                         encrypted_value: None,
+                        target_project_id: None,
                         created_at: Utc::now(),
                         resolved_at: None,
                         error: None,
@@ -886,6 +963,7 @@ pub async fn handle_tool(
                     note: None,
                     value_sha256: None,
                     encrypted_value: None,
+                    target_project_id: None,
                     created_at: Utc::now(),
                     resolved_at: None,
                     error: None,
@@ -958,6 +1036,7 @@ pub async fn handle_tool(
                     note: str_arg("note").map(str::to_string),
                     value_sha256: Some(value_sha256),
                     encrypted_value: Some(encrypt(state, value).await?),
+                    target_project_id: None,
                     created_at: Utc::now(),
                     resolved_at: None,
                     error: None,
@@ -970,6 +1049,105 @@ pub async fn handle_tool(
                 Some(r) if r.status == RequestStatus::Rejected => Err(r
                     .error
                     .unwrap_or_else(|| "Thomas declined the write.".into())),
+                Some(r) if r.status == RequestStatus::Expired => Err("The request expired.".into()),
+                _ => Ok(pending_reply(&request)),
+            }
+        }
+        "secret_delete" | "secret_move" => {
+            let kind = if name == "secret_delete" {
+                RequestKind::Delete
+            } else {
+                RequestKind::Move
+            };
+            let key = str_arg("name").ok_or("`name` is required")?.to_string();
+            let projects = bitwarden::list_projects_raw(state)
+                .await
+                .map_err(|(_, e)| e)?;
+            let names = project_names(&projects);
+            // Delete: optional `bitwarden_project` picks among duplicates.
+            // Move: `bitwarden_project` is the destination.
+            let wanted = str_arg("bitwarden_project")
+                .map(|w| {
+                    resolve_project(&projects, w)
+                        .ok_or_else(|| format!("Unknown Bitwarden project `{w}`"))
+                })
+                .transpose()?;
+            if kind == RequestKind::Move && wanted.is_none() {
+                return Err("`bitwarden_project` (the destination) is required".into());
+            }
+            let secrets = broker.list_all(state, true).await?;
+            let mut matches: Vec<_> = secrets.iter().filter(|s| s.key == key).collect();
+            if kind == RequestKind::Delete && wanted.is_some() {
+                matches.retain(|s| s.project_id == wanted);
+            }
+            let done = |id: Option<Uuid>| -> Result<Value, String> {
+                Ok(json!({
+                    "status": if kind == RequestKind::Delete { "deleted" } else { "moved" },
+                    "request_id": id,
+                }))
+            };
+            let Some(summary) = matches.first().copied() else {
+                if let Some(id) = broker.recent_approved(kind, caller.mission_id, &key).await {
+                    return done(Some(id));
+                }
+                return Err(format!(
+                    "No secret named `{key}`. Use secret_list to see names."
+                ));
+            };
+            if matches.len() > 1 {
+                return Err(format!(
+                    "`{key}` exists in several projects; pass `bitwarden_project` to pick one{}.",
+                    if kind == RequestKind::Move {
+                        " (delete the duplicate first)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if kind == RequestKind::Move && summary.project_id == wanted {
+                return done(broker.recent_approved(kind, caller.mission_id, &key).await);
+            }
+            let project_label = |id: Option<&str>| {
+                id.and_then(|id| names.get(id).cloned())
+                    .unwrap_or_else(|| "unknown".into())
+            };
+            let request = broker
+                .open_request(SecretRequest {
+                    id: Uuid::new_v4(),
+                    kind,
+                    status: RequestStatus::Pending,
+                    mission_id: caller.mission_id,
+                    mission_title: caller.mission_title.clone(),
+                    paloma_project: caller.paloma_project.clone(),
+                    key: Some(key.clone()),
+                    project_id: summary.project_id.clone(),
+                    all_projects: false,
+                    reason,
+                    note: None,
+                    value_sha256: None,
+                    encrypted_value: None,
+                    target_project_id: if kind == RequestKind::Move {
+                        wanted.clone()
+                    } else {
+                        None
+                    },
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                    error: None,
+                })
+                .await;
+            match broker.wait_resolved(request.id, APPROVAL_WAIT).await {
+                Some(r) if r.status == RequestStatus::Approved => {
+                    let mut out = done(Some(r.id))?;
+                    out["from"] = json!(project_label(summary.project_id.as_deref()));
+                    if kind == RequestKind::Move {
+                        out["to"] = json!(project_label(wanted.as_deref()));
+                    }
+                    Ok(out)
+                }
+                Some(r) if r.status == RequestStatus::Rejected => Err(r
+                    .error
+                    .unwrap_or_else(|| "Thomas declined the change.".into())),
                 Some(r) if r.status == RequestStatus::Expired => Err("The request expired.".into()),
                 _ => Ok(pending_reply(&request)),
             }
@@ -1034,6 +1212,31 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
                 "value":{"type":"string","minLength":1,"maxLength":65536},
                 "bitwarden_project":{"type":"string","minLength":1,"maxLength":200},
                 "note":{"type":"string","maxLength":2000},
+                "reason":{"type":"string","minLength":1,"maxLength":500}
+            },"additionalProperties":false}),
+        },
+        ToolDefinition {
+            name: "secret_delete".into(),
+            description: "Permanently delete a secret from Bitwarden. Always needs Thomas's approval; waits up to 20 s, \
+                          then returns `pending` — call again later. If the same name exists in several projects, \
+                          pass `bitwarden_project` to pick which copy to delete. To rename a secret: secret_get the old \
+                          name, secret_put the new one, then secret_delete the old one."
+                .into(),
+            input_schema: json!({"type":"object","required":["name","reason"],"properties":{
+                "name":{"type":"string","minLength":1,"maxLength":200},
+                "bitwarden_project":{"type":"string","minLength":1,"maxLength":200,
+                    "description":"Project holding the copy to delete; only needed when the name is duplicated."},
+                "reason":{"type":"string","minLength":1,"maxLength":500}
+            },"additionalProperties":false}),
+        },
+        ToolDefinition {
+            name: "secret_move".into(),
+            description: "Move a secret (value and note unchanged) to another Bitwarden project. Always needs Thomas's \
+                          approval; waits up to 20 s, then returns `pending` — call again later."
+                .into(),
+            input_schema: json!({"type":"object","required":["name","bitwarden_project","reason"],"properties":{
+                "name":{"type":"string","minLength":1,"maxLength":200},
+                "bitwarden_project":{"type":"string","minLength":1,"maxLength":200,"description":"Destination project."},
                 "reason":{"type":"string","minLength":1,"maxLength":500}
             },"additionalProperties":false}),
         },
@@ -1114,10 +1317,39 @@ mod tests {
             note: None,
             value_sha256: None,
             encrypted_value: Some("<encrypted>".into()),
+            target_project_id: None,
             created_at: Utc::now(),
             resolved_at: None,
             error: None,
         };
         assert!(r.public().get("encrypted_value").is_none());
+    }
+
+    #[test]
+    fn move_request_shows_kind_and_destination_to_clients() {
+        let r = SecretRequest {
+            id: Uuid::new_v4(),
+            kind: RequestKind::Move,
+            status: RequestStatus::Pending,
+            mission_id: Uuid::new_v4(),
+            mission_title: None,
+            paloma_project: None,
+            key: Some("K".into()),
+            project_id: Some("from".into()),
+            all_projects: false,
+            reason: "r".into(),
+            note: None,
+            value_sha256: None,
+            encrypted_value: None,
+            target_project_id: Some("to".into()),
+            created_at: Utc::now(),
+            resolved_at: None,
+            error: None,
+        };
+        let v = r.public();
+        assert_eq!(v["kind"], "move");
+        assert_eq!(v["target_project_id"], "to");
+        let names: Vec<_> = tool_definitions().into_iter().map(|t| t.name).collect();
+        assert!(TOOL_NAMES.iter().all(|n| names.iter().any(|d| d == n)));
     }
 }

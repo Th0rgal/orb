@@ -158,7 +158,7 @@ export interface SecretGrant {
 
 export interface SecretAccessRequest {
   id: string;
-  kind: "read" | "write";
+  kind: "read" | "write" | "delete" | "move";
   status: "pending" | "approved" | "rejected" | "expired";
   mission_id: string;
   mission_title?: string | null;
@@ -168,9 +168,16 @@ export interface SecretAccessRequest {
   all_projects: boolean;
   reason: string;
   note?: string | null;
+  /** Destination project of a move. */
+  target_project_id?: string | null;
   created_at: string;
   resolved_at?: string | null;
   error?: string | null;
+}
+
+/** Button verb for a request that changes Bitwarden, or null for a read. */
+export function secretChangeVerb(r: Pick<SecretAccessRequest, "kind">): "Store" | "Delete" | "Move" | null {
+  return r.kind === "write" ? "Store" : r.kind === "delete" ? "Delete" : r.kind === "move" ? "Move" : null;
 }
 
 export interface SecretAuditEntry {
@@ -179,7 +186,7 @@ export interface SecretAuditEntry {
   paloma_project?: string | null;
   key: string;
   project_id?: string | null;
-  via: "default" | "grant" | "write" | string;
+  via: "default" | "grant" | "write" | "delete" | "move" | string;
 }
 
 export interface SecretBrokerSnapshot {
