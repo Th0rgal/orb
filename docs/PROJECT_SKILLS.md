@@ -1,5 +1,9 @@
 # Project skills in Orb
 
+> Library skills, global skills and per-project Library selections are
+> described in [SKILLS.md](SKILLS.md). Project-file skills (this page) win over
+> Library skills that have the same name.
+
 Project skills are ordinary synchronized project files. Put each skill in
 `skills/<name>/SKILL.md`, with supporting files alongside it, for example:
 

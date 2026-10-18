@@ -18,6 +18,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 pub mod config;
 // GitHub git-credential injection so workspace agents can commit/push.
 pub mod git_credentials;
+pub mod skill_delivery;
 pub(crate) use config::write_opencode_config;
 pub use config::*;
 #[allow(unused_imports)]
@@ -260,6 +261,10 @@ pub struct Workspace {
     /// it to PATH/GH_CONFIG_DIR.
     #[serde(skip, default)]
     pub read_only_command_guard_dir: Option<PathBuf>,
+    /// Runtime-only: the mission project's Library skill list (projects.db),
+    /// set by the mission runner before preparation. Never persisted.
+    #[serde(skip, default)]
+    pub mission_project_skills: Vec<String>,
     /// Harness CLI versions last probed inside this container workspace
     /// (after harness bootstrap on build/rebuild). None = never probed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,6 +524,7 @@ impl Workspace {
             config_profile: None,
             resolved_git_credentials: None,
             read_only_command_guard_dir: None,
+            mission_project_skills: Vec::new(),
             harness_versions: None,
         }
     }
@@ -548,6 +554,7 @@ impl Workspace {
             mcps_replace_defaults: true,
             resolved_git_credentials: None,
             read_only_command_guard_dir: None,
+            mission_project_skills: Vec::new(),
             harness_versions: None,
         }
     }
@@ -753,6 +760,7 @@ impl WorkspaceStore {
                     config_profile: None,
                     resolved_git_credentials: None,
                     read_only_command_guard_dir: None,
+                    mission_project_skills: Vec::new(),
                     harness_versions: None,
                 };
 
@@ -3045,23 +3053,19 @@ async fn resolve_workspace_skill_names(
     workspace: &Workspace,
     library: &LibraryStore,
 ) -> anyhow::Result<Vec<String>> {
-    if !workspace.skills.is_empty() {
-        return Ok(workspace.skills.clone());
-    }
-
-    // Default host workspace should expose all library skills when none are explicitly configured.
-    if workspace.id == DEFAULT_WORKSPACE_ID && workspace.workspace_type == WorkspaceType::Host {
-        let skills = library.list_skills().await?;
-        let names: Vec<String> = skills.into_iter().map(|skill| skill.name).collect();
-        tracing::debug!(
-            workspace = %workspace.name,
-            count = names.len(),
-            "Using all library skills for default host workspace"
-        );
-        return Ok(names);
-    }
-
-    Ok(Vec::new())
+    let plan = skill_delivery::resolve_for_workspace(
+        &workspace.skills,
+        skill_delivery::is_default_host(workspace),
+        library,
+        &workspace.mission_project_skills,
+    )
+    .await?;
+    tracing::debug!(
+        workspace = %workspace.name,
+        skills = ?plan.skills,
+        "Resolved Library skill delivery"
+    );
+    Ok(plan.names())
 }
 
 /// Sync skills from library to workspace's `.opencode/skill/` directory.
@@ -3918,11 +3922,20 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
         &workspace.mcps,
         workspace.mcps_replace_defaults,
     );
-    let skill_allowlist = if workspace.skills.is_empty() {
+    // OpenCode's allowlist must admit every delivered Library skill (base,
+    // globals and project selections), not only the workspace's own list.
+    let resolved_allowlist: Option<Vec<String>> = if workspace.skills.is_empty() {
         None
+    } else if let Some(lib) = library {
+        Some(
+            resolve_workspace_skill_names(workspace, lib)
+                .await
+                .unwrap_or_else(|_| workspace.skills.clone()),
+        )
     } else {
-        Some(workspace.skills.as_slice())
+        Some(workspace.skills.clone())
     };
+    let skill_allowlist = resolved_allowlist.as_deref();
     let mut skill_contents: Option<Vec<SkillContent>> = None;
     let mut command_contents: Option<Vec<CommandContent>> = None;
 

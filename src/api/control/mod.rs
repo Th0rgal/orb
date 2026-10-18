@@ -14793,6 +14793,181 @@ fn bind_remote_claude_session(execution: &mut RemoteExecution, session_id: &str)
     );
 }
 
+/// Skill preparation run in the final remote cwd before the harness:
+/// (a) Library cleanup of its owned copies, (b) strict project skills,
+/// (c) best-effort Library install that never overrides an existing name.
+fn remote_skill_prefix(
+    project_skill_source: &str,
+    backend: &str,
+    library_archive: Option<&(String, String)>,
+) -> String {
+    let library_sh = shell_single_quote(include_str!("../../../shared/prepare_library_skills.sh"));
+    let mut prefix = format!(
+        "sandboxed_library_py={}; sh -c {library_sh} sandboxed-library-skills cleanup {} '' '' \"$sandboxed_library_py\"; ",
+        shell_single_quote(include_str!("../../../shared/prepare_library_skills.py")),
+        shell_single_quote(backend),
+    );
+    prefix.push_str(&format!(
+        "sh -c {} orb-project-skills {} {} {} || exit 78; ",
+        shell_single_quote(include_str!("../../../shared/prepare_project_skills.sh")),
+        shell_single_quote(project_skill_source),
+        shell_single_quote(backend),
+        shell_single_quote(include_str!("../../../shared/prepare_project_skills.py")),
+    ));
+    if let Some((path, sha)) = library_archive {
+        prefix.push_str(&format!(
+            "sh -c {library_sh} sandboxed-library-skills install {} {} {} \"$sandboxed_library_py\"; ",
+            shell_single_quote(backend),
+            shell_single_quote(path),
+            shell_single_quote(sha),
+        ));
+    }
+    prefix
+}
+
+#[cfg(test)]
+mod remote_skill_prefix_tests {
+    use super::remote_skill_prefix;
+
+    #[test]
+    fn remote_skill_prefix_orders_library_around_project_skills() {
+        let without = remote_skill_prefix("/src", "codex", None);
+        assert!(without.contains("sandboxed-library-skills cleanup 'codex'"));
+        assert!(!without.contains("sandboxed-library-skills install"));
+        let archive = ("/node/uploads/x/a.tar.gz".to_string(), "ab".repeat(32));
+        let with = remote_skill_prefix("/src", "codex", Some(&archive));
+        let cleanup = with.find("sandboxed-library-skills cleanup").unwrap();
+        let project = with.find("' orb-project-skills '").unwrap();
+        let install = with.find("sandboxed-library-skills install").unwrap();
+        assert!(cleanup < project && project < install);
+        // Project skills stay strict; Library steps never abort the job.
+        assert!(with[project..install].contains("|| exit 78"));
+        assert!(!with[install..].contains("exit 78"));
+        // The Python program is embedded once and referenced by variable.
+        assert_eq!(
+            with.matches("Install Library skills as native copies")
+                .count(),
+            1
+        );
+    }
+}
+
+/// Node uploads already holding a given Library skill archive, keyed by
+/// (node id, sha256) → absolute path on the node.
+static REMOTE_LIBRARY_SKILL_UPLOADS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<(String, String), String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Resolve, package and upload this mission's Library skills to the node.
+/// Best-effort: any failure is logged and the mission launches without them.
+async fn remote_library_skills(
+    state: &Arc<AppState>,
+    mission: &Mission,
+    node: &crate::remote_node::RemoteNodeConfig,
+) -> Option<(String, String)> {
+    let library = state.library.read().await.clone()?;
+    let (workspace_skills, default_host) = match state.workspaces.get(mission.workspace_id).await {
+        Some(ws) => (
+            ws.skills.clone(),
+            crate::workspace::skill_delivery::is_default_host(&ws),
+        ),
+        None => (Vec::new(), false),
+    };
+    let project_skills = mission
+        .project
+        .project
+        .as_deref()
+        .and_then(|slug| state.projects.get_project(slug).ok().flatten())
+        .map(|record| record.skills)
+        .unwrap_or_default();
+    let plan = match crate::workspace::skill_delivery::resolve_for_workspace(
+        &workspace_skills,
+        default_host,
+        &library,
+        &project_skills,
+    )
+    .await
+    {
+        Ok(plan) if !plan.skills.is_empty() => plan,
+        Ok(_) => return None,
+        Err(error) => {
+            tracing::warn!(mission_id = %mission.id, %error, "Library skill resolution failed; launching without Library skills");
+            return None;
+        }
+    };
+    let contents = crate::workspace::skill_delivery::load_skill_contents(
+        &plan,
+        &format!("mission-{}", mission.id),
+        &library,
+    )
+    .await;
+    let (archive, sha) = match crate::workspace::skill_delivery::build_skill_tarball(&contents) {
+        Ok(built) => built,
+        Err(error) => {
+            tracing::warn!(mission_id = %mission.id, %error, "Library skill archive failed; launching without Library skills");
+            return None;
+        }
+    };
+    let key = (node.id.clone(), sha.clone());
+    if let Some(path) = REMOTE_LIBRARY_SKILL_UPLOADS
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
+        return Some((path, sha));
+    }
+    let upload = async {
+        if archive.len() > crate::uploads::MAX_BYTES {
+            return Err(format!("archive is {} bytes", archive.len()));
+        }
+        let token = std::env::var(&node.token_env)
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or("node token unavailable")?;
+        use base64::Engine as _;
+        let body = crate::uploads::Upload {
+            name: format!("library-skills-{}.tar.gz", &sha[..12]),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&archive),
+        };
+        let response = state
+            .http_client
+            .post(format!("{}/uploads", node.base_url.trim_end_matches('/')))
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(60))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("node answered {}", response.status()));
+        }
+        let receipt: crate::uploads::Receipt = response.json().await.map_err(|e| e.to_string())?;
+        if receipt.sha256 != sha {
+            return Err("node stored a different archive".to_string());
+        }
+        Ok(receipt.path)
+    };
+    match upload.await {
+        Ok(path) => {
+            tracing::info!(
+                mission_id = %mission.id,
+                node = %node.id,
+                skills = ?plan.names(),
+                %sha,
+                "Uploaded Library skills to remote node"
+            );
+            if let Ok(mut cache) = REMOTE_LIBRARY_SKILL_UPLOADS.lock() {
+                cache.insert(key, path.clone());
+            }
+            Some((path, sha))
+        }
+        Err(error) => {
+            tracing::warn!(mission_id = %mission.id, node = %node.id, %error, "Library skill upload failed; launching without Library skills");
+            None
+        }
+    }
+}
+
 async fn submit_leased_remote_job(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -14870,12 +15045,11 @@ async fn submit_leased_remote_job(
     // Run in the final execution cwd, before any harness command. A failed
     // preparation exits the job clearly rather than starting without skills.
     if !matches!(plan, RemoteHarnessPlan::Raw { .. }) {
-        workspace_prefix.push_str(&format!(
-            "sh -c {} orb-project-skills {} {} {} || exit 78; ",
-            shell_single_quote(include_str!("../../../shared/prepare_project_skills.sh")),
-            shell_single_quote(&project_skill_source),
-            shell_single_quote(&mission.backend),
-            shell_single_quote(include_str!("../../../shared/prepare_project_skills.py")),
+        let library_archive = remote_library_skills(state, mission, &node).await;
+        workspace_prefix.push_str(&remote_skill_prefix(
+            &project_skill_source,
+            &mission.backend,
+            library_archive.as_ref(),
         ));
     }
     let context_prompt = match plan {

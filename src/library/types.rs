@@ -260,6 +260,73 @@ pub enum SkillSource {
     },
 }
 
+/// Delivery scope of a Library skill.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SkillScope {
+    /// Delivered to every mission whose audience matches.
+    Global,
+    /// Delivered only when selected (workspace or project skill list).
+    #[default]
+    OnDemand,
+}
+
+pub const SKILL_AUDIENCE_MISSION: &str = "mission";
+
+pub fn default_skill_audience() -> Vec<String> {
+    vec!["mission".to_string(), "local".to_string()]
+}
+
+/// Delivery metadata parsed from `metadata.sandboxed` in SKILL.md frontmatter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillDeliveryMeta {
+    pub audience: Vec<String>,
+    pub scope: SkillScope,
+}
+
+impl SkillDeliveryMeta {
+    pub fn targets_missions(&self) -> bool {
+        self.audience.iter().any(|a| a == SKILL_AUDIENCE_MISSION)
+    }
+}
+
+/// Parse `metadata.sandboxed.{audience,scope}`; absent values fall back to
+/// `audience: [mission, local]` and `scope: on-demand`.
+pub fn extract_skill_delivery(frontmatter: &Option<serde_yaml::Value>) -> SkillDeliveryMeta {
+    let sandboxed = frontmatter
+        .as_ref()
+        .and_then(|fm| fm.get("metadata"))
+        .and_then(|m| m.get("sandboxed"));
+    let audience = sandboxed
+        .and_then(|s| s.get("audience"))
+        .and_then(|v| match v {
+            serde_yaml::Value::Sequence(seq) => Some(
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.trim().to_ascii_lowercase()))
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>(),
+            ),
+            serde_yaml::Value::String(s) => Some(
+                s.split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_else(default_skill_audience);
+    let scope = match sandboxed
+        .and_then(|s| s.get("scope"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("global") => SkillScope::Global,
+        _ => SkillScope::OnDemand,
+    };
+    SkillDeliveryMeta { audience, scope }
+}
+
 /// Skill summary for listing (without full content).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSummary {
@@ -276,6 +343,16 @@ pub struct SkillSummary {
     /// Shell commands to run during workspace setup (e.g., install dependencies)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub setup_commands: Vec<String>,
+    /// Who should receive this skill (`metadata.sandboxed.audience`).
+    /// Absent in frontmatter => `[mission, local]`.
+    #[serde(default = "default_skill_audience")]
+    pub audience: Vec<String>,
+    /// Delivery scope (`metadata.sandboxed.scope`): `global` or `on-demand`.
+    #[serde(default)]
+    pub scope: SkillScope,
+    /// Number of lines in SKILL.md.
+    #[serde(default)]
+    pub line_count: usize,
 }
 
 /// Full skill with content.
@@ -302,6 +379,16 @@ pub struct Skill {
     /// Shell commands to run during workspace setup (e.g., install dependencies)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub setup_commands: Vec<String>,
+    /// Who should receive this skill (`metadata.sandboxed.audience`).
+    /// Absent in frontmatter => `[mission, local]`.
+    #[serde(default = "default_skill_audience")]
+    pub audience: Vec<String>,
+    /// Delivery scope (`metadata.sandboxed.scope`): `global` or `on-demand`.
+    #[serde(default)]
+    pub scope: SkillScope,
+    /// Number of lines in SKILL.md.
+    #[serde(default)]
+    pub line_count: usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -921,4 +1008,39 @@ pub fn extract_implicit_params(body: &str, explicit_params: &[CommandParam]) -> 
     }
 
     result
+}
+
+#[cfg(test)]
+mod skill_delivery_tests {
+    use super::*;
+
+    fn meta(md: &str) -> SkillDeliveryMeta {
+        let (fm, _) = parse_frontmatter(md);
+        extract_skill_delivery(&fm)
+    }
+
+    #[test]
+    fn skill_delivery_defaults_when_absent() {
+        let m = meta("---\nname: a\ndescription: x\n---\nbody");
+        assert_eq!(m.audience, vec!["mission", "local"]);
+        assert_eq!(m.scope, SkillScope::OnDemand);
+        assert!(m.targets_missions());
+        let m = meta("no frontmatter");
+        assert_eq!(m.audience, vec!["mission", "local"]);
+    }
+
+    #[test]
+    fn skill_delivery_parses_metadata() {
+        let m = meta(
+            "---\nname: a\nmetadata:\n  sandboxed:\n    audience: [coordinator]\n    scope: global\n---\n",
+        );
+        assert_eq!(m.audience, vec!["coordinator"]);
+        assert_eq!(m.scope, SkillScope::Global);
+        assert!(!m.targets_missions());
+        let m = meta("---\nmetadata:\n  sandboxed:\n    audience: [Mission, local]\n---\n");
+        assert!(m.targets_missions());
+        assert_eq!(m.scope, SkillScope::OnDemand);
+        let m = meta("---\nmetadata:\n  other: 1\n---\n");
+        assert_eq!(m.audience, default_skill_audience());
+    }
 }

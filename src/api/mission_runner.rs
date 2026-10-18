@@ -4201,6 +4201,17 @@ pub(crate) async fn run_mission_turn(
     } else {
         None
     };
+    // The project's Library skill selection joins this mission's delivery set.
+    workspace.mission_project_skills = project
+        .as_deref()
+        .filter(|p| super::projects_overview::is_plain_key(p))
+        .map(|p| {
+            super::projects_store::read_project_skills(
+                &config.working_dir.join(".sandboxed-sh/projects.db"),
+                p,
+            )
+        })
+        .unwrap_or_default();
     let mut visible_source = String::new();
     let context_manifest = if let Some(project) = project {
         if !super::projects_overview::is_plain_key(&project) {
@@ -10318,6 +10329,7 @@ mod tests {
             config_profile: None,
             resolved_git_credentials: None,
             read_only_command_guard_dir: None,
+            mission_project_skills: Vec::new(),
             harness_versions: None,
         };
         let dest =
@@ -10498,6 +10510,7 @@ mod tests {
             config_profile: None,
             resolved_git_credentials: None,
             read_only_command_guard_dir: None,
+            mission_project_skills: Vec::new(),
             harness_versions: None,
         }
     }
