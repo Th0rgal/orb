@@ -40,8 +40,9 @@ export function syncSecretRequestNotices(list: SecretAccessRequest[], openSecret
   notify({ key: KEY, kind: "info", variant: "secret", title: "", content: () => <SecretRequestsCard /> });
 }
 
-/** Reads of one named secret and writes are approvable here; whole-project reads need a scope (Secrets page). */
-const approvable = (r: SecretAccessRequest) => r.kind === "write" || !!r.key;
+/** Every request is approvable here, with the Secrets page's default scope. */
+const approvable = (_r: SecretAccessRequest) => true;
+const readScope = (r: SecretAccessRequest) => (r.key ? "secret" : r.project_id ? "project" : "all");
 
 function act(requests: SecretAccessRequest[], approve: boolean) {
   const ids = requests.map((r) => r.id);
@@ -54,7 +55,7 @@ function act(requests: SecretAccessRequest[], approve: boolean) {
       try {
         if (!approve) await rejectSecretRequest(r.id);
         else if (r.kind === "write") await approveSecretRequest(r.id);
-        else await approveSecretRequest(r.id, "secret");
+        else await approveSecretRequest(r.id, readScope(r));
       } catch (e) {
         hide([r.id], false); // still pending: show it again
         syncSecretRequestNotices(pending(), openSecretsPage);
