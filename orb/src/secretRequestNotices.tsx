@@ -1,5 +1,5 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
-import { approveSecretRequest, rejectSecretRequest, secretChangeVerb, type SecretAccessRequest } from "./bitwardenApi";
+import { approveSecretRequest, listBitwardenProjects, rejectSecretRequest, secretChangeVerb, type SecretAccessRequest } from "./bitwardenApi";
 import { ApprovalCancelled, graceUntil } from "./deviceApproval";
 import { CloseIcon, TrashIcon } from "./icons";
 import { dismissToast, notify } from "./toast";
@@ -15,6 +15,10 @@ const [pending, setPending] = createSignal<SecretAccessRequest[]>([]);
 /** Closed with the X, or being approved/denied right now. */
 const [hidden, setHidden] = createSignal<ReadonlySet<string>>(new Set());
 let openSecretsPage = () => {};
+/** Bitwarden project names, loaded once a delete or move needs them. */
+const [projectNames, setProjectNames] = createSignal<Record<string, string> | null>(null);
+let projectsLoading = false;
+const projectLabel = (id?: string | null) => (id && projectNames()?.[id]) || (id ? id.slice(0, 8) : "unknown project");
 
 const visible = () => pending().filter((r) => !hidden().has(r.id));
 const hide = (ids: string[], on: boolean) =>
@@ -32,6 +36,12 @@ let lastIds = "";
 export function syncSecretRequestNotices(list: SecretAccessRequest[], openSecrets: () => void) {
   openSecretsPage = openSecrets;
   setPending(list);
+  if (!projectsLoading && list.some((r) => !bulkApprovable(r))) {
+    projectsLoading = true;
+    listBitwardenProjects()
+      .then((ps) => setProjectNames(Object.fromEntries(ps.map((p) => [p.id, p.name]))))
+      .catch(() => { projectsLoading = false; });
+  }
   const live = new Set(list.map((r) => r.id));
   setHidden((prev) => new Set([...prev].filter((id) => live.has(id))));
   const ids = visible().map((r) => r.id).join(",");
@@ -42,6 +52,8 @@ export function syncSecretRequestNotices(list: SecretAccessRequest[], openSecret
 
 /** Every request is approvable here, with the Secrets page's default scope. */
 const approvable = (_r: SecretAccessRequest) => true;
+/** Deletes and moves are approved one by one, never through "Approve all". */
+const bulkApprovable = (r: SecretAccessRequest) => r.kind === "read" || r.kind === "write";
 const readScope = (r: SecretAccessRequest) => (r.key ? "secret" : r.project_id ? "project" : "all");
 
 function act(requests: SecretAccessRequest[], approve: boolean) {
@@ -72,6 +84,8 @@ function act(requests: SecretAccessRequest[], approve: boolean) {
 }
 
 function label(r: SecretAccessRequest) {
+  if (r.key && r.kind === "delete") return `${r.key} from ${projectLabel(r.project_id)}`;
+  if (r.key && r.kind === "move") return `${r.key} from ${projectLabel(r.project_id)} to ${projectLabel(r.target_project_id)}`;
   if (r.key) return r.key;
   return r.all_projects ? "Every secret project" : "A whole secret project";
 }
@@ -83,7 +97,7 @@ function SecretRequestsCard() {
   const list = visible;
   const one = () => list().length === 1 ? list()[0] : undefined;
   const missions = () => [...new Set(list().map((r) => r.mission_title || `Mission ${r.mission_id.slice(0, 8)}`))];
-  const ready = () => list().filter(approvable);
+  const ready = () => list().length === 1 ? list().filter(approvable) : list().filter(bulkApprovable);
   const graceLeft = () => Math.max(0, Math.floor(graceUntil() - now() / 1000));
   const graceText = () => {
     const s = graceLeft();

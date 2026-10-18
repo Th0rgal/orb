@@ -1107,6 +1107,19 @@ pub async fn handle_tool(
             if kind == RequestKind::Move && summary.project_id == wanted {
                 return done(broker.recent_approved(kind, caller.mission_id, &key).await);
             }
+            if kind == RequestKind::Move {
+                // A move must not turn into a read: refuse moving a secret this
+                // mission cannot read into a project it can.
+                let access = broker.access_for(state, &caller).await;
+                if !access.allows(&key, summary.project_id.as_deref())
+                    && access.allows(&key, wanted.as_deref())
+                {
+                    return Err(format!(
+                        "This mission could read `{key}` after the move; use secret_get to ask for it, \
+                         or ask Thomas to move it himself."
+                    ));
+                }
+            }
             let project_label = |id: Option<&str>| {
                 id.and_then(|id| names.get(id).cloned())
                     .unwrap_or_else(|| "unknown".into())
