@@ -13357,6 +13357,10 @@ fn positional_prompt(prompt: &str) -> String {
 /// its own chain/passthrough resolution. The stock `openai` provider only
 /// advertises OpenAI's catalog and would reject non-GPT ids before any
 /// request.
+/// Conservative window for proxy-routed models: every chain member offers at least this.
+const REMOTE_OPENCODE_CONTEXT_LIMIT: u64 = 200_000;
+const REMOTE_OPENCODE_OUTPUT_LIMIT: u64 = 32_000;
+
 pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -13370,7 +13374,10 @@ pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_j
             "builtin": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Builtin",
-                "models": { model: { "name": model } },
+                // A declared window lets OpenCode compact before the prompt outgrows the
+                // smallest member of a chain (mission 64619ac7 overflowed the Spark's 262k
+                // window with 32k output reserved and no limit known, then hung).
+                "models": { model: { "name": model, "limit": { "context": REMOTE_OPENCODE_CONTEXT_LIMIT, "output": REMOTE_OPENCODE_OUTPUT_LIMIT } } },
                 "options": {
                     "baseURL": format!("{}/v1", api_base_url.trim_end_matches('/')),
                     "apiKey": format!("{{env:{REMOTE_PROXY_KEY_ENV}}}")
@@ -40695,6 +40702,14 @@ Investigate <service/> failures.
         let execution = remote_execution_for_plan(&resumed, "https://core.example", "test");
         assert!(execution.command.contains(&format!("--resume '{id}'")));
         assert!(!execution.command.contains("--session-id"));
+    }
+
+    #[test]
+    fn remote_opencode_config_declares_a_context_limit() {
+        let config = remote_opencode_config("private", "https://core.example");
+        let limit = &config["provider"]["builtin"]["models"]["private"]["limit"];
+        assert_eq!(limit["context"], 200_000);
+        assert_eq!(limit["output"], 32_000);
     }
 
     #[test]
