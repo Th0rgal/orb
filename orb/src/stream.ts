@@ -73,7 +73,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
     case "thinking":
       return d({ content: ev.content, done: ev.metadata?.done === true });
     case "user_message":
-      return d({ id: ev.event_id ?? undefined, content: ev.content, queued: ev.metadata?.queued === true, source: ev.metadata?.source, messages: ev.metadata?.messages });
+      return d({ id: ev.event_id ?? undefined, content: ev.content, queued: ev.metadata?.queued === true, source: ev.metadata?.source, messages: ev.metadata?.messages, at: ev.timestamp });
     case "assistant_message":
     case "assistant_message_canonical":
       // Exact generated remote-job status rows, not ordinary assistant prose.

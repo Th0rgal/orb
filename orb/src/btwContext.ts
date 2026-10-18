@@ -61,7 +61,20 @@ export async function archiveParts(name:string,rows:string[],write:(name:string,
  }}
  if(chunk.length||!paths.length)await flush();return paths;
 }
-export async function prepareBtwContext(source:Mission,visible:string,destination:string,previous?:ConversationCursor,sideHistory:SideExchange[]=[],localRoot?:string){
+/** Core and nodes give side agents the sandboxed MCP, whose get_mission_events reads the parent
+ * conversation on demand. Send only the delta since the last side question instead of
+ * downloading every event and re-uploading it as an archive on each new session. */
+export async function lazyBtwContext(source:Mission,visible:string,previous?:ConversationCursor,sideHistory:SideExchange[]=[]){
+ const events=await conversationEvents(source.id,previous?.sequence,1);
+ const snapshot=await contextSnapshot(source,events,visible,previous?.archive?undefined:previous);
+ const sides=sideHistory.length?`\nEarlier side questions in this conversation (most recent last):\n${byteTail(sideHistory.map(e=>`Q: ${e.question}\nA: ${e.answer}`).join('\n\n'),4000)}\n`:'';
+ return {cursor:{...snapshot.cursor},context:`Mission: ${source.id}\nTitle: ${source.title??''}\nStatus: ${source.status}\nParent conversation: not attached. Call the get_mission_events tool with mission_id="${source.id}" (view "transcript" for messages, "trace" for tool calls; before_seq pages back, since_seq reads newer events; latest sequence ${snapshot.cursor.sequence}). Read only what the question needs.${sides}\n${snapshot.summary}`};
+}
+export function prepareBtwContext(source:Mission,visible:string,destination:string,previous?:ConversationCursor,sideHistory:SideExchange[]=[],localRoot?:string){
+ return destination!=='local'?lazyBtwContext(source,visible,previous,sideHistory):archiveBtwContext(source,visible,destination,previous,sideHistory,localRoot);
+}
+/** Full archive snapshot, for side agents on this computer that have no Core MCP. */
+export async function archiveBtwContext(source:Mission,visible:string,destination:string,previous?:ConversationCursor,sideHistory:SideExchange[]=[],localRoot?:string){
  const hasStagedArchive=!!previous?.archive?.startsWith('.paloma/conversation/')&&!sideHistory.length;
  let events=await conversationEvents(source.id,hasStagedArchive?previous!.sequence:undefined,hasStagedArchive?1:undefined);
  let snapshot=await contextSnapshot(source,events,visible,previous);

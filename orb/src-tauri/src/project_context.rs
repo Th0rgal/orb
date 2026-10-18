@@ -69,6 +69,49 @@ pub fn project_context_status(request: Request) -> Result<serde_json::Value, Str
     }
     Ok(serde_json::json!({"root":replica.store.root,"state":state}))
 }
+/// Background context workers for this account: one per project, kept alive after Orb quits
+/// so the local replica stays fresh. Listed in Settings so they are never invisible.
+#[tauri::command]
+pub fn project_context_workers(request: Request) -> Result<serde_json::Value, String> {
+    let replica = replica(&Request { project: "list".into(), ..request })?;
+    let account = replica
+        .store
+        .metadata
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("Invalid context root")?;
+    let mut rows = Vec::new();
+    if account.exists() {
+        for item in std::fs::read_dir(account).map_err(|e| e.to_string())? {
+            let path = item.map_err(|e| e.to_string())?.path();
+            let state = path.join("state");
+            let Some(project) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else { continue };
+            if !state.is_dir() || project == "list" {
+                continue;
+            }
+            let connected = state.join("connection.json").exists();
+            // A held lock means a live worker owns this replica.
+            let running = std::fs::OpenOptions::new()
+                .write(true)
+                .open(state.join("worker.lock"))
+                .map(|lock| lock.try_lock_exclusive().is_err())
+                .unwrap_or(false);
+            rows.push(serde_json::json!({"project": project, "connected": connected, "running": running}));
+        }
+    }
+    rows.sort_by(|a, b| a["project"].as_str().cmp(&b["project"].as_str()));
+    Ok(serde_json::json!({"workers": rows}))
+}
+/// Stops one project's worker until the project is used again (removing its config ends the loop).
+#[tauri::command]
+pub fn project_context_stop(request: Request) -> Result<(), String> {
+    let replica = replica(&request)?;
+    let config = replica.store.metadata.join("connection.json");
+    if config.exists() {
+        std::fs::remove_file(config).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 #[tauri::command]
 pub fn project_context_disconnect(request: Request) -> Result<(), String> {
     let replica = replica(&request)?;

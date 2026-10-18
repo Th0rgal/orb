@@ -109,7 +109,7 @@ export async function rememberBinding(id: string, binding: LocalBinding) {
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
-function tauriInvoke(): Invoke | null {
+export function tauriInvoke(): Invoke | null {
   const g = window as unknown as {
     __TAURI__?: { core?: { invoke?: Invoke } };
     __TAURI_INTERNALS__?: { invoke?: Invoke };

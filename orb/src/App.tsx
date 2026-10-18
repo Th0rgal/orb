@@ -63,6 +63,11 @@ import { MenuList, PopupMenu, type MenuEntry } from "./Menu";
 import { MdSource, MdView, mdSource, safeHref, setMdSource, toggleMdSource } from "./Markdown";
 import { streamMission, heldAfterHistory, type StreamEvent } from "./stream";
 import { latestChecklist, localActivitiesToStreamItems } from "./workModel";
+import { TurnStatus } from "./TurnStatus";
+import { applyPendingMoves } from "./missionMove";
+import { Chapters } from "./Chapters";
+import { Changes } from "./Changes";
+import { TurnRecap } from "./TurnRecap";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
@@ -1382,7 +1387,7 @@ export default function App() {
       setCompletedMissions(completed);
       const freshIds = new Set(fresh.map(m => m.id));
       const vanished = prev.filter(m => !freshIds.has(m.id));
-      setMissions((current) => mergeById(current.filter(m => !isMissionDeleting(m.id)), fresh));
+      setMissions((current) => applyPendingMoves(mergeById(current.filter(m => !isMissionDeleting(m.id)), fresh)));
       recordMissions(fresh);
       if (vanished.length) {
         const slugs = [...new Set(vanished.map(m => m.project?.trim()).filter((s): s is string => !!s))];
@@ -1979,6 +1984,12 @@ export default function App() {
       setNewAgentRevision({ text: detail.prompt });
     };
     window.addEventListener("orb:open-page", onOpenPage);
+    const onMoved = (e: Event) => {
+      const { id, project, tags } = (e as CustomEvent<{ id: string; project: string | null; tags: string[] }>).detail;
+      setMissions(prev => prev.map(m => m.id === id ? { ...m, project, tags } : m));
+    };
+    window.addEventListener("orb:mission-moved", onMoved);
+    onCleanup(() => window.removeEventListener("orb:mission-moved", onMoved));
     window.addEventListener("orb:debug-cron", onDebugCron);
     onCleanup(() => {
       window.removeEventListener("orb:open-page", onOpenPage);
@@ -2915,7 +2926,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     el.classList.add("landing");
     const land = () => el.scrollTo({ top: el.scrollHeight });
     land();
-    requestAnimationFrame(() => { land(); requestAnimationFrame(() => { land(); el.classList.remove("landing"); }); });
+    // rAF can be throttled (background window, headless WebKit): never leave the thread hidden.
+    let shown = false;
+    const show = () => { if (shown) return; shown = true; land(); el.classList.remove("landing"); };
+    const fallback = setTimeout(show, 80);
+    requestAnimationFrame(() => { land(); requestAnimationFrame(() => { clearTimeout(fallback); show(); }); });
   };
   const scrollIfPinned = () => {
     if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) scroller?.scrollTo({ top: scroller.scrollHeight });
@@ -3507,6 +3522,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
 
   return (
     <>
+      <div class="mission-tools"><Changes items={viewItems()} githubPr={mission()?.github_pr} /><Chapters items={viewItems()} scroller={() => scroller} /></div>
       <div
         class="scroll"
         ref={scroller}
@@ -3539,7 +3555,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
-            <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
               <div class="resend-status" role="status">{row().state==='error' ? row().error : row().state==='sending' ? (row().waiting ? "Sending · queued after the current turn…" : "Sending…") : row().waiting ? "Queued after the current turn" : "Sent"}
@@ -3577,6 +3594,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>
           <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => setOptimisticList(prev => prev.filter(item => item.id !== id))} onEdit={row=>void queuedEdit.start(row)}/>
+          <Show when={busy() && activity() && !sendingImmediate()}><TurnStatus items={viewItems()} /></Show>
           <Composer
             allowConcurrentSend
             revision={sideRevision()}

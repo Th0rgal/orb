@@ -444,6 +444,11 @@ export function isSubagentMission(
 }
 
 export type InboxScope = { includeAutonomous?: boolean };
+/** Working missions the Inbox hides because autonomous agents are filtered out. */
+export function hiddenAutonomousWorking(missions: ReadonlyArray<Mission>, includeAutonomous: boolean): number {
+  if (includeAutonomous) return 0;
+  return missions.filter((m) => WORKING_STATUSES.has(m.status) && isAutonomousInboxMission(m) && isInInboxScope(m, { includeAutonomous: true })).length;
+}
 
 /** Creation provenance, not the source of the latest message (which may be a watchdog). */
 export function isAutonomousInboxMission(mission: Mission): boolean {

@@ -4,8 +4,10 @@ import { getHermesSettings, updateHermesSettings, type HermesSettingsState } fro
 import { isConnected } from "./api";
 import { Select } from "./Select";
 import { ProviderLogo } from "./ProviderLogo";
+import { MdView } from "./Markdown";
 
 export function HermesSettings() {
+  const [soulPreview, setSoulPreview] = createSignal(false);
   const [state, setState] = createSignal<HermesSettingsState | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [saving, setSaving] = createSignal(false);
@@ -352,19 +354,26 @@ export function HermesSettings() {
                         />
                       </div>
                     </div>
-                    <div class="s-row" style={{ "flex-direction": "column", "align-items": "stretch", gap: "8px" }}>
-                      <div class="s-row-text">
-                        <div class="s-row-title">Persona &amp; instructions (SOUL.md)</div>
-                        <div class="s-row-desc">{s().soul_path}</div>
+                    <div class="s-row soul-row">
+                      <div class="soul-head">
+                        <div class="s-row-text">
+                          <div class="s-row-title">Persona &amp; instructions</div>
+                          <div class="s-row-desc"><code>{s().soul_path}</code> · {soulMarkdown().split("\n").length} lines · {soulMarkdown().length.toLocaleString()} chars<Show when={soulMarkdown() !== s().soul_markdown}> · <span class="soul-edited">Edited</span></Show></div>
+                        </div>
+                        <div class="seg soul-mode" role="tablist" aria-label="SOUL.md view">
+                          <button type="button" role="tab" aria-selected={!soulPreview()} class={!soulPreview() ? "on" : ""} onClick={() => setSoulPreview(false)}>Edit</button>
+                          <button type="button" role="tab" aria-selected={soulPreview()} class={soulPreview() ? "on" : ""} onClick={() => setSoulPreview(true)}>Preview</button>
+                        </div>
                       </div>
-                      <textarea
-                        class="s-input"
-                        aria-label="SOUL.md content"
-                        rows={8}
-                        style={{ width: "100%", "font-family": "var(--mono)", "font-size": "12px", resize: "vertical" }}
-                        value={soulMarkdown()}
-                        onInput={e => setSoulMarkdown(e.currentTarget.value)}
-                      />
+                      <Show when={!soulPreview()} fallback={<div class="soul-preview"><MdView text={soulMarkdown()} /></div>}>
+                        <textarea
+                          class="soul-editor"
+                          aria-label="SOUL.md content"
+                          spellcheck={false}
+                          value={soulMarkdown()}
+                          onInput={e => setSoulMarkdown(e.currentTarget.value)}
+                        />
+                      </Show>
                     </div>
                     <div class="s-row">
                       <span class="s-row-desc" role="status">{notice()}</span>

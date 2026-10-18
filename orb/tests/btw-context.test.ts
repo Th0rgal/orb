@@ -1,5 +1,5 @@
 import {it,expect,vi,afterEach} from 'vitest';
-import {contextSnapshot,publicEvents,conversationEvents,prepareBtwContext} from '../src/btwContext';
+import {contextSnapshot,publicEvents,conversationEvents,archiveBtwContext} from '../src/btwContext';
 import type {Mission} from '../src/api';
 import {api} from '../src/api';
 import {transferFile} from '../src/uploads';
@@ -30,7 +30,7 @@ it('paginates the entire fixed snapshot, not just the latest 4000 events',async(
 });
 it('uploads readable archives to the selected machine and returns their manifest, not inline history',async()=>{
  vi.mocked(api).mockResolvedValueOnce([event(1,'tool_result','full details')]).mockResolvedValueOnce([]);
- const result=await prepareBtwContext(source,'Latest','old-agent');
+ const result=await archiveBtwContext(source,'Latest','old-agent');
  expect(result.context).toContain('@conversation: .paloma/conversation/00000000-0000-0000-0000-000000000001/conversation.json');
  expect(result.context).not.toContain('x'.repeat(100));
  const calls=vi.mocked(transferFile).mock.calls;
@@ -42,20 +42,20 @@ it('resets the cursor when an event log is replaced',async()=>{
 });
 it('reuses the archive when no events or visible text changed',async()=>{
  vi.mocked(api).mockResolvedValueOnce([event(1)]).mockResolvedValueOnce([]);
- const first=await prepareBtwContext(source,'Latest','old-agent');
+ const first=await archiveBtwContext(source,'Latest','old-agent');
  vi.mocked(api).mockResolvedValueOnce([event(1)]);
- const second=await prepareBtwContext(source,'Latest','old-agent',first.cursor);
+ const second=await archiveBtwContext(source,'Latest','old-agent',first.cursor);
  expect(transferFile).toHaveBeenCalledTimes(3);
  expect(second.cursor.archive).toBe(first.cursor.archive);
  expect(second.context).toContain('No new public events.');
 });
 it('stops paginating at previous.sequence and reuses the staged archive when new events arrive',async()=>{
  vi.mocked(api).mockResolvedValueOnce([event(1),event(2)]).mockResolvedValueOnce([]);
- const first=await prepareBtwContext(source,'Latest','old-agent');
+ const first=await archiveBtwContext(source,'Latest','old-agent');
  expect(vi.mocked(api)).toHaveBeenCalledTimes(2);
  expect(transferFile).toHaveBeenCalledTimes(3);
  vi.mocked(api).mockResolvedValueOnce([event(2),event(3,'tool_result','fresh update')]);
- const second=await prepareBtwContext(source,'Latest','old-agent',first.cursor);
+ const second=await archiveBtwContext(source,'Latest','old-agent',first.cursor);
  expect(vi.mocked(api)).toHaveBeenCalledTimes(3);
  expect(transferFile).toHaveBeenCalledTimes(3);
  expect(second.cursor.archive).toBe(first.cursor.archive);
@@ -68,7 +68,7 @@ it('preserves large Unicode tool results byte-for-byte across bounded archive pa
  try {
   const content='🕊'.repeat(2200000);
   vi.mocked(api).mockResolvedValueOnce([event(1,'tool_result',content)]).mockResolvedValueOnce([]);
-  await prepareBtwContext(source,'Latest','core');
+  await archiveBtwContext(source,'Latest','core');
   const files=vi.mocked(transferFile).mock.calls.map(([s])=>s.file!);
   const parts=files.filter(f=>f.name.startsWith('events.jsonl'));
   expect(parts.length).toBeGreaterThan(1);expect(parts.every(f=>f.size<=8*1024*1024)).toBe(true);
@@ -84,10 +84,22 @@ it('writes local archives inside the owning workspace without external uploads',
  try {
   const {writeLocalFiles}=await import('../src/localAgents');
   vi.mocked(api).mockResolvedValueOnce([event(1)]).mockResolvedValueOnce([]);
-  const result=await prepareBtwContext(source,'Latest','local',undefined,[],'/owned/workspace');
+  const result=await archiveBtwContext(source,'Latest','local',undefined,[],'/owned/workspace');
   expect(transferFile).not.toHaveBeenCalled();
   expect(result.cursor.archive).toMatch(/^\.paloma\/conversation\/[0-9a-f-]+\/conversation.json$/);
   expect(writeLocalFiles).toHaveBeenCalledTimes(3);
   expect(vi.mocked(writeLocalFiles).mock.calls.every(([root,files])=>root==='/owned/workspace'&&files.every(f=>f.rel.startsWith('.paloma/conversation/')))).toBe(true);
  }finally{vi.unstubAllGlobals();}
+});
+
+it("remote side agents get only the delta and a get_mission_events pointer, no archive upload", async () => {
+  const { lazyBtwContext } = await import("../src/btwContext");
+  const api = await import("../src/api");
+  const spy = vi.spyOn(api, "api").mockResolvedValueOnce([{ id: 1, sequence: 7, event_type: "assistant_message", timestamp: "", content: "Done with step 2" }]).mockResolvedValue([]);
+  const out = await lazyBtwContext({ id: "m1", title: "T", status: "active", history: [] } as never, "visible", { sequence: 5, visibleHash: "x" });
+  expect(out.context).toContain('get_mission_events tool with mission_id="m1"');
+  expect(out.context).toContain("Done with step 2");
+  expect(out.context).not.toContain("@conversation");
+  expect(out.cursor.sequence).toBe(7);
+  spy.mockRestore();
 });

@@ -3,7 +3,7 @@ import { deferredMessages } from "./deferredMessages";
 import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
-  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean }
+  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
   | { kind: "text"; key: string; text: string; live: boolean }
   | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean }
@@ -108,12 +108,12 @@ export class TranscriptReducer {
           for (const [key, position] of map) if (position > index) map.set(key, position - 1);
         }
         this.users.set(messageId!, this.items.length);
-        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true });
+        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, at: typeof d.at === "string" ? d.at : previous.at });
         return;
       }
       if (!queued) { this.close(); this.lastFinal = undefined; }
       if (messageId) this.users.set(messageId, this.items.length);
-      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, source, queued, attached: d.attached === true, receipt: d.receipt === true });
+      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(typeof d.at === "string" ? { at: d.at } : {}) });
       return;
     }
     const id = ev.eventId ?? (typeof d.id === "string" ? d.id : undefined);

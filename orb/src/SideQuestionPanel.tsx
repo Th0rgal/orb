@@ -40,7 +40,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  // The thread opens at its end, like the conversation, and follows new
  // text only while the reader is near the end.
  let shown='';
- createEffect(()=>{answer();history();const now=open()?loadedKey():'';const opened=now!==shown;shown=now;
+ createEffect(()=>{answer();history();busy();btwActivities(p.mission).length;const now=open()?loadedKey():'';const opened=now!==shown;shown=now;
   if(!scroll)return;const toEnd=()=>{if(scroll)scroll.scrollTop=scroll.scrollHeight;};
   if(opened)requestAnimationFrame(toEnd);
   else if(scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<120)queueMicrotask(toEnd);});
@@ -151,7 +151,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setPreparing(false);
   const current=key(),missionId=p.mission,activeTurnId=turnId(),context=sideContext(p.items,true),controller=new AbortController(),launchController=new AbortController();abort=controller;launchAbort=launchController;
   let attachments:SideAttachment[];
-  setBusy(true);setRunStatus('Preparing conversation snapshot…');
+  setBusy(true);setRunStatus('Sending…');
   try { attachments=retryAttachments??await sideAttachments(images,files); }
   catch(e){setBusy(false);setRunStatus('');throw e;}
   if(launchController.signal.aborted)return false;
