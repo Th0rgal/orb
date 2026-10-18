@@ -1,18 +1,16 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { Select } from "./Select";
+import { ConfirmDialog, Field, NameDialog } from "./Dialog";
 import {
   connectionVersion,
-  getLibrarySkill,
   getRemoteNodes,
   isConnected,
   listLibrarySkills,
   listProjectFiles,
   listProjects,
   readProjectFile,
-  saveLibrarySkill,
-  writeProjectFile,
-  mkdirProjectFile,
+  type LibrarySkill,
   type LibrarySkillSummary,
   type ProjectSummary,
   type RemoteNodeView,
@@ -22,12 +20,17 @@ import {
   localSkillsStatus,
   localSkillsSync,
   refreshLocalAgents,
-  type DiscoveredSkill,
   type HarnessSkillTarget,
   type LocalSkillsReport,
+  type SkillSourceRef,
   type SyncSkillPayload,
 } from "./localAgents";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
+import { AUDIENCES, newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
+import { buildSkillRows, filterSkillRows, type ProblemFilter, type ProjectContextSkill, type SkillRow } from "./skillRows";
+import { deleteLibrarySkill, fetchLibrarySkill, putLibrarySkill, putSkillFile, readSkillFile } from "./skillsApi";
+import { SkillBadges, SkillDetail } from "./SkillDetail";
+import { SkillDeliveryPreview } from "./SkillDelivery";
 
 export interface HarnessCatalogRow {
   id: string;
@@ -45,28 +48,6 @@ export interface HarnessCatalogRow {
   statusLabel: string;
   mechanism: string;
   warning?: string;
-}
-
-export interface UnifiedSkillEntry {
-  name: string;
-  description: string;
-  origin: "Library" | "Paloma" | "Agent Skills" | "Identity" | "User";
-  originDetail: string;
-  harnesses: string[];
-  inLibrary: boolean;
-  contentPreview?: string | null;
-}
-
-export interface ProjectSkillGroup {
-  slug: string;
-  title: string;
-  skills: Array<{
-    name: string;
-    path: string;
-    description?: string;
-  }>;
-  loading?: boolean;
-  error?: string;
 }
 
 const HARNESS_META: Record<
@@ -162,81 +143,104 @@ export function rememberKnownSkillNames(names: Iterable<string>) {
   cachedSkillNames = [...merged].sort();
 }
 
-function classifyOrigin(raw: string, inLibrary: boolean): UnifiedSkillEntry["origin"] {
-  const lower = raw.toLowerCase();
-  if (lower.includes("identity")) return "Identity";
-  if (lower.includes("paloma")) return "Paloma";
-  if (lower.includes("agent skills")) return "Agent Skills";
-  if (inLibrary || lower.includes("library")) return "Library";
-  return "User";
-}
+const PROBLEM_FILTERS: Array<[ProblemFilter, string]> = [
+  ["all", "All"],
+  ["problems", "Problems"],
+  ["drift", "Drift"],
+  ["divergent", "Divergent"],
+  ["legacy", "Only legacy"],
+  ["lint", "Lint"],
+];
+
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [machine, setMachine] = createSignal<string>("local");
   const [remoteNodes, setRemoteNodes] = createSignal<RemoteNodeView[]>([]);
   const [localReport, setLocalReport] = createSignal<LocalSkillsReport | null>(null);
   const [librarySkills, setLibrarySkills] = createSignal<LibrarySkillSummary[]>([]);
+  const [libraryFull, setLibraryFull] = createSignal<Record<string, LibrarySkill>>({});
+  const [libraryLoaded, setLibraryLoaded] = createSignal(false);
   const [libraryError, setLibraryError] = createSignal<string | null>(null);
+  const [projects, setProjects] = createSignal<ProjectSummary[]>([]);
+  const [projectSkills, setProjectSkills] = createSignal<ProjectContextSkill[]>([]);
   const [loading, setLoading] = createSignal(false);
   const [syncing, setSyncing] = createSignal(false);
   const [syncNotice, setSyncNotice] = createSignal<string | null>(null);
   const [syncError, setSyncError] = createSignal<string | null>(null);
   const [search, setSearch] = createSignal("");
-  const [originFilter, setOriginFilter] = createSignal<string>("all");
-  const [expandedSkill, setExpandedSkill] = createSignal<string | null>(null);
-  const [skillContentCache, setSkillContentCache] = createSignal<Record<string, string>>({});
-  const [loadingSkillContent, setLoadingSkillContent] = createSignal<string | null>(null);
-  const [projectGroups, setProjectGroups] = createSignal<ProjectSkillGroup[]>([]);
-  const [projectsLoading, setProjectsLoading] = createSignal(false);
-  const [creatingProjectSkill, setCreatingProjectSkill] = createSignal<string | null>(null);
-  const [newSkillName, setNewSkillName] = createSignal("");
-  const [newSkillDesc, setNewSkillDesc] = createSignal("");
-  const [newSkillSaving, setNewSkillSaving] = createSignal(false);
-  const [newSkillError, setNewSkillError] = createSignal<string | null>(null);
+  const [audienceFilter, setAudienceFilter] = createSignal("all");
+  const [scopeFilter, setScopeFilter] = createSignal("all");
+  const [problemFilter, setProblemFilter] = createSignal<ProblemFilter>("all");
+  const [openSkill, setOpenSkill] = createSignal<string | null>(null);
+  const [confirmPrune, setConfirmPrune] = createSignal<string[] | null>(null);
+  const [creating, setCreating] = createSignal(false);
+  const [newName, setNewName] = createSignal("");
+  const [newDesc, setNewDesc] = createSignal("");
+  const [createBusy, setCreateBusy] = createSignal(false);
+  const [createError, setCreateError] = createSignal<string | null>(null);
+
+  const harnessTotal = () => localReport()?.harnesses.length || LOCAL_SYNC_HARNESS_IDS.length;
+
+  const payloadFor = (skill: LibrarySkill, summary?: LibrarySkillSummary, extra: SyncSkillPayload["files"] = []): SyncSkillPayload => ({
+    name: skill.name,
+    content: skill.content,
+    files: [
+      ...(skill.files ?? []).filter((f) => (f.path || f.name) !== "SKILL.md").map((f) => ({ rel: f.path || f.name, content: f.content })),
+      ...(extra ?? []),
+    ],
+    audience: summary?.audience ?? null,
+    scope: summary?.scope ?? null,
+  });
+
+  const libraryPayloads = (): SyncSkillPayload[] | undefined => {
+    if (!libraryLoaded()) return undefined;
+    const full = libraryFull();
+    return librarySkills().flatMap((s) => (full[s.name] ? [payloadFor(full[s.name], s)] : []));
+  };
+
+  /** Fetch every Library skill body; the Library is the canonical source for local sync. */
+  const loadLibrary = async () => {
+    const items = await listLibrarySkills();
+    const fetched = await Promise.all(items.map((s) => fetchLibrarySkill(s.name).catch(() => null)));
+    const map: Record<string, LibrarySkill> = {};
+    for (const skill of fetched) if (skill) map[skill.name] = skill;
+    setLibrarySkills(items);
+    setLibraryFull(map);
+    setLibraryLoaded(true);
+    setLibraryError(null);
+    rememberKnownSkillNames(items.map((s) => s.name));
+  };
+
+  const refreshReport = async () => {
+    const rep = await localSkillsStatus(libraryPayloads());
+    if (rep) {
+      setLocalReport(rep);
+      rememberKnownSkillNames(rep.skills.map((s) => s.name));
+    }
+  };
 
   const loadAll = async (force = false) => {
     setLoading(true);
     setSyncError(null);
     try {
-      const tasks: Promise<unknown>[] = [
-        refreshLocalAgents(force).catch(() => []),
-        refreshSoftware(force).catch(() => {}),
-        localSkillsStatus()
-          .then((rep) => {
-            if (rep) {
-              setLocalReport(rep);
-              rememberKnownSkillNames(rep.skills.map((s) => s.name));
-            }
-          })
-          .catch((e) => {
-            setSyncError(e instanceof Error ? e.message : String(e));
-          }),
-      ];
-
+      const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(() => {})];
       if (isConnected()) {
-        tasks.push(
-          listLibrarySkills()
-            .then((items) => {
-              setLibrarySkills(items);
-              setLibraryError(null);
-              rememberKnownSkillNames(items.map((s) => s.name));
-            })
-            .catch((e) => {
-              setLibraryError(e instanceof Error ? e.message : String(e));
-            }),
-        );
-        tasks.push(
-          getRemoteNodes()
-            .then((res) => setRemoteNodes(res.nodes ?? []))
-            .catch(() => {}),
-        );
-        tasks.push(loadProjectSkills());
+        await loadLibrary().catch((e) => {
+          setLibraryLoaded(false);
+          setLibraryError(errorText(e));
+        });
+        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(() => {}));
+        side.push(loadProjectSkills());
       } else {
         setLibrarySkills([]);
-        setProjectGroups([]);
+        setLibraryFull({});
+        setLibraryLoaded(false);
+        setProjects([]);
+        setProjectSkills([]);
       }
-
-      await Promise.all(tasks);
+      side.push(refreshReport().catch((e) => setSyncError(errorText(e))));
+      await Promise.all(side);
     } finally {
       setLoading(false);
     }
@@ -244,59 +248,33 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
 
   const loadProjectSkills = async () => {
     if (!isConnected()) return;
-    setProjectsLoading(true);
-    try {
-      const projs: ProjectSummary[] = await listProjects().catch(() => []);
-      const initial: ProjectSkillGroup[] = projs.map((proj) => ({
-        slug: proj.slug,
-        title: proj.title || proj.slug,
-        skills: [],
-        loading: true,
-      }));
-      setProjectGroups(initial);
-
-      const resolved = await Promise.all(
-        projs.map(async (proj): Promise<ProjectSkillGroup> => {
-          try {
-            const entries = await listProjectFiles(proj.slug, "skills");
-            const dirs = entries.filter((e) => e.kind === "dir" && !e.name.startsWith("."));
-            const skills = await Promise.all(
-              dirs.map(async (d) => {
-                const path = `skills/${d.name}/SKILL.md`;
-                let description: string | undefined;
-                try {
-                  const content = await readProjectFile(proj.slug, path);
-                  const descMatch = content.match(/description:\s*["']?([^\n"']+)["']?/i);
-                  if (descMatch?.[1] && !["|", ">", "|-", ">-"].includes(descMatch[1].trim())) {
-                    description = descMatch[1].trim();
-                  }
-                } catch {
-                  /* optional description */
-                }
-                return { name: d.name, path, description };
-              }),
-            );
-            rememberKnownSkillNames(skills.map((s) => s.name));
-            return {
-              slug: proj.slug,
-              title: proj.title || proj.slug,
-              skills,
-              loading: false,
-            };
-          } catch {
-            return {
-              slug: proj.slug,
-              title: proj.title || proj.slug,
-              skills: [],
-              loading: false,
-            };
-          }
-        }),
-      );
-      setProjectGroups(resolved);
-    } finally {
-      setProjectsLoading(false);
-    }
+    const projs: ProjectSummary[] = await listProjects().catch(() => []);
+    setProjects(projs);
+    const resolved = await Promise.all(
+      projs.map(async (proj) => {
+        try {
+          const entries = await listProjectFiles(proj.slug, "skills");
+          const dirs = entries.filter((e) => e.kind === "dir" && !e.name.startsWith("."));
+          return await Promise.all(
+            dirs.map(async (d): Promise<ProjectContextSkill> => {
+              const path = `skills/${d.name}/SKILL.md`;
+              let description: string | undefined;
+              try {
+                description = parseSkillMeta(await readProjectFile(proj.slug, path)).description;
+              } catch {
+                /* optional description */
+              }
+              return { slug: proj.slug, name: d.name, path, description };
+            }),
+          );
+        } catch {
+          return [];
+        }
+      }),
+    );
+    const flat = resolved.flat();
+    rememberKnownSkillNames(flat.map((s) => s.name));
+    setProjectSkills(flat);
   };
 
   onMount(() => {
@@ -315,12 +293,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     const opts = [{ id: "local", label: "This Mac (Local Harnesses)" }];
     if (isConnected()) {
       opts.push({ id: "core", label: "Core (agent-core)" });
-      for (const node of remoteNodes()) {
-        opts.push({
-          id: node.id,
-          label: `${node.id} (${node.status})`,
-        });
-      }
+      for (const node of remoteNodes()) opts.push({ id: node.id, label: `${node.id} (${node.status})` });
     }
     return opts;
   });
@@ -466,169 +439,131 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const driftCount = createMemo(() => {
     const rep = localReport();
     if (!rep) return 0;
-    return rep.harnesses.filter((h) => h.canonical_total > 0 && h.synced_count < h.canonical_total).length;
+    return rep.harnesses.filter((h) => (h.canonical_total > 0 && h.synced_count < h.canonical_total) || (rep.library_known && (h.stale_managed?.length ?? 0) > 0)).length;
   });
 
-  const unifiedSkills = createMemo<UnifiedSkillEntry[]>(() => {
-    const map = new Map<string, UnifiedSkillEntry>();
-    const libSet = new Set(librarySkills().map((s) => s.name));
+  const rows = createMemo(() =>
+    buildSkillRows({
+      report: localReport(),
+      summaries: librarySkills(),
+      library: libraryFull(),
+      projectSkills: projectSkills(),
+      localHarnessIds: LOCAL_SYNC_HARNESS_IDS,
+    }),
+  );
+  const filteredRows = createMemo(() =>
+    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: problemFilter(), harnessTotal: harnessTotal() }),
+  );
+  const openRow = createMemo(() => rows().find((r) => r.name === openSkill() && !r.name.startsWith("project:")) ?? null);
 
-    for (const item of localReport()?.skills ?? []) {
-      const inLib = libSet.has(item.name);
-      map.set(item.name, {
-        name: item.name,
-        description: item.description || "Skill instructions and reference workflow.",
-        origin: classifyOrigin(item.origin, inLib),
-        originDetail: item.origin,
-        harnesses: [...item.harnesses],
-        inLibrary: inLib,
-        contentPreview: item.content_preview,
-      });
-    }
-
-    for (const lib of librarySkills()) {
-      const existing = map.get(lib.name);
-      if (existing) {
-        existing.inLibrary = true;
-        if (!existing.description || existing.description === "Skill instructions and reference workflow.") {
-          if (lib.description) existing.description = lib.description;
-        }
-      } else {
-        map.set(lib.name, {
-          name: lib.name,
-          description: lib.description || "Shared skill in the Core Library.",
-          origin: "Library",
-          originDetail: "Core Library (/api/library/skill)",
-          harnesses: [],
-          inLibrary: true,
-          contentPreview: null,
-        });
-      }
-    }
-
-    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
-  });
-
-  const filteredSkills = createMemo(() => {
-    const q = search().trim().toLowerCase();
-    const filter = originFilter();
-    return unifiedSkills().filter((skill) => {
-      if (filter !== "all") {
-        if (filter === "drift" && skill.harnesses.length >= LOCAL_SYNC_HARNESS_IDS.length) return false;
-        if (filter === "library" && !skill.inLibrary && skill.origin !== "Library") return false;
-        if (filter === "paloma" && skill.origin !== "Paloma" && skill.origin !== "Identity") return false;
-        if (filter === "local" && skill.origin !== "Agent Skills" && skill.origin !== "User") return false;
-      }
-      if (!q) return true;
-      return (
-        skill.name.toLowerCase().includes(q) ||
-        skill.description.toLowerCase().includes(q) ||
-        skill.origin.toLowerCase().includes(q)
-      );
-    });
-  });
-
-  const handleSyncAll = async () => {
-    if (syncing()) return;
+  /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
+  const syncNow = async (prune: boolean, label?: string) => {
     setSyncing(true);
     setSyncNotice(null);
     setSyncError(null);
     try {
-      const payloads: SyncSkillPayload[] = [];
-      if (isConnected() && librarySkills().length > 0) {
-        const fetched = await Promise.all(
-          librarySkills().map(async (s) => {
-            try {
-              const full = await getLibrarySkill(s.name);
-              return {
-                name: full.name,
-                content: full.content,
-                files: (full.files ?? [])
-                  .filter((f) => f.path !== "SKILL.md" && f.name !== "SKILL.md")
-                  .map((f) => ({ rel: f.path || f.name, content: f.content })),
-              } satisfies SyncSkillPayload;
-            } catch {
-              return null;
-            }
-          }),
-        );
-        for (const item of fetched) {
-          if (item) payloads.push(item);
-        }
-      }
-
-      const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: false });
+      const base = libraryPayloads() ?? [];
+      // Non-markdown reference files are not inlined in the skill body; fetch them for install.
+      const payloads = await Promise.all(base.map(async (pl) => {
+        const refs = (libraryFull()[pl.name]?.references ?? []).filter((r) => !pl.files?.some((f) => f.rel === r));
+        if (!refs.length) return pl;
+        const extra = await Promise.all(refs.map(async (rel) => ({ rel, content: await readSkillFile(pl.name, rel).catch(() => "") })));
+        return { ...pl, files: [...(pl.files ?? []), ...extra] };
+      }));
+      const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded() });
       setLocalReport(result.report);
       rememberKnownSkillNames(result.report.skills.map((s) => s.name));
-      setSyncNotice(
-        `Synchronized ${result.synced_skills} skills across all 5 local harness directories (${
-          result.harnesses_updated
-        } updated${result.skipped_unmanaged.length ? `, ${result.skipped_unmanaged.length} user-owned preserved` : ""}).`,
-      );
+      const n = result.report.harnesses.length;
+      const parts = [`${result.harnesses_updated} updated`];
+      if (result.pruned?.length) parts.push(`${result.pruned.length} removed`);
+      if (result.skipped_unmanaged.length) parts.push(`${result.skipped_unmanaged.length} user-owned preserved`);
+      setSyncNotice(`${label ? `${label} ` : ""}Synchronized ${result.synced_skills} skills across all ${n} local harness directories (${parts.join(", ")}).`);
     } catch (e) {
-      setSyncError(e instanceof Error ? e.message : String(e));
+      setSyncError(errorText(e));
     } finally {
       setSyncing(false);
     }
   };
 
-  const toggleSkillPreview = async (skill: UnifiedSkillEntry) => {
-    if (expandedSkill() === skill.name) {
-      setExpandedSkill(null);
-      return;
-    }
-    setExpandedSkill(skill.name);
-    if (skill.contentPreview || skillContentCache()[skill.name]) return;
-    if (isConnected() && skill.inLibrary) {
-      setLoadingSkillContent(skill.name);
-      try {
-        const full = await getLibrarySkill(skill.name);
-        setSkillContentCache((prev) => ({ ...prev, [skill.name]: full.content }));
-      } catch {
-        /* ignore preview fetch failure */
-      } finally {
-        setLoadingSkillContent(null);
-      }
-    }
+  const handleSyncAll = () => {
+    if (syncing()) return;
+    const rep = localReport();
+    const stale = rep?.library_known ? [...new Set(rep.harnesses.flatMap((h) => h.stale_managed ?? []))] : [];
+    if (stale.length && libraryLoaded()) setConfirmPrune(stale);
+    else void syncNow(libraryLoaded());
   };
 
-  const pushSkillToLibrary = async (skill: UnifiedSkillEntry) => {
-    const content = skill.contentPreview ?? skillContentCache()[skill.name];
-    if (!content || !isConnected()) return;
-    setSyncError(null);
-    try {
-      await saveLibrarySkill(skill.name, content);
-      const updated = await listLibrarySkills();
-      setLibrarySkills(updated);
-      setSyncNotice(`Published "${skill.name}" to the Core Library.`);
-    } catch (e) {
-      setSyncError(e instanceof Error ? e.message : String(e));
-    }
+  const refetchSkill = async (name: string) => {
+    const skill = await fetchLibrarySkill(name);
+    setLibraryFull((prev) => ({ ...prev, [name]: skill }));
+    if (!librarySkills().some((s) => s.name === name)) setLibrarySkills(await listLibrarySkills());
   };
 
-  const createNewProjectSkill = async (slug: string) => {
-    const rawName = newSkillName().trim().toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-+|-+$/g, "");
-    if (!rawName) {
-      setNewSkillError("Enter a valid skill folder name (e.g. lean-prover).");
+  const saveSkill = async (name: string, content: string) => {
+    await putLibrarySkill(name, content);
+    await refetchSkill(name);
+    await syncNow(false, `Saved "${name}".`);
+  };
+
+  const importSkill = async (name: string, src: SkillSourceRef) => {
+    if (!src.content) throw new Error("This copy has no readable SKILL.md.");
+    await putLibrarySkill(name, src.content);
+    for (const f of src.files ?? []) await putSkillFile(name, f.rel, f.content);
+    setLibrarySkills(await listLibrarySkills());
+    await refetchSkill(name);
+    await syncNow(false, `Imported "${name}" from ${src.label}.`);
+  };
+
+  const removeSkill = async (name: string) => {
+    await deleteLibrarySkill(name);
+    setLibrarySkills((list) => list.filter((s) => s.name !== name));
+    setLibraryFull((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+    await syncNow(true, `Deleted "${name}".`);
+  };
+
+  const filesChanged = async (name: string) => {
+    await refetchSkill(name);
+    await syncNow(false);
+  };
+
+  const createSkill = async () => {
+    const name = normalizeSkillName(newName());
+    if (!name) {
+      setCreateError("Enter a skill name such as lean-prover.");
       return;
     }
-    const desc = newSkillDesc().trim() || `Project skill ${rawName} for ${slug}.`;
-    const template = `---\nname: ${rawName}\ndescription: "${desc.replace(/"/g, '\\"')}"\n---\n\n# ${rawName}\n\n${desc}\n\n## Instructions\n\n- Describe the domain workflow, invariants, or commands here.\n`;
-    setNewSkillSaving(true);
-    setNewSkillError(null);
+    if (librarySkills().some((s) => s.name === name)) {
+      setCreateError(`"${name}" already exists in the Library.`);
+      return;
+    }
+    setCreateBusy(true);
+    setCreateError(null);
     try {
-      await mkdirProjectFile(slug, `skills/${rawName}`).catch(() => {});
-      await writeProjectFile(slug, `skills/${rawName}/SKILL.md`, template);
-      setCreatingProjectSkill(null);
-      setNewSkillName("");
-      setNewSkillDesc("");
-      await loadProjectSkills();
-      p.onOpenPage?.(`pf:${slug}:skills/${rawName}/SKILL.md`);
+      await putLibrarySkill(name, newSkillTemplate(name, newDesc()));
+      setLibrarySkills(await listLibrarySkills());
+      await refetchSkill(name);
+      setCreating(false);
+      setNewName("");
+      setNewDesc("");
+      setOpenSkill(name);
+      void syncNow(false, `Created "${name}".`);
     } catch (e) {
-      setNewSkillError(e instanceof Error ? e.message : String(e));
+      setCreateError(errorText(e));
     } finally {
-      setNewSkillSaving(false);
+      setCreateBusy(false);
     }
+  };
+
+  const openRowDetail = (row: SkillRow) => {
+    if (!row.inLibrary && !row.sources.length && row.projectFile) {
+      p.onOpenPage?.(`pf:${row.projectFile.slug}:${row.projectFile.path}`);
+      return;
+    }
+    setOpenSkill(row.name);
   };
 
   const preflight = () => localReport()?.preflight;
@@ -640,25 +575,15 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
           <div>
             <h2>Skills</h2>
             <p class="s-lead">
-              Unified skill discovery and synchronization across Claude Code, Codex, Antigravity, OpenCode, Grok, and Hermes controllers.
+              The Library is the single source of skills. Orb installs Library skills meant for <code>local</code> use into every local harness
+              and flags copies that only live in legacy folders.
             </p>
           </div>
           <div class="skills-head-actions">
-            <button
-              type="button"
-              class="s-btn sm"
-              disabled={loading() || syncing()}
-              onClick={() => void loadAll(true)}
-              title="Re-scan local and remote skill directories"
-            >
+            <button type="button" class="s-btn sm" disabled={loading() || syncing()} onClick={() => void loadAll(true)} title="Re-scan local and remote skill directories">
               {loading() ? "Scanning…" : "Refresh"}
             </button>
-            <button
-              type="button"
-              class="s-btn sm primary"
-              disabled={syncing()}
-              onClick={() => void handleSyncAll()}
-            >
+            <button type="button" class="s-btn sm primary" disabled={syncing()} onClick={handleSyncAll}>
               {syncing() ? "Syncing…" : driftCount() > 0 ? `Sync all harnesses (${driftCount()} drifted)` : "Sync all harnesses"}
             </button>
           </div>
@@ -685,6 +610,62 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
               </button>
             </div>
           )}
+        </Show>
+
+        <section class="s-sec" aria-label="Global and Library skills catalog">
+          <div class="skills-sec-head">
+            <h3>Skills ({filteredRows().length})</h3>
+            <div class="skills-catalog-controls">
+              <input type="search" aria-label="Filter skills" class="s-input skills-search" placeholder="Search skills…" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} />
+              <Show when={isConnected()}>
+                <button type="button" class="s-btn sm" onClick={() => { setCreating(true); setCreateError(null); }}>New skill</button>
+              </Show>
+            </div>
+          </div>
+          <div class="skills-filter-bar">
+            <Select aria-label="Filter by audience" class="s-input" value={audienceFilter()} onChange={(e) => setAudienceFilter(e.currentTarget.value)}>
+              <option value="all">All audiences</option>
+              <For each={AUDIENCES}>{(a) => <option value={a}>{a}</option>}</For>
+            </Select>
+            <Select aria-label="Filter by scope" class="s-input" value={scopeFilter()} onChange={(e) => setScopeFilter(e.currentTarget.value)}>
+              <option value="all">Any scope</option>
+              <option value="global">Global</option>
+              <option value="on-demand">On demand</option>
+            </Select>
+            <div class="skills-filter-pills" role="tablist" aria-label="Filter skills by problem">
+              <For each={PROBLEM_FILTERS}>{([id, label]) => (
+                <button type="button" role="tab" aria-selected={problemFilter() === id} class={`skills-filter-pill ${problemFilter() === id ? "on" : ""}`} onClick={() => setProblemFilter(id)}>
+                  {label}
+                </button>
+              )}</For>
+            </div>
+          </div>
+
+          <Show when={libraryError()}>{(err) => <p class="skills-sub-note">Core Library unavailable: {err()}. Local status only; syncing will not remove anything.</p>}</Show>
+          <Show when={!isConnected()}><p class="skills-sub-note">Connect to Core to load the Library, the canonical skill source.</p></Show>
+
+          <div class="s-card skills-catalog-card">
+            <For each={filteredRows()} fallback={<div class="s-row"><div class="s-row-text"><div class="s-row-desc">No skills match the current filter.</div></div></div>}>
+              {(row) => (
+                <div class="skills-item" data-skill={row.name}>
+                  <button type="button" class="skills-item-head" onClick={() => openRowDetail(row)}>
+                    <div class="skills-item-body">
+                      <div class="skills-item-top">
+                        <code class="skills-item-name">{row.name}</code>
+                        <SkillBadges row={row} harnessTotal={harnessTotal()} />
+                        <Show when={row.lint.length}><span class="skills-lint-count" title={row.lint.map((l) => l.message).join("\n")}>{row.lint.length} warning{row.lint.length === 1 ? "" : "s"}</span></Show>
+                      </div>
+                      <div class="skills-item-desc">{row.description || "No description."}</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </For>
+          </div>
+        </section>
+
+        <Show when={isConnected()}>
+          <SkillDeliveryPreview projects={projects()} librarySkills={librarySkills().map((s) => s.name)} />
         </Show>
 
         <section class="s-sec" aria-label="Harness compatibility">
@@ -758,7 +739,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         </section>
 
         <section class="s-sec" aria-label="Skill preparation preflight">
-          <h3>Runtime preflight &amp; canonical sources</h3>
+          <h3>Runtime preflight &amp; sources</h3>
           <div class="s-card">
             <div class="s-row">
               <div class="s-row-text">
@@ -810,7 +791,10 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
               {(src) => (
                 <div class="s-row">
                   <div class="s-row-text">
-                    <div class="s-row-title">{src.label}</div>
+                    <div class="s-row-title">
+                      {src.label}
+                      <Show when={src.legacy}><span class="p-chip" title="Scanned for import; never synced to harnesses">legacy</span></Show>
+                    </div>
                     <div class="s-row-desc">
                       <code>{src.path}</code>
                     </div>
@@ -825,290 +809,44 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             </For>
           </div>
         </section>
-
-        <section class="s-sec" aria-label="Global and Library skills catalog">
-          <div class="skills-sec-head">
-            <h3>Global &amp; Library catalog ({filteredSkills().length})</h3>
-            <div class="skills-catalog-controls">
-              <div class="skills-filter-pills" role="tablist" aria-label="Filter skills by source">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={originFilter() === "all"}
-                  class={`skills-filter-pill ${originFilter() === "all" ? "on" : ""}`}
-                  onClick={() => setOriginFilter("all")}
-                >
-                  All
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={originFilter() === "drift"}
-                  class={`skills-filter-pill ${originFilter() === "drift" ? "on" : ""}`}
-                  onClick={() => setOriginFilter("drift")}
-                >
-                  Unsynced
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={originFilter() === "paloma"}
-                  class={`skills-filter-pill ${originFilter() === "paloma" ? "on" : ""}`}
-                  onClick={() => setOriginFilter("paloma")}
-                >
-                  Paloma
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={originFilter() === "library"}
-                  class={`skills-filter-pill ${originFilter() === "library" ? "on" : ""}`}
-                  onClick={() => setOriginFilter("library")}
-                >
-                  Library
-                </button>
-              </div>
-              <input
-                type="search"
-                aria-label="Filter skills"
-                class="s-input skills-search"
-                placeholder="Filter skills…"
-                value={search()}
-                onInput={(e) => setSearch(e.currentTarget.value)}
-              />
-            </div>
-          </div>
-
-          <Show when={libraryError()}>
-            {(err) => <p class="skills-sub-note">Core Library status: {err()}</p>}
-          </Show>
-
-          <div class="s-card skills-catalog-card">
-            <Show
-              when={filteredSkills().length > 0}
-              fallback={
-                <div class="s-row">
-                  <div class="s-row-text">
-                    <div class="s-row-desc">No skills match the current filter.</div>
-                  </div>
-                </div>
-              }
-            >
-              <For each={filteredSkills()}>
-                {(skill) => {
-                  const isOpen = () => expandedSkill() === skill.name;
-                  const preview = () => skill.contentPreview ?? skillContentCache()[skill.name];
-                  const coverageCount = () =>
-                    LOCAL_SYNC_HARNESS_IDS.filter((id) => skill.harnesses.includes(id)).length;
-                  return (
-                    <div class={`skills-item ${isOpen() ? "open" : ""}`} data-skill={skill.name}>
-                      <button
-                        type="button"
-                        class="skills-item-head"
-                        aria-expanded={isOpen()}
-                        onClick={() => void toggleSkillPreview(skill)}
-                      >
-                        <span class="skills-harness-Chevron">{isOpen() ? "⌄" : "›"}</span>
-                        <div class="skills-item-body">
-                          <div class="skills-item-top">
-                            <code class="skills-item-name">{skill.name}</code>
-                            <span class="skills-origin-tag">{skill.origin}</span>
-                            <Show when={skill.inLibrary && skill.origin !== "Library"}>
-                              <span class="skills-origin-tag">Core Library</span>
-                            </Show>
-                          </div>
-                          <div class="skills-item-desc">{skill.description}</div>
-                        </div>
-                        <div class="skills-coverage" title={`Installed in ${coverageCount()}/${LOCAL_SYNC_HARNESS_IDS.length} local harnesses`}>
-                          <For each={LOCAL_SYNC_HARNESS_IDS}>
-                            {(hid) => (
-                              <span
-                                class={`skills-cov-pill ${skill.harnesses.includes(hid) ? "on" : ""}`}
-                                title={`${HARNESS_META[hid].name}: ${
-                                  skill.harnesses.includes(hid) ? "Installed" : "Missing"
-                                }`}
-                              >
-                                {hid === "claudecode"
-                                  ? "CC"
-                                  : hid === "codex"
-                                    ? "CX"
-                                    : hid === "antigravity"
-                                      ? "AG"
-                                      : hid === "opencode"
-                                        ? "OC"
-                                        : hid === "vibe" ? "VB" : "GK"}
-                              </span>
-                            )}
-                          </For>
-                        </div>
-                      </button>
-                      <Show when={isOpen()}>
-                        <div class="skills-item-drawer">
-                          <div class="skills-drawer-meta">
-                            <span>Source: {skill.originDetail}</span>
-                            <Show when={isConnected() && !skill.inLibrary && preview()}>
-                              <button
-                                type="button"
-                                class="s-btn sm"
-                                onClick={() => void pushSkillToLibrary(skill)}
-                              >
-                                Publish to Core Library
-                              </button>
-                            </Show>
-                          </div>
-                          <Show
-                            when={preview()}
-                            fallback={
-                              <p class="skills-preview-empty">
-                                {loadingSkillContent() === skill.name
-                                  ? "Loading SKILL.md…"
-                                  : "SKILL.md preview unavailable."}
-                              </p>
-                            }
-                          >
-                            {(text) => <pre class="skills-md-preview">{text()}</pre>}
-                          </Show>
-                        </div>
-                      </Show>
-                    </div>
-                  );
-                }}
-              </For>
-            </Show>
-          </div>
-        </section>
-
-        <section class="s-sec" aria-label="Project skills">
-          <div class="skills-sec-head">
-            <h3>Project skills (@context/skills)</h3>
-            <span class="skills-sub-note">
-              Synchronized automatically to every local and remote mission in that project
-            </span>
-          </div>
-
-          <div class="s-card">
-            <Show
-              when={isConnected()}
-              fallback={
-                <div class="s-row">
-                  <div class="s-row-text">
-                    <div class="s-row-title">Connect to Core to inspect project skills</div>
-                    <div class="s-row-desc">
-                      Project-scoped skills live under <code>skills/&lt;name&gt;/SKILL.md</code> in each project's shared context.
-                    </div>
-                  </div>
-                </div>
-              }
-            >
-              <Show
-                when={projectGroups().length > 0}
-                fallback={
-                  <div class="s-row">
-                    <div class="s-row-text">
-                      <div class="s-row-desc">
-                        {projectsLoading() ? "Checking project skill folders…" : "No active projects found."}
-                      </div>
-                    </div>
-                  </div>
-                }
-              >
-                <For each={projectGroups()}>
-                  {(group) => (
-                    <div class="skills-project-group" data-project-skills={group.slug}>
-                      <div class="s-row skills-project-row">
-                        <div class="s-row-text">
-                          <div class="s-row-title">
-                            {group.title}
-                            <span class="p-chip">
-                              {group.loading
-                                ? "Checking…"
-                                : `${group.skills.length} skill${group.skills.length === 1 ? "" : "s"}`}
-                            </span>
-                          </div>
-                          <Show
-                            when={group.skills.length > 0}
-                            fallback={
-                              <div class="s-row-desc">
-                                No project-specific skills in <code>skills/*/SKILL.md</code>.
-                              </div>
-                            }
-                          >
-                            <div class="skills-project-chips">
-                              <For each={group.skills}>
-                                {(sk) => (
-                                  <button
-                                    type="button"
-                                    class="skills-proj-chip"
-                                    title={sk.description || sk.path}
-                                    onClick={() => p.onOpenPage?.(`pf:${group.slug}:${sk.path}`)}
-                                  >
-                                    <Ic.FileIcon size={12} />
-                                    <span>{sk.name}</span>
-                                  </button>
-                                )}
-                              </For>
-                            </div>
-                          </Show>
-                        </div>
-                        <div class="s-row-ctrl">
-                          <button
-                            type="button"
-                            class="s-btn sm"
-                            onClick={() => {
-                              setCreatingProjectSkill(
-                                creatingProjectSkill() === group.slug ? null : group.slug,
-                              );
-                              setNewSkillName("");
-                              setNewSkillDesc("");
-                              setNewSkillError(null);
-                            }}
-                          >
-                            {creatingProjectSkill() === group.slug ? "Cancel" : "New skill"}
-                          </button>
-                        </div>
-                      </div>
-
-                      <Show when={creatingProjectSkill() === group.slug}>
-                        <div class="skills-new-form">
-                          <div class="skills-new-inputs">
-                            <input
-                              type="text"
-                              aria-label={`New skill name for ${group.title}`}
-                              class="s-input"
-                              placeholder="skill-name (e.g. proof-tactics)"
-                              value={newSkillName()}
-                              onInput={(e) => setNewSkillName(e.currentTarget.value)}
-                            />
-                            <input
-                              type="text"
-                              aria-label={`New skill description for ${group.title}`}
-                              class="s-input"
-                              placeholder="Short trigger description for YAML frontmatter"
-                              value={newSkillDesc()}
-                              onInput={(e) => setNewSkillDesc(e.currentTarget.value)}
-                            />
-                            <button
-                              type="button"
-                              class="s-btn sm primary"
-                              disabled={newSkillSaving()}
-                              onClick={() => void createNewProjectSkill(group.slug)}
-                            >
-                              {newSkillSaving() ? "Creating…" : "Create SKILL.md"}
-                            </button>
-                          </div>
-                          <Show when={newSkillError()}>
-                            {(err) => <p class="inline-error" role="alert">{err()}</p>}
-                          </Show>
-                        </div>
-                      </Show>
-                    </div>
-                  )}
-                </For>
-              </Show>
-            </Show>
-          </div>
-        </section>
       </div>
+
+      <Show when={openRow()}>
+        {(row) => (
+          <SkillDetail
+            row={row()}
+            library={libraryFull()[row().name]}
+            connected={isConnected()}
+            harnessTotal={harnessTotal()}
+            onClose={() => setOpenSkill(null)}
+            onSave={saveSkill}
+            onImport={importSkill}
+            onDelete={removeSkill}
+            onFilesChanged={filesChanged}
+            onOpenProjectFile={(slug, path) => p.onOpenPage?.(`pf:${slug}:${path}`)}
+          />
+        )}
+      </Show>
+      <Show when={confirmPrune()}>
+        {(stale) => (
+          <ConfirmDialog
+            title="Remove skills that left the Library?"
+            description={`Sync will remove ${stale().length} Orb-managed skill${stale().length === 1 ? "" : "s"} no longer in the Library (or not meant for local use): ${stale().slice(0, 8).join(", ")}${stale().length > 8 ? ` +${stale().length - 8} more` : ""}. Import any you want to keep first. Your own unmanaged skills are never touched.`}
+            action="Sync and remove"
+            destructive
+            onClose={() => setConfirmPrune(null)}
+            onConfirm={() => { setConfirmPrune(null); void syncNow(true); }}
+          />
+        )}
+      </Show>
+      <Show when={creating()}>
+        <NameDialog title="New Library skill" label="Name" placeholder="lean-prover" value={newName()} onInput={setNewName} action="Create" busy={createBusy()} error={createError()}
+          onAction={() => void createSkill()} onClose={() => setCreating(false)}>
+          <Field label="Description" description="When should an agent load this skill? Aim for one specific sentence.">
+            <input class="s-input" value={newDesc()} disabled={createBusy()} onInput={(e) => setNewDesc(e.currentTarget.value)} />
+          </Field>
+        </NameDialog>
+      </Show>
     </div>
   );
 }

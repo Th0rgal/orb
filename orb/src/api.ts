@@ -100,10 +100,15 @@ export function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (init.method && init.method.toUpperCase() !== 'GET') invalidateReads();
   return apiRequest<T>(path, init);
 }
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+/** Like `api`, for endpoints that answer with plain text (e.g. Library save receipts). */
+export function apiText(path: string, init?: RequestInit): Promise<string> {
+  if (init?.method && init.method.toUpperCase() !== 'GET') invalidateReads();
+  return apiRequest<string>(path, init, true);
+}
+async function apiRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
   const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${path}`;
   try {
-    const result = await sendRequest<T>(path, init);
+    const result = await sendRequest<T>(path, init, text);
     requestDone(label, performance.now() - from, true);
     return result;
   } catch (error) {
@@ -111,7 +116,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     throw error;
   }
 }
-async function sendRequest<T>(path: string, init?: RequestInit): Promise<T> {
+async function sendRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
   const version = connectionVersion();
   const jwt = getJwt();
   const headers: Record<string, string> = {
@@ -135,6 +140,7 @@ async function sendRequest<T>(path: string, init?: RequestInit): Promise<T> {
     throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${path}`, { cause });
   }
   if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+  if (text) return body as T;
   // Empty mutation receipts are valid for endpoints returning only a status.
   // A failed/invalid JSON read is not a successful response with no value.
   if (!body.trim() && init?.method && init.method.toUpperCase() !== "GET") return undefined as T;
@@ -1327,6 +1333,10 @@ export async function listNodeAntigravityModels(nodeId: string): Promise<[string
 
 export interface LibrarySkillSummary {
   name: string;
+  /** `metadata.sandboxed.audience` (newer backends); parse SKILL.md when absent. */
+  audience?: string[] | null;
+  /** `metadata.sandboxed.scope` (newer backends). */
+  scope?: string | null;
   description?: string | null;
   path: string;
   source?: { type: string; identifier?: string; version?: string };
@@ -1349,7 +1359,7 @@ export async function getLibrarySkill(name: string): Promise<LibrarySkill> {
 }
 
 export async function saveLibrarySkill(name: string, content: string): Promise<void> {
-  await api(`/api/library/skill/${encodeURIComponent(name)}`, {
+  await apiText(`/api/library/skill/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
