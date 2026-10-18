@@ -1,22 +1,35 @@
 import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
-test('secret request notice is compact: key first, mission muted, Allow primary',async({page})=>{
+test('secret requests share one card: D for one, rows for several',async({page})=>{
  await page.goto('/tests/secret-notice.html');
- const toast=page.locator('.toast.secret');
- await expect(toast.locator('.toast-title strong')).toHaveText('VERCEL_TOKEN');
- await expect(toast.locator('.toast-sub')).toHaveAttribute('title',/autoresearch/);
- await expect(toast.locator('.toast-glyph svg')).toBeVisible();
- await expect(toast.getByRole('button',{name:'Allow'})).toHaveClass(/primary/);
- // Allow sits above Deny; Review is a quiet link under the reason.
- const allow=(await toast.getByRole('button',{name:'Allow'}).boundingBox())!, deny=(await toast.getByRole('button',{name:'Deny'}).boundingBox())!;
- expect(deny.y).toBeGreaterThan(allow.y);
- expect(Math.abs(deny.x-allow.x)).toBeLessThan(2);
- await expect(toast.locator('.toast-link')).toHaveText('Review in Secrets');
- // Title stays on one line and the reason is clamped to two.
- const lineHeight=await toast.locator('.toast-message').evaluate(e=>parseFloat(getComputedStyle(e).lineHeight));
- expect((await toast.locator('.toast-message').boundingBox())!.height).toBeLessThanOrEqual(lineHeight*2+1);
- expect((await toast.locator('.toast-title').boundingBox())!.height).toBeLessThan(lineHeight*1.6);
- await toast.screenshot({path:'test-results/secret-notice.png'});
+ const card=page.locator('.secret-card');
+ await expect(card.locator('.toast-title strong')).toHaveText('SPARK_ROUTER_API_KEY');
+ await expect(card.locator('.toast-sub')).toHaveText('DGX Spark');
+ await expect(card.locator('.secret-rows')).toHaveCount(0);
+ const bar=card.locator('.secret-bar');
+ await expect(bar.getByRole('button',{name:'Store'})).toBeVisible();
+ await expect(bar.getByRole('button',{name:'Deny'})).toBeVisible();
+ await expect(bar.locator('.secret-grace')).toHaveText('Touch ID required');
+ await card.screenshot({path:'test-results/secret-card-one.png'});
+
+ await page.evaluate(()=>(window as any).showMany());
+ await expect(card.locator('.toast-title')).toContainText('3 secret requests');
+ await expect(card.locator('.secret-row')).toHaveCount(3);
+ await expect(card.locator('.secret-kind[aria-label="Write"]')).toHaveCount(1);
+ await expect(card.locator('.secret-kind[aria-label="Read"]')).toHaveCount(2);
+ // A batch approve waits until the list has been on screen briefly.
+ await expect(bar.getByRole('button',{name:'Approve all'})).toBeDisabled();
+ await expect(bar.getByRole('button',{name:'Approve all'})).toBeEnabled({timeout:3000});
+ await expect(bar.getByRole('button',{name:'Deny all'})).toBeVisible();
+ // The action bar and every row stay on one line.
+ const lineBox=(await bar.boundingBox())!;
+ expect(lineBox.height).toBeLessThan(40);
+ for(const row of await card.locator('.secret-row').all()) expect((await row.boundingBox())!.height).toBeLessThan(48);
+ await card.screenshot({path:'test-results/secret-card-many.png'});
  await page.emulateMedia({colorScheme:'dark'});
- await toast.screenshot({path:'test-results/secret-notice-dark.png'});
+ await card.screenshot({path:'test-results/secret-card-many-dark.png'});
+
+ await bar.getByRole('button',{name:'Review'}).click();
+ expect(await page.evaluate(()=>(window as any).opened)).toBe(true);
+ await expect(card).toHaveCount(0);
 });

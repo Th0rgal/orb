@@ -93,6 +93,15 @@ struct Server {
 
 static SERVER: std::sync::Mutex<Option<Server>> = std::sync::Mutex::new(None);
 
+/// Unix seconds until which the helper signs eligible approvals without
+/// Touch ID; 0 when it holds no authenticated context.
+static GRACE_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[tauri::command]
+pub fn approval_grace_until() -> u64 {
+    GRACE_UNTIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn spawn_server(key: &std::path::Path) -> Result<Server, String> {
     let mut child = std::process::Command::new(signer()?)
         .args(["serve", "--key", &key.display().to_string()])
@@ -155,6 +164,8 @@ pub async fn approval_sign(app: tauri::AppHandle, payload: String, reason: Strin
     })
     .await
     .map_err(|e| e.to_string())??;
+    let until = v["grace_until"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    GRACE_UNTIL.store(until, std::sync::atomic::Ordering::Relaxed);
     if let Some(error) = v["error"].as_str() {
         return Err(if v["code"].as_str() == Some("2") { "cancelled".to_string() } else { error.to_string() });
     }

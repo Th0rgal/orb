@@ -19,6 +19,8 @@ export type Toast = {
   title: JSX.Element;
   /** Leading glyph for info toasts; errors always show the alert icon. */
   icon?: JSX.Element;
+  /** Replaces the whole layout; the content owns its own close control. */
+  content?: () => JSX.Element;
   /** Extra class for a specialised layout (e.g. "secret"). */
   variant?: string;
   message?: string;
@@ -151,6 +153,8 @@ function ToastItem(p: { toast: Toast }) {
   const copy = async () => {
     try { await copyText(t().copy ?? ""); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
   };
+  const content = t().content;
+  if (content) return <div class={`toast ${t().kind} custom${t().variant ? ` ${t().variant}` : ""}`} role="status">{content()}</div>;
   return <div class={`toast ${t().kind}${t().variant ? ` ${t().variant}` : ""}`} role={t().kind === "error" ? "alert" : "status"} onMouseEnter={pause} onMouseLeave={resume} onFocusIn={pause} onFocusOut={resume}>
     <Show when={t().kind === "error"}>
       <svg class="toast-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
@@ -159,7 +163,11 @@ function ToastItem(p: { toast: Toast }) {
     <div class="toast-body">
       <span class="toast-title">{t().title}</span>
       <Show when={t().message}><span class="toast-message">{t().message}</span></Show>
-      <For each={t().actions?.filter(a => a.link)}>{a => <button type="button" class="toast-link" onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}</button>}</For>
+      <Show when={t().actions?.some(a => a.link)}>
+        <div class="toast-links">
+          <For each={t().actions?.filter(a => a.link)}>{a => <button type="button" class="toast-link" onClick={() => { a.run(); dismissToast(t().id); }}>{a.label}</button>}</For>
+        </div>
+      </Show>
       <Show when={t().details}>
         <details class="toast-details"><summary>Details</summary><pre>{t().details}</pre></details>
       </Show>
