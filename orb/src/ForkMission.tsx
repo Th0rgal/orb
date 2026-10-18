@@ -3,7 +3,7 @@ import {localBinding} from './localAgents';
 import type {CodexServiceTier} from './api';
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createSignal, onMount } from "solid-js";
-import { forkMission, shortModelLabel, type HarnessChoice, type Mission } from "./api";
+import { archiveMission, cancelMission, forkMission, getMission, shortModelLabel, type HarnessChoice, type Mission } from "./api";
 import { effortLabel, supportedEfforts } from "./effort";
 import { Menu } from "./Menu";
 
@@ -21,7 +21,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
   const fork = async (effort = "") => {
     if (busy() || !backend() || unavailable(backend()) || !choices().some(choice => choice.value === model())) return;
     setBusy(true); setError("");
-    try { if(backend()==="codex")await requireSpeedSupport(model(),speed(),undefined,!!localBinding(p.mission.id)); p.onFork(await forkMission(p.mission.id, { backend: backend(), model_override: model(), model_effort: effort, service_tier:backend()==="codex"?speed():undefined, idempotency_key: key })); }
+    try { if(backend()==="codex")await requireSpeedSupport(model(),speed(),undefined,!!localBinding(p.mission.id)); const next = await forkMission(p.mission.id, { backend: backend(), model_override: model(), model_effort: effort, service_tier:backend()==="codex"?speed():undefined, idempotency_key: key }); p.onFork(next); void retireTransferredSource(p.mission.id); }
     catch (e) {setError(e instanceof Error ? e.message : String(e));}
     finally {setBusy(false);}
   };
@@ -30,8 +30,8 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
     if(id!==backend())setSpeed('standard');
     setBackend(id); setEffortAnchor(undefined); setModelAnchor(anchor);
   };
-  return <Menu label="Fork conversation" class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={p.onClose}>
-    <Show when={!p.anchor}><div class="menu-group">Fork conversation</div></Show>
+  return <Menu label="Transfer to another agent" class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={p.onClose}>
+    <Show when={!p.anchor}><div class="menu-group">Transfer to another agent</div></Show>
     <For each={p.choices}>{choice => <button type="button" class="menu-item" role="menuitem" aria-haspopup="menu" aria-expanded={!!modelAnchor() && backend() === choice.backend.id} disabled={busy() || unavailable(choice.backend.id)}
       title={unavailable(choice.backend.id) ? "Not supported on this remote workspace" : choice.backend.name}
       onMouseEnter={e => openModels(choice.backend.id, e.currentTarget)} onClick={e => openModels(choice.backend.id,e.currentTarget)}
@@ -58,4 +58,25 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
     </Menu>}</Show>
     <Show when={busy()}><div class="menu-group" role="status">Forking…</div></Show>
   </Menu>;
+}
+
+/** A transfer replaces the original: stop it (two agents must not share its folder), then
+ * archive it so one row remains. The new conversation keeps the full history as fork context. */
+export async function retireTransferredSource(id: string): Promise<void> {
+  window.dispatchEvent(new CustomEvent("orb:mission-archived", { detail: { id } }));
+  try {
+    const current = await getMission(id);
+    if (!["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled"].includes(current.status) || current.execution?.state === "running") {
+      await cancelMission(id);
+      for (let i = 0; i < 20; i++) {
+        const m = await getMission(id);
+        if (m.execution?.state !== "running" && ["cancelled", "interrupted", "failed", "completed", "awaiting_user"].includes(m.status)) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    await archiveMission(id);
+  } catch {
+    // The original stays listed (Core refused or is unreachable); the transfer itself succeeded.
+    window.dispatchEvent(new CustomEvent("orb:mission-archive-failed", { detail: { id } }));
+  }
 }

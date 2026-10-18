@@ -27,7 +27,12 @@ export function prLink(raw?: string | null): { label: string; url?: string } | n
   if (short) return { label: v, url: `https://github.com/${short[1]}/pull/${short[2]}` };
   return { label: /^\d+$/.test(v) ? `PR ${v}` : v };
 }
-const short = (path: string) => path.split("/").slice(-3).join("/");
+// Drop node workspace roots (UUID dirs, Claude's "-var-lib-…" project dirs) so the repo path shows.
+export const shortPath = (path: string) => {
+  const parts = path.split("/").filter(Boolean);
+  const cut = parts.reduce((last, part, i) => /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(part) || part.startsWith("-") ? i : last, -1);
+  return parts.slice(cut + 1).slice(-3).join("/") || parts.at(-1) || path;
+};
 
 /** Codex-style review entry point: what changed and where it ships, without reading the thread. */
 export function Changes(p: { items: StreamItem[]; githubPr?: string | null }) {
@@ -37,8 +42,10 @@ export function Changes(p: { items: StreamItem[]; githubPr?: string | null }) {
   const [open, setOpen] = createSignal(false);
   let root!: HTMLDivElement;
   const close = (e: PointerEvent) => { if (open() && !root.contains(e.target as Node)) setOpen(false); };
+  const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
   document.addEventListener("pointerdown", close);
-  onCleanup(() => document.removeEventListener("pointerdown", close));
+  document.addEventListener("keydown", esc);
+  onCleanup(() => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", esc); });
   return (
     <Show when={files().length || pr()}>
       <div class="changes" ref={root}>
@@ -60,7 +67,7 @@ export function Changes(p: { items: StreamItem[]; githubPr?: string | null }) {
             )}</Show>
             <For each={files()}>{f => (
               <div class="changes-row" title={f.file}>
-                <span class="chapters-t">{short(f.file)}</span>
+                <span class="chapters-t">{shortPath(f.file)}</span>
                 <span class="diff-add">+{f.additions}</span><span class="diff-del">−{f.deletions}</span>
               </div>
             )}</For>

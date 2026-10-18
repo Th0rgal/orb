@@ -35,3 +35,11 @@ describe("ux round 2", () => {
     expect(applyPendingMoves([{ id: "m", project: "a" }])).toEqual([{ id: "m", project: "a" }]);
   });
 });
+import { shortPath } from "../src/Changes";
+describe("shortPath", () => {
+  it("drops node workspace roots", () => {
+    expect(shortPath("/var/lib/sandboxed-node/d2415091-a5e0-4e38-8582-62f6175ed355/honeypot/src/main.rs")).toBe("honeypot/src/main.rs");
+    expect(shortPath("/root/.claude/projects/-var-lib-sandboxed-node-d2415091/memory/notes.md")).toBe("memory/notes.md");
+    expect(shortPath("src/a.ts")).toBe("src/a.ts");
+  });
+});

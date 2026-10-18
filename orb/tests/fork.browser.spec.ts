@@ -34,8 +34,8 @@ test(`fork dialog uses ${target.name} on the source destination without mutating
   await page.goto("/");
   await page.locator(".row.project .row-main", { hasText: "Test" }).click();
   await page.getByRole("button", { name: /Original work/ }).click();
-  await page.getByRole("button", { name: "Fork conversation", exact: true }).click();
-  const menu = page.getByRole("menu", { name: "Fork conversation", exact: true });
+  await page.getByRole("button", { name: "Transfer to another agent", exact: true }).click();
+  const menu = page.getByRole("menu", { name: "Transfer to another agent", exact: true });
   await expect(menu).toBeVisible();
   await menu.getByRole("menuitem", { name: target.name }).click();
   const models = page.getByRole("menu", { name: "Choose a model" });

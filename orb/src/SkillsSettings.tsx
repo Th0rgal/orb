@@ -29,7 +29,7 @@ import {
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
 import { AUDIENCES, newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
 import { buildSkillRows, filterSkillRows, type ProblemFilter, type ProjectContextSkill, type SkillRow } from "./skillRows";
-import { deleteLibrarySkill, fetchLibrarySkill, putLibrarySkill, putSkillFile, readSkillFile } from "./skillsApi";
+import { deleteLibrarySkill, fetchLibrarySkill, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile } from "./skillsApi";
 import { SkillBadges, SkillDetail } from "./SkillDetail";
 import { SkillDeliveryPreview } from "./SkillDelivery";
 
@@ -165,6 +165,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [libraryError, setLibraryError] = createSignal<string | null>(null);
   const [projects, setProjects] = createSignal<ProjectSummary[]>([]);
   const [projectSkills, setProjectSkills] = createSignal<ProjectContextSkill[]>([]);
+  // Library skills each project lists (PUT /api/projects/:slug/skills), keyed by project slug.
+  const [projectSelections, setProjectSelections] = createSignal<Record<string, string[]>>({});
+  const [whereFilter, setWhereFilter] = createSignal("all");
   const [loading, setLoading] = createSignal(false);
   const [syncing, setSyncing] = createSignal(false);
   const [syncNotice, setSyncNotice] = createSignal<string | null>(null);
@@ -251,6 +254,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     if (!isConnected()) return;
     const projs: ProjectSummary[] = await listProjects().catch(() => []);
     setProjects(projs);
+    void Promise.all(projs.map(async (proj) => [proj.slug, (await getProjectSkills(proj.slug).catch(() => ({ skills: [] as string[] }))).skills] as const))
+      .then((pairs) => setProjectSelections(Object.fromEntries(pairs)));
     const resolved = await Promise.all(
       projs.map(async (proj) => {
         try {
@@ -452,12 +457,31 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       localHarnessIds: LOCAL_SYNC_HARNESS_IDS,
     }),
   );
+  const membership = (name: string) => Object.entries(projectSelections()).filter(([, names]) => names.includes(name)).map(([slug]) => slug).sort();
+  const matchesWhere = (row: SkillRow) => {
+    const w = whereFilter();
+    if (w === "all") return true;
+    if (w === "local") return row.audience.includes("local");
+    if (w === "common") return row.scope === "global";
+    return w.startsWith("project:") && membership(row.name).includes(w.slice(8));
+  };
   const filteredRows = createMemo(() =>
-    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: problemFilter(), harnessTotal: harnessTotal() }),
+    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: problemFilter(), harnessTotal: harnessTotal() }).filter(matchesWhere),
   );
+  const saveProjects = async (name: string, next: string[]) => {
+    const current = projectSelections();
+    const changed = projects().filter((proj) => (current[proj.slug] ?? []).includes(name) !== next.includes(proj.slug));
+    const updated = { ...current };
+    for (const proj of changed) {
+      const list = current[proj.slug] ?? [];
+      const skills = next.includes(proj.slug) ? [...list, name] : list.filter((n) => n !== name);
+      updated[proj.slug] = (await putProjectSkills(proj.slug, skills)).skills;
+    }
+    setProjectSelections(updated);
+  };
   // Pills count skills under the other active filters, so "Drift 4" matches the list it opens.
   const problemCounts = createMemo(() => Object.fromEntries(PROBLEM_FILTERS.map(([id]) => [id,
-    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: id, harnessTotal: harnessTotal() }).length])) as Record<ProblemFilter, number>);
+    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: id, harnessTotal: harnessTotal() }).filter(matchesWhere).length])) as Record<ProblemFilter, number>);
   const openRow = createMemo(() => rows().find((r) => r.name === openSkill() && !r.name.startsWith("project:")) ?? null);
 
   /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
@@ -629,14 +653,11 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             </div>
           </div>
           <div class="skills-filter-bar">
-            <Select aria-label="Filter by audience" class="s-input" value={audienceFilter()} onChange={(e) => setAudienceFilter(e.currentTarget.value)}>
-              <option value="all">All audiences</option>
-              <For each={AUDIENCES}>{(a) => <option value={a}>{a}</option>}</For>
-            </Select>
-            <Select aria-label="Filter by scope" class="s-input" value={scopeFilter()} onChange={(e) => setScopeFilter(e.currentTarget.value)}>
-              <option value="all">Any scope</option>
-              <option value="global">Global</option>
-              <option value="on-demand">On demand</option>
+            <Select aria-label="Filter by place" class="s-input" value={whereFilter()} onChange={(e) => setWhereFilter(e.currentTarget.value)}>
+              <option value="all">Everywhere</option>
+              <option value="local">Local</option>
+              <option value="common">Common</option>
+              <For each={projects()}>{(proj) => <option value={`project:${proj.slug}`}>{proj.title || proj.slug}</option>}</For>
             </Select>
             <div class="skills-filter-pills" role="tablist" aria-label="Filter skills by problem">
               <For each={PROBLEM_FILTERS}>{([id, label]) => (
@@ -658,7 +679,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                     <div class="skills-item-body">
                       <div class="skills-item-top">
                         <code class="skills-item-name">{row.name}</code>
-                        <SkillBadges row={row} harnessTotal={harnessTotal()} />
+                        <SkillBadges row={row} harnessTotal={harnessTotal()} projects={membership(row.name)} />
                         <Show when={row.lint.length}><span class="skills-lint-count" title={row.lint.map((l) => l.message).join("\n")}>{row.lint.length} warning{row.lint.length === 1 ? "" : "s"}</span></Show>
                       </div>
                       <div class="skills-item-desc">{row.description || "No description."}</div>
@@ -829,6 +850,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             onImport={importSkill}
             onDelete={removeSkill}
             onFilesChanged={filesChanged}
+            projects={projects().map((proj) => ({ slug: proj.slug, title: proj.title ?? undefined }))}
+            projectMembership={membership(row().name)}
+            onSaveProjects={saveProjects}
             onOpenProjectFile={(slug, path) => p.onOpenPage?.(`pf:${slug}:${path}`)}
           />
         )}

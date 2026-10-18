@@ -14,8 +14,10 @@ export function Chapters(p: { items: StreamItem[]; scroller: () => HTMLElement |
   const [open, setOpen] = createSignal(false);
   let root!: HTMLDivElement;
   const close = (e: PointerEvent) => { if (open() && !root.contains(e.target as Node)) setOpen(false); };
+  const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
   document.addEventListener("pointerdown", close);
-  onCleanup(() => document.removeEventListener("pointerdown", close));
+  document.addEventListener("keydown", esc);
+  onCleanup(() => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", esc); });
   const go = async (key: string) => {
     setOpen(false);
     const scope = p.scroller();

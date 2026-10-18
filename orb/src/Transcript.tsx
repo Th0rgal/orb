@@ -291,7 +291,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
       <Show when={editing()} fallback={<>
       <Show when={plan() !== null}><small class="user-plan"><Ic.PlanIcon size={12}/>Plan</small></Show>
       <Show when={fork()} fallback={<span>{goal().kind === "goal" ? (goal() as { objective: string }).objective : plan() ?? images().text}</span>}>
-        {context => <details class="fork-context"><summary>Forked from {context().source_title || "conversation"} · {context().messages.length} messages</summary>
+        {context => <details class="fork-context"><summary>Transferred from {context().source_title || "conversation"} · {context().messages.length} messages</summary>
           <For each={context().messages}>{m => <div class="fork-context-message"><small>{m.role === "user" ? "You" : "Assistant"}</small><p>{m.content}</p></div>}</For>
         </details>}
       </Show>

@@ -109,7 +109,7 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
   // Identity actions only — no project/file creation leaking onto an agent row.
-  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Fork conversation/, "Move", "Rename", "Copy mission ID"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Copy mission ID"]);
 
   await menu.getByRole("menuitem", { name: "Copy mission ID" }).click();
   expect(await copied(page)).toEqual([MISSION_ID]);

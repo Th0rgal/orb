@@ -846,7 +846,7 @@ export function FilePanelProvider(p: {
       <FileReferenceContext.Provider value={resolver}>
         <span ref={layoutMarker} hidden />
         {p.children}
-        <aside class="btw-sidebar" classList={{ "file-panel": sideVisible(), maximized: sideVisible() && maximized() }} style={{ display: sideVisible() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
+        <aside class="btw-sidebar" classList={{ "file-panel": sideVisible(), maximized: sideVisible() && maximized() }} style={{ display: sideVisible() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><PanelSwitch active="side" files={available()} side={!!openSide()} onFiles={() => setOpened(true)} onSide={() => undefined} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
         <Show when={opened() && available()}>
           <aside
             ref={(el) => {
@@ -874,6 +874,7 @@ export function FilePanelProvider(p: {
               aria-label="Resize file panel"
               onPointerDown={(e) => resize(e)}
             />
+            <Show when={openSide()}><PanelSwitch active="files" files side onFiles={() => undefined} onSide={() => { setFilesOpened(false); setSideVisible(true); openSide()?.(); }} /></Show>
             <div class="file-tabs file-header" data-tauri-drag-region>
               <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?"Restore conversation (⌘⇧F)":"Expand file editor (⌘⇧F)"} aria-keyshortcuts="Meta+Shift+F" aria-pressed={maximized()} onClick={()=>setMaximized(v=>!v)}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d={maximized()?"M4 9h5V4m6 0v5h5M4 15h5v5m6 0v-5h5":"M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"}/></svg>
@@ -1212,5 +1213,16 @@ export function FilePanelProvider(p: {
       </FileReferenceContext.Provider>
     </PanelContext.Provider>
     </SidePanelContext.Provider>
+  );
+}
+
+/** One right-hand panel, two tabs (Codex-style): the side question and the files share the
+ * same slot, so switching keeps width and position instead of opening another pane. */
+function PanelSwitch(p: { active: "side" | "files"; side: boolean; files: boolean; onSide: () => void; onFiles: () => void }) {
+  return (
+    <div class="panel-switch" role="tablist" aria-label="Side panel">
+      <Show when={p.side}><button type="button" role="tab" aria-selected={p.active === "side"} class={p.active === "side" ? "on" : ""} onClick={p.onSide}>Side question</button></Show>
+      <Show when={p.files}><button type="button" role="tab" aria-selected={p.active === "files"} class={p.active === "files" ? "on" : ""} onClick={p.onFiles}>Files</button></Show>
+    </div>
   );
 }

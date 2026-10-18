@@ -21,8 +21,7 @@ test("skills settings displays harness matrix, resolves drift with one click, an
   // Unified catalog: badges for audience, scope, sources and problems.
   const catalogSection = page.getByRole("region", { name: "Global and Library skills catalog" });
   const policyItem = catalogSection.locator('[data-skill="controllers-policy"]');
-  await expect(policyItem).toContainText("coordinator");
-  await expect(policyItem).toContainText("global");
+  await expect(policyItem).toContainText("common");
   await expect(policyItem).toContainText("Divergent");
   await expect(catalogSection.locator('[data-skill="spark-lean-offload"]')).toContainText("Only in legacy folder");
 
@@ -40,7 +39,7 @@ test("skills settings displays harness matrix, resolves drift with one click, an
   // Divergent skills open on their copies; the editor is one tab away.
   await dialog.getByRole("tab", { name: "SKILL.md" }).click();
   await expect(dialog.locator(".skills-editor")).toContainText("STATE_SIGNATURE");
-  await expect(dialog.getByLabel("Scope")).toHaveValue("global");
+  await expect(dialog.getByRole("button", { name: /Common/ })).toBeVisible();
   await page.waitForTimeout(250);
   await page.screenshot({ path: "test-results/skills-detail-dark.png" });
   await dialog.getByRole("tab", { name: /Copies/ }).click();

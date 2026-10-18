@@ -3770,3 +3770,24 @@ select.orb-select-native:disabled { cursor: default; }
 .verdict-needs_input .turn-recap-dot { background: var(--purple); }
 .turn-recap-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .turn-recap-actions .s-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Skill places picker (Local · Common · projects). */
+.skill-places { position: relative; }
+.skill-places-btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--stroke); font-size: 12.5px; color: var(--fg); background: var(--bg); }
+.skill-places-btn:hover { background: var(--hover-1); }
+.skill-places-menu { position: absolute; top: 34px; left: 0; z-index: 20; width: 300px; max-height: 360px; overflow: auto; padding: 6px; border-radius: 12px; border: 1px solid var(--stroke); background: var(--bg); box-shadow: 0 10px 30px rgb(0 0 0 / 14%); }
+.skill-places-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
+.skill-places-row:hover { background: var(--hover-1); }
+.skill-places-row span { display: flex; flex-direction: column; min-width: 0; }
+.skill-places-row strong { font-size: 13px; font-weight: 500; }
+.skill-places-row small { font-size: 11.5px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-places-sep { margin: 6px 8px 2px; padding-top: 8px; border-top: 1px solid var(--stroke-soft); font-size: 11px; color: var(--fg-3); }
+.skill-places-empty { margin: 4px 8px; font-size: 11.5px; }
+.skills-aud.aud-project { color: var(--fg-2); }
+
+/* Shared tab row for the right-hand panel (side question / files). */
+.panel-switch { display: flex; gap: 2px; padding: 8px 12px 0; margin-top: var(--tb-h, 0px); }
+.file-panel > .panel-switch { margin-top: 0; }
+.panel-switch button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; color: var(--fg-3); }
+.panel-switch button:hover { color: var(--fg); background: var(--hover-1); }
+.panel-switch button.on { color: var(--fg); background: var(--hover-2, var(--hover-1)); font-weight: 500; }

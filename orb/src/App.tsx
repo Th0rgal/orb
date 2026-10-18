@@ -1990,6 +1990,20 @@ export default function App() {
     };
     window.addEventListener("orb:mission-moved", onMoved);
     onCleanup(() => window.removeEventListener("orb:mission-moved", onMoved));
+    // A harness transfer archives the original: hide it at once, restore it if Core refuses.
+    const archivedBefore = new Map<string, Mission>();
+    const onArchived = (e: Event) => {
+      const { id } = (e as CustomEvent<{ id: string }>).detail;
+      setMissions(prev => { const m = prev.find(x => x.id === id); if (m) archivedBefore.set(id, m); return prev.filter(x => x.id !== id); });
+    };
+    const onArchiveFailed = (e: Event) => {
+      const { id } = (e as CustomEvent<{ id: string }>).detail;
+      const m = archivedBefore.get(id); archivedBefore.delete(id);
+      if (m) setMissions(prev => prev.some(x => x.id === id) ? prev : [...prev, m]);
+    };
+    window.addEventListener("orb:mission-archived", onArchived);
+    window.addEventListener("orb:mission-archive-failed", onArchiveFailed);
+    onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); });
     window.addEventListener("orb:debug-cron", onDebugCron);
     onCleanup(() => {
       window.removeEventListener("orb:open-page", onOpenPage);
@@ -2722,7 +2736,7 @@ function MissionDock(p: {
       </div>
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
-        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Fork conversation" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
+        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Transfer to another agent" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
         <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">

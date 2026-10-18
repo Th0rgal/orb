@@ -11,8 +11,12 @@ import {
   lineDiff,
   lintSkill,
   parseSkillMeta,
+  placesOf,
+  placesToMeta,
   setSandboxedMeta,
+  type SkillPlaces,
 } from "./skillModel";
+import { SkillPlacesPicker, type PlaceProject } from "./SkillPlaces";
 import { deleteSkillFile, putSkillFile, readSkillFile, referencePaths } from "./skillsApi";
 import type { SkillRow } from "./skillRows";
 
@@ -55,6 +59,11 @@ export interface SkillDetailProps {
   /** Reference file changed in the Library; refresh and sync. */
   onFilesChanged: (name: string) => Promise<void>;
   onOpenProjectFile?: (slug: string, path: string) => void;
+  /** Projects that can receive Library skills, and those that currently list this one. */
+  projects?: PlaceProject[];
+  projectMembership?: string[];
+  /** Persist this skill's project memberships (only called when they changed). */
+  onSaveProjects?: (name: string, projects: string[]) => Promise<void>;
 }
 
 export function SkillDetail(p: SkillDetailProps) {
@@ -70,10 +79,19 @@ export function SkillDetail(p: SkillDetailProps) {
   const [importRels, setImportRels] = createSignal<string[]>([]);
   // Allowed files start checked; the user can deselect any before the PUT.
   const setConfirmImport = (src: SkillSourceRef | null) => { setImportRels(src?.files?.map((f) => f.rel) ?? []); setConfirmImportRaw(src); };
-  const dirty = () => editable() && draft() !== original();
+  const dirty = () => editable() && (draft() !== original() || projectsDirty());
   const meta = createMemo(() => parseSkillMeta(draft()));
   const audience = createMemo(() => effectiveAudience(meta()));
   const lint = createMemo(() => lintSkill(p.row.name, draft()));
+  const [projectDraft, setProjectDraft] = createSignal<string[]>([...(p.projectMembership ?? [])].sort());
+  const projectsDirty = () => projectDraft().join(",") !== [...(p.projectMembership ?? [])].sort().join(",");
+  const places = createMemo<SkillPlaces>(() => placesOf(audience(), meta().scope, projectDraft()));
+  const setPlaces = (next: SkillPlaces) => {
+    const projects = next.common ? [] : next.projects;
+    const m = placesToMeta({ ...next, projects }, audience().includes("coordinator") && meta().scope !== "global");
+    setProjectDraft(projects);
+    setDraft(setSandboxedMeta(draft(), m.audience, m.scope, p.row.name));
+  };
 
   const run = async (fn: () => Promise<void>) => {
     if (busy()) return;
@@ -136,13 +154,13 @@ export function SkillDetail(p: SkillDetailProps) {
           </Show>
           <DialogButton disabled={busy()} onClick={close}>{dirty() ? "Cancel" : "Close"}</DialogButton>
           <Show when={editable()}>
-            <DialogButton variant="primary" disabled={busy() || !dirty()} onClick={() => void run(async () => { await p.onSave(p.row.name, draft()); })}>
+            <DialogButton variant="primary" disabled={busy() || !dirty()} onClick={() => void run(async () => { if (draft() !== original()) await p.onSave(p.row.name, draft()); if (projectsDirty()) await p.onSaveProjects?.(p.row.name, projectDraft()); })}>
               {busy() ? "Saving…" : "Save & sync"}
             </DialogButton>
           </Show>
         </>}>
         <div class="skills-detail-badges">
-          <SkillBadges row={p.row} harnessTotal={p.harnessTotal} />
+          <SkillBadges row={p.row} harnessTotal={p.harnessTotal} projects={projectDraft()} />
         </div>
         <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()}</p>}</Show>
         <Show when={lint().length}>
@@ -166,19 +184,7 @@ export function SkillDetail(p: SkillDetailProps) {
         <Show when={tab() === "skill"}>
           <Show when={editable()}>
             <div class="skills-meta-controls">
-              <fieldset class="skills-audience">
-                <legend>Audience</legend>
-                <For each={AUDIENCES}>{(a) => (
-                  <label class="skills-check"><input type="checkbox" checked={audience().includes(a)} disabled={busy()} onChange={(e) => toggleAudience(a, e.currentTarget.checked)} />{a}</label>
-                )}</For>
-              </fieldset>
-              <label class="skills-scope">
-                <span>Scope</span>
-                <Select aria-label="Scope" class="s-input" value={meta().scope === "global" ? "global" : "on-demand"} disabled={busy()} onChange={(e) => setScope(e.currentTarget.value)}>
-                  <option value="on-demand" selected={meta().scope !== "global"}>On demand</option>
-                  <option value="global" selected={meta().scope === "global"}>Global (always delivered)</option>
-                </Select>
-              </label>
+              <SkillPlacesPicker value={places()} projects={p.projects ?? []} disabled={busy()} onChange={setPlaces} />
               <button type="button" class="s-btn sm quiet skills-preview-toggle" onClick={() => setPreview(!preview())}>{preview() ? "Edit" : "Preview"}</button>
             </div>
           </Show>
@@ -307,19 +313,20 @@ export function SkillDetail(p: SkillDetailProps) {
   );
 }
 
-export function SkillBadges(p: { row: SkillRow; harnessTotal: number }) {
+export function SkillBadges(p: { row: SkillRow; harnessTotal: number; projects?: string[] }) {
   const r = () => p.row;
   return (
     <>
-      <For each={r().audience}>{(a) => <span class={`skills-aud aud-${a}`}>{a}</span>}</For>
-      <Show when={r().scope === "global"}><span class="skills-aud aud-global">global</span></Show>
+      <Show when={r().audience.includes("local")}><span class="skills-aud aud-local">local</span></Show>
+      <Show when={r().scope === "global"}><span class="skills-aud aud-global">common</span></Show>
+      <For each={p.projects ?? []}>{(slug) => <span class="skills-aud aud-project">{slug}</span>}</For>
       <For each={r().sourceKinds}>{(k) => <span class="skills-origin-tag">{k}</span>}</For>
       <Show when={r().desired}>
         <span class={`skills-badge ${r().harnessCount >= p.harnessTotal && !r().staleCount ? "synced" : "drift"}`}>
           {r().staleCount ? `Drift · ${r().harnessCount}/${p.harnessTotal}` : `Synced ${r().harnessCount}/${p.harnessTotal}`}
         </span>
       </Show>
-      <Show when={r().inLibrary && !r().desired}><span class="skills-badge missing" title="Audience does not include local">Not local</span></Show>
+      
       <Show when={r().legacyOnly}><span class="skills-badge drift">Only in legacy folder</span></Show>
       <Show when={r().divergent}><span class="skills-badge drift">Divergent</span></Show>
       <Show when={r().lines}><span class="skills-sub-note">{r().lines} lines</span></Show>
