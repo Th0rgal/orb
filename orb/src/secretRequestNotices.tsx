@@ -24,11 +24,18 @@ const hide = (ids: string[], on: boolean) =>
     return next;
   });
 
+/** When the visible set last changed: a batch approve must not catch a request that just appeared. */
+const [changedAt, setChangedAt] = createSignal(0);
+const SETTLE_MS = 1500;
+let lastIds = "";
+
 export function syncSecretRequestNotices(list: SecretAccessRequest[], openSecrets: () => void) {
   openSecretsPage = openSecrets;
   setPending(list);
   const live = new Set(list.map((r) => r.id));
   setHidden((prev) => new Set([...prev].filter((id) => live.has(id))));
+  const ids = visible().map((r) => r.id).join(",");
+  if (ids !== lastIds) { lastIds = ids; setChangedAt(Date.now()); }
   if (!visible().length) return dismissToast(KEY);
   notify({ key: KEY, kind: "info", variant: "secret", title: "", content: () => <SecretRequestsCard /> });
 }
@@ -70,7 +77,7 @@ function label(r: SecretAccessRequest) {
 
 function SecretRequestsCard() {
   const [now, setNow] = createSignal(Date.now());
-  const tick = setInterval(() => setNow(Date.now()), 1000);
+  const tick = setInterval(() => setNow(Date.now()), 250);
   onCleanup(() => clearInterval(tick));
   const list = visible;
   const one = () => list().length === 1 ? list()[0] : undefined;
@@ -120,7 +127,10 @@ function SecretRequestsCard() {
       <button type="button" class="toast-link" onClick={() => { close(); openSecretsPage(); }}>Review</button>
       <button type="button" class="toast-btn" onClick={() => act(list(), false)}>{one() ? "Deny" : "Deny all"}</button>
       <Show when={ready().length}>
-        <button type="button" class="toast-btn primary" onClick={() => act(ready(), true)}>
+        <button type="button" class="toast-btn primary" disabled={now() - changedAt() < SETTLE_MS} onClick={() => {
+          // Approve exactly what was on screen when the button became active.
+          if (Date.now() - changedAt() >= SETTLE_MS) act(ready(), true);
+        }}>
           <FingerprintIcon size={14} />{one() ? (one()!.kind === "write" ? "Store" : "Allow") : "Approve all"}
         </button>
       </Show>

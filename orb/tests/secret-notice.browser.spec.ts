@@ -17,7 +17,9 @@ test('secret requests share one card: D for one, rows for several',async({page})
  await expect(card.locator('.secret-row')).toHaveCount(3);
  await expect(card.locator('.secret-kind[aria-label="Write"]')).toHaveCount(1);
  await expect(card.locator('.secret-kind[aria-label="Read"]')).toHaveCount(2);
- await expect(bar.getByRole('button',{name:'Approve all'})).toBeVisible();
+ // A batch approve waits until the list has been on screen briefly.
+ await expect(bar.getByRole('button',{name:'Approve all'})).toBeDisabled();
+ await expect(bar.getByRole('button',{name:'Approve all'})).toBeEnabled({timeout:3000});
  await expect(bar.getByRole('button',{name:'Deny all'})).toBeVisible();
  // The action bar and every row stay on one line.
  const lineBox=(await bar.boundingBox())!;

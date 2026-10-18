@@ -3442,6 +3442,7 @@ select.orb-select-native:disabled { cursor: default; }
 .secret-bar .toast-btn { min-height: 24px; }
 .secret-bar .toast-btn:not(.primary) { background: var(--overlay-surface); border: 1px solid var(--overlay-border); }
 .secret-bar .toast-btn.primary { gap: 6px; }
+.secret-bar .toast-btn:disabled { opacity: .5; cursor: default; }
 .secret-grace { flex: 1; min-width: 0; color: var(--fg-3); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
