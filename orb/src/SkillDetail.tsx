@@ -247,7 +247,7 @@ export function SkillDetail(p: SkillDetailProps) {
                         <button type="button" class="s-btn sm" onClick={() => setCompare(!compare())}>{compare() ? "Hide diff" : "Compare"}</button>
                       </Show>
                       <Show when={p.connected && src.content && !same()}>
-                        <button type="button" class="s-btn sm primary" disabled={busy()} onClick={() => setConfirmImport(src)}>{p.row.inLibrary ? "Use this version" : "Import to Library"}</button>
+                        <button type="button" class={`s-btn sm${p.row.inLibrary ? "" : " primary"}`} disabled={busy()} onClick={() => setConfirmImport(src)}>{p.row.inLibrary ? "Use this version" : "Import to Library"}</button>
                       </Show>
                     </div>
                   </div>
@@ -279,6 +279,9 @@ export function SkillDetail(p: SkillDetailProps) {
             </DialogButton>
           </>}>
           <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()}</p>}</Show>
+          <Show when={p.row.inLibrary && dropsSandboxedMetadata(original(), src().content)}>
+            <p class="inline-error" role="alert">This copy has no <code>metadata.sandboxed</code> block. Replacing the Library version removes its audience and scope, so missions stop receiving it automatically.</p>
+          </Show>
           <Show when={src().files?.length} fallback={<p class="skills-sub-note">No importable reference files: only SKILL.md is imported.</p>}>
             <fieldset class="skills-import-files">
               <legend>Reference files (text under references/, scripts/, assets/, templates/; secrets and dotfiles are never offered)</legend>
@@ -322,4 +325,10 @@ export function SkillBadges(p: { row: SkillRow; harnessTotal: number }) {
       <Show when={r().lines}><span class="skills-sub-note">{r().lines} lines</span></Show>
     </>
   );
+}
+
+/** True when the Library frontmatter declares sandboxed delivery metadata that the candidate lacks. */
+export function dropsSandboxedMetadata(library: string | null | undefined, candidate: string | null | undefined): boolean {
+  const front = (text?: string | null) => /^---\n([\s\S]*?)\n---/.exec(text ?? "")?.[1] ?? "";
+  return /^\s+sandboxed:/m.test(front(library)) && !/^\s+sandboxed:/m.test(front(candidate));
 }

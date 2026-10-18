@@ -229,6 +229,9 @@ fn context_listener(
     let project = request.project.clone();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
+        // Failed connects back off 3 s → 60 s; a healthy stream resets it. A fixed 3 s retry
+        // from every project's worker turned a Core error into a request storm.
+        let mut backoff = std::time::Duration::from_secs(3);
         loop {
             if let Ok(mut response) = client
                 .get(format!(
@@ -241,6 +244,7 @@ fn context_listener(
                 .await
             {
                 if response.status().is_success() {
+                    backoff = std::time::Duration::from_secs(3);
                     let _ = wake_tx.try_send(());
                     let mut pending = String::new();
                     while let Ok(Some(chunk)) = response.chunk().await {
@@ -254,7 +258,8 @@ fn context_listener(
                     }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
         }
     })
 }

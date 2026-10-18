@@ -36,6 +36,12 @@ export interface HermesSettingsState {
     api_server_url?: string;
     api_server_healthy?: boolean;
     active_runs?: number;
+    service_active?: boolean;
+    model?: string;
+    base_url?: string;
+    uses_sandboxed_proxy?: boolean;
+    token_present?: boolean;
+    notes?: string[];
   };
   sessions: {
     available?: boolean;

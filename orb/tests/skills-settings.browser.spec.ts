@@ -69,7 +69,7 @@ test("skills settings displays harness matrix, resolves drift with one click, an
   });
 
   // Click Sync all harnesses and verify drift is resolved
-  const syncBtn = page.getByRole("button", { name: /Sync all harnesses \(2 drifted\)/ });
+  const syncBtn = page.getByRole("button", { name: /Sync all harnesses \(2 out of date\)/ });
   await syncBtn.click();
   await expect(page.getByRole("status")).toContainText(
     "Synchronized 37 skills across all 6 local harness directories",

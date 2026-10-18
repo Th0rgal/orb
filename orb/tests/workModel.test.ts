@@ -14,7 +14,8 @@ describe("harness checklist adapters",()=>{
   it("ignores malformed payloads and unrelated tools without inventing pending tasks",()=>{
     for(const input of [null,{},"{broken",{todos:[null]},{todos:[{content:"hi",status:"whatever"}]},{todos:[{content:42,status:"pending"}]},{todos:[{content:"",status:"pending"}]}]) expect(parseChecklist("TodoWrite",input)).toBeNull();
     expect(parseChecklist("write",{todos:[{content:"hi",status:"pending"}]})).toBeNull();
-    expect(parseChecklist("update_plan",{plan:[{step:"hi",status:"cancelled"}]})).toBeNull();
+    expect(parseChecklist("update_plan",{plan:[{step:"hi",status:"cancelled"}]})).toEqual([{text:"hi",status:"cancelled"}]);
+    expect(parseChecklist("TodoWrite",{todos:[{content:"a",status:"blocked"},{content:"b",status:"done"}]})).toEqual([{text:"a",status:"pending"},{text:"b",status:"completed"}]);
     expect(parseChecklist("todowrite",{todos:[{content:"hi",status:"cancelled"}]})).toEqual([{text:"hi",status:"cancelled"}]);
   });
   it("uses the latest valid checklist, retains raw events, and accepts explicit empty lists",()=>{

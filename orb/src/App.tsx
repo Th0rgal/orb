@@ -2905,6 +2905,18 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   let nearBottom = true;
   createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
 
+  // First paint of a mission lands at the bottom: hide the column for the few frames the
+  // virtual list needs to mount and measure the tail, instead of showing the top then jumping.
+  let landedFor = "";
+  const landAtBottom = () => {
+    if (!scroller || landedFor === p.id || !nearBottom) { landedFor = p.id; return; }
+    landedFor = p.id;
+    const el = scroller;
+    el.classList.add("landing");
+    const land = () => el.scrollTo({ top: el.scrollHeight });
+    land();
+    requestAnimationFrame(() => { land(); requestAnimationFrame(() => { land(); el.classList.remove("landing"); }); });
+  };
   const scrollIfPinned = () => {
     if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) scroller?.scrollTo({ top: scroller.scrollHeight });
   };
@@ -2997,6 +3009,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       replaying = false;
       if(disposed)return;
       setAwaiting(false);
+      landAtBottom();
       const queued = held;
       held = [];
       for (const ev of heldAfterHistory(history, queued)) applyLive(ev);

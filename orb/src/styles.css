@@ -3692,3 +3692,6 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-request-ok { display: inline-flex; align-items: center; gap: 6px; }
 .bw-requests .secret-bar { padding: 6px 10px 6px 14px; }
 .bw-grace-setting { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-3); font-size: 11px; white-space: nowrap; }
+
+/* First paint of a mission: hidden for two frames while it lands at the bottom. */
+.scroll.landing > .col { visibility: hidden; }

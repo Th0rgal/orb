@@ -11,7 +11,7 @@ import { Portal } from 'solid-js/web';
 import { useSidePanel } from './FilePanel';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion } from './api';
-import { readSideQuestion, writeSideQuestion, sideQuestionKey, type QueuedSideQuestion } from './sideQuestionStorage';
+import { readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, type QueuedSideQuestion } from './sideQuestionStorage';
 import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
@@ -71,6 +71,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
    }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(e instanceof Error?e.message:String(e));setBusy(false);}});
   };
+  if(peekSideQuestionOpen(current)){setOpen(true);side?.show();}
   ready=readSideQuestion(current).then(saved=>{
   if(stale)return;
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
@@ -201,6 +202,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setOpen(true);side?.show();revealSentQuestion();
  };
  let inline!:HTMLDivElement;
+ // Never leave the panel silent: show a live stage and elapsed time until the first answer text.
+ const [elapsed,setElapsed]=createSignal(0);
+ createEffect(on(busy,b=>{setElapsed(0);if(!b)return;const started=Date.now(),t=setInterval(()=>setElapsed(Math.floor((Date.now()-started)/1000)),1000);onCleanup(()=>clearInterval(t));}));
  return <>
   <div ref={inline}/>
   <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
@@ -223,7 +227,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <ol><For each={queue()}>{row=><li class="queue-row"><div class="queue-line"><span class="queue-text" title={row.question}>{row.question}</span><span class="queue-row-actions"><button type="button" title="Remove" aria-label={`Remove queued side question: ${row.question}`} onClick={()=>setQueue(rows=>rows.filter(other=>other.id!==row.id))}><Ic.TrashIcon size={14}/></button></span></div></li>}</For></ol>
     </section></Show>
     <Show when={!history().length&&!question()}><p class="dim">Ask a question or give the side agent a task. It shares the main agent’s workspace.</p></Show>
-    <Show when={busy() && runStatus()}><p class="dim" role="status">{runStatus()}</p></Show>
+    <Show when={busy() && (runStatus() || !answer())}><p class="dim btw-progress" role="status">{runStatus() || "Thinking…"}<Show when={elapsed() >= 3}> · {elapsed()} s</Show></p></Show>
     <AgentActivity items={btwActivities(p.mission)} running={busy()} completed={!busy() && !error()}/>
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>

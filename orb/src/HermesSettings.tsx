@@ -140,11 +140,10 @@ export function HermesSettings() {
                       <ProviderLogo type="hermes" />
                       <div class="s-row-text">
                         <div class="s-row-title">
-                          Paloma · {s().runtime?.service_name || "hermes-agent.service"}
+                          Paloma · {s().runtime?.service_name || "hermes-assistant.service"}
                         </div>
                         <div class="s-row-desc">
-                          Service: {s().runtime?.service_state || "unknown"} · Gateway: {s().runtime?.gateway_state || "unknown"} · API: {s().runtime?.api_server_healthy ? "Healthy" : "Unreachable"}
-                          <Show when={typeof s().runtime?.active_runs === "number"}> · Active runs: {s().runtime?.active_runs}</Show>
+                          {hermesRuntimeLine(s().runtime)}
                         </div>
                       </div>
                       <div class="s-row-ctrl">
@@ -387,4 +386,18 @@ export function HermesSettings() {
       </div>
     </div>
   );
+}
+
+/** Core reports `service_active` (+ proxy/token flags); older cores sent `service_state`/`api_server_healthy`. */
+export function hermesRuntimeLine(r: HermesSettingsState["runtime"] | undefined): string {
+  if (!r) return "Status unavailable";
+  const service = typeof r.service_active === "boolean" ? (r.service_active ? "active" : "stopped") : r.service_state || "unknown";
+  const parts = [`Service: ${service}`];
+  if (r.gateway_state) parts.push(`Gateway: ${r.gateway_state}`);
+  if (typeof r.api_server_healthy === "boolean") parts.push(`API: ${r.api_server_healthy ? "Healthy" : "Unreachable"}`);
+  if (typeof r.uses_sandboxed_proxy === "boolean") parts.push(r.uses_sandboxed_proxy ? "Via Core proxy" : "Direct provider");
+  if (r.token_present === false) parts.push("Token missing");
+  if (typeof r.active_runs === "number") parts.push(`Active runs: ${r.active_runs}`);
+  if (r.notes?.length) parts.push(r.notes.join(" · "));
+  return parts.join(" · ");
 }

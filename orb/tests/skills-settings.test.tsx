@@ -187,7 +187,7 @@ describe("SkillsSettings", () => {
     expect(screen.getByText("Active · 4C8811A0")).toBeTruthy();
     expect(knownSkillNames()).toContain("paloma-backends");
 
-    const syncBtn = screen.getByRole("button", { name: /Sync all harnesses \(2 drifted\)/i });
+    const syncBtn = screen.getByRole("button", { name: /Sync all harnesses \(2 out of date\)/i });
     fireEvent.click(syncBtn);
 
     await waitFor(() => {

@@ -455,6 +455,9 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const filteredRows = createMemo(() =>
     filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: problemFilter(), harnessTotal: harnessTotal() }),
   );
+  // Pills count skills under the other active filters, so "Drift 4" matches the list it opens.
+  const problemCounts = createMemo(() => Object.fromEntries(PROBLEM_FILTERS.map(([id]) => [id,
+    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: id, harnessTotal: harnessTotal() }).length])) as Record<ProblemFilter, number>);
   const openRow = createMemo(() => rows().find((r) => r.name === openSkill() && !r.name.startsWith("project:")) ?? null);
 
   /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
@@ -587,7 +590,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
               {loading() ? "Scanning…" : "Refresh"}
             </button>
             <button type="button" class="s-btn sm primary" disabled={syncing()} onClick={handleSyncAll}>
-              {syncing() ? "Syncing…" : driftCount() > 0 ? `Sync all harnesses (${driftCount()} drifted)` : "Sync all harnesses"}
+              {syncing() ? "Syncing…" : driftCount() > 0 ? `Sync all harnesses (${driftCount()} out of date)` : "Sync all harnesses"}
             </button>
           </div>
         </div>
@@ -638,7 +641,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             <div class="skills-filter-pills" role="tablist" aria-label="Filter skills by problem">
               <For each={PROBLEM_FILTERS}>{([id, label]) => (
                 <button type="button" role="tab" aria-selected={problemFilter() === id} class={`skills-filter-pill ${problemFilter() === id ? "on" : ""}`} onClick={() => setProblemFilter(id)}>
-                  {label}
+                  {label}<Show when={!loading() || rows().length}> <span class="dim">{problemCounts()[id]}</span></Show>
                 </button>
               )}</For>
             </div>
@@ -648,7 +651,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
           <Show when={!isConnected()}><p class="skills-sub-note">Connect to Core to load the Library, the canonical skill source.</p></Show>
 
           <div class="s-card skills-catalog-card">
-            <For each={filteredRows()} fallback={<div class="s-row"><div class="s-row-text"><div class="s-row-desc">No skills match the current filter.</div></div></div>}>
+            <For each={filteredRows()} fallback={<div class="s-row"><div class="s-row-text"><div class="s-row-desc">{loading() || (isConnected() && !libraryLoaded() && !libraryError()) ? "Loading skills…" : "No skills match the current filter."}</div></div></div>}>
               {(row) => (
                 <div class="skills-item" data-skill={row.name}>
                   <button type="button" class="skills-item-head" onClick={() => openRowDetail(row)}>
