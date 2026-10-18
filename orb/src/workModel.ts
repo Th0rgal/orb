@@ -112,6 +112,15 @@ export interface DiffStats {
   file?: string;
 }
 
+function lineDiff(oldStr: string, newStr: string) {
+  const oldLines = oldStr ? oldStr.split("\n") : [], newLines = newStr ? newStr.split("\n") : [];
+  const remaining = new Map<string, number>();
+  for (const l of oldLines) remaining.set(l, (remaining.get(l) ?? 0) + 1);
+  let common = 0;
+  for (const l of newLines) { const c = remaining.get(l) ?? 0; if (c > 0) { common++; remaining.set(l, c - 1); } }
+  return { additions: Math.max(0, newLines.length - common), deletions: Math.max(0, oldLines.length - common) };
+}
+
 export function computeDiffStats(tool: Tool): DiffStats | null {
   const args = toolArgs(tool.args);
   const res = toolArgs(tool.result);
@@ -124,25 +133,34 @@ export function computeDiffStats(tool: Tool): DiffStats | null {
       file: typeof filediff.file === "string" ? filediff.file : fileTarget(tool) ?? undefined,
     };
   }
+  // OpenCode's newer edit/patch metadata lists every changed file.
+  const files = Array.isArray(meta?.files) ? meta.files : null;
+  if (files?.length) {
+    let additions = 0, deletions = 0, counted = false;
+    for (const f of files) {
+      const row = toolArgs(f);
+      if (typeof row?.additions === "number") { additions += row.additions; counted = true; }
+      if (typeof row?.deletions === "number") { deletions += row.deletions; counted = true; }
+    }
+    const only = files.length === 1 ? toolArgs(files[0]) : null;
+    const file = typeof only?.file === "string" ? only.file : typeof only?.path === "string" ? only.path : fileTarget(tool) ?? undefined;
+    if (counted) return { additions, deletions, file };
+  }
   if (!args) return null;
+  // Claude Code MultiEdit carries a list of old/new pairs for one file.
+  if (Array.isArray(args.edits) && args.edits.length) {
+    let additions = 0, deletions = 0, counted = false;
+    for (const e of args.edits) {
+      const pair = toolArgs(e);
+      const o = pair?.old_string ?? pair?.oldString, n = pair?.new_string ?? pair?.newString;
+      if (typeof o !== "string" || typeof n !== "string") continue;
+      const d = lineDiff(o, n); additions += d.additions; deletions += d.deletions; counted = true;
+    }
+    if (counted) return { additions, deletions, file: fileTarget(tool) ?? undefined };
+  }
   const oldStr = typeof args.oldString === "string" ? args.oldString : typeof args.old_string === "string" ? args.old_string : null;
   const newStr = typeof args.newString === "string" ? args.newString : typeof args.new_string === "string" ? args.new_string : null;
-  if (oldStr !== null && newStr !== null) {
-    const oldLines = oldStr ? oldStr.split("\n") : [];
-    const newLines = newStr ? newStr.split("\n") : [];
-    const oldSet = new Map<string, number>();
-    for (const l of oldLines) oldSet.set(l, (oldSet.get(l) ?? 0) + 1);
-    let common = 0;
-    for (const l of newLines) {
-      const c = oldSet.get(l) ?? 0;
-      if (c > 0) { common++; oldSet.set(l, c - 1); }
-    }
-    return {
-      additions: Math.max(0, newLines.length - common),
-      deletions: Math.max(0, oldLines.length - common),
-      file: fileTarget(tool) ?? undefined,
-    };
-  }
+  if (oldStr !== null && newStr !== null) return { ...lineDiff(oldStr, newStr), file: fileTarget(tool) ?? undefined };
   const n = toolName(tool.name);
   if ((n === "write" || n === "write_file" || n === "write_to_file") && typeof args.content === "string" && args.content) {
     const lines = args.content.replace(/\n$/, "").split("\n").length;
@@ -165,8 +183,8 @@ export function workKind(name: string): Kind {
   switch (toolName(name)) {
     case "read": case "read_file": case "readfile": case "workspace_read_file": case "view_file": case "view_file_outline": case "view_code_item": return "read";
     case "grep": case "glob": case "search": case "websearch": case "web_search": case "list_files": case "search_files": case "list": case "list_dir": case "find_by_name": case "grep_search": return "search";
-    case "bash": case "shell": case "shell_command": case "exec_command": case "run_terminal_command": case "terminal": case "run_command": return "command";
-    case "edit": case "write": case "multiedit": case "apply_patch": case "write_file": case "edit_file": case "patch": case "replace_file_content": case "multi_replace_file_content": case "write_to_file": return "edit";
+    case "bash": case "shell": case "shell_command": case "exec_command": case "run_terminal_command": case "terminal": case "run_command": case "execute": return "command";
+    case "edit": case "write": case "multiedit": case "apply_patch": case "write_file": case "edit_file": case "patch": case "replace_file_content": case "multi_replace_file_content": case "write_to_file": case "search_replace": case "notebookedit": return "edit";
     default: return "other";
   }
 }
