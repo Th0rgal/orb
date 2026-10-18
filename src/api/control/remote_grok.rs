@@ -2035,7 +2035,7 @@ async fn continue_inner(
     // requests with no writer flag. Re-admit that same identity and capability;
     // PR bindings and explicit tracks still require full create admission.
     let replacement = || {
-        (StatusCode::CONFLICT, format!("{REMOTE_RESUME_REQUIRES_REPLACEMENT}: PR or explicit-track missions need create admission; create a remote replacement with supersedes_mission_id={mission_id}"))
+        (StatusCode::CONFLICT, format!("{REMOTE_RESUME_REQUIRES_REPLACEMENT}: PR missions and closed or missing tracks need create admission; create a remote replacement with supersedes_mission_id={mission_id}"))
     };
     if crate::api::mission_horizon::superseded_by(&mission).is_some() {
         return Err((
@@ -2045,22 +2045,25 @@ async fn continue_inner(
             ),
         ));
     }
-    if mission.project.github_pr.is_some()
-        || mission.project.tags.iter().any(|tag| tag == "pr-writer")
-    {
+    // A PR binding needs create admission (PR ownership). A writer on its own
+    // track does not: the track lease below re-admits it, so a follow-up keeps
+    // the native session instead of replaying history into a replacement.
+    if mission.project.github_pr.is_some() {
         return Err(replacement());
     }
     let track_claim = if let Some(track) = mission.project.track.as_deref() {
         let slug = mission.project.project.as_deref().ok_or_else(replacement)?;
-        if track != crate::api::track_leases::generated_track_key(&mission_id.to_string()) {
-            return Err(replacement());
-        }
         let canonical = state
             .projects
             .track(slug, track)
             .map_err(internal)?
             .ok_or_else(replacement)?;
-        if canonical.track != track {
+        if canonical.track != track
+            || matches!(
+                canonical.status.as_deref(),
+                Some("cancelled" | "done" | "satisfied")
+            )
+        {
             return Err(replacement());
         }
         // Preserve the generated-track restriction against another owner, but
