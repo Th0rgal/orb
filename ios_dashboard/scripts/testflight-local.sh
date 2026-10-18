@@ -3,7 +3,7 @@
 # Archive, sign and upload Orb to TestFlight from this Mac, without waiting for
 # Xcode Cloud. Signing is automatic through an App Store Connect API key read
 # from Bitwarden Secrets Manager:
-#   APPSTORE_CONNECT_API        the .p8 private key (PEM)
+#   APPSTORE_CONNECT_API_PRIVATE_KEY        the .p8 private key (PEM)
 #   APPSTORE_CONNECT_KEY_ID     e.g. CSV5HVF963
 #   APPSTORE_CONNECT_ISSUER_ID  issuer UUID from App Store Connect
 # Env overrides: ASC_TEAM_ID (default BQ6Z84B8L5), BWS (bws binary path).
@@ -45,7 +45,7 @@ sys.exit("missing Bitwarden secret "+sys.argv[2]) if not v else print(v[0].strip
 KEY_ID="${ASC_KEY_ID:-$(secret APPSTORE_CONNECT_KEY_ID 2>/dev/null || echo CSV5HVF963)}"
 ISSUER_ID="${ASC_ISSUER_ID:-$(secret APPSTORE_CONNECT_ISSUER_ID)}"
 KEY_PATH="${WORK}/AuthKey_${KEY_ID}.p8"
-secret APPSTORE_CONNECT_API > "${KEY_PATH}"
+secret APPSTORE_CONNECT_API_PRIVATE_KEY > "${KEY_PATH}"
 rm -f "${WORK}/secrets.json"
 AUTH=(-allowProvisioningUpdates
   -authenticationKeyPath "${KEY_PATH}"

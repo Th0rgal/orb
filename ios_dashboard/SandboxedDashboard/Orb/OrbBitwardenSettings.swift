@@ -552,6 +552,10 @@ struct OrbBitwardenSettings: View {
     private func describe(_ r: OrbJSON) -> String {
         let key = r["key"].text, project = r["project_id"].text
         if r["kind"].text == "write" { return "Store \(key) in \(projectName(project))" }
+        if r["kind"].text == "delete" { return "Delete \(key) from \(projectName(project))" }
+        if r["kind"].text == "move" {
+            return "Move \(key) from \(projectName(project)) to \(projectName(r["target_project_id"].text))"
+        }
         if !key.isEmpty { return "Read \(key)" }
         if r["all_projects"] == .bool(true) { return "Read every project" }
         return "Read project \(projectName(project))"
@@ -588,7 +592,7 @@ struct OrbBitwardenSettings: View {
                             Text("“\(r["reason"].text)”").font(.caption).italic()
                         }
                         HStack {
-                            if r["kind"].text == "write" {
+                            if r["kind"].text != "read" {
                                 Button("Approve") { Task { await respond(r, scope: "") } }
                             } else {
                                 if !r["key"].text.isEmpty {

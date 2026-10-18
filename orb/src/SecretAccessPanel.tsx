@@ -4,6 +4,7 @@ import {
   getSecretBroker,
   rejectSecretRequest,
   revokeSecretGrant,
+  secretChangeVerb,
   type BitwardenProject,
   type SecretAccessRequest,
   type SecretBrokerSnapshot,
@@ -12,7 +13,7 @@ import {
 import * as Ic from "./icons";
 import { Select } from "./Select";
 import { ApprovalCancelled, approvalGraceSecs, graceUntil, setApprovalGraceSecs } from "./deviceApproval";
-import { EyeIcon, FingerprintIcon, PencilIcon } from "./secretRequestNotices";
+import { FingerprintIcon, SecretKindIcon } from "./secretRequestNotices";
 
 const POLL_MS = 5000;
 
@@ -77,6 +78,8 @@ export function SecretAccessPanel(p: {
 
   const describe = (r: SecretAccessRequest) => {
     if (r.kind === "write") return `store ${r.key} in ${projectName(r.project_id)}`;
+    if (r.kind === "delete") return `delete ${r.key} from ${projectName(r.project_id)}`;
+    if (r.kind === "move") return `move ${r.key} from ${projectName(r.project_id)} to ${projectName(r.target_project_id)}`;
     if (r.key) return `read ${r.key}${r.project_id ? ` (${projectName(r.project_id)})` : ""}`;
     if (r.all_projects) return "read every project";
     return `read project ${projectName(r.project_id)}`;
@@ -123,17 +126,19 @@ export function SecretAccessPanel(p: {
             {(r) => {
               const [scope, setScope] = createSignal<"secret" | "project" | "all">(r.key ? "secret" : r.project_id ? "project" : "all");
               const tier = () => projectName(r.project_id);
-              const write = r.kind === "write";
+              const verb = secretChangeVerb(r);
+              const write = verb !== null;
               return (
                 <div class="secret-row bw-request-row">
-                  <span class="secret-kind" title={write ? "Write" : "Read"} aria-label={write ? "Write" : "Read"}>
-                    {write ? <PencilIcon /> : <EyeIcon />}
-                  </span>
+                  <SecretKindIcon request={r} />
                   <div class="bw-request-body">
                     <div class="bw-request-line">
                       <strong class="secret-row-key">{r.key || (r.all_projects ? "Every secret project" : `Project ${tier()}`)}</strong>
                       <Show when={r.project_id && r.key}>
                         <span class={`bw-tier bw-tier-${tier()}`}>{tier()}</span>
+                      </Show>
+                      <Show when={r.kind === "move"}>
+                        <span class="bw-request-meta">→ {projectName(r.target_project_id)}</span>
                       </Show>
                       <span class="bw-request-meta" title={who(r)}>{who(r)} · {ago(r.created_at)}</span>
                     </div>
@@ -162,15 +167,15 @@ export function SecretAccessPanel(p: {
                   <button
                     class="s-btn primary bw-request-ok"
                     disabled={!!busy()}
-                    title={write ? "Store" : "Allow for 24 h"}
+                    title={verb ?? "Allow for 24 h"}
                     onClick={() =>
                       void (write
-                        ? act(r.id, `store secret ${r.key}`, () => approveSecretRequest(r.id), true)
+                        ? act(r.id, describe(r), () => approveSecretRequest(r.id), true)
                         : act(r.id, "allow a mission secret access", () => approveSecretRequest(r.id, scope())))
                     }
                   >
                     <FingerprintIcon size={14} />
-                    {write ? "Store" : "Allow"}
+                    {verb ?? "Allow"}
                   </button>
                 </div>
               );

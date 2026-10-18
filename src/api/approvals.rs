@@ -396,8 +396,21 @@ async fn describe(
                 "mission {}",
                 quoted(r["mission_title"].as_str().unwrap_or("untitled"))
             );
+            let target = match r["target_project_id"].as_str() {
+                Some(pid) => super::bitwarden::list_projects_raw(state)
+                    .await
+                    .ok()
+                    .and_then(|ps| ps.into_iter().find(|p| p.id == pid))
+                    .map(|p| quoted(&p.name))
+                    .unwrap_or_else(|| quoted(pid)),
+                None => "an unknown project".into(),
+            };
             let what = match (r["kind"].as_str(), r["key"].as_str()) {
                 (Some("write"), Some(k)) => format!("WRITE secret {} into {project}", quoted(k)),
+                (Some("delete"), Some(k)) => format!("DELETE secret {} from {project}", quoted(k)),
+                (Some("move"), Some(k)) => {
+                    format!("MOVE secret {} from {project} to {target}", quoted(k))
+                }
                 (_, Some(k)) => format!("read secret {} from {project}", quoted(k)),
                 _ => format!("read {project}"),
             };
@@ -408,7 +421,7 @@ async fn describe(
                 }
                 "approve" => {
                     let req: ApproveRequest = typed(body)?;
-                    if r["kind"].as_str() == Some("write") {
+                    if matches!(r["kind"].as_str(), Some("write" | "delete" | "move")) {
                         format!("Allow {who} to {what}")
                     } else {
                         let hours = req

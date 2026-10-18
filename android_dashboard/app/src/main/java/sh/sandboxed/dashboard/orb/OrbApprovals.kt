@@ -272,6 +272,12 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         val project = projects[r["project_id"] as? String] ?: (r["project_id"] as? String)?.take(8) ?: ""
         return when {
             r["kind"] == "write" -> "Store $key in $project"
+            r["kind"] == "delete" -> "Delete $key from $project"
+            r["kind"] == "move" -> {
+                val target = projects[r["target_project_id"] as? String]
+                    ?: (r["target_project_id"] as? String)?.take(8) ?: ""
+                "Move $key from $project to $target"
+            }
             key != null -> "Read $key ($project)"
             r["all_projects"] == true -> "Read every project"
             else -> "Read project $project"
@@ -319,7 +325,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     )
                                 }
                             }) { Text(label) }
-                            if (r["kind"] == "write") {
+                            if (r["kind"] != "read") {
                                 approve(null, "Approve")
                             } else {
                                 if (r["key"] != null) approve("secret", "Secret")

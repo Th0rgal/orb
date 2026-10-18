@@ -81,9 +81,17 @@ object OrbBitwardenApi {
     fun describe(request: OrbRow, projectName: (String?) -> String?): String {
         val key = request.str("key")
         val project = projectName(request.str("project_id"))
-        return if (request.str("kind") == "write") {
-            "Store ${key ?: "a secret"}" + (project?.let { " in $it" } ?: "")
-        } else when {
+        return when (request.str("kind")) {
+            "write" -> "Store ${key ?: "a secret"}" + (project?.let { " in $it" } ?: "")
+            "delete" -> "Delete ${key ?: "a secret"}" + (project?.let { " from $it" } ?: "")
+            "move" -> "Move ${key ?: "a secret"}" + (project?.let { " from $it" } ?: "") +
+                (projectName(request.str("target_project_id"))?.let { " to $it" } ?: "")
+            else -> describeRead(request, key, project)
+        }
+    }
+
+    private fun describeRead(request: OrbRow, key: String?, project: String?): String {
+        return when {
             key != null -> "Read $key"
             request.bool("all_projects") == true -> "Read every project"
             else -> "Read project ${project ?: request.str("project_id") ?: ""}".trim()
