@@ -323,6 +323,12 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         let actionable = needsYou + ready
         let unreadItems = actionable.filter(\.unread)
         UNUserNotificationCenter.current().setBadgeCount(unreadItems.count) { _ in }
+        OrbFleetActivityController.shared.reconcile(
+            account: OrbInboxAccount.current,
+            needsYou: needsYou,
+            ready: ready,
+            working: working
+        )
 
         guard notificationsEnabled else { return }
 

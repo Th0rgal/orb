@@ -240,6 +240,8 @@ final class APIService {
         OrbKeychain.saveCredentials(nil, for: baseURL)
         jwtToken = nil
         authSessionExpired = false
+        // Mission titles must not stay on the Lock Screen after sign-out.
+        OrbFleetActivityController.shared.endAll()
     }
 
     func markSessionExpired() {

@@ -26,9 +26,12 @@ fi
 WORK="$(mktemp -d)"
 chmod 700 "${WORK}"
 PLIST="${IOS}/SandboxedDashboard/Info.plist"
+EXT_PLIST="${IOS}/OrbLiveActivity/Info.plist"
 cp "${PLIST}" "${WORK}/Info.plist.orig"
+cp "${EXT_PLIST}" "${WORK}/ExtInfo.plist.orig"
 cleanup() {
   cp "${WORK}/Info.plist.orig" "${PLIST}"
+  cp "${WORK}/ExtInfo.plist.orig" "${EXT_PLIST}"
   rm -rf "${WORK}"
 }
 trap cleanup EXIT
@@ -55,6 +58,7 @@ CI_PRIMARY_REPOSITORY_PATH="${ROOT}" bash "${IOS}/ci_scripts/ci_post_clone.sh"
 BASE="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "${PLIST}")"
 BUILD="${BASE%%.*}.$(date -u +%j%H%M)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD}" "${EXT_PLIST}"
 VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${PLIST}")"
 echo "=== Orb ${VERSION} (${BUILD}) ==="
 
