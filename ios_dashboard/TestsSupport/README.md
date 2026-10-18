@@ -29,6 +29,11 @@ xcodebuild -project ios_dashboard/SandboxedDashboard.xcodeproj \
 node ios_dashboard/TestsSupport/test_rich_renderer.cjs
 ```
 
+`OrbTurnStatusUITests` uses the default fixture (18766): `agent-work` is a coding turn
+in progress (task list in harness vocabulary, edits, a running command, turn started
+95 s before each request), `agent-done` is the finished turn with `github_pr`, and
+`POST …/btw/agent` takes 3 s, then the side answer arrives 6 s later.
+
 The loopback fixture has no provider credentials. UI tests use a DEBUG-only
 local cache reset; it is refused for non-loopback API endpoints. They create
 classic agents and each cloud type, send follow-ups, navigate expanded folders,

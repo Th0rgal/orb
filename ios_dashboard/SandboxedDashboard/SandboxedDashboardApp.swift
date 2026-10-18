@@ -5,6 +5,7 @@
 //  iOS Dashboard for sandboxed.sh with liquid glass design
 //
 
+import BackgroundTasks
 import SwiftUI
 
 @main
@@ -24,6 +25,8 @@ struct SandboxedDashboardApp: App {
         ControlView.migrateMissionCacheIfNeeded()
     }
 
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -31,6 +34,12 @@ struct SandboxedDashboardApp: App {
                 .onOpenURL { url in
                     NavigationState.shared.handle(url: url)
                 }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { OrbBackgroundRefresh.schedule() }
+        }
+        .backgroundTask(.appRefresh(OrbBackgroundRefresh.identifier)) {
+            await OrbBackgroundRefresh.run()
         }
     }
 }

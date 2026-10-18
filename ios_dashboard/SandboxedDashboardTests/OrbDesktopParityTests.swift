@@ -311,8 +311,8 @@ final class OrbDesktopParityTests: XCTestCase {
         )
 
         let payload = try XCTUnwrap(OrbNotificationPayload.build(from: item))
-        XCTAssertEqual(payload.title, "✅ Paloma · Prove soundness theorem")
-        XCTAssertEqual(payload.subtitle, "Completed · AI Summary · dgx-spark · 4 commands · Edited 3 files")
+        XCTAssertEqual(payload.title, "Prove soundness theorem")
+        XCTAssertEqual(payload.subtitle, "Paloma · Done · dgx-spark · 4 commands · Edited 3 files")
         XCTAssertTrue(payload.body.contains("Completed the Lean 4 proof on DGX Spark with zero sorries."))
         XCTAssertTrue(payload.body.contains("To decide: Approve opening the PR on master"))
         XCTAssertEqual(payload.categoryIdentifier, OrbNotificationCenter.categoryInboxReady)

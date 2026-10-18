@@ -31,7 +31,37 @@ def reset():
     MISSIONS['reconnect']=dict(id='reconnect',title='Reconnect ChatGPT',status='blocked',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'blocked-turn','prompt':'Continue the analysis.','phase':'reconnect_required','detail':'Reconnect your ChatGPT account in Orb on your Mac.','result':'','artifacts':[]}]})
     for mission in MISSIONS.values():
         mission.update(created_at='2026-10-09T10:00:00Z', updated_at='2026-10-09T10:01:00Z')
+    # A coding agent mid-turn: an earlier finished turn, then the current one with a
+    # task list in harness vocabulary, edits, a running command and a linked PR.
+    for mid, title, status in [('agent-work', 'Fix the iOS build', 'active'), ('agent-done', 'Ship the iOS fix', 'completed')]:
+        MISSIONS[mid]=dict(id=mid,title=title,status=status,project='orb-test',backend='claudecode',tags=[],model_override='test-model',github_pr='Th0rgal/orb#1132',history=[dict(role='user',content='Set up CI for the app'),dict(role='assistant',content='CI is set up.'),dict(role='user',content='Now fix the build')]+([dict(role='assistant',content='The build is fixed and the PR is open.')] if status=='completed' else []),created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:01:00Z')
 reset()
+
+def iso(t): return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))
+def agent_events(mid):
+    """Events of the agent-work/agent-done fixtures; the current turn started 95 s ago."""
+    started=time.time()-95; rows=[]
+    def add(kind, content, tool=None, call=None, at=None):
+        rows.append(dict(id=len(rows)+1, mission_id=mid, sequence=len(rows)+1, event_type=kind, timestamp=iso(at or started), event_id=f'{mid}-{len(rows)+1}', tool_call_id=call, tool_name=tool, content=content, metadata={}))
+    old=started-3600
+    add('user_message','Set up CI for the app',at=old)
+    add('tool_call',json.dumps({'todos':[{'content':'Write the workflow','status':'pending'},{'content':'Run it','status':'pending'}]}),'TodoWrite','t0',old)
+    add('tool_call',json.dumps({'file_path':'/repo/.github/workflows/ci.yml','old_string':'','new_string':'name: CI\non: push'}),'Edit','e0',old)
+    add('tool_result','ok','Edit','e0',old)
+    add('assistant_message','CI is set up.',at=old)
+    add('user_message','Now fix the build')
+    add('tool_call',json.dumps({'file_path':'/repo/ios/App.swift'}),'Read','r1')
+    add('tool_result','struct App {}','Read','r1')
+    add('tool_call',json.dumps({'plan':[{'step':'Reproduce the failure','status':'done'},{'step':'Fix the type-check timeout','status':'in-progress'},{'step':'Wait for CI','status':'blocked'},{'step':'Old approach','status':'canceled'}]}),'update_plan','p1')
+    add('tool_call',json.dumps({'file_path':'/repo/ios/App.swift','old_string':'let a = 1','new_string':'let a = 1\nlet b = 2\nlet c = 3'}),'Edit','e1')
+    add('tool_result','ok','Edit','e1')
+    add('tool_call',json.dumps({'file_path':'/repo/ios/View.swift','content':'import SwiftUI\n'}),'Write','w1')
+    add('tool_result','ok','Write','w1')
+    add('tool_call',json.dumps({'command':'xcodebuild build -scheme App'}),'Bash','b1')
+    if mid=='agent-done':
+        add('tool_result','BUILD SUCCEEDED','Bash','b1'); add('assistant_message','The build is fixed and the PR is open.')
+    return rows
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def send(self, value, status=200):
@@ -53,6 +83,7 @@ class Handler(BaseHTTPRequestHandler):
         if p=='/api/control/missions':
             time.sleep(LIST_DELAY)
             return self.send(list(MISSIONS.values()))
+        if p.endswith('/events') and p.split('/')[4] in ('agent-work','agent-done'): return self.send(agent_events(p.split('/')[4]))
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
         if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'},{'id':'chatgpt_ui','name':'ChatGPT UI'}])
         if p=='/api/providers/backend-models': return self.send({'backends':{b:[{'value':'test-model','label':'Test model'}] for b in ['claudecode','codex']}})
@@ -65,6 +96,8 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith('/api/control/missions/'):
             mid=p.split('/')[4]; m=MISSIONS.get(mid)
             if not m: return self.send({'error':'Not found'},404)
+            if m.get('side_ready_at') and time.time()>=m['side_ready_at'] and m['status']=='running':
+                m['status']='completed'; m['history'].append({'role':'assistant','content':'SIDE_ANSWER_OK: the agent is fixing the build.'})
             if p.endswith('/cloud/artifact'):
                 name=parse_qs(u.query).get('path',[''])[0].split('/')[-1]
                 if name=='chart.png': data=Path(__file__).with_name('fixtures').joinpath('chart.png').read_bytes()
@@ -122,6 +155,10 @@ class Handler(BaseHTTPRequestHandler):
             DOC.update(content=body['content'],revision=DOC['revision']+1); return self.send({'revision':DOC['revision']})
         key=body.get('idempotency_key') or body.get('client_message_id')
         if key in RECEIPTS: return self.send(RECEIPTS[key])
+        if p.endswith('/btw/agent'):
+            time.sleep(3); parent=p.split('/')[4]; mid=str(uuid.uuid4())
+            MISSIONS[mid]=dict(id=mid,title='Side question',status='running',project='orb-test',backend=body.get('backend','opencode'),tags=['btw-parent:'+parent],history=[{'role':'user','content':'Current request:\n'+body.get('side_question','')}],created_at=iso(time.time()),updated_at=iso(time.time()),side_ready_at=time.time()+6)
+            RECEIPTS[key]=MISSIONS[mid]; return self.send(MISSIONS[mid])
         if p=='/api/control/missions':
             mid=str(uuid.uuid4()); cloud=body.get('cloud'); m=dict(body,id=mid,status='awaiting_user',backend=('cloud_'+cloud['provider']) if cloud else body['backend'],history=[{'role':'user','content':body['prompt']},{'role':'assistant','content':'**ORB_TEST_OK**\n\nA response from the test agent.'}])
             if cloud: m['cloud_execution']={'mission_id':mid,'selection':cloud,'turns':[{'key':key,'prompt':body['prompt'],'result':'**ORB_TEST_OK**','phase':'response_complete','artifacts':[],'branches':[]}]}

@@ -66,9 +66,18 @@ struct OrbSideQuestionSheet: View {
     @State private var earlierLoaded = false
     /// "New side session": keep showing history, but don't continue the old session.
     @State private var freshSession = false
+    /// The question just sent, shown at once until Core's history has it (like the desktop).
+    @State private var pending: String?
+    @State private var askedAt: Date?
+    @State private var autoAsked = false
 
     private var running: Bool { Self.live.contains(side["status"].text) }
-    private var exchanges: [(role: String, text: String)] { earlier + current }
+    private var exchanges: [(role: String, text: String)] {
+        var all = earlier + current
+        if let pending, !current.contains(where: { $0.role == "user" && $0.text == pending }) { all.append(("user", pending)) }
+        return all
+    }
+    private var waiting: Bool { running || pending != nil }
     private var current: [(role: String, text: String)] {
         side["history"].items.compactMap { h in
             let role = h["role"].text
@@ -82,20 +91,14 @@ struct OrbSideQuestionSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if !error.isEmpty { OrbNotice(message: error) }
-                    if exchanges.isEmpty && !running {
-                        Text("Ask about this conversation without interrupting it. The side agent reads the conversation and shares its working folder.")
-                            .font(.footnote).foregroundStyle(OrbStyle.textSecondary)
-                    }
-                    ForEach(Array(exchanges.enumerated()), id: \.offset) { _, item in exchangeRow(item.role, item.text) }
-                    if running {
-                        HStack(spacing: 8) { OrbRunningDots(size: 10); Text(statusText).font(.footnote).foregroundStyle(OrbStyle.textSecondary) }
-                    }
+            ScrollViewReader { scroll in
+                ScrollView {
+                    transcript
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .defaultScrollAnchor(.bottom)
+                .onChange(of: exchanges.count) { _, _ in
+                    withAnimation(.snappy(duration: 0.2)) { scroll.scrollTo("btw.bottom", anchor: .bottom) }
+                }
             }
             .background(OrbStyle.background)
             .safeAreaInset(edge: .bottom, spacing: 0) { composer }
@@ -104,10 +107,47 @@ struct OrbSideQuestionSheet: View {
             .task(id: phase) { await follow() }
             .onAppear {
                 sideID = UserDefaults.standard.string(forKey: OrbBtwConfig.sessionKey(parentID))
-                focused = sideID == nil
+                // `/btw <question>` from the composer was already a send: don't ask for a second tap.
+                let typed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+                focused = sideID == nil && typed.isEmpty
+                if !typed.isEmpty && !autoAsked {
+                    autoAsked = true
+                    Task { await ask() }
+                }
             }
         }
         .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+    }
+
+    private var transcript: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !error.isEmpty { OrbNotice(message: error) }
+            if exchanges.isEmpty && !waiting {
+                Text("Ask about this conversation without interrupting it. The side agent reads the conversation and shares its working folder.")
+                    .font(.footnote).foregroundStyle(OrbStyle.textSecondary)
+            }
+            ForEach(Array(exchanges.enumerated()), id: \.offset) { _, item in exchangeRow(item.role, item.text) }
+            if waiting { progressRow }
+            Color.clear.frame(height: 1).id("btw.bottom")
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Stage and elapsed time from the tap until the answer: no silent wait.
+    private var progressRow: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 8) {
+                OrbRunningDots(size: 10)
+                Text(statusText).font(.footnote).foregroundStyle(OrbStyle.textSecondary)
+                if let askedAt {
+                    Text(OrbTurnSummary.clock(Int(context.date.timeIntervalSince(askedAt))))
+                        .font(.footnote.monospacedDigit()).foregroundStyle(OrbStyle.textMuted)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("btw.progress")
+        }
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -122,6 +162,7 @@ struct OrbSideQuestionSheet: View {
     }
 
     private var statusText: String {
+        if pending != nil && !running { return sideID == nil ? "Starting side agent…" : "Sending…" }
         switch side["status"].text {
         case "paused": return "Side agent paused"
         case "waiting_background": return "Waiting for background work…"
@@ -133,11 +174,17 @@ struct OrbSideQuestionSheet: View {
     private func exchangeRow(_ role: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(role == "user" ? "You" : "Side agent").font(.caption.weight(.semibold)).foregroundStyle(OrbStyle.textSecondary)
-            Text(text).font(.subheadline).textSelection(.enabled)
+            Text(Self.markdown(text)).font(.subheadline).textSelection(.enabled)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(role == "user" ? OrbStyle.elevated : OrbStyle.card, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+    }
+
+    /// Side answers are Markdown (bold, `code`, links); showing `**40/45**` raw was noise.
+    static func markdown(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
     }
 
     private var composer: some View {
@@ -250,6 +297,7 @@ struct OrbSideQuestionSheet: View {
                 UserDefaults.standard.set(sideID, forKey: OrbBtwConfig.sessionKey(parentID))
                 side = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(sideID ?? ""))")
             }
+            if pending != nil && !busy && !running { pending = nil; askedAt = nil }
         } catch let e as OrbHTTPError where e.status == 404 {
             reset()
         }
@@ -259,7 +307,7 @@ struct OrbSideQuestionSheet: View {
         guard phase == .active else { return }
         while !Task.isCancelled {
             do { try await load() } catch is CancellationError { return } catch { self.error = error.localizedDescription }
-            do { try await Task.sleep(for: .seconds(running || busy ? 2 : 15)) } catch { return }
+            do { try await Task.sleep(for: .seconds(running || busy || pending != nil ? 2 : 15)) } catch { return }
         }
     }
 
@@ -267,6 +315,7 @@ struct OrbSideQuestionSheet: View {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !busy, !text.isEmpty else { return }
         busy = true; defer { busy = false }
+        pending = text; askedAt = Date(); question = ""
         do {
             try await load()
             if running { throw OrbHTTPError(status: 409, detail: "The side agent is still running. Stop it before sending another question.") }
@@ -286,14 +335,22 @@ struct OrbSideQuestionSheet: View {
                 sideID = created["id"].text
                 UserDefaults.standard.set(sideID, forKey: OrbBtwConfig.sessionKey(parentID))
             }
-            question = ""
             error = ""
             try await load()
+            if !running { pending = nil; askedAt = nil }
         } catch let e as OrbHTTPError where [404, 405].contains(e.status) && sideID == nil {
+            restore(text)
             error = "This backend does not support /btw side agents yet."
         } catch {
+            restore(text)
             self.error = error.localizedDescription
         }
+    }
+
+    /// A failed send puts the question back in the field instead of losing it.
+    private func restore(_ text: String) {
+        pending = nil; askedAt = nil
+        if question.isEmpty { question = text }
     }
 
     private func stop() async {
