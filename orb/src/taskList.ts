@@ -1,5 +1,5 @@
 import type { StreamItem } from "./transcriptModel";
-import { parseChecklist, toolArgs, toolName, type Checklist, type TaskItem, type TaskStatus } from "./workModel";
+import { normalizeTaskStatus, parseChecklist, toolArgs, toolName, type Checklist, type TaskItem, type TaskStatus } from "./workModel";
 
 /**
  * One task list for every harness. Two families exist:
@@ -19,13 +19,7 @@ export const isTaskTool = (name: string) => {
 
 /** Vocabulary drifts between harnesses (Codex app-server sends `inProgress`). */
 export function taskStatus(raw: unknown): TaskStatus | null {
-  if (typeof raw !== "string") return null;
-  const v = raw.trim().replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase().replace(/[\s-]+/g, "_");
-  if (["pending", "todo", "not_started", "blocked", "waiting"].includes(v)) return "pending";
-  if (["in_progress", "active", "running", "doing", "started"].includes(v)) return "in_progress";
-  if (["completed", "complete", "done", "finished", "succeeded"].includes(v)) return "completed";
-  if (["cancelled", "canceled", "skipped", "abandoned"].includes(v)) return "cancelled";
-  return null;
+  return typeof raw === "string" ? normalizeTaskStatus(raw.trim().replace(/([a-z])([A-Z])/g, "$1_$2")) : null;
 }
 
 /** A full-list snapshot from one tool call, or null when the call is not one. */

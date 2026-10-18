@@ -1,6 +1,6 @@
 import { createMemo, createSignal, onCleanup, Show } from "solid-js";
 import type { StreamItem } from "./transcriptModel";
-import { latestChecklist } from "./workModel";
+import { latestTaskList } from "./taskList";
 import { toolTarget } from "./Transcript";
 
 /** Turn start: the latest delivered user message's server time. */
@@ -37,7 +37,7 @@ export function TurnStatus(p: { items: StreamItem[] }) {
   const timer = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
-  const checklist = createMemo(() => latestChecklist(p.items));
+  const checklist = createMemo(() => latestTaskList(p.items));
   const done = () => checklist()?.tasks.filter((t) => t.status === "completed").length ?? 0;
   return (
     <div class="turn-status" role="status" aria-live="off">
