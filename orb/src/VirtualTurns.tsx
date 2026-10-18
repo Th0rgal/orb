@@ -12,9 +12,20 @@ export function transcriptSearch(scope:HTMLElement):TranscriptSearch|undefined{
  const root=scope.matches('[data-virtual-transcript]')?scope:scope.querySelector<HTMLElement>('[data-virtual-transcript]');
  return root?searches.get(root):undefined;
 }
-export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=>string;prepare?:(signal:AbortSignal)=>Promise<void>;children:(item:T)=>JSX.Element}){
+// Measured row heights survive remounts, per conversation (small LRU), so switching back to a
+// mission lays out at real sizes instead of the 300px estimate and needs no scroll correction.
+const sizeCaches=new Map<string,Map<string,number>>();
+function sizeCache(key?:string){
+ if(!key)return new Map<string,number>();
+ let cache=sizeCaches.get(key);
+ if(cache)sizeCaches.delete(key);else cache=new Map();
+ sizeCaches.set(key,cache);
+ while(sizeCaches.size>40)sizeCaches.delete(sizeCaches.keys().next().value!);
+ return cache;
+}
+export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=>string;prepare?:(signal:AbortSignal)=>Promise<void>;sizeKey?:string;children:(item:T)=>JSX.Element}){
  let root!:HTMLDivElement,scroller:HTMLElement|undefined,frame=0;
- const sizes=new Map<string,number>(),nodes=new Map<string,HTMLElement>();
+ const sizes=sizeCache(p.sizeKey),nodes=new Map<string,HTMLElement>();
  const [revision,setRevision]=createSignal(0),[viewport,setViewport]=createSignal({top:0,height:800});
  const [pinned,setPinned]=createSignal(new Set<string>());
  let firstKey:string|undefined;

@@ -83,6 +83,10 @@ pub fn route(p: &AIProvider) -> Route {
 
 /// A successful empty response is not allowed to wipe the last successful
 /// observation. A partial response supplements, rather than replaces, fallback.
+/// Google models granted per key that `models.list` never returns.
+const GOOGLE_EARLY_ACCESS_MODELS: &[(&str, &str)] =
+    &[("gemini-4-argon-eap", "Gemini 4 Argon (early access)")];
+
 pub fn record_result(
     o: &mut Observation,
     result: Result<(Vec<ProviderModel>, Completeness), String>,
@@ -362,6 +366,34 @@ async fn discover(p: &AIProvider, r: &Route) -> Result<(Vec<ProviderModel>, Comp
                 .append_pair(key, cursor);
             continue;
         }
+        // Early-access Gemini models (Gemini 4 Argon) are served to allowlisted keys but never
+        // appear in `models.list`; probe them directly so the picker offers what the key can use.
+        if r.adapter == "google" {
+            for (id, name) in GOOGLE_EARLY_ACCESS_MODELS {
+                if models.contains_key(*id) {
+                    continue;
+                }
+                let mut probe = url.clone();
+                probe.set_query(None);
+                probe.set_path(&format!("{}/{id}", probe.path().trim_end_matches('/')));
+                let ok = client
+                    .get(probe)
+                    .header("x-goog-api-key", key)
+                    .send()
+                    .await
+                    .is_ok_and(|r| r.status().is_success());
+                if ok {
+                    models.insert(
+                        id.to_string(),
+                        ProviderModel {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            description: Some("Early access".into()),
+                        },
+                    );
+                }
+            }
+        }
         // OpenAI-compatible schemas lack a completeness contract in general.
         // Kimi and custom routers have an established authoritative list.
         let complete = r.adapter == "anthropic"
@@ -430,6 +462,41 @@ mod tests {
         p.base_url = Some("https://private.example/v1".into());
         assert!(!route(&p).exportable);
         assert_eq!(route(&p).profile, "custom");
+    }
+    #[tokio::test]
+    async fn google_probes_early_access_models_missing_from_list() {
+        let (url, task) = server(
+            Router::new()
+                .route("/v1beta/models", get(|| async { Json(serde_json::json!({"models":[{"name":"models/gemini-3.1-pro-preview","displayName":"Gemini 3.1 Pro","supportedGenerationMethods":["generateContent"]}]})) }))
+                .route("/v1beta/models/gemini-4-argon-eap", get(|headers: HeaderMap| async move {
+                    if headers.get("x-goog-api-key").and_then(|v| v.to_str().ok()) == Some("allowlisted") { axum::http::StatusCode::OK } else { axum::http::StatusCode::NOT_FOUND }
+                })),
+        )
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let mut p = AIProvider::new(ProviderType::Google, "Google".into());
+        p.base_url = Some(format!("{url}/v1beta"));
+        p.api_key = Some("allowlisted".into());
+        let mut other = p.clone();
+        other.id = uuid::Uuid::new_v4();
+        other.api_key = Some("regular".into());
+        let state = refresh(root.path(), vec![p.clone(), other]).await.unwrap();
+        let has_argon: Vec<bool> = state
+            .connections
+            .iter()
+            .map(|o| {
+                o.last_success
+                    .as_ref()
+                    .unwrap()
+                    .models
+                    .iter()
+                    .any(|m| m.id == "gemini-4-argon-eap")
+            })
+            .collect();
+        // Only the allowlisted key gets it; the regular key keeps the listed models only.
+        assert_eq!(has_argon.iter().filter(|x| **x).count(), 1, "{has_argon:?}");
+        assert_eq!(state.connections.len(), 2);
+        task.abort();
     }
     #[tokio::test]
     async fn paginates_and_isolates_accounts() {

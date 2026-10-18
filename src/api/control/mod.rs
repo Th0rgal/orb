@@ -13357,6 +13357,10 @@ fn positional_prompt(prompt: &str) -> String {
 /// its own chain/passthrough resolution. The stock `openai` provider only
 /// advertises OpenAI's catalog and would reject non-GPT ids before any
 /// request.
+/// Conservative window for proxy-routed models: every chain member offers at least this.
+const REMOTE_OPENCODE_CONTEXT_LIMIT: u64 = 200_000;
+const REMOTE_OPENCODE_OUTPUT_LIMIT: u64 = 32_000;
+
 pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -13370,7 +13374,10 @@ pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_j
             "builtin": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Builtin",
-                "models": { model: { "name": model } },
+                // A declared window lets OpenCode compact before the prompt outgrows the
+                // smallest member of a chain (mission 64619ac7 overflowed the Spark's 262k
+                // window with 32k output reserved and no limit known, then hung).
+                "models": { model: { "name": model, "limit": { "context": REMOTE_OPENCODE_CONTEXT_LIMIT, "output": REMOTE_OPENCODE_OUTPUT_LIMIT } } },
                 "options": {
                     "baseURL": format!("{}/v1", api_base_url.trim_end_matches('/')),
                     "apiKey": format!("{{env:{REMOTE_PROXY_KEY_ENV}}}")
@@ -13636,8 +13643,19 @@ pub(crate) fn remote_execution_for_plan(
                 remote_opencode_config(model, api_base_url).to_string(),
             );
             let effective_prompt = plan_body.unwrap_or(prompt.as_str());
-            command.push(' ');
-            command.push_str(&shell_single_quote(&positional_prompt(effective_prompt)));
+            // A transferred conversation can exceed ARG_MAX (E2BIG). `opencode run` appends
+            // non-TTY stdin to the message, so long prompts go through the same staged fd 3
+            // as the other harnesses instead of argv.
+            match stdin_prompt(effective_prompt) {
+                None => {
+                    command.push(' ');
+                    command.push_str(&shell_single_quote(&positional_prompt(effective_prompt)));
+                }
+                Some(staged) => {
+                    command = format!("{}{command} <&3", staged.prelude);
+                    env.extend(staged.env);
+                }
+            }
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,
@@ -19310,6 +19328,34 @@ pub struct CloneMissionRequest {
 /// title/backend/model_effort/model_override. Conversation history is **not**
 /// copied — the clone starts fresh. Reuses the standard create path so all
 /// backend/agent/model validation applies identically.
+/// A clone keeps an explicit project track but not the source's own generated track
+/// (`mission-<source id prefix>`): that one belongs to the source alone, and inheriting it
+/// made the clone fail the remote queue's writer check (mission 27b29974).
+fn inherited_track(source_id: Uuid, track: Option<&str>) -> Option<String> {
+    track
+        .filter(|t| *t != super::track_leases::generated_track_key(&source_id.to_string()))
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod inherited_track_tests {
+    use super::*;
+    #[test]
+    fn clones_drop_only_the_sources_generated_track() {
+        let id = Uuid::parse_str("9888cd20-6191-45a5-b1cb-cea8b24a9eec").unwrap();
+        assert_eq!(inherited_track(id, Some("mission-9888cd20")), None);
+        assert_eq!(
+            inherited_track(id, Some("verity-family-a")).as_deref(),
+            Some("verity-family-a")
+        );
+        assert_eq!(
+            inherited_track(id, Some("mission-deadbeef")).as_deref(),
+            Some("mission-deadbeef")
+        );
+        assert_eq!(inherited_track(id, None), None);
+    }
+}
+
 pub async fn clone_mission(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -19371,7 +19417,10 @@ pub async fn clone_mission(
         // Inherit project tagging from the source mission so clones stay
         // grouped under the same project/track/intent.
         project: source.project.project.clone(),
-        track: source.project.track.clone(),
+        // A generated track belongs to the source mission alone; the clone gets its own at
+        // create. Inheriting it made the clone fail the remote queue's writer check
+        // (REMOTE_JOB_STILL_RUNNING instead of queueing, mission 27b29974).
+        track: inherited_track(source.id, source.project.track.as_deref()),
         idempotency_key: None,
         intent: source.project.intent.clone(),
         github_pr: source.project.github_pr.clone(),
@@ -40684,6 +40733,56 @@ Investigate <service/> failures.
         let execution = remote_execution_for_plan(&resumed, "https://core.example", "test");
         assert!(execution.command.contains(&format!("--resume '{id}'")));
         assert!(!execution.command.contains("--session-id"));
+    }
+
+    #[test]
+    fn remote_opencode_config_declares_a_context_limit() {
+        let config = remote_opencode_config("private", "https://core.example");
+        let limit = &config["provider"]["builtin"]["models"]["private"]["limit"];
+        assert_eq!(limit["context"], 200_000);
+        assert_eq!(limit["output"], 32_000);
+    }
+
+    #[test]
+    fn remote_opencode_long_prompt_reaches_opencode_on_stdin_not_argv() {
+        // Mission c13b82ea: a Claude Code -> OpenCode transfer of 165 messages failed with
+        // "Argument list too long (os error 7)" because the history was the positional prompt.
+        let prompt = format!(
+            "Transferred conversation\n{}",
+            "earlier turn with details ".repeat(20_000)
+        );
+        let plan = RemoteHarnessPlan::OpenCode {
+            model: Some("xai/grok-4.6".into()),
+            prompt: prompt.clone(),
+            resume_session_id: None,
+        };
+        let execution = remote_execution_for_plan(&plan, "https://core.example", "test");
+        assert!(execution.command.len() < 8192, "{}", execution.command);
+        assert!(execution.command.contains("opencode run --format json"));
+        assert!(execution.command.ends_with(" <&3"), "{}", execution.command);
+        assert!(!execution.command.contains("earlier turn with details"));
+        let env = execution.env.unwrap();
+        let parts: Vec<_> = env
+            .iter()
+            .filter(|(key, _)| key.starts_with(STDIN_PROMPT_ENV))
+            .collect();
+        assert!(parts.len() > 1);
+        assert!(parts
+            .iter()
+            .all(|(key, value)| key.len() + value.len() < 128 * 1024));
+
+        // Short prompts stay positional.
+        let short = RemoteHarnessPlan::OpenCode {
+            model: Some("xai/grok-4.6".into()),
+            prompt: "hi".into(),
+            resume_session_id: None,
+        };
+        let execution = remote_execution_for_plan(&short, "https://core.example", "test");
+        assert!(
+            execution.command.ends_with(" 'hi'"),
+            "{}",
+            execution.command
+        );
     }
 
     #[test]

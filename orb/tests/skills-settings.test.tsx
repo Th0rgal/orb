@@ -187,7 +187,7 @@ describe("SkillsSettings", () => {
     expect(screen.getByText("Active · 4C8811A0")).toBeTruthy();
     expect(knownSkillNames()).toContain("paloma-backends");
 
-    const syncBtn = screen.getByRole("button", { name: /Sync all harnesses \(2 drifted\)/i });
+    const syncBtn = screen.getByRole("button", { name: /Sync all harnesses \(2 out of date\)/i });
     fireEvent.click(syncBtn);
 
     await waitFor(() => {
@@ -268,7 +268,7 @@ describe("SkillsSettings", () => {
 
     await waitFor(() => {
       expect(screen.getByText("spark-lean-offload")).toBeTruthy();
-      expect(screen.getByText("Erdos 647 Proof")).toBeTruthy();
+      expect(screen.getAllByText("Erdos 647 Proof").length).toBeGreaterThan(0);
       expect(screen.getByText("aristotle-tactics")).toBeTruthy();
     });
 
@@ -316,11 +316,13 @@ describe("SkillsSettings", () => {
     const dialog = await screen.findByRole("dialog");
     // Lint: missing metadata.sandboxed.
     expect(dialog.textContent).toContain("No metadata.sandboxed block");
-    // Toggle coordinator audience and save.
-    fireEvent.click(screen.getByRole("checkbox", { name: "coordinator" }));
+    // Make it Common (every mission + coordinator) through the places picker, then save.
+    fireEvent.click(screen.getByRole("button", { name: /Local/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Common/ }));
     fireEvent.click(screen.getByRole("button", { name: "Save & sync" }));
     await waitFor(() => expect(syncCalls.length).toBe(1));
     expect(content).toContain("audience: [mission, coordinator, local]");
+    expect(content).toContain("scope: global");
     expect(syncCalls[0].prune_removed).toBe(false);
     expect(syncCalls[0].library_skills.map((s) => s.name)).toEqual(["spark-lean-offload"]);
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("across all 6 local harness directories"));

@@ -26,12 +26,20 @@ export function parseChecklist(name: string, input: unknown): TaskItem[] | null 
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const text = entry[codex ? "step" : "content"], status = entry.status;
     if (typeof text !== "string" || !text.trim() || typeof status !== "string") return null;
-    // OpenCode supports cancellation; Claude and Codex only advertise three states.
-    const allowed = name === "todowrite" ? ["pending", "in_progress", "completed", "cancelled"] : ["pending", "in_progress", "completed"];
-    if (!allowed.includes(status)) return null;
-    tasks.push({ text, status: status as TaskStatus });
+    // Harnesses drift in vocabulary (blocked, done, canceled…); one odd status must not hide the whole list.
+    const mapped = normalizeTaskStatus(status);
+    if (!mapped) return null;
+    tasks.push({ text, status: mapped });
   }
   return tasks;
+}
+export function normalizeTaskStatus(raw: string): TaskStatus | null {
+  const v = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["pending", "todo", "not_started", "blocked", "waiting"].includes(v)) return "pending";
+  if (["in_progress", "active", "running", "doing", "started"].includes(v)) return "in_progress";
+  if (["completed", "complete", "done", "finished", "succeeded"].includes(v)) return "completed";
+  if (["cancelled", "canceled", "skipped", "abandoned"].includes(v)) return "cancelled";
+  return null;
 }
 export function latestChecklist(items: StreamItem[]): Checklist | null {
   for (let i = items.length - 1; i >= 0; i--) {
@@ -40,6 +48,9 @@ export function latestChecklist(items: StreamItem[]): Checklist | null {
     if (item.kind !== "tool") continue;
     const tasks = parseChecklist(item.name, item.args);
     if (tasks !== null) return { key: item.key, tasks };
+    // A finished checklist call we cannot read is newer than any older list: showing the
+    // older (usually all-pending) one would claim no progress. Streaming partial args still fall through.
+    if (item.done && ["todowrite", "update_plan"].includes(toolName(item.name))) return null;
   }
   return null;
 }

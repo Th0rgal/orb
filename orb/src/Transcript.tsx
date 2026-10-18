@@ -51,7 +51,7 @@ function thinkInline(text: string): JSX.Element[] {
 }
 
 /** Short, human-readable target for a tool call row (Cursor-style). */
-function toolTarget(name: string, args: unknown): string {
+export function toolTarget(name: string, args: unknown): string {
   const a = toolArgs(args);
   if (!a) return "";
   const pick = (...keys: string[]): string => {
@@ -291,7 +291,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
       <Show when={editing()} fallback={<>
       <Show when={plan() !== null}><small class="user-plan"><Ic.PlanIcon size={12}/>Plan</small></Show>
       <Show when={fork()} fallback={<span>{goal().kind === "goal" ? (goal() as { objective: string }).objective : plan() ?? images().text}</span>}>
-        {context => <details class="fork-context"><summary>Forked from {context().source_title || "conversation"} · {context().messages.length} messages</summary>
+        {context => <details class="fork-context"><summary>Transferred from {context().source_title || "conversation"} · {context().messages.length} messages</summary>
           <For each={context().messages}>{m => <div class="fork-context-message"><small>{m.role === "user" ? "You" : "Assistant"}</small><p>{m.content}</p></div>}</For>
         </details>}
       </Show>
@@ -586,7 +586,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
   );
 }
 
-export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
+export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -617,7 +617,7 @@ export function Transcript(p: { prepareSearch?:(signal:AbortSignal)=>Promise<voi
   const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='work'?item.items.map(t=>t.kind==='think'?t.text:`${t.name} ${resultText(t.args)} ${resultText(t.result)}`).join('\n'):item.kind==='tool'?`${item.name} ${resultText(item.result)}`:item.kind==='text'?markdownText(item.text):item.text).join('\n');
   return (
     <>
-      <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} text={searchText} prepare={p.prepareSearch}>{turn=><For each={turn.items}>
+      <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
             case "work":

@@ -13,14 +13,39 @@ export function readCutMission(text: string, backend: string): string | null {
     return value.backend === backend && typeof value.id === 'string' && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(value.id) ? value.id : null;
   } catch { return null; }
 }
+// Optimistic moves: the sidebar shows the mission in its new project at once, and a list
+// refresh that was already in flight (still carrying the old project) cannot move it back.
+const pendingMoves = new Map<string, { project: string; tags: string[]; until: number }>();
+export function applyPendingMoves<T extends { id: string; project?: string | null; tags?: string[] | null }>(list: T[]): T[] {
+  if (!pendingMoves.size) return list;
+  const now = Date.now();
+  for (const [id, move] of pendingMoves) if (move.until < now) pendingMoves.delete(id);
+  return list.map(m => {
+    const move = pendingMoves.get(m.id);
+    if (!move) return m;
+    // Core caught up: stop overriding.
+    if (m.project === move.project) { pendingMoves.delete(m.id); return m; }
+    return { ...m, project: move.project, tags: move.tags };
+  });
+}
 export async function moveMission(id: string, project: string, folder: string): Promise<void> {
   const version = connectionVersion();
   const mission = await getMission(id);
   if (version !== connectionVersion()) throw new Error('Connection changed. Cut the conversation again.');
   const tags = (mission.tags ?? []).filter(tag => !tag.startsWith('orb-folder:'));
   if (folder) tags.push(`orb-folder:${folder}`);
-  await api(`/api/control/missions/${encodeURIComponent(id)}/project`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project, tags }),
-  });
+  const previous = pendingMoves.get(id);
+  pendingMoves.set(id, { project, tags, until: Date.now() + 30_000 });
+  window.dispatchEvent(new CustomEvent('orb:mission-moved', { detail: { id, project, tags } }));
+  try {
+    await api(`/api/control/missions/${encodeURIComponent(id)}/project`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project, tags }),
+    });
+  } catch (error) {
+    // Roll back the optimistic placement.
+    if (previous) pendingMoves.set(id, previous); else pendingMoves.delete(id);
+    window.dispatchEvent(new CustomEvent('orb:mission-moved', { detail: { id, project: mission.project ?? null, tags: mission.tags ?? [] } }));
+    throw error;
+  }
 }

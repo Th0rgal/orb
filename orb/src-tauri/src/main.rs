@@ -250,6 +250,8 @@ fn main() {
             context_service::project_context_unsubscribe,
             context_service::project_context_sync,
             context_service::project_context_disconnect,
+            context_service::project_context_workers,
+            context_service::project_context_stop,
             software::software_inventory,
             software::software_update,
             software::software_cancel,

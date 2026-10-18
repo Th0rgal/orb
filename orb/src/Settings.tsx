@@ -5,8 +5,8 @@ import { Select } from "./Select";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import * as Ic from "./icons";
-import { clearConnection, getApiUrl, isConnected, login, setApiUrl } from "./api";
-import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride } from "./localAgents";
+import { clearConnection, getApiUrl, getJwt, isConnected, login, setApiUrl } from "./api";
+import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride, tauriInvoke } from "./localAgents";
 import { getThemePref, setThemePref, type ThemePref } from "./theme";
 
 const THEME_LABELS: Record<ThemePref, string> = { auto: "Auto", light: "Light", dark: "Dark" };
@@ -74,6 +74,38 @@ function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
       <Show when={a.provider === "hermes" && p.onOpenPage}><button class="s-btn" onClick={() => p.onOpenPage?.("hermes-settings")}>Configure</button></Show>
     </Row>}</For>
   </Card>;
+}
+
+type ContextWorker = { project: string; connected: boolean; running: boolean };
+/** Project context workers keep each project's local replica fresh, even after Orb quits. */
+function BackgroundSyncCard() {
+  const [workers, setWorkers] = createSignal<ContextWorker[]>([]);
+  const [error, setError] = createSignal("");
+  const request = (project: string) => ({ endpoint: getApiUrl(), token: getJwt() ?? "", project, paths: [] });
+  const refresh = async () => {
+    try {
+      const invoke = tauriInvoke(); if (!invoke) return;
+      const res = await invoke("project_context_workers", { request: request("list") }) as { workers: ContextWorker[] };
+      setWorkers(res.workers); setError("");
+    } catch (e) { setError(String(e)); }
+  };
+  const stop = async (project: string) => {
+    try { const invoke = tauriInvoke(); if (!invoke) return; await invoke("project_context_stop", { request: request(project) }); }
+    catch (e) { setError(String(e)); }
+    setTimeout(() => void refresh(), 1500);
+  };
+  onMount(() => { if (isConnected()) void refresh(); });
+  return <Show when={workers().length || error()}>
+    <Card title="Background sync">
+      <Row title="Project context" desc="One small process per project keeps its context folder in sync with Core, also while Orb is closed. Stopping one pauses it until you use that project again.">
+        <button class="s-btn" onClick={() => void refresh()}>Refresh</button>
+      </Row>
+      <ErrorToast error={error()} title="Couldn’t read background sync" onDismiss={() => setError("")} />
+      <For each={workers()}>{w => <Row title={w.project} desc={w.running ? "Syncing in the background" : w.connected ? "Starting…" : "Paused"}>
+        <Show when={w.connected}><button class="s-btn" onClick={() => void stop(w.project)}>Stop</button></Show>
+      </Row>}</For>
+    </Card>
+  </Show>;
 }
 
 function LocalAgentsCard() {
@@ -209,6 +241,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
         <BackendTab />
         <LocalAgentsCard />
         <CloudAccountsCard onOpenPage={p.onOpenPage} />
+        <BackgroundSyncCard />
         <Show when={isConnected()}>
           <section class="s-sec">
             <h3>Execution</h3>

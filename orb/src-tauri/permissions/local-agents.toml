@@ -23,6 +23,8 @@ commands.allow = [
   "project_context_unsubscribe",
   "project_context_sync",
   "project_context_disconnect",
+  "project_context_workers",
+  "project_context_stop",
   "local_run_launch",
   "local_run_reconcile",
   "local_binding_set",

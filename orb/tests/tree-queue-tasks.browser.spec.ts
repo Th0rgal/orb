@@ -120,7 +120,8 @@ test("combined queue and checklist survives failure, identical sends, reload and
   state.setReject(false);
   for(let i=0;i<2;i++){await field.fill("same text @README.md");await field.press("Escape");await field.press("Enter");await expect(field).toHaveValue("");}
   await expect(page.locator('.followup-queue .queue-row')).toHaveCount(2);
-  expect(state.posts[1].attachments).toEqual([{kind:"path",path:"README.md"}]);
+  // Queue rows render optimistically; the second POST can land a moment later under load.
+  await expect.poll(()=>state.posts[1]?.attachments).toEqual([{kind:"path",path:"README.md"}]);
   await expect(page.locator('.followup-queue')).toContainText("Attached context");
   await expect(page.locator('.followup-queue')).not.toContainText(".paloma");
   expect(state.posts.slice(-2).map(p=>p.client_message_id)[0]).not.toBe(state.posts.at(-1)!.client_message_id);

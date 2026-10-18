@@ -78,6 +78,26 @@ struct ErrorBody {
     code: Option<String>,
 }
 
+/// The upstream message for a context-window overflow (vLLM, OpenAI, llama.cpp wording), bounded.
+fn context_overflow_message(body: &str) -> Option<String> {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| body.to_string());
+    let lower = message.to_ascii_lowercase();
+    let overflow = lower.contains("maximum context length")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("context length")
+        || lower.contains("prompt is too long")
+        || lower.contains("exceeds the available context");
+    overflow.then(|| message.chars().take(600).collect())
+}
+
 fn error_response(status: StatusCode, message: String, code: &str) -> Response {
     let body = ErrorResponse {
         error: ErrorBody {
@@ -2404,6 +2424,9 @@ pub(crate) async fn chat_completions_inner(
     // 4. Try each entry in order (waterfall)
     let mut rate_limit_count: u32 = 0;
     let mut client_error_count: u32 = 0;
+    // An upstream "prompt too long" 4xx, kept so the client learns it must compact instead of
+    // treating the exhausted chain as a 502 outage and retrying the same oversized request.
+    let mut context_overflow: Option<String> = None;
     let mut transport_validation_errors = Vec::new();
     let mut server_error_count: u32 = 0;
     let mut pending_fallback_events: Vec<crate::provider_health::FallbackEvent> = Vec::new();
@@ -3683,6 +3706,13 @@ pub(crate) async fn chat_completions_inner(
                 status = %status,
                 "Upstream client error (possibly wrong model), trying next entry"
             );
+            if context_overflow.is_none() {
+                let body = upstream_resp.text().await.unwrap_or_default();
+                context_overflow = context_overflow_message(&body);
+                if context_overflow.is_some() {
+                    tracing::warn!(provider = %entry.provider_id, model = %entry.model_id, "Upstream rejected the prompt as too long for the model context");
+                }
+            }
             client_error_count += 1;
             continue;
         }
@@ -3978,6 +4008,9 @@ pub(crate) async fn chat_completions_inner(
             ),
             "provider_configuration_error",
         )
+    } else if let Some(message) = context_overflow.filter(|_| rate_limit_count == 0) {
+        // OpenAI-compatible shape harnesses recognise (OpenCode compacts on it).
+        error_response(StatusCode::BAD_REQUEST, message, "context_length_exceeded")
     } else if client_error_count > 0 && rate_limit_count == 0 && server_error_count == 0 {
         // All failures were client errors (4xx / auth) — likely a configuration
         // or credentials issue, not a transient rate limit.
@@ -7655,6 +7688,19 @@ fn extract_google_retry_from_message(message: &str) -> Option<std::time::Duratio
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_overflow_is_recognised_from_vllm_and_openai_errors() {
+        let vllm = r#"{"object":"error","message":"This model's maximum context length is 262144 tokens. However, you requested 271000 tokens (239000 in the messages, 32000 in the completion).","type":"BadRequestError","code":400}"#;
+        assert!(super::context_overflow_message(vllm)
+            .unwrap()
+            .contains("262144"));
+        let openai = r#"{"error":{"message":"prompt is too long: 210000 tokens > 200000 maximum","code":"context_length_exceeded"}}"#;
+        assert!(super::context_overflow_message(openai).is_some());
+        assert!(
+            super::context_overflow_message(r#"{"error":{"message":"model not found"}}"#).is_none()
+        );
+    }
+
     use super::*;
     use bytes::Bytes;
     use futures::StreamExt;

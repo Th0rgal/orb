@@ -9,13 +9,13 @@ it("keeps the parent menu open on hover and treats submenu clicks as inside", as
   const ui = render(() => {
     const [submenu, setSubmenu] = createSignal(false);
     return <PopupMenu x={20} y={30} focus={false} onDismissSubmenu={() => setSubmenu(false)} onClose={closed} items={[
-      { kind: "item", label: "Fork conversation", openOnHover: true, onClick: () => setSubmenu(true) },
+      { kind: "item", label: "Transfer to another agent", openOnHover: true, onClick: () => setSubmenu(true) },
       { kind: "item", label: "Copy mission ID", onClick: () => {} },
     ]}>
       <Show when={submenu()}><div role="menu"><button role="menuitem" onClick={action}>Codex</button></div></Show>
     </PopupMenu>;
   });
-  fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "Fork conversation" }));
+  fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "Transfer to another agent" }));
   const model = await waitFor(() => screen.getByRole("menuitem", { name: "Codex" }));
   expect(screen.getByRole("menuitem", { name: "Copy mission ID" })).toBeTruthy();
   fireEvent.pointerDown(model);

@@ -60,6 +60,7 @@ import {
   isSyntheticUserMessage,
   type InboxItem,
   type InboxOption,
+  hiddenAutonomousWorking,
 } from "./inboxModel";
 import { inboxConfig } from "./inboxSettings";
 import {
@@ -366,6 +367,7 @@ export function InboxPage(p: {
       return next;
     });
 
+  const hiddenWorking = createMemo(() => hiddenAutonomousWorking(p.missions.filter((m) => !dismissedIds().has(m.id)), inboxConfig().includeAutonomous));
   const allSections = createMemo(() => {
     transcriptVersion();
     unreadVersion();
@@ -1749,7 +1751,7 @@ export function InboxPage(p: {
         </div>
 
         <div class="inbox-head-right">
-          <Show when={allSections().working.length > 0}>
+          <Show when={allSections().working.length > 0 || hiddenWorking() > 0}>
             <button
               type="button"
               class={`inbox-working-pill ${showWorking() ? "on" : ""}`}
@@ -1759,6 +1761,7 @@ export function InboxPage(p: {
             >
               <Ic.RunningDots />
               <span>{allSections().working.length} working</span>
+              <Show when={hiddenWorking() > 0}><span class="dim" title="Sub-agents and Hermes missions are hidden from the Inbox. Settings → Notifications → Include autonomous agents.">+{hiddenWorking()} autonomous</span></Show>
             </button>
           </Show>
           <button

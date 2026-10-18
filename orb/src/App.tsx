@@ -63,6 +63,11 @@ import { MenuList, PopupMenu, type MenuEntry } from "./Menu";
 import { MdSource, MdView, mdSource, safeHref, setMdSource, toggleMdSource } from "./Markdown";
 import { streamMission, heldAfterHistory, type StreamEvent } from "./stream";
 import { latestChecklist, localActivitiesToStreamItems } from "./workModel";
+import { TurnStatus } from "./TurnStatus";
+import { applyPendingMoves } from "./missionMove";
+import { Chapters } from "./Chapters";
+import { Changes } from "./Changes";
+import { TurnRecap } from "./TurnRecap";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "./Transcript";
 import { cacheRemember, cacheRecents } from "./pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, harnessSupportsEffort, normalizeEffort, supportedEfforts } from "./effort";
@@ -174,7 +179,11 @@ async function refreshNodeAntigravityModels(machine: string) {
   try {
     const models = await listNodeAntigravityModels(machine);
     if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:models}));
-  } catch { if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:[]})); }
+  } catch {
+    // A slow or failed lookup must not hide Antigravity on this machine for the whole
+    // session: keep whatever was known and retry shortly instead of caching [].
+    if (version === connectionVersion()) setTimeout(() => void refreshNodeAntigravityModels(machine), 15_000);
+  }
   finally { nodeModelRequests.delete(key); }
 }
 const harnessChoices = (machine = "core"): HarnessChoice[] => {
@@ -1382,7 +1391,7 @@ export default function App() {
       setCompletedMissions(completed);
       const freshIds = new Set(fresh.map(m => m.id));
       const vanished = prev.filter(m => !freshIds.has(m.id));
-      setMissions((current) => mergeById(current.filter(m => !isMissionDeleting(m.id)), fresh));
+      setMissions((current) => applyPendingMoves(mergeById(current.filter(m => !isMissionDeleting(m.id)), fresh)));
       recordMissions(fresh);
       if (vanished.length) {
         const slugs = [...new Set(vanished.map(m => m.project?.trim()).filter((s): s is string => !!s))];
@@ -1979,6 +1988,26 @@ export default function App() {
       setNewAgentRevision({ text: detail.prompt });
     };
     window.addEventListener("orb:open-page", onOpenPage);
+    const onMoved = (e: Event) => {
+      const { id, project, tags } = (e as CustomEvent<{ id: string; project: string | null; tags: string[] }>).detail;
+      setMissions(prev => prev.map(m => m.id === id ? { ...m, project, tags } : m));
+    };
+    window.addEventListener("orb:mission-moved", onMoved);
+    onCleanup(() => window.removeEventListener("orb:mission-moved", onMoved));
+    // A harness transfer archives the original: hide it at once, restore it if Core refuses.
+    const archivedBefore = new Map<string, Mission>();
+    const onArchived = (e: Event) => {
+      const { id } = (e as CustomEvent<{ id: string }>).detail;
+      setMissions(prev => { const m = prev.find(x => x.id === id); if (m) archivedBefore.set(id, m); return prev.filter(x => x.id !== id); });
+    };
+    const onArchiveFailed = (e: Event) => {
+      const { id } = (e as CustomEvent<{ id: string }>).detail;
+      const m = archivedBefore.get(id); archivedBefore.delete(id);
+      if (m) setMissions(prev => prev.some(x => x.id === id) ? prev : [...prev, m]);
+    };
+    window.addEventListener("orb:mission-archived", onArchived);
+    window.addEventListener("orb:mission-archive-failed", onArchiveFailed);
+    onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); });
     window.addEventListener("orb:debug-cron", onDebugCron);
     onCleanup(() => {
       window.removeEventListener("orb:open-page", onOpenPage);
@@ -1988,8 +2017,7 @@ export default function App() {
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000);
     // Learn this Mac's approval device id so notifications sign approvals too.
     if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(() => {});
-    const stopSecretRequests = pollWhileVisible(
-      () =>
+    const loadSecretRequests = () =>
         isConnected()
           ? getSecretBroker()
               .then((b) => {
@@ -1998,9 +2026,14 @@ export default function App() {
                 syncSecretRequestNotices(pending, () => open("bitwarden-settings"));
               })
               .catch(() => {})
-          : undefined,
-      10000,
-    );
+          : undefined;
+    const stopSecretRequests = pollWhileVisible(loadSecretRequests, 10000);
+    // Answering from a notification or the Secrets page updates the badge at once, then confirms.
+    const onSecretAnswered = () => { setSecretRequests((n) => Math.max(0, n - 1)); void loadSecretRequests(); };
+    const onFocus = () => void loadSecretRequests();
+    window.addEventListener("orb:secret-request-answered", onSecretAnswered);
+    window.addEventListener("focus", onFocus);
+    onCleanup(() => { window.removeEventListener("orb:secret-request-answered", onSecretAnswered); window.removeEventListener("focus", onFocus); });
     onCleanup(() => {
       stopMissions();
       stopFleet();
@@ -2711,7 +2744,7 @@ function MissionDock(p: {
       </div>
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
-        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Fork conversation" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
+        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Transfer to another agent" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
         <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">
@@ -2905,6 +2938,23 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   let nearBottom = true;
   createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
 
+  // First paint of a mission lands at the bottom: hide the column for the few frames the
+  // virtual list needs to mount and measure the tail, instead of showing the top then jumping.
+  let landedFor = "";
+  const landAtBottom = () => {
+    if (!scroller || landedFor === p.id || !nearBottom) { landedFor = p.id; return; }
+    landedFor = p.id;
+    const el = scroller;
+    el.classList.add("landing");
+    const land = () => { if (nearBottom) el.scrollTo({ top: el.scrollHeight }); };
+    // Stop following the moment the reader (or a test) scrolls away during the landing frames.
+    land();
+    // rAF can be throttled (background window, headless WebKit): never leave the thread hidden.
+    let shown = false;
+    const show = () => { if (shown) return; shown = true; land(); el.classList.remove("landing"); };
+    const fallback = setTimeout(show, 80);
+    requestAnimationFrame(() => { land(); requestAnimationFrame(() => { clearTimeout(fallback); show(); }); });
+  };
   const scrollIfPinned = () => {
     if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) scroller?.scrollTo({ top: scroller.scrollHeight });
   };
@@ -2997,6 +3047,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       replaying = false;
       if(disposed)return;
       setAwaiting(false);
+      landAtBottom();
       const queued = held;
       held = [];
       for (const ev of heldAfterHistory(history, queued)) applyLive(ev);
@@ -3494,6 +3545,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
 
   return (
     <>
+      <div class="mission-tools"><Changes items={viewItems()} githubPr={mission()?.github_pr} /><Chapters items={viewItems()} scroller={() => scroller} /></div>
       <div
         class="scroll"
         ref={scroller}
@@ -3526,7 +3578,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
-            <Transcript prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={pending()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
               <div class="resend-status" role="status">{row().state==='error' ? row().error : row().state==='sending' ? (row().waiting ? "Sending · queued after the current turn…" : "Sending…") : row().waiting ? "Queued after the current turn" : "Sent"}
@@ -3564,6 +3617,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>
           <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => setOptimisticList(prev => prev.filter(item => item.id !== id))} onEdit={row=>void queuedEdit.start(row)}/>
+          <Show when={busy() && activity() && !sendingImmediate()}><TurnStatus items={viewItems()} /></Show>
           <Composer
             allowConcurrentSend
             revision={sideRevision()}

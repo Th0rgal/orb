@@ -24,10 +24,15 @@ export function sideQuestionKey(mission: string): string {
   } catch { account = 'authenticated'; }
   return `orb.btw:v1:${JSON.stringify([getApiUrl().replace(/\/+$/, ''), account, mission])}`;
 }
+// Last known open/closed state per thread, so a mission switch can place the dock in the
+// same frame as the transcript instead of after the async storage read.
+const openHints = new Map<string, boolean>();
+export function peekSideQuestionOpen(key: string): boolean | undefined { return openHints.get(key); }
 export async function readSideQuestion(key: string): Promise<SavedSideQuestion | undefined> {
   try {
     const value = await readSideThread<SavedSideQuestion>(key).catch(()=>undefined) ?? JSON.parse(localStorage.getItem(key) ?? 'null');
     if (!value || !Array.isArray(value.history)) return;
+    openHints.set(key, Boolean(value.open));
     return {
       history: value.history.filter((v: SideExchange) => typeof v?.question === 'string' && typeof v?.answer === 'string').slice(-20),
       draft: typeof value.draft === 'string' ? value.draft.slice(0, 2000) : '',
@@ -40,6 +45,7 @@ export async function readSideQuestion(key: string): Promise<SavedSideQuestion |
   } catch { return; }
 }
 export async function writeSideQuestion(key: string, value: SavedSideQuestion): Promise<boolean> {
+  openHints.set(key, Boolean(value.open));
   try { await saveSideThread(key,value); localStorage.removeItem(key); return true; }
   catch { return false; }
 }

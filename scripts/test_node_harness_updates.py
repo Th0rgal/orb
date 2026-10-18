@@ -51,3 +51,8 @@ class UpdateSafety(unittest.TestCase):
             self.assertTrue((root/'1.0.0').exists())
 
 if __name__ == '__main__': unittest.main()
+
+
+def test_agy_update_skips_when_not_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, 'AGY', tmp_path / 'agy')
+    assert updater.update_agy() == {'skipped': 'not installed'}
