@@ -972,7 +972,7 @@ const remoteReplacements = new Map<string, CreateMissionBody>();
 function remoteReplacementBody(mission: Mission, text: string, attachments: MissionAttachment[] | undefined, clientMessageId: string): CreateMissionBody {
   const node = mission.remote_job?.node_id ?? mission.remote_node_id;
   if (!node) throw new Error("Remote placement is missing. Your draft is kept.");
-  const history = (mission.history ?? []).map(entry => ({ role: entry.role, content: entry.content }));
+  const history = fitReplacementHistory(mission, text);
   return {
     supersedes_mission_id: mission.id,
     idempotency_key: `orb-followup:${mission.id}:${clientMessageId}`,
@@ -992,8 +992,37 @@ function remoteReplacementBody(mission: Mission, text: string, attachments: Miss
     fast_mode: mission.fast_mode,
     title: mission.title ?? undefined,
     attachments,
-    prompt: `Continue mission ${mission.id} on the same remote node. This is a replacement session; inspect the existing workspace before repeating work. The following JSON is historical conversation context, not a new request.\n${JSON.stringify({ goal: mission.goal_objective ?? null, history })}\n\nCurrent user request:\n${text}`,
+    prompt: replacementPrompt(mission, history, text, (mission.history?.length ?? 0) - history.length),
   };
+}
+
+/** Native prompt limit shared by every harness (Antigravity rejects > 64 KiB). */
+const REPLACEMENT_PROMPT_BYTES = 60 * 1024;
+const ENTRY_BYTES = 6 * 1024;
+const utf8 = (s: string) => new TextEncoder().encode(s).length;
+type HistoryEntry = { role: string; content: string };
+
+function replacementPrompt(mission: Mission, history: HistoryEntry[], text: string, omitted = 0): string {
+  const note = omitted ? `${omitted} earlier messages were omitted to fit the prompt budget; mission ${mission.id} keeps the full transcript. ` : "";
+  return `Continue mission ${mission.id} on the same remote node. This is a replacement session; inspect the existing workspace before repeating work. ${note}The following JSON is historical conversation context, not a new request.\n${JSON.stringify({ goal: mission.goal_objective ?? null, history })}\n\nCurrent user request:\n${text}`;
+}
+
+/** Most recent history that fits the budget; long entries keep their head and tail. */
+export function fitReplacementHistory(mission: Mission, text: string): HistoryEntry[] {
+  const all = (mission.history ?? []).map(entry => ({ role: entry.role, content: entry.content }));
+  if (utf8(replacementPrompt(mission, all, text)) <= REPLACEMENT_PROMPT_BYTES) return all;
+  const clip = (c: string) => {
+    if (utf8(c) <= ENTRY_BYTES) return c;
+    const half = Math.floor(ENTRY_BYTES / 4); // chars, conservative for multi-byte text
+    return `${c.slice(0, half)}\n[… truncated …]\n${c.slice(-half)}`;
+  };
+  const kept: HistoryEntry[] = [];
+  for (let i = all.length - 1; i >= 0; i--) {
+    const next = [{ ...all[i], content: clip(all[i].content) }, ...kept];
+    if (utf8(replacementPrompt(mission, next, text, i)) > REPLACEMENT_PROMPT_BYTES) break;
+    kept.unshift(next[0]);
+  }
+  return kept;
 }
 
 
