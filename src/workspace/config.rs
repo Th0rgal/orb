@@ -1524,6 +1524,11 @@ pub async fn write_backend_config(
             Ok(())
         }
         "grok" => {
+            // Grok discovers native skills in `.grok/skills`; the OpenCode
+            // `.opencode/skill` copy is not on its discovery path.
+            if let Some(skills) = skill_contents {
+                write_codex_skills_to_workspace(&workspace_dir.join(".grok"), skills).await?;
+            }
             // These CLIs don't need a Sandboxed.sh-specific config format; use
             // OpenCode config for workspace setup (skills, commands, etc.).
             write_opencode_config(

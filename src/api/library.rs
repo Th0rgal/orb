@@ -172,6 +172,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         // Skills
         .route("/skill", get(list_skills))
         .route("/skill/import", post(import_skill))
+        .route("/skill-delivery", get(skill_delivery_preview))
         .route("/skill/:name", get(get_skill))
         .route("/skill/:name", put(save_skill))
         .route("/skill/:name", delete(delete_skill))
@@ -599,6 +600,46 @@ async fn save_mcps(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// GET /api/library/skills - List all skills.
+#[derive(Debug, Deserialize)]
+struct SkillDeliveryQuery {
+    workspace_id: Option<uuid::Uuid>,
+    project: Option<String>,
+}
+
+/// GET /api/library/skill-delivery?workspace_id=&project= - Read-only
+/// preview of the Library skills a mission would receive, with reasons.
+async fn skill_delivery_preview(
+    State(state): State<Arc<super::routes::AppState>>,
+    Query(query): Query<SkillDeliveryQuery>,
+    headers: HeaderMap,
+) -> Result<Json<workspace::skill_delivery::SkillDeliveryPlan>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    let workspace_id = query.workspace_id.unwrap_or(DEFAULT_WORKSPACE_ID);
+    let ws = state
+        .workspaces
+        .get(workspace_id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Unknown workspace".to_string()))?;
+    let project_skills = match query.project.as_deref().filter(|p| !p.is_empty()) {
+        Some(slug) => state
+            .projects
+            .get_project(slug)
+            .map_err(internal_error)?
+            .map(|record| record.skills)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    workspace::skill_delivery::resolve_for_workspace(
+        &ws.skills,
+        workspace::skill_delivery::is_default_host(&ws),
+        &library,
+        &project_skills,
+    )
+    .await
+    .map(Json)
+    .map_err(internal_error)
+}
+
 async fn list_skills(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,

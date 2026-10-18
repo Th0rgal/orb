@@ -3826,6 +3826,7 @@ sys.exit(0 if sys.argv[1]=='success_without_id' else 1)
             config_profile: None,
             resolved_git_credentials: None,
             read_only_command_guard_dir: None,
+            mission_project_skills: Vec::new(),
             harness_versions: None,
         }
     }

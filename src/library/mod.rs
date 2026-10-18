@@ -291,6 +291,8 @@ impl LibraryStore {
 
             let description = extract_description(&frontmatter);
             let setup_commands = extract_string_array(&frontmatter, "setup_commands");
+            let delivery = extract_skill_delivery(&frontmatter);
+            let line_count = content.as_deref().map(|c| c.lines().count()).unwrap_or(0);
 
             // Read skill source metadata if present
             let source_file = entry_path.join(".skill-source.json");
@@ -310,6 +312,9 @@ impl LibraryStore {
                 path: format!("{}/{}", SKILL_DIR, entry.file_name().to_string_lossy()),
                 source,
                 setup_commands,
+                audience: delivery.audience,
+                scope: delivery.scope,
+                line_count,
             });
         }
 
@@ -362,6 +367,8 @@ impl LibraryStore {
 
         // Extract setup_commands from frontmatter
         let setup_commands = extract_string_array(&frontmatter, "setup_commands");
+        let delivery = extract_skill_delivery(&frontmatter);
+        let line_count = content.lines().count();
 
         Ok(Skill {
             name: name.to_string(),
@@ -372,6 +379,9 @@ impl LibraryStore {
             files,
             references,
             setup_commands,
+            audience: delivery.audience,
+            scope: delivery.scope,
+            line_count,
         })
     }
 

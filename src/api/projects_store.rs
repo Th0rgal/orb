@@ -524,6 +524,8 @@ impl ProjectsStore {
         // 2026-09: the project color moved from each client's local storage
         // to the record, so desktop and iOS show the same one.
         Self::ensure_column(connection, "projects", "color", "color TEXT")?;
+        // 2026-10: per-project Library skill selection (JSON array).
+        Self::ensure_column(connection, "projects", "skills", "skills TEXT")?;
         // Rows that already had a mode before this column existed must not
         // look unstamped: the first ingest would otherwise overwrite them.
         connection.execute(
@@ -1974,7 +1976,7 @@ impl ProjectsStore {
             .prepare(
                 "SELECT slug, title, objective, status, mode, wait_ticks, \
                  next_action, blocker, controller_cron_id, repository, \
-                 created_at, updated_at, mode_signal_at, color FROM projects \
+                 created_at, updated_at, mode_signal_at, color, skills FROM projects \
                  ORDER BY updated_at DESC, slug",
             )
             .map_err(|e| e.to_string())?;
@@ -1992,7 +1994,7 @@ impl ProjectsStore {
             .query_row(
                 "SELECT slug, title, objective, status, mode, wait_ticks, \
                  next_action, blocker, controller_cron_id, repository, \
-                 created_at, updated_at, mode_signal_at, color FROM projects WHERE slug = ?1",
+                 created_at, updated_at, mode_signal_at, color, skills FROM projects WHERE slug = ?1",
                 params![slug],
                 Self::project_from_row,
             )
@@ -2168,6 +2170,10 @@ impl ProjectsStore {
             updated_at: row.get(11)?,
             mode_signal_at: row.get(12)?,
             color: row.get(13)?,
+            skills: row
+                .get::<_, Option<String>>(14)?
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default(),
         })
     }
 
@@ -2181,6 +2187,23 @@ impl ProjectsStore {
             .execute(
                 "UPDATE projects SET color = ?2 WHERE slug = ?1",
                 params![slug, color],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(affected > 0)
+    }
+
+    /// Replace the project's Library skill list. Names are validated and
+    /// deduplicated (first occurrence wins). Like the color, this is
+    /// configuration, not activity: `updated_at` does not move. Returns false
+    /// when the slug has no roster row.
+    pub fn set_skills(&self, slug: &str, skills: &[String]) -> Result<bool, String> {
+        let skills = normalize_project_skills(skills)?;
+        let raw = serde_json::to_string(&skills).map_err(|e| e.to_string())?;
+        let connection = self.lock()?;
+        let affected = connection
+            .execute(
+                "UPDATE projects SET skills = ?2 WHERE slug = ?1",
+                params![slug, raw],
             )
             .map_err(|e| e.to_string())?;
         Ok(affected > 0)
@@ -4680,6 +4703,60 @@ pub(crate) fn rfc3339_after(candidate: &str, existing: &str) -> bool {
     }
 }
 
+/// Skill names: lowercase letters, digits and single hyphens, at most 64.
+pub fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A project skill list as stored: validated, deduplicated, order kept.
+pub fn normalize_project_skills(skills: &[String]) -> Result<Vec<String>, String> {
+    if skills.len() > 256 {
+        return Err("at most 256 project skills".into());
+    }
+    let mut out: Vec<String> = Vec::new();
+    for raw in skills {
+        let name = raw.trim();
+        if !valid_skill_name(name) {
+            return Err(format!(
+                "invalid skill name '{raw}': use lowercase letters, digits and hyphens (at most 64 characters)"
+            ));
+        }
+        if !out.iter().any(|s| s == name) {
+            out.push(name.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Read one project's skill list straight from `projects.db` without
+/// running migrations. Used by the mission runner, which holds no store
+/// handle. Missing database, row or column all mean "no project skills".
+pub fn read_project_skills(db_path: &std::path::Path, slug: &str) -> Vec<String> {
+    let Ok(connection) =
+        Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return Vec::new();
+    };
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(2));
+    connection
+        .query_row(
+            "SELECT skills FROM projects WHERE slug = ?1",
+            params![slug],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
 /// The palette every client offers, by name. Clients own the rendering (hex
 /// values); the record only says which entry was chosen.
 pub const PROJECT_COLORS: [&str; 5] = ["blue", "green", "amber", "rose", "purple"];
@@ -4728,6 +4805,9 @@ pub struct ProjectRecord {
     /// stores colors and the project has none, which a missing field (older
     /// backend) does not.
     pub color: Option<String>,
+    /// Library skills delivered to every mission of this project.
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 /// A chat-planned roadmap item: the project-scoped precursor of a board task.
@@ -5589,6 +5669,70 @@ pub struct ProjectDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_skills_validate_and_roundtrip() {
+        assert!(valid_skill_name("lean-proofs2"));
+        for bad in [
+            "",
+            "Upper",
+            "a_b",
+            "-a",
+            "a-",
+            "a--b",
+            "../x",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_skill_name(bad), "{bad}");
+        }
+        assert!(normalize_project_skills(&["Bad".into()]).is_err());
+        assert_eq!(
+            normalize_project_skills(&["a".into(), " b ".into(), "a".into()]).unwrap(),
+            vec!["a", "b"]
+        );
+        let store = ProjectsStore::open_in_memory().expect("store");
+        assert!(!store.set_skills("nope", &["a".into()]).unwrap());
+        store.upsert_project("p", None, None, None, None).unwrap();
+        assert!(store.get_project("p").unwrap().unwrap().skills.is_empty());
+        assert!(store.set_skills("p", &["x".into(), "y".into()]).unwrap());
+        assert_eq!(
+            store.get_project("p").unwrap().unwrap().skills,
+            vec!["x", "y"]
+        );
+        assert_eq!(store.list_projects().unwrap()[0].skills, vec!["x", "y"]);
+    }
+
+    /// An existing database without the `skills` column migrates in place
+    /// and old rows read back an empty list.
+    #[test]
+    fn project_skills_column_migrates_legacy_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects.db");
+        {
+            let store = ProjectsStore::open(path.clone()).unwrap();
+            store
+                .upsert_project("legacy", None, None, None, None)
+                .unwrap();
+            let connection = store.lock().unwrap();
+            connection
+                .execute_batch("ALTER TABLE projects DROP COLUMN skills;")
+                .unwrap();
+            assert!(!ProjectsStore::table_has_column(&connection, "projects", "skills").unwrap());
+        }
+        assert!(read_project_skills(&path, "legacy").is_empty());
+        let store = ProjectsStore::open(path.clone()).unwrap();
+        assert!(store
+            .get_project("legacy")
+            .unwrap()
+            .unwrap()
+            .skills
+            .is_empty());
+        store.set_skills("legacy", &["lean".into()]).unwrap();
+        drop(store);
+        assert_eq!(read_project_skills(&path, "legacy"), vec!["lean"]);
+        assert!(read_project_skills(&path, "absent").is_empty());
+        assert!(read_project_skills(&dir.path().join("none.db"), "legacy").is_empty());
+    }
 
     /// A rename moves every table that keys on the slug — record, grant
     /// (FK child), binding, tracks, state events, decisions — and the old

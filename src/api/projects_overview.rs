@@ -838,6 +838,76 @@ pub async fn set_project_appearance(
     Ok(Json(serde_json::json!({ "slug": slug, "color": color })))
 }
 
+/// Library skill names that are not (or no longer) in the Library. Unknown
+/// names are allowed in the list: delivery warns and skips them.
+async fn missing_library_skills(state: &AppState, skills: &[String]) -> Vec<String> {
+    let library = state.library.read().await.clone();
+    let Some(library) = library else {
+        return Vec::new();
+    };
+    match library.list_skills().await {
+        Ok(listing) => skills
+            .iter()
+            .filter(|name| !listing.iter().any(|s| &s.name == *name))
+            .cloned()
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// `GET /api/projects/:slug/skills` — `{slug, skills, missing}`.
+pub async fn get_project_skills(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    let record = state
+        .projects
+        .get_project(&slug)
+        .map_err(store_err)?
+        .ok_or((StatusCode::NOT_FOUND, format!("unknown project '{slug}'")))?;
+    let missing = missing_library_skills(&state, &record.skills).await;
+    Ok(Json(serde_json::json!({
+        "slug": slug,
+        "skills": record.skills,
+        "missing": missing,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectSkillsRequest {
+    pub skills: Vec<String>,
+}
+
+/// `PUT /api/projects/:slug/skills` — body `{"skills": [name, ...]}` replaces
+/// the project's Library skill list (lowercase-hyphen names, ≤64 chars).
+pub async fn set_project_skills(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(body): Json<ProjectSkillsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !is_plain_key(&slug) {
+        return Err(bad_slug());
+    }
+    let skills = super::projects_store::normalize_project_skills(&body.skills)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    if !state
+        .projects
+        .set_skills(&slug, &skills)
+        .map_err(store_err)?
+    {
+        return Err((StatusCode::NOT_FOUND, format!("unknown project '{slug}'")));
+    }
+    let missing = missing_library_skills(&state, &skills).await;
+    Ok(Json(serde_json::json!({
+        "slug": slug,
+        "skills": skills,
+        "missing": missing,
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RenameProjectRequest {
     pub new_slug: String,
@@ -2090,6 +2160,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/:slug/appearance",
             axum::routing::post(set_project_appearance),
         )
+        .route(
+            "/:slug/skills",
+            get(get_project_skills).put(set_project_skills),
+        )
         .route("/:slug/status", axum::routing::post(set_project_status))
         .route("/:slug/track", axum::routing::post(set_project_track))
         .route(
@@ -2992,6 +3066,7 @@ fn synthetic_project_record(slug: &str) -> super::projects_store::ProjectRecord 
         updated_at: now,
         mode_signal_at: None,
         color: None,
+        skills: Vec::new(),
     }
 }
 
@@ -6906,6 +6981,7 @@ mod tests {
             updated_at: "2026-08-16T00:00:00Z".to_string(),
             mode_signal_at: None,
             color: None,
+            skills: Vec::new(),
         }
     }
 

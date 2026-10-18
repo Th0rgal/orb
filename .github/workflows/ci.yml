@@ -185,6 +185,7 @@ jobs:
         run: |
           python3 -m pip install --user 'PyYAML>=6,<7'
           python3 -m unittest discover -s tests -p project_skills_test.py
+          python3 -m unittest discover -s tests -p library_skills_test.py
 
       # The layout tests skip silently without Python Playwright and Chromium.
       - name: Install Python Playwright
