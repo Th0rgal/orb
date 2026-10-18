@@ -30869,6 +30869,21 @@ async fn run_single_control_turn(
             return crate::agents::AgentResult::failure(error, 0);
         }
         let mut ws = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
+        // The project's Library skill selection joins this mission's delivery set.
+        if let Ok(Some(mission)) = mission_store.get_mission(mid).await {
+            ws.mission_project_skills = mission
+                .project
+                .project
+                .as_deref()
+                .filter(|p| super::projects_overview::is_plain_key(p))
+                .map(|p| {
+                    super::projects_store::read_project_skills(
+                        &config.working_dir.join(".sandboxed-sh/projects.db"),
+                        p,
+                    )
+                })
+                .unwrap_or_default();
+        }
         if let Err(e) =
             workspace::sync_workspace_mcp_binaries_for_workspace(&config.working_dir, &ws).await
         {
