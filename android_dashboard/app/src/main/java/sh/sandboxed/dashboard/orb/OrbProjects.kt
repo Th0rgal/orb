@@ -566,8 +566,10 @@ fun OrbHomeScreen(
                             items(visibleProjects, key = { it.id }) { proj ->
                                 val pName = proj.str("title", "name", "slug") ?: proj.id
                                 val pColor = OrbProjectAppearance.color(proj)
-                                val latestTime = remember(proj) {
-                                    OrbJSON.relative(proj.str("updated_at", "created_at"))
+                                // Last activity across the project's missions, not the project record's
+                                // own edit time (every project showed "1w" while missions ran today).
+                                val latestTime = remember(proj, missions, projects) {
+                                    latestActivityRelative(proj, missionsForProject(proj, missions, projects))
                                 }
                                 val projectWorkingCount = remember(proj, missions, projects) {
                                     missionsForProject(proj, missions, projects).count { m ->
