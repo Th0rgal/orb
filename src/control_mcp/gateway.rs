@@ -10,6 +10,29 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Read-only tools a /btw side agent may call on its parent mission.
+fn btw_parent_read_allowed(tool: &str, owner_tags: &[String], target: Uuid) -> bool {
+    BTW_PARENT_READS.contains(&tool)
+        && owner_tags
+            .iter()
+            .any(|t| *t == format!("btw-parent:{target}"))
+}
+fn sets_reserved_btw_tag(args: &Value) -> bool {
+    args.get("tags")
+        .and_then(Value::as_array)
+        .is_some_and(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .any(|t| t.starts_with("btw-parent:"))
+        })
+}
+const BTW_PARENT_READS: &[&str] = &[
+    "get_mission",
+    "get_mission_events",
+    "get_mission_health",
+    "list_mission_shared_files",
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Principal {
     pub sub: String,
@@ -370,6 +393,11 @@ async fn authorize(
             }
         }
     }
+    // `btw-parent:` grants read access to another mission (see BTW_PARENT_READS); only Core's
+    // /btw launch may set it, never an agent through MCP.
+    if sets_reserved_btw_tag(args) {
+        return Err(ToolError::denied("The btw-parent tag is reserved"));
+    }
     authorize_job(state, p, args).await?;
     if tool.handler == super::Handler::Workspace {
         super::workspace_ops::preflight(state, p, args)
@@ -403,7 +431,12 @@ async fn authorize(
                 .await
                 .map_err(|_| ToolError::denied("Mission unavailable"))?
                 .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
-            if id != own && m.parent_mission_id != Some(own) {
+            // A /btw side agent may read (never act on) the conversation it was asked about:
+            // Core tags it `btw-parent:<id>` at creation, and side agents read the parent
+            // through get_mission_events instead of receiving a full uploaded archive.
+            let reads_btw_parent =
+                btw_parent_read_allowed(&tool.definition.name, &owner.project.tags, id);
+            if id != own && m.parent_mission_id != Some(own) && !reads_btw_parent {
                 return Err(ToolError::denied("Mission is outside this session's scope"));
             }
             if tool.definition.name == "start_workspace_job" && m.workspace_id != owner.workspace_id
@@ -982,6 +1015,32 @@ pub async fn revoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn btw_side_agent_reads_only_its_parent_and_cannot_mint_the_tag() {
+        let parent = Uuid::new_v4();
+        let tags = vec![format!("btw-parent:{parent}")];
+        assert!(btw_parent_read_allowed("get_mission_events", &tags, parent));
+        assert!(btw_parent_read_allowed("get_mission", &tags, parent));
+        assert!(!btw_parent_read_allowed(
+            "send_message_to_mission",
+            &tags,
+            parent
+        ));
+        assert!(!btw_parent_read_allowed("cancel_mission", &tags, parent));
+        assert!(!btw_parent_read_allowed(
+            "get_mission_events",
+            &tags,
+            Uuid::new_v4()
+        ));
+        assert!(!btw_parent_read_allowed("get_mission_events", &[], parent));
+        assert!(sets_reserved_btw_tag(
+            &json!({"tags": ["x", format!("btw-parent:{parent}")]})
+        ));
+        assert!(!sets_reserved_btw_tag(
+            &json!({"tags": ["btw", "project:x"]})
+        ));
+        assert!(!sets_reserved_btw_tag(&json!({"title": "no tags"})));
+    }
     #[test]
     fn core_enforces_eight_calls_even_when_stdio_is_bypassed() {
         let id = Uuid::new_v4();

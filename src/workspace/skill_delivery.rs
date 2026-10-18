@@ -5,12 +5,15 @@
 //! missions and remote node jobs):
 //!
 //! ```text
-//! mission skills = base ∪ globals ∪ project
-//!   base    = workspace.skills if non-empty,
-//!             else (default host workspace) every Library skill whose
-//!             audience includes `mission`, else nothing
-//!   globals = Library skills with scope=global and audience ∋ mission
+//! mission skills = base ∪ common ∪ project
+//!   base    = workspace.skills (an explicit list; empty = nothing)
+//!   common  = Library skills with scope=global and audience ∋ mission
+//!             ("Common" in Orb: every mission and the coordinator)
 //!   project = the project's Library skill list (projects.db)
+//!
+//! There is no implicit "every mission skill" base any more: a skill reaches
+//! missions only when it is Common or selected by their project, so project
+//! selection is meaningful (Orb's Local / Common / Projects places).
 //! ```
 //!
 //! Names absent from the Library are reported as `missing` and skipped.
@@ -91,14 +94,9 @@ pub fn resolve_skill_delivery(
             }
         }
     };
-    if !workspace_skills.is_empty() {
-        for name in workspace_skills {
-            add(&mut plan, name, SkillDeliveryReason::Base);
-        }
-    } else if default_host {
-        for skill in library.iter().filter(|s| targets_missions(s)) {
-            add(&mut plan, &skill.name, SkillDeliveryReason::Base);
-        }
+    let _ = default_host;
+    for name in workspace_skills {
+        add(&mut plan, name, SkillDeliveryReason::Base);
     }
     for skill in library
         .iter()
@@ -295,9 +293,12 @@ mod tests {
     }
 
     #[test]
-    fn skill_delivery_default_host_filters_coordinator_skills() {
+    fn skill_delivery_default_host_gets_common_and_project_only() {
+        // No implicit base: the default host behaves like any workspace.
         let plan = resolve_skill_delivery(&[], true, &library(), &[]);
-        assert_eq!(names(&plan), vec!["alpha", "glob", "zeta"]);
+        assert_eq!(names(&plan), vec!["glob"]);
+        let plan = resolve_skill_delivery(&[], true, &library(), &["alpha".into()]);
+        assert_eq!(names(&plan), vec!["glob", "alpha"]);
         assert!(plan.missing.is_empty());
     }
 

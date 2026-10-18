@@ -13636,8 +13636,19 @@ pub(crate) fn remote_execution_for_plan(
                 remote_opencode_config(model, api_base_url).to_string(),
             );
             let effective_prompt = plan_body.unwrap_or(prompt.as_str());
-            command.push(' ');
-            command.push_str(&shell_single_quote(&positional_prompt(effective_prompt)));
+            // A transferred conversation can exceed ARG_MAX (E2BIG). `opencode run` appends
+            // non-TTY stdin to the message, so long prompts go through the same staged fd 3
+            // as the other harnesses instead of argv.
+            match stdin_prompt(effective_prompt) {
+                None => {
+                    command.push(' ');
+                    command.push_str(&shell_single_quote(&positional_prompt(effective_prompt)));
+                }
+                Some(staged) => {
+                    command = format!("{}{command} <&3", staged.prelude);
+                    env.extend(staged.env);
+                }
+            }
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,
@@ -40684,6 +40695,48 @@ Investigate <service/> failures.
         let execution = remote_execution_for_plan(&resumed, "https://core.example", "test");
         assert!(execution.command.contains(&format!("--resume '{id}'")));
         assert!(!execution.command.contains("--session-id"));
+    }
+
+    #[test]
+    fn remote_opencode_long_prompt_reaches_opencode_on_stdin_not_argv() {
+        // Mission c13b82ea: a Claude Code -> OpenCode transfer of 165 messages failed with
+        // "Argument list too long (os error 7)" because the history was the positional prompt.
+        let prompt = format!(
+            "Transferred conversation\n{}",
+            "earlier turn with details ".repeat(20_000)
+        );
+        let plan = RemoteHarnessPlan::OpenCode {
+            model: Some("xai/grok-4.6".into()),
+            prompt: prompt.clone(),
+            resume_session_id: None,
+        };
+        let execution = remote_execution_for_plan(&plan, "https://core.example", "test");
+        assert!(execution.command.len() < 8192, "{}", execution.command);
+        assert!(execution.command.contains("opencode run --format json"));
+        assert!(execution.command.ends_with(" <&3"), "{}", execution.command);
+        assert!(!execution.command.contains("earlier turn with details"));
+        let env = execution.env.unwrap();
+        let parts: Vec<_> = env
+            .iter()
+            .filter(|(key, _)| key.starts_with(STDIN_PROMPT_ENV))
+            .collect();
+        assert!(parts.len() > 1);
+        assert!(parts
+            .iter()
+            .all(|(key, value)| key.len() + value.len() < 128 * 1024));
+
+        // Short prompts stay positional.
+        let short = RemoteHarnessPlan::OpenCode {
+            model: Some("xai/grok-4.6".into()),
+            prompt: "hi".into(),
+            resume_session_id: None,
+        };
+        let execution = remote_execution_for_plan(&short, "https://core.example", "test");
+        assert!(
+            execution.command.ends_with(" 'hi'"),
+            "{}",
+            execution.command
+        );
     }
 
     #[test]
