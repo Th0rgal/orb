@@ -18,9 +18,10 @@ import * as Ic from "./icons";
 import { markdownText, MdView } from "./Markdown";
 import { createStore, reconcile } from "solid-js/store";
 import { goalDraft, planObjective } from "./goal";
+import { isTaskTool, latestTaskList, parseTaskList } from "./taskList";
 
 import { messagePresentation, isAutomaticRecovery, isResumePrompt } from "./messagePresentation";
-import { computeDiffStats, latestChecklist, parseChecklist, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
+import { computeDiffStats, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
 export { buildTranscript, applyStreamEvent } from "./transcriptModel";
 export type { StreamItem } from "./transcriptModel";
@@ -98,7 +99,15 @@ export function toolTarget(name: string, args: unknown): string {
     case "task":
     case "agent":
     case "delegate_task":
+    case "subagent":
+    case "spawn_subagent":
       t = pick("description", "prompt", "preview");
+      break;
+    case "taskcreate":
+      t = pick("subject", "description");
+      break;
+    case "taskupdate":
+      t = [pick("taskId") && `#${pick("taskId").replace(/^#/, "")}`, pick("status").replaceAll("_", " ")].filter(Boolean).join(" ");
       break;
     case "webfetch":
     case "web_fetch":
@@ -131,7 +140,7 @@ function toolArgsBadges(name: string, args: unknown): string[] {
     if (typeof a.StartLine === "number" && typeof a.EndLine === "number") badges.push(`L${a.StartLine}-${a.EndLine}`);
   } else if (n === "grep" || n === "grep_search") {
     if (typeof a.include === "string" && a.include.trim()) badges.push(`include=${a.include.trim()}`);
-  } else if (n === "task" || n === "agent") {
+  } else if (n === "task" || n === "agent" || n === "subagent" || n === "spawn_subagent") {
     const sub = typeof a.subagent_type === "string" ? a.subagent_type : typeof a.agent === "string" ? a.agent : "";
     if (sub.trim()) badges.push(sub.trim());
   }
@@ -141,8 +150,8 @@ function toolArgsBadges(name: string, args: unknown): string[] {
 function ToolGlyph(p: { name: string }) {
   const kind = () => {
     const n = toolName(p.name);
-    if (n === "task" || n === "agent" || n === "delegate_task") return "agent";
-    if (n === "todowrite" || n === "update_plan") return "plan";
+    if (n === "task" || n === "agent" || n === "delegate_task" || n === "subagent" || n === "spawn_subagent") return "agent";
+    if (isTaskTool(p.name)) return "plan";
     if (n === "webfetch" || n === "web_fetch" || n === "websearch" || n === "web_search" || n === "search_web" || n === "read_url_content") return "web";
     return workKind(p.name);
   };
@@ -324,7 +333,7 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
   const target = () => toolTarget(p.item.name, p.item.args);
   const badges = createMemo(() => toolArgsBadges(p.item.name, p.item.args));
   const diff = createMemo(() => computeDiffStats(p.item));
-  const checklist = createMemo(() => parseChecklist(p.item.name, p.item.args));
+  const checklist = createMemo(() => parseTaskList(p.item.name, p.item.args));
   const failed=()=>{const r=toolArgs(p.item.result);return !!r&&(!!r.error||r.status==="failed"||r.is_error===true);};
   const isCommand = () => workKind(p.item.name) === "command";
   const commandText = () => {
@@ -591,7 +600,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
   const reminders = createMemo(() => reminderMessages(p.items));
-  const checklist = createMemo(() => latestChecklist(p.items));
+  const checklist = createMemo(() => latestTaskList(p.items));
   const groups = createMemo<Grouped[]>((previous) => groupWork(p.items.filter(item => item.kind !== "user" || !item.queued), previous), []);
   /** Key of the last user turn, when nothing follows it yet. Compared by key
    * rather than identity: `reconcile` hands the loop store proxies, not the

@@ -4,6 +4,8 @@ import {sideQuestionKey} from './sideQuestionStorage';
 import {readSideThread,saveSideThread} from './composerDrafts';
 import {MdView} from './Markdown';
 import type {StreamItem} from './transcriptModel';
+import {foldIncrementalTasks,INCREMENTAL_TASK_TOOLS} from './taskList';
+import {toolName} from './workModel';
 export type ApprovedPlan={requestId:string;text:string;approvedAt:string;boundary?:string};
 const key=(mission:string)=>'plan:'+sideQuestionKey(mission);
 const [revision,setRevision]=createSignal(0);
@@ -18,7 +20,8 @@ export function planSteps(items:StreamItem[],boundary?:string){
  const start=boundary?items.findIndex(i=>i.key===boundary):-1;
  if(boundary&&start<0)return [];
  for(const item of items.slice(start+1).reverse()){
-  if(item.kind!=='tool'||!['TodoWrite','todowrite','update_plan'].includes(item.name))continue;
+  if(item.kind==='tool'&&INCREMENTAL_TASK_TOOLS.includes(toolName(item.name)))return foldIncrementalTasks(items.slice(0,items.indexOf(item)+1));
+  if(item.kind!=='tool'||!['TodoWrite','todowrite','update_plan','todo_write'].includes(item.name))continue;
   let args:any=item.args;
   try{if(typeof args==='string')args=JSON.parse(args);}catch{continue;}
   const rows=args?.todos??args?.plan;
