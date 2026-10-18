@@ -19328,6 +19328,34 @@ pub struct CloneMissionRequest {
 /// title/backend/model_effort/model_override. Conversation history is **not**
 /// copied — the clone starts fresh. Reuses the standard create path so all
 /// backend/agent/model validation applies identically.
+/// A clone keeps an explicit project track but not the source's own generated track
+/// (`mission-<source id prefix>`): that one belongs to the source alone, and inheriting it
+/// made the clone fail the remote queue's writer check (mission 27b29974).
+fn inherited_track(source_id: Uuid, track: Option<&str>) -> Option<String> {
+    track
+        .filter(|t| *t != super::track_leases::generated_track_key(&source_id.to_string()))
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod inherited_track_tests {
+    use super::*;
+    #[test]
+    fn clones_drop_only_the_sources_generated_track() {
+        let id = Uuid::parse_str("9888cd20-6191-45a5-b1cb-cea8b24a9eec").unwrap();
+        assert_eq!(inherited_track(id, Some("mission-9888cd20")), None);
+        assert_eq!(
+            inherited_track(id, Some("verity-family-a")).as_deref(),
+            Some("verity-family-a")
+        );
+        assert_eq!(
+            inherited_track(id, Some("mission-deadbeef")).as_deref(),
+            Some("mission-deadbeef")
+        );
+        assert_eq!(inherited_track(id, None), None);
+    }
+}
+
 pub async fn clone_mission(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -19389,7 +19417,10 @@ pub async fn clone_mission(
         // Inherit project tagging from the source mission so clones stay
         // grouped under the same project/track/intent.
         project: source.project.project.clone(),
-        track: source.project.track.clone(),
+        // A generated track belongs to the source mission alone; the clone gets its own at
+        // create. Inheriting it made the clone fail the remote queue's writer check
+        // (REMOTE_JOB_STILL_RUNNING instead of queueing, mission 27b29974).
+        track: inherited_track(source.id, source.project.track.as_deref()),
         idempotency_key: None,
         intent: source.project.intent.clone(),
         github_pr: source.project.github_pr.clone(),

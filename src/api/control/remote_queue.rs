@@ -173,11 +173,9 @@ pub(super) async fn enqueue(
     // into a replacement mission or silently switch writer identity.
     let unsupported = mission.project.github_pr.is_some()
         || mission.project.tags.iter().any(|tag| tag == "pr-writer")
-        || mission
-            .project
-            .track
-            .as_ref()
-            .is_some_and(|track| !crate::api::track_leases::is_generated_track_key(track));
+        || mission.project.track.as_ref().is_some_and(|track| {
+            track != &crate::api::track_leases::generated_track_key(&mid.to_string())
+        });
     if unsupported {
         let prefix = if placement.live {
             remote_grok::REMOTE_JOB_STILL_RUNNING

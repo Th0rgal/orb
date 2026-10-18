@@ -86,15 +86,6 @@ pub fn track_required() -> bool {
 
 /// Generated key for a legacy untagged mission during the compatibility
 /// window. Stable per mission so retries do not fan out.
-/// A Core-generated per-mission track (`mission-<8 hex>`), as opposed to an explicit project
-/// track. Replacement missions keep their source's generated track, so the mission id of the
-/// owner is not required to match: either way no project writer identity is involved.
-pub fn is_generated_track_key(track: &str) -> bool {
-    track
-        .strip_prefix("mission-")
-        .is_some_and(|rest| rest.len() == 8 && rest.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
 pub fn generated_track_key(mission_id: &str) -> String {
     format!("mission-{}", mission_id.chars().take(8).collect::<String>())
 }
@@ -245,15 +236,6 @@ async fn sweep_locked(state: &Arc<AppState>) -> Result<LeaseSweepReport, String>
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn generated_track_keys_are_recognised() {
-        assert!(super::is_generated_track_key("mission-9888cd20"));
-        assert!(super::is_generated_track_key(&super::generated_track_key(
-            "27b29974-5827-4d1f"
-        )));
-        assert!(!super::is_generated_track_key("verity-family-a"));
-        assert!(!super::is_generated_track_key("mission-xyz"));
-    }
 
     use super::*;
 
