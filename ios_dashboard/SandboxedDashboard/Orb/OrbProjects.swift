@@ -377,6 +377,8 @@ struct OrbHome: View {
                         linkedMission = row.id
                     }
                 )
+                .onAppear { OrbOnScreen.inboxVisible = true }
+                .onDisappear { OrbOnScreen.inboxVisible = false }
             } else {
                 projectsScrollView
                     .searchable(text: $search, prompt: "Search projects")

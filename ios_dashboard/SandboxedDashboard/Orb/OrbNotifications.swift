@@ -502,7 +502,10 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
     ) {
         // Called once, on main: safe to carry across despite not being Sendable.
         nonisolated(unsafe) let done = completionHandler
-        DispatchQueue.main.async { done([.banner, .list, .sound, .badge]) }
+        let missionID = (notification.request.content.userInfo["mission_id"] as? String) ?? ""
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { done(OrbOnScreen.presentation(missionID: missionID)) }
+        }
     }
 
     nonisolated func userNotificationCenter(
@@ -639,5 +642,21 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
             // Default tap on the notification banner: open Inbox directly on this mission card with AI summary expanded!
             focusInbox(missionID: missionID, expandPeek: true)
         }
+    }
+}
+
+/// What the user is looking at right now. A banner for an item already on screen
+/// (the Inbox, or that conversation) is noise: it stays in Notification Center only.
+@MainActor enum OrbOnScreen {
+    static var inboxVisible = false
+    private static var openMissions: [String: Int] = [:]
+    static func opened(_ id: String) { openMissions[id, default: 0] += 1 }
+    static func closed(_ id: String) {
+        guard let count = openMissions[id] else { return }
+        openMissions[id] = count > 1 ? count - 1 : nil
+    }
+    static func presentation(missionID: String) -> UNNotificationPresentationOptions {
+        let visible = inboxVisible || (!missionID.isEmpty && openMissions[missionID] != nil)
+        return visible ? [.list, .badge] : [.banner, .list, .sound, .badge]
     }
 }

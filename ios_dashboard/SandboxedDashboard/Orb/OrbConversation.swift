@@ -32,6 +32,7 @@ struct OrbConversation: View {
     @State private var preview: OrbPreviewFile?
     @State private var events: [StoredEvent] = []
     @State private var workModel = OrbWorkModel()
+    @State private var changedFiles: [OrbTurnSummary.FileChange] = []
     @State private var queued: [OrbJSON] = []
     @State private var mode = "Message"
     @State private var refreshing = false
@@ -76,6 +77,8 @@ struct OrbConversation: View {
         if workModel != next {
             workModel = next
         }
+        let files = OrbTurnSummary.changedFiles(events)
+        if changedFiles != files { changedFiles = files }
     }
 
     private func rebuildHistory() {
@@ -172,23 +175,21 @@ struct OrbConversation: View {
         return !liveText.isEmpty ? "Writing…" : "Working…"
     }
 
-    /// Same wording as the desktop: the step, then how long Orb has seen it working.
+    /// Same wording as the desktop: the step, then how long the turn has been running.
     private func progress(at now: Date) -> String {
-        let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
-        let key = turn?["key"].text ?? "local:\(id ?? "")"
-        let started = OrbWorkClock.start(key)
-        let seconds = max(0, Int(now.timeIntervalSince(started)))
         let headline = workModel.liveHeadline(fallback: baseStepLabel())
         let label = headline.detail.isEmpty ? headline.action : "\(headline.action) \(headline.detail)"
-        return "\(label) · \(seconds / 60):\(String(format: "%02d", seconds % 60))"
+        return "\(label) · \(elapsedClock(at: now))"
     }
 
+    /// Turn start from Core (latest delivered user message), so reopening the app
+    /// does not restart a long turn at 0:00; Orb's own clock only as a fallback.
     private func elapsedClock(at now: Date) -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
         let key = turn?["key"].text ?? "local:\(id ?? "")"
-        let started = OrbWorkClock.start(key)
-        let seconds = max(0, Int(now.timeIntervalSince(started)))
-        return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+        let serverStart = isCloud ? nil : OrbTurnSummary.turnStart(events)
+        let started = serverStart.map { min($0, now) } ?? OrbWorkClock.start(key)
+        return OrbTurnSummary.clock(Int(now.timeIntervalSince(started)))
     }
 
     /// Only the latest ChatGPT answer becomes an interactive quiz, like the desktop.
@@ -258,6 +259,7 @@ struct OrbConversation: View {
                 .confirmationDialog("Clone conversation", isPresented: $cloning, titleVisibility: .visible) { cloneActions }
                 .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
                 .task {
+                    if let missionID { OrbOnScreen.opened(missionID) }
                     OrbWebViewPool.shared.warmUp(count: 2)
                     id = missionID
                     text = OrbDisk.read(draftKey, as: String.self) ?? ""
@@ -352,6 +354,7 @@ struct OrbConversation: View {
                     OrbDisk.saveAsync(value, key: draftKey + ":files")
                 }
                 .onDisappear {
+                    if let missionID { OrbOnScreen.closed(missionID) }
                     dictation.cancel()
                     draftSaveTask?.cancel()
                     eventRefreshTask?.cancel()
@@ -599,6 +602,9 @@ struct OrbConversation: View {
                 accessibilityStatus: ""
             )
         }
+        if !working && !isCloud {
+            turnChangesCard
+        }
         if working && !liveText.isEmpty {
             OrbRichText(source: liveText, onArtifact: { path in
                 Task { await openWorkspaceOrArtifact(path) }
@@ -622,6 +628,15 @@ struct OrbConversation: View {
             }
             .foregroundStyle(OrbStyle.warning)
             .padding(.vertical, 2)
+        }
+    }
+
+    /// Files edited in this conversation and its pull request, like the desktop's Changes.
+    @ViewBuilder
+    private var turnChangesCard: some View {
+        let pr = OrbTurnSummary.prLink(mission["github_pr"].text)
+        if !changedFiles.isEmpty || pr != nil {
+            OrbChangesCard(files: changedFiles, pr: pr)
         }
     }
 
@@ -2022,6 +2037,12 @@ struct OrbWorkModel: Equatable {
         for (idx, event) in events.enumerated() {
             let isLastEvent = idx == events.count - 1
             switch event.eventType {
+            case "user_message":
+                // Like the desktop: the fold, counts and task list describe the
+                // current turn, not every turn loaded so far.
+                model = OrbWorkModel()
+                toolIndexByCallID = [:]
+
             case "thinking":
                 let trimmed = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { continue }
@@ -2129,7 +2150,7 @@ struct OrbWorkModel: Equatable {
         return candidates.enumerated().compactMap { idx, item in
             let text = !item["content"].text.isEmpty ? item["content"].text : (!item["step"].text.isEmpty ? item["step"].text : item["title"].text)
             guard !text.isEmpty else { return nil }
-            let status = item["status"].text.isEmpty ? "pending" : item["status"].text
+            let status = OrbTurnSummary.taskStatus(item["status"].text)
             return TodoItem(id: item["id"].text.isEmpty ? "todo-\(idx)" : item["id"].text, content: text, status: status)
         }
     }
@@ -2470,6 +2491,14 @@ private struct OrbMissionTasksCard: View {
     private var completedCount: Int {
         todos.filter { $0.status == "completed" }.count
     }
+    static func icon(_ status: String) -> String {
+        switch status {
+        case "completed": return "checkmark.circle.fill"
+        case "in_progress": return "record.circle"
+        case "cancelled": return "xmark.circle"
+        default: return "circle"
+        }
+    }
     private var activeTodo: OrbWorkModel.TodoItem? {
         todos.first { $0.status == "in_progress" } ?? todos.first { $0.status == "pending" }
     }
@@ -2510,14 +2539,14 @@ private struct OrbMissionTasksCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(todos) { item in
                         HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: item.status == "completed" ? "checkmark.circle.fill" : (item.status == "in_progress" ? "record.circle" : "circle"))
+                            Image(systemName: Self.icon(item.status))
                                 .font(.system(size: 11))
                                 .foregroundStyle(item.status == "completed" ? OrbStyle.success : (item.status == "in_progress" ? .white : OrbStyle.textMuted))
                                 .padding(.top, 2)
                             Text(item.content)
                                 .font(.caption)
                                 .foregroundStyle(item.status == "completed" ? OrbStyle.textMuted : .primary.opacity(0.9))
-                                .strikethrough(item.status == "completed")
+                                .strikethrough(item.status == "completed" || item.status == "cancelled")
                         }
                     }
                 }

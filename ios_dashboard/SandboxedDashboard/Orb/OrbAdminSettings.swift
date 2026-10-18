@@ -500,12 +500,14 @@ struct OrbHermesSettings: View {
 
     private var runtimeSection: some View {
         let runtime = state["runtime"], sessions = state["sessions"]
+        // Core's HermesRuntimeSummary: service_active, uses_sandboxed_proxy, token_present
+        // (no service_state/api_server_healthy, which made this always read "Unreachable").
         return Section("Runtime & gateway") {
-            LabeledContent("Service", value: runtime["service_state"].text.isEmpty ? "unknown" : runtime["service_state"].text)
-            LabeledContent("Gateway", value: runtime["gateway_state"].text.isEmpty ? "unknown" : runtime["gateway_state"].text)
-            LabeledContent("API", value: runtime["api_server_healthy"].flag ? "Healthy" : "Unreachable")
-            if sessions["available"].flag {
-                LabeledContent("Sessions", value: "\(sessions["total_sessions"].display) · \(sessions["active_sessions_24h"].display) active in 24 h")
+            ForEach(OrbTurnSummary.hermesRuntime(runtime), id: \.0) { row in
+                LabeledContent(row.0, value: row.1)
+            }
+            if let line = OrbTurnSummary.hermesSessions(sessions) {
+                LabeledContent("Sessions", value: line)
             }
         }
     }
