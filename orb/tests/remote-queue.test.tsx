@@ -180,3 +180,13 @@ it('send now leaves the queue and shows in the thread before Core answers', asyn
   expect(sendImmediate).toHaveBeenCalledWith([], [{ id: 'one', content: 'Go now', attached: undefined }]);
   resolve({ delivered: true });
 });
+it('does not list a follow-up as queued once the transcript shows it delivered', async () => {
+  // Core keeps the inbox row until the node accepts the job (e.g. a full node),
+  // but it has already written the user message to the conversation.
+  backend.list.mockResolvedValue([{id:'sent',content:'Review this plan',source:'remote-queue'},{id:'later',content:'Then continue',source:'remote-queue'}]);
+  const rows=vi.fn();
+  render(()=><RemoteQueue mission="remote" delivered={['sent']} onRows={rows} onCancel={()=>{}}/>);
+  await screen.findByText('1 Queued');
+  expect(screen.queryByText('Review this plan')).toBeNull();
+  expect(rows).toHaveBeenLastCalledWith(['later']);
+});

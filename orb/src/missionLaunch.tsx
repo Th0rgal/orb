@@ -36,13 +36,33 @@ export function dockModelLabel(harnessName: string, modelLabel: string): string 
   const rest = modelLabel.replace(new RegExp(`^${h.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+`, "i"), "").trim();
   return rest || modelLabel;
 }
+// Auto-placed remote missions name their node only on the current job. Between
+// two jobs that field is empty and workspace_name is the host's bookkeeping
+// workspace, so the label flipped to "host". Remember the last node per mission.
+const LAST_NODE_KEY = "orb.mission-node:v1";
+function lastNodes(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(LAST_NODE_KEY) || "{}"); } catch { return {}; }
+}
+export function rememberMissionNode(id: string, node: string) {
+  const nodes = lastNodes();
+  if (nodes[id] === node) return;
+  delete nodes[id]; nodes[id] = node;
+  const keys = Object.keys(nodes);
+  for (const key of keys.slice(0, Math.max(0, keys.length - 500))) delete nodes[key];
+  try { localStorage.setItem(LAST_NODE_KEY, JSON.stringify(nodes)); } catch { /* best effort */ }
+}
+export function lastMissionNode(id: string | undefined): string | undefined {
+  return id ? lastNodes()[id] : undefined;
+}
 export function missionDestination(mission: Mission | null, receipt?: LaunchReceipt) {
   const destination = mission?.machine_transfer?.destination;
   if (destination) return destination.kind === "core" ? "Core" : destination.kind === "client" ? "This computer" : nodeLabel(destination.id);
   if (mission?.tags?.includes("placement:client") || receipt?.nodeId === "local") return "This computer";
   // Server-owned remote placement or the accepted selection takes precedence
   // over workspace_name, which can still name the host's bookkeeping workspace.
-  return nodeLabel(mission?.remote_job?.node_id ?? mission?.remote_node_id ?? receipt?.nodeId ?? mission?.workspace_name ?? "selected machine");
+  const node = mission?.remote_job?.node_id ?? mission?.remote_node_id;
+  if (node && mission?.id) rememberMissionNode(mission.id, node);
+  return nodeLabel(node ?? receipt?.nodeId ?? lastMissionNode(mission?.id) ?? mission?.workspace_name ?? "selected machine");
 }
 export function initialPrompt(mission: Mission | null, receipt?: LaunchReceipt): string | undefined {
   if (receipt?.prompt) return receipt.prompt;

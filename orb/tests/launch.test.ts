@@ -171,3 +171,10 @@ it("preserves the remote job while reconnecting and exposes actionable failures"
  const retry = mission({status:"interrupted",terminal_reason:"usage_limit_wait",recovery:{kind:"transient",reason:"Inference connection interrupted",resume_at:"2026-10-10T12:01:00Z",attempt:1,max_attempts:12}});
  expect(missionPhase(retry,false).detail).toContain("attempt 1/12");
 });
+it("keeps the last remote node between two jobs instead of showing the host workspace", () => {
+  const job = {node_id:"dgx-spark-admin",node_state:"running"} as Mission["remote_job"];
+  const running = missionDestination(mission({id:"between-jobs",status:"active",workspace_name:"host",remote_job:job}));
+  expect(running).not.toBe("host");
+  expect(missionDestination(mission({id:"between-jobs",status:"active",workspace_name:"host",remote_job:null}))).toBe(running);
+  expect(missionDestination(mission({id:"never-remote",workspace_name:"host"}))).toBe("host");
+});
