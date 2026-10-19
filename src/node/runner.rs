@@ -2243,6 +2243,9 @@ mod tests {
 
     #[tokio::test]
     async fn side_questions_have_one_independent_cancellable_slot() {
+        // This test pins a one-slot side lane; the lane size is configurable.
+        // Only node runners read this variable, and 1 is valid for all of them.
+        std::env::set_var("SANDBOXED_NODE_SIDE_CAPACITY", "1");
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::open(dir.path()).await.unwrap();
         let admission = Arc::new(Semaphore::new(1));
