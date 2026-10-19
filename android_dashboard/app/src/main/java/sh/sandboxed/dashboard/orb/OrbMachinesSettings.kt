@@ -222,7 +222,7 @@ fun OrbMachinesSettingsPage(
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 errorBanner?.let { err ->
-                    item { OrbNotice(title = err, log = core.lastErrorLog.value) }
+                    item { OrbNotice(title = err, log = core.lastErrorLog.collectAsState().value) }
                 }
 
                 item { OrbComputersBlock(core = core, computers = computers, ready = computersReady) }

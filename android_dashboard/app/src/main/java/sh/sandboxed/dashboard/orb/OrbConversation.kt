@@ -1281,7 +1281,7 @@ fun OrbConversationPage(
                 item(key = "conv_error") {
                     OrbRemoteLog(
                         title = err,
-                        log = core.lastErrorLog.value,
+                        log = core.lastErrorLog.collectAsState().value,
                         onRetry = {
                             errorMessage = null
                             missionId?.let { scope.launch { loadHistory(it) } }

@@ -6,7 +6,7 @@ was hit in practice and cost real time.
 
 ## Stage 1 — GitHub release (CI)
 
-1. Bump `versionCode` (+1) and `versionName` in `app/build.gradle.kts`.
+1. Bump `orbVersionCode` (+1) and `orbVersionName` in `gradle.properties` (CI can override the code with `-PorbVersionCode=N`).
    Convention: minor bump per feature release (`1.4.0` → `1.5.0`).
 2. Optional local sanity build (exercises R8 + signing like CI):
    ```bash

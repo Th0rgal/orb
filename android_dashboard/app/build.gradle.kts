@@ -13,8 +13,12 @@ android {
         applicationId = "sh.sandboxed.dashboard"
         minSdk = 33
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.6.0"
+        // Single source: android_dashboard/gradle.properties. CI may override
+        // the code with -PorbVersionCode=<n> or ORB_VERSION_CODE=<n>.
+        versionCode = (providers.gradleProperty("orbVersionCode").orNull
+            ?: System.getenv("ORB_VERSION_CODE")?.takeIf { it.isNotBlank() }
+            ?: error("orbVersionCode missing from gradle.properties")).toInt()
+        versionName = providers.gradleProperty("orbVersionName").get()
         manifestPlaceholders["orbAppLabel"] = "@string/app_name"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -71,7 +75,8 @@ android {
         }
     }
     lint {
-        abortOnError = false
+        // Orb code is lint-error free; keep it that way (warnings stay warnings).
+        abortOnError = true
         checkReleaseBuilds = false
         textReport = true
     }

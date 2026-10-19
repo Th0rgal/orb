@@ -521,7 +521,7 @@ fun OrbProvidersSettingsPage(
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 errorBanner?.let { err ->
-                    item { OrbNotice(title = err, log = core.lastErrorLog.value) }
+                    item { OrbNotice(title = err, log = core.lastErrorLog.collectAsState().value) }
                 }
                 statusBanner?.let { msg ->
                     item {

@@ -293,8 +293,14 @@ object OrbNotifications {
             .addAction(0, "Inspect Summary", contentPendingIntent)
             .addAction(0, "Reply", replyPendingIntent)
 
-        orbTry(OrbLog.Category.Notify, "post notification") {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            OrbLog.w(OrbLog.Category.Notify, "notification for ${item.id} skipped: permission not granted")
+            return
+        }
+        try {
             nm.notify(notificationIdFor(item.id), builder.build())
+        } catch (e: SecurityException) {
+            OrbLog.w(OrbLog.Category.Notify, "post notification failed", e)
         }
     }
 }

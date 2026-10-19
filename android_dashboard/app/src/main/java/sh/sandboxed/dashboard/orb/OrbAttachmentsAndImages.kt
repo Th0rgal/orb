@@ -44,6 +44,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -825,7 +826,7 @@ fun OrbPreviewSheet(
                     }
                 }
                 error != null -> {
-                    OrbNotice(title = error!!, log = core.lastErrorLog.value)
+                    OrbNotice(title = error!!, log = core.lastErrorLog.collectAsState().value)
                 }
                 imageBitmap != null -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
