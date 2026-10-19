@@ -42,7 +42,7 @@ enum Log {
     /// Replacement for `try?` on calls whose failure should be visible: returns nil on
     /// failure after logging it. Cancellation is expected (views disappear) and is not recorded.
     @MainActor
-    static func attempt<T>(_ category: Category, _ what: String, path: String? = nil, _ operation: () async throws -> T) async -> T? {
+    static func attempt<T>(_ category: Category, _ what: String, path: String? = nil, _ operation: @MainActor () async throws -> T) async -> T? {
         do {
             return try await operation()
         } catch is CancellationError {

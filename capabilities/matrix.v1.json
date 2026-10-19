@@ -27,8 +27,8 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "ios_dashboard/SandboxedDashboard/Models/Mission.swift",
-            "pattern": "let history: [MissionHistoryEntry]"
+            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbConversation.swift",
+            "pattern": "for (offset, element) in mission[\"history\"].items.enumerated() {"
           }
         ]
       }
@@ -58,7 +58,7 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "ios_dashboard/SandboxedDashboard/Views/Control/ControlView.swift",
+            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbConversation.swift",
             "pattern": "case \"thinking\":"
           }
         ]
@@ -86,13 +86,8 @@
         ]
       },
       "ios": {
-        "status": "supported",
-        "evidence": [
-          {
-            "path": "ios_dashboard/SandboxedDashboard/Services/APIService.swift",
-            "pattern": "func listMissionAutomations(missionId: String) async throws -> [Automation]"
-          }
-        ]
+        "status": "deferred",
+        "note": "The Orb iOS UI has no automations screen; the legacy Control tab that had one was removed (#1155)."
       }
     },
     {
@@ -143,13 +138,8 @@
         ]
       },
       "ios": {
-        "status": "supported",
-        "evidence": [
-          {
-            "path": "ios_dashboard/SandboxedDashboard/Models/ChatMessage.swift",
-            "pattern": "case assistant(success: Bool, costCents: Int, costSource: CostSource, model: String?, sharedFiles: [SharedFile]?)"
-          }
-        ]
+        "status": "deferred",
+        "note": "The Orb iOS UI does not show per-message cost; the legacy Control tab that did was removed (#1155)."
       }
     }
   ]
