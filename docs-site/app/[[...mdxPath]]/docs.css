@@ -31,6 +31,19 @@ header.nextra-navbar .nextra-navbar-blur {
   display: none !important;
 }
 
+header.nextra-navbar nav {
+  height: var(--nextra-navbar-height);
+  padding-left: max(env(safe-area-inset-left, 0px), 1rem) !important;
+  padding-right: max(env(safe-area-inset-right, 0px), 1rem) !important;
+}
+
+@media (min-width: 768px) {
+  header.nextra-navbar nav {
+    padding-left: max(env(safe-area-inset-left, 0px), 1.5rem) !important;
+    padding-right: max(env(safe-area-inset-right, 0px), 1.5rem) !important;
+  }
+}
+
 .orb-nav-brand {
   display: inline-flex;
   align-items: center;
@@ -55,20 +68,91 @@ header.nextra-navbar .nextra-navbar-blur {
   font-weight: 400;
 }
 
+/* Search input & results dropdown */
+header.nextra-navbar input[type="search"],
+header.nextra-navbar input[placeholder*="Search"],
+aside.nextra-mobile-nav input[type="search"],
+aside.nextra-mobile-nav input[placeholder*="Search"] {
+  background-color: var(--orb-bg-elev) !important;
+  border: 1px solid var(--orb-stroke) !important;
+  color: var(--orb-fg-strong) !important;
+  border-radius: 8px !important;
+  font-size: 13px !important;
+  height: 34px !important;
+  padding: 0 11px !important;
+  transition: border-color 140ms ease, background-color 140ms ease !important;
+}
+
+@media (max-width: 767px) {
+  aside.nextra-mobile-nav input[type="search"],
+  aside.nextra-mobile-nav input[placeholder*="Search"] {
+    font-size: 16px !important;
+    height: 40px !important;
+  }
+}
+
+header.nextra-navbar input:focus,
+aside.nextra-mobile-nav input:focus {
+  border-color: var(--orb-blue) !important;
+  background-color: var(--orb-bg) !important;
+  outline: none !important;
+}
+
+.nextra-search-results {
+  background-color: color-mix(in srgb, var(--orb-bg-elev) 96%, transparent) !important;
+  backdrop-filter: blur(20px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
+  border: 1px solid var(--orb-stroke-strong) !important;
+  border-radius: 11px !important;
+  box-shadow: var(--orb-shadow-lg) !important;
+  color: var(--orb-fg) !important;
+}
+
+/* HeadlessUI popovers/menus (Copy page dropdown, Theme switcher listbox) */
+[role="menu"],
+[role="listbox"]:not(.nextra-search-results) {
+  background-color: color-mix(in srgb, var(--orb-bg-elev) 96%, transparent) !important;
+  backdrop-filter: blur(18px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(160%) !important;
+  border: 1px solid var(--orb-stroke-strong) !important;
+  border-radius: 9px !important;
+  box-shadow: var(--orb-shadow-lg) !important;
+  color: var(--orb-fg) !important;
+}
+
 /* ============================================
-   LEFT SIDEBAR (Fixed layout & bottom footer)
+   LEFT SIDEBAR & MOBILE DRAWER
    ============================================ */
 
 aside.nextra-sidebar {
   background-color: var(--orb-bg-sidebar) !important;
   border-right: 1px solid var(--orb-stroke-soft) !important;
-  display: flex !important;
-  flex-direction: column !important;
-  width: 244px !important;
+}
+
+@media (min-width: 768px) {
+  aside.nextra-sidebar.x\:w-64 {
+    width: 244px !important;
+    padding-left: env(safe-area-inset-left, 0px);
+  }
+
+  aside.nextra-sidebar.x\:w-20 {
+    width: 64px !important;
+    padding-left: env(safe-area-inset-left, 0px);
+  }
+}
+
+/* Mobile drawer (aside.nextra-mobile-nav) */
+aside.nextra-mobile-nav {
+  background-color: var(--orb-bg-sidebar) !important;
+  border-bottom: 1px solid var(--orb-stroke-soft);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* Remove any artificial scroll fade masks that cause bottom gap artifacts */
 aside.nextra-sidebar .nextra-mask,
+aside.nextra-mobile-nav .nextra-mask,
 .nextra-toc .nextra-mask {
   mask-image: none !important;
   -webkit-mask-image: none !important;
@@ -81,14 +165,22 @@ aside.nextra-sidebar > div:first-child {
   background: transparent !important;
 }
 
-aside.nextra-sidebar ul {
+aside.nextra-mobile-nav > ul {
+  flex: 1 1 auto !important;
+  padding: 10px 14px 16px !important;
+  background: transparent !important;
+}
+
+aside.nextra-sidebar ul,
+aside.nextra-mobile-nav ul {
   display: flex !important;
   flex-direction: column !important;
   gap: 2px !important;
 }
 
 /* Sidebar bottom footer (Theme switch + Collapse button) */
-aside.nextra-sidebar .nextra-sidebar-footer {
+aside.nextra-sidebar .nextra-sidebar-footer,
+aside.nextra-mobile-nav .nextra-sidebar-footer {
   margin: 0 !important;
   padding: 8px 10px !important;
   background-color: var(--orb-bg-sidebar) !important;
@@ -101,8 +193,18 @@ aside.nextra-sidebar .nextra-sidebar-footer {
   gap: 6px !important;
 }
 
+aside.nextra-mobile-nav .nextra-sidebar-footer {
+  padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px)) !important;
+}
+
+aside.nextra-sidebar.x\:w-20 .nextra-sidebar-footer {
+  justify-content: center !important;
+  padding: 8px 6px !important;
+}
+
 /* Section headers in sidebar */
-aside.nextra-sidebar li:not(:has(a)):not(:has(button)) {
+aside.nextra-sidebar li:not(:has(a)):not(:has(button)),
+aside.nextra-mobile-nav li:not(:has(a)):not(:has(button)) {
   color: var(--orb-fg-3) !important;
   font-size: 10.5px !important;
   font-weight: 600 !important;
@@ -112,13 +214,15 @@ aside.nextra-sidebar li:not(:has(a)):not(:has(button)) {
   margin: 4px 0 0 !important;
 }
 
-aside.nextra-sidebar li:not(:has(a)):not(:has(button)):first-child {
+aside.nextra-sidebar li:not(:has(a)):not(:has(button)):first-child,
+aside.nextra-mobile-nav li:not(:has(a)):not(:has(button)):first-child {
   padding-top: 4px !important;
   margin-top: 0 !important;
 }
 
 /* Sidebar links */
-aside.nextra-sidebar a {
+aside.nextra-sidebar a,
+aside.nextra-mobile-nav a {
   color: var(--orb-fg-2) !important;
   font-size: 13px !important;
   font-weight: 450 !important;
@@ -131,13 +235,21 @@ aside.nextra-sidebar a {
   transition: background-color 120ms ease, color 120ms ease !important;
 }
 
-aside.nextra-sidebar a:hover {
+aside.nextra-mobile-nav a {
+  font-size: 14px !important;
+  padding: 9px 12px !important;
+}
+
+aside.nextra-sidebar a:hover,
+aside.nextra-mobile-nav a:hover {
   color: var(--orb-fg-strong) !important;
   background-color: var(--orb-bg-hover) !important;
 }
 
 aside.nextra-sidebar a[aria-current="page"],
-aside.nextra-sidebar li.active > a {
+aside.nextra-sidebar li.active > a,
+aside.nextra-mobile-nav a[aria-current="page"],
+aside.nextra-mobile-nav li.active > a {
   color: var(--orb-fg-strong) !important;
   background-color: var(--orb-bg-active) !important;
   font-weight: 560 !important;
@@ -146,7 +258,8 @@ aside.nextra-sidebar li.active > a {
 }
 
 /* Theme switch & collapse button inside sidebar footer */
-aside.nextra-sidebar .nextra-sidebar-footer button {
+aside.nextra-sidebar .nextra-sidebar-footer button,
+aside.nextra-mobile-nav .nextra-sidebar-footer button {
   color: var(--orb-fg-2) !important;
   border-radius: 6px !important;
   font-size: 12px !important;
@@ -154,7 +267,14 @@ aside.nextra-sidebar .nextra-sidebar-footer button {
   padding: 0 8px !important;
 }
 
-aside.nextra-sidebar .nextra-sidebar-footer button:hover {
+aside.nextra-mobile-nav .nextra-sidebar-footer button {
+  height: 34px !important;
+  font-size: 13px !important;
+  padding: 0 10px !important;
+}
+
+aside.nextra-sidebar .nextra-sidebar-footer button:hover,
+aside.nextra-mobile-nav .nextra-sidebar-footer button:hover {
   color: var(--orb-fg-strong) !important;
   background-color: var(--orb-bg-hover) !important;
 }
@@ -199,17 +319,107 @@ nav.nextra-toc code {
   font-size: 0.88em !important;
 }
 
+nav.nextra-toc > div > div.x\:border-t {
+  border-top-color: var(--orb-stroke-soft) !important;
+}
+
+nav.nextra-toc > div > div.x\:border-t a,
+nav.nextra-toc > div > div.x\:border-t button {
+  color: var(--orb-fg-3) !important;
+  font-size: 12px !important;
+}
+
+nav.nextra-toc > div > div.x\:border-t a:hover,
+nav.nextra-toc > div > div.x\:border-t button:hover {
+  color: var(--orb-fg-strong) !important;
+}
+
 /* ============================================
    MAIN ARTICLE & TYPOGRAPHY
    ============================================ */
 
 article {
   color: var(--orb-fg);
+  padding-left: max(env(safe-area-inset-left, 0px), 1.15rem) !important;
+  padding-right: max(env(safe-area-inset-right, 0px), 1.15rem) !important;
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 2.5rem) !important;
+}
+
+@media (min-width: 768px) {
+  article {
+    padding-left: 3rem !important;
+    padding-right: max(env(safe-area-inset-right, 0px), 3rem) !important;
+  }
+}
+
+/* Breadcrumb & Copy page action bar */
+article .nextra-breadcrumb {
+  color: var(--orb-fg-3) !important;
+  font-size: 12px !important;
+  margin-bottom: 6px !important;
+}
+
+article .nextra-breadcrumb span {
+  color: var(--orb-fg-3) !important;
+  font-weight: 500 !important;
+}
+
+article > div.x\:float-end {
+  border-color: var(--orb-stroke) !important;
+  background-color: var(--orb-bg-elev) !important;
+  border-radius: 7px !important;
+  margin-left: 12px !important;
+  margin-bottom: 8px !important;
+}
+
+article > div.x\:float-end button {
+  color: var(--orb-fg-2) !important;
+  font-size: 12px !important;
+  height: 28px !important;
+}
+
+article > div.x\:float-end button:hover {
+  color: var(--orb-fg-strong) !important;
+  background-color: var(--orb-bg-hover) !important;
+}
+
+@media (max-width: 640px) {
+  article > div.x\:float-end {
+    float: none !important;
+    display: inline-flex !important;
+    margin: 2px 0 12px 0 !important;
+  }
+}
+
+/* Hide redundant breadcrumb + Copy page bar above the full-width hero on the home page */
+article:has(.orb-hero-banner) > .nextra-breadcrumb,
+article:has(.orb-hero-banner) > div.x\:float-end {
+  display: none !important;
+}
+
+/* Article bottom timestamp & Prev/Next pagination links */
+article > div.x\:text-end {
+  color: var(--orb-fg-3) !important;
+}
+
+article > div.x\:border-t {
+  border-top-color: var(--orb-stroke-soft) !important;
+}
+
+article > div.x\:border-t a {
+  color: var(--orb-fg-2) !important;
+  font-weight: 550 !important;
+  transition: color 120ms ease !important;
+}
+
+article > div.x\:border-t a:hover {
+  color: var(--orb-fg-strong) !important;
+  text-decoration: none !important;
 }
 
 article h1 {
   color: var(--orb-fg-strong) !important;
-  font-size: 2rem !important;
+  font-size: clamp(1.55rem, 4.5vw, 2rem) !important;
   font-weight: 650 !important;
   letter-spacing: -0.025em !important;
   line-height: 1.2 !important;
@@ -217,20 +427,20 @@ article h1 {
 
 article h2 {
   color: var(--orb-fg-strong) !important;
-  font-size: 1.375rem !important;
+  font-size: clamp(1.2rem, 3.2vw, 1.375rem) !important;
   font-weight: 600 !important;
   letter-spacing: -0.018em !important;
-  margin-top: 2.5rem !important;
+  margin-top: 2.25rem !important;
   padding-bottom: 0.5rem !important;
   border-bottom: 1px solid var(--orb-stroke-soft) !important;
 }
 
 article h3 {
   color: var(--orb-fg-strong) !important;
-  font-size: 1.125rem !important;
+  font-size: clamp(1.04rem, 2.6vw, 1.125rem) !important;
   font-weight: 600 !important;
   letter-spacing: -0.012em !important;
-  margin-top: 1.75rem !important;
+  margin-top: 1.6rem !important;
 }
 
 article p,
@@ -249,6 +459,7 @@ article a:not(.orb-btn):not(.nextra-card) {
   color: var(--orb-blue);
   text-decoration: none;
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 article a:not(.orb-btn):not(.nextra-card):hover {
@@ -273,6 +484,7 @@ article code:not(pre code) {
   border-radius: 5px !important;
   font-size: 0.84em !important;
   font-family: var(--font-mono) !important;
+  overflow-wrap: break-word;
 }
 
 pre {
@@ -280,6 +492,9 @@ pre {
   border: 1px solid var(--orb-stroke) !important;
   border-radius: 10px !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02) !important;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 pre code {
@@ -288,13 +503,22 @@ pre code {
   line-height: 1.6 !important;
 }
 
+@media (max-width: 640px) {
+  pre code {
+    font-size: 12.25px !important;
+  }
+}
+
 /* ============================================
    TABLES
    ============================================ */
 
 article table {
-  display: table !important;
+  display: block !important;
   width: 100% !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  -webkit-overflow-scrolling: touch;
   border-collapse: collapse !important;
   border-spacing: 0 !important;
   margin: 1.25rem 0 !important;
@@ -302,6 +526,12 @@ article table {
   border-radius: 0 !important;
   background: transparent !important;
   font-size: 0.9rem !important;
+}
+
+@media (min-width: 900px) {
+  article table {
+    display: table !important;
+  }
 }
 
 article thead,
@@ -322,6 +552,7 @@ article th {
   text-align: left !important;
   border: none !important;
   border-bottom: 1px solid var(--orb-stroke) !important;
+  white-space: nowrap;
 }
 
 article td {
@@ -331,6 +562,29 @@ article td {
   border: none !important;
   border-bottom: 1px solid var(--orb-stroke-soft) !important;
   vertical-align: top !important;
+}
+
+@media (max-width: 640px) {
+  article table {
+    font-size: 0.84rem !important;
+  }
+
+  article th,
+  article td {
+    padding-right: 0.75rem !important;
+  }
+
+  article td:first-child {
+    min-width: 120px;
+  }
+
+  article td:nth-child(2) {
+    min-width: 130px;
+  }
+
+  article td:nth-child(3) {
+    min-width: 210px;
+  }
 }
 
 article th:last-child,
@@ -399,7 +653,7 @@ article div[class*="x:dark:bg-blue-"] {
 }
 
 .orb-hero-title {
-  font-size: 1.95rem !important;
+  font-size: clamp(1.5rem, 4.5vw, 1.95rem) !important;
   line-height: 1.2 !important;
   font-weight: 650 !important;
   letter-spacing: -0.028em !important;
@@ -408,7 +662,7 @@ article div[class*="x:dark:bg-blue-"] {
 }
 
 .orb-hero-lead {
-  font-size: 0.96rem !important;
+  font-size: clamp(0.9rem, 2.2vw, 0.96rem) !important;
   line-height: 1.62 !important;
   color: var(--orb-fg-2) !important;
   margin: 0 0 20px !important;
@@ -420,6 +674,7 @@ article div[class*="x:dark:bg-blue-"] {
   align-items: center;
   justify-content: center;
   gap: 10px;
+  width: 100%;
 }
 
 .orb-hero-ai-note {
@@ -434,6 +689,7 @@ article div[class*="x:dark:bg-blue-"] {
   align-items: center;
   justify-content: center;
   padding: 8px 15px;
+  min-height: 36px;
   border-radius: 8px;
   font-size: 13.5px;
   font-weight: 550;
@@ -543,6 +799,78 @@ article div[class*="x:dark:bg-blue-"] {
   .orb-shader-stage {
     width: 176px;
     height: 176px;
+  }
+}
+
+@media (max-width: 480px) {
+  .orb-hero-banner {
+    gap: 14px;
+    padding: 8px 0 22px;
+    margin: 0 0 20px;
+  }
+
+  .orb-shader-stage {
+    width: 152px;
+    height: 152px;
+  }
+}
+
+/* Mobile landscape & short viewports */
+@media (max-height: 500px) and (orientation: landscape) {
+  :root {
+    --nextra-navbar-height: 48px;
+  }
+
+  .orb-hero-banner {
+    flex-direction: row;
+    text-align: left;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 8px 0 18px;
+    margin: 0 0 18px;
+  }
+
+  .orb-hero-visual {
+    width: auto;
+    flex-shrink: 0;
+  }
+
+  .orb-shader-stage {
+    width: 128px;
+    height: 128px;
+  }
+
+  .orb-hero-copy {
+    align-items: flex-start;
+  }
+
+  .orb-hero-title {
+    font-size: 1.35rem !important;
+    margin-bottom: 6px !important;
+  }
+
+  .orb-hero-lead {
+    font-size: 0.88rem !important;
+    margin-bottom: 12px !important;
+  }
+
+  .orb-hero-actions {
+    justify-content: flex-start;
+  }
+
+  .orb-hero-ai-note {
+    margin-top: 10px !important;
+  }
+
+  aside.nextra-sidebar a,
+  aside.nextra-mobile-nav a {
+    padding: 5px 10px !important;
+  }
+
+  aside.nextra-sidebar li:not(:has(a)):not(:has(button)),
+  aside.nextra-mobile-nav li:not(:has(a)):not(:has(button)) {
+    padding-top: 8px !important;
   }
 }
 
@@ -874,6 +1202,24 @@ article div[class*="x:dark:bg-blue-"] {
 @media (max-width: 640px) {
   .orb-ios-showcase {
     grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .orb-ios-card {
+    padding: 14px 14px 12px;
+  }
+
+  .orb-ios-frame {
+    max-width: 230px;
+  }
+
+  .orb-arch {
+    padding: 14px;
+  }
+
+  .orb-arch-tier,
+  .orb-arch-card {
+    padding: 12px;
   }
 }
 

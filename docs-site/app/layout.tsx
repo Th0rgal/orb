@@ -7,7 +7,7 @@ import "./globals.css";
 export const viewport: Viewport = {
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#0c0b0a" },
+    { media: "(prefers-color-scheme: dark)", color: "#141414" },
   ],
   colorScheme: "light dark",
   width: "device-width",
@@ -80,7 +80,7 @@ export const metadata: Metadata = {
     title: "Orb",
   },
   other: {
-    "msapplication-TileColor": "#0c0b0a",
+    "msapplication-TileColor": "#141414",
   },
 };
 
@@ -100,7 +100,7 @@ export default function RootLayout({
         <meta
           name="theme-color"
           media="(prefers-color-scheme: dark)"
-          content="#0c0b0a"
+          content="#141414"
         />
       </Head>
       <body className="min-h-dvh bg-mesh-subtle">
