@@ -20,8 +20,10 @@ pub(crate) mod dispatch_admission_tests;
 pub(crate) mod execution_ownership;
 pub mod fork;
 pub(crate) mod machine_transfer;
+mod rebalance;
 mod remote_failure;
 pub(crate) mod remote_grok;
+pub use rebalance::spawn_queued_job_rebalancer;
 mod remote_queue;
 pub mod speed;
 pub mod speed_proxy;
@@ -12315,6 +12317,7 @@ pub(super) async fn create_mission_inner(
     if let Some(RemoteHarnessPlan::Antigravity { effort, .. }) = remote_plan.as_mut() {
         *effort = model_effort.clone();
     }
+    let mut auto_placement: Option<Vec<String>> = None;
     if let Some(node_id) = remote_node_id.as_deref() {
         if remote_dispatch_is_scheduled_for_future(
             Some(node_id),
@@ -12378,6 +12381,7 @@ pub(super) async fn create_mission_inner(
                     }
                 };
             tracing::info!(node_id = %resolved, "auto placement selected remote node");
+            auto_placement = Some(requirements);
             remote_node_id = Some(resolved);
         } else {
             crate::remote_node::placement_for_selected_node(
@@ -12485,6 +12489,14 @@ pub(super) async fn create_mission_inner(
         }
     };
 
+    if let Some(requirements) = auto_placement.as_deref() {
+        // Only auto-placed missions may later be moved off a full node.
+        if let Err(error) =
+            rebalance::record_auto(&state.config.working_dir, mission.id, requirements)
+        {
+            tracing::warn!(mission_id = %mission.id, %error, "could not record auto placement; the mission will not be rebalanced");
+        }
+    }
     if let Some(mode) = req.cyber_access {
         if let Err(error) = cyber::write(&state.config.working_dir, mission.id, mode) {
             interrupt_new_mission(&control, mission.id, "cyber_settings_unavailable").await;
@@ -16816,6 +16828,22 @@ async fn poll_remote_job(
                     continue;
                 }
                 let terminal = crate::remote_node::job_state_confirms_termination(&status.state);
+                if terminal
+                    && status.state == "cancelled"
+                    && rebalance::is_superseded(ledger_dir, job_id)
+                {
+                    // Withdrawn before start and re-dispatched on another node:
+                    // the mission continues there, so this job is not its result.
+                    tracing::info!(%mission_id, %job_id, node = %node.id, "retired rebalanced job without finalizing the mission");
+                    fleet.record_outcome(outcome(
+                        &status.state,
+                        status.exit_code,
+                        status.error.clone(),
+                        true,
+                    ));
+                    crate::remote_node::job_ledger::remove(ledger_dir, job_id).await;
+                    return;
+                }
                 if terminal {
                     terminal_observation = Some(status.clone());
                     // Publish the observed node result before terminal mission/lease

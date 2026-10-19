@@ -679,6 +679,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // the previous process exited (durable handles in remote-jobs.json).
     super::control::spawn_remote_job_reconciler(Arc::clone(&state));
     super::control::spawn_remote_usage_limit_replayer(Arc::clone(&state));
+    super::control::spawn_queued_job_rebalancer(Arc::clone(&state));
 
     // Start background OAuth token refresher task
     {
