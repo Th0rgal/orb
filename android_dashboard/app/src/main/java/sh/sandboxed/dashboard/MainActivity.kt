@@ -1,51 +1,33 @@
 package sh.sandboxed.dashboard
 
-import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.os.Bundle
-import android.util.Rational
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.fragment.app.FragmentActivity
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import sh.sandboxed.dashboard.orb.OrbAppRoot
 import sh.sandboxed.dashboard.orb.OrbCore
-import sh.sandboxed.dashboard.ui.PipHost
-import sh.sandboxed.dashboard.ui.theme.SandboxedTheme
-import sh.sandboxed.dashboard.util.GitHubAuth
-import kotlin.math.roundToInt
+import sh.sandboxed.dashboard.orb.OrbDeepLink
+import sh.sandboxed.dashboard.orb.OrbLog
+import sh.sandboxed.dashboard.orb.OrbMaterialTheme
+import sh.sandboxed.dashboard.orb.OrbNotifications
 
-class MainActivity : FragmentActivity(), PipHost {
-    private val _isInPipMode = MutableStateFlow(false)
-    override val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
-
-    override val isPipSupported: Boolean by lazy {
-        packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
-    }
-
-    private var pipActive = false
-    private var pipAspect: Rational? = null
+// FragmentActivity: BiometricPrompt (device approvals, FIDO signing) needs one.
+class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val orbCore = OrbCore.getInstance(applicationContext)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                runCatching {
-                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
-                }
-            }
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
         handleIncomingIntent(intent, orbCore)
         setContent {
-            SandboxedTheme {
+            OrbMaterialTheme {
                 OrbAppRoot(core = orbCore)
             }
         }
@@ -53,107 +35,39 @@ class MainActivity : FragmentActivity(), PipHost {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val orbCore = OrbCore.getInstance(applicationContext)
-        handleIncomingIntent(intent, orbCore)
-    }
-
-    override fun enterPip() {
-        if (!isPipSupported) return
-        runCatching { enterPictureInPictureMode(buildPipParams()) }
-    }
-
-    override fun setPipActive(active: Boolean, aspectWidth: Int, aspectHeight: Int) {
-        if (!isPipSupported) return
-        pipActive = active
-        pipAspect = clampedAspect(aspectWidth, aspectHeight)
-        runCatching { setPictureInPictureParams(buildPipParams()) }
-    }
-
-    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
-        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
-        _isInPipMode.value = isInPictureInPictureMode
-    }
-
-    private fun buildPipParams(): PictureInPictureParams =
-        PictureInPictureParams.Builder()
-            .apply { pipAspect?.let { setAspectRatio(it) } }
-            .setAutoEnterEnabled(pipActive)
-            .setSeamlessResizeEnabled(true)
-            .build()
-
-    private fun clampedAspect(width: Int, height: Int): Rational? {
-        if (width <= 0 || height <= 0) return null
-        val ratio = (width.toDouble() / height.toDouble()).coerceIn(1.0 / 2.39, 2.39)
-        return Rational((ratio * 1000).roundToInt(), 1000)
+        handleIncomingIntent(intent, OrbCore.getInstance(applicationContext))
     }
 
     private fun handleIncomingIntent(intent: Intent?, orbCore: OrbCore) {
         if (intent == null) return
 
-        // Handle launch extras for automated testing & quick setup
+        // Launch extras for automated testing & quick setup
         val extraBase = intent.getStringExtra("orb_base_url")?.trim()
         val extraToken = intent.getStringExtra("orb_token")?.trim()
         if (!extraBase.isNullOrEmpty()) {
             orbCore.configureSession(extraBase, extraToken ?: orbCore.token, null)
             lifecycleScope.launch { orbCore.refreshAll() }
         }
-        if (intent.getBooleanExtra("orb_open_inbox", false)) {
-            orbCore.requestInboxOpen()
-        }
-        if (intent.getBooleanExtra("orb_open_settings", false)) {
-            orbCore.requestSettingsOpen()
-        }
-        intent.getStringExtra("orb_open_project")?.trim()?.takeIf { it.isNotEmpty() }?.let { slug ->
-            orbCore.requestProjectFocus(slug)
-        }
-        intent.getStringExtra("orb_open_mission")?.trim()?.takeIf { it.isNotEmpty() }?.let { mid ->
-            orbCore.requestMissionFocus(mid)
-        }
-        intent.getStringExtra("orb_open_documents")?.trim()?.takeIf { it.isNotEmpty() }?.let { slug ->
-            orbCore.requestDocumentsFocus(slug)
-        }
+        if (intent.getBooleanExtra("orb_open_inbox", false)) orbCore.requestInboxOpen()
+        if (intent.getBooleanExtra("orb_open_settings", false)) orbCore.requestSettingsOpen()
+        intent.getStringExtra("orb_open_project")?.trim()?.takeIf { it.isNotEmpty() }?.let(orbCore::requestProjectFocus)
+        intent.getStringExtra("orb_open_mission")?.trim()?.takeIf { it.isNotEmpty() }?.let(orbCore::requestMissionFocus)
+        intent.getStringExtra("orb_open_documents")?.trim()?.takeIf { it.isNotEmpty() }?.let(orbCore::requestDocumentsFocus)
 
-        val data = intent.data ?: return
-        val scheme = data.scheme?.lowercase() ?: ""
-        if (scheme == "orb" || scheme == "sandboxed") {
-            val host = data.host?.lowercase() ?: ""
-            val pathSegments = data.pathSegments.map { it.trim() }.filter { it.isNotEmpty() }
-            if (host == "inbox") {
+        when (val link = OrbDeepLink.parse(intent.dataString)) {
+            null -> Unit
+            is OrbDeepLink.Inbox -> {
                 orbCore.requestInboxOpen()
-                val missionId = pathSegments.firstOrNull()
-                    ?: data.getQueryParameter("mission")?.trim()
-                    ?: data.getQueryParameter("id")?.trim()
-                if (!missionId.isNullOrEmpty()) {
-                    val expandPeek = data.getQueryParameter("peek")?.lowercase() !in setOf("0", "false")
-                    val openReply = data.getQueryParameter("reply")?.lowercase() in setOf("1", "true")
-                    sh.sandboxed.dashboard.orb.OrbNotifications.requestInboxFocus(
-                        missionId = missionId,
-                        expandPeek = expandPeek,
-                        openReply = openReply
-                    )
-                }
-                return
+                link.missionId?.let { OrbNotifications.requestInboxFocus(it, link.expandPeek, link.openReply) }
             }
-            if (host == "settings") {
-                orbCore.requestSettingsOpen()
-                return
-            }
-            if ((host == "project" || host == "projects") && pathSegments.isNotEmpty()) {
-                orbCore.requestProjectFocus(pathSegments.first())
-                return
-            }
-            if ((host == "mission" || host == "missions") && pathSegments.isNotEmpty()) {
-                orbCore.requestMissionFocus(pathSegments.first())
-                return
-            }
-            if ((host == "documents" || host == "context") && pathSegments.isNotEmpty()) {
-                orbCore.requestDocumentsFocus(pathSegments.first())
-                return
+            OrbDeepLink.Settings -> orbCore.requestSettingsOpen()
+            is OrbDeepLink.Project -> orbCore.requestProjectFocus(link.slug)
+            is OrbDeepLink.Mission -> orbCore.requestMissionFocus(link.id)
+            is OrbDeepLink.Documents -> orbCore.requestDocumentsFocus(link.slug)
+            is OrbDeepLink.GitHubCallback -> {
+                if (link.token != null) orbCore.token = link.token
+                else OrbLog.w(OrbLog.Category.Auth, "GitHub sign-in callback without token: ${link.error ?: "no error"}")
             }
         }
-        if (!GitHubAuth.isCallback(data)) return
-        val result = GitHubAuth.parse(data)
-        val token = result.token ?: return
-        orbCore.token = token
     }
 }

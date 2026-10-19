@@ -1,10 +1,9 @@
-package sh.sandboxed.dashboard.ui.theme
+package sh.sandboxed.dashboard.orb
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Shapes
 import androidx.compose.ui.unit.dp
-import sh.sandboxed.dashboard.orb.OrbStyle
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -28,11 +27,11 @@ private val DarkColors = darkColorScheme(
     tertiaryContainer = OrbStyle.elevated,
     onTertiaryContainer = OrbStyle.textPrimary,
     background = OrbStyle.background,
-    onBackground = Palette.TextPrimary,
+    onBackground = Color(0xFFEDEDED),
     surface = OrbStyle.surface,
-    onSurface = Palette.TextPrimary,
+    onSurface = Color(0xFFEDEDED),
     surfaceVariant = OrbStyle.card,
-    onSurfaceVariant = Palette.TextSecondary,
+    onSurfaceVariant = Color(0xCCFFFFFF),
     surfaceTint = OrbStyle.textPrimary,
     surfaceDim = OrbStyle.background,
     surfaceBright = OrbStyle.elevated,
@@ -41,7 +40,7 @@ private val DarkColors = darkColorScheme(
     surfaceContainer = OrbStyle.card,
     surfaceContainerHigh = OrbStyle.elevated,
     surfaceContainerHighest = OrbStyle.elevated,
-    error = Palette.Error,
+    error = Color(0xFFEF4444),
     outline = OrbStyle.borderStrong,
 )
 
@@ -58,8 +57,7 @@ private val AppTypography = Typography(
 )
 
 @Composable
-fun SandboxedTheme(content: @Composable () -> Unit) {
-    @Suppress("UNUSED_VARIABLE") val dark = isSystemInDarkTheme()
+fun OrbMaterialTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = DarkColors,
         typography = AppTypography,

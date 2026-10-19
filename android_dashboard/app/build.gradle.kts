@@ -79,11 +79,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
-    implementation("androidx.navigation:navigation-compose:2.9.8")
-    implementation("androidx.datastore:datastore-preferences:1.2.1")
-    implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.fragment:fragment-ktx:1.8.9")
     implementation("androidx.browser:browser:1.10.0")
@@ -97,16 +93,10 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
-    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     //noinspection GradleDependency -- 1.11.0 requires Kotlin 2.2 metadata; this app currently builds with Kotlin 2.0.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-
-    implementation("io.coil-kt:coil-compose:2.7.0")
-
-    //noinspection GradleDependency -- newer versions need Kotlin 2.1 metadata; this app builds with Kotlin 2.0.
-    implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.26.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
