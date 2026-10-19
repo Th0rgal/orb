@@ -1,7 +1,7 @@
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import {render,screen,waitFor} from '@solidjs/testing-library';
 import {createSignal} from 'solid-js';
-import {NativeMissionView} from '../src/App';
+import {NativeMissionView} from '../src/mission/MissionView';
 import type {Mission} from '../src/api';
 beforeEach(()=>{Object.defineProperty(HTMLElement.prototype,'scrollTo',{configurable:true,value:vi.fn()});});
 const state=vi.hoisted(()=>({event:undefined as undefined|((event:any)=>void)}));

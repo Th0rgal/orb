@@ -32,7 +32,7 @@ import {
   type Mission,
   type ProjectSummary,
 } from "./api";
-import { Composer } from "./App";
+import { Composer } from "./composer/Composer";
 import { chipToAttachment, type AttachChip } from "./attach";
 import {
   FileReferenceContext,

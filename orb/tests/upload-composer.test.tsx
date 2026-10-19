@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
-import { Composer } from "../src/App";
+import { Composer } from "../src/composer/Composer";
 import * as uploads from "../src/uploads";
 vi.mock("../src/uploads", async (original) => ({ ...await original<typeof import("../src/uploads")>(), hasNativePicker: () => true, pickNativeFiles: vi.fn(), transferFile: vi.fn(), statUploadSource: vi.fn(async () => ({ size: 10, modified: 0 })) }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });

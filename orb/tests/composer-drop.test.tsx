@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
-import { Composer } from '../src/App';
+import { Composer } from '../src/composer/Composer';
 import {nativeComposerDrop} from '../src/composerDrop';
 const handlers = new Map<string, (event: any) => void>();
 afterEach(() => { cleanup(); handlers.clear(); delete (window as any).__TAURI__; vi.unstubAllGlobals(); vi.restoreAllMocks(); });

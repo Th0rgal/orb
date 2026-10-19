@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { NativeMissionView } from "../src/App";
+import { NativeMissionView } from "../src/mission/MissionView";
 import { setConnection } from "../src/api";
 import "../src/styles.css";
 

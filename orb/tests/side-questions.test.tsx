@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createSignal } from 'solid-js';
-import { Composer } from '../src/App';
+import { Composer } from '../src/composer/Composer';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
 const serverReconcile=vi.hoisted(()=>({fn:async(_parent:string,local:any[])=>({history:local})}));

@@ -8,7 +8,7 @@ import { api, getMission, openExternalUrl, type Mission } from './api';
 import { cloudAccounts, cloudAccountLabel, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider, type CloudTurn } from './cloudAgentApi';
 import './cloudAgents.css';
 import { ProviderLogo } from './ProviderLogo';
-import { Composer, draftLightbox, floatingDock } from './App';
+import { Composer, draftLightbox, floatingDock } from './composer/Composer';
 import { Transcript } from './Transcript';
 import type { StreamItem } from './transcriptModel';
 import { ProjectPicker } from './ProjectPicker';

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { expect, it, vi } from 'vitest';
-import { Composer } from '../src/App';
+import { Composer } from '../src/composer/Composer';
 import { loadAttachItems } from '../src/attach';
 vi.mock('../src/attach', async importOriginal => ({ ...await importOriginal<typeof import('../src/attach')>(), loadAttachItems: vi.fn() }));
 vi.mock('../src/api', async importOriginal => ({ ...await importOriginal<typeof import('../src/api')>(), isConnected: () => true }));

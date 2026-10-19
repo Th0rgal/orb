@@ -5,7 +5,7 @@ import * as btwMod from "./btwAgent";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote} from "./btwAgent";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
-import { Composer } from "./App";
+import { Composer } from "./composer/Composer";
 import type { DraftImage } from "./imageAttachments";
 import { uploadToken, type UploadedFile } from "./uploads";
 import { Portal } from 'solid-js/web';

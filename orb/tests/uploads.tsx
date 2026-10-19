@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { createSignal } from "solid-js";
-import { Composer } from "../src/App";
+import { Composer } from "../src/composer/Composer";
 import { setConnection } from "../src/api";
 import "../src/styles.css";
 setConnection(location.origin, "test-only");

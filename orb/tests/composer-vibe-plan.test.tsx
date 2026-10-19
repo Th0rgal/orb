@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, expect, it, vi } from "vitest";
-import { Composer } from "../src/App";
+import { Composer } from "../src/composer/Composer";
 
 const catalog = vi.hoisted(() => ({ supported: true }));
 vi.mock("../src/harness-models", () => ({

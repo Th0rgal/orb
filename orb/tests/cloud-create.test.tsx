@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CloudAgentPage } from '../src/CloudAgents';
 const fakes = vi.hoisted(() => ({ accounts: vi.fn(), launch: vi.fn() }));
 vi.mock('../src/cloudAgentApi', async original => ({...await original<object>(), cloudAccounts:fakes.accounts, launchCloud:fakes.launch}));
-vi.mock('../src/App', () => ({Composer: () => null, floatingDock: () => {}}));
+vi.mock('../src/composer/Composer', () => ({Composer: () => null, floatingDock: () => {}}));
 vi.mock('../src/api', () => ({api:vi.fn(async () => ({models:{items:[]},repositories:{items:[]}}))}));
 afterEach(() => {cleanup();vi.clearAllMocks();});
 const capabilities = {models:false,repository:false,follow_up:false,cancel:false,artifacts:false,attachments:false,detailed_events:false};
