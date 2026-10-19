@@ -4,11 +4,6 @@ import android.app.Application
 import sh.sandboxed.dashboard.data.AppContainer
 
 class SandboxedDashboardApp : Application() {
-    lateinit var container: AppContainer
-        private set
-
-    override fun onCreate() {
-        super.onCreate()
-        container = AppContainer(this)
-    }
+    /** Legacy container: built lazily so nothing in it runs at app start. */
+    val container: AppContainer by lazy { AppContainer(this) }
 }

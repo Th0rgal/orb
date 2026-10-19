@@ -12,8 +12,8 @@ import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import sh.sandboxed.dashboard.data.AppContainer
 import sh.sandboxed.dashboard.orb.OrbAppRoot
 import sh.sandboxed.dashboard.orb.OrbCore
 import sh.sandboxed.dashboard.ui.PipHost
@@ -35,7 +35,6 @@ class MainActivity : FragmentActivity(), PipHost {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val container = (application as SandboxedDashboardApp).container
         val orbCore = OrbCore.getInstance(applicationContext)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -44,7 +43,7 @@ class MainActivity : FragmentActivity(), PipHost {
                 }
             }
         }
-        handleIncomingIntent(intent, container, orbCore)
+        handleIncomingIntent(intent, orbCore)
         setContent {
             SandboxedTheme {
                 OrbAppRoot(core = orbCore)
@@ -54,9 +53,8 @@ class MainActivity : FragmentActivity(), PipHost {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val container = (application as SandboxedDashboardApp).container
         val orbCore = OrbCore.getInstance(applicationContext)
-        handleIncomingIntent(intent, container, orbCore)
+        handleIncomingIntent(intent, orbCore)
     }
 
     override fun enterPip() {
@@ -89,7 +87,7 @@ class MainActivity : FragmentActivity(), PipHost {
         return Rational((ratio * 1000).roundToInt(), 1000)
     }
 
-    private fun handleIncomingIntent(intent: Intent?, container: AppContainer, orbCore: OrbCore) {
+    private fun handleIncomingIntent(intent: Intent?, orbCore: OrbCore) {
         if (intent == null) return
 
         // Handle launch extras for automated testing & quick setup
@@ -97,7 +95,7 @@ class MainActivity : FragmentActivity(), PipHost {
         val extraToken = intent.getStringExtra("orb_token")?.trim()
         if (!extraBase.isNullOrEmpty()) {
             orbCore.configureSession(extraBase, extraToken ?: orbCore.token, null)
-            container.scope.launch { orbCore.refreshAll() }
+            lifecycleScope.launch { orbCore.refreshAll() }
         }
         if (intent.getBooleanExtra("orb_open_inbox", false)) {
             orbCore.requestInboxOpen()
@@ -157,6 +155,5 @@ class MainActivity : FragmentActivity(), PipHost {
         val result = GitHubAuth.parse(data)
         val token = result.token ?: return
         orbCore.token = token
-        container.scope.launch { container.settings.setToken(token) }
     }
 }

@@ -41,5 +41,5 @@ class AppContainer(context: Context) {
     val ask: AskClient = AskClient(api, Net.streamingClient)
     val terminal: TerminalSocket = TerminalSocket(Net.streamingClient) { snapshot() }
     val desktop: DesktopStreamSocket = DesktopStreamSocket(Net.streamingClient) { snapshot() }
-    val fido: FidoChannel = FidoChannel(sse, api, scope, cached).also { it.start() }
+    val fido: FidoChannel = FidoChannel(sse, api, scope, cached)
 }

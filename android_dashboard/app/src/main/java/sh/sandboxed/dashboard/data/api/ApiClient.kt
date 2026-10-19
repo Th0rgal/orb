@@ -2,7 +2,6 @@ package sh.sandboxed.dashboard.data.api
 
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
-import okhttp3.logging.HttpLoggingInterceptor
 import java.util.concurrent.TimeUnit
 
 object Net {
@@ -19,7 +18,6 @@ object Net {
         .writeTimeout(60, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
-        .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
         .build()
 
     val streamingClient: OkHttpClient = httpClient.newBuilder()
