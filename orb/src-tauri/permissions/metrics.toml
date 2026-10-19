@@ -5,5 +5,5 @@ commands.allow = ["local_machine_metrics"]
 
 [[permission]]
 identifier = "allow-diagnostics"
-description = "Append the page's performance records to Orb's own log"
-commands.allow = ["diagnostics_append"]
+description = "Append the page's performance records to Orb's own log, and reveal that log"
+commands.allow = ["diagnostics_append", "reveal_logs"]

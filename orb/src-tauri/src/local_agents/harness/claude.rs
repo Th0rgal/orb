@@ -64,7 +64,7 @@ pub(crate) fn spawn(
     } else {
         let fresh = uuid_like();
         cmd.arg("--session-id").arg(&fresh);
-        ctx.session.set(fresh);
+        ctx.bind_session(fresh);
     }
     if let Some(command) = crate::local_wakeups::command(&request.id) {
         cmd.arg("--mcp-config").arg(
@@ -73,7 +73,7 @@ pub(crate) fn spawn(
         );
     }
     let mut child = cmd
-        .spawn()
+        .spawn_logged(ctx)
         .map_err(|e| format!("failed to start Claude Code: {e}"))?;
     let stdin = Arc::new(Mutex::new(
         child.stdin.take().ok_or("Claude stdin missing")?,

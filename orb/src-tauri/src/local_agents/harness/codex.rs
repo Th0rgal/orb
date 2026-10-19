@@ -122,7 +122,7 @@ pub(crate) fn spawn(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_logged(ctx)
         .map_err(|e| format!("failed to start Codex: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("codex stdin missing")?;
     let stdout = child.stdout.take().ok_or("codex stdout missing")?;
@@ -153,12 +153,18 @@ pub(crate) fn spawn(
             &mut reader,
             turn,
             &ctx.output,
-            &ctx.session,
+            &mut |id| ctx.bind_session(id),
             &mission_id,
         );
         crate::interactions::finish(&mission_id);
         if let Err(message) = result {
-            eprintln!("Codex run failed: {message}");
+            crate::orb_log!(
+                error,
+                "codex_run_failed",
+                mission = ctx.mission,
+                harness = ctx.harness,
+                extra = json!({"error": message.chars().take(1000).collect::<String>()})
+            );
             ctx.error.set(if busy_thread(&message) {
                 format!("Codex thread is busy: {message}")
             } else {
@@ -205,7 +211,7 @@ pub(crate) fn drive_codex(
     reader: &mut impl BufRead,
     turn: Turn<'_>,
     text: &Output,
-    session_out: &Slot<String>,
+    bind_session: &mut dyn FnMut(String),
     mission_id: &crate::interactions::Session,
 ) -> Result<(), String> {
     let Turn {
@@ -226,7 +232,16 @@ pub(crate) fn drive_codex(
             "capabilities": {"experimentalApi": true}
         }),
     )?;
-    let _ = write_line(stdin, &json!({"method": "initialized"}).to_string());
+    // The notification has no reply; a broken pipe surfaces on the next RPC.
+    if let Err(error) = write_line(stdin, &json!({"method": "initialized"}).to_string()) {
+        crate::orb_log!(
+            warn,
+            "codex_rpc_failed",
+            mission = mission_id.mission,
+            harness = "codex",
+            extra = json!({"method": "initialized", "error": error})
+        );
+    }
     if service_tier != crate::codex_speed::Tier::Standard {
         let model = model.ok_or("Choose an explicit model before enabling accelerated speed.")?;
         let account = rpc(stdin, reader, "account/read", json!({"refreshToken":false}))?;
@@ -264,7 +279,7 @@ pub(crate) fn drive_codex(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "codex did not return a thread id".to_string())?
         .to_string();
-    session_out.set(thread_id.clone());
+    bind_session(thread_id.clone());
     let resolved_model = model.or_else(|| started.get("model").and_then(Value::as_str));
     let goal_objective = prompt
         .trim()
@@ -345,7 +360,7 @@ pub(crate) fn drive_codex(
                 return Err("unsupported_access_program: choose Automatic explicitly to resume a native goal.".into());
             }
         }
-        let _ = rpc_collect(
+        rpc_collect(
             stdin,
             reader,
             "turn/start",
@@ -518,6 +533,12 @@ pub(crate) fn rpc_collect(
         line.clear();
         let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
         if n == 0 {
+            crate::orb_log!(
+                warn,
+                "codex_rpc_failed",
+                harness = "codex",
+                extra = json!({"method": method, "error": "stream closed"})
+            );
             return Err(format!("{method} closed the stream"));
         }
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
@@ -527,10 +548,14 @@ pub(crate) fn rpc_collect(
             && value.get("method").is_none()
         {
             if let Some(error) = value.get("error") {
-                return Err(format!(
-                    "{method}: {}",
-                    error["message"].as_str().unwrap_or("Codex RPC failed")
-                ));
+                let message = error["message"].as_str().unwrap_or("Codex RPC failed");
+                crate::orb_log!(
+                    warn,
+                    "codex_rpc_failed",
+                    harness = "codex",
+                    extra = json!({"method": method, "code": error["code"], "error": message})
+                );
+                return Err(format!("{method}: {message}"));
             }
             return Ok(value.get("result").cloned().unwrap_or(Value::Null));
         }
@@ -605,7 +630,7 @@ mod tests {
                     resume: None,
                 },
                 &Output::default(),
-                &Slot::default(),
+                &mut |_| {},
                 &crate::interactions::begin("cyber-goal-boundary"),
             );
             let sent = String::from_utf8(sent).unwrap();
@@ -649,7 +674,7 @@ mod tests {
                 resume: None,
             },
             &Output::default(),
-            &session,
+            &mut |id| session.set(id),
             &crate::interactions::begin("cyber-denial-test"),
         )
         .unwrap_err();
@@ -694,7 +719,7 @@ mod tests {
                 resume: None,
             },
             &output,
-            &Slot::default(),
+            &mut |_| {},
             &crate::interactions::begin("test-codex"),
         )
         .unwrap();
@@ -780,7 +805,7 @@ mod tests {
                 resume: None,
             },
             &Output::default(),
-            &Slot::default(),
+            &mut |_| {},
             &crate::interactions::begin("terminal-error-test"),
         );
         assert_eq!(result.unwrap_err(), "Retry limit reached");
@@ -820,7 +845,7 @@ mod tests {
                 resume: None,
             },
             &output,
-            &Slot::default(),
+            &mut |_| {},
             &crate::interactions::begin("native-goal-test"),
         )
         .unwrap();

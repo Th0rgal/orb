@@ -132,15 +132,23 @@ pub(crate) fn drain_stderr(
             }
             StderrPolicy::CodexLog => {
                 each_line(&mut reader, |line| {
-                    eprintln!("Codex diagnostic: {}", strip_terminal_codes(line));
+                    let line: String = strip_terminal_codes(line).chars().take(1000).collect();
+                    crate::orb_log!(
+                        debug,
+                        "stderr",
+                        mission = ctx.mission,
+                        harness = ctx.harness,
+                        extra = json!({"line": line})
+                    );
                 });
                 None
             }
             StderrPolicy::ClaudeDiagnostic => {
                 let clean = read_prefix(&mut reader);
                 if !clean.trim().is_empty() {
-                    ctx.output
-                        .set_diagnostic(clean.trim().chars().take(1000).collect());
+                    let diagnostic: String = clean.trim().chars().take(1000).collect();
+                    log_diagnostic(&ctx, &diagnostic);
+                    ctx.output.set_diagnostic(diagnostic);
                 }
                 None
             }
@@ -148,12 +156,25 @@ pub(crate) fn drain_stderr(
                 let clean = read_prefix(&mut reader);
                 let trimmed = clean.trim();
                 if !trimmed.is_empty() {
-                    ctx.error.set_if_none(trimmed.chars().take(500).collect());
+                    let head: String = trimmed.chars().take(500).collect();
+                    log_diagnostic(&ctx, &head);
+                    ctx.error.set_if_none(head);
                 }
                 None
             }
         }
     })
+}
+
+/// Log the start of a harness's stderr, capped like what the run keeps.
+fn log_diagnostic(ctx: &RunCtx, text: &str) {
+    crate::orb_log!(
+        info,
+        "stderr_diagnostic",
+        mission = ctx.mission,
+        harness = ctx.harness,
+        extra = json!({"text": text.chars().take(500).collect::<String>(), "chars": text.chars().count()})
+    );
 }
 
 pub(crate) fn each_line(reader: &mut impl BufRead, mut visit: impl FnMut(&str)) {

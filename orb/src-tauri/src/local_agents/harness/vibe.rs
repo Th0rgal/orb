@@ -41,7 +41,7 @@ pub(crate) fn spawn(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = command
-        .spawn()
+        .spawn_logged(ctx)
         .map_err(|e| format!("Cannot start Vibe: {e}"))?;
     let stdout = child.stdout.take().ok_or("Vibe stdout unavailable")?;
     let mut stdin = child.stdin.take().ok_or("Vibe stdin unavailable")?;
@@ -89,7 +89,10 @@ impl LineHandler for Reader {
             );
         }
         if stream.error.is_none() && event["type"] == "session" {
-            self.ctx.session.replace(stream.session.clone());
+            match stream.session.clone() {
+                Some(id) => self.ctx.bind_session(id),
+                None => self.ctx.session.replace(None),
+            }
             // The bridge fsyncs its native-session journal before this acknowledgement.
             if self.stdin.write_all(b"{\"continue\":true}\n").is_err() {
                 stream.error = Some("Vibe acknowledgement failed".into());

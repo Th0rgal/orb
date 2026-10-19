@@ -198,3 +198,78 @@ mod development_identity_tests {
         assert_eq!(command.get_args().count(), 0);
     }
 }
+
+/// The shape of a command line, safe to log: the program's file name, the
+/// flag names and how many other arguments there are. Values (prompts,
+/// config overrides, MCP definitions) and the environment are never logged.
+pub(crate) fn argv_shape(command: &Command) -> Value {
+    let program = Path::new(command.get_program())
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut flags = Vec::new();
+    let mut values = 0usize;
+    for arg in command.get_args() {
+        let arg = arg.to_string_lossy();
+        if arg.starts_with('-') && arg.len() > 1 && arg.len() <= 64 {
+            flags.push(arg.split('=').next().unwrap_or_default().to_owned());
+        } else {
+            values += 1;
+        }
+    }
+    json!({"program": program, "flags": flags, "values": values})
+}
+
+/// `Command::spawn` that logs the launch (or its failure) for the run.
+pub(crate) trait SpawnLogged {
+    fn spawn_logged(&mut self, ctx: &RunCtx) -> std::io::Result<Child>;
+}
+
+impl SpawnLogged for Command {
+    fn spawn_logged(&mut self, ctx: &RunCtx) -> std::io::Result<Child> {
+        let shape = argv_shape(self);
+        let spawned = self.spawn();
+        match &spawned {
+            Ok(child) => crate::orb_log!(
+                info,
+                "spawn",
+                mission = ctx.mission,
+                harness = ctx.harness,
+                pid = child.id(),
+                extra = json!({"argv": shape})
+            ),
+            Err(error) => crate::orb_log!(
+                error,
+                "spawn_failed",
+                mission = ctx.mission,
+                harness = ctx.harness,
+                extra = json!({"argv": shape, "error": error.to_string()})
+            ),
+        }
+        spawned
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn argv_shape_names_flags_but_never_values() {
+        let mut command = Command::new("/opt/bin/claude");
+        command
+            .args(["--print", "--model", "opus", "-c", "token=secret"])
+            .arg("--settings={\"key\":\"v\"}")
+            .arg("Write the secret plan")
+            .env("API_KEY", "sk-live");
+        let shape = argv_shape(&command);
+        assert_eq!(shape["program"], "claude");
+        assert_eq!(
+            shape["flags"],
+            json!(["--print", "--model", "-c", "--settings"])
+        );
+        assert_eq!(shape["values"], 3);
+        let text = shape.to_string();
+        assert!(!text.contains("secret") && !text.contains("sk-live") && !text.contains("opus"));
+    }
+}

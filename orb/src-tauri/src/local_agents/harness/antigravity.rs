@@ -82,7 +82,7 @@ pub(crate) fn spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_logged(ctx)
         .map_err(|e| {
             if let Some(path) = &claim {
                 let _ = std::fs::remove_file(path);
@@ -179,7 +179,7 @@ impl LineHandler for Reader {
             if self.expected.as_deref().is_some_and(|old| old != id) {
                 stream.error = Some("Antigravity resumed a different conversation".into());
             } else {
-                self.ctx.session.set(id.clone());
+                self.ctx.bind_session(id.clone());
             }
         }
         output.replace(stream.text.clone());

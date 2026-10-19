@@ -105,6 +105,15 @@ pub(crate) fn start_with_options(
     let mut run = Run::new(ctx, child, cwd, resumed);
     run.mcp_wrapped = env.iter().any(|(key, _)| key == "SANDBOXED_MCP_WRAPPER");
     run.shared_cwd_with = shared_parent.map(str::to_owned);
+    crate::orb_log!(
+        info,
+        "run_started",
+        mission = request.id,
+        harness = request.harness,
+        pid = lock(&run.child).id(),
+        generation = run.generation,
+        extra = json!({"resumed": resumed, "mcp_wrapped": run.mcp_wrapped})
+    );
     watch_exit(
         software_execution,
         interaction,
@@ -115,12 +124,30 @@ pub(crate) fn start_with_options(
     Ok(())
 }
 
-/// Kill a child that may still run, then reap it.
-pub(crate) fn reap(child: &mut Child, _mission: &str, _why: &str) {
+/// Kill a child that may still run, then reap it. Failures are logged: a
+/// child that cannot be reaped stays a zombie.
+pub(crate) fn reap(child: &mut Child, mission: &str, why: &str) {
+    let pid = child.id();
     if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
+        if let Err(error) = child.kill() {
+            crate::orb_log!(
+                warn,
+                "kill_failed",
+                mission = mission,
+                pid = pid,
+                extra = json!({"why": why, "error": error.to_string()})
+            );
+        }
     }
-    let _ = child.wait();
+    if let Err(error) = child.wait() {
+        crate::orb_log!(
+            warn,
+            "reap_failed",
+            mission = mission,
+            pid = pid,
+            extra = json!({"why": why, "error": error.to_string()})
+        );
+    }
 }
 
 pub(crate) fn watch_exit(
@@ -161,7 +188,10 @@ pub(crate) fn watch_exit(
                 WaitForSingleObject(handle, u32::MAX);
             }
         }
-        let status = lock(child).wait().ok();
+        let (pid, status) = {
+            let mut child = lock(child);
+            (child.id(), child.wait().ok())
+        };
         crate::interactions::finish(&mission_id);
         run.exit_code
             .replace(status.and_then(|status| status.code()));
@@ -173,6 +203,22 @@ pub(crate) fn watch_exit(
             run.stopped.load(Ordering::SeqCst),
             status.and_then(exit_signal),
             &run.exit_code,
+        );
+        let error = run.ctx.error.get();
+        crate::orb_log!(
+            (if error.is_some() { "warn" } else { "info" }),
+            "exit",
+            mission = run.ctx.mission,
+            harness = run.ctx.harness,
+            pid = pid,
+            generation = run.generation,
+            extra = json!({
+                "code": run.exit_code.get(),
+                "raw_code": status.and_then(|status| status.code()),
+                "signal": status.and_then(exit_signal),
+                "stopped": run.stopped.load(Ordering::SeqCst),
+                "error": error.as_deref().map(|e| e.chars().take(500).collect::<String>()),
+            })
         );
         run.ctx.done.store(true, Ordering::SeqCst);
         let _ = run.finished.set(Instant::now());
@@ -272,11 +318,15 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         }
         crate::interactions::cancel(id);
         run.stopped.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let mut path = Vec::new();
         let mut child = lock(&run.child);
+        let pid = child.id();
         // The trusted wrapper owns the CLI's child process group. Give it
         // time to forward termination and reap that group before escalation.
         #[cfg(unix)]
         if run.mcp_wrapped && !run.is_done() {
+            path.push("wrapper_sigterm");
             unsafe {
                 libc::kill(child.id() as i32, libc::SIGTERM);
             }
@@ -291,14 +341,17 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         // group ID may have been reused, so never signal it after completion.
         #[cfg(unix)]
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            path.push("group_sigkill");
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
         }
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            path.push("kill");
             child.kill().map_err(|e| e.to_string())?;
         }
         let status = child.wait().map_err(|e| e.to_string())?;
+        let reaped_ms = started.elapsed().as_millis() as u64;
         run.exit_code.replace(status.code());
         drop(child);
         if expected.is_none() {
@@ -307,12 +360,40 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         // The process is gone; a grandchild may still hold the pipe open. Stop the mission's
         // orphans and give the readers time, then finish anyway instead of failing the queued
         // follow-up ("has not finished closing its output", which a user could only retry).
-        if !run.ctx.output.wait_drained(Some(Duration::from_secs(2))) {
+        let mut drained = run.ctx.output.wait_drained(Some(Duration::from_secs(2)));
+        if !drained {
+            path.push("orphans_after_drain_timeout");
             stop_orphan_mission_processes(id);
-            if !run.ctx.output.wait_drained(Some(Duration::from_secs(8))) {
-                eprintln!("orb: local agent {id} output readers still open after stop; continuing");
+            drained = run.ctx.output.wait_drained(Some(Duration::from_secs(8)));
+            if !drained {
+                crate::orb_log!(
+                    warn,
+                    "stop_readers_open",
+                    mission = id,
+                    harness = run.ctx.harness,
+                    pid = pid,
+                    extra = json!({"message": "output readers still open after stop; continuing"})
+                );
             }
         }
+        if path.is_empty() {
+            path.push("already_exited");
+        }
+        crate::orb_log!(
+            info,
+            "stop",
+            mission = id,
+            harness = run.ctx.harness,
+            pid = pid,
+            generation = run.generation,
+            extra = json!({
+                "path": path,
+                "reaped_ms": reaped_ms,
+                "total_ms": started.elapsed().as_millis() as u64,
+                "drained": drained,
+                "code": status.code(),
+            })
+        );
         run.ctx.done.store(true, Ordering::SeqCst);
     } else if expected.is_none() {
         stop_orphan_mission_processes(id);

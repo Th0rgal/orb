@@ -165,10 +165,17 @@ fn main() {
             {
                 use tauri::Emitter;
                 let paths = uploads::allow_drop(paths);
-                let _ = window.emit(
+                let count = paths.len();
+                if let Err(error) = window.emit(
                     "orb-upload-drop",
                     serde_json::json!({"paths":paths,"x":position.x,"y":position.y}),
-                );
+                ) {
+                    orb_log!(
+                        warn,
+                        "upload_drop_emit_failed",
+                        extra = serde_json::json!({"paths": count, "error": error.to_string()})
+                    );
+                }
             }
         })
         .setup(|app| {
@@ -201,6 +208,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             diagnostics::diagnostics_append,
+            diagnostics::reveal_logs,
             approval_key::approval_key_status,
             approval_key::approval_key_create,
             approval_key::approval_sign,

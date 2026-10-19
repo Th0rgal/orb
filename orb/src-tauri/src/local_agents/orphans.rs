@@ -62,6 +62,12 @@ pub(crate) fn stop_orphan_mission_processes(id: &str) {
     if pids.is_empty() {
         return;
     }
+    crate::orb_log!(
+        warn,
+        "orphan_kill",
+        mission = id,
+        extra = json!({"pids": pids, "signal": "SIGTERM"})
+    );
     #[cfg(unix)]
     {
         for &pid in &pids {
@@ -77,6 +83,12 @@ pub(crate) fn stop_orphan_mission_processes(id: &str) {
             }
             thread::sleep(Duration::from_millis(50));
         }
+        crate::orb_log!(
+            warn,
+            "orphan_kill",
+            mission = id,
+            extra = json!({"pids": pids, "signal": "SIGKILL"})
+        );
         for &pid in &pids {
             unsafe {
                 libc::kill(pid as i32, libc::SIGKILL);
@@ -88,7 +100,16 @@ pub(crate) fn stop_orphan_mission_processes(id: &str) {
 
 /// Follow an Antigravity conversation still running from before a restart.
 pub(crate) fn reattach_if_orphaned(id: &str) {
-    let _ = try_reattach_orphan_antigravity(id);
+    // Most unknown ids are simply not running: only a reattach is news.
+    if try_reattach_orphan_antigravity(id) {
+        crate::orb_log!(
+            info,
+            "reattach",
+            mission = id,
+            harness = "antigravity",
+            extra = json!({"outcome": "following"})
+        );
+    }
 }
 
 pub(crate) fn try_reattach_orphan_antigravity(id: &str) -> bool {
@@ -138,7 +159,16 @@ pub(crate) fn try_reattach_orphan_antigravity(id: &str) -> bool {
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(error) => {
+            crate::orb_log!(
+                error,
+                "reattach",
+                mission = id,
+                harness = "antigravity",
+                extra = json!({"outcome": "placeholder_spawn_failed", "error": error.to_string()})
+            );
+            return false;
+        }
     };
     let ctx = RunCtx::new(id, "antigravity", Some(session.clone()));
     let run = Run::new(ctx.clone(), dummy_child, PathBuf::from(cwd_str), true);

@@ -95,7 +95,7 @@ pub(crate) fn spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_logged(ctx)
         .map_err(|e| format!("failed to start {}: {e}", request.harness))?;
     if let Some(stdout) = child.stdout.take() {
         if harness.json() {
@@ -132,7 +132,7 @@ impl LineHandler for Reader {
         let output = &self.ctx.output;
         if let Ok(value) = serde_json::from_str::<Value>(line) {
             if let Some(id) = session_id_from_event(&value) {
-                self.ctx.session.set(id.to_string());
+                self.ctx.bind_session(id.to_string());
             }
             output.native_activity(&value);
             if matches!(

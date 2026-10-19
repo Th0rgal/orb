@@ -78,6 +78,23 @@ impl RunCtx {
     pub(crate) fn label(&self) -> &'static str {
         harness_label(&self.harness)
     }
+    /// Record the native session the harness announced; logged when it changes.
+    pub(crate) fn bind_session(&self, id: String) {
+        let changed = self.session.update(|slot| {
+            let changed = slot.as_deref() != Some(id.as_str());
+            *slot = Some(id.clone());
+            changed
+        });
+        if changed {
+            crate::orb_log!(
+                info,
+                "session_bound",
+                mission = self.mission,
+                harness = self.harness,
+                extra = json!({"session": id})
+            );
+        }
+    }
 }
 
 #[derive(Clone)]
