@@ -312,21 +312,24 @@ jobs:
             libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: orb/src-tauri
+          workspaces: |
+            . -> target
+            orb/src-tauri -> target
           shared-key: orb-tauri
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      # tauri-build checks that frontendDist and every externalBin exist. The
-      # sidecar is built by scripts/build-mcp.py in a real build; a stub is
-      # enough to compile and unit-test the app. gen/app-icon is macOS-only
-      # (tauri.macos.conf.json) and is not read on Linux.
-      - name: Stub frontend dist and sidecar binaries
+      # tauri-build checks that frontendDist and every externalBin exist, and
+      # the run_recovery tests launch the real sandboxed-mcp companion, so build
+      # it (what scripts/build-mcp.py does, without its -j1) and stage it.
+      # orb-signer is macOS-only (tauri.macos.conf.json), as is gen/app-icon,
+      # so neither is needed on Linux.
+      - name: Build and stage sandboxed-mcp; stub frontend dist
         run: |
-          mkdir -p ../dist binaries
+          set -euo pipefail
+          (cd ../.. && cargo build --locked --bin sandboxed-mcp)
           host="$(rustc -vV | sed -n 's/^host: //p')"
-          for bin in sandboxed-mcp orb-signer; do
-            printf '#!/bin/sh\nexit 1\n' > "binaries/$bin-$host"
-            chmod +x "binaries/$bin-$host"
-          done
+          mkdir -p ../dist binaries target/debug
+          cp ../../target/debug/sandboxed-mcp "binaries/sandboxed-mcp-$host"
+          cp ../../target/debug/sandboxed-mcp target/debug/sandboxed-mcp
       # TODO: make blocking once orb/src-tauri is rustfmt-clean (owned by the
       # Orb refactor; not reformatted here to avoid conflicts).
       - name: cargo fmt --check (non-blocking)
