@@ -1,4 +1,5 @@
 import { missionParent } from "./missionTree";
+import { compactAgo } from "./time";
 import { isBtwMission, type Mission, type ProjectSummary } from "./api";
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { DEFAULT_PROJECT } from "./defaultProject";
@@ -271,12 +272,7 @@ export function formatRelativeTime(iso: string | undefined | null, nowMs = Date.
   if (!iso) return "";
   const parsed = Date.parse(iso);
   if (!Number.isFinite(parsed)) return "";
-  const deltaSec = Math.max(0, Math.floor((nowMs - parsed) / 1000));
-  if (deltaSec < 45) return "now";
-  if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m`;
-  if (deltaSec < 86_400) return `${Math.floor(deltaSec / 3600)}h`;
-  if (deltaSec < 604_800) return `${Math.floor(deltaSec / 86_400)}d`;
-  return `${Math.floor(deltaSec / 604_800)}w`;
+  return compactAgo(parsed, nowMs);
 }
 
 type RawInteractionParams = {

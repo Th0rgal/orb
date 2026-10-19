@@ -14,6 +14,21 @@ export function ago(timestampMs: number, now = Date.now(), opts: { round?: boole
   return opts.days && hours >= 48 ? `${Math.round(hours / 24)} days ago` : `${hours} h ago`;
 }
 
+/**
+ * Compact relative time for dense lists: "now", "5m", "3h", "2d", "1w".
+ * Shared with the iOS and Android apps (shared/orb-spec/fixtures/relative-time.json):
+ * under 45 s is "now", minutes clamp to at least 1, then hours, days, and
+ * weeks from 7 days. A future timestamp counts as 0 s.
+ */
+export function compactAgo(timestampMs: number, now = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((now - timestampMs) / 1000));
+  if (seconds < 45) return "now";
+  if (seconds < 3600) return `${Math.max(1, Math.floor(seconds / 60))}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
+  if (seconds < 604_800) return `${Math.floor(seconds / 86_400)}d`;
+  return `${Math.floor(seconds / 604_800)}w`;
+}
+
 /** "42 s", "3 min 05 s", "2 h 07". */
 export function formatElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
