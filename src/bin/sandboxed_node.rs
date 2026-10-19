@@ -172,6 +172,14 @@ async fn main() -> anyhow::Result<()> {
             post(transfer_files).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .route(
+            "/machine-transfer/archive/pack",
+            post(transfer_archive_pack),
+        )
+        .route(
+            "/machine-transfer/archive/unpack",
+            post(transfer_archive_unpack).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
             "/uploads",
             post(upload_file).layer(DefaultBodyLimit::max(sandboxed_sh::uploads::MAX_BODY_BYTES)),
         )
@@ -751,6 +759,98 @@ mod tests {
 
     async fn test_state(work_root: PathBuf) -> Arc<NodeState> {
         test_state_with_capacity(work_root, 2).await
+    }
+
+    #[tokio::test]
+    async fn machine_transfer_archive_routes_stream_a_checkpoint_between_areas() {
+        use sandboxed_sh::machine_transfer::{Manifest, Operation};
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path().into()).await;
+        let mid = Uuid::new_v4();
+        let tid = Uuid::new_v4();
+        let root = dir.path().join(mid.to_string());
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("proof.txt"), "complete proof").unwrap();
+        let request = |side: &str, operation| TransferFilesRequest {
+            mission_id: mid,
+            transfer_id: tid,
+            source_transfer: None,
+            source_mission_id: None,
+            side: side.into(),
+            operation,
+        };
+        let pack = || TransferArchivePackRequest {
+            mission_id: mid,
+            transfer_id: tid,
+            source_mission_id: None,
+        };
+        // Unauthenticated, or before a snapshot: refused.
+        assert!(
+            transfer_archive_pack(State(state.clone()), HeaderMap::new(), Json(pack()))
+                .await
+                .is_err()
+        );
+        assert!(transfer_archive_pack(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(pack())
+        )
+        .await
+        .is_err());
+        let m = transfer_files(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(request("source", Operation::Snapshot)),
+        )
+        .await
+        .unwrap()
+        .0;
+        let manifest: Manifest = serde_json::from_value(m).unwrap();
+        transfer_files(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(request("destination", Operation::Stage { manifest })),
+        )
+        .await
+        .unwrap();
+        let archive = transfer_archive_pack(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(pack()),
+        )
+        .await
+        .unwrap();
+        let unpacked = transfer_archive_unpack(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Query(TransferArchiveUnpackQuery {
+                mission_id: mid,
+                transfer_id: tid,
+            }),
+            archive.into_body(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(unpacked["bytes"], "complete proof".len());
+        let receipt = transfer_files(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(request("destination", Operation::Verify)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(receipt["files"], 1);
+        let caps = transfer_capabilities(State(state.clone()), auth_headers("node-secret"))
+            .await
+            .unwrap()
+            .0;
+        assert!(caps["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == sandboxed_sh::machine_transfer_archive::FEATURE));
     }
 
     #[tokio::test]
@@ -1337,7 +1437,7 @@ async fn transfer_capabilities(
         python_ready,
     );
     Ok(Json(
-        serde_json::json!({"version":2,"harnesses":harnesses,"features":["links","selection"]}),
+        serde_json::json!({"version":2,"harnesses":harnesses,"features":["links","selection",sandboxed_sh::machine_transfer_archive::FEATURE]}),
     ))
 }
 async fn vibe_python_available() -> bool {
@@ -1482,6 +1582,97 @@ async fn transfer_files(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(Json(value))
+}
+
+async fn refuse_live_jobs(
+    state: &NodeState,
+    missions: &[Uuid],
+) -> Result<(), (StatusCode, String)> {
+    for mission in missions {
+        if state
+            .jobs
+            .mission_has_live_jobs(*mission)
+            .await
+            .map_err(internal_error)?
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "Source execution has not terminated".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct TransferArchivePackRequest {
+    mission_id: Uuid,
+    transfer_id: Uuid,
+    source_mission_id: Option<Uuid>,
+}
+/// Streams the source checkpoint of `transfer_id` as tar+zstd, for Core to
+/// relay straight into a destination's `/machine-transfer/archive/unpack`.
+async fn transfer_archive_pack(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    Json(req): Json<TransferArchivePackRequest>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    refuse_live_jobs(
+        &state,
+        &[
+            req.mission_id,
+            req.source_mission_id.unwrap_or(req.mission_id),
+        ],
+    )
+    .await?;
+    let area = state
+        .work_root
+        .join(".transfers")
+        .join(req.transfer_id.to_string())
+        .join("source");
+    if !area.join("manifest.json").exists() {
+        return Err((
+            StatusCode::CONFLICT,
+            "Take the source snapshot first".into(),
+        ));
+    }
+    axum::response::Response::builder()
+        .header("content-type", "application/zstd")
+        .body(axum::body::Body::from_stream(
+            sandboxed_sh::machine_transfer_archive::pack_stream(area),
+        ))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[derive(serde::Deserialize)]
+struct TransferArchiveUnpackQuery {
+    mission_id: Uuid,
+    transfer_id: Uuid,
+}
+/// Unpacks a streamed tar+zstd archive into the staged destination
+/// checkpoint. The caller still runs the `verify` file operation.
+async fn transfer_archive_unpack(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    Query(query): Query<TransferArchiveUnpackQuery>,
+    body: axum::body::Body,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    refuse_live_jobs(&state, &[query.mission_id]).await?;
+    let area = state
+        .work_root
+        .join(".transfers")
+        .join(query.transfer_id.to_string())
+        .join("destination");
+    let bytes = sandboxed_sh::machine_transfer_archive::unpack_stream(
+        area,
+        body.into_data_stream(),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    )
+    .await
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(serde_json::json!({"ok":true,"bytes":bytes})))
 }
 
 #[derive(serde::Deserialize)]

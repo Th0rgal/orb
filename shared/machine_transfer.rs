@@ -102,7 +102,7 @@ fn relative(value: &str) -> Result<PathBuf, String> {
     }
     Ok(path.to_owned())
 }
-fn confined(root: &Path, value: &str) -> Result<PathBuf, String> {
+pub(crate) fn confined(root: &Path, value: &str) -> Result<PathBuf, String> {
     let path = relative(value)?;
     let mut current = root.to_owned();
     if fs::symlink_metadata(root)
@@ -795,7 +795,7 @@ fn restore_links(root: &Path, links: &[Link]) -> Result<(), String> {
 fn manifest_path(area: &Path) -> PathBuf {
     area.join("manifest.json")
 }
-fn load(area: &Path) -> Result<Manifest, String> {
+pub(crate) fn load(area: &Path) -> Result<Manifest, String> {
     serde_json::from_slice(&fs::read(manifest_path(area)).map_err(err)?).map_err(err)
 }
 fn validate(m: &Manifest) -> Result<(), String> {
@@ -925,13 +925,9 @@ fn bundle_repository(repo: &Path, destination: &Path, limit: u64) -> Result<u64,
 
 /// `area` is a host-owned, unique per-action directory; `source` exists only on
 /// the source adapter. The restored root is always area/workspace.
-pub fn operate(
-    area: &Path,
-    source: Option<&Path>,
-    op: Operation,
-) -> Result<serde_json::Value, String> {
+/// Creates `area` and holds its exclusive lock until the returned file drops.
+pub(crate) fn lock_area(area: &Path) -> Result<File, String> {
     fs::create_dir_all(area).map_err(err)?;
-    let root = area.join("workspace");
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -940,6 +936,15 @@ pub fn operate(
         .open(area.join("lock"))
         .map_err(err)?;
     fs2::FileExt::lock_exclusive(&lock).map_err(err)?;
+    Ok(lock)
+}
+pub fn operate(
+    area: &Path,
+    source: Option<&Path>,
+    op: Operation,
+) -> Result<serde_json::Value, String> {
+    let root = area.join("workspace");
+    let _lock = lock_area(area)?;
     match op {
         Operation::Inventory => survey(
             &source

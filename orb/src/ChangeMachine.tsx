@@ -84,6 +84,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     const rows = destinations(), node = (d: Destination) => d.machine.kind === "node";
     return [...rows.filter(d => !node(d)), ...byLeastLoaded(rows.filter(d => node(d) && d.available), loadKey), ...rows.filter(d => node(d) && !d.available)];
   });
+  let features: string[] | undefined;
   const load = async (force = false) => {
     setLoading(true); setReady(false); setError("");
     const version=connectionVersion();
@@ -91,6 +92,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       const {view,rows,client:id}=await loadMachineDestinations(p.mission.id,force);
       if (!alive || version!==connectionVersion()) return;
       client=id;
+      features=view.features;
       setDestinations(rows);
       setReady(true);
       const previous=selected();
@@ -162,7 +164,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     cancelled = false; setBusy(true); setError("");
     try {
       setStage("Copying workspace…");
-      a = await copyTransfer(a, (done, total) => setProgress(total ? done / total : 1), () => cancelled);
+      a = await copyTransfer(a, (done, total) => setProgress(total ? done / total : 1), () => cancelled, features);
       if (cancelled) throw new Error("Transfer cancelled before activation.");
       setStage("Verifying destination…"); a = await verifyTransfer(a); setAction(a);
       if (cancelled) throw new Error("Transfer cancelled before activation.");
