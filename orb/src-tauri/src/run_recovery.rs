@@ -295,10 +295,20 @@ async fn inspect_and_settle_for(
     if receipt["run_id"].as_str().is_none() || receipt["generation"].as_u64().is_none() {
         return Err("Invalid previous run receipt".into());
     }
+    // The previous run's own processes (matched by this mission id) outlive an Orb restart and
+    // keep the workspace busy. Their owner is gone and the user asked to retry: stop them here
+    // instead of asking for a Stop the user cannot perform. Unrelated agents still block below.
     if local_agents::has_orphan_mission_processes(id) {
-        return Err(
-            "An agent process may still be using this workspace. Stop it before retrying.".into(),
-        );
+        local_agents::stop_orphan_mission_processes(id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while local_agents::has_orphan_mission_processes(id) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        if local_agents::has_orphan_mission_processes(id) {
+            return Err(
+                "The previous agent for this conversation did not stop. Quit it from Activity Monitor, then retry.".into(),
+            );
+        }
     }
     if shared_cwd_with
         .map(str::trim)
