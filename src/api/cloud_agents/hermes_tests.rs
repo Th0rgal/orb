@@ -565,3 +565,21 @@ async fn mid_mission_model_and_effort_switch_preserves_session_without_fork_and_
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn capabilities_accepts_upstream_hermes_without_fork_flags() {
+    let app = Router::new().route(
+        "/v1/capabilities",
+        get(|| async { Json(json!({"features": {}})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let h = Hermes {
+        client: reqwest::Client::new(),
+        url,
+        key: "fixture".into(),
+    };
+    assert!(h.capabilities().await.is_ok());
+    server.abort();
+}
