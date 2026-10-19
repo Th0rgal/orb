@@ -11325,6 +11325,22 @@ pub(super) async fn create_mission_inner(
     worker_location::inherit(&state, &parent_control, &mut req)
         .await
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    // A replacement continues the same conversation, so it stays under the
+    // superseded mission's parent (e.g. a coordinator's worker dispatch) unless
+    // the caller places it elsewhere. Without this, replacements created by Orb
+    // or the API surfaced as top-level missions detached from their coordinator.
+    if req.parent_mission_id.is_none() {
+        if let Some(prior_id) = req.supersedes_mission_id {
+            if let Some(prior) = parent_control
+                .mission_store
+                .get_mission(prior_id)
+                .await
+                .map_err(internal_error)?
+            {
+                req.parent_mission_id = prior.parent_mission_id;
+            }
+        }
+    }
 
     if let Some(prompt) = req.prompt.as_deref() {
         crate::api::mission_payload::validate_user_content(prompt)

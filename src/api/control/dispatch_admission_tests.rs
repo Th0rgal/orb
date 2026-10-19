@@ -12611,3 +12611,54 @@ async fn cyber_settings_refuse_incompatible_remote_model_before_persistence() {
     assert_eq!(stored.model_override.as_deref(), Some("gpt-6-sol"));
     assert_eq!(stored.session_id, m.session_id);
 }
+
+#[tokio::test]
+async fn replacement_keeps_the_superseded_missions_parent() {
+    let h = Harness::new().await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let coordinator = h.writer(MissionStatus::Active, None).await;
+    let worker = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("Worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("claudecode"),
+            None,
+            Some(coordinator.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Worker (replacement)",
+        "backend": "claudecode",
+        "placement": "client",
+        "supersedes_mission_id": worker.id,
+    }))
+    .unwrap();
+    let created = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let replacement_id = Uuid::parse_str(created.1 .0["id"].as_str().unwrap()).unwrap();
+    let replacement = h
+        .control
+        .mission_store
+        .get_mission(replacement_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement.parent_mission_id, Some(coordinator.id));
+}
