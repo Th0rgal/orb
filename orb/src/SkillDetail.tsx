@@ -1,11 +1,9 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
 import { MdSource, MdView } from "./Markdown";
-import { Select } from "./Select";
 import type { LibrarySkill } from "./api";
 import type { SkillSourceRef } from "./localAgents";
 import {
-  AUDIENCES,
   compactDiff,
   effectiveAudience,
   lineDiff,
@@ -100,11 +98,6 @@ export function SkillDetail(p: SkillDetailProps) {
     try { await fn(); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   };
 
-  const toggleAudience = (a: string, on: boolean) => {
-    const next = on ? [...new Set([...audience(), a])] : audience().filter((x) => x !== a);
-    setDraft(setSandboxedMeta(draft(), next, meta().scope ?? null, p.row.name));
-  };
-  const setScope = (scope: string) => setDraft(setSandboxedMeta(draft(), audience(), scope === "global" ? "global" : null, p.row.name));
 
   // ── Reference files ──
   const [files, setFiles] = createSignal<string[]>(p.library ? referencePaths(p.library) : []);

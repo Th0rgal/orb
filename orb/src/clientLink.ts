@@ -4,14 +4,6 @@ import { nativeInvoke } from "./clientRuns";
 
 const connection = () => ({ api_url: getApiUrl(), token: getJwt() ?? "" });
 
-/** Whether Orb desktop streams local runs to Core over the client link. */
-export async function clientLinkActive(): Promise<boolean> {
-  const invoke = nativeInvoke();
-  if (!invoke) return false;
-  try { return await invoke("client_link_active", { connection: connection() }) === true; }
-  catch { return false; }
-}
-
 /**
  * Wait until Core acknowledged everything the client link journaled for this
  * run (its converter finished and every event was acknowledged). Call before

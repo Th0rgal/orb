@@ -1,5 +1,5 @@
 import { Menu } from "./Menu";
-import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { api, connectionVersion, type Mission } from "./api";
 import "./cyberAccess.css";
 export type CyberMode = "standard" | "daybreak" | "automatic";

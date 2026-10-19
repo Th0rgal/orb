@@ -1,6 +1,6 @@
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { api, type Mission } from "./api";
 import {
   CheckIcon,

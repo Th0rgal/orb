@@ -1,4 +1,4 @@
-import { deliverAssistantText, flushClientLink, connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
+import { flushClientLink, connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
 import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
 import type {CodexServiceTier} from './api';
 import { Picker } from "./Picker";
@@ -33,24 +33,21 @@ import { startLocalOrigin, localRunKnown, localAgentForLaunch } from "./localAge
 import { ChangeMachine, preloadMachineDestinations } from "./ChangeMachine";
 import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, recordMissions } from "./machineLoad";
 import { adoptTransferredWorkspace } from "./machineTransfer";
-import type { ClientRunReceipt } from "./clientRuns";
 import { NativeInteraction } from "./NativeInteraction";
 import { backgroundUploads, cancelBackgroundUpload, encoded, formatFileSize, HARD_MAX_BYTES, hasNativePicker, pauseBackgroundUpload, pickNativeFiles, prepareUploads, resumeBackgroundUpload, softLimitForDestination, startBackgroundUpload, statUploadSource, transferFile, uploadToken, type UploadedFile, type UploadSource } from "./uploads";
 import { readComposerDraft, saveComposerDraft } from "./composerDrafts";
 import { readImagePaste, imagePrompt, stageLocalImages, stageRemoteImages, IMAGE_COUNT, type DraftImage } from "./imageAttachments";
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
 import { ErrorToast } from "./toast";
-import { MissionFailure, LaunchStatus, MissionPending, missionPhase, phaseIsQuiet, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, nodeLabel, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, missionSettingsIdle, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
-import { goalDraft, goalObjective, goalPrompt, planObjective, missionTitle, displayTitle, GoalTag, EMPTY_GOAL_ERROR, absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "./goal";
+import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, nodeLabel, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, missionSettingsIdle, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
+import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "./goal";
 import { atQuery, browseAttachItems, chipToAttachment, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
 import { hasOverlay } from "./overlayLayer";
 import { Lightbox } from "./Lightbox";
 import { For, Show, Switch, Match, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch } from "solid-js";
-import { createStore, produce } from "solid-js/store";
 import type { JSX } from "solid-js";
-import { projects as seed, LOREM_REPLY, type Agent, type Block, type Turn } from "./data";
 import * as Ic from "./icons";
 import { ForkMission } from "./ForkMission";
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
@@ -59,10 +56,10 @@ import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
 import { MACHINES, Machines } from "./Machines";
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
-import { MenuList, PopupMenu, type MenuEntry } from "./Menu";
-import { MdSource, MdView, mdSource, safeHref, setMdSource, toggleMdSource } from "./Markdown";
+import { PopupMenu, type MenuEntry } from "./Menu";
+import { mdSource, toggleMdSource } from "./Markdown";
 import { streamMission, heldAfterHistory, type StreamEvent } from "./stream";
-import { latestChecklist, localActivitiesToStreamItems } from "./workModel";
+import { localActivitiesToStreamItems } from "./workModel";
 import { applyPendingMoves } from "./missionMove";
 import { Chapters } from "./Chapters";
 import { Changes } from "./Changes";
@@ -84,7 +81,6 @@ import { insertAtCaret } from "./voice";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "./missionContext";
 import {
   bindWorkspace,
-  followLocal,
   installedIds,
   localBinding,
   localInstalled,
@@ -100,15 +96,12 @@ import {
   materializeMentions,
   prepareProjectSkills,
   refreshLocalAgents,
-  rememberBinding,
-  startLocal,
   stopLocal,
   writeLocalFiles,
 } from "./localAgents";
 import { ControllerView } from "./Controller";
 import { timed } from "./diagnostics";
 import {
-  api,
   createMission,
   getMission,
   getRemoteNodes,
@@ -124,7 +117,6 @@ import {
   projectsVersion,
   type HarnessChoice,
   cancelMission,
-  appendClientTranscript,
   setClientMissionStatus,
   sendMissionMessage,
   ApiError,
@@ -137,7 +129,6 @@ import {
   type RemoteNodeView,
   type RemoteLaunchCapability,
   type RemoteNodesResponse,
-  openExternalUrl,
   listNodeAntigravityModels,
 } from "./api";
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
@@ -212,120 +203,12 @@ const effectivePick = (machine = "core"): HarnessPick | null => {
   const first = choices.find((c) => c.backend.id === "claudecode") ?? choices[0];
   return { backend: first.backend.id, model: first.models[0].value };
 };
-const pickLabel = (pick: HarnessPick | null): string => {
-  if (!pick) return "Choose model";
-  const c = harnessChoices().find((x) => x.backend.id === pick.backend);
-  const m = c?.models.find((x) => x.value === pick.model);
-  return `${c?.backend.name ?? pick.backend} · ${m ? shortModelLabel(m.label) : pick.model}`;
-};
 async function refreshHarnessChoices() {
   try {
     setRemoteHarnessChoices(await listHarnessChoices());
   } catch {
     /* keep last */
   }
-}
-
-/** Inline markup: `code`, **bold**, [label](href). Nesting is limited to code inside bold/link. */
-function inline(text: string): JSX.Element[] {
-  const out: JSX.Element[] = [];
-  const re = /\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    if (m[1] !== undefined) out.push(<strong>{inline(m[1])}</strong>);
-    else if (m[2] !== undefined) out.push(<code>{m[2]}</code>);
-    else
-      out.push(
-        <a
-          href={safeHref(m[4]) ?? "#"}
-          onClick={(e) => {
-            e.preventDefault();
-            const href = safeHref(m[4]);
-            if (href) void openExternalUrl(href);
-          }}
-        >
-          {inline(m[3])}
-        </a>,
-      );
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
-}
-
-function BlockView(p: { block: Block }) {
-  const b = p.block;
-  switch (b.kind) {
-    case "p":
-      return <p>{inline(b.text)}</p>;
-    case "ul":
-      return <ul>{b.items.map((t) => <li>{inline(t)}</li>)}</ul>;
-    case "note":
-      return (
-        <p class="note">
-          {b.strong} <span>{b.rest}</span>
-        </p>
-      );
-    case "tool":
-      return (
-        <div class="tool">
-          <span class="tool-verb">{b.verb}</span>
-          <span class="tool-target">{b.target}</span>
-          <Show when={b.meta}>
-            <span class="tool-meta">{b.meta}</span>
-          </Show>
-        </div>
-      );
-    case "code": {
-      const [copied, setCopied] = createSignal(false);
-      return (
-        <div class="codeblock">
-          <div class="codeblock-head">
-            <span>{b.file ?? b.lang}</span>
-            <button
-              class="icon-btn sm"
-              title="Copy"
-              onClick={() => {
-                navigator.clipboard?.writeText(b.text);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1200);
-              }}
-            >
-              <Show when={copied()} fallback={<Ic.CopyIcon size={14} />}>
-                <span class="copied">Copied</span>
-              </Show>
-            </button>
-          </div>
-          <pre>{b.text}</pre>
-        </div>
-      );
-    }
-  }
-}
-
-function AgentTurn(p: { turn: Extract<Turn, { role: "agent" }>; streaming?: boolean }) {
-  const [open, setOpen] = createSignal(true);
-  const tools = () => p.turn.blocks.filter((b) => b.kind === "tool");
-  const rest = () => p.turn.blocks.filter((b) => b.kind !== "tool");
-  return (
-    <div class="agent-turn">
-      <button class="worked" onClick={() => setOpen(!open())} disabled={!tools().length}>
-        <Show when={p.streaming} fallback={<>Worked for {p.turn.worked}</>}>
-          <span class="shimmer">Working…</span>
-        </Show>
-        <Show when={tools().length}>
-          <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
-        </Show>
-      </button>
-      <Show when={open() && tools().length}>
-        <div class="tools">
-          <For each={tools()}>{(b) => <BlockView block={b} />}</For>
-        </div>
-      </Show>
-      <For each={rest()}>{(b) => <BlockView block={b} />}</For>
-    </div>
-  );
 }
 
 export const draftLightbox = (images: DraftImage[]) => images.map((image, index) => ({ src: image.dataUrl, label: image.reference ? `Image #${image.reference}` : `Image ${index + 1}` }));
@@ -351,9 +234,6 @@ export function Composer(p: {
   disabled?: boolean;
   autofocus?: boolean;
   tall?: boolean;
-  files?: { id: string; name: string }[];
-  attached?: string[];
-  onToggleFile?: (id: string) => void;
   /** Show the harness + model picker (new agents only). */
   picker?: boolean;
   /** Conversation identity; dictation results for another scope are dropped. */
@@ -617,14 +497,7 @@ export function Composer(p: {
   });
   const [ctxFolder, setCtxFolder] = createSignal("");
   const atSource = createMemo<AttachItem[]>(() => {
-    const demo = (p.files ?? []).map((f) => ({
-      id: f.id,
-      kind: "file" as const,
-      section: "Files" as const,
-      path: f.name,
-      label: f.name,
-    }));
-    return [...(p.sideQuestion || mode() === "btw" ? [{ id: "btw:conversation", kind: "context" as const, section: "Context" as const, path: "conversation", label: "conversation · Latest agent conversation" }] : []), ...(isConnected() ? atItems() : demo)];
+    return [...(p.sideQuestion || mode() === "btw" ? [{ id: "btw:conversation", kind: "context" as const, section: "Context" as const, path: "conversation", label: "conversation · Latest agent conversation" }] : []), ...(isConnected() ? atItems() : [])];
   });
   const at = createMemo(() => {
     if (p.textOnly || p.imagesOnly || voiceActive() || atOff() || slash()) return null;
@@ -867,9 +740,7 @@ export function Composer(p: {
     window.removeEventListener("keydown", onEsc, true);
   });
   const plusItems = createMemo(() => {
-    const raw: AttachItem[] = isConnected()
-      ? atItems()
-      : (p.files ?? []).map((f) => ({ id: f.id, kind: "file" as const, section: "Files" as const, path: f.name, label: f.name }));
+    const raw: AttachItem[] = isConnected() ? atItems() : [];
     return browseAttachItems(raw, ctxFolder());
   });
   const plus = (
@@ -916,16 +787,13 @@ export function Composer(p: {
                 const display = () => ctxFolder() && item.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? item.label.slice(ctxFolder().length + 1) : item.label;
                 return (
                   <button
-                    class={`menu-item ${mentioned().some((c) => c.id === item.id) || p.attached?.includes(item.id) ? "on" : ""}`}
+                    class={`menu-item ${mentioned().some((c) => c.id === item.id) ? "on" : ""}`}
                     title={item.path ?? item.label}
-                    onClick={() => {
-                      if (p.onAttachments) pickAttach(item);
-                      else p.onToggleFile?.(item.id);
-                    }}
+                    onClick={() => { if (p.onAttachments) pickAttach(item); }}
                   >
                     <span class="menu-ico"><Ic.FileIcon size={14} /></span>
                     <span class="slash-item-label">{display()}</span>
-                    <span class="menu-attachment-mark" aria-hidden="true">{mentioned().some((c) => c.id === item.id) || p.attached?.includes(item.id) ? "✓" : ""}</span>
+                    <span class="menu-attachment-mark" aria-hidden="true">{mentioned().some((c) => c.id === item.id) ? "✓" : ""}</span>
                   </button>
                 );
               }}
@@ -1249,14 +1117,11 @@ export default function App() {
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
-  const [projects, setProjects] = createStore<typeof seed>([]);
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = localStorage.getItem("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? saved : null; })());
   createEffect(() => { localStorage.setItem("orb.selectedConversation",selected() ?? ""); });
-  const [collapsed, setCollapsed] = createStore<Record<string, boolean>>({});
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
   const [sbWidth, setSbWidth] = createSignal(220);
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
-  const [streamingId, setStreamingId] = createSignal<string | null>(null);
   const [newFolder, setNewFolder] = createSignal<{ project: string; path: string } | null>(null);
   const folderTags = (project: string | null | undefined) => newFolder()?.project === project && newFolder()?.path ? [`orb-folder:${newFolder()!.path}`] : [];
   const [newProject, setNewProject] = createSignal(DEFAULT_PROJECT.slug);
@@ -1319,25 +1184,12 @@ export default function App() {
   const [history, setHistory] = createSignal<(string | null)[]>([selected()]);
   const [hIdx, setHIdx] = createSignal(0);
 
-  const [plusFor, setPlusFor] = createSignal<string | null>(null);
-  const [attached, setAttached] = createSignal<string[]>([]);
   const [attachChips, setAttachChips] = createSignal<AttachChip[]>([]);
   const [ctx, setCtx] = createSignal<{ x: number; y: number; items: MenuEntry[] } | null>(null);
   /** A structured launch refusal, when the core gave one we can act on. */
   const [createRefusal, setCreateRefusal] = createSignal<{ refusal: LaunchRefusal; project: string | null } | null>(null);
   // Shared with ProjectFileView so ⌘/ reaches core-hosted reference files too.
   const mdSrc = mdSource;
-  const setMdSrc = setMdSource;
-  let scroller: HTMLDivElement | undefined;
-  let timer: number | undefined;
-  let prevStatus: Agent["status"] = "idle";
-
-  const current = createMemo(() => {
-    const id = selected();
-    if (!id || PAGES.has(id) || id.startsWith("f:")) return null;
-    for (const p of projects) for (const a of p.agents) if (a.id === id) return a;
-    return null;
-  });
 
   const [missions, setMissions] = createSignal<Mission[]>([]);
   const [missionsLoading, setMissionsLoading] = createSignal(true);
@@ -1601,29 +1453,6 @@ export default function App() {
       // Keep an explicit machine selection across reconnects.
     }
   }));
-  const currentFile = createMemo(() => {
-    const id = selected();
-    if (!id?.startsWith("f:")) return null;
-    const [, pid, fid, fileId] = id.split(":");
-    const p = projects.find((x) => x.id === pid);
-    const folder = p?.folders.find((f) => f.id === fid);
-    const file = folder?.files.find((f) => f.id === fileId);
-    if (!p || !folder || !file) return null;
-    return { pid, fid, file };
-  });
-  const projectFiles = createMemo(() => {
-    if (isConnected()) return [];
-    const id = selected();
-    let pid: string | undefined;
-    if (id?.startsWith("f:")) pid = id.split(":")[1];
-    else if (id && !PAGES.has(id)) {
-      for (const p of projects) if (p.agents.some((a) => a.id === id)) pid = p.id;
-    }
-    if (!pid) pid = newProject();
-    const p = projects.find((x) => x.id === pid);
-    if (!p) return [] as { id: string; name: string; text: string }[];
-    return p.folders.flatMap((f) => f.files.map((file) => ({ id: `f:${p.id}:${f.id}:${file.id}`, name: `${f.name}/${file.name}`, text: file.text })));
-  });
   const sessionPreview = createMemo<SessionPreviewData>(() => {
     const id = currentMissionId() ?? "";
     const mission = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
@@ -1663,8 +1492,6 @@ export default function App() {
     open(null);
   };
 
-  const toBottom = (smooth = false) =>
-    requestAnimationFrame(() => scroller?.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? "smooth" : "auto" }));
 
   let navigationVersion = 0;
   const open = (id: string | null, push = true) => {
@@ -1694,7 +1521,6 @@ export default function App() {
       if (known) markMissionRead(known, true, Boolean(pendingMissionInteraction(mid)));
       void loadTranscript(mid).catch(() => {});
     }
-    toBottom();
     return true;
   };
   const nav = (d: number) => {
@@ -1704,73 +1530,6 @@ export default function App() {
     if (open(history()[i], false)) setHIdx(i);
   };
 
-  const stop = () => {
-    clearInterval(timer);
-    const id = streamingId();
-    if (id) mutate(id, (a) => (a.status = prevStatus));
-    setStreamingId(null);
-  };
-
-  const mutate = (id: string, fn: (a: Agent) => void) =>
-    setProjects(
-      produce((ps) => {
-        for (const p of ps) for (const a of p.agents) if (a.id === id) fn(a);
-      }),
-    );
-
-  const stream = (id: string) => {
-    stop();
-    setStreamingId(id);
-    mutate(id, (a) => {
-      prevStatus = a.status === "running" ? "idle" : a.status;
-      a.status = "running";
-      a.turns.push({ role: "agent", worked: "0s", blocks: [{ kind: "p", text: "" }] });
-    });
-    const words = LOREM_REPLY.split(" ");
-    let i = 0;
-    const t0 = performance.now();
-    timer = window.setInterval(() => {
-      i += 2;
-      mutate(id, (a) => {
-        const turn = a.turns[a.turns.length - 1];
-        if (turn.role !== "agent") return;
-        turn.blocks[0] = { kind: "p", text: words.slice(0, i).join(" ") };
-        turn.worked = `${Math.max(1, Math.round((performance.now() - t0) / 1000))}s`;
-      });
-      const s = scroller;
-      if (s && s.scrollHeight - s.scrollTop - s.clientHeight < 80) s.scrollTop = s.scrollHeight;
-      if (i >= words.length) stop();
-    }, 45);
-  };
-
-  const send = (text: string) => {
-    const c = current();
-    if (!c) return;
-    const extra = attached()
-      .map((id) => projectFiles().find((f) => f.id === id))
-      .filter((f): f is { id: string; name: string; text: string } => !!f)
-      .map((f) => `[${f.name}]\n${f.text}`)
-      .join("\n\n");
-    mutate(c.id, (a) => a.turns.push({ role: "user", text: extra ? `${extra}\n\n${text}` : text }));
-    setAttached([]);
-    toBottom(true);
-    stream(c.id);
-  };
-
-  const finishLocal = async (id: string, run: ClientRunReceipt) => {
-    try {
-      const state = await followLocal(id, () => {});
-      await deliverAssistantText(id, state.text, run);
-      const failed = (state.exit_code != null && state.exit_code !== 0) || (!!state.error && !state.text.trim());
-      if (failed) recordLocalFailure(id, state.error || `Local process exited with code ${state.exit_code}`);
-      await setClientMissionStatus(id, failed ? "failed" : "awaiting_user", run);
-    } catch (error) {
-      recordLocalFailure(id, error);
-      await flushClientLink(id).catch(() => false);
-      await setClientMissionStatus(id, "failed", run).catch(() => {});
-    }
-    void refreshMissions();
-  };
   /** `remote`: a start requested from another device over the client link.
    * It never reads or clears this window's draft and never navigates. */
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number, remote?: { key: string; cwd?: string | null }) => {
@@ -1912,13 +1671,6 @@ export default function App() {
     return false;
   };
 
-  const showCtx = (e: MouseEvent, items: MenuEntry[]) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setPlusFor(null);
-    setCtx({ x: e.clientX, y: e.clientY, items });
-  };
-
   const onKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.isComposing) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r" && !e.altKey) {
@@ -1957,9 +1709,8 @@ export default function App() {
       return;
     }
     if (e.metaKey && e.key === "/") {
-      // Both kinds of Markdown file view: the local demo files and the
-      // core-hosted reference files, which render through ProjectFileView.
-      if (currentFile() || currentProjectFile()) {
+      // Core-hosted reference files render through ProjectFileView.
+      if (currentProjectFile()) {
         e.preventDefault();
         toggleMdSource();
       }
@@ -2038,11 +1789,9 @@ export default function App() {
       stopFleet();
       stopSecretRequests();
     });
-    toBottom();
   });
   onCleanup(() => {
     window.removeEventListener("keydown", onKey);
-    clearInterval(timer);
   });
 
   const startResize = (e: PointerEvent) => {
@@ -2254,24 +2003,6 @@ export default function App() {
                 </>
               )}
             </Match>
-            <Match when={currentFile()}>
-              {(f) => (
-                <>
-                  <span>{f().file.name}</span>
-                  <kbd class="tb-kbd">{mdSrc() ? "Preview" : "Source"} ⌘/</kbd>
-                </>
-              )}
-            </Match>
-            <Match when={current()}>
-              {(c) => (
-                <>
-                  <span>{c().title}</span>
-                  <Show when={c().cloud} fallback={<Ic.LaptopIcon class="dim" />}>
-                    <Ic.CloudIcon class="dim" />
-                  </Show>
-                </>
-              )}
-            </Match>
             {/* Right after sending, title the view from the prompt instead of "New Agent"
                 for the seconds Core takes to create and title the mission. */}
             <Match when={launchPreview()?.prompt?.trim()}>
@@ -2294,12 +2025,12 @@ export default function App() {
                     <button class="na-drop-btn" aria-label="Choose project" aria-haspopup="dialog" aria-expanded={envOpen() === "project"} onClick={(event) => { event.currentTarget.focus(); setEnvOpen(envOpen() === "project" ? null : "project"); }}>
                       {isConnected()
                         ? (liveProjects().find((p) => p.slug === effectiveNewProject())?.title ?? (effectiveNewProject() === DEFAULT_PROJECT.slug ? DEFAULT_PROJECT.title : effectiveNewProject()) ?? "No project")
-                        : projects.find((p) => p.id === newProject())?.name}
+                        : undefined}
                       <Show when={newFolder()?.project === effectiveNewProject()}><span class="new-agent-folder">/ {newFolder()?.path}</span></Show>
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "project"}>
-                      <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : projects.map((p) => ({ id: p.id, name: p.name }))}
+                      <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
                         selected={effectiveNewProject() ?? ""} canCreate={isConnected()}
                         onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
                         onClose={() => setEnvOpen(null)}
@@ -2455,7 +2186,6 @@ export default function App() {
                   onSend={create}
                   onPending={prepareLaunch}
                   onSendError={setCreateError}
-                  onStop={stop}
                   onDraft={(text) => { if (createError() === EMPTY_GOAL_ERROR && goalDraft(text).kind !== "empty") setCreateError(null); }}
                   autofocus
                   tall
@@ -2463,11 +2193,6 @@ export default function App() {
                   uploadTarget={newMachine()}
                   remoteSupport={remoteSupport}
                   harnessIds={newMachine() === "local" ? installedIds() : undefined}
-                  files={projectFiles()}
-                  attached={attached()}
-                  onToggleFile={(id) =>
-                    setAttached(attached().includes(id) ? attached().filter((x) => x !== id) : [...attached(), id])
-                  }
                   projectSlug={liveProjects().some(project => project.slug === effectiveNewProject()) ? effectiveNewProject() : undefined}
                   onAttachments={setAttachChips}
                 />
@@ -2555,106 +2280,6 @@ export default function App() {
                 {(f) => <ProjectFileView slug={f.slug} path={f.path} />}
               </Show>
             )}
-          </Match>
-          <Match when={currentFile()}>
-            {(f) => {
-              const save = (text: string) =>
-                setProjects(
-                  produce((ps) => {
-                    const file = ps
-                      .find((x) => x.id === f().pid)
-                      ?.folders.find((x) => x.id === f().fid)
-                      ?.files.find((x) => x.id === f().file.id);
-                    if (file) file.text = text;
-                  }),
-                );
-              return (
-                <div class="file-view">
-                  <Show when={mdSrc()} fallback={<MdView text={f().file.text} />}>
-                    <MdSource text={f().file.text} onInput={save} />
-                  </Show>
-                </div>
-              );
-            }}
-          </Match>
-          <Match when={true}>
-        <Show
-          when={current()}
-          keyed
-          fallback={null}
-        >
-          {(c) => (
-            <>
-              <div class="scroll" ref={scroller}>
-                <div class="col">
-                  <For each={c.turns}>
-                    {(turn, i) =>
-                      turn.role === "user" ? (
-                        <div class="user">
-                          <span>{turn.text}</span>
-                          <button class="icon-btn restore" title="Restore checkpoint">
-                            <Ic.ReplyIcon />
-                          </button>
-                        </div>
-                      ) : (
-                        <AgentTurn turn={turn} streaming={streamingId() === c.id && i() === c.turns.length - 1} />
-                      )
-                    }
-                  </For>
-                </div>
-              </div>
-              <div class="dock" ref={floatingDock}>
-                <div class="col">
-                  <div class="actions">
-                    <Show when={c.diff}>
-                      <button class="pill">
-                        Review <span class="c-green">+{c.diff}</span>
-                      </button>
-                    </Show>
-                    <button class="pill">
-                      Commit &amp; Push <Ic.ChevronDown size={12} />
-                    </button>
-                    <button class="pill round">
-                      <Ic.DotsIcon size={14} />
-                    </button>
-                  </div>
-                  <Show when={attached().length}>
-                    <div class="attach-pills">
-                      <For each={attached()}>
-                        {(id) => {
-                          const f = () => projectFiles().find((x) => x.id === id);
-                          return (
-                            <button class="pill on" onClick={() => setAttached(attached().filter((x) => x !== id))}>
-                              <Ic.FileIcon size={12} /> {f()?.name} <Ic.CloseIcon size={12} />
-                            </button>
-                          );
-                        }}
-                      </For>
-                    </div>
-                  </Show>
-                  <Composer
-                    placeholder="Send follow-up"
-                    picker={false}
-                    busy={streamingId() === c.id}
-                    onSend={send}
-                    onStop={stop}
-                    scope={c.id}
-                    files={projectFiles()}
-                    attached={attached()}
-                    onToggleFile={(id) =>
-                      setAttached(attached().includes(id) ? attached().filter((x) => x !== id) : [...attached(), id])
-                    }
-                  />
-                  <div class="under">
-                    <span class="ctx">
-                      <Ic.ContextRing pct={c.context} /> {c.context}%
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-        </Show>
           </Match>
         </Switch>
       </main>

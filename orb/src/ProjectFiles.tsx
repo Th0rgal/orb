@@ -65,13 +65,12 @@ import {
 } from "./api";
 import { CronGlyph, untilLabel } from "./Controller";
 import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
-import { Select } from "./Select";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { copyText } from "./clipboard";
 import { CronForm } from "./ControllerSettings";
 import { getProjectCronFromJob } from "./cronSchema";
 import { loadTranscript, prefetchTranscript } from "./missionCache";
-import { cacheCanPrefetch, cacheLoad, cachePeek, cachePrefetch, cachePut, cacheRemember, prefetchProjectLimit } from "./pageCache";
+import { cacheCanPrefetch, cachePeek, cachePrefetch, cachePut, cacheRemember } from "./pageCache";
 import { SidebarTree } from "./Tree";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 import { FileSkeleton } from "./Skeleton";
@@ -256,7 +255,6 @@ export function LiveProjectsSection(p: {
   };
   const [selectionActive, setSelectionActive] = createSignal(false);
   const selectedTreeSet = createMemo(() => new Set(selectedTreeIds()));
-  const selectedAgentSet = createMemo(() => new Set(selectedAgents()));
   const selectedRowIds = createMemo(() => selectionActive() ? selectedTreeSet() : undefined);
   const [deleteTargets, setDeleteTargets] = createSignal<string[]>([]);
   const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);

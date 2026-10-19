@@ -8,7 +8,7 @@ import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
  */
 import { bufferedOutput, type OutputEvent } from "./localStream";
 import { createSignal } from "solid-js";
-import { mentionText, scanMentions, type AttachChip } from "./attach";
+import { scanMentions, type AttachChip } from "./attach";
 import { getApiUrl, getJwt, listProjectFiles, readProjectFile, getProjectController } from "./api";
 
 function savedLocalFailures(): Record<string,string> {

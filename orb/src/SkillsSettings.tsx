@@ -27,7 +27,7 @@ import {
   type SyncSkillPayload,
 } from "./localAgents";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
-import { AUDIENCES, newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
+import { newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
 import { buildSkillRows, filterSkillRows, type ProblemFilter, type ProjectContextSkill, type SkillRow } from "./skillRows";
 import { deleteLibrarySkill, fetchLibrarySkill, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile } from "./skillsApi";
 import { SkillBadges, SkillDetail } from "./SkillDetail";
@@ -173,8 +173,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [syncNotice, setSyncNotice] = createSignal<string | null>(null);
   const [syncError, setSyncError] = createSignal<string | null>(null);
   const [search, setSearch] = createSignal("");
-  const [audienceFilter, setAudienceFilter] = createSignal("all");
-  const [scopeFilter, setScopeFilter] = createSignal("all");
+  const [audienceFilter] = createSignal("all");
+  const [scopeFilter] = createSignal("all");
   const [problemFilter, setProblemFilter] = createSignal<ProblemFilter>("all");
   const [openSkill, setOpenSkill] = createSignal<string | null>(null);
   const [confirmPrune, setConfirmPrune] = createSignal<string[] | null>(null);

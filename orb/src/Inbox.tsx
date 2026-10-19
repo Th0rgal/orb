@@ -323,7 +323,6 @@ export function InboxPage(p: {
   const [peekedIds, setPeekedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [expandedPeekIds, setExpandedPeekIds] = createSignal<ReadonlySet<string>>(new Set());
   const [seenUnreadIds, setSeenUnreadIds] = createSignal<ReadonlySet<string>>(new Set());
-  const [peekReplyDrafts, setPeekReplyDrafts] = createSignal<Record<string, string>>({});
   const [busyIds, setBusyIds] = createSignal<ReadonlySet<string>>(new Set());
   const [dismissedIds, setDismissedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [undoItem, setUndoItem] = createSignal<{
@@ -926,11 +925,6 @@ export function InboxPage(p: {
           chips.length > 0,
         );
       }
-      setPeekReplyDrafts((prev) => {
-        const next = { ...prev };
-        delete next[item.id];
-        return next;
-      });
       // Keep the Peek drawer open so the user sees their sent message and the live-streamed reply
       void refreshTranscript(item.id).catch(() => {});
       void p.onRefresh();
@@ -1703,11 +1697,6 @@ export function InboxPage(p: {
                       backend={stableBackend()}
                       projectSlug={stableProjectSlug()}
                       onAttachments={setFollowAttach}
-                      onDraft={(text) =>
-                        setPeekReplyDrafts((prev) =>
-                          prev[id] === text ? prev : { ...prev, [id]: text },
-                        )
-                      }
                       onStop={() => {
                         void cancelMission(id)
                           .then(() => {

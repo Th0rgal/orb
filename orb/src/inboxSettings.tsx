@@ -1,5 +1,5 @@
 import { writeInboxState } from "./inboxState";
-import { For, Show, createMemo, createSignal, onMount } from "solid-js";
+import { For, createMemo, createSignal, onMount } from "solid-js";
 import { isConnected } from "./api";
 import { listChains, routingCatalog, type ModelChain, type RoutingCatalog } from "./routingApi";
 import { RoutingPicker } from "./RoutingPicker";

@@ -1,5 +1,5 @@
 import { Select } from "./Select";
-import { For, Match, Show, Switch, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
 
 import { Popover } from "./Popover";
 
@@ -223,9 +223,3 @@ export function SchedulePicker(p: { value: string; onChange: (v: string) => void
   );
 }
 
-/** One-line readout for the row subtitle, e.g. "Weekdays at 09:00 · Hermes timezone". */
-export function scheduleSummary(value: string): string {
-  const parsed = parseSchedule(value);
-  const text = describeSchedule(parsed);
-  return parsed.mode === "days" || parsed.mode === "once" ? `${text} · Hermes timezone` : text;
-}

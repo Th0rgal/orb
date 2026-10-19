@@ -977,14 +977,6 @@ export function extractAllPeekTurns(
   return turns.slice(-maxTurns);
 }
 
-export function extractPeekTurns(
-  mission: Mission,
-  items?: StreamItem[],
-  summaryFallback?: string,
-): InboxPeekTurn[] {
-  return extractAllPeekTurns(mission, items, summaryFallback, 24).slice(-3);
-}
-
 /**
  * Build a stable StreamItem[] list for rendering the shared `<Transcript>` component
  * inside the Inbox Peek drawer. Preserves original StreamItem object references and keys

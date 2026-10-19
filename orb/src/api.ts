@@ -359,7 +359,7 @@ async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean
  }
 }
 
-export async function listBackends(): Promise<BackendInfo[]> {
+async function listBackends(): Promise<BackendInfo[]> {
   const data = await cachedCatalog<BackendInfo[] | { backends?: BackendInfo[] }>("/api/backends");
   return Array.isArray(data) ? data : (data.backends ?? []);
 }
@@ -956,13 +956,6 @@ export async function listQueuedMessages(missionId: string): Promise<QueuedMessa
 }
 
 /** Attempt to inject a queued message live into a running turn without cancelling it. */
-export async function sendQueuedMessageNow(queueId: string): Promise<boolean> {
-  const res = await api<{ ok: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(queueId)}/send-now`, {
-    method: "POST",
-  });
-  return res.delivered === true;
-}
-
 export class MessageRejectedError extends Error {}
 
 export interface MessageReceipt {
@@ -1358,11 +1351,4 @@ export async function getLibrarySkill(name: string): Promise<LibrarySkill> {
   return api<LibrarySkill>(`/api/library/skill/${encodeURIComponent(name)}`);
 }
 
-export async function saveLibrarySkill(name: string, content: string): Promise<void> {
-  await apiText(`/api/library/skill/${encodeURIComponent(name)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-  });
-}
 

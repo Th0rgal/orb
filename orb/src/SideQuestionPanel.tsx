@@ -16,7 +16,7 @@ import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
 import { remoteLog } from './remoteLog';
-import { askSide, sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
+import { sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
 import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
 export type SideQuestionsHandle={ask:(question:string,images?:DraftImage[],files?:UploadedFile[])=>Promise<boolean>;open:()=>void};

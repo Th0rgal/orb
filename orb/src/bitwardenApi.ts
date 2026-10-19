@@ -1,8 +1,6 @@
 import { api } from "./api";
 import { signedApi } from "./deviceApproval";
 
-export const PALOMA_BITWARDEN_PROJECT_ID = "297f3106-758f-43d5-8a4b-b460007558c8";
-
 export interface BitwardenStatus {
   configured: boolean;
   token_source: string | null;
