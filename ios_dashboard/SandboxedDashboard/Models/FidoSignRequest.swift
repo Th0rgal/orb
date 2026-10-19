@@ -53,6 +53,37 @@ extension FidoSignRequest {
     }
 }
 
+/// Body of `GET /api/fido/pending` (src/api/fido.rs `FidoPendingResponse`).
+struct FidoPendingResponse: Decodable {
+    struct Item: Decodable {
+        let request_id: String
+        let key_type: String
+        let key_fingerprint: String
+        let origin: String
+        let hostname: String?
+        let workspace: String?
+        let expires_at: String
+    }
+
+    let requests: [Item]
+
+    /// Each item as a `fido_sign_request` event payload, for `FidoSignRequest.parse`.
+    var payloads: [[String: Any]] {
+        requests.map { item in
+            var d: [String: Any] = [
+                "request_id": item.request_id,
+                "key_type": item.key_type,
+                "key_fingerprint": item.key_fingerprint,
+                "origin": item.origin,
+                "expires_at": item.expires_at,
+            ]
+            if let h = item.hostname { d["hostname"] = h }
+            if let w = item.workspace { d["workspace"] = w }
+            return d
+        }
+    }
+}
+
 /// Body of `POST /api/fido/respond` (src/api/fido.rs `FidoRespondRequest`).
 struct FidoRespondBody: Encodable, Equatable {
     let request_id: String

@@ -859,6 +859,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // FIDO signing relay endpoints
         .route("/api/fido/request", post(super::fido::post_fido_request))
         .route("/api/fido/respond", post(super::fido::post_fido_respond))
+        .route("/api/fido/pending", get(super::fido::get_fido_pending))
         // Global control session endpoints
         .route("/api/control/message", post(control::post_message))
         .route("/api/control/tool_result", post(control::post_tool_result))

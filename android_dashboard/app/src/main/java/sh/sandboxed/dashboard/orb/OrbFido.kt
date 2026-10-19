@@ -53,7 +53,10 @@ data class OrbFidoRequest(
 object OrbFido {
     const val EVENT_TYPE = "fido_sign_request"
     const val RESPOND_PATH = "/api/fido/respond"
-    private const val STREAM_PATH = "/api/control/stream"
+    /** Filtered to FIDO events so the monitor does not receive every mission event. */
+    const val STREAM_PATH = "/api/control/stream?kinds=fido"
+    /** Requests still waiting for an answer; fetched on each (re)connect. Core has no push channel. */
+    const val PENDING_PATH = "/api/fido/pending"
 
     private val _pending = MutableStateFlow<List<OrbFidoRequest>>(emptyList())
     val pending: StateFlow<List<OrbFidoRequest>> = _pending.asStateFlow()
@@ -63,6 +66,15 @@ object OrbFido {
         val dict = OrbJSON.dict(OrbJSON.parse(data)) ?: return null
         val type = eventType?.takeIf { it.isNotEmpty() && it != "message" } ?: OrbJSON.str(dict, "type")
         if (type != EVENT_TYPE) return null
+        return fromDict(dict)
+    }
+
+    /** Parse a `GET /api/fido/pending` response (`{"requests":[...]}`). */
+    fun parsePending(response: Any?): List<OrbFidoRequest> =
+        (OrbJSON.dict(response)?.get("requests") as? List<*>).orEmpty()
+            .mapNotNull { item -> OrbJSON.dict(item)?.let(::fromDict) }
+
+    private fun fromDict(dict: OrbDict): OrbFidoRequest? {
         val id = OrbJSON.str(dict, "request_id")?.takeIf { it.isNotBlank() } ?: return null
         return OrbFidoRequest(
             requestId = id,
@@ -108,6 +120,9 @@ object OrbFido {
         while (true) {
             if (!core.isConfigured || core.token.isNullOrBlank()) return
             val error: Throwable? = try {
+                // Requests made while the app was closed or the stream was down.
+                val now = System.currentTimeMillis()
+                parsePending(core.request(PENDING_PATH)).filterNot { it.isExpired(now) }.forEach(::enqueue)
                 streamOnce(core) { attempt = 0 }
             } catch (c: CancellationException) {
                 throw c

@@ -20525,6 +20525,32 @@ pub struct StreamQuery {
     /// event the user can see (used by the mission list / debug overlay).
     #[serde(default)]
     pub mission: Option<Uuid>,
+    /// Optional comma-separated event-kind filter, e.g. `kinds=fido`. A kind
+    /// matches an event whose SSE name equals it or starts with `<kind>_`
+    /// (`fido` matches `fido_sign_request`). The initial status snapshot and
+    /// `stream_lagged` are always sent. Lets the mobile apps' background
+    /// FIDO monitor skip every mission event.
+    #[serde(default)]
+    pub kinds: Option<String>,
+}
+
+/// Parse `StreamQuery::kinds` into a filter; `None` means "every event".
+pub(crate) fn parse_stream_kinds(raw: Option<&str>) -> Option<Vec<String>> {
+    let kinds: Vec<String> = raw?
+        .split(',')
+        .map(|k| k.trim().to_ascii_lowercase())
+        .filter(|k| !k.is_empty())
+        .collect();
+    (!kinds.is_empty()).then_some(kinds)
+}
+
+pub(crate) fn stream_kind_matches(kinds: &[String], event_name: &str) -> bool {
+    kinds.iter().any(|k| {
+        event_name == k
+            || (event_name.len() > k.len()
+                && event_name.starts_with(k.as_str())
+                && event_name.as_bytes()[k.len()] == b'_')
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -21038,6 +21064,7 @@ pub async fn stream(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let mission_filter = query.mission;
+    let kinds_filter = parse_stream_kinds(query.kinds.as_deref());
     // P3-#20: when a mission filter is set, subscribe to that mission's
     // dedicated channel — the fan-out task in spawn_control_session
     // mirrors events from the global tx into per-mission txs. Avoids
@@ -21143,6 +21170,11 @@ pub async fn stream(
                     match ev_result {
                         Ok(ev) => {
                             let mission_id = ev.mission_id();
+                            if let Some(kinds) = kinds_filter.as_deref() {
+                                if !stream_kind_matches(kinds, ev.event_name()) {
+                                    continue;
+                                }
+                            }
                             // Per-mission channel only carries events that
                             // already match the filter (the fan-out task
                             // is the gate); no further filtering needed.
@@ -21203,6 +21235,11 @@ pub async fn stream(
                     match result {
                         Ok(ev) => {
                             let mission_id = ev.mission_id();
+                            if let Some(kinds) = kinds_filter.as_deref() {
+                                if !stream_kind_matches(kinds, ev.event_name()) {
+                                    continue;
+                                }
+                            }
                             // When a per-mission channel is active, the
                             // global arm only forwards connection-scoped
                             // events (Status, FidoSignRequest). Per-mission
@@ -43780,5 +43817,33 @@ Investigate <service/> failures.
         );
         assert_eq!(waits.get(&waiting.mission_id), Some(&None));
         assert!(!waits.contains_key(&running.mission_id));
+    }
+}
+
+#[cfg(test)]
+mod stream_kinds_tests {
+    use super::{parse_stream_kinds, stream_kind_matches};
+
+    #[test]
+    fn absent_or_empty_kinds_means_everything() {
+        assert_eq!(parse_stream_kinds(None), None);
+        assert_eq!(parse_stream_kinds(Some(" , ")), None);
+    }
+
+    #[test]
+    fn fido_kind_selects_only_fido_events() {
+        let kinds = parse_stream_kinds(Some("FIDO")).unwrap();
+        assert!(stream_kind_matches(&kinds, "fido_sign_request"));
+        assert!(!stream_kind_matches(&kinds, "assistant_message"));
+        assert!(!stream_kind_matches(&kinds, "status"));
+        assert!(!stream_kind_matches(&kinds, "fidoish"));
+    }
+
+    #[test]
+    fn multiple_kinds_and_exact_names() {
+        let kinds = parse_stream_kinds(Some("fido, status")).unwrap();
+        assert!(stream_kind_matches(&kinds, "status"));
+        assert!(stream_kind_matches(&kinds, "fido_sign_request"));
+        assert!(!stream_kind_matches(&kinds, "thinking"));
     }
 }
