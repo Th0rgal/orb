@@ -775,10 +775,9 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            let until = Instant::now() + Duration::from_secs(5);
-            loop {
-                let state = local_agents_poll(id.clone()).unwrap();
-                if state.done {
+            {
+                let state = wait_for_terminal(&id, Duration::from_secs(5));
+                {
                     assert_eq!(state.exit_code, Some(code));
                     match expected {
                         Some(message) => assert!(
@@ -792,63 +791,91 @@ mod tests {
                         }
                     }
                     assert!(!state.text.contains("connectors are disabled"));
-                    break;
                 }
-                assert!(Instant::now() < until);
-                thread::sleep(Duration::from_millis(5));
             }
             runs().lock().unwrap().remove(&id);
         }
     }
 
+    /// Each case feeds events in order; `expected` is what each one yields.
     #[test]
-    fn claude_final_result_fills_missing_stream_without_duplicates() {
-        let mut text = ClaudeText::default();
-        let result = json!({"type":"result","is_error":false,"result":"Recovered final"});
-        assert_eq!(text.consume(&result).as_deref(), Some("Recovered final"));
-        assert!(text.consume(&result).is_none());
-        let mut failed = ClaudeText::default();
-        assert!(failed
-            .consume(&json!({"type":"result","is_error":true,"result":"Rate limited"}))
-            .is_none());
-    }
-
-    #[test]
-    fn claude_snapshot_without_deltas_is_not_lost() {
-        let mut text = ClaudeText::default();
-        let event = json!({"type":"assistant","message":{"id":"a","content":[{"type":"text","text":"Final answer"}]}});
-        assert_eq!(text.consume(&event).as_deref(), Some("Final answer"));
-        assert!(text.consume(&event).is_none());
-        let next = json!({"type":"assistant","message":{"id":"b","content":[{"type":"text","text":"Next answer"}]}});
-        assert_eq!(text.consume(&next).as_deref(), Some("\n\nNext answer"));
-    }
-
-    #[test]
-    fn claude_text_preserves_tokens_and_separates_message_blocks() {
-        let mut text = ClaudeText::default();
-        let mut output = String::new();
-        for event in [
-            json!({"type":"message_start"}),
-            json!({"type":"content_block_start","content_block":{"type":"text"}}),
-            json!({"delta":{"type":"text_delta","text":"Bon"}}),
-            json!({"delta":{"type":"text_delta","text":"jour."}}),
-            json!({"type":"content_block_start","content_block":{"type":"tool_use"}}),
-            json!({"type":"message_start"}),
-            json!({"type":"content_block_start","content_block":{"type":"text"}}),
-            json!({"delta":{"type":"text_delta","text":""}}),
-            json!({"delta":{"type":"text_delta","text":"La suite."}}),
-            json!({"type":"content_block_start","content_block":{"type":"text"}}),
-            json!({"delta":{"type":"text_delta","text":"```rust\nfn main() {}\n```"}}),
-        ] {
-            if let Some(piece) = text.consume(&json!({"type":"stream_event","event":event})) {
-                output.push_str(&piece);
+    fn claude_text_cases() {
+        let stream = |event: Value| json!({"type":"stream_event","event":event});
+        let delta = |text: &str| stream(json!({"delta":{"type":"text_delta","text":text}}));
+        let text_block =
+            || stream(json!({"type":"content_block_start","content_block":{"type":"text"}}));
+        let snapshot = |id: &str, text: &str| json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":text}]}});
+        let ok_result = |text: &str| json!({"type":"result","is_error":false,"result":text});
+        let cases: Vec<(&str, Vec<(Value, Option<&str>)>)> = vec![
+            (
+                "a final result fills a missing stream once",
+                vec![
+                    (ok_result("Recovered final"), Some("Recovered final")),
+                    (ok_result("Recovered final"), None),
+                ],
+            ),
+            (
+                "an error result is never text",
+                vec![(
+                    json!({"type":"result","is_error":true,"result":"Rate limited"}),
+                    None,
+                )],
+            ),
+            (
+                "a snapshot without deltas is kept, once per message",
+                vec![
+                    (snapshot("a", "Final answer"), Some("Final answer")),
+                    (snapshot("a", "Final answer"), None),
+                    (snapshot("b", "Next answer"), Some("\n\nNext answer")),
+                ],
+            ),
+            (
+                "deltas keep tokens and messages are separated",
+                vec![
+                    (stream(json!({"type":"message_start"})), None),
+                    (text_block(), None),
+                    (delta("Bon"), Some("Bon")),
+                    (delta("jour."), Some("jour.")),
+                    (
+                        stream(
+                            json!({"type":"content_block_start","content_block":{"type":"tool_use"}}),
+                        ),
+                        None,
+                    ),
+                    (stream(json!({"type":"message_start"})), None),
+                    (text_block(), None),
+                    (delta(""), None),
+                    (delta("La suite."), Some("\n\nLa suite.")),
+                    (text_block(), None),
+                    (
+                        delta("```rust\nfn main() {}\n```"),
+                        Some("\n\n```rust\nfn main() {}\n```"),
+                    ),
+                    // The snapshot of a streamed message is a duplicate.
+                    (
+                        json!({"type":"assistant","message":{"content":[{"type":"text","text":"duplicate"}]}}),
+                        None,
+                    ),
+                ],
+            ),
+            (
+                "a result after streamed text is not repeated",
+                vec![
+                    (delta("Streamed"), Some("Streamed")),
+                    (ok_result("Streamed"), None),
+                ],
+            ),
+        ];
+        for (name, steps) in cases {
+            let mut text = ClaudeText::default();
+            for (index, (event, expected)) in steps.into_iter().enumerate() {
+                assert_eq!(
+                    text.consume(&event).as_deref(),
+                    expected,
+                    "{name}, event {index}"
+                );
             }
         }
-        assert_eq!(
-            output,
-            "Bonjour.\n\nLa suite.\n\n```rust\nfn main() {}\n```"
-        );
-        assert!(text.consume(&json!({"type":"assistant","message":{"content":[{"type":"text","text":"duplicate"}]}})).is_none());
     }
 
     #[cfg(unix)]
@@ -1166,14 +1193,7 @@ printf '%s\n' '{"type":"result"}'
             shared_cwd_with: None,
         })
         .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let state = loop {
-            let state = local_agents_poll(id.clone()).unwrap();
-            if state.done || Instant::now() > deadline {
-                break state;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
+        let state = wait_for_terminal(&id, Duration::from_secs(10));
         runs().lock().unwrap().remove(&id);
         assert!(state.done, "the run did not finish");
         assert_eq!(state.text, "Resumed reply.");
@@ -1210,11 +1230,8 @@ printf '%s\n' '{"type":"result"}'
                 session_id: resume.map(Into::into),
                 image_paths: vec![], shared_cwd_with: None, })
             .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !local_agents_poll(id.clone()).unwrap().done {
-                assert!(Instant::now() < deadline, "the run never ended (resume={resume:?})");
-                thread::sleep(Duration::from_millis(20));
-            }
+            let state = wait_for_terminal(&id, Duration::from_secs(10));
+            assert!(state.done, "the run never ended (resume={resume:?})");
             let _ = local_agents_stop(id.clone());
             runs().lock().unwrap().remove(&id);
         }

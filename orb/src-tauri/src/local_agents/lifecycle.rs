@@ -401,9 +401,259 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Block until the run publishes its terminal state, then poll it. The
+/// terminal event comes through the same subscription the client link uses,
+/// so tests wait on an event instead of sleeping between polls.
+#[cfg(test)]
+pub(crate) fn wait_for_terminal(id: &str, timeout: Duration) -> PollState {
+    let (sink, events) = std::sync::mpsc::channel();
+    subscribe_native(id, sink).expect("the run exists");
+    let deadline = Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match events.recv_timeout(left) {
+            Ok(event) if event.state.is_some() => break,
+            Ok(_) => {}
+            Err(_) => panic!("{id} did not finish within {timeout:?}"),
+        }
+    }
+    poll_generation(id, None).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settled(
+        harness: &str,
+        strict: bool,
+        stopped: bool,
+        code: Option<i32>,
+        signal: Option<i32>,
+        diagnostic: Option<&str>,
+        error: Option<&str>,
+    ) -> (Option<i32>, Option<String>) {
+        let ctx = RunCtx::new("settle", harness, None);
+        if let Some(diagnostic) = diagnostic {
+            ctx.output.set_diagnostic(diagnostic.into());
+        }
+        if let Some(error) = error {
+            ctx.error.set(error.into());
+        }
+        let exit_code = Slot::new(code);
+        settle_exit(&ctx, strict, stopped, signal, &exit_code);
+        (exit_code.get(), ctx.error.get())
+    }
+
+    #[test]
+    fn a_failed_process_is_labelled_with_its_own_harness() {
+        assert_eq!(
+            settled("opencode", false, false, Some(3), None, Some("boom"), None),
+            (Some(3), Some("OpenCode process failed: boom".into()))
+        );
+        assert_eq!(
+            settled(
+                "claudecode",
+                false,
+                false,
+                Some(9),
+                None,
+                Some("boom"),
+                Some(harness::claude::STOPPED_WITHOUT_RESULT)
+            ),
+            (Some(9), Some("Claude process failed: boom".into()))
+        );
+        // A real protocol error is kept, and a success ignores stderr.
+        assert_eq!(
+            settled(
+                "grok",
+                false,
+                false,
+                Some(1),
+                None,
+                Some("noise"),
+                Some("Rate limited")
+            ),
+            (Some(1), Some("Rate limited".into()))
+        );
+        assert_eq!(
+            settled("codex", false, false, Some(0), None, Some("warning"), None),
+            (Some(0), None)
+        );
+    }
+
+    #[test]
+    fn strict_terminal_keeps_a_crash_code_and_explains_it() {
+        assert_eq!(
+            settled("antigravity", true, false, Some(2), None, None, None),
+            (Some(2), Some("Antigravity exited with code 2".into()))
+        );
+        assert_eq!(
+            settled("antigravity", true, false, None, Some(11), None, None),
+            (
+                Some(1),
+                Some("Antigravity was terminated by signal 11".into())
+            )
+        );
+        // A parsed error fails even a clean exit, and keeps a real code.
+        assert_eq!(
+            settled(
+                "antigravity",
+                true,
+                false,
+                Some(0),
+                None,
+                None,
+                Some("network")
+            ),
+            (Some(1), Some("network".into()))
+        );
+        assert_eq!(
+            settled(
+                "antigravity",
+                true,
+                false,
+                Some(4),
+                None,
+                None,
+                Some("network")
+            ),
+            (Some(4), Some("network".into()))
+        );
+        // Stop is deliberate: not reported as a crash.
+        assert_eq!(
+            settled("antigravity", true, true, None, Some(9), None, None),
+            (Some(0), None)
+        );
+        assert_eq!(
+            settled("antigravity", true, false, Some(0), None, None, None),
+            (Some(0), None)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_terminal_reports_a_silent_nonzero_exit_end_to_end() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agy-fixture");
+        // A resumed conversation that dies with code 3 and an empty stderr.
+        std::fs::write(&bin, "#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let request = StartRequest {
+            id: format!("strict-exit-{}", uuid_like()),
+            harness: "antigravity".into(),
+            bin: bin.to_string_lossy().into_owned(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: "hello".into(),
+            session_id: Some("native-session".into()),
+            ..Default::default()
+        };
+        let ctx = RunCtx::new(&request.id, &request.harness, request.session_id.clone());
+        let mut child = harness::spawn_harness(&request, &ctx, &[], &[]).unwrap();
+        let status = child.wait().unwrap();
+        assert!(ctx.output.wait_drained(Some(Duration::from_secs(5))));
+        let exit_code = Slot::new(status.code());
+        // The stream itself reports a missing result; without it, the
+        // exit code alone must still read as a failure.
+        ctx.error.replace(None);
+        settle_exit(&ctx, true, false, exit_signal(status), &exit_code);
+        assert_eq!(exit_code.get(), Some(3));
+        assert_eq!(
+            ctx.error.get().as_deref(),
+            Some("Antigravity exited with code 3")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_poisoned_slot_does_not_hang_the_exit_watcher() {
+        let id = format!("poisoned-{}", uuid_like());
+        let ctx = RunCtx::new(&id, "grok", None);
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 5"])
+            .spawn()
+            .unwrap();
+        let run = Run::new(ctx.clone(), child, PathBuf::from("/tmp"), false);
+        let code = run.exit_code.clone();
+        let _ = thread::spawn(move || code.update(|_| panic!("poison"))).join();
+        let error = ctx.error.clone();
+        let _ = thread::spawn(move || error.update(|_| panic!("poison"))).join();
+        let _ = {
+            let child = Arc::clone(&run.child);
+            thread::spawn(move || {
+                let _guard = child.lock().unwrap();
+                panic!("poison the child");
+            })
+            .join()
+        };
+        assert!(run.child.is_poisoned());
+        lock(runs()).insert(id.clone(), run.clone());
+        watch_exit(
+            crate::agent_software::begin(&id, "grok", None).unwrap(),
+            crate::interactions::begin(&id),
+            run.clone(),
+            false,
+        );
+        let state = wait_for_terminal(&id, Duration::from_secs(5));
+        assert!(state.done);
+        assert_eq!(state.exit_code, Some(5));
+        lock(runs()).remove(&id);
+    }
+
+    #[test]
+    fn finished_runs_beyond_the_cap_are_pruned_oldest_first() {
+        let prefix = format!("prune-{}", uuid_like());
+        let ids: Vec<String> = (0..KEPT_FINISHED_RUNS + 3)
+            .map(|n| format!("{prefix}-{n}"))
+            .collect();
+        // Older than any run another test finishes meanwhile, so only these
+        // are pruned.
+        let hour_ago = Instant::now() - Duration::from_secs(3600);
+        for (n, id) in ids.iter().enumerate() {
+            let child = Command::new("true").spawn().unwrap();
+            let run = Run::new(
+                RunCtx::new(id, "grok", None),
+                child,
+                PathBuf::from("/tmp"),
+                false,
+            );
+            run.ctx.done.store(true, Ordering::SeqCst);
+            let _ = run.finished.set(hour_ago + Duration::from_secs(n as u64));
+            reap(&mut lock(&run.child), id, "test");
+            lock(runs()).insert(id.clone(), run);
+        }
+        let running = format!("{prefix}-running");
+        let child = Command::new("true").spawn().unwrap();
+        let live = Run::new(
+            RunCtx::new(&running, "grok", None),
+            child,
+            PathBuf::from("/tmp"),
+            false,
+        );
+        reap(&mut lock(&live.child), &running, "test");
+        lock(runs()).insert(running.clone(), live);
+        let untouched_fence = launch_fence(&format!("{prefix}-fence"));
+        *lock(&launch_fence(&format!("{prefix}-stopped"))) += 1;
+        drop(untouched_fence);
+        prune_finished_runs();
+        let map = lock(runs());
+        assert!(map.contains_key(&running), "a live run is never pruned");
+        // Other tests may finish runs concurrently: only this test's oldest
+        // runs must be gone, and its newest kept.
+        assert!(!map.contains_key(&ids[0]));
+        assert!(map.contains_key(ids.last().unwrap()));
+        drop(map);
+        let fences = lock(fences());
+        assert!(!fences.contains_key(&format!("{prefix}-fence")));
+        assert!(
+            fences.contains_key(&format!("{prefix}-stopped")),
+            "an advanced fence persists"
+        );
+        drop(fences);
+        let mut map = lock(runs());
+        map.retain(|id, _| !id.starts_with(&prefix));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -425,11 +675,10 @@ mod tests {
         };
         local_agents_start(request.clone()).unwrap();
         let initial_generation = native_generation(&request.id).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !local_agents_poll(request.id.clone()).unwrap().done {
-            assert!(Instant::now() < deadline, "fixture did not complete");
-            thread::sleep(Duration::from_millis(10));
-        }
+        assert!(
+            wait_for_terminal(&request.id, Duration::from_secs(3)).done,
+            "fixture did not complete"
+        );
         local_agents_start(request.clone()).expect("a finished run must not block a new turn");
         assert!(
             poll_generation(&request.id, Some(&initial_generation)).is_err(),

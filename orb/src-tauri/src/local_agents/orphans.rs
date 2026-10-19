@@ -333,4 +333,51 @@ mod tests {
         let pids = find_orphan_mission_pids(&mission, Some(&session));
         assert!(pids.is_empty());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_orphans_spares_unrelated_process_groups() {
+        use std::os::unix::process::CommandExt;
+        let mission = uuid::Uuid::new_v4().to_string();
+        let group = |args: &[&str]| {
+            let mut command = Command::new("/bin/sh");
+            command.args(args).process_group(0);
+            command.spawn().unwrap()
+        };
+        // The orphan names the mission in its argv and leads a group with a
+        // child of its own; the bystander leads another group.
+        let mut orphan = group(&["-c", "sleep 30 & wait", "orphan", "--mission-id", &mission]);
+        let mut bystander = group(&[
+            "-c",
+            "sleep 30 & wait",
+            "bystander",
+            "--mission-id",
+            "other",
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while find_orphan_mission_pids(&mission, None).is_empty() {
+            assert!(Instant::now() < deadline, "the orphan never appeared");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(find_orphan_mission_pids(&mission, None), vec![orphan.id()]);
+        stop_orphan_mission_processes(&mission);
+        let status = orphan.wait().unwrap();
+        assert!(!status.success(), "the orphan was signalled");
+        let orphan_group = orphan.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Its group (the background sleep) goes with it.
+        while unsafe { libc::kill(-orphan_group, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the orphan's group survived");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "an unrelated group was signalled"
+        );
+        assert_eq!(unsafe { libc::kill(-(bystander.id() as i32), 0) }, 0);
+        unsafe {
+            libc::kill(-(bystander.id() as i32), libc::SIGKILL);
+        }
+        let _ = bystander.wait();
+    }
 }

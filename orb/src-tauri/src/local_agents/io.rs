@@ -322,6 +322,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oversized_stderr_is_drained_but_only_its_start_is_kept() {
+        let flood = || std::io::Cursor::new(vec![b'x'; 8 * 1024 * 1024]);
+        let ctx = RunCtx::new("stderr-cap", "grok", None);
+        drain_stderr(flood(), &ctx, StderrPolicy::ErrorHead)
+            .join()
+            .unwrap();
+        assert_eq!(ctx.error.get().unwrap().len(), 500);
+        assert!(ctx.output.drained());
+        let ctx = RunCtx::new("stderr-cap", "claudecode", None);
+        drain_stderr(flood(), &ctx, StderrPolicy::ClaudeDiagnostic)
+            .join()
+            .unwrap();
+        assert_eq!(ctx.output.diagnostic().unwrap().len(), 1000);
+        assert!(ctx.error.get().is_none(), "a diagnostic is not an error");
+        // One endless line still yields the marker on the next line.
+        let mut lines = vec![b'y'; 4 * MAX_STDERR_LINE];
+        lines
+            .extend_from_slice(b"\nAGY_ERROR: {\"short_error\":\"no route\",\"retryable\":true}\n");
+        let ctx = RunCtx::new("stderr-cap", "antigravity", None);
+        let marker = drain_stderr(
+            std::io::Cursor::new(lines),
+            &ctx,
+            StderrPolicy::AntigravityMarker,
+        )
+        .join()
+        .unwrap();
+        assert!(marker.is_some());
+    }
+
+    #[test]
+    fn bounded_lines_are_cut_and_the_reader_moves_on() {
+        let mut input = std::io::Cursor::new(b"abcdefgh\r\nok\nlast".to_vec());
+        let mut line = Vec::new();
+        assert_eq!(read_bounded_line(&mut input, &mut line, 3).unwrap(), 10);
+        assert_eq!(line, b"abc");
+        read_bounded_line(&mut input, &mut line, 3).unwrap();
+        assert_eq!(line, b"ok");
+        read_bounded_line(&mut input, &mut line, 3).unwrap();
+        assert_eq!(line, b"las");
+        assert_eq!(read_bounded_line(&mut input, &mut line, 3).unwrap(), 0);
+    }
+
+    #[test]
+    fn session_ids_follow_one_table_of_harness_conventions() {
+        let uuid = "6f1c1f43-6c38-4cb6-9d0f-7f3c4c2b9a10";
+        for (event, expected) in [
+            (json!({"sessionID":"ses_abc"}), Some("ses_abc")),
+            (json!({"sessionID":"not-opencode"}), None),
+            (json!({"type":"init","session_id":"grok-1"}), Some("grok-1")),
+            (json!({"type":"init","session_id":""}), None),
+            (json!({"type":"result","session_id":"grok-1"}), None),
+            (json!({"sessionId":uuid}), Some(uuid)),
+            (json!({"sessionId":"not-a-uuid"}), None),
+            // The first matching rule wins.
+            (
+                json!({"sessionID":"ses_first","type":"init","session_id":"second"}),
+                Some("ses_first"),
+            ),
+            (
+                json!({"type":"init","session_id":"init","sessionId":uuid}),
+                Some("init"),
+            ),
+            (json!({}), None),
+        ] {
+            assert_eq!(session_id_from_event(&event), expected, "{event}");
+        }
+        assert_eq!(SESSION_RULES.len(), 3);
+    }
+
+    #[test]
     fn plain_stream_does_not_wait_for_newlines_and_preserves_utf8() {
         struct Bytes<'a> {
             bytes: &'a [u8],
