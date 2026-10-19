@@ -452,7 +452,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         backgroundLoopTask = Task { @MainActor in
             // Poll at launch too: a finished mission shouldn't wait 15 s to show up.
             await Poller.run(every: .seconds(15), while: {
-                APIService.shared.isConfigured && APIService.shared.isAuthenticated && !APIService.shared.authSessionExpired
+                OrbCore.shared.isConfigured && OrbCore.shared.isAuthenticated && !OrbCore.shared.authSessionExpired
             }) { await pollHybridMissionsOnce() }
         }
     }
@@ -728,8 +728,8 @@ enum OrbBackgroundRefresh {
         schedule()
         OrbDiagnosticsClock.lastBackgroundRefresh = Date()
         Log.background.notice("background refresh started")
-        guard APIService.shared.isConfigured, APIService.shared.isAuthenticated,
-              !APIService.shared.authSessionExpired else { return }
+        guard OrbCore.shared.isConfigured, OrbCore.shared.isAuthenticated,
+              !OrbCore.shared.authSessionExpired else { return }
         await OrbNotificationCenter.shared.pollHybridMissionsOnce()
     }
 }

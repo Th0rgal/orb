@@ -67,6 +67,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -82,6 +84,7 @@ import kotlin.math.roundToInt
 
 enum class OrbSettingsRoute {
     Root,
+    Fido,
     Backend,
     Providers,
     Machines,
@@ -233,6 +236,16 @@ fun OrbSettingsSheet(
                                 modifier = Modifier.padding(start = 52.dp)
                             )
                             OrbSettingsRow(
+                                icon = Icons.Default.Lock,
+                                title = "SSH signing",
+                                subtitle = "Biometric approvals · trust window ${OrbFidoSettings.trust.minutes.let { if (it <= 0) "off" else "$it min" }}",
+                                onClick = { route = OrbSettingsRoute.Fido }
+                            )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            OrbSettingsRow(
                                 icon = Icons.Default.Mic,
                                 title = "Dictation",
                                 subtitle = OrbDictationSettings.stored.let {
@@ -301,6 +314,9 @@ fun OrbSettingsSheet(
                         onBack = { route = OrbSettingsRoute.Root },
                         onOpenRequests = { route = OrbSettingsRoute.Secrets }
                     )
+                }
+                OrbSettingsRoute.Fido -> {
+                    OrbFidoSettingsPage(onBack = { route = OrbSettingsRoute.Root })
                 }
                 OrbSettingsRoute.Dictation -> {
                     OrbDictationSettingsPage(onBack = { route = OrbSettingsRoute.Root })
@@ -380,6 +396,28 @@ fun OrbSetupView(
     var passwordInput by remember { mutableStateOf("") }
     var isConnecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val signedInToken by core.tokenFlow.collectAsState()
+    val gitHubButton = remember {
+        OrbGitHubSignInButton(OrbGitHubSignIn(OrbGitHubSignIn.prefsStore(context))) { base ->
+            // The callback is only accepted for the endpoint the app is configured with.
+            core.configureSession(base, core.token, null)
+            sh.sandboxed.dashboard.util.GitHubAuth.launch(context, base)
+        }
+    }
+    var gitHubState by remember { mutableStateOf<OrbGitHubSignInButton.State>(OrbGitHubSignInButton.State.Idle) }
+    LaunchedEffect(gitHubState, signedInToken) {
+        val pending = gitHubState as? OrbGitHubSignInButton.State.Pending ?: return@LaunchedEffect
+        while (isActive) {
+            delay(1_000)
+            val next = gitHubButton.refresh(pending)
+            if (next != pending) {
+                gitHubState = next
+                if (!core.token.isNullOrEmpty() && core.baseURL.trimEnd('/').equals(pending.endpoint, ignoreCase = true)) onConnected()
+                break
+            }
+        }
+    }
 
     fun connect() {
         val cleanBase = urlInput.trim().trimEnd('/')
@@ -549,6 +587,37 @@ fun OrbSetupView(
                     fontWeight = FontWeight.SemiBold
                 )
             }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(OrbStyle.surface)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+                .orbPressClickable(enabled = !isConnecting && gitHubState !is OrbGitHubSignInButton.State.Pending) {
+                    errorMessage = null
+                    gitHubState = gitHubButton.start(urlInput)
+                }
+                .padding(vertical = 14.dp)
+                .semantics { contentDescription = "Sign in with GitHub" },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (gitHubState is OrbGitHubSignInButton.State.Pending) "Waiting for GitHub…" else "Sign in with GitHub",
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        when (val state = gitHubState) {
+            is OrbGitHubSignInButton.State.Pending -> Text(
+                "Finish signing in in the browser. Orb accepts the sign-in for this server for 10 minutes.",
+                color = OrbStyle.textMuted,
+                fontSize = 13.sp
+            )
+            is OrbGitHubSignInButton.State.Failed -> OrbNotice(title = state.message, log = null)
+            OrbGitHubSignInButton.State.Idle -> Unit
         }
 
         if (core.isConfigured) {

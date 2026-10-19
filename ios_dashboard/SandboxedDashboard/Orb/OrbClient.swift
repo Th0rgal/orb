@@ -1,17 +1,14 @@
-//
-//  APIService.swift
-//  SandboxedDashboard
-//
-//  HTTP API client for the sandboxed.sh backend
-//
-
 import Foundation
 import Observation
 
+/// The one HTTP client for the sandboxed.sh backend: server URL, auth (Keychain
+/// token + saved login), typed and untyped JSON calls, control streams. Every
+/// request goes through `send`, so 401 handling and errors (`OrbHTTPError`) are
+/// the same everywhere.
 @MainActor
 @Observable
-final class APIService {
-    static let shared = APIService()
+final class OrbCore {
+    static let shared = OrbCore()
     nonisolated init() {}
 
     nonisolated static let defaultBaseURL: String = {
@@ -144,6 +141,9 @@ final class APIService {
         jwtToken
     }
 
+    /// `baseURL` without a trailing slash; requests are built as `endpoint + path`.
+    var endpoint: String { baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+
     var isAuthenticated: Bool {
         jwtToken != nil
     }
@@ -152,10 +152,11 @@ final class APIService {
     var authMode: AuthMode = .singleTenant
     var authSessionExpired: Bool = false
     var authRefreshing = false
+    /// Core version from the last `/api/health` (nil until probed or when the server omits it).
+    var backendVersion: String?
     private var sessionRecovery: Task<Void, Never>?
     private var loginAttempt = UUID()
     var connectionGeneration = 0
-    var onSuccessfulAuthenticatedRequest: (() -> Void)?
 
     enum AuthMode: String {
         case disabled = "disabled"
@@ -257,9 +258,10 @@ final class APIService {
             let status: String
             let authRequired: Bool
             let authMode: String?
-            
+            let version: String?
+
             enum CodingKeys: String, CodingKey {
-                case status
+                case status, version
                 case authRequired = "auth_required"
                 case authMode = "auth_mode"
             }
@@ -267,6 +269,7 @@ final class APIService {
         
         let response: HealthResponse = try await get("/api/health", authenticated: false)
         authRequired = response.authRequired
+        backendVersion = response.version
         if let modeRaw = response.authMode, let mode = AuthMode(rawValue: modeRaw) {
             authMode = mode
         } else {
@@ -627,11 +630,66 @@ final class APIService {
         return true
     }
     
-    // MARK: - Private Helpers
-    
-    private struct EmptyBody: Encodable {}
+    // MARK: - Requests
+
     private struct EmptyResponse: Decodable {}
-    
+
+    /// Untyped JSON call used by the Orb screens. `rawBody` sends exact bytes
+    /// (device-signed requests hash them); `headers` are added as-is.
+    func call(_ path: String, method: String = "GET", body: OrbJSON? = nil, rawBody: Data? = nil, headers: [String: String] = [:]) async throws -> OrbJSON {
+        guard let url = URL(string: endpoint + path) else {
+            ErrorRing.shared.recordRequest(path: "\(method) \(path)", error: OrbHTTPError.invalidURL)
+            throw OrbHTTPError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 45
+        request.setValue("Bearer \(authToken ?? "")", forHTTPHeaderField: "Authorization")
+        if let rawBody { request.httpBody = rawBody; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        else if let body {
+            do { request.httpBody = try JSONEncoder().encode(body) }
+            catch { ErrorRing.shared.recordRequest(path: "\(method) \(path)", error: error); throw error }
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        let (data, _) = try await send(request, session: .shared, label: "\(method) \(path)", failure: "Request failed")
+        if data.isEmpty { return .null }
+        return try await decode(OrbJSON.self, from: data, label: "\(method) \(path)")
+    }
+
+    func transcribe(_ wav: Data, language: String) async throws -> String {
+        guard wav.count <= 4 * 1024 * 1024,
+              let url = URL(string: endpoint + "/api/voice/transcribe?language=" + Self.escape(language)) else { throw OrbHTTPError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 100
+        request.setValue("Bearer \(authToken ?? "")", forHTTPHeaderField: "Authorization")
+        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        request.httpBody = wav
+        let (data, _) = try await send(request, session: .shared, label: "POST /api/voice/transcribe", failure: "Transcription failed")
+        return try await decode(OrbJSON.self, from: data, label: "POST /api/voice/transcribe")["text"].text
+    }
+
+    nonisolated static func escape(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }
+
+    func missions(_ project: String, includeArchived: Bool = false) async throws -> [OrbRow] {
+        var rows: [OrbRow] = [], offset = 0
+        while true {
+            let page = try await call("/api/control/missions?project=\(Self.escape(project))&all=true&limit=100&offset=\(offset)").items
+            for raw in page {
+                let mid = raw["id"].text
+                if !mid.isEmpty {
+                    OrbReadCache.seedMemory("mission:\(mid)", value: raw)
+                }
+            }
+            let fresh = page.map { OrbRow($0) }.filter { row in !rows.contains(where: { $0.id == row.id }) }
+            rows += fresh
+            if !includeArchived || page.count < 100 || fresh.isEmpty { break }
+            offset += page.count
+        }
+        return rows.filter(\.mobile)
+    }
+
     private func get<T: Decodable>(_ path: String, authenticated: Bool = true) async throws -> T {
         try await getWithResponse(path, authenticated: authenticated).0
     }
@@ -642,74 +700,74 @@ final class APIService {
         _ path: String,
         authenticated: Bool = true
     ) async throws -> (T, HTTPURLResponse) {
-        guard let url = makeURL(path) else {
-            throw APIError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-
-        if authenticated, let token = jwtToken {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
-        return try await executeWithResponse(request)
+        try await typed(path, method: "GET", body: nil as OrbJSON?, authenticated: authenticated)
     }
-    
+
     private func post<T: Decodable, B: Encodable>(
         _ path: String,
         body: B,
-        authenticated: Bool = true,
-        session: URLSession? = nil
+        authenticated: Bool = true
     ) async throws -> T {
-        guard let url = makeURL(path) else {
-            throw APIError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        if authenticated, let token = jwtToken {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
-        request.httpBody = try JSONEncoder().encode(body)
-
-        return try await execute(request, session: session)
+        try await typed(path, method: "POST", body: body, authenticated: authenticated).0
     }
 
-    private func delete<T: Decodable>(_ path: String, authenticated: Bool = true) async throws -> T {
-        guard let url = makeURL(path) else {
-            throw APIError.invalidURL
-        }
-
+    private func typed<T: Decodable, B: Encodable>(_ path: String, method: String, body: B?, authenticated: Bool) async throws -> (T, HTTPURLResponse) {
+        guard let url = makeURL(path) else { throw OrbHTTPError.invalidURL }
         var request = URLRequest(url: url)
-        request.httpMethod = "DELETE"
-
+        request.httpMethod = method
         if authenticated, let token = jwtToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-
-        return try await execute(request)
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(body)
+        }
+        let label = "\(method) \(url.path)"
+        let (data, response) = try await send(request, session: Self.jsonSession, label: label, failure: "Unknown error")
+        if data.isEmpty || T.self == EmptyResponse.self, let empty = EmptyResponse() as? T {
+            return (empty, response)
+        }
+        return (try await decode(T.self, from: data, label: label), response)
     }
 
-    private func patch<T: Decodable, B: Encodable>(_ path: String, body: B, authenticated: Bool = true) async throws -> T {
-        guard let url = makeURL(path) else {
-            throw APIError.invalidURL
+    /// The single transport: performs the request, maps failures to
+    /// `OrbHTTPError`, expires the session on a 401 for the current token, and
+    /// records failures in the diagnostics ring.
+    private func send(_ request: URLRequest, session: URLSession, label: String, failure: String) async throws -> (Data, HTTPURLResponse) {
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw OrbHTTPError.invalidResponse }
+            if http.statusCode == 401 {
+                // A rejected login or an old in-flight request must not clear a newer session.
+                if let authorization = request.value(forHTTPHeaderField: "Authorization"),
+                   authorization == "Bearer \(authToken ?? "")",
+                   request.url?.absoluteString.hasPrefix(endpoint + "/") == true {
+                    markSessionExpired()
+                }
+                throw OrbHTTPError.unauthorized
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let text = String(data: data, encoding: .utf8) ?? ""
+                throw OrbHTTPError(status: http.statusCode, detail: text.isEmpty ? failure : text)
+            }
+            return (data, http)
+        } catch {
+            ErrorRing.shared.recordRequest(path: label, error: error)
+            throw error
         }
+    }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "PATCH"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        if authenticated, let token = jwtToken {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    /// Decodes off the main actor so a multi-MB events payload does not block the UI.
+    private func decode<T: Decodable>(_ type: T.Type, from data: Data, label: String) async throws -> T {
+        do {
+            return try await Task.detached(priority: .userInitiated) {
+                try DecodedBox(value: JSONDecoder().decode(T.self, from: data))
+            }.value.value
+        } catch {
+            let wrapped = OrbHTTPError.decoding(error)
+            ErrorRing.shared.recordRequest(path: label, error: wrapped)
+            throw wrapped
         }
-
-        request.httpBody = try JSONEncoder().encode(body)
-
-        return try await execute(request)
     }
 
     private func makeURL(_ path: String) -> URL? {
@@ -777,68 +835,6 @@ final class APIService {
         ))
     }
     
-    private func execute<T: Decodable>(_ request: URLRequest, session: URLSession? = nil) async throws -> T {
-        try await executeWithResponse(request, session: session).0
-    }
-
-    private func executeWithResponse<T: Decodable>(_ request: URLRequest, session: URLSession? = nil) async throws -> (T, HTTPURLResponse) {
-        do {
-            return try await performRequest(request, session: session)
-        } catch {
-            ErrorRing.shared.recordRequest(path: "\(request.httpMethod ?? "GET") \(request.url?.path ?? "?")", error: error)
-            throw error
-        }
-    }
-
-    private func performRequest<T: Decodable>(_ request: URLRequest, session: URLSession?) async throws -> (T, HTTPURLResponse) {
-        let urlSession = session ?? Self.jsonSession
-        let (data, response) = try await urlSession.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIError.invalidResponse
-        }
-
-        if httpResponse.statusCode == 401 {
-            // A rejected login or an old in-flight request must not clear a newer session.
-            if let authorization = request.value(forHTTPHeaderField: "Authorization"),
-               authorization == "Bearer \(authToken ?? "")",
-               request.url?.absoluteString.hasPrefix(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") == true {
-                markSessionExpired()
-            }
-            throw APIError.unauthorized
-        }
-
-        guard httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 else {
-            throw APIError.httpError(httpResponse.statusCode, String(data: data, encoding: .utf8))
-        }
-
-        if request.value(forHTTPHeaderField: "Authorization") != nil {
-            onSuccessfulAuthenticatedRequest?()
-        }
-
-        // Handle empty responses
-        if data.isEmpty || (T.self == EmptyResponse.self) {
-            if let empty = EmptyResponse() as? T {
-                return (empty, httpResponse)
-            }
-        }
-
-        // Decode off the main actor. APIService is `@MainActor`, so without
-        // this hop a multi-MB events payload would block the UI thread for
-        // hundreds of ms during decode. We use a `nonisolated` global-actor-free
-        // helper wrapped in `Task.detached` so the decode runs on a cooperative
-        // thread; `DecodedBox` is `@unchecked Sendable` because the decoded
-        // value is treated as immutable from the moment we ship it back.
-        let box: DecodedBox<T>
-        do {
-            box = try await Task.detached(priority: .userInitiated) {
-                try DecodedBox(value: JSONDecoder().decode(T.self, from: data))
-            }.value
-        } catch {
-            throw APIError.decodingError(error)
-        }
-        return (box.value, httpResponse)
-    }
 }
 
 /// Sendable transport for decoded values across the detached-decode boundary.
@@ -861,25 +857,26 @@ struct MissionEventsResult: Sendable {
 }
 
 
-enum APIError: LocalizedError {
-    case invalidURL
-    case invalidResponse
-    case unauthorized
-    case httpError(Int, String?)
-    case decodingError(Error)
-    
-    var errorDescription: String? {
-        switch self {
-        case .invalidURL:
-            return "Invalid URL"
-        case .invalidResponse:
-            return "Invalid response from server"
-        case .unauthorized:
-            return "Authentication required"
-        case .httpError(let code, let message):
-            return "HTTP \(code): \(message ?? "Unknown error")"
-        case .decodingError(let error):
-            return "Failed to decode response: \(error.localizedDescription)"
-        }
+/// The one error type for backend requests. `status` is the HTTP status
+/// (401 for an expired session) or 0 for failures that never got a response.
+struct OrbHTTPError: LocalizedError, Equatable {
+    enum Kind: Equatable { case http, unauthorized, invalidURL, invalidResponse, decoding }
+    let status: Int
+    let detail: String
+    var kind: Kind = .http
+
+    init(status: Int, detail: String, kind: Kind = .http) {
+        self.status = status
+        self.detail = detail
+        self.kind = kind
     }
+
+    static let unauthorized = OrbHTTPError(status: 401, detail: "Authentication required", kind: .unauthorized)
+    static let invalidURL = OrbHTTPError(status: 0, detail: "Invalid URL", kind: .invalidURL)
+    static let invalidResponse = OrbHTTPError(status: 0, detail: "Invalid response from server", kind: .invalidResponse)
+    static func decoding(_ error: Error) -> OrbHTTPError {
+        OrbHTTPError(status: 0, detail: "Failed to decode response: \(error.localizedDescription)", kind: .decoding)
+    }
+
+    var errorDescription: String? { kind == .http ? "\(status): \(detail)" : detail }
 }

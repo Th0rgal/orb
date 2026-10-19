@@ -60,7 +60,7 @@ struct OrbMessageImages: Equatable {
             return UIImage(data: data)
         }
         // Scoped to server, account and mission: the same path elsewhere is another file.
-        let token = APIService.shared.authToken ?? ""
+        let token = OrbCore.shared.authToken ?? ""
         var hash: UInt64 = 14695981039346656037
         for byte in token.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
         let key = "\(OrbCore.shared.endpoint)|\(String(hash, radix: 36))|\(missionID ?? "")|\(path)"

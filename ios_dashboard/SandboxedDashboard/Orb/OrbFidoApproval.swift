@@ -275,7 +275,7 @@ final class OrbFidoMonitor {
     private var generation = -1
 
     func update(active: Bool) {
-        let api = APIService.shared
+        let api = OrbCore.shared
         guard active, api.isConfigured, api.isAuthenticated, !api.authSessionExpired else {
             stop()
             return
@@ -287,7 +287,7 @@ final class OrbFidoMonitor {
             var delay: Double = 2
             while !Task.isCancelled {
                 let started = Date()
-                let stream = APIService.shared.streamControl(missionId: nil, generation: generation) { type, data in
+                let stream = OrbCore.shared.streamControl(missionId: nil, generation: generation) { type, data in
                     if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data) }
                 }
                 await withTaskCancellationHandler { await stream.value } onCancel: { stream.cancel() }

@@ -18,7 +18,7 @@ enum OrbInboxAccount {
         }
         return endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + ":" + identity
     }
-    @MainActor static var current: String { scope(endpoint: OrbCore.shared.endpoint, token: APIService.shared.authToken) }
+    @MainActor static var current: String { scope(endpoint: OrbCore.shared.endpoint, token: OrbCore.shared.authToken) }
 }
 
 @MainActor
@@ -291,7 +291,7 @@ final class OrbInboxDigestStore {
         loadedScope = account
         let stored = OrbDisk.read(diskKey, as: [String: OrbInboxDigest].self, accountScope: account)
             ?? OrbDisk.read(diskKey, as: [String: OrbInboxDigest].self) ?? [:]
-        let legacy = SHA256.hash(data: Data((OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? "")).utf8)).map { String(format: "%02x", $0) }.joined() + "|"
+        let legacy = SHA256.hash(data: Data((OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? "")).utf8)).map { String(format: "%02x", $0) }.joined() + "|"
         let current = scope + "|"
         cache = [:]
         for (key, digest) in stored {
@@ -378,7 +378,7 @@ final class OrbInboxDigestStore {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 100
-        request.setValue("Bearer \(APIService.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(OrbCore.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(OrbJSON.object(["model": .string(model)]))
         let (data, response) = try await URLSession.shared.data(for: request)

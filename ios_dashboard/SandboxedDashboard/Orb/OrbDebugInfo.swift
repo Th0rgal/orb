@@ -17,6 +17,12 @@ struct OrbDebugInfoView: View {
         return "\(short) (\(build))"
     }
 
+    /// `/api/health` reports the Core version; older servers may omit it.
+    nonisolated static func describeBackend(_ version: String?) -> String {
+        guard let version, !version.isEmpty else { return "Unknown" }
+        return version
+    }
+
     private var liveActivitiesEnabled: Bool { ActivityAuthorizationInfo().areActivitiesEnabled }
     private var activeLiveActivities: Int { Activity<OrbFleetActivityAttributes>.activities.count }
 
@@ -47,6 +53,7 @@ struct OrbDebugInfoView: View {
             "Orb \(Self.version)",
             "iOS \(UIDevice.current.systemVersion) · \(UIDevice.current.model)",
             "Endpoint: \(OrbCore.shared.endpoint)",
+            "Core: \(Self.describeBackend(OrbCore.shared.backendVersion))",
             "Account: \(account)",
             "Notifications: \(Self.describe(notificationStatus)) (in-app \(OrbNotificationCenter.shared.notificationsEnabled ? "on" : "off"))",
             "Live Activities: \(liveActivitiesEnabled ? "enabled" : "disabled"), \(activeLiveActivities) active",
@@ -65,6 +72,7 @@ struct OrbDebugInfoView: View {
             Section("App") {
                 LabeledContent("Version", value: Self.version).accessibilityIdentifier("debug.version")
                 LabeledContent("Endpoint", value: OrbCore.shared.endpoint.isEmpty ? "Not configured" : OrbCore.shared.endpoint)
+                LabeledContent("Core version", value: Self.describeBackend(OrbCore.shared.backendVersion)).accessibilityIdentifier("debug.backendVersion")
                 LabeledContent("Account", value: account)
             }
             Section("System") {
@@ -111,6 +119,7 @@ struct OrbDebugInfoView: View {
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Debug info").navigationBarTitleDisplayMode(.inline)
         .task {
+            _ = try? await OrbCore.shared.checkHealth()
             await OrbNotificationCenter.shared.refreshAuthorizationStatus()
             notificationStatus = OrbNotificationCenter.shared.authorizationStatus
         }

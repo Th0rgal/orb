@@ -1658,7 +1658,7 @@ struct OrbConversation: View {
             let knownCloud = mission != .null && OrbRow(mission).cloud
             let sinceSeq = events.last?.sequence
             async let valueTask = OrbReadCache.conversation(id, force: force)
-            async let batchTask = knownCloud ? nil : (try? await APIService.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
+            async let batchTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
             async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue")) ?? .null)
 
             var value = try await valueTask
@@ -1682,7 +1682,7 @@ struct OrbConversation: View {
             } else if OrbRow(value).cloud { execution = try await OrbReadCache.cloud(id, force: force) }
             if !OrbRow(value).cloud {
                 if stream == nil && phase == .active {
-                    stream = APIService.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
+                    stream = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
                         if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data); return }
                         if type == "text_delta", let delta = data["delta"] as? String ?? data["content"] as? String {
                             liveText += delta
@@ -1917,7 +1917,7 @@ struct OrbConversation: View {
     }
 
     private func downloadWorkspaceFile(_ path: String) async {
-        let token = APIService.shared.authToken ?? ""
+        let token = OrbCore.shared.authToken ?? ""
         var candidates: [[URLQueryItem]] = []
         if let id { candidates.append([.init(name: "path", value: path), .init(name: "mission_id", value: id)]) }
         candidates.append([.init(name: "path", value: path)])

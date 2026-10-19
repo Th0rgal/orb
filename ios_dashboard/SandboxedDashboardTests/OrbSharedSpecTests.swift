@@ -130,11 +130,11 @@ final class OrbReadCacheEventsTests: XCTestCase {
 
     override func tearDown() async throws {
         OrbReadCache.eventsFetcher = savedFetcher
-        APIService.shared.baseURL = savedBaseURL
+        OrbCore.shared.baseURL = savedBaseURL
     }
 
     func testConcurrentCallersShareOneRequestAndTTLIsHonoured() async throws {
-        APIService.shared.baseURL = "http://127.0.0.1:1"
+        OrbCore.shared.baseURL = "http://127.0.0.1:1"
         let id = "ttl-" + UUID().uuidString
         let clock = TestClock(Date(timeIntervalSince1970: 1_000))
         async let first = OrbReadCache.events(id, now: { clock.now })
@@ -159,14 +159,14 @@ final class OrbReadCacheEventsTests: XCTestCase {
     func testEventsAreScopedPerAccount() async throws {
         let id = "scope-" + UUID().uuidString
         let now = Date(timeIntervalSince1970: 2_000)
-        APIService.shared.baseURL = "http://127.0.0.1:1"
+        OrbCore.shared.baseURL = "http://127.0.0.1:1"
         let a = try await OrbReadCache.events(id, now: { now })
-        APIService.shared.baseURL = "http://127.0.0.1:2"
+        OrbCore.shared.baseURL = "http://127.0.0.1:2"
         let b = try await OrbReadCache.events(id, now: { now })
         XCTAssertEqual(calls.count, 2, "another account never reads the first account's events")
         XCTAssertEqual(a.first?.content, "http://127.0.0.1:1")
         XCTAssertEqual(b.first?.content, "http://127.0.0.1:2")
-        APIService.shared.baseURL = "http://127.0.0.1:1"
+        OrbCore.shared.baseURL = "http://127.0.0.1:1"
         let again = try await OrbReadCache.events(id, now: { now })
         XCTAssertEqual(calls.count, 2, "switching back reuses that account's fresh cache")
         XCTAssertEqual(again.first?.content, "http://127.0.0.1:1")
@@ -224,6 +224,6 @@ final class ErrorRingTests: XCTestCase {
         XCTAssertEqual(ring.entries.first?.path, "GET /p10")
         XCTAssertEqual(ErrorRing.redact("GET /api/x?token=secret"), "GET /api/x")
         XCTAssertEqual(ErrorRing.status(of: OrbHTTPError(status: 503, detail: "")), 503)
-        XCTAssertEqual(ErrorRing.status(of: APIError.unauthorized), 401)
+        XCTAssertEqual(ErrorRing.status(of: OrbHTTPError.unauthorized), 401)
     }
 }
