@@ -62,7 +62,7 @@ struct FidoApprovalOverlay: View {
                                     duration: 5,
                                     requireBiometric: false
                                 )
-                                Task { await fidoState.approve(request.id) }
+                                Task { await fidoState.approveWithAuthentication(request.id) }
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: "clock")
@@ -101,7 +101,7 @@ struct FidoApprovalOverlay: View {
                                 .disabled(isInFlight)
 
                                 Button {
-                                    Task { await fidoState.approve(request.id) }
+                                    Task { await fidoState.approveWithAuthentication(request.id) }
                                 } label: {
                                     HStack(spacing: 6) {
                                         if isInFlight {
@@ -262,5 +262,45 @@ private struct OrbFidoCard<Content: View>: View {
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(.white.opacity(0.2), lineWidth: 0.5))
+    }
+}
+
+/// Core only delivers `fido_sign_request` on the control stream (no poll endpoint),
+/// and the legacy Control tab that used to hold that stream is gone. While Orb is
+/// in the foreground and signed in, keep one global stream open just for FIDO.
+@MainActor
+final class OrbFidoMonitor {
+    static let shared = OrbFidoMonitor()
+    private var loop: Task<Void, Never>?
+    private var generation = -1
+
+    func update(active: Bool) {
+        let api = APIService.shared
+        guard active, api.isConfigured, api.isAuthenticated, !api.authSessionExpired else {
+            stop()
+            return
+        }
+        if loop != nil && generation == api.connectionGeneration { return }
+        stop()
+        generation = api.connectionGeneration
+        loop = Task { @MainActor in
+            var delay: Double = 2
+            while !Task.isCancelled {
+                let started = Date()
+                let stream = APIService.shared.streamControl(missionId: nil, generation: generation) { type, data in
+                    if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data) }
+                }
+                await withTaskCancellationHandler { await stream.value } onCancel: { stream.cancel() }
+                if Task.isCancelled { break }
+                // A stream that stayed up for a while resets the backoff.
+                delay = Date().timeIntervalSince(started) > 60 ? 2 : min(delay * 2, 60)
+                do { try await Task.sleep(for: .seconds(delay)) } catch { break }
+            }
+        }
+    }
+
+    func stop() {
+        loop?.cancel()
+        loop = nil
     }
 }

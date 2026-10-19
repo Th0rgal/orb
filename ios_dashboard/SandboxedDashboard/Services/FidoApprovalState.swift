@@ -40,43 +40,20 @@ final class FidoApprovalState {
     // MARK: - SSE Event Handling
 
     func handleSignRequest(_ data: [String: Any]) {
-        guard let requestId = data["request_id"] as? String,
-              let keyType = data["key_type"] as? String,
-              let keyFingerprint = data["key_fingerprint"] as? String,
-              let origin = data["origin"] as? String,
-              let expiresAtString = data["expires_at"] as? String else {
-            return
-        }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let expiresAt = formatter.date(from: expiresAtString) ?? Date().addingTimeInterval(30)
-
-        let request = FidoSignRequest(
-            id: requestId,
-            keyType: keyType,
-            keyFingerprint: keyFingerprint,
-            origin: origin,
-            hostname: data["hostname"] as? String,
-            workspace: data["workspace"] as? String,
-            expiresAt: expiresAt
-        )
-
+        guard let request = FidoSignRequest.parse(data) else { return }
+        // The same request can arrive on several open streams (global monitor + conversation).
+        guard !pendingRequests.contains(where: { $0.id == request.id }), !inFlightRequestIds.contains(request.id) else { return }
         clearExpiredRules()
 
-        if let rule = matchingRule(for: request) {
-            if rule.requireBiometric || requireBiometricForAll {
-                Task {
-                    let authenticated = await authenticateWithBiometric()
-                    if authenticated {
-                        await approve(request.id)
-                    } else {
-                        pendingRequests.append(request)
-                        HapticService.error()
-                    }
+        if matchingRule(for: request) != nil {
+            // Rules skip the overlay, never the Face ID / passcode check.
+            Task {
+                if await authenticateDeviceOwner() {
+                    await approve(request.id)
+                } else {
+                    pendingRequests.append(request)
+                    HapticService.error()
                 }
-            } else {
-                Task { await approve(request.id) }
             }
         } else {
             pendingRequests.append(request)
@@ -85,6 +62,20 @@ final class FidoApprovalState {
     }
 
     // MARK: - Approve / Deny
+
+    /// Manual approval from the overlay: always gated by Face ID / Touch ID with a
+    /// device passcode fallback. A failed or cancelled check leaves the request pending.
+    func approveWithAuthentication(_ requestId: String) async {
+        guard !inFlightRequestIds.contains(requestId) else { return }
+        guard await authenticateDeviceOwner() else {
+            lastError = "Authentication was not completed."
+            HapticService.error()
+            return
+        }
+        await approve(requestId)
+    }
+
+    var lastError: String?
 
     func approve(_ requestId: String) async {
         // Idempotent — bail out if the user double-taps Approve before the
@@ -96,7 +87,8 @@ final class FidoApprovalState {
             try await api.fidoRespond(requestId: requestId, approved: true)
             HapticService.success()
         } catch {
-            // Silently handle - request may have expired
+            // Usually the 60 s server timeout already expired the request.
+            lastError = error.localizedDescription
         }
         pendingRequests.removeAll { $0.id == requestId }
     }
@@ -108,7 +100,7 @@ final class FidoApprovalState {
         do {
             try await api.fidoRespond(requestId: requestId, approved: false)
         } catch {
-            // Silently handle
+            lastError = error.localizedDescription
         }
         pendingRequests.removeAll { $0.id == requestId }
     }
@@ -156,19 +148,17 @@ final class FidoApprovalState {
 
     // MARK: - Biometric Authentication
 
-    func authenticateWithBiometric() async -> Bool {
+    func authenticateWithBiometric() async -> Bool { await authenticateDeviceOwner() }
+
+    /// Face ID / Touch ID, falling back to the device passcode (`.deviceOwnerAuthentication`),
+    /// the same LocalAuthentication pattern as `OrbBiometric` in OrbSecretRequests.swift.
+    func authenticateDeviceOwner() async -> Bool {
         let context = LAContext()
+        context.localizedCancelTitle = "Cancel"
         var error: NSError?
-
-        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
-            return false
-        }
-
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { return false }
         do {
-            return try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: "Authenticate to approve signing request"
-            )
+            return try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Approve the SSH signing request")
         } catch {
             return false
         }
