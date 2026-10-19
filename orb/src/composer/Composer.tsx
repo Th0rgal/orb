@@ -369,6 +369,7 @@ export function Composer(p: {
   });
   /** What the current draft refers to, resolved against this project's files. */
   const mentioned = createMemo(() => mentionedChips(text(), atItems()));
+  const mentionedIds = createMemo(() => new Set(mentioned().map(c => c.id)));
   createEffect(() => p.onAttachments?.(mentioned()));
   const [multiline, setMultiline] = createSignal(false);
   // Measuring scrollHeight forces a synchronous layout of the whole window on
@@ -595,10 +596,10 @@ export function Composer(p: {
               {(it) => {
                 const display = () => ctxFolder() && it.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? it.label.slice(ctxFolder().length + 1) : it.label;
                 return (
-                  <button class={`menu-item ${mentioned().some((c) => c.id === it.id) ? "on" : ""}`} title={it.path ?? it.label} onClick={() => setCtxFolder((it.path ?? it.label).replace(/\/$/, ""))}>
+                  <button class={`menu-item ${mentionedIds().has(it.id) ? "on" : ""}`} title={it.path ?? it.label} onClick={() => setCtxFolder((it.path ?? it.label).replace(/\/$/, ""))}>
                     <span class="menu-ico"><Ic.FolderIcon size={14} /></span>
                     <span class="slash-item-label">{display()}</span>
-                    <span class="menu-attachment-mark" aria-hidden="true">{mentioned().some((c) => c.id === it.id) ? "✓" : ""}</span>
+                    <span class="menu-attachment-mark" aria-hidden="true">{mentionedIds().has(it.id) ? "✓" : ""}</span>
                     <span class="slash-chevron"><Ic.ChevronRight size={12} /></span>
                   </button>
                 );
@@ -612,13 +613,13 @@ export function Composer(p: {
                 const display = () => ctxFolder() && item.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? item.label.slice(ctxFolder().length + 1) : item.label;
                 return (
                   <button
-                    class={`menu-item ${mentioned().some((c) => c.id === item.id) ? "on" : ""}`}
+                    class={`menu-item ${mentionedIds().has(item.id) ? "on" : ""}`}
                     title={item.path ?? item.label}
                     onClick={() => { if (p.onAttachments) pickAttach(item); }}
                   >
                     <span class="menu-ico"><Ic.FileIcon size={14} /></span>
                     <span class="slash-item-label">{display()}</span>
-                    <span class="menu-attachment-mark" aria-hidden="true">{mentioned().some((c) => c.id === item.id) ? "✓" : ""}</span>
+                    <span class="menu-attachment-mark" aria-hidden="true">{mentionedIds().has(item.id) ? "✓" : ""}</span>
                   </button>
                 );
               }}

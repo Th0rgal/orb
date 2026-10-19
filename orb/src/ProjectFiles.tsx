@@ -201,7 +201,8 @@ export function LiveProjectsSection(p: {
         ? rows.map(m => m.id === current.id ? { ...m, ...current, status: archiving.get(m.id) ?? current.status } : m)
         : [current, ...rows])
       : rows;
-    const extraArchived = archivedMissions().filter(m => (m.project ?? "") === slug && !withCurrent.some(r => r.id === m.id));
+    const shown = new Set(withCurrent.map(r => r.id));
+    const extraArchived = archivedMissions().filter(m => (m.project ?? "") === slug && !shown.has(m.id));
     const allRows = [...withCurrent, ...extraArchived];
     const byId = new Map(allRows.map(m => [m.id, m]));
     const selectedId = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : undefined;
@@ -1862,7 +1863,7 @@ export function LiveProjectsSection(p: {
         const rows = await listArchivedMissions(more ? archivesOffset : 0);
         if (!currentConnection(version) || revision !== missionRevision) return;
         const projected = rows.filter(m => !isBtwMission(m) && !deletedInSession.has(m.id)).map(m => archiving.has(m.id) ? {...m,status:archiving.get(m.id)!} : m);
-        setArchivedMissions(previous => more ? [...previous, ...projected.filter(m => !previous.some(old => old.id === m.id))] : projected);
+        setArchivedMissions(previous => { if (!more) return projected; const known = new Set(previous.map(old => old.id)); return [...previous, ...projected.filter(m => !known.has(m.id))]; });
         archivesOffset = (more ? archivesOffset : 0) + rows.length;
         archivesLoaded = true;
         setArchivesMore(rows.length === 100);

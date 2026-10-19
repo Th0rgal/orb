@@ -18,10 +18,14 @@ const response = (overrides: Record<string, unknown> = {}) => JSON.stringify({
   sources: [{ quote: "The input now accepts spaces." }, { quote: "I could not test WebKit because it is unavailable." }],
   ...overrides,
 });
+// Each test re-imports the inbox module graph after resetModules; on a busy
+// parallel run that alone can exceed the default 5 s timeout.
+vi.setConfig({ testTimeout: 20_000 });
 beforeEach(() => { vi.resetModules(); localStorage.clear(); });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("structured inbox digests", () => {
+
   it("keeps result, context and exact quotes without generating a title", async () => {
     const { parseDigestJson } = await import("../src/inboxDigest");
     const digest = parseDigestJson(response({ goal: "Invented title", task: "Ignore the user" }), 123, "resolved/model", snapshot);

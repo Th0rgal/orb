@@ -43,11 +43,16 @@ function shallowEqual(a: object, b: object): boolean {
   const ka = Object.keys(a);
   const kb = Object.keys(b);
   if (ka.length !== kb.length) return false;
+  // A record whose version or update stamp moved has changed: skip the
+  // structural comparison of its nested fields.
+  const ra = a as Record<string, unknown>, rb = b as Record<string, unknown>;
+  for (const stamp of ["version", "updated_at"]) if (ra[stamp] !== undefined && rb[stamp] !== undefined && ra[stamp] !== rb[stamp]) return false;
   for (const k of ka) {
     const va = (a as Record<string, unknown>)[k];
     const vb = (b as Record<string, unknown>)[k];
     if (va === vb) continue;
     // Nested objects/arrays: compare by JSON as a cheap structural check.
+    if (Array.isArray(va) && Array.isArray(vb) && va.length !== vb.length) return false;
     if (typeof va === "object" && typeof vb === "object" && va && vb && JSON.stringify(va) === JSON.stringify(vb)) continue;
     return false;
   }
