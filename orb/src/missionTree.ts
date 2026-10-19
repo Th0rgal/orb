@@ -1,3 +1,4 @@
+import { harnessName } from "./harnesses";
 import { isWorking } from "./missionStatus";
 /** Missions launched by a mission are shown inside it, like files in a folder.
  * Forks are versions of one conversation, not launched work: the most recently
@@ -24,11 +25,9 @@ export const missionParent = (mission: Omit<Linked, "id">): string | undefined =
 /** A fork shares its conversation's name; versions are told apart by harness and model. */
 export const forkTitle = (title: string | null | undefined): string => (title ?? "").replace(LEGACY_FORK_TITLE, "");
 
-const HARNESS_NAMES: Record<string, string> = { claudecode: "Claude Code", codex: "Codex", opencode: "OpenCode", grok: "Grok", gemini: "Gemini", vibe: "Mistral Vibe", antigravity: "Antigravity CLI", hermes: "Hermes" };
-
 /** "Codex · gpt-6.1-sol": how an earlier version is told apart from the current one. */
 export const versionLabel = (mission: { backend?: string | null; model_override?: string | null }): string =>
-  [mission.backend ? HARNESS_NAMES[mission.backend] ?? mission.backend : "", mission.model_override ?? ""].filter(Boolean).join(" · ") || "Earlier version";
+  [mission.backend ? harnessName(mission.backend) : "", mission.model_override ?? ""].filter(Boolean).join(" · ") || "Earlier version";
 
 const activity = (mission: Dated) => Date.parse(mission.updated_at || mission.created_at || "") || 0;
 

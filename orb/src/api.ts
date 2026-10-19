@@ -1,3 +1,4 @@
+import { harnessRank, isHarness } from "./harnesses";
 import { isArchivable, isReopenable } from "./missionStatus";
 import { swallow } from "./log";
 import { sharedRead, invalidateReads } from "./sharedReads";
@@ -377,18 +378,12 @@ export async function listBackendModels(): Promise<Record<string, BackendModelOp
   return {...data.backends, opencode: chains.map(chain => ({value:chain.id,label:`Routing — ${chain.name}`}))};
 }
 
-/** Harness order for the composer: the native agents first, then routers. */
-const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "antigravity", "vibe"];
 
 export async function listHarnessChoices(): Promise<HarnessChoice[]> {
   const [backends, models] = await Promise.all([listBackends(), listBackendModels()]);
   return backends
-    .filter((b) => HARNESS_ORDER.includes(b.id) && (models[b.id]?.length ?? 0) > 0)
-    .sort((a, b) => {
-      const ia = HARNESS_ORDER.indexOf(a.id);
-      const ib = HARNESS_ORDER.indexOf(b.id);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-    })
+    .filter((b) => isHarness(b.id) && (models[b.id]?.length ?? 0) > 0)
+    .sort((a, b) => harnessRank(a.id) - harnessRank(b.id))
     .map((b) => ({ backend: b, models: models[b.id] ?? [] }));
 }
 

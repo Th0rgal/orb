@@ -1,3 +1,4 @@
+import { HARNESS_IDS, type HarnessId } from "./harnesses";
 import { getCyber, requireCyberSupport, type CyberMode } from "./cyberAccess";
 import {followNative} from "./nativeInteractionStream";
 import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
@@ -21,8 +22,8 @@ export function recordLocalFailure(id:string, error:unknown) {
   setLocalFailures(previous => { const next={...previous}; if(message)next[id]=message;else delete next[id];
     try {localStorage.setItem("orb.localFailures",JSON.stringify(next));} catch {} return next; });
 }
-export const LOCAL_HARNESSES = ["claudecode", "codex", "grok", "opencode", "antigravity", "vibe"] as const;
-export type LocalHarnessId = (typeof LOCAL_HARNESSES)[number];
+export const LOCAL_HARNESSES = HARNESS_IDS;
+export type LocalHarnessId = HarnessId;
 
 const FILE_CAP = 512 * 1024;
 const FOLDER_CAP = 256 * 1024;

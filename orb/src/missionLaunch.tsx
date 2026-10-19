@@ -1,3 +1,4 @@
+import { REMOTE_PROXY_HARNESSES } from "./harnesses";
 import { isQueued } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
@@ -133,7 +134,7 @@ export function remoteLaunchPreflight(fleet: RemoteNodesResponse, nodeId: string
 export function remoteHarnessNeedsProxy(capability: RemoteLaunchCapability, backend: string): boolean {
   const listed = capability.requires_proxy_harnesses;
   if (Array.isArray(listed)) return listed.includes(backend);
-  return backend === "claudecode" || backend === "opencode" || backend === "codex";
+  return REMOTE_PROXY_HARNESSES.has(backend);
 }
 /** The capability could not be read at all (network/server error): refuse rather than guess. */
 export function remoteLaunchUnconfirmed(nodeId: string, error: unknown): string {

@@ -1,3 +1,4 @@
+import { isHarness } from "./harnesses";
 import { isArchivable } from "./missionStatus";
 import {CodexSpeedPicker,missionSpeed,requireSpeedSupport} from './CodexSpeedPicker';
 import {localBinding} from './localAgents';
@@ -16,7 +17,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
   const [effortAnchor, setEffortAnchor] = createSignal<HTMLButtonElement>();
   const [busy, setBusy] = createSignal(false), [error, setError] = createSignal("");
   const choices = () => p.choices.find(choice => choice.backend.id === backend())?.models ?? [];
-  const unavailable = (id: string) => !!p.mission.remote_node_id && !["codex", "grok", "claudecode", "opencode", "antigravity", "vibe"].includes(id);
+  const unavailable = (id: string) => !!p.mission.remote_node_id && !isHarness(id);
   const key = crypto.randomUUID();
   onMount(() => p.onOpen?.());
   const fork = async (effort = "") => {

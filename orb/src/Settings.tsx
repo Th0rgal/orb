@@ -1,3 +1,4 @@
+import { HARNESS_IDS, harnessName } from "./harnesses";
 import { cloudAccounts, cloudNames, type CloudAccount } from "./cloudAgentApi";
 import { ErrorToast } from "./toast";
 import { ExecutionSettings } from "./ExecutionSettings";
@@ -121,14 +122,6 @@ function LocalAgentsCard() {
   };
   if (!localInstalled().length) void scan();
   const row = (id: string) => localInstalled().find((item) => item.id === id);
-  const label: Record<string, string> = {
-    claudecode: "Claude Code",
-    codex: "Codex",
-    grok: "Grok",
-    antigravity: "Antigravity CLI",
-    vibe: "Mistral Vibe",
-    opencode: "OpenCode",
-  };
   const save = (id: string) => {
     setPathOverride(id, drafts()[id] ?? "");
     void scan();
@@ -140,14 +133,14 @@ function LocalAgentsCard() {
           {busy() ? "Scanning…" : "Scan"}
         </button>
       </Row>
-      <For each={["claudecode", "codex", "grok", "opencode", "antigravity", "vibe"]}>
+      <For each={HARNESS_IDS}>
         {(id) => {
           const found = () => row(id);
           return (
-            <Row title={label[id]} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
+            <Row title={harnessName(id)} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
               <input
                 class="s-input"
-                aria-label={`${label[id]} path`}
+                aria-label={`${harnessName(id)} path`}
                 placeholder="Path override"
                 value={drafts()[id] ?? ""}
                 onInput={(e) => setDrafts({ ...drafts(), [id]: e.currentTarget.value })}
