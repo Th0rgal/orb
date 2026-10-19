@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { createSignal } from "solid-js";
 import { api, connectionVersion, getApiUrl } from "./api";
 import { mentionText, scanMentions } from "./attach";
@@ -509,7 +510,7 @@ export function startBackgroundUpload(params: {
   };
 
   bgRunners.set(id, launch);
-  void launch().catch(() => {});
+  void launch().catch(swallow("uploads.background", { id }));
   return id;
 }
 
@@ -525,7 +526,7 @@ export function pauseBackgroundUpload(id: string) {
 export function resumeBackgroundUpload(id: string) {
   const runner = bgRunners.get(id);
   if (!runner) return;
-  void runner().catch(() => {});
+  void runner().catch(swallow("uploads.resume", { id }));
 }
 
 export function cancelBackgroundUpload(id: string) {

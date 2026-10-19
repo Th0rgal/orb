@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { projectColor, projectColors, projectColorsSynced, setProjectColor } from "./projectAppearance";
 import { ErrorToast } from "./toast";
 import { ErrorNotice } from "./ErrorNotice";
@@ -137,7 +138,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
   void load();
   void listProjects()
     .then((list) => setTitle(list.find((x) => x.slug === p.slug)?.title ?? null))
-    .catch(() => {});
+    .catch(swallow("projectSettings.listProjects", { slug: p.slug }));
   onCleanup(pollWhileVisible(load, 15000));
 
   const parsed = (): { value: number } | { error: string } => {

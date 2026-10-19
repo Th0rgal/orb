@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { Show, createEffect, createSignal, onCleanup, useContext } from "solid-js";
 import { FileReferenceContext } from "./fileReferenceContext";
 import { Lightbox } from "./Lightbox";
@@ -21,7 +22,7 @@ export function WorkspaceImage(p: { path: string; alt: string }) {
     void resolver.loadImage(path).then(value => {
       if (cancelled) { if (value?.startsWith("blob:")) URL.revokeObjectURL(value); return; }
       loaded = value; setUrl(value);
-    }).catch(() => {}).finally(() => { if (!cancelled) setLoading(false); });
+    }).catch(swallow("workspaceImage.load")).finally(() => { if (!cancelled) setLoading(false); });
     onCleanup(() => { cancelled = true; if (loaded?.startsWith("blob:")) URL.revokeObjectURL(loaded); });
   });
   return <span class="md-workspace-image">

@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { For, Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
 import { ErrorToast } from "./toast";
 import { messagePresentation } from "./messagePresentation";
@@ -192,7 +193,7 @@ export function RemoteQueue(p: {
     try {
       await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
       for (const r of after) {
-        await api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" }).catch(() => {});
+        await api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" }).catch(swallow("remoteQueue.delete", { message: r.id }));
       }
       revision++;
       for (const r of tail) deletedIds.add(r.id);

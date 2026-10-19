@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { AntigravityProvider } from "./AntigravityProvider";
 import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
@@ -242,8 +243,8 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
     } finally { fetching = false; }
   };
   onMount(() => {
-    void refreshUsage().catch(() => {});
-    const timer = setInterval(() => { void refreshUsage().catch(() => {}); }, 30_000);
+    void refreshUsage().catch(swallow("providers.usage"));
+    const timer = setInterval(() => { void refreshUsage().catch(swallow("providers.usage")); }, 30_000);
     onCleanup(() => { disposed = true; clearInterval(timer); });
   });
 
@@ -267,7 +268,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
     <div class="page">
       <div class="page-head">
         <h2>Providers</h2>
-        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(() => {}); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
+        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(swallow("providers.usage")); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
           Refresh
         </button>
       </div>
@@ -404,7 +405,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
               p.onRefresh();
               if (id) void getProviderUsage(id, true).then(value => {
                 if (!disposed) setUsage(previous => ({ ...previous, [id]: value }));
-              }).catch(() => {});
+              }).catch(swallow("providers.usage", { provider: id }));
             }}
           />
         )}
@@ -569,7 +570,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
   };
-  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (polledLogin && s && !completed) void cancelSubscriptionLogin(s.id).catch(() => {}); });
+  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (polledLogin && s && !completed) void cancelSubscriptionLogin(s.id).catch(swallow("providers.cancelLogin")); });
 
   const startPolling = (id: string) => {
     stopPolling();
@@ -604,7 +605,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
     start
       .then((s) => {
-        if (disposed) { if (polledLogin) void cancelSubscriptionLogin(s.id).catch(() => {}); return; }
+        if (disposed) { if (polledLogin) void cancelSubscriptionLogin(s.id).catch(swallow("providers.cancelLogin")); return; }
         setSession(s);
         setPhase("awaiting");
         if (polledLogin) startPolling(s.id);

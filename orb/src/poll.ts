@@ -1,13 +1,14 @@
+import { swallow } from "./log";
 /** Interval polling that respects the window: skipped while the document is
  * hidden, never overlaps an in-flight run, and fires once as soon as the
  * window becomes visible again. Returns a stop function. */
-export function pollWhileVisible(run: () => void | Promise<unknown>, ms: number): () => void {
+export function pollWhileVisible(run: () => void | Promise<unknown>, ms: number, name = "poll"): () => void {
   let busy = false, stopped = false;
   const tick = () => {
     if (stopped || busy || document.visibilityState === "hidden") return;
     busy = true;
     // A failed refresh must neither overlap nor create an unhandled rejection.
-    void Promise.resolve().then(run).catch(() => {}).finally(() => { busy = false; });
+    void Promise.resolve().then(run).catch(swallow(`${name}.run`, { ms })).finally(() => { busy = false; });
   };
   const timer = window.setInterval(tick, ms);
   const onVisible = () => { if (document.visibilityState === "visible") tick(); };

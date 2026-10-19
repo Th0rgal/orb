@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import {deliverAssistantText,flushClientLink} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
@@ -91,7 +92,7 @@ function follow(id:string,receipt?:import('./clientRuns').ClientRunReceipt){
  if(finishing.has(id))return;
  const version=connectionVersion();
  const task=followLocal(id,()=>{}).then(async state=>{if(version!==connectionVersion())return;await deliverAssistantText(id,state.text,receipt);await setClientMissionStatus(id,state.exit_code||state.error||!state.text.trim()?'failed':'awaiting_user',receipt);}).finally(()=>finishing.delete(id));
- finishing.set(id,task);void task.catch(()=>{});
+ finishing.set(id,task);void task.catch(swallow("btw.followLocal", { mission: id }));
 }
 export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideEvent)=>void){
  const s=btwSession(parent);if(!s)throw new Error('Side session not found.');const version=connectionVersion();
@@ -101,7 +102,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   await restoreLocalBindings();
   await reconcileLocalRun(s.id);
   if(signal.aborted||connectionVersion()!==version)return;
-  await getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(m.status))follow(s.id);}).catch(()=>{});
+  await getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(m.status))follow(s.id);}).catch(swallow("btw.watchStatus", { mission: s.id }));
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
   if(signal.aborted||connectionVersion()!==version)return;

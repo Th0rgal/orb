@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { appendClientTranscript, getApiUrl, getJwt } from "./api";
 import type { ClientRunReceipt } from "./clientRuns";
 import { nativeInvoke } from "./clientRuns";
@@ -60,7 +61,7 @@ export async function connectClientLink(start: (request: RemoteStart) => Promise
     if (!payload?.request_id || seen.has(payload.request_id)) return;
     seen.add(payload.request_id);
     const answer = (ok: boolean, missionId?: string, error?: string) =>
-      invoke("client_link_start_result", { connection: connection(), requestId: payload.request_id, ok, missionId: missionId ?? null, error: error ?? null }).catch(() => {});
+      invoke("client_link_start_result", { connection: connection(), requestId: payload.request_id, ok, missionId: missionId ?? null, error: error ?? null }).catch(swallow("clientLink.startResult", { requestId: payload.request_id, ok }));
     void start(payload).then(id => answer(true, id), (e: unknown) => answer(false, undefined, e instanceof Error ? e.message : String(e)));
   });
 }

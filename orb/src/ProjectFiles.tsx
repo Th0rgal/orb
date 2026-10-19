@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
 import { ErrorToast } from "./toast";
 import {nativeComposerDrop} from "./composerDrop";
@@ -424,9 +425,9 @@ export function LiveProjectsSection(p: {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ status: "acknowledged" }),
-                  }).catch(() => {});
+                  }).catch(swallow("projectFiles.acknowledgeChild", { mission: extraId }));
                 }
-                await api(`/api/control/missions/${extraId}`, {method: "DELETE"}).catch(() => {});
+                await api(`/api/control/missions/${extraId}`, {method: "DELETE"}).catch(swallow("projectFiles.deleteChild", { mission: extraId }));
               }
             }
           }
@@ -659,7 +660,7 @@ export function LiveProjectsSection(p: {
     const version = connectionVersion();
     return requests.read(`controller:${version}:${slug}`, () => getProjectController(slug, 3), force)
       .then((view) => { if (currentConnection(version)) setControllers(slug, reconcile(view)); })
-      .catch(() => {});
+      .catch(swallow("projectFiles.loadController", { slug }));
   };
   const missingCronApi = (error: unknown) => error instanceof ApiError && [404, 405].includes(error.status) && !/project not found/i.test(error.detail);
   const cronFailure = (slug: string, error: unknown) => {
@@ -2075,7 +2076,7 @@ export function LiveProjectsSection(p: {
     return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
       aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission ? (!deleting() && (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id)) ? "active" : "" : (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id) ? "active" : ""}`} {...tip}
-      onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(() => {}); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } onMissionContext(e, d.mission); } else {
+      onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } onMissionContext(e, d.mission); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
         setSelectionActive(true);
         if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); selectionAnchor = row.id; }

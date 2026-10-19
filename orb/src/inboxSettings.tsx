@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { writeInboxState } from "./inboxState";
 import { For, createMemo, createSignal, onMount } from "solid-js";
 import { isConnected } from "./api";
@@ -76,10 +77,10 @@ export function InboxSettings() {
     if (!isConnected()) return;
     void listChains()
       .then((rows) => setChains(rows))
-      .catch(() => {});
+      .catch(swallow("inboxSettings.listChains"));
     void routingCatalog()
       .then((cat) => setCatalog(cat))
-      .catch(() => {});
+      .catch(swallow("inboxSettings.routingCatalog"));
   });
 
   const modelOptions = createMemo(() => {

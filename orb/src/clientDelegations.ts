@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { api, connectionVersion, getMission, type Mission } from './api';
 import { machineIdentity, nativeInvoke } from './clientRuns';
 import { localBinding, localDirectory, recordLocalFailure, refreshLocalAgents, rememberBinding, restoreLocalBindings } from './localAgents';
@@ -52,7 +53,7 @@ export function startClientDelegations(missions: () => Mission[]) {
       }
     } finally { busy = false; }
   };
-  const run = () => { void tick().catch(() => {}); };
+  const run = () => { void tick().catch(swallow("clientDelegations.tick")); };
   run();
   const timer = setInterval(run, 10000);
   window.addEventListener('orb:refresh', run);

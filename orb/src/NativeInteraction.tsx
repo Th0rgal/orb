@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import {followInteraction} from "./nativeInteractionStream";
 import { ErrorToast } from "./toast";
 import {rememberApprovedPlan} from "./PlanProgress";
@@ -80,7 +81,7 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
   try{
    const text=action==='accept'?'Implement the approved plan.':`/plan ${feedback().trim()}`;
    if(action==='accept'){
-    await rememberApprovedPlan(p.mission,{requestId:completed.id,text:completed.plan,approvedAt:new Date().toISOString(),boundary:completed.boundary}).catch(()=>{});
+    await rememberApprovedPlan(p.mission,{requestId:completed.id,text:completed.plan,approvedAt:new Date().toISOString(),boundary:completed.boundary}).catch(swallow("nativeInteraction.rememberPlan", { mission: p.mission }));
    }
    await p.onSend(text);
    answered.add(completed.id);

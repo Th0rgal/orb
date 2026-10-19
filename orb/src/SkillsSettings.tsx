@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { Select } from "./Select";
@@ -228,13 +229,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     setLoading(true);
     setSyncError(null);
     try {
-      const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(() => {})];
+      const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(swallow("skills.refreshSoftware"))];
       if (isConnected()) {
         await loadLibrary().catch((e) => {
           setLibraryLoaded(false);
           setLibraryError(errorText(e));
         });
-        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(() => {}));
+        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(swallow("skills.remoteNodes")));
         side.push(loadProjectSkills());
       } else {
         setLibrarySkills([]);

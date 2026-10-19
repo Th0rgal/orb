@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { sharedRead, invalidateReads } from "./sharedReads";
 import { cacheReset } from "./pageCache";
 import type { ClientRunReceipt } from "./clientRuns";
@@ -29,7 +30,7 @@ export const [connectionVersion, bumpConnectionVersion] = createSignal(0);
 let connectionSave = Promise.resolve();
 function persistDesktopConnection(connection: {api_url:string;token:string}|null) {
   const invoke=(window as any).__TAURI__?.core?.invoke;
-  if(invoke)connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(()=>{});
+  if(invoke)connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(swallow("api.connectionSave"));
 }
 export async function restoreDesktopConnection() {
   const invoke=(window as any).__TAURI__?.core?.invoke;
@@ -43,8 +44,8 @@ export async function restoreDesktopConnection() {
 function disconnectNativeSync(){
   const invoke=(window as any).__TAURI_INTERNALS__?.invoke ?? (window as any).__TAURI__?.core?.invoke;
   if(!invoke||!getJwt())return;
-  void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(()=>{});
-  void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(()=>{});
+  void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(swallow("api.disconnect.projectContext"));
+  void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
 }
 export function setConnection(url: string, token: string) {
   if(getJwt() && (url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt()))disconnectNativeSync();
@@ -641,7 +642,7 @@ export async function listProjects(force = false): Promise<ProjectSummary[]> {
       && (value as {projects: unknown[]}).projects.every(project => !!project && typeof project === "object" && typeof (project as {slug?: unknown}).slug === "string"),
     force);
   // Colors ride on the roster; applying them never fails the list.
-  try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(() => {}); } catch { /* keep the local colors */ }
+  try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(swallow("api.projectRoster")); } catch { /* keep the local colors */ }
   return (data.projects ?? []).filter(
     (p) => p.status !== "archived" && p.status !== "deleted" && !archivedSlugs.has(p.slug),
   );

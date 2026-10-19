@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
 import * as btwMod from "./btwAgent";
@@ -121,7 +122,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(reconciled.activeSession&&!busy()){
      watchActive(reconciled.activeSession);
     }
-   }).catch(()=>{});
+   }).catch(swallow("sideQuestions.reconcile"));
   }
   });
  }));

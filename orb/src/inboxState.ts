@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { connectionVersion, getApiUrl, getJwt, isConnected } from "./api";
 import { sideQuestionKey } from "./sideQuestionStorage";
 
@@ -49,7 +50,7 @@ export function writeInboxState(path: string, input: unknown): void {
     // Drop only that terminal receipt; retain preferences and transient failures.
     if (!response.ok && !(response.status === 404 && path.startsWith("seen/"))) throw new Error("Inbox state write failed");
     if (loadOutbox() === key && outbox[path]?.serial === serial) { delete outbox[path]; persist(); }
-  }).catch(() => {}).finally(() => { pending--; });
+  }).catch(swallow("inboxState.outbox", { path })).finally(() => { pending--; });
 }
 
 export async function readInboxState(): Promise<SharedInboxState | undefined> {

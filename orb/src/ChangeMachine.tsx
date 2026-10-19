@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministration} from "./machineDestinations";
@@ -47,7 +48,7 @@ export function loadMachineDestinations(missionId: string, force = false): Promi
 /** Forget reusable loads (connection reset, tests). */
 export function forgetMachineDestinationLoads() { loads.clear(); }
 /** Warm the machine list in the background; failures surface when the menu opens. */
-export function preloadMachineDestinations(missionId: string) { void loadMachineDestinations(missionId).catch(() => {}); }
+export function preloadMachineDestinations(missionId: string) { void loadMachineDestinations(missionId).catch(swallow("changeMachine.preload", { mission: missionId })); }
 
 export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; choicesFor?: (machine: Machine) => HarnessChoice[]; onDestination?: (machine: Machine) => void; onClose: () => void; onMoved: (mission: Mission) => void }) {
   const [destinations, setDestinations] = createSignal<Destination[]>(cachedMachineDestinations());

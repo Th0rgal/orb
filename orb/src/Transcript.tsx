@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { formatElapsed, turnStartedAt } from "./TurnStatus";
 import {AutomaticReminder, reminderMessages} from "./AutomaticReminder";
 import { ErrorToast } from "./toast";
@@ -216,7 +217,7 @@ function MessageImage(p: {path:string; index:number; onUrl:(url:string|null)=>vo
     void Promise.resolve(resolver?.loadImage?.(path)).then(value => {
       if(cancelled) { if(value?.startsWith("blob:"))URL.revokeObjectURL(value); return; }
       loaded=value ?? null;setUrl(value ?? null);
-    }).catch(() => {}).finally(() => {if(!cancelled)setLoading(false);});
+    }).catch(swallow("transcript.loadImage")).finally(() => {if(!cancelled)setLoading(false);});
     onCleanup(() => {cancelled=true;if(loaded?.startsWith("blob:"))URL.revokeObjectURL(loaded);});
   });
   createEffect(() => p.onUrl(url()));
@@ -371,7 +372,7 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
     void copyText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-    }).catch(() => {});
+    }).catch(swallow("transcript.copy"));
   };
   return (
     <div class={`st-tool ${open() ? "open" : ""} ${failed() ? "is-failed" : ""}`} data-kind={workKind(p.item.name)}>

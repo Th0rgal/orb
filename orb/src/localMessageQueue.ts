@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import {createSignal,batch} from 'solid-js';
 import {mergeById} from './poll';
 import {deliverAssistantText,flushClientLink} from './clientLink';
@@ -220,7 +221,7 @@ export async function retryQueuedMessage(id:string){
     wake();
     return;
    }
-  }catch{/* fall through to recovery */}
+  }catch(error){swallow('localQueue.sendNow.resume',{mission:id})(error);/* fall through to recovery */}
  }
  if(row.interrupted||(row.state==='dispatching'&&row.error)){
   try{await recoverLocalLaunch(row.mission);}
@@ -335,7 +336,7 @@ export function startLocalQueueWorker(){
     const userSync=Promise.resolve(appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt)).then(async()=>{
      row.userSynced=true;
      await update(key,row.id,stored=>{stored.userSynced=true;});
-    }).catch(()=>{});
+    }).catch(swallow("localQueue.syncUser", { mission: row.mission, message: row.id }));
     const result=await output;await userSync;if(!valid())return;
     row={...row,result,resultId:crypto.randomUUID(),resultStatus:stopping.has(runKey)?'interrupted':undefined};
     await update(key,row.id,stored=>{stored.result=result;stored.resultId=row.resultId;stored.resultStatus=row.resultStatus;});
@@ -374,7 +375,7 @@ export function startLocalQueueWorker(){
      // background task: a message waiting behind it goes next after the same delay.
      if(rows.some(r=>r.mission===row.mission&&r.state==='queued'&&!held(r))){
       const native=await pollLocal(row.mission).catch(()=>undefined);
-      if(native&&!native.done&&native.waiting_since&&Date.now()-native.waiting_since>BACKGROUND_WAIT_MS)void sendQueuedNow(row.mission).catch(()=>{});
+      if(native&&!native.done&&native.waiting_since&&Date.now()-native.waiting_since>BACKGROUND_WAIT_MS)void sendQueuedNow(row.mission).catch(swallow("localQueue.backgroundSendNow", { mission: row.mission }));
      }
      continue;
     }
@@ -395,7 +396,7 @@ export function startLocalQueueWorker(){
        follow({...row,interrupted:undefined,error:undefined});
        continue;
       }
-     }catch{/* no local run or poll error falls through to recovery */}
+     }catch(error){swallow('localQueue.reconcile',{mission:row.mission})(error);/* no local run or poll error falls through to recovery */}
      // The previous agent was still finishing when recovery was first tried. Look again.
      try{
       await recoverLocalLaunch(row.mission);if(!valid())return;
@@ -466,7 +467,7 @@ export function startLocalQueueWorker(){
       if(row.receipt||row.result)await saveSideThread(`${key}:recovered:${row.id}:${row.receipt?.run_id??'unknown'}`,row);
       await update(key,row.id,stored=>{if(stored.state!=='dispatching'||stored.error!==row.error)return;stored.state='queued';stored.resumes=(stored.resumes??0)+1;delete stored.error;delete stored.receipt;delete stored.claimedAt;});
       again=true;
-     }catch{/* Still unreachable, or the previous agent is still stopping: the next check tries again. */}
+     }catch(error){swallow('localQueue.recover',{mission:row.mission})(error);/* Still unreachable, or the previous agent is still stopping: the next check tries again. */}
      continue;
     }
     if(row.state==='dispatching'&&!row.error&&Date.now()-(row.claimedAt??0)>30_000){
@@ -482,7 +483,7 @@ export function startLocalQueueWorker(){
     try {
      try{const native=await pollLocal(row.mission);if(!native.done){
       // The turn has answered; a background task that never ends must not hold the queue.
-      if(native.waiting_since&&Date.now()-native.waiting_since>BACKGROUND_WAIT_MS)void sendQueuedNow(row.mission).catch(()=>{});
+      if(native.waiting_since&&Date.now()-native.waiting_since>BACKGROUND_WAIT_MS)void sendQueuedNow(row.mission).catch(swallow("localQueue.backgroundSendNow", { mission: row.mission }));
       else await reconcileLocalRun(row.mission);
       continue;}}catch(error){if(!/no local run/i.test(String(error)))throw error;}
      await reconcileLocalRun(row.mission);if(!valid())return;
@@ -533,7 +534,7 @@ export function startLocalQueueWorker(){
      if(scheduleRetry)scheduleRetryWake(scheduleRetry);
     }
    }
-  }catch{/* Durable entries stay available for the next attempt. */}
+  }catch(error){swallow('localQueue.tick')(error);/* Durable entries stay available for the next attempt. */}
   finally{busy=false;if(again&&valid()){again=false;queueMicrotask(()=>void tick());}}
  };
  const onWake=()=>void tick();window.addEventListener(wakeEvent,onWake);void tick();// A queued row waits on a turn this window may not be following: look again on its own.

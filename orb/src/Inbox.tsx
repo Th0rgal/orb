@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { readInboxState } from "./inboxState";
 import { ErrorToast, dismissToast, notify } from "./toast";
 import { applySharedInboxSeen } from "./missionUnread";
@@ -542,7 +543,7 @@ export function InboxPage(p: {
               requestInboxDigest(item.mission, snap.items, item.updatedMs, priority);
             }
           })
-          .catch(() => {});
+          .catch(swallow("inbox.prefetchTranscript", { mission: item.id }));
         return;
       }
       if (cfg.aiSummary && idx < 12 && !item.interaction) {
@@ -637,9 +638,9 @@ export function InboxPage(p: {
       setReplyingId(null);
       setPeekedIds(new Set([item.id]));
       if (!peekReadyTranscript(item.id)) {
-        void loadTranscript(item.id).catch(() => {});
+        void loadTranscript(item.id).catch(swallow("inbox.loadTranscript", { mission: item.id }));
       } else {
-        void refreshTranscript(item.id).catch(() => {});
+        void refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
       }
     }
 
@@ -748,7 +749,7 @@ export function InboxPage(p: {
           false,
         );
         p.onMissionUpdated?.({ ...item.mission, status: "running" });
-        void refreshTranscript(item.id).catch(() => {});
+        void refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
         void p.onRefresh();
         return;
       }
@@ -876,7 +877,7 @@ export function InboxPage(p: {
       const msgId = crypto.randomUUID();
       if (clientPlaced) {
         const sendVersion = connectionVersion();
-        await refreshLocalBindings().catch(() => {});
+        await refreshLocalBindings().catch(swallow("inbox.refreshLocalBindings"));
         const binding = localBinding(item.id);
         if (!binding) {
           throw new Error("This session runs on the computer that started it. Your draft is kept.");
@@ -926,7 +927,7 @@ export function InboxPage(p: {
         );
       }
       // Keep the Peek drawer open so the user sees their sent message and the live-streamed reply
-      void refreshTranscript(item.id).catch(() => {});
+      void refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
       void p.onRefresh();
       return true;
     } catch (e) {
@@ -978,10 +979,10 @@ export function InboxPage(p: {
           requestId: interaction.callId,
           text: interaction.detail ?? interaction.prompt,
           approvedAt: new Date().toISOString(),
-        }).catch(() => {});
+        }).catch(swallow("inbox.rememberPlan", { mission: item.id }));
       }
 
-      await refreshTranscript(item.id).catch(() => {});
+      await refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
       void p.onRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1220,14 +1221,14 @@ export function InboxPage(p: {
                           : curM.status_message,
                     });
                   }
-                  void refreshTranscript(id).catch(() => {});
+                  void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
                   void p.onRefresh();
                   return;
                 }
                 appendLiveEvent(ev);
               },
               () => {
-                void refreshTranscript(id).catch(() => {});
+                void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
               },
             );
             onCleanup(() => {
@@ -1700,7 +1701,7 @@ export function InboxPage(p: {
                       onStop={() => {
                         void cancelMission(id)
                           .then(() => {
-                            void refreshTranscript(id).catch(() => {});
+                            void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
                             void p.onRefresh();
                           })
                           .catch((err) => setError(err instanceof Error ? err.message : String(err)));

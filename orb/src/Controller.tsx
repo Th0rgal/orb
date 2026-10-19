@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import { MdView } from "./Markdown";
@@ -421,7 +422,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
                       {busy() === "run" ? "Starting…" : "Run now"}
                     </button>
                     <Show when={!!p.id}>
-                      <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron().catch(() => {})}>
+                      <button class="s-btn sm quiet" disabled={!!busy() || running()} onClick={() => void removeCron().catch(swallow("controller.removeCron"))}>
                         {busy() === "delete" ? "Deleting…" : "Delete"}
                       </button>
                     </Show>

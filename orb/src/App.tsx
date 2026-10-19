@@ -1,3 +1,4 @@
+import { errorText, log, swallow } from "./log";
 import { flushClientLink, connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
 import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
 import type {CodexServiceTier} from './api';
@@ -383,7 +384,7 @@ export function Composer(p: {
       // A fast close can happen before hydration enables the persistence
       // effect. Flush typed content without clearing an untouched disk draft.
       if (draftReady() || text() || images().length || mode()) {
-        void saveComposerDraft(scope,{text:pendingSend()?.text ?? text(),images:pendingSend()?.images ?? images(),mode:mode(),uploads:uploaded.map(file => ({...file, source:file.source}))}).catch(() => {});
+        void saveComposerDraft(scope,{text:pendingSend()?.text ?? text(),images:pendingSend()?.images ?? images(),mode:mode(),uploads:uploaded.map(file => ({...file, source:file.source}))}).catch(swallow("composer.saveDraft", { scope, phase: "close" }));
       }
     });
     void readComposerDraft(scope).then(draft => {
@@ -393,7 +394,7 @@ export function Composer(p: {
         if(draft.mode) setMode(draft.mode);
         queueMicrotask(() => { if (ta?.isConnected) { ta.value=draft.text; resize(); } });
       }
-    }).catch(() => {}).finally(() => { if (current) setDraftReady(true); });
+    }).catch(swallow("composer.readDraft", { scope })).finally(() => { if (current) setDraftReady(true); });
   }));
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingDraftSave: { scope: string; draft: Parameters<typeof saveComposerDraft>[1] } | null = null;
@@ -405,7 +406,7 @@ export function Composer(p: {
     if (pendingDraftSave) {
       const { scope, draft } = pendingDraftSave;
       pendingDraftSave = null;
-      void saveComposerDraft(scope, draft).catch(() => {});
+      void saveComposerDraft(scope, draft).catch(swallow("composer.saveDraft", { scope }));
     }
   };
   onCleanup(flushDraftSave);
@@ -685,7 +686,7 @@ export function Composer(p: {
         }
         pendingDraftSave = null;
         if (sendingCount() <= 1) setPendingSend(null);
-        if (draftScope && !text() && !images().length) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(() => {});
+        if (draftScope && !text() && !images().length) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(swallow("composer.clearDraft", { scope: draftScope }));
         if (!text()) setMode(null);
       }
     } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
@@ -1130,7 +1131,7 @@ export default function App() {
   const [projectCreationAnchor, setProjectCreationAnchor] = createSignal<HTMLElement>();
   const [newProjectDraft, setNewProjectDraft] = createSignal(false);
   createEffect(on(projectsVersion, () => {
-    if (isConnected()) listProjects(true).then(setLiveProjects).catch(() => {});
+    if (isConnected()) listProjects(true).then(setLiveProjects).catch(swallow("app.listProjects"));
   }, { defer: true }));
   const submitNewProject = async (title: string, slug: string) => {
     const created = await createProject({ slug, title });
@@ -1252,7 +1253,7 @@ export default function App() {
               const clean = rows.filter(m => !isMissionDeleting(m.id));
               setProjectMissions(cur => ({ ...cur, [slug]: clean }));
             })
-            .catch(() => {});
+            .catch(swallow("app.refreshProjectMissions", { slug }));
         }
         for (const m of vanished) {
           if (!m.project?.trim()) {
@@ -1265,7 +1266,7 @@ export default function App() {
                   return { ...cur, [slug]: [updated, ...existing.filter(x => x.id !== updated.id)] };
                 });
               })
-              .catch(() => {});
+              .catch(swallow("app.refreshVanishedMission", { mission: m.id }));
           }
         }
       }
@@ -1519,7 +1520,7 @@ export default function App() {
       const mid = id.slice(2);
       const known = inboxMissions().find((m) => m.id === mid) ?? missions().find((m) => m.id === mid);
       if (known) markMissionRead(known, true, Boolean(pendingMissionInteraction(mid)));
-      void loadTranscript(mid).catch(() => {});
+      void loadTranscript(mid).catch(swallow("app.loadTranscript", { mission: mid }));
     }
     return true;
   };
@@ -1763,10 +1764,10 @@ export default function App() {
       window.removeEventListener("orb:open-page", onOpenPage);
       window.removeEventListener("orb:debug-cron", onDebugCron);
     });
-    const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000);
-    const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000);
+    const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000, "app.missions");
+    const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000, "app.fleet");
     // Learn this Mac's approval device id so notifications sign approvals too.
-    if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(() => {});
+    if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(swallow("app.approvalDevices"));
     const loadSecretRequests = () =>
         isConnected()
           ? getSecretBroker()
@@ -1775,9 +1776,9 @@ export default function App() {
                 setSecretRequests(pending.length);
                 syncSecretRequestNotices(pending, () => open("bitwarden-settings"));
               })
-              .catch(() => {})
+              .catch(swallow("app.secretRequests"))
           : undefined;
-    const stopSecretRequests = pollWhileVisible(loadSecretRequests, 10000);
+    const stopSecretRequests = pollWhileVisible(loadSecretRequests, 10000, "app.secretRequests");
     // Answering from a notification or the Secrets page updates the badge at once, then confirms.
     const onSecretAnswered = () => { setSecretRequests((n) => Math.max(0, n - 1)); void loadSecretRequests(); };
     const onFocus = () => void loadSecretRequests();
@@ -2470,7 +2471,7 @@ function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
     if (init) setResolved(prev => prev && prev.id === init.id ? { ...prev, ...init } : init);
   });
   onMount(() => {
-    if (p.id) void loadTranscript(p.id).catch(() => {});
+    if (p.id) void loadTranscript(p.id).catch(swallow("mission.loadTranscript", { mission: p.id }));
     if (!resolved()) void getMission(p.id).then(setResolved).catch(e => setError(String(e)));
   });
   return <Show when={Boolean(resolved())} fallback={<Show when={error()} fallback={<ConversationSkeleton />}><div class="scroll"><div class="col"><p role="alert">{error()}</p></div></div></Show>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} />}><CloudConversation id={p.id} onMission={p.onMission} onOpenMission={p.onFork} /></Show></Show>;
@@ -2772,7 +2773,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       // Queue failures are recoverable independently of the mission stream.
       // A healthy stream must not leave a transient startup warning forever.
       if (queueError()) await resync(true);
-    }, 10000);
+    }, 10000, "mission.status");
     onCleanup(() => {
       if (scroller) putTranscriptHeight(p.id, scroller.scrollHeight);
       stopStream();
@@ -2790,7 +2791,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     };
     const refreshLocal = () => reconcile().catch(console.error);
     refreshLocal();
-    const stopPoll = pollWhileVisible(reconcile, 2000);
+    const stopPoll = pollWhileVisible(reconcile, 2000, "mission.localReconcile");
     window.addEventListener('orb:queue-wake',refreshLocal);
     onCleanup(()=>{stopPoll();window.removeEventListener('orb:queue-wake',refreshLocal);});
   });
@@ -2963,6 +2964,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return true;
     }
     catch (e) {
+      log.warn("mission.send", errorText(e), { mission: targetMissionId, message: explicitId ?? retryMessage?.id });
       if (e instanceof MessageRejectedError || (e instanceof ApiError && e.status < 500 && e.status !== 408)) retryMessage = null;
       if (!staleMission()) setSendError(launchError(e));
       return false;
@@ -3039,7 +3041,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return;
     }
     void cancelMission(targetMissionId)
-      .catch(() => {})
+      .catch(swallow("mission.cancel", { mission: targetMissionId }))
       .then(() => refresh());
   };
 
@@ -3091,7 +3093,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     queueMicrotask(scrollIfPinned);
     try {
       if (wasBusy) {
-        await cancelMission(targetMissionId).catch(() => {});
+        await cancelMission(targetMissionId).catch(swallow("mission.sendNow.cancel", { mission: targetMissionId }));
         for (let poll = 0; poll < 75; poll++) {
           if (staleMission() || p.id !== targetMissionId) return;
           try {
@@ -3136,7 +3138,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               for (const rest of ordered.slice(i + 1)) {
                 const restText = messagePresentation(rest.content).text;
                 const restAttach = (project ? mentionedChips(restText, attachItems) : []).map(chipToAttachment);
-                await sendMissionMessage(replacement.id, restText, restAttach, crypto.randomUUID()).catch(() => {});
+                await sendMissionMessage(replacement.id, restText, restAttach, crypto.randomUUID()).catch(swallow("mission.forwardToReplacement", { replacement: replacement.id }));
               }
               p.onFork?.(replacement);
               return;

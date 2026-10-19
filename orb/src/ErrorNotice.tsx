@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { Show, createMemo, createSignal, createEffect, type JSX } from "solid-js";
 import { copyText } from "./clipboard";
 import { CloseIcon, CopyIcon, CheckIcon } from "./icons";
@@ -63,7 +64,7 @@ export function ErrorNotice(p: { error: string; title?: string; onDismiss?: () =
     <svg class="error-notice-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     <div class="error-notice-body"><strong>{info().title}</strong><p>{info().message}</p>
       <Show when={p.children || info().link}><div class="error-notice-actions">
-        <Show when={info().link}>{link => <button type="button" class="error-notice-link" onClick={() => void import("./api").then(m => m.openExternalUrl(link().url)).catch(() => {})}>{link().label}</button>}</Show>
+        <Show when={info().link}>{link => <button type="button" class="error-notice-link" onClick={() => void import("./api").then(m => m.openExternalUrl(link().url)).catch(swallow("errorNotice.openLink"))}>{link().label}</button>}</Show>
         {p.children}
       </div></Show>
       <Show when={info().message !== p.error}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>

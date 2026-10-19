@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import {
   Show,
   createEffect,
@@ -57,7 +58,7 @@ export function SessionPreview(p: { data: SessionPreviewData; goal?: boolean; pl
       .then((value) => {
         if (epoch === generation) setGit(value);
       })
-      .catch(() => {});
+      .catch(swallow("sessionPreview.git"));
   };
   const hover = () => {
     clearTimeout(hideTimer);
