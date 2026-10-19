@@ -12662,3 +12662,95 @@ async fn replacement_keeps_the_superseded_missions_parent() {
         .unwrap();
     assert_eq!(replacement.parent_mission_id, Some(coordinator.id));
 }
+
+#[tokio::test]
+async fn replacement_attaches_to_the_live_successor_of_a_superseded_coordinator() {
+    let h = Harness::new().await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let retired = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Retired coordinator"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    let current = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("Current coordinator"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            retired.id,
+            MissionProjectPatch {
+                tags: Some(vec![
+                    "superseded".into(),
+                    format!("superseded_by:{}", current.id),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let worker = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("Worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("claudecode"),
+            None,
+            Some(retired.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let request: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Worker (replacement)",
+        "backend": "claudecode",
+        "placement": "client",
+        "supersedes_mission_id": worker.id,
+    }))
+    .unwrap();
+    let created = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(request)),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let replacement_id = Uuid::parse_str(created.1 .0["id"].as_str().unwrap()).unwrap();
+    let replacement = h
+        .control
+        .mission_store
+        .get_mission(replacement_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement.parent_mission_id, Some(current.id));
+}

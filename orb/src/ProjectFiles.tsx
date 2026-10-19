@@ -394,9 +394,13 @@ export function LiveProjectsSection(p: {
           if (version !== connectionVersion()) break;
           // Preserve live running agents. DELETE also checks all descendants
           // against the current server runner registry.
-          if (["active", "waiting_background"].includes(mission.status)
-            || subtree.some(m => m.id !== id && ["active", "waiting_background"].includes(m.status)))
-            throw new Error("Stop or finish this agent before deleting it.");
+          const live = (status: string) => ["active", "waiting_background"].includes(status);
+          if (live(mission.status)) throw new Error("Stop or finish this agent before deleting it.");
+          const runningChildren = subtree.filter(m => m.id !== id && live(m.status));
+          if (runningChildren.length) {
+            const names = runningChildren.slice(0, 3).map(m => `“${m.title || m.id.slice(0, 8)}”`).join(", ");
+            throw new Error(`${runningChildren.length} agent${runningChildren.length > 1 ? "s" : ""} under it ${runningChildren.length > 1 ? "are" : "is"} still running (${names}${runningChildren.length > 3 ? ", …" : ""}). Stop ${runningChildren.length > 1 ? "them" : "it"} first.`);
+          }
           const pausedIds = [
             ...(mission.status === "paused" ? [id] : []),
             ...subtree.filter(m => m.id !== id && m.status === "paused").map(m => m.id),
@@ -2155,7 +2159,7 @@ export function LiveProjectsSection(p: {
       </Show>
       <Show when={deleteTargets().length}>
         <ConfirmDialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} destructive action="Delete"
-          description="This permanently deletes the selected conversations, their child agents and associated workspace files. Agents still running will be kept."
+          description="This permanently deletes the selected conversations, their child agents and associated workspace files. A conversation with a running agent under it is kept until that agent stops."
           busy={deleteConfirmBusy()} error={actionError()} onConfirm={() => void deleteSelected()} onClose={() => {setActionError(null);setDeleteTargets([]);}}/>
       </Show>
       <Show when={pendingLargeImport()} keyed>{pending => (
