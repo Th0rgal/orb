@@ -27,7 +27,7 @@ describe("ux round 2", () => {
     const items = buildTranscript([storedToStream(stored)!, { type: "tool_call", data: { tool_call_id: "t", name: "Bash", args: { command: "make check" } } }]);
     expect(chaptersOf(items)).toEqual([{ key: "user:u1", title: "Fix the build please" }]);
     expect(turnStartedAt(items)).toBe(Date.parse("2026-10-18T12:00:00Z"));
-    expect(currentStep(items)).toMatch(/^Bash/);
+    expect(currentStep(items)).toBe("Running a command");
     expect(formatElapsed(65_000)).toBe("1 min 05 s");
     expect(formatElapsed(3_700_000)).toBe("1 h 01");
   });
@@ -42,4 +42,16 @@ describe("shortPath", () => {
     expect(shortPath("/root/.claude/projects/-var-lib-sandboxed-node-d2415091/memory/notes.md")).toBe("memory/notes.md");
     expect(shortPath("src/a.ts")).toBe("src/a.ts");
   });
+});
+
+import { toolActivity } from "../src/TurnStatus";
+import { it as itActivity, expect as expectActivity } from "vitest";
+itActivity("names the kind of work instead of repeating the transcript step", () => {
+  expectActivity(toolActivity("Bash")).toBe("Running a command");
+  expectActivity(toolActivity("run_command")).toBe("Running a command");
+  expectActivity(toolActivity("replace_file_content")).toBe("Editing files");
+  expectActivity(toolActivity("Grep")).toBe("Searching");
+  expectActivity(toolActivity("view_file")).toBe("Reading files");
+  expectActivity(toolActivity("WebFetch")).toBe("Browsing");
+  expectActivity(toolActivity("mcp__sandboxed__get_mission_events")).toBe("Working");
 });
