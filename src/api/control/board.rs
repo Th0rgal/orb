@@ -1317,6 +1317,7 @@ fn self_cancel_mission(cmd_tx: &mpsc::Sender<ControlCommand>, mission_id: Uuid) 
     match cmd_tx.try_send(ControlCommand::CancelMission {
         mission_id,
         min_idle: None,
+        keep_remote_queue: false,
         respond,
     }) {
         Ok(()) => true,

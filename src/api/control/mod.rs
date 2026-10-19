@@ -20,8 +20,10 @@ pub(crate) mod dispatch_admission_tests;
 pub(crate) mod execution_ownership;
 pub mod fork;
 pub(crate) mod machine_transfer;
+mod rebalance;
 mod remote_failure;
 pub(crate) mod remote_grok;
+pub use rebalance::spawn_queued_job_rebalancer;
 mod remote_queue;
 pub mod speed;
 pub mod speed_proxy;
@@ -6433,13 +6435,58 @@ pub async fn remove_from_queue(
 /// Returns `{"ok": true, "delivered": true}` when injected live, or
 /// `{"ok": true, "delivered": false}` when live mid-turn injection is not
 /// available so the caller can fall back to stop + restart.
+/// Query for `repair_borrowed_tracks`.
+#[derive(Debug, Default, Deserialize)]
+pub struct RepairTracksQuery {
+    /// Report what would change without writing (default true: applying
+    /// requires an explicit `dry_run=false`).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+}
+
+/// `POST /api/control/repair/borrowed-tracks`: idempotent one-off repair that
+/// moves each non-active mission off another mission's generated track key
+/// onto its own, together with its live leases. See `track_repair`.
+pub async fn repair_borrowed_tracks(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<RepairTracksQuery>,
+) -> Result<Json<super::track_repair::TrackRepairReport>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let dry_run = query.dry_run.unwrap_or(true);
+    // Serialize with dispatch: admission reads and writes the same identity.
+    let _guard = DISPATCH_ADMISSION.lock().await;
+    let _file = dispatch_admission::durable_lock(&state.config)
+        .await
+        .map_err(internal_error)?;
+    super::track_repair::repair_borrowed_generated_tracks(
+        &state.projects,
+        &control.mission_store,
+        dry_run,
+    )
+    .await
+    .map(Json)
+    .map_err(internal_error)
+}
+
+/// Query for `send_queued_now`.
+#[derive(Debug, Default, Deserialize)]
+pub struct SendQueuedNowQuery {
+    /// For a durable remote follow-up (no live injection): stop the current
+    /// turn and deliver THIS message next under its same id.
+    #[serde(default)]
+    pub interrupt: bool,
+}
+
 pub async fn send_queued_now(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(message_id): Path<Uuid>,
+    query: Option<Query<SendQueuedNowQuery>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let interrupt = query.is_some_and(|q| q.interrupt);
     let control = control_for_user(&state, &user).await;
-    {
+    let promoted_mission = {
         let _guard = DISPATCH_ADMISSION.lock().await;
         let _file = dispatch_admission::durable_lock(&state.config)
             .await
@@ -6447,8 +6494,47 @@ pub async fn send_queued_now(
         if remote_queue::is_waiting(&state.projects, &user.id, message_id)
             .map_err(internal_error)?
         {
-            return Ok(Json(serde_json::json!({ "ok": true, "delivered": false })));
+            if !interrupt {
+                return Ok(Json(serde_json::json!({ "ok": true, "delivered": false })));
+            }
+            let mission =
+                remote_queue::promote(&state.projects, &user.id, message_id).map_err(|error| {
+                    if error == "message not in queue" {
+                        (StatusCode::NOT_FOUND, error)
+                    } else {
+                        (StatusCode::CONFLICT, error)
+                    }
+                })?;
+            tracing::info!(mission_id = %mission, %message_id, "send-now promoted remote follow-up; interrupting current turn");
+            Some(mission)
+        } else {
+            None
         }
+    };
+    if let Some(mission_id) = promoted_mission {
+        // The actor takes dispatch admission itself, so the guard above is
+        // released first. The promoted row stays waiting with its same id;
+        // the remote queue pump delivers it once the stopped job is terminal.
+        let (tx, rx) = oneshot::channel();
+        control
+            .cmd_tx
+            .send(ControlCommand::CancelMission {
+                mission_id,
+                min_idle: None,
+                keep_remote_queue: true,
+                respond: tx,
+            })
+            .await
+            .map_err(session_unavailable)?;
+        // Nothing running (already between turns) is fine: the pump delivers.
+        if let Err(error) = rx.await.map_err(recv_failed)? {
+            tracing::debug!(%mission_id, %error, "send-now interrupt found no running turn");
+        }
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "delivered": false,
+            "promoted": true,
+        })));
     }
     let (tx, rx) = oneshot::channel();
     control
@@ -12231,6 +12317,7 @@ pub(super) async fn create_mission_inner(
     if let Some(RemoteHarnessPlan::Antigravity { effort, .. }) = remote_plan.as_mut() {
         *effort = model_effort.clone();
     }
+    let mut auto_placement: Option<Vec<String>> = None;
     if let Some(node_id) = remote_node_id.as_deref() {
         if remote_dispatch_is_scheduled_for_future(
             Some(node_id),
@@ -12294,6 +12381,7 @@ pub(super) async fn create_mission_inner(
                     }
                 };
             tracing::info!(node_id = %resolved, "auto placement selected remote node");
+            auto_placement = Some(requirements);
             remote_node_id = Some(resolved);
         } else {
             crate::remote_node::placement_for_selected_node(
@@ -12401,6 +12489,14 @@ pub(super) async fn create_mission_inner(
         }
     };
 
+    if let Some(requirements) = auto_placement.as_deref() {
+        // Only auto-placed missions may later be moved off a full node.
+        if let Err(error) =
+            rebalance::record_auto(&state.config.working_dir, mission.id, requirements)
+        {
+            tracing::warn!(mission_id = %mission.id, %error, "could not record auto placement; the mission will not be rebalanced");
+        }
+    }
     if let Some(mode) = req.cyber_access {
         if let Err(error) = cyber::write(&state.config.working_dir, mission.id, mode) {
             interrupt_new_mission(&control, mission.id, "cyber_settings_unavailable").await;
@@ -16732,6 +16828,22 @@ async fn poll_remote_job(
                     continue;
                 }
                 let terminal = crate::remote_node::job_state_confirms_termination(&status.state);
+                if terminal
+                    && status.state == "cancelled"
+                    && rebalance::is_superseded(ledger_dir, job_id)
+                {
+                    // Withdrawn before start and re-dispatched on another node:
+                    // the mission continues there, so this job is not its result.
+                    tracing::info!(%mission_id, %job_id, node = %node.id, "retired rebalanced job without finalizing the mission");
+                    fleet.record_outcome(outcome(
+                        &status.state,
+                        status.exit_code,
+                        status.error.clone(),
+                        true,
+                    ));
+                    crate::remote_node::job_ledger::remove(ledger_dir, job_id).await;
+                    return;
+                }
                 if terminal {
                     terminal_observation = Some(status.clone());
                     // Publish the observed node result before terminal mission/lease
@@ -19512,6 +19624,7 @@ pub async fn cancel_mission(
         .send(ControlCommand::CancelMission {
             mission_id,
             min_idle: None,
+            keep_remote_queue: false,
             respond: tx,
         })
         .await
@@ -27361,7 +27474,7 @@ async fn control_actor_loop(
                                     )));
                                 }
                             }
-                            ControlCommand::CancelMission { mission_id, min_idle, respond } => {
+                            ControlCommand::CancelMission { mission_id, min_idle, keep_remote_queue, respond } => {
                                 // Race-protect background cancels (watchdog, stale-cleanup):
                                 // if the caller asked us to only cancel when truly idle and the
                                 // mission has touched activity in the meantime, skip the cancel.
@@ -27394,7 +27507,7 @@ async fn control_actor_loop(
                                 // The actor already holds DISPATCH_ADMISSION. Fence
                                 // durable follow-ups before stopping the current run,
                                 // so a timer snapshot cannot restart an explicit Stop.
-                                if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                                if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade).filter(|_| !keep_remote_queue) {
                                     let cleared = async {
                                         let _file = dispatch_admission::durable_lock(&config).await?;
                                         remote_queue::cancel_tree(&state.projects, &mission_store, &session_user_id, mission_id).await

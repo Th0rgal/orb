@@ -361,6 +361,51 @@ pub(super) fn start(state: std::sync::Weak<AppState>) {
     });
 }
 
+/// Move a waiting follow-up to the head of its mission's FIFO, keeping its
+/// id and content. The other waiting rows of that mission keep their relative
+/// order behind it. Returns the mission id. Refuses a row already bound to a
+/// node job: that delivery may have been accepted and must not be reordered.
+pub(super) fn promote(store: &ProjectsStore, user: &str, id: Uuid) -> Result<Uuid, String> {
+    let mut conn = store.lock()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let (mission, bound): (String, bool) = tx
+        .query_row(
+            "SELECT mission_id, json_extract(payload,'$.job_id') IS NOT NULL FROM remote_message_queue WHERE user_id=?1 AND message_id=?2 AND state='waiting'",
+            params![user, id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("message not in queue")?;
+    if bound {
+        return Err("This message is already being delivered".into());
+    }
+    let others: Vec<i64> = {
+        let mut stmt = tx
+            .prepare("SELECT sequence FROM remote_message_queue WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND message_id!=?3 ORDER BY sequence")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![user, mission, id.to_string()], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    for sequence in others {
+        tx.execute(
+            "UPDATE remote_message_queue SET sequence=(SELECT MAX(sequence)+1 FROM remote_message_queue) WHERE sequence=?1",
+            params![sequence],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    // Keep AUTOINCREMENT ahead of the moved rows so new follow-ups append.
+    tx.execute(
+        "UPDATE sqlite_sequence SET seq=MAX(seq,(SELECT MAX(sequence) FROM remote_message_queue)) WHERE name='remote_message_queue'",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Uuid::parse_str(&mission).map_err(|e| e.to_string())
+}
+
 pub(super) fn is_waiting(store: &ProjectsStore, user: &str, id: Uuid) -> Result<bool, String> {
     store
         .lock()?
@@ -505,6 +550,64 @@ mod tests {
         let remaining = waiting(&db, Some("u")).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].message.mission_id, Some(other.id));
+    }
+
+    #[test]
+    fn promote_moves_message_to_head_keeping_id_and_others_order() {
+        let db = ProjectsStore::open_in_memory().unwrap();
+        let mid = Uuid::new_v4();
+        let other_mission = Uuid::new_v4();
+        let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let entry = |id, mission| Entry {
+            user_id: "u".into(),
+            message: QueuedMessage {
+                id,
+                content: format!("content-{id}"),
+                mission_id: Some(mission),
+                agent: None,
+                source: Some("remote-queue".into()),
+                inflight: false,
+                queue_error: None,
+            },
+            node_id: "nippur".into(),
+            session_id: None,
+            job_id: None,
+            assignment: serde_json::json!({}),
+        };
+        save(&db, &entry(ids[0], mid)).unwrap();
+        save(&db, &entry(ids[1], other_mission)).unwrap();
+        save(&db, &entry(ids[2], mid)).unwrap();
+        save(&db, &entry(ids[3], mid)).unwrap();
+        assert_eq!(promote(&db, "u", ids[3]).unwrap(), mid);
+        let order = |db: &ProjectsStore| {
+            waiting(db, Some("u"))
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.message.mission_id == Some(mid))
+                .map(|e| e.message.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&db), vec![ids[3], ids[0], ids[2]]);
+        // Content and id are unchanged; idempotent re-promotion.
+        let head = waiting(&db, Some("u")).unwrap();
+        let promoted = head.iter().find(|e| e.message.id == ids[3]).unwrap();
+        assert_eq!(promoted.message.content, format!("content-{}", ids[3]));
+        assert_eq!(promote(&db, "u", ids[3]).unwrap(), mid);
+        assert_eq!(order(&db), vec![ids[3], ids[0], ids[2]]);
+        // A new follow-up still appends at the tail.
+        let late = Uuid::new_v4();
+        save(&db, &entry(late, mid)).unwrap();
+        assert_eq!(order(&db), vec![ids[3], ids[0], ids[2], late]);
+        // The head is what validate() would deliver next.
+        assert!(promote(&db, "other-user", ids[3]).is_err());
+        bind_job(&db, "u", ids[0], Some(Uuid::new_v4())).unwrap();
+        assert!(promote(&db, "u", ids[0])
+            .unwrap_err()
+            .contains("already being delivered"));
+        finish(&db, "u", ids[2], "cancelled").unwrap();
+        assert!(promote(&db, "u", ids[2])
+            .unwrap_err()
+            .contains("not in queue"));
     }
 
     #[test]

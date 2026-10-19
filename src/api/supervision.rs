@@ -414,6 +414,7 @@ pub(crate) async fn cleanup_stale_active_missions_once(
                     .send(ControlCommand::CancelMission {
                         mission_id: mission.id,
                         min_idle: Some(std::time::Duration::from_secs(stuck_seconds())),
+                        keep_remote_queue: false,
                         respond: tx,
                     })
                     .await
@@ -1104,6 +1105,7 @@ pub(crate) async fn stuck_mission_watchdog_loop(
                 .send(ControlCommand::CancelMission {
                     mission_id: info.mission_id,
                     min_idle: Some(std::time::Duration::from_secs(stuck_seconds())),
+                    keep_remote_queue: false,
                     respond: cancel_tx,
                 })
                 .await

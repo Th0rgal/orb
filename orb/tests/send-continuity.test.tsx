@@ -200,7 +200,7 @@ it('never leaks an in-flight Send now retry to another mission when the selected
  });
  vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
   const u=String(url);
-  if(u.endsWith('/send-now')&&options?.method==='POST')return sendNowGate;
+  if(u.includes('/send-now')&&options?.method==='POST')return sendNowGate;
   if(u.endsWith('/cancel')&&options?.method==='POST'){
    cancelRequests.push(u);
    return Response.json({ok:true});

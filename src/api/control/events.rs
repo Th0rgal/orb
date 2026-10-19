@@ -534,6 +534,10 @@ pub enum ControlCommand {
         /// the caller's "stalled" observation and the actor processing
         /// this command. User-initiated cancels pass `None`.
         min_idle: Option<std::time::Duration>,
+        /// Keep durable remote follow-ups queued instead of revoking them.
+        /// Set only by "send now" interrupt-and-promote, which stops the
+        /// current turn precisely so the promoted message is delivered next.
+        keep_remote_queue: bool,
         respond: oneshot::Sender<Result<CancelMissionOutcome, String>>,
     },
     /// Pause a mission (FLEET-004). Stops any in-flight runner (main or

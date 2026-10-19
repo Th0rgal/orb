@@ -2138,7 +2138,10 @@ mod tests {
             side_question: false,
             companion_of: None,
             long_running: false,
-            command: format!("test \"$HOME\" = \"$PWD\" && test \"$GROK_HOME\" = '{}' && test -r \"$GROK_HOME/auth.json\" && printf managed-ok", auth_home.display()),
+            // Compare physical paths: on macOS the temp dir lives under the
+            // /var -> /private/var symlink, so `$PWD` (from getcwd) and the
+            // logical `$HOME` differ textually while naming the same directory.
+            command: format!("test \"$(cd \"$HOME\" && pwd -P)\" = \"$(pwd -P)\" || {{ echo home-mismatch; exit 1; }}; test \"$GROK_HOME\" = '{}' || {{ echo grok-home-mismatch; exit 1; }}; test -r \"$GROK_HOME/auth.json\" || {{ echo auth-unreadable; exit 1; }}; printf managed-ok", auth_home.display()),
             timeout_secs: Some(30),
             env: Some(std::collections::HashMap::from([("GROK_HOME".into(), "/untrusted-payload-path".into())])),
             managed_auth: vec!["grok".into()],

@@ -7485,6 +7485,19 @@ async fn native_grok_auto_track_continuation(
     assert_eq!(retry["queued"], false);
     assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
     crate::remote_node::job_ledger::remove(&h.state.config.working_dir, bound_job).await;
+    // The fixture's job state is shared by every job it ever accepted. Flipping
+    // it back to "running" before the monitor has observed the last delivered
+    // job as terminal resurrects that job, and the next follow-up then waits
+    // behind it forever (the pre-fix flake under CPU contention). Wait for the
+    // terminal observation to settle first.
+    wait_until("last delivered native job settles", 20, || async {
+        store.get_active_mission_run(id).await.unwrap().is_none()
+            && crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+                .await
+                .unwrap()
+                .is_empty()
+    })
+    .await;
     // Stop must revoke queued follow-ups before a terminal observation can
     // let the background pump start another generation.
     fixture.set_state("running");
@@ -7586,6 +7599,65 @@ async fn remote_queue_status_wait_does_not_hold_admission() {
     );
     assert!(delivery.is_err());
     assert!(!remote_queue::is_waiting(&h.state.projects, &h.user.id, id).unwrap());
+}
+
+#[tokio::test]
+async fn send_now_interrupt_promotes_remote_follow_up_with_same_id_and_keeps_queue() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Failed, None).await;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for (id, content) in [(first, "first"), (second, "second")] {
+        let entry = remote_queue::Entry {
+            user_id: h.user.id.clone(),
+            node_id: "absent-node".into(),
+            session_id: None,
+            job_id: None,
+            assignment: json!({}),
+            message: QueuedMessage {
+                id,
+                content: content.into(),
+                mission_id: Some(mission.id),
+                agent: None,
+                source: Some("remote-queue".into()),
+                inflight: false,
+                queue_error: None,
+            },
+        };
+        h.state.projects.lock().unwrap().execute(
+            "INSERT INTO remote_message_queue(user_id,message_id,mission_id,payload) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![h.user.id,id.to_string(),mission.id.to_string(),serde_json::to_string(&entry).unwrap()],
+        ).unwrap();
+    }
+    let post = |query: &'static str, id: Uuid| {
+        let client = h.state.http_client.clone();
+        let url = format!("{}/queue/{id}/send-now{query}", h.url);
+        async move { client.post(url).send().await.unwrap() }
+    };
+    // Without interrupt: unchanged contract, nothing reordered.
+    let plain: Value = post("", second).await.json().await.unwrap();
+    assert_eq!(plain["delivered"], false);
+    assert!(plain.get("promoted").is_none());
+    let order = || {
+        remote_queue::waiting(&h.state.projects, Some(&h.user.id))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(), vec![first, second]);
+    let promoted: Value = post("?interrupt=true", second).await.json().await.unwrap();
+    assert_eq!(promoted["delivered"], false);
+    assert_eq!(promoted["promoted"], true);
+    // Stop did not revoke the queue: both ids survive, the promoted one first.
+    assert_eq!(order(), vec![second, first]);
+    let rows = remote_queue::waiting(&h.state.projects, Some(&h.user.id)).unwrap();
+    assert_eq!(rows[0].message.content, "second");
+    // Unknown ids are reported, not silently accepted.
+    assert_eq!(
+        post("?interrupt=true", Uuid::new_v4()).await.status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
