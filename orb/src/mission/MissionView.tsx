@@ -1,4 +1,5 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
+import { followProjectFolder } from "../localFolder";
 import { isFailedStatus, isRunning, isSettingsIdle } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
@@ -689,8 +690,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           return false;
         }
       }
-      const binding = localBinding(sendMission);
-      if (!binding) {
+      if (!localBinding(sendMission)) {
         setSendError("This session runs on the computer that started it. Your draft is kept.");
         return false;
       }
@@ -700,6 +700,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         return false;
       }
       try {
+        // After a project move, the next turn runs in the new project's folder.
+        const binding = await followProjectFolder(sendMission, project);
+        if (!binding) throw new Error("This session runs on the computer that started it. Your draft is kept.");
         const plan = await materializeMentions(project, text, chips);
         await prepareProjectSkills(project, binding.cwd, binding.harness, binding.bin);
         if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
