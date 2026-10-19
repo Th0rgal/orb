@@ -8,7 +8,7 @@
 #   APPSTORE_CONNECT_ISSUER_ID  issuer UUID from App Store Connect
 # Env overrides: ASC_TEAM_ID (default BQ6Z84B8L5), BWS (bws binary path).
 #
-# Build numbers are <base CFBundleVersion>.<UTC day-of-year HHMM> (Apple caps
+# Build numbers are <base CURRENT_PROJECT_VERSION from project.yml>.<UTC day-of-year HHMM> (Apple caps
 # CFBundleVersion at 18 characters), which can never
 # collide with Xcode Cloud's <base>.<run number> (run numbers stay small).
 set -euo pipefail
@@ -25,13 +25,7 @@ fi
 
 WORK="$(mktemp -d)"
 chmod 700 "${WORK}"
-PLIST="${IOS}/SandboxedDashboard/Info.plist"
-EXT_PLIST="${IOS}/OrbLiveActivity/Info.plist"
-cp "${PLIST}" "${WORK}/Info.plist.orig"
-cp "${EXT_PLIST}" "${WORK}/ExtInfo.plist.orig"
 cleanup() {
-  cp "${WORK}/Info.plist.orig" "${PLIST}"
-  cp "${WORK}/ExtInfo.plist.orig" "${EXT_PLIST}"
   rm -rf "${WORK}"
 }
 trap cleanup EXIT
@@ -55,11 +49,13 @@ AUTH=(-allowProvisioningUpdates
 # Same project generation as Xcode Cloud (pinned XcodeGen, no drift allowed).
 CI_PRIMARY_REPOSITORY_PATH="${ROOT}" bash "${IOS}/ci_scripts/ci_post_clone.sh"
 
-BASE="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "${PLIST}")"
+# The version is single-sourced in project.yml; both Info.plists read the build settings,
+# so overriding CURRENT_PROJECT_VERSION on the command line stamps the app and the extension.
+setting() { sed -nE "s/^[[:space:]]*$1:[[:space:]]*\"?([0-9.]+)\"?.*/\\1/p" "${IOS}/project.yml" | head -n 1; }
+BASE="$(setting CURRENT_PROJECT_VERSION)"
+VERSION="$(setting MARKETING_VERSION)"
+[[ -n "${BASE}" && -n "${VERSION}" ]] || { echo "version settings missing from project.yml" >&2; exit 1; }
 BUILD="${BASE%%.*}.$(date -u +%j%H%M)"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD}" "${PLIST}"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD}" "${EXT_PLIST}"
-VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${PLIST}")"
 echo "=== Orb ${VERSION} (${BUILD}) ==="
 
 xcodebuild archive \
@@ -69,6 +65,7 @@ xcodebuild archive \
   -destination generic/platform=iOS \
   -archivePath "${WORK}/Orb.xcarchive" \
   CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="${TEAM_ID}" \
+  CURRENT_PROJECT_VERSION="${BUILD}" \
   "${AUTH[@]}"
 
 cat > "${WORK}/ExportOptions.plist" <<EOF
