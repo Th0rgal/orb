@@ -1,0 +1,65 @@
+{
+  "description": "OrbJSON.relative / OrbStyle.relativeTime: seconds elapsed -> label. <45 s 'now'; minutes clamp to at least 1; m/h/d below a week, then weeks. Future timestamps count as 0 s.",
+  "cases": [
+    {
+      "secondsAgo": -30,
+      "expected": "now"
+    },
+    {
+      "secondsAgo": 0,
+      "expected": "now"
+    },
+    {
+      "secondsAgo": 44,
+      "expected": "now"
+    },
+    {
+      "secondsAgo": 45,
+      "expected": "1m"
+    },
+    {
+      "secondsAgo": 59,
+      "expected": "1m"
+    },
+    {
+      "secondsAgo": 60,
+      "expected": "1m"
+    },
+    {
+      "secondsAgo": 119,
+      "expected": "1m"
+    },
+    {
+      "secondsAgo": 120,
+      "expected": "2m"
+    },
+    {
+      "secondsAgo": 3599,
+      "expected": "59m"
+    },
+    {
+      "secondsAgo": 3600,
+      "expected": "1h"
+    },
+    {
+      "secondsAgo": 86399,
+      "expected": "23h"
+    },
+    {
+      "secondsAgo": 86400,
+      "expected": "1d"
+    },
+    {
+      "secondsAgo": 604799,
+      "expected": "6d"
+    },
+    {
+      "secondsAgo": 604800,
+      "expected": "1w"
+    },
+    {
+      "secondsAgo": 1814400,
+      "expected": "3w"
+    }
+  ]
+}

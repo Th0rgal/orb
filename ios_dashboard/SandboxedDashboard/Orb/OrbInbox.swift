@@ -668,8 +668,8 @@ struct OrbInboxItem: Identifiable, Equatable {
 enum OrbInboxModel {
     static let maxSummaryChars = 320
 
-    private static let workingStatuses: Set<String> = Set(MissionState.allCases.filter { $0.category == .working }.map(\.rawValue))
-    private static let hiddenStatuses: Set<String> = Set(MissionState.allCases.filter { $0.category == .hidden }.map(\.rawValue))
+    private static let workingStatuses: Set<String> = Set(MissionState.allCases.filter { $0.inboxSection == .working }.map(\.rawValue))
+    private static let hiddenStatuses: Set<String> = Set(MissionState.allCases.filter { $0.inboxSection == .hidden }.map(\.rawValue))
     private static let interactiveTools: Set<String> = [
         "ui_native_request", "AskUserQuestion", "question",
     ]
@@ -981,7 +981,7 @@ enum OrbInboxModel {
         if isSubagent(row: row, includeAutonomous: includeAutonomous) { return .hidden }
         if interaction != nil { return .needsYou }
         if workingStatuses.contains(status) { return .working }
-        switch MissionState(rawValue: status)?.category {
+        switch MissionState(rawValue: status)?.inboxSection {
         case .needsYou: return .needsYou
         case .ready: return .ready
         default: return .hidden
@@ -1210,7 +1210,7 @@ enum OrbInboxModel {
             guard cat == .needsYou || cat == .ready else { continue }
             var isRowUnread = unreadStore.isUnread(row: row)
             if !isRowUnread, let children = childrenByParent[row.id] {
-                for child in children where child.missionState?.needsAttention == true {
+                for child in children where child.missionState?.isProblem == true {
                     if unreadStore.isUnread(row: child) {
                         isRowUnread = true
                         break
@@ -1261,7 +1261,7 @@ enum OrbInboxModel {
         let (badge, tone) = resolveBadgeAndTone(row: row, summary: summary, interaction: interaction)
         let isGoal = row.raw["goal_mode"].flag || OrbStyle.goalObjective(row.raw["title"].text) != nil
         let unread = OrbMissionUnreadStore.shared.isUnread(row: row, hasInteraction: interaction != nil)
-        let attention = interaction != nil || row.missionState?.needsAttention == true
+        let attention = interaction != nil || row.missionState?.isProblem == true
         let canRetry = row.missionState?.canRetry ?? false
         let peekTurns = includePeekTurns ? extractPeekTurns(row: row, events: events, summaryFallback: summary) : []
 
@@ -1291,8 +1291,8 @@ enum OrbInboxModel {
     }
 
     private static func urgencyRank(_ item: OrbInboxItem) -> Int {
-        if item.interaction != nil { return 0 }
-        return item.row.missionState?.sortRank ?? 4
+        if item.interaction != nil { return -1 }
+        return MissionState.sortRank(item.row.state)
     }
 
     @MainActor
@@ -1354,7 +1354,7 @@ enum OrbInboxModel {
                         completed += 1
                     } else if workingStatuses.contains(st) {
                         running += 1
-                    } else if MissionState(rawValue: st)?.needsAttention == true {
+                    } else if MissionState(rawValue: st)?.isProblem == true {
                         failed += 1
                         let childTitle = cleanChildTrackLabel(child.raw["title"].text)
                         failedChildren.append(

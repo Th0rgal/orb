@@ -1,0 +1,369 @@
+{
+  "version": 1,
+  "description": "Mission/conversation state table shared by the iOS and Android Orb apps. Keys are lowercase Core status strings. Unknown states: label = state with '_' replaced by ' ', category 'unknown', sortRank 9, all flags false.",
+  "categories": [
+    "waiting",
+    "blocked",
+    "failed",
+    "live",
+    "queued",
+    "paused",
+    "stopped",
+    "done",
+    "archived"
+  ],
+  "unknown": {
+    "category": "unknown",
+    "sortRank": 9
+  },
+  "states": {
+    "active": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "running": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "starting": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "working": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "in_progress": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "processing": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "streaming": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "resuming": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "waiting_background": {
+      "label": "Working",
+      "category": "live",
+      "sortRank": 3,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "pending": {
+      "label": "Queued",
+      "category": "queued",
+      "sortRank": 4,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "queued": {
+      "label": "Queued",
+      "category": "queued",
+      "sortRank": 4,
+      "flags": {
+        "live": true,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "awaiting_user": {
+      "label": "Waiting for reply",
+      "category": "waiting",
+      "sortRank": 0,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": true,
+        "unreadResponse": true,
+        "canRetry": false
+      }
+    },
+    "waiting_user": {
+      "label": "Waiting for reply",
+      "category": "waiting",
+      "sortRank": 0,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": true,
+        "unreadResponse": true,
+        "canRetry": false
+      }
+    },
+    "waiting_for_user": {
+      "label": "Waiting for reply",
+      "category": "waiting",
+      "sortRank": 0,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": true,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "needs_input": {
+      "label": "Needs input",
+      "category": "waiting",
+      "sortRank": 0,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": true,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "awaiting_approval": {
+      "label": "Awaiting approval",
+      "category": "waiting",
+      "sortRank": 0,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": true,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "blocked": {
+      "label": "Blocked",
+      "category": "blocked",
+      "sortRank": 1,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": true,
+        "unreadResponse": true,
+        "canRetry": true
+      }
+    },
+    "failed": {
+      "label": "Failed",
+      "category": "failed",
+      "sortRank": 2,
+      "flags": {
+        "live": false,
+        "terminal": true,
+        "needsAttention": true,
+        "unreadResponse": true,
+        "canRetry": true
+      }
+    },
+    "error": {
+      "label": "Failed",
+      "category": "failed",
+      "sortRank": 2,
+      "flags": {
+        "live": false,
+        "terminal": true,
+        "needsAttention": true,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "errored": {
+      "label": "Failed",
+      "category": "failed",
+      "sortRank": 2,
+      "flags": {
+        "live": false,
+        "terminal": true,
+        "needsAttention": true,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "not_feasible": {
+      "label": "Not feasible",
+      "category": "failed",
+      "sortRank": 2,
+      "flags": {
+        "live": false,
+        "terminal": true,
+        "needsAttention": true,
+        "unreadResponse": true,
+        "canRetry": true
+      }
+    },
+    "timed_out": {
+      "label": "Timed out",
+      "category": "failed",
+      "sortRank": 2,
+      "flags": {
+        "live": false,
+        "terminal": true,
+        "needsAttention": true,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "interrupted": {
+      "label": "Stopped",
+      "category": "stopped",
+      "sortRank": 6,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": true,
+        "canRetry": true
+      }
+    },
+    "cancelled": {
+      "label": "Stopped",
+      "category": "stopped",
+      "sortRank": 6,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "paused": {
+      "label": "Paused",
+      "category": "paused",
+      "sortRank": 5,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": true,
+        "canRetry": false
+      }
+    },
+    "completed": {
+      "label": "Completed",
+      "category": "done",
+      "sortRank": 7,
+      "flags": {
+        "live": false,
+        "terminal": true,
+        "needsAttention": false,
+        "unreadResponse": true,
+        "canRetry": false
+      }
+    },
+    "succeeded": {
+      "label": "Completed",
+      "category": "done",
+      "sortRank": 7,
+      "flags": {
+        "live": false,
+        "terminal": true,
+        "needsAttention": false,
+        "unreadResponse": true,
+        "canRetry": false
+      }
+    },
+    "acknowledged": {
+      "label": "Archived",
+      "category": "archived",
+      "sortRank": 8,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    },
+    "archived": {
+      "label": "Archived",
+      "category": "archived",
+      "sortRank": 8,
+      "flags": {
+        "live": false,
+        "terminal": false,
+        "needsAttention": false,
+        "unreadResponse": false,
+        "canRetry": false
+      }
+    }
+  }
+}

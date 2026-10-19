@@ -1003,7 +1003,7 @@ struct OrbConversation: View {
                 }
                 Button("Rename") { title = mission["title"].text; rename = true }
                 Button("Move") { destinationProject = mission["project"].text; destinationFolder = OrbRow(mission).folder; moving = true }
-                if MissionState(rawValue: currentStatus)?.isTerminal == true {
+                if MissionState(rawValue: currentStatus)?.canReopen == true {
                     Button(currentStatus == "acknowledged" ? "Restore" : "Reopen") {
                         Task { await mutate(["status": .string("paused")]) }
                     }

@@ -1178,7 +1178,7 @@ struct OrbProjectPage: View {
         (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)) &&
         (filter == "Archived" ? row.state == "acknowledged" : row.state != "acknowledged") &&
         (filter != "Working" || row.active) &&
-        (filter != "Needs attention" || row.missionState.map { $0.needsAttention || $0 == .interrupted } == true)
+        (filter != "Needs attention" || row.missionState.map { $0.isProblem || $0 == .interrupted } == true)
     }
     private var visible: [OrbRow] {
         if !search.isEmpty {
@@ -1471,7 +1471,7 @@ struct OrbProjectPage: View {
         } else {
             OrbListIcon(symbol: row.backend.hasPrefix("cloud_") ? "cloud" : "cpu")
                 .overlay(alignment: .bottomTrailing) {
-                    if row.missionState?.needsAttention == true {
+                    if row.missionState?.isProblem == true {
                         Circle().fill(OrbStyle.warning).frame(width: 6, height: 6)
                     } else if OrbMissionUnreadStore.shared.isUnread(row: row) {
                         Circle().fill(Color.blue).frame(width: 6, height: 6)
@@ -1598,7 +1598,7 @@ struct OrbProjectPage: View {
         Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
         Button { moveClipboard.pick(row, from: project.id) } label: { Label("Move…", systemImage: "folder") }
         Divider()
-        if row.missionState?.isTerminal == true {
+        if row.missionState?.canReopen == true {
             Button { Task { await setStatus(row, "paused") } } label: {
                 Label(row.state == "acknowledged" ? "Restore" : "Reopen", systemImage: "arrow.uturn.backward")
             }
