@@ -1,3 +1,4 @@
+import { isLive } from "./missionStatus";
 import { swallow } from "./log";
 import { readInboxState } from "./inboxState";
 import { ErrorToast, dismissToast, notify } from "./toast";
@@ -1132,7 +1133,7 @@ export function InboxPage(p: {
           const isMissionRunning = () => {
             const s = currentItem().mission.status;
             return Boolean(
-              s && ["active", "running", "pending", "queued", "starting", "resuming"].includes(s),
+              isLive(s),
             );
           };
           const color = () => projectColor(currentItem().projectSlug);

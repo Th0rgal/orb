@@ -1,3 +1,4 @@
+import { statusPresentation } from "./missionStatus";
 import { discardLocalWakeup, localContinuation } from "./localWakeups";
 import { Dynamic } from "solid-js/web";
 import { Show, For, createSignal, type JSX } from "solid-js";
@@ -16,31 +17,10 @@ export function missionStatusPresentation(status: string, request?: PendingInter
     const failed = continuation.items.some(item => item.state === "error");
     return { label: continuationLabel(continuation), tone: failed ? "attention" : "scheduled", icon: failed ? Icon.CircleAlert : Icon.WakeClock };
   }
-  switch (status) {
-    case "active": case "running": case "resuming": case "starting":
-      return { label: "Running", tone: "running", icon: Icon.LoaderCircle };
-    case "pending": case "queued":
-      return { label: "Queued", tone: "quiet", icon: Icon.Clock };
-    case "waiting_background":
-      return { label: "Background work running", tone: "running", icon: Icon.Clock };
-    case "awaiting_user": case "waiting_user": case "acknowledged":
-      return { label: "Ready for a follow-up", tone: "quiet", icon: null };
-    case "blocked":
-      return { label: "Blocked", tone: "attention", icon: Icon.CircleAlert };
-    case "paused":
-      return { label: "Paused", tone: "quiet", icon: Icon.Pause };
-    case "completed":
-      return { label: "Completed", tone: "success", icon: Icon.CircleCheck };
-    case "failed": case "not_feasible":
-      return { label: status === "failed" ? "Failed" : "Not feasible", tone: "attention", icon: Icon.CircleAlert };
-    case "interrupted": case "cancelled":
-      return { label: "Interrupted", tone: "quiet", icon: Icon.Pause };
-    case "idle":
-      return { label: "Idle", tone: "quiet", icon: null };
-    default:
-      return { label: status || "Unknown status", tone: "quiet", icon: null };
-  }
+  const shown = statusPresentation(status);
+  return { label: shown.label, tone: shown.tone, icon: shown.icon ? ICONS[shown.icon] : null };
 }
+const ICONS = { loader: Icon.LoaderCircle, clock: Icon.Clock, alert: Icon.CircleAlert, pause: Icon.Pause, check: Icon.CircleCheck };
 
 export function MissionGlyph(p: { status: string; missionId?: string; unread?: boolean; identity?: JSX.Element; continuation?: ContinuationSummary | null }) {
   const continuation = () => {

@@ -1,3 +1,4 @@
+import { isArchivable, isReopenable } from "./missionStatus";
 import { swallow } from "./log";
 import { sharedRead, invalidateReads } from "./sharedReads";
 import { cacheReset } from "./pageCache";
@@ -1140,7 +1141,7 @@ export async function archiveMission(id: string): Promise<void> {
   const version = connectionVersion();
   const mission = await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
-  if (!["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled"].includes(mission.status)
+  if (!isArchivable(mission.status)
     || mission.execution?.state === "running") throw new Error("Wait for the mission to stop before archiving it.");
   await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
     method: "POST",
@@ -1155,7 +1156,7 @@ export async function reopenMission(id: string): Promise<void> {
   const version = connectionVersion();
   const mission = await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
-  if (!["completed", "failed", "interrupted", "acknowledged", "cancelled"].includes(mission.status)
+  if (!isReopenable(mission.status)
     || mission.execution?.state === "running") throw new Error("This mission is no longer finished. Refresh its status before reopening it.");
   await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
     method: "POST", headers: { "Content-Type": "application/json" },

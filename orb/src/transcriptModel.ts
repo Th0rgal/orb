@@ -1,3 +1,4 @@
+import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
 import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
@@ -245,7 +246,7 @@ export class TranscriptReducer {
           this.close();
         }
         const summary = str(d.summary ?? d.content).trim();
-        if (["failed", "not_feasible"].includes(status) && summary) {
+        if (isFailedStatus(status) && summary) {
           const lastUser = this.items.reduce((last, item, idx) => item.kind === "user" && !item.queued ? idx : last, -1);
           // The harness already reported the concrete failure; the status summary
           // ("Remote node 'x' finished") would only add a second, vaguer card.

@@ -1,3 +1,4 @@
+import { isFailedStatus, isLive, isRunning, isSettingsIdle } from "./missionStatus";
 import { errorText, log, swallow } from "./log";
 import { flushClientLink, connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
 import {CodexSpeedPicker, missionSpeed, requireSpeedSupport} from './CodexSpeedPicker';
@@ -40,7 +41,7 @@ import { readComposerDraft, saveComposerDraft } from "./composerDrafts";
 import { readImagePaste, imagePrompt, stageLocalImages, stageRemoteImages, IMAGE_COUNT, type DraftImage } from "./imageAttachments";
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
 import { ErrorToast } from "./toast";
-import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, nodeLabel, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, missionSettingsIdle, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
+import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, nodeLabel, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "./goal";
 import { atQuery, browseAttachItems, chipToAttachment, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
@@ -1270,8 +1271,7 @@ export default function App() {
           }
         }
       }
-      const live = new Set(["active", "running", "pending", "queued", "starting", "resuming"]);
-      for (const m of fresh) if (live.has(m.status)) prefetchTranscript(m.id);
+      for (const m of fresh) if (isLive(m.status)) prefetchTranscript(m.id);
       for (const key of cacheRecents()) {
         if (key.startsWith("m:") && !isMissionDeleting(key.slice(2))) prefetchTranscript(key.slice(2));
       }
@@ -2322,7 +2322,7 @@ function MissionDock(p: {
     if (m) return dockModelLabel(harnessName(), shortModelLabel(m.label));
     return id ? dockModelLabel(harnessName(), shortModelLabel(id)) : "Default";
   };
-  const idle = () => missionSettingsIdle(p.mission?.status);
+  const idle = () => isSettingsIdle(p.mission?.status);
   const models = () => choice()?.models ?? [];
   const canChangeModel = () => idle() && models().length > 1 && !saving();
   // The mission's own stored effort, normalized against its harness: a mission
@@ -2804,7 +2804,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(() => {
     const status = mission()?.status;
     if (!p.id || !clientPlaced() || !status || !localFailure(p.id) || localRunActive(p.id)) return;
-    if (!["failed", "not_feasible"].includes(status) && !queuedLocalMessages(p.id).some(row => !!row.result && ((row.result.exit_code != null && row.result.exit_code !== 0) || !!row.result.error))) {
+    if (!isFailedStatus(status) && !queuedLocalMessages(p.id).some(row => !!row.result && ((row.result.exit_code != null && row.result.exit_code !== 0) || !!row.result.error))) {
       recordLocalFailure(p.id, null);
     }
   });
@@ -2816,7 +2816,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if (localRunActive(p.id)) return true;
     if(clientPlaced()&&localRunKnown(p.id))return queuedLocalMessages(p.id).some(row=>row.state==='dispatching');
     const s = mission()?.status;
-    return !!s && ["active","running","pending","queued","starting","resuming"].includes(s);
+    return isLive(s);
   };
 
   /** Anything the agent has actually said or done in this turn. */
@@ -3101,7 +3101,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             if (staleMission() || p.id !== targetMissionId) return;
             setMission(current);
             const stillStopping =
-              ["active", "running", "starting", "resuming"].includes(current.status) ||
+              isRunning(current.status) ||
               current.execution?.state === "stopping" ||
               (!!current.remote_job && current.remote_job.phase !== "finished");
             if (!stillStopping) break;

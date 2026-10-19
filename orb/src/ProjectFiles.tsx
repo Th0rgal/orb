@@ -1,3 +1,4 @@
+import { isArchivable, isReopenable, isRunning, isLive, isWorking } from "./missionStatus";
 import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
 import { ErrorToast } from "./toast";
@@ -187,7 +188,6 @@ export function LiveProjectsSection(p: {
   let archivesLoaded = false;
   let archivesRequest: Promise<void> | null = null;
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
-  const RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const visibleMissions = (slug: string) => {
     const rows = missions[slug] ?? [];
@@ -831,9 +831,8 @@ export function LiveProjectsSection(p: {
         if (merged !== missions[slug]) setMissions(slug, merged);
         p.onProjectMissions?.(slug, merged);
         if (opts?.transcripts === false) return;
-        const live = new Set(["active", "pending", "queued", "resuming", "running", "starting"]);
         const deleting = deletingIds();
-        for (const m of merged) if (live.has(m.status) && !deleting.has(m.id)) prefetchTranscript(m.id);
+        for (const m of merged) if (isLive(m.status) && !deleting.has(m.id)) prefetchTranscript(m.id);
       })
       .catch(() => {
         if (currentConnection(version) && !missions[slug]) setMissions(slug, []);
@@ -901,7 +900,7 @@ export function LiveProjectsSection(p: {
   const warmupProjects = (list: ProjectSummary[]) => {
     const limit = list.length;
     if (!limit) return;
-    const active = new Set((p.activityMissions ?? []).filter(m => ["active", "running", "starting", "resuming"].includes(m.status)).map(m => m.project));
+    const active = new Set((p.activityMissions ?? []).filter(m => isRunning(m.status)).map(m => m.project));
     const prioritized = [...list].sort((a, b) => Number(!!expanded[b.slug] || active.has(b.slug)) - Number(!!expanded[a.slug] || active.has(a.slug)));
     for (const p of prioritized.slice(0, limit)) {
       if (warmed.has(p.slug)) continue;
@@ -1444,7 +1443,7 @@ export function LiveProjectsSection(p: {
     const subtree = missionSubtree(allKnownMissions(), [mission.id]);
     const fullSubtree = subtree.some(m => m.id === mission.id) ? subtree : [mission, ...subtree];
     if (fullSubtree.some(m => deletingIds().has(m.id))) return false;
-    if (!restore && fullSubtree.some(m => RUNNING.has(m.status))) {
+    if (!restore && fullSubtree.some(m => isWorking(m.status))) {
       setActionError("Stop or finish this agent before archiving it.");
       return false;
     }
@@ -1515,7 +1514,7 @@ export function LiveProjectsSection(p: {
         const row = Object.values(missions).flat().find(m => m.id === selected) ?? archivedMissions().find(m => m.id === selected);
         if (!row || isArchived(row)) continue;
         const subtree = missionSubtree(allKnownMissions(), [row.id]);
-        if (RUNNING.has(row.status) || subtree.some(m => RUNNING.has(m.status))) { failures.push(`${selected.slice(0,8)}: stop or finish this agent first`); continue; }
+        if (isWorking(row.status) || subtree.some(m => isWorking(m.status))) { failures.push(`${selected.slice(0,8)}: stop or finish this agent first`); continue; }
         if (!await archiveConversation(row)) failures.push(`${selected.slice(0,8)}: ${actionError() ?? "archive failed"}`);
       }
       if (currentConnection(version) && failures.length) setActionError(failures.join("; "));
@@ -1591,12 +1590,12 @@ export function LiveProjectsSection(p: {
   ] : [
     {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
     ...(!mission.backend?.startsWith("cloud_") ? [{ kind: "item" as const, label: "Transfer to another agent", icon: Ic.BranchIcon, openOnHover: true, onClick: (anchor?: HTMLButtonElement) => { setForkTarget({ mission, anchor }); } }] : []),
-    ...(["completed", "failed", "interrupted", "acknowledged", "cancelled"].includes(mission.status)
+    ...(isReopenable(mission.status)
       ? [{ kind: "item" as const, label: isArchived(mission) ? "Restore" : "Reopen", icon: Ic.ReopenIcon, onClick: () => void reopenConversation(mission) }] : []),
     { kind: "item", label: "Move", icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id) },
     { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginMissionRename(mission) },
     { kind: "item", label: "Copy mission ID", icon: Ic.CopyIcon, onClick: () => void copyMissionId(mission) },
-    ...(["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled"].includes(mission.status)
+    ...(isArchivable(mission.status)
       ? [{ kind: "item" as const, label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void archiveConversation(mission) }]
       : []),
   ];
@@ -1808,7 +1807,7 @@ export function LiveProjectsSection(p: {
     if (!nested.children.length) return { id, data };
     const selected = p.selected();
     const open = expanded[id] ?? (!!selected?.startsWith("m:") && holds(nested, selected.slice(2)));
-    return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, child => RUNNING.has(child.status)), versions: countVersions(nested) },
+    return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, child => isWorking(child.status)), versions: countVersions(nested) },
       expanded: open, children: open ? nested.children.map(child => missionNode(slug, child)) : [] };
   };
   const tree = (): Node[] => projects().map(project => {
@@ -1821,7 +1820,7 @@ export function LiveProjectsSection(p: {
         const inside = !!selected?.startsWith("m:") && launched.some(root => root.mission.id === selected.slice(2) || holds(root, selected.slice(2)));
         const open = launched.length ? (expanded[id] ?? inside) : undefined;
         const count = launched.reduce((sum, root) => sum + 1 + countNested(root), 0);
-        const live = launched.reduce((sum, root) => sum + Number(RUNNING.has(root.mission.status)) + countNested(root, child => RUNNING.has(child.status)), 0);
+        const live = launched.reduce((sum, root) => sum + Number(isWorking(root.mission.status)) + countNested(root, child => isWorking(child.status)), 0);
         children.push({ id, data: { kind: "cron", slug, label: job.name, job, controller: true, ...(launched.length ? { launched: count, launchedLive: live } : {}) },
           ...(launched.length ? { expanded: open, children: open ? launched.map(root => missionNode(slug, root)) : [] } : {}) });
       }

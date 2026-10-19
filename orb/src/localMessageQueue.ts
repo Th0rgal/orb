@@ -1,3 +1,4 @@
+import { isRunning } from "./missionStatus";
 import { swallow } from "./log";
 import {createSignal,batch} from 'solid-js';
 import {mergeById} from './poll';
@@ -489,7 +490,7 @@ export function startLocalQueueWorker(){
      await reconcileLocalRun(row.mission);if(!valid())return;
      const mission=await getMission(row.mission);
      if(!mission.tags?.includes('placement:client')||binding.cwd!==row.request.cwd)throw Error('This conversation changed machines or folders. Remove this message and send it again.');
-     if(['active','running','starting','resuming'].includes(mission.status)||mission.status==='pending'&&!row.delegated)continue;
+     if(isRunning(mission.status)||mission.status==='pending'&&!row.delegated)continue;
      if(!valid())return;
      // Only the durable claim is locked: enqueue/cancel never waits for the network.
      const claimed=await locked(key,async()=>{const current=await read(key);const first=current.find(r=>r.mission===row.mission);if(first?.id!==row.id||first.state!=='queued'||current.some(r=>r.mission===row.mission&&held(r))||!valid()||stopping.has(runKey))return false;first.state='dispatching';first.claimedAt=Date.now();delete first.retryAfter;await write(key,current);return true;});

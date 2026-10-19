@@ -1,3 +1,4 @@
+import { isWorking } from "./missionStatus";
 /** Missions launched by a mission are shown inside it, like files in a folder.
  * Forks are versions of one conversation, not launched work: the most recently
  * active version leads and earlier versions are listed inside it (`version`). */
@@ -139,7 +140,6 @@ export function archiveOnlyRows<M extends {id:string;status:string}>(archived:M[
  return archived.filter(m=>m.status==="acknowledged"&&!visible.has(m.id));
 }
 
-const SUPERSEDED_RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
 
 export function hasSupersededTag(tags?: readonly string[] | null): boolean {
   return Boolean(
@@ -154,7 +154,7 @@ export function hasSupersededTag(tags?: readonly string[] | null): boolean {
 
 /** True when a mission was explicitly superseded by a replacement attempt and is no longer running. */
 export function isSupersededMission(mission: { status?: string | null; tags?: readonly string[] | null }): boolean {
-  if (mission.status && SUPERSEDED_RUNNING.has(mission.status)) return false;
+  if (isWorking(mission.status)) return false;
   return hasSupersededTag(mission.tags);
 }
 
@@ -163,7 +163,7 @@ export function isSupersededInTree<M extends Linked & { status?: string | null; 
   mission: M,
   byId: ReadonlyMap<string, M>,
 ): boolean {
-  if (mission.status && SUPERSEDED_RUNNING.has(mission.status)) return false;
+  if (isWorking(mission.status)) return false;
   if (isSupersededMission(mission)) return true;
   const seen = new Set<string>([mission.id]);
   let parent = missionParent(mission);

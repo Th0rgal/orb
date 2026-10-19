@@ -1,3 +1,4 @@
+import { isArchivable } from "./missionStatus";
 import {CodexSpeedPicker,missionSpeed,requireSpeedSupport} from './CodexSpeedPicker';
 import {localBinding} from './localAgents';
 import type {CodexServiceTier} from './api';
@@ -66,7 +67,7 @@ export async function retireTransferredSource(id: string): Promise<void> {
   window.dispatchEvent(new CustomEvent("orb:mission-archived", { detail: { id } }));
   try {
     const current = await getMission(id);
-    if (!["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled"].includes(current.status) || current.execution?.state === "running") {
+    if (!isArchivable(current.status) || current.execution?.state === "running") {
       await cancelMission(id);
       for (let i = 0; i < 20; i++) {
         const m = await getMission(id);

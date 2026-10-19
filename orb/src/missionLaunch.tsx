@@ -1,3 +1,4 @@
+import { isQueued } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice } from "./ErrorNotice";
@@ -21,13 +22,6 @@ export function recalledLaunch(id: string): LaunchReceipt | undefined {
 export const nodeLabel = (id: string) => id === "core" ? "Core" : id === "local" ? "This computer" : id === "dgx-spark" ? "DGX Spark" : id === "dgx-spark-admin" ? "DGX Spark · Administration" : id;
 export const isAdministrationNode = (node: { id: string; labels?: string[] }) => node.id === "dgx-spark-admin" && node.labels?.includes("administration") === true && node.labels.includes("manual-only");
 
-/** Statuses where PATCH /settings can change the next-turn model. A live turn returns 409. */
-const SETTINGS_IDLE = new Set([
-  "awaiting_user", "acknowledged", "interrupted", "failed", "paused", "blocked",
-]);
-export function missionSettingsIdle(status?: string | null): boolean {
-  return SETTINGS_IDLE.has((status ?? "").toLowerCase());
-}
 
 /** "Grok 4.6" next to harness "Grok" → "4.6". */
 export function dockModelLabel(harnessName: string, modelLabel: string): string {
@@ -277,7 +271,7 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
     return {label:"Remote job accepted",moving:true,detail:"Waiting for the remote node to confirm execution."};
   }
   if (status === "resuming") return {label:"Resuming",moving:true,detail:"Waiting for the runner to resume."};
-  if (["pending","queued"].includes(status)) return {label:"Queued",moving:true,detail:"Request accepted. Waiting for the runner to start."};
+  if (isQueued(status)) return {label:"Queued",moving:true,detail:"Request accepted. Waiting for the runner to start."};
   if (["active","running","starting"].includes(status)) return {label:activity?"Running":"Starting",moving:true,detail:activity?"":"Request accepted. Waiting for the first output."};
   return {label:status.replaceAll("_"," "),moving:false,detail:""};
 }
