@@ -726,7 +726,8 @@ function WorkingRow(p: { items: StreamItem[]; label?: string }) {
   const now = useNow(1000);
   const seen = Date.now();
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
-  return <div class="st-think st-working" role="status" aria-live="off">
-    <div class="st-think-head"><span class="shimmer">{p.label || "Working"}</span><span class="st-working-time">{formatElapsed(now() - started())}</span></div>
+  // The label is the announced status; the ticking time is not read out.
+  return <div class="st-think st-working">
+    <div class="st-think-head"><span class="shimmer agent-wait-status" role="status" aria-live="polite">{p.label || "Working"}</span><span class="st-working-time" aria-hidden="true">{formatElapsed(now() - started())}</span></div>
   </div>;
 }

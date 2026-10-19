@@ -615,7 +615,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     return busy() || optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
   };
   // A remote job queued for capacity has not started: say so instead of "Working".
-  const phaseLabel = () => sendingImmediate() ? "Stopping the current turn…" : runState().reason === "queued" && runState().label ? runState().label! : mission()?.backend === "claudecode" && !activity() ? "Waiting for Claude Code" : "Working";
+  const phaseLabel = () => sendingImmediate() ? "Stopping the current turn…" : mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : mission()?.backend === "claudecode" && !activity() ? "Waiting for Claude Code" : "Working";
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
@@ -968,7 +968,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} working={working()} workingLabel={phaseLabel()} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} working={working()} workingLabel={`${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
