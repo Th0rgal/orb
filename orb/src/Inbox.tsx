@@ -1,3 +1,4 @@
+import { missionAssignedNode } from "./machines/nodes";
 import { isLive } from "./missionStatus";
 import { swallow } from "./log";
 import { readInboxState } from "./inboxState";
@@ -1300,7 +1301,7 @@ export function InboxPage(p: {
           const uploadTarget = createMemo(() => {
             const m = currentItem().mission;
             if (m.tags?.includes("placement:client")) return "local";
-            return m.remote_node_id ?? m.remote_job?.node_id ?? "core";
+            return missionAssignedNode(m) ?? "core";
           });
           const stableProjectSlug = createMemo(() => currentItem().mission.project ?? undefined);
           const stableBackend = createMemo(() => currentItem().mission.backend);

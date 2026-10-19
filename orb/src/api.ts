@@ -1,3 +1,4 @@
+import { missionNode } from "./machines/nodes";
 import { harnessRank, isHarness } from "./harnesses";
 import { isArchivable, isReopenable } from "./missionStatus";
 import { swallow } from "./log";
@@ -966,7 +967,7 @@ export interface MessageReceipt {
 // composer attempt must replay create admission, not resume a superseded mission.
 const remoteReplacements = new Map<string, CreateMissionBody>();
 function remoteReplacementBody(mission: Mission, text: string, attachments: MissionAttachment[] | undefined, clientMessageId: string): CreateMissionBody {
-  const node = mission.remote_job?.node_id ?? mission.remote_node_id;
+  const node = missionNode(mission);
   if (!node) throw new Error("Remote placement is missing. Your draft is kept.");
   const history = fitReplacementHistory(mission, text);
   return {

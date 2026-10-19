@@ -1,3 +1,4 @@
+import { missionAssignedNode, missionNode, nodeLabel } from "./machines/nodes";
 import { isFailedStatus, isLive, isRunning, isSettingsIdle } from "./missionStatus";
 import { errorText, log, swallow } from "./log";
 import { flushClientLink, connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
@@ -41,7 +42,7 @@ import { readComposerDraft, saveComposerDraft } from "./composerDrafts";
 import { readImagePaste, imagePrompt, stageLocalImages, stageRemoteImages, IMAGE_COUNT, type DraftImage } from "./imageAttachments";
 import { FilePanelProvider, FilePanelButton } from "./FilePanel";
 import { ErrorToast } from "./toast";
-import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, nodeLabel, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
+import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, dockModelLabel, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, absorbGoalPrefix, composerModes, filterSlash, slashQuery, modePrompt, ModeChip, type ComposerMode } from "./goal";
 import { atQuery, browseAttachItems, chipToAttachment, filterAttach, folderPrefixFromQuery, insertMention, loadAttachItems, mentionedChips, type AttachChip, type AttachItem } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
@@ -2948,7 +2949,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       if (staleMission()) return true;
       if (result.replacement) {
         const replacement = result.replacement;
-        const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
+        const nodeId = missionNode(replacement) ?? missionNode(mission()) ?? "";
         rememberLaunch(replacement.id, { prompt: sent, nodeId, destination: nodeLabel(nodeId), replacement: true });
         setOptimisticList(prev => prev.filter(item => item.id !== attemptId));
         if (chips === followAttach()) setFollowAttach([]);
@@ -3133,7 +3134,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             if (staleMission() || p.id !== targetMissionId) return;
             if (result.replacement) {
               const replacement = result.replacement;
-              const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
+              const nodeId = missionNode(replacement) ?? missionNode(mission()) ?? "";
               rememberLaunch(replacement.id, { prompt: cleanText, nodeId, destination: nodeLabel(nodeId), replacement: true });
               for (const rest of ordered.slice(i + 1)) {
                 const restText = messagePresentation(rest.content).text;
@@ -3296,7 +3297,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             onEditFirstQueued={editFirstQueued}
             onStop={stopM}
             scope={`m:${p.id}`}
-            uploadTarget={clientPlaced() ? "local" : mission()?.remote_node_id ?? mission()?.remote_job?.node_id ?? "core"}
+            uploadTarget={clientPlaced() ? "local" : missionAssignedNode(mission()) ?? "core"}
             backend={mission()?.backend}
             projectSlug={mission()?.project ?? undefined}
             onAttachments={setFollowAttach}

@@ -3,7 +3,7 @@ import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministration} from "./machineDestinations";
 import {connectionVersion} from "./api";
-import {nodeLabel} from "./missionLaunch";
+import {nodeLabel} from "./machines/nodes";
 import { Select } from "./Select";
 import { For, Show, createMemo, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";

@@ -1,3 +1,4 @@
+import { missionNode } from "./machines/nodes";
 import { imagePreview, imagePreviewScope } from "./imagePreviews";
 import {
   api,
@@ -70,7 +71,7 @@ export function createFileClient(scope: FileScope) {
   const transfer = mission?.machine_transfer?.destination;
   const destination = transfer ? (transfer.kind === "client" ? "local" : transfer.kind === "core" ? "core" : transfer.id)
     : mission?.tags?.includes("placement:client") || (mission && localBinding(mission.id)) ? "local"
-    : mission?.remote_job?.node_id ?? mission?.remote_node_id ?? "core";
+    : missionNode(mission) ?? "core";
   const previewScope = imagePreviewScope(endpoint, version, destination);
   const binding = scope.mission && (!scope.mission.machine_transfer || scope.mission.machine_transfer.destination.kind === "client") ? localBinding(scope.mission.id) : undefined;
   const server = (source: string, op: FileOp) =>

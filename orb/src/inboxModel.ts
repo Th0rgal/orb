@@ -6,7 +6,8 @@ import { displayTitle } from "./goal";
 import { messageImages } from "./messageImages";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
 import type { PendingInteraction } from "./missionAttention";
-import { nodeLabel, isRecoveryScheduled } from "./missionLaunch";
+import { isRecoveryScheduled } from "./missionLaunch";
+import { missionNode, nodeLabel } from "./machines/nodes";
 import { isMissionUnread, missionResponseTimestampMs } from "./missionUnread";
 import { remoteLog as parseRemoteLog } from "./remoteLog";
 import type { StreamEvent } from "./stream";
@@ -667,8 +668,7 @@ function resolveMachine(mission: Mission): string | undefined {
     ? [...mission.history].reverse().find((h) => h.role === "assistant")?.content
     : undefined;
   const nodeId =
-    mission.remote_job?.node_id ??
-    mission.remote_node_id ??
+    missionNode(mission) ??
     mission.status_message?.match(/\bon node '([^']+)'/i)?.[1] ??
     lastAssistant?.match(/\bon node '([^']+)'/i)?.[1];
   if (nodeId) return nodeLabel(nodeId);

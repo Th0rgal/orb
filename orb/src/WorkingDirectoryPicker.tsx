@@ -1,3 +1,4 @@
+import { missionNode } from "./machines/nodes";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
@@ -92,7 +93,7 @@ function missionMatchesMachine(m: Mission, machine: string): boolean {
         : transfer.id
     : m.tags?.includes("placement:client")
       ? "local"
-      : m.remote_job?.node_id ?? m.remote_node_id ?? "core";
+      : missionNode(m) ?? "core";
   return dest === machine;
 }
 

@@ -1,3 +1,4 @@
+import { missionNode, nodeLabel } from "./machines/nodes";
 import { REMOTE_PROXY_HARNESSES } from "./harnesses";
 import { isQueued } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
@@ -20,7 +21,6 @@ export function recalledLaunch(id: string): LaunchReceipt | undefined {
   if (cached) return cached;
   try { return JSON.parse(sessionStorage.getItem(receiptKey(id)) ?? "null") ?? undefined; } catch { return undefined; }
 }
-export const nodeLabel = (id: string) => id === "core" ? "Core" : id === "local" ? "This computer" : id === "dgx-spark" ? "DGX Spark" : id === "dgx-spark-admin" ? "DGX Spark · Administration" : id;
 export const isAdministrationNode = (node: { id: string; labels?: string[] }) => node.id === "dgx-spark-admin" && node.labels?.includes("administration") === true && node.labels.includes("manual-only");
 
 
@@ -55,7 +55,7 @@ export function missionDestination(mission: Mission | null, receipt?: LaunchRece
   if (mission?.tags?.includes("placement:client") || receipt?.nodeId === "local") return "This computer";
   // Server-owned remote placement or the accepted selection takes precedence
   // over workspace_name, which can still name the host's bookkeeping workspace.
-  const node = mission?.remote_job?.node_id ?? mission?.remote_node_id;
+  const node = missionNode(mission);
   if (node && mission?.id) rememberMissionNode(mission.id, node);
   return nodeLabel(node ?? receipt?.nodeId ?? lastMissionNode(mission?.id) ?? mission?.workspace_name ?? "selected machine");
 }

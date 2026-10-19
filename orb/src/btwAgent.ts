@@ -1,3 +1,4 @@
+import { missionAssignedNode, missionNode } from "./machines/nodes";
 import { isQueued, WORKING_STATUSES } from "./missionStatus";
 import { swallow } from "./log";
 import {deliverAssistantText,flushClientLink} from './clientLink';
@@ -40,7 +41,7 @@ export function btwTurnEvents(events:StoredEvent[],session:Pick<BtwSession,'base
 }
 
 export function btwQueueStatus(mission: Mission): string {
- const node = mission.remote_job?.node_id ?? mission.remote_node_id;
+ const node = missionNode(mission);
  if (mission.remote_job?.node_state === 'queued') return `Waiting for capacity${node ? ` on ${node}` : ''}…`;
  if (mission.status === 'paused') return 'Side agent paused';
  if (mission.status === 'waiting_background') return 'Waiting for background work…';
@@ -222,7 +223,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const source=await getMission(parent,{coreOnly:true}),config=btwConfig();
   const machine=source.machine_transfer?.destination;
   let local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
-  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:source.remote_node_id??source.remote_job?.node_id;
+  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
   const destination=local?'local':node??'core';
   const placement=JSON.stringify([local,node,source.working_directory,source.workspace_id]);
   const paths=await upload(attachments,destination);
