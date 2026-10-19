@@ -33,8 +33,7 @@ scripts/check-capability-matrix.sh
 (cd dashboard && bun install --frozen-lockfile && bun run test:unit && bun run build)
 ```
 
-`.githooks/pre-push` runs the format check; enable it with
-`git config core.hooksPath .githooks`.
+CI enforces formatting (`cargo fmt --check`); run it before pushing.
 
 # Execution architecture
 
