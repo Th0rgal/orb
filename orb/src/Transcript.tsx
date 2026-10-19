@@ -601,7 +601,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
   );
 }
 
-export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; working?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
+export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; working?: boolean; workingLabel?: string; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -667,7 +667,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
           }
         }}
       </For>}</VirtualTurns></DisclosureState.Provider>
-      <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} /></Show>
+      <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} /></Show>
       <Show when={checklist()?.tasks.length}>
         <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} />
       </Show>
@@ -722,11 +722,11 @@ export function liveTail(items: StreamItem[]): boolean {
 
 /** The only "working" indicator: a transcript row shaped like "Thinking", shown
  * when no live row is visible, with the elapsed turn time. */
-function WorkingRow(p: { items: StreamItem[] }) {
+function WorkingRow(p: { items: StreamItem[]; label?: string }) {
   const now = useNow(1000);
   const seen = Date.now();
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
   return <div class="st-think st-working" role="status" aria-live="off">
-    <div class="st-think-head"><span class="shimmer">Working</span><span class="st-working-time">{formatElapsed(now() - started())}</span></div>
+    <div class="st-think-head"><span class="shimmer">{p.label || "Working"}</span><span class="st-working-time">{formatElapsed(now() - started())}</span></div>
   </div>;
 }

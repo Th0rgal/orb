@@ -85,15 +85,15 @@ it('recovers a stored Antigravity answer on completion when live text was missed
  }));
  const view=render(()=><NativeMissionView id={id} initial={mission} launch={{prompt:'What model are you?',nodeId:'core',destination:'Core'}}/>);
  await waitFor(()=>expect(state.event).toBeTypeOf('function'));
- await waitFor(()=>expect(view.container.querySelector('.agent-wait-status')).not.toBeNull());
+ await waitFor(()=>expect(view.container.querySelector('.st-working')).not.toBeNull());
  state.event!({type:'text_delta',data:{content:''}});
- expect(view.container.querySelector('.agent-wait-status')).not.toBeNull();
+ expect(view.container.querySelector('.st-working')).not.toBeNull();
  state.event!({type:'thinking',data:{content:'Checking the requested model.',done:true}});
  state.event!({type:'tool_call',data:{tool_call_id:'partial-tool',name:'read',args:{}}});
  state.event!({type:'text_delta',data:{content:'I am'}});
  mission.status='awaiting_user';
  state.event!({type:'mission_status_changed',data:{status:'awaiting_user'}});
- await waitFor(()=>expect(view.container.querySelector('.agent-wait-status')).toBeNull());
+ await waitFor(()=>expect(view.container.querySelector('.st-working')).toBeNull());
  // Durable history lags the terminal status, and the live final never arrives.
  expect(screen.queryByText('I am Gemini inside Antigravity.')).toBeNull();
  complete=true;

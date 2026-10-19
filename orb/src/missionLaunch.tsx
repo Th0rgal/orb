@@ -265,6 +265,7 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
     if (job?.phase === "reconnecting" || job?.node_state === "reconnecting") return {label:"Reconnecting",moving:true,detail:"The node is temporarily unreachable. The existing job is preserved; no replacement will start until its outcome is known."};
     // Active means durable acceptance, not that the selected harness is running.
     if (["failed", "lost", "cancelled", "canceled"].includes(job?.node_state ?? "") || (job?.exit_code != null && job.exit_code !== 0)) return {label:"Remote job stopped",moving:false,failed:true,detail:job?.error ?? job?.terminal_reason ?? `Remote job ${job?.node_state ?? "exited"}${job?.exit_code != null ? ` (exit ${job.exit_code})` : ""}.`};
+    if ((job?.phase === "finished" || job?.finished_at) && job?.terminal_reason) return {label:"Remote job stopped",moving:false,failed:true,detail:job.error ?? job.terminal_reason.replaceAll("_", " ")};
     if (job?.phase === "finished" || job?.finished_at) return {label:"Remote job finished",moving:false,detail:"Waiting for the backend to finalize the mission."};
     if (job?.phase === "submit_ambiguous") return {label:"Checking submission",moving:true,detail:"The backend is checking whether the remote node accepted the job."};
     if (job?.phase === "unobserved" || job?.phase === "lease_only") return {label:"Checking remote job",moving:true,detail:"Waiting for a current remote job status. Execution is not confirmed."};

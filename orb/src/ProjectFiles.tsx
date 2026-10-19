@@ -1,5 +1,5 @@
 import { renamedTitle, renameOptimistically } from "./renames";
-import { isArchivable, isReopenable, isRunning, isLive, isWorking } from "./missionStatus";
+import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
 import { ErrorToast } from "./toast";
@@ -2083,7 +2083,7 @@ export function LiveProjectsSection(p: {
         }
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
       } }} onClick={e => { if (d.mission) { if (deleting()) return; clickAgent(e, d.mission.id); } else { clickSelectableRow(e, row.id, () => p.open(row.id)); } }}>
-      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={m().status} unread={isMissionUnread(m(), currentMission()?.id, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
+      <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={presentedStatus(m())} unread={isMissionUnread(m(), currentMission()?.id, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><Show when={d.version}><span class="row-version-tag">earlier</span></Show><Show when={!d.launched && !d.versions}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
     {launchedToggle(row, d)}</>;
