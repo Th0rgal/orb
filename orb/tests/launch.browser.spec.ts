@@ -316,7 +316,7 @@ for(const [phase,node_state,label] of [["observed",undefined,"Remote job accepte
  await setup(page,{failed:true,emptyStatus:"active",remoteJob:{phase,node_state}});
  await page.getByRole("button",{name:"Test",exact:true}).click();
  await page.getByRole("button",{name:/Remote task/}).click();
- await expect(phaseStatus(page)).toContainText("Working on DGX Spark");
+ await expect(phaseStatus(page)).toContainText(node_state==="queued"?"Waiting for a free slot on DGX Spark":"Working on DGX Spark");
  await expectGoalTurn(page,".user","Original saved objective");
 });
 
