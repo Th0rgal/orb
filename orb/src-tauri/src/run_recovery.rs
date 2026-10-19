@@ -247,6 +247,12 @@ async fn recover(
     // before checking for processes outside this native runner.
     if local_agents::local_agents_poll(id.to_string()).is_ok() {
         local_agents::stop_generation(id, None)?;
+        // Stop returns at once; the workspace checks below need it gone.
+        let waited = id.to_owned();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            local_agents::wait_stopped(&waited, std::time::Duration::from_secs(12))
+        })
+        .await;
     }
     inspect_and_settle_for(
         c,
