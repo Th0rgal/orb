@@ -24,3 +24,13 @@
 @media (prefers-reduced-motion: reduce) { .cloud-working-dot { animation: none; } }
 
 .cloud-conversation-meta{align-items:center}.cloud-conversation-meta .cloud-meta-picks{height:20px;margin:-2px 0}
+/* Parity with agent conversations: provider marks use the 13-14px icon scale of
+   the machine/harness chips, the meta row matches `.under`, and the running line
+   matches `.turn-status`. */
+.cloud-agent-page .na-meta .provider-logo, .cloud-conversation-meta .provider-logo { width: 14px; height: 14px; }
+.cloud-agent-page .na-meta .provider-logo > span, .cloud-conversation-meta .provider-logo > span { width: 13px; height: 13px; }
+.cloud-conversation-meta { gap: 6px; padding: 8px 12px 4px; font-size: 12px; white-space: nowrap; flex-wrap: nowrap; min-width: 0; }
+.cloud-conversation-meta > span:not([role="status"]) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cloud-conversation-meta a:hover { color: var(--fg); }
+.cloud-working { gap: 8px; margin: 4px 0 12px; color: var(--fg-3); font-size: 12px; }
+.cloud-working-dot { width: 6px; height: 6px; background: var(--green); animation: turn-pulse 1.6s ease-in-out infinite; }

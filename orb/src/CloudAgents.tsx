@@ -198,7 +198,6 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
           <input ref={fileInput} type="file" accept={provider() === 'hermes' ? undefined : "image/png,image/jpeg,image/webp,image/gif"} multiple hidden aria-label="Choose images" onChange={event => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachImageFiles(files); }} />
           <button class="plus" title={provider() === 'hermes' ? "Attach file or image" : "Attach image"} aria-label={provider() === 'hermes' ? "Attach file or image" : "Attach image"} disabled={busy() || readingImages()} onClick={() => fileInput.click()}><Ic.PlusIcon size={14} /></button>
         </Show>
-        <ProviderLogo type={provider()}/>
       </div>
       <div class="picks">
         <AgentChoice label="Service" value={provider()} items={Object.entries(cloudNames).map(([value,label]) => ({value,label}))} disabled={busy()}

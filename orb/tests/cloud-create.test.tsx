@@ -35,4 +35,11 @@ describe('cloud creation', () => {
   expect(fakes.launch.mock.calls[0][0].tags).toEqual(['orb-folder:notes']);
   expect(fakes.launch.mock.calls[0][0]).not.toHaveProperty('working_directory');
  });
+ it('shows the provider mark once, in the account chip, not inside the composer', async () => {
+  fakes.accounts.mockResolvedValue([{id:'profile',provider:'chatgpt',label:'Pro account',available:true,experimental:false,capabilities}]);
+  const { container } = render(() => <CloudAgentPage project="demo" onCreated={() => {}} />);
+  await screen.findByText(/Pro account/);
+  expect(container.querySelectorAll('.provider-logo')).toHaveLength(1);
+  expect(container.querySelector('.composer .provider-logo')).toBeNull();
+ });
 });
