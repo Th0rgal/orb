@@ -3137,14 +3137,26 @@ impl ProjectsStore {
         title_hint: Option<&str>,
         pr_number: Option<i64>,
     ) -> Result<AbsorbOutcome, String> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let outcome = Self::absorb_track_on(&tx, slug, key, title_hint, pr_number)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(outcome)
+    }
+
+    fn absorb_track_on(
+        tx: &Connection,
+        slug: &str,
+        key: &str,
+        title_hint: Option<&str>,
+        pr_number: Option<i64>,
+    ) -> Result<AbsorbOutcome, String> {
         let normalized = normalize_track_key(key);
         if normalized.is_empty() {
             return Err(format!("track key '{key}' is empty after normalization"));
         }
         let now = Utc::now().to_rfc3339();
-        let mut connection = self.lock()?;
-        let tx = connection.transaction().map_err(|e| e.to_string())?;
-        if let Some(id) = Self::resolve_track_id_on(&tx, slug, key)? {
+        if let Some(id) = Self::resolve_track_id_on(tx, slug, key)? {
             let canonical: String = tx
                 .query_row(
                     "SELECT track FROM project_tracks WHERE id = ?1",
@@ -3157,7 +3169,6 @@ impl ProjectsStore {
             } else {
                 "alias"
             };
-            tx.commit().map_err(|e| e.to_string())?;
             return Ok(AbsorbOutcome {
                 key: canonical,
                 track_id: id,
@@ -3187,7 +3198,6 @@ impl ProjectsStore {
                     params![slug, key.trim(), id, now],
                 )
                 .map_err(|e| e.to_string())?;
-                tx.commit().map_err(|e| e.to_string())?;
                 return Ok(AbsorbOutcome {
                     key: canonical,
                     track_id: id,
@@ -3227,7 +3237,6 @@ impl ProjectsStore {
             )
             .map_err(|e| e.to_string())?;
         }
-        tx.commit().map_err(|e| e.to_string())?;
         Ok(AbsorbOutcome {
             key: normalized,
             track_id: id,
@@ -3399,6 +3408,85 @@ impl ProjectsStore {
                 lease_from_row,
             )
             .map_err(|e| LeaseError::Store(e.to_string()))
+    }
+
+    /// Move a mission's live track lease to another project in one SQLite
+    /// write transaction: absorb the track into `target_slug` (same semantics
+    /// as [`Self::absorb_track`]), take the target lease for the same holder
+    /// and mode, then release every other live lease of that holder. The
+    /// running job, queue and deferred goal are untouched: leases are only
+    /// revalidated at turn start, so the next turn sees the new project.
+    ///
+    /// The mode is the mode the holder currently holds on the source track;
+    /// when it differs from `mode` the move would change writer status, which
+    /// is an identity change and is refused with [`MoveLeaseError::ModeChange`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_track_lease(
+        &self,
+        source: Option<(&str, &str)>,
+        target_slug: &str,
+        target_key: &str,
+        attempt_id: &str,
+        mode: &str,
+        title_hint: Option<&str>,
+        pr_number: Option<i64>,
+    ) -> Result<(AbsorbOutcome, TrackLease), MoveLeaseError> {
+        let store = |e: String| MoveLeaseError::Store(e);
+        let mut connection = self.lock().map_err(store)?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| store(e.to_string()))?;
+        if let Some((slug, key)) = source {
+            if let Some(track_id) = Self::resolve_track_id_on(&tx, slug, key).map_err(store)? {
+                let held: Option<String> = tx
+                    .query_row(
+                        "SELECT mode FROM track_leases WHERE track_id = ?1 AND attempt_id = ?2 \
+                           AND mutation_domain = 'track' AND state IN ('reserved','active') \
+                         ORDER BY created_at DESC LIMIT 1",
+                        params![track_id, attempt_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| store(e.to_string()))?;
+                if let Some(held) = held.filter(|held| held != mode) {
+                    return Err(MoveLeaseError::ModeChange { held });
+                }
+            }
+        }
+        let outcome = Self::absorb_track_on(&tx, target_slug, target_key, title_hint, pr_number)
+            .map_err(store)?;
+        let request = crate::api::track_leases::lease_request(
+            target_slug,
+            &outcome.key,
+            attempt_id,
+            mode,
+            Some(&format!("project-move:{}", Uuid::new_v4())),
+        );
+        let lease = match Self::acquire_track_lease_on(&tx, &request) {
+            Ok(lease) => lease,
+            Err(LeaseError::Owned {
+                holder_attempt_id, ..
+            }) => {
+                return Err(MoveLeaseError::Conflict {
+                    project: target_slug.to_string(),
+                    track: outcome.key,
+                    pr_number,
+                    holder_mission_id: holder_attempt_id,
+                })
+            }
+            Err(LeaseError::NotFound) => {
+                return Err(store("absorbed target track is missing".into()))
+            }
+            Err(LeaseError::Store(e)) => return Err(store(e)),
+        };
+        tx.execute(
+            "UPDATE track_leases SET state = 'released', updated_at = ?3 \
+             WHERE attempt_id = ?1 AND state IN ('reserved','active') AND id != ?2",
+            params![attempt_id, lease.id, Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| store(e.to_string()))?;
+        tx.commit().map_err(|e| store(e.to_string()))?;
+        Ok((outcome, lease))
     }
 
     /// Revalidate a queued assignment without creating a new binding or
@@ -5314,6 +5402,47 @@ pub struct LeaseRequest {
     pub mode: String,
     pub idempotency_key: String,
     pub ttl_secs: u64,
+}
+
+/// Why [`ProjectsStore::move_track_lease`] refused a move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveLeaseError {
+    /// Another mission already holds the writer lease on the target track.
+    Conflict {
+        project: String,
+        track: String,
+        pr_number: Option<i64>,
+        holder_mission_id: String,
+    },
+    /// The move would change the holder's lease mode (writer status).
+    ModeChange {
+        held: String,
+    },
+    Store(String),
+}
+
+impl std::fmt::Display for MoveLeaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict {
+                project,
+                track,
+                pr_number,
+                holder_mission_id,
+            } => {
+                let what = match pr_number {
+                    Some(number) => format!("PR #{number} / track {track}"),
+                    None => format!("track {track}"),
+                };
+                write!(
+                    f,
+                    "writer_conflict: Project {project} already has a writer for {what} (mission {holder_mission_id})"
+                )
+            }
+            Self::ModeChange { held } => write!(f, "lease mode change from {held}"),
+            Self::Store(error) => f.write_str(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

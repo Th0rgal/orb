@@ -12754,3 +12754,254 @@ async fn replacement_attaches_to_the_live_successor_of_a_superseded_coordinator(
         .unwrap();
     assert_eq!(replacement.parent_mission_id, Some(current.id));
 }
+
+async fn patch_project(h: &Harness, id: Uuid, body: Value) -> (StatusCode, String) {
+    let response = h
+        .state
+        .http_client
+        .patch(format!("{}/missions/{}/project", h.url, id))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.text().await.unwrap())
+}
+
+fn live_for(h: &Harness, id: Uuid) -> Vec<crate::api::projects_store::TrackLease> {
+    h.state
+        .projects
+        .live_leases(None)
+        .unwrap()
+        .into_iter()
+        .filter(|lease| lease.attempt_id == id.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn running_mission_moves_project_keeping_run_and_remote_job() {
+    use crate::remote_node::job_ledger::{self, JobHandle, JobHandleKind};
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Active, Some("repo#244")).await;
+    h.control
+        .mission_store
+        .begin_mission_run(m.id, "running-actor", None)
+        .await
+        .unwrap();
+    job_ledger::record(
+        &h.state.config.working_dir,
+        JobHandle {
+            mission_id: m.id,
+            node_id: "node".into(),
+            job_id: Uuid::new_v4(),
+            started_at: chrono::Utc::now(),
+            submission_sequence: 0,
+            accepted_at: Some(chrono::Utc::now()),
+            heartbeat_at: None,
+            disk_reservation_bytes: 0,
+            kind: JobHandleKind::Mission,
+            identity: None,
+            wait_for_completion: None,
+            wake_on_terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+    let (status, body) = patch_project(
+        &h,
+        m.id,
+        json!({"project":"verity", "tags":["pr-writer","orb-folder:docs"]}),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let after = h
+        .control
+        .mission_store
+        .get_mission(m.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.project.project.as_deref(), Some("verity"));
+    assert_eq!(after.project.track, m.project.track);
+    assert_eq!(after.status, MissionStatus::Active);
+    assert!(after.project.tags.contains(&"orb-folder:docs".to_string()));
+    assert!(h
+        .control
+        .mission_store
+        .get_active_mission_run(m.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(job_ledger::load(&h.state.config.working_dir)
+        .await
+        .unwrap()
+        .iter()
+        .any(|handle| handle.mission_id == m.id));
+    let leases = live_for(&h, m.id);
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].slug, "verity");
+    assert_eq!(leases[0].track, "trio-reserve1");
+    assert_eq!(leases[0].mode, "writer");
+    // The next turn's revalidation passes under the new project.
+    h.state
+        .projects
+        .revalidate_track_lease(&crate::api::track_leases::lease_request(
+            "verity",
+            "trio-reserve1",
+            &m.id.to_string(),
+            "writer",
+            None,
+        ))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn running_mission_move_reports_writer_conflict_naming_holder() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Active, None).await;
+    h.control
+        .mission_store
+        .begin_mission_run(m.id, "running-actor", None)
+        .await
+        .unwrap();
+    let other = Uuid::new_v4();
+    h.state
+        .projects
+        .absorb_track("verity", "trio-reserve1", None, None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&crate::api::track_leases::lease_request(
+            "verity",
+            "trio-reserve1",
+            &other.to_string(),
+            "writer",
+            None,
+        ))
+        .unwrap();
+    let (status, body) = patch_project(&h, m.id, json!({"project":"verity"})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains("writer_conflict"), "{body}");
+    assert!(body.contains(&other.to_string()), "{body}");
+    h.unchanged(&m).await;
+    let leases = live_for(&h, m.id);
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].slug, "lido");
+}
+
+#[tokio::test]
+async fn running_mission_real_track_change_is_refused_with_reason() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Active, None).await;
+    h.control
+        .mission_store
+        .begin_mission_run(m.id, "running-actor", None)
+        .await
+        .unwrap();
+    let (status, body) =
+        patch_project(&h, m.id, json!({"project":"verity", "track":"other-work"})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body.contains("assignment_busy: mission has an active run"),
+        "{body}"
+    );
+    h.unchanged(&m).await;
+}
+
+#[tokio::test]
+async fn running_mission_generated_track_follows_the_mission() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Active, None).await;
+    let generated = crate::api::track_leases::generated_track_key(&m.id.to_string());
+    h.state
+        .projects
+        .release_leases_for_attempt(&m.id.to_string())
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                track: Some(Some(generated.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", &generated, None, None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&crate::api::track_leases::lease_request(
+            "lido",
+            &generated,
+            &m.id.to_string(),
+            "writer",
+            None,
+        ))
+        .unwrap();
+    h.control
+        .mission_store
+        .begin_mission_run(m.id, "running-actor", None)
+        .await
+        .unwrap();
+    let (status, body) =
+        patch_project(&h, m.id, json!({"project":"verity", "track": generated})).await;
+    assert!(status.is_success(), "{body}");
+    let after = h
+        .control
+        .mission_store
+        .get_mission(m.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.project.project.as_deref(), Some("verity"));
+    assert_eq!(after.project.track.as_deref(), Some(generated.as_str()));
+    let leases = live_for(&h, m.id);
+    assert_eq!(leases.len(), 1);
+    assert_eq!(
+        (leases[0].slug.as_str(), leases[0].track.as_str()),
+        ("verity", generated.as_str())
+    );
+}
+
+#[tokio::test]
+async fn queued_followup_is_delivered_after_running_project_move() {
+    let h = Harness::new().await;
+    let a = h.writer(MissionStatus::Failed, Some("repo#244")).await;
+    let dir = install_native_fixture(&h, a.id, "after").await;
+    assert!(h
+        .request(
+            true,
+            a.id,
+            json!({"content":"/goal running work", "continue_identity":Harness::assertion(&a)})
+        )
+        .await
+        .status()
+        .is_success());
+    wait_native_file(&dir.join("started")).await;
+    let response = h
+        .request(
+            false,
+            a.id,
+            json!({"content":"queued follow-up", "continue_identity":Harness::assertion(&a)}),
+        )
+        .await;
+    assert!(
+        response.status().is_success(),
+        "{}",
+        response.text().await.unwrap()
+    );
+    let (status, body) = patch_project(&h, a.id, json!({"project":"verity"})).await;
+    assert!(status.is_success(), "{body}");
+    std::fs::write(dir.join("release"), "").unwrap();
+    wait_native_status(&h, a.id, MissionStatus::AwaitingUser).await;
+    let requests = std::fs::read_to_string(dir.join("requests.jsonl")).unwrap();
+    assert!(requests.contains("queued follow-up"), "{requests}");
+    let leases = live_for(&h, a.id);
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].slug, "verity");
+    NATIVE_FIXTURES.lock().unwrap().remove(&a.id);
+}

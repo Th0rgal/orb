@@ -24,6 +24,11 @@ export function describeError(raw: string, fallback = "Something went wrong"): E
   const disk = raw.match(/\((\d+(?:\.\d+)?) GiB required\), but only (\d+(?:\.\d+)?) GiB is free/i);
   if (disk) return { title: "Not enough disk space", message: `${disk[2]} GiB available · ${disk[1]} GiB required, including the safety reserve. Choose another machine or free up space.` };
   if (/parallel_missions_cap|maximum.*parallel|parallel mission limit/i.test(raw)) return { title: "Mission limit reached", message: "Wait for a mission to finish or adjust the parallel mission limit in settings." };
+  const writer = raw.match(/writer_conflict: Project (\S+) already has a writer for (.+?) \(mission ([\da-f-]+)\)/);
+  if (writer) return { title: "That project already has a writer", message: `Project ${writer[1]} already has a writer for ${writer[2]} (mission ${writer[3].slice(0, 8)}). The conversation has not moved.` };
+  if (/local_run_in_progress/.test(raw)) return { title: "A local run is in progress", message: "This computer is still running a turn in the current folder. Wait for it to finish, then move the conversation." };
+  const busy = raw.match(/assignment_busy: mission (has an active run|has a remote job|has a deferred goal|has queued or running work|is Pending|is Active)/);
+  if (busy) return { title: "Can’t change the track or PR while it runs", message: `This mission ${busy[1]}. Stop it or wait for it to finish, then change its track or PR.` };
   if (/REMOTE_JOB_STILL_RUNNING/.test(raw)) return { title: "A turn is still running", message: "Wait for it to finish before sending this follow-up. Your draft is kept." };
   if (/REMOTE_RESUME_REQUIRES_REPLACEMENT/.test(raw)) return { title: "Couldn’t resume this session", message: "Your draft is kept. Try again; if the problem persists, fork the conversation into a new mission." };
   if (/There was a network issue connecting to the server/i.test(raw)) return { title: "Network issue connecting to the model server", message: "The connection dropped while the agent was working. Check your internet connection, then resume to continue from the last completed step." };
