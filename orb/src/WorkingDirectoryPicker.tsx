@@ -1,6 +1,9 @@
+import { nativeInvoke } from "./native";
+import { readJson, writeJson } from "./storage";
+import { missionNode } from "./machines/nodes";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { api, type Mission } from "./api";
 import {
   CheckIcon,
@@ -28,8 +31,7 @@ const RECENT_PREFIX = "orb.recentDirs:";
 
 function loadRecentDirs(machine: string): string[] {
   try {
-    const raw = localStorage.getItem(`${RECENT_PREFIX}${machine}`);
-    const parsed = raw ? JSON.parse(raw) : [];
+    const parsed = readJson<unknown>(`${RECENT_PREFIX}${machine}`, []);
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0) : [];
   } catch {
     return [];
@@ -41,7 +43,7 @@ function saveRecentDir(machine: string, dir: string) {
   if (!clean) return;
   try {
     const next = [clean, ...loadRecentDirs(machine).filter((x) => x !== clean)].slice(0, 8);
-    localStorage.setItem(`${RECENT_PREFIX}${machine}`, JSON.stringify(next));
+    writeJson(`${RECENT_PREFIX}${machine}`, next);
   } catch {}
 }
 
@@ -92,7 +94,7 @@ function missionMatchesMachine(m: Mission, machine: string): boolean {
         : transfer.id
     : m.tags?.includes("placement:client")
       ? "local"
-      : m.remote_job?.node_id ?? m.remote_node_id ?? "core";
+      : missionNode(m) ?? "core";
   return dest === machine;
 }
 
@@ -288,7 +290,7 @@ export function WorkingDirectoryPicker(p: {
       setOpen(!open());
       return;
     }
-    const invoke = (window as any).__TAURI__?.core?.invoke;
+    const invoke = nativeInvoke();
     if (!invoke) {
       setOpen(!open());
       return;

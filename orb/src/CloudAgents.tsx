@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { pollWhileVisible } from "./poll";
 import { ErrorToast } from "./toast";
 import { QuizAnswer } from "./QuizAnswer";
@@ -7,7 +8,7 @@ import { api, getMission, openExternalUrl, type Mission } from './api';
 import { cloudAccounts, cloudAccountLabel, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider, type CloudTurn } from './cloudAgentApi';
 import './cloudAgents.css';
 import { ProviderLogo } from './ProviderLogo';
-import { Composer, draftLightbox, floatingDock } from './App';
+import { Composer, draftLightbox, floatingDock } from './composer/Composer';
 import { Transcript } from './Transcript';
 import type { StreamItem } from './transcriptModel';
 import { ProjectPicker } from './ProjectPicker';
@@ -157,7 +158,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
     const signature = JSON.stringify({ title: rawPrompt.slice(0, 100), prompt: rawPrompt, images: images().map(i => i.id), files: uploadedFiles().map(f => f.path), project: p.project, tags: p.path ? [`orb-folder:${p.path}`] : [], cloud });
     setBusy(true); setError('');
     try {
-      if (p.project === DEFAULT_PROJECT.slug) await ensureDefaultProject().catch(() => {});
+      if (p.project === DEFAULT_PROJECT.slug) await ensureDefaultProject().catch(swallow("cloudAgents.ensureDefaultProject"));
       if (attempt?.signature !== signature) {
         const withImages = images().length ? imagePrompt(rawPrompt, await stageRemoteImages(images(), undefined, "core"), images()) : rawPrompt;
         const missingFileTokens = uploadedFiles().map(f => uploadToken(f.path)).filter(tok => !withImages.includes(tok));

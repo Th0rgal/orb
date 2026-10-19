@@ -1,3 +1,5 @@
+import { invokeNative } from "./native";
+import { swallow } from "./log";
 import {followInteraction} from "./nativeInteractionStream";
 import { ErrorToast } from "./toast";
 import {rememberApprovedPlan} from "./PlanProgress";
@@ -8,11 +10,7 @@ import {observeMissionInteraction} from './missionAttention';
 import type {StreamItem} from './transcriptModel';
 
 type Request={id:string;method:string;params:{plan?:string;tool?:string;input?:{command?:string;file_path?:string;description?:string};questions?:Array<{id?:string;question:string;header?:string;multiSelect?:boolean;options?:Array<{label:string;description?:string}>}>}};
-const invoke=(command:string,args:Record<string,unknown>) => {
- const host=window as unknown as {__TAURI_INTERNALS__?:{invoke:(cmd:string,args:Record<string,unknown>)=>Promise<unknown>}};
- if(!host.__TAURI_INTERNALS__) return Promise.reject(new Error('Open this session in Orb.'));
- return host.__TAURI_INTERNALS__.invoke(command,args);
-};
+const invoke=(command:string,args:Record<string,unknown>) => invokeNative(command,args,'Open this session in Orb.');
 export function NativeInteraction(p:{mission:string;active:boolean;remote?:boolean;items?:StreamItem[];onSend?:(text:string)=>Promise<unknown>|unknown}) {
  // Native polling and remote snapshots deserialize fresh objects. Keep an
  // unchanged request stable so Solid's question list retains its DOM/focus.
@@ -80,7 +78,7 @@ export function NativeInteraction(p:{mission:string;active:boolean;remote?:boole
   try{
    const text=action==='accept'?'Implement the approved plan.':`/plan ${feedback().trim()}`;
    if(action==='accept'){
-    await rememberApprovedPlan(p.mission,{requestId:completed.id,text:completed.plan,approvedAt:new Date().toISOString(),boundary:completed.boundary}).catch(()=>{});
+    await rememberApprovedPlan(p.mission,{requestId:completed.id,text:completed.plan,approvedAt:new Date().toISOString(),boundary:completed.boundary}).catch(swallow("nativeInteraction.rememberPlan", { mission: p.mission }));
    }
    await p.onSend(text);
    answered.add(completed.id);

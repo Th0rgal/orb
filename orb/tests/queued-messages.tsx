@@ -3,7 +3,7 @@ import {render} from 'solid-js/web';
 import {QueuedMessages} from '../src/QueuedMessages';
 import {enqueueLocalMessage,queuedLocalMessages} from '../src/localMessageQueue';
 import {createQueuedEdit} from '../src/queuedEdit';
-import {Composer} from '../src/App';
+import {Composer} from '../src/composer/Composer';
 import '../src/styles.css';
 const request={id:'queue-fixture',harness:'claudecode',bin:'claude',cwd:'/work',prompt:''};
 await enqueueLocalMessage({...request,prompt:'ceci est un message dans la queue'},'ceci est un message dans la queue');

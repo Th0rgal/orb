@@ -1,10 +1,7 @@
 import { api, ApiError, getApiUrl, getJwt } from "./api";
 export interface ClientRunReceipt { run_id: string; generation: number; legacy?: boolean }
-type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
-export function nativeInvoke(): Invoke | undefined {
-  const w = window as unknown as { __TAURI_INTERNALS__?: { invoke: Invoke }; __TAURI__?: { core?: { invoke: Invoke } } };
-  return w.__TAURI_INTERNALS__?.invoke ?? w.__TAURI__?.core?.invoke;
-}
+import { nativeInvoke } from "./native";
+export { nativeInvoke };
 export async function machineIdentity(): Promise<string> {
   const invoke = nativeInvoke();
   if (!invoke) throw new Error("Open Orb desktop to move a conversation to or from this computer.");

@@ -1,3 +1,5 @@
+import { nativeInvoke } from "./native";
+import { swallow } from "./log";
 import { createSignal } from "solid-js";
 import { api, connectionVersion, getApiUrl } from "./api";
 import { mentionText, scanMentions } from "./attach";
@@ -12,10 +14,6 @@ export const HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
 export const RESUMABLE_CHUNK_BYTES = 4 * 1024 * 1024; // 4 MiB
 const MAX = SOFT_DIRECT_BYTES;
 
-type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-function nativeInvoke(): Invoke | undefined {
-  return (window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } } }).__TAURI__?.core?.invoke;
-}
 export function hasNativePicker() { return !!nativeInvoke(); }
 export async function pickNativeFiles(): Promise<UploadSource[]> {
   const invoke = nativeInvoke();
@@ -509,7 +507,7 @@ export function startBackgroundUpload(params: {
   };
 
   bgRunners.set(id, launch);
-  void launch().catch(() => {});
+  void launch().catch(swallow("uploads.background", { id }));
   return id;
 }
 
@@ -525,7 +523,7 @@ export function pauseBackgroundUpload(id: string) {
 export function resumeBackgroundUpload(id: string) {
   const runner = bgRunners.get(id);
   if (!runner) return;
-  void runner().catch(() => {});
+  void runner().catch(swallow("uploads.resume", { id }));
 }
 
 export function cancelBackgroundUpload(id: string) {

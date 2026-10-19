@@ -1,3 +1,5 @@
+import { harnessName } from "./harnesses";
+import { isWorking } from "./missionStatus";
 /** Missions launched by a mission are shown inside it, like files in a folder.
  * Forks are versions of one conversation, not launched work: the most recently
  * active version leads and earlier versions are listed inside it (`version`). */
@@ -23,11 +25,9 @@ export const missionParent = (mission: Omit<Linked, "id">): string | undefined =
 /** A fork shares its conversation's name; versions are told apart by harness and model. */
 export const forkTitle = (title: string | null | undefined): string => (title ?? "").replace(LEGACY_FORK_TITLE, "");
 
-const HARNESS_NAMES: Record<string, string> = { claudecode: "Claude Code", codex: "Codex", opencode: "OpenCode", grok: "Grok", gemini: "Gemini", vibe: "Mistral Vibe", antigravity: "Antigravity CLI", hermes: "Hermes" };
-
 /** "Codex · gpt-6.1-sol": how an earlier version is told apart from the current one. */
 export const versionLabel = (mission: { backend?: string | null; model_override?: string | null }): string =>
-  [mission.backend ? HARNESS_NAMES[mission.backend] ?? mission.backend : "", mission.model_override ?? ""].filter(Boolean).join(" · ") || "Earlier version";
+  [mission.backend ? harnessName(mission.backend) : "", mission.model_override ?? ""].filter(Boolean).join(" · ") || "Earlier version";
 
 const activity = (mission: Dated) => Date.parse(mission.updated_at || mission.created_at || "") || 0;
 
@@ -139,7 +139,6 @@ export function archiveOnlyRows<M extends {id:string;status:string}>(archived:M[
  return archived.filter(m=>m.status==="acknowledged"&&!visible.has(m.id));
 }
 
-const SUPERSEDED_RUNNING = new Set(["active", "pending", "queued", "resuming", "running", "starting", "waiting_background"]);
 
 export function hasSupersededTag(tags?: readonly string[] | null): boolean {
   return Boolean(
@@ -154,7 +153,7 @@ export function hasSupersededTag(tags?: readonly string[] | null): boolean {
 
 /** True when a mission was explicitly superseded by a replacement attempt and is no longer running. */
 export function isSupersededMission(mission: { status?: string | null; tags?: readonly string[] | null }): boolean {
-  if (mission.status && SUPERSEDED_RUNNING.has(mission.status)) return false;
+  if (isWorking(mission.status)) return false;
   return hasSupersededTag(mission.tags);
 }
 
@@ -163,7 +162,7 @@ export function isSupersededInTree<M extends Linked & { status?: string | null; 
   mission: M,
   byId: ReadonlyMap<string, M>,
 ): boolean {
-  if (mission.status && SUPERSEDED_RUNNING.has(mission.status)) return false;
+  if (isWorking(mission.status)) return false;
   if (isSupersededMission(mission)) return true;
   const seen = new Set<string>([mission.id]);
   let parent = missionParent(mission);

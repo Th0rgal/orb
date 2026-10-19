@@ -1,3 +1,9 @@
+import { pollWhileVisible } from "./poll";
+import { invokeNative } from "./native";
+import { useNow } from "./time";
+import { missionAssignedNode } from "./machines/nodes";
+import { isLive } from "./missionStatus";
+import { swallow } from "./log";
 import { readInboxState } from "./inboxState";
 import { ErrorToast, dismissToast, notify } from "./toast";
 import { applySharedInboxSeen } from "./missionUnread";
@@ -26,7 +32,7 @@ import {
   type Mission,
   type ProjectSummary,
 } from "./api";
-import { Composer } from "./App";
+import { Composer } from "./composer/Composer";
 import { chipToAttachment, type AttachChip } from "./attach";
 import {
   FileReferenceContext,
@@ -109,17 +115,8 @@ function InboxInline(p: { text: string }) {
 
 export type InboxViewMode = "unread" | "attention" | "all";
 
-const invokeLocalInteraction = (command: string, args: Record<string, unknown>) => {
-  const host = window as unknown as {
-    __TAURI_INTERNALS__?: {
-      invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
-    };
-  };
-  if (!host.__TAURI_INTERNALS__) {
-    return Promise.reject(new Error("Open this session in Orb desktop to answer local tool requests."));
-  }
-  return host.__TAURI_INTERNALS__.invoke(command, args);
-};
+const invokeLocalInteraction = (command: string, args: Record<string, unknown>) =>
+  invokeNative(command, args, "Open this session in Orb desktop to answer local tool requests.");
 
 function MissionFileScope(p: {
   mission: Mission;
@@ -323,7 +320,6 @@ export function InboxPage(p: {
   const [peekedIds, setPeekedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [expandedPeekIds, setExpandedPeekIds] = createSignal<ReadonlySet<string>>(new Set());
   const [seenUnreadIds, setSeenUnreadIds] = createSignal<ReadonlySet<string>>(new Set());
-  const [peekReplyDrafts, setPeekReplyDrafts] = createSignal<Record<string, string>>({});
   const [busyIds, setBusyIds] = createSignal<ReadonlySet<string>>(new Set());
   const [dismissedIds, setDismissedIds] = createSignal<ReadonlySet<string>>(new Set());
   const [undoItem, setUndoItem] = createSignal<{
@@ -333,7 +329,7 @@ export function InboxPage(p: {
     wasUnread: boolean;
   } | null>(null);
   const [error, setError] = createSignal<string | null>(null);
-  const [nowMs, setNowMs] = createSignal(Date.now());
+  const nowMs = useNow(30_000);
 
   let undoTimer: ReturnType<typeof setTimeout> | undefined;
   let listContainerRef: HTMLDivElement | undefined;
@@ -345,11 +341,9 @@ export function InboxPage(p: {
       if (state) { applySharedInboxSeen(state); applySharedInboxPreferences(state.preferences); }
     };
     void refreshSharedState();
-    const sync = setInterval(() => void refreshSharedState(), 10_000);
-    const clock = setInterval(() => setNowMs(Date.now()), 30_000);
+    const stopSync = pollWhileVisible(refreshSharedState, 10_000, "inbox.sharedState");
     onCleanup(() => {
-      clearInterval(clock);
-      clearInterval(sync);
+      stopSync();
       if (undoTimer) clearTimeout(undoTimer);
     });
   });
@@ -543,7 +537,7 @@ export function InboxPage(p: {
               requestInboxDigest(item.mission, snap.items, item.updatedMs, priority);
             }
           })
-          .catch(() => {});
+          .catch(swallow("inbox.prefetchTranscript", { mission: item.id }));
         return;
       }
       if (cfg.aiSummary && idx < 12 && !item.interaction) {
@@ -638,9 +632,9 @@ export function InboxPage(p: {
       setReplyingId(null);
       setPeekedIds(new Set([item.id]));
       if (!peekReadyTranscript(item.id)) {
-        void loadTranscript(item.id).catch(() => {});
+        void loadTranscript(item.id).catch(swallow("inbox.loadTranscript", { mission: item.id }));
       } else {
-        void refreshTranscript(item.id).catch(() => {});
+        void refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
       }
     }
 
@@ -749,7 +743,7 @@ export function InboxPage(p: {
           false,
         );
         p.onMissionUpdated?.({ ...item.mission, status: "running" });
-        void refreshTranscript(item.id).catch(() => {});
+        void refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
         void p.onRefresh();
         return;
       }
@@ -877,7 +871,7 @@ export function InboxPage(p: {
       const msgId = crypto.randomUUID();
       if (clientPlaced) {
         const sendVersion = connectionVersion();
-        await refreshLocalBindings().catch(() => {});
+        await refreshLocalBindings().catch(swallow("inbox.refreshLocalBindings"));
         const binding = localBinding(item.id);
         if (!binding) {
           throw new Error("This session runs on the computer that started it. Your draft is kept.");
@@ -926,13 +920,8 @@ export function InboxPage(p: {
           chips.length > 0,
         );
       }
-      setPeekReplyDrafts((prev) => {
-        const next = { ...prev };
-        delete next[item.id];
-        return next;
-      });
       // Keep the Peek drawer open so the user sees their sent message and the live-streamed reply
-      void refreshTranscript(item.id).catch(() => {});
+      void refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
       void p.onRefresh();
       return true;
     } catch (e) {
@@ -984,10 +973,10 @@ export function InboxPage(p: {
           requestId: interaction.callId,
           text: interaction.detail ?? interaction.prompt,
           approvedAt: new Date().toISOString(),
-        }).catch(() => {});
+        }).catch(swallow("inbox.rememberPlan", { mission: item.id }));
       }
 
-      await refreshTranscript(item.id).catch(() => {});
+      await refreshTranscript(item.id).catch(swallow("inbox.refreshTranscript", { mission: item.id }));
       void p.onRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1137,7 +1126,7 @@ export function InboxPage(p: {
           const isMissionRunning = () => {
             const s = currentItem().mission.status;
             return Boolean(
-              s && ["active", "running", "pending", "queued", "starting", "resuming"].includes(s),
+              isLive(s),
             );
           };
           const color = () => projectColor(currentItem().projectSlug);
@@ -1226,14 +1215,14 @@ export function InboxPage(p: {
                           : curM.status_message,
                     });
                   }
-                  void refreshTranscript(id).catch(() => {});
+                  void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
                   void p.onRefresh();
                   return;
                 }
                 appendLiveEvent(ev);
               },
               () => {
-                void refreshTranscript(id).catch(() => {});
+                void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
               },
             );
             onCleanup(() => {
@@ -1304,7 +1293,7 @@ export function InboxPage(p: {
           const uploadTarget = createMemo(() => {
             const m = currentItem().mission;
             if (m.tags?.includes("placement:client")) return "local";
-            return m.remote_node_id ?? m.remote_job?.node_id ?? "core";
+            return missionAssignedNode(m) ?? "core";
           });
           const stableProjectSlug = createMemo(() => currentItem().mission.project ?? undefined);
           const stableBackend = createMemo(() => currentItem().mission.backend);
@@ -1703,15 +1692,10 @@ export function InboxPage(p: {
                       backend={stableBackend()}
                       projectSlug={stableProjectSlug()}
                       onAttachments={setFollowAttach}
-                      onDraft={(text) =>
-                        setPeekReplyDrafts((prev) =>
-                          prev[id] === text ? prev : { ...prev, [id]: text },
-                        )
-                      }
                       onStop={() => {
                         void cancelMission(id)
                           .then(() => {
-                            void refreshTranscript(id).catch(() => {});
+                            void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
                             void p.onRefresh();
                           })
                           .catch((err) => setError(err instanceof Error ? err.message : String(err)));

@@ -1,3 +1,4 @@
+import { GOAL_HARNESSES } from "./harnesses";
 import * as Ic from "./icons";
 
 /**
@@ -65,7 +66,7 @@ export function GoalTag(p: { detail?: string; class?: string }) {
 }
 
 /** Native `/goal` loop — same harness ids as `native_loops.rs`. */
-export const GOAL_HARNESSES = new Set(["antigravity", "claudecode", "codex", "grok", "opencode"]);
+export { GOAL_HARNESSES };
 
 export type ComposerMode = "goal" | "plan" | "btw";
 

@@ -83,13 +83,6 @@ export const CubeIcon = (p: P) => (
     <path d="M2.6 5.4 8 8.4l5.4-3M8 8.4v5.2" />
   </I>
 );
-export const AppearanceIcon = (p: P) => (
-  <I {...p}>
-    <circle cx="8" cy="8" r="5.4" />
-    <path d="M8 2.6v10.8" />
-    <path d="M8 2.6a5.4 5.4 0 0 0 0 10.8z" fill="currentColor" stroke="none" />
-  </I>
-);
 export const ExternalIcon = (p: P) => (
   <I {...p}>
     <path d="M9.2 3.2h3.6v3.6M12.6 3.4 7.2 8.8" />
@@ -155,18 +148,6 @@ export const FolderOpenIcon = (p: P) => (
   </I>
 );
 /** Collapsed finished-missions group: the same family as the sidebar status dot. */
-export const FinishedIcon = (p: P) => (
-  <I {...p}>
-    <circle cx="8" cy="8" r="5.2" />
-  </I>
-);
-/** Expanded finished-missions group: the ring opens onto the inner dot. */
-export const FinishedOpenIcon = (p: P) => (
-  <I {...p}>
-    <circle cx="8" cy="8" r="5.2" />
-    <circle cx="8" cy="8" r="2" fill="currentColor" stroke="none" />
-  </I>
-);
 export const LaptopIcon = (p: P) => (
   <I {...p}>
     <path d="M3.5 4.2c0-.7.5-1.200 1.200-1.200h6.600c.7 0 1.200.5 1.200 1.200V10h-9zM2 12.500 3.500 10h9l1.500 2.500z" />
@@ -204,12 +185,6 @@ export const PlusIcon = (p: P) => (
     <path d="M8 3v10M3 8h10" />
   </I>
 );
-export const ReplyIcon = (p: P) => (
-  <I {...p}>
-    <path d="M6.500 4 3 7.500 6.500 11" />
-    <path d="M3 7.500h6c2.200 0 4 1.500 4 3.800V12" />
-  </I>
-);
 export const MicIcon = (p: P) => (
   <svg class={p.class} width={p.size ?? 16} height={p.size ?? 16} viewBox="0 0 16 16" fill="none">
     <rect x="5.700" y="1.800" width="4.600" height="8" rx="2.300" fill="currentColor" />
@@ -242,21 +217,6 @@ export const StopIcon = (p: P) => (
   <svg class={p.class} width={p.size ?? 16} height={p.size ?? 16} viewBox="0 0 16 16" fill="currentColor">
     <rect x="4.500" y="4.500" width="7" height="7" rx="1.500" />
   </svg>
-);
-export const PrClosedIcon = (p: P) => (
-  <I {...p}>
-    <circle cx="4.500" cy="12.200" r="1.500" />
-    <circle cx="11.500" cy="12.200" r="1.500" />
-    <path d="M4.500 10.700V5M11.500 10.700V8M3 2.500l3 3M6 2.500l-3 3M10 3l3 3M13 3l-3 3" />
-  </I>
-);
-export const PrMergedIcon = (p: P) => (
-  <I {...p}>
-    <circle cx="4.500" cy="3.800" r="1.500" />
-    <circle cx="4.500" cy="12.200" r="1.500" />
-    <circle cx="11.500" cy="9" r="1.500" />
-    <path d="M4.500 5.300v5.400M4.500 5.300c0 2.500 2.500 3.700 5.500 3.700" />
-  </I>
 );
 export const CopyIcon = (p: P) => (
   <I {...p}>

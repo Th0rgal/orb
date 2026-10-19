@@ -1,3 +1,5 @@
+import { isRecord, readJson, writeJson } from "./storage";
+import { swallow } from "./log";
 import { connectionVersion, getApiUrl, getJwt, isConnected } from "./api";
 import { sideQuestionKey } from "./sideQuestionStorage";
 
@@ -13,11 +15,11 @@ function loadOutbox(): string {
   const key = sideQuestionKey("inbox-state:outbox:v1");
   if (key !== loadedKey) {
     loadedKey = key; outbox = {}; versions = {};
-    try { const saved = JSON.parse(localStorage.getItem(key) ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) outbox = saved; } catch {}
+    outbox = { ...readJson<typeof outbox>(key, {}, isRecord) };
   }
   return key;
 }
-function persist(): void { try { localStorage.setItem(loadedKey, JSON.stringify(outbox)); } catch {} }
+function persist(): void { writeJson(loadedKey, outbox); }
 
 export function writeInboxState(path: string, input: unknown): void {
   const key = loadOutbox(), serial = ++mutation;
@@ -49,7 +51,7 @@ export function writeInboxState(path: string, input: unknown): void {
     // Drop only that terminal receipt; retain preferences and transient failures.
     if (!response.ok && !(response.status === 404 && path.startsWith("seen/"))) throw new Error("Inbox state write failed");
     if (loadOutbox() === key && outbox[path]?.serial === serial) { delete outbox[path]; persist(); }
-  }).catch(() => {}).finally(() => { pending--; });
+  }).catch(swallow("inboxState.outbox", { path })).finally(() => { pending--; });
 }
 
 export async function readInboxState(): Promise<SharedInboxState | undefined> {

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
-import { Composer } from "../src/App";
+import { Composer } from "../src/composer/Composer";
 import { readComposerDraft, saveComposerDraft } from "../src/composerDrafts";
 
 vi.mock("../src/composerDrafts", async original => ({

@@ -1,10 +1,11 @@
+import { swallow } from "./log";
 import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
 import * as btwMod from "./btwAgent";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote} from "./btwAgent";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
-import { Composer } from "./App";
+import { Composer } from "./composer/Composer";
 import type { DraftImage } from "./imageAttachments";
 import { uploadToken, type UploadedFile } from "./uploads";
 import { Portal } from 'solid-js/web';
@@ -16,7 +17,7 @@ import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
 import { remoteLog } from './remoteLog';
-import { askSide, sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
+import { sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
 import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
 export type SideQuestionsHandle={ask:(question:string,images?:DraftImage[],files?:UploadedFile[])=>Promise<boolean>;open:()=>void};
@@ -121,7 +122,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(reconciled.activeSession&&!busy()){
      watchActive(reconciled.activeSession);
     }
-   }).catch(()=>{});
+   }).catch(swallow("sideQuestions.reconcile"));
   }
   });
  }));

@@ -1,3 +1,5 @@
+import { nativeInvoke } from "./native";
+import { readJson, writeJson } from "./storage";
 import { createSignal } from "solid-js";
 import { api, getRemoteNodes, connectionVersion, isConnected } from "./api";
 import { historyScope } from "./resourceCache";
@@ -10,7 +12,7 @@ export type SoftwareMachine={id:string;name:string;online:boolean;inventory?:Sof
 const [machines,setMachines]=createSignal<SoftwareMachine[]>([]);
 const [refreshing,setRefreshing]=createSignal(false);
 export {machines as softwareMachines,refreshing as softwareRefreshing};
-const native=()=> (window as any).__TAURI__?.core?.invoke as undefined|((command:string,args:unknown)=>Promise<any>);
+const native=nativeInvoke;
 const cacheKey=()=>`orb.software.inventory.v1:${historyScope()}`;
 export const softwareVersion=(s:string|null)=>s?.match(/(?:^|\s|v)(\d+)\.(\d+)\.(\d+)(?:\s|$)/)?.slice(1).map(Number);
 export function newer(latest:string|null,current:string|null){
@@ -21,7 +23,7 @@ export function newer(latest:string|null,current:string|null){
 let flight:Promise<void>|undefined;
 let generation=0;
 let scope="";
-function enterScope(){const next=cacheKey();if(scope===next)return;scope=next;generation++;flight=undefined;setRefreshing(false);try{setMachines(JSON.parse(localStorage.getItem(next)||'[]').map((m:SoftwareMachine)=>({...m,online:false})));}catch{setMachines([]);}}
+function enterScope(){const next=cacheKey();if(scope===next)return;scope=next;generation++;flight=undefined;setRefreshing(false);setMachines(readJson<SoftwareMachine[]>(next,[],Array.isArray).map(m=>({...m,online:false})));}
 export function refreshSoftware(force=false):Promise<void>{
  enterScope();if(flight)return flight;
  const epoch=generation,connection=connectionVersion(),key=scope;setRefreshing(true);
@@ -48,7 +50,7 @@ export function refreshSoftware(force=false):Promise<void>{
    }catch(e){const message=String(e);return publish({...target,inventory:old?.inventory,error:/404|unknown command|not found|not allowed|Runtime update required/i.test(message)?'Runtime update required':message});}
   }));
   if(epoch!==generation||connection!==connectionVersion())return;
-  setMachines(result);try{localStorage.setItem(key,JSON.stringify(result));}catch{}
+  setMachines(result);writeJson(key,result);
  })().finally(()=>{if(epoch===generation){flight=undefined;setRefreshing(false);}});
  return flight;
 }

@@ -1,16 +1,10 @@
+import { nativeEvents } from "./native";
+import { swallow } from "./log";
 import { appendClientTranscript, getApiUrl, getJwt } from "./api";
 import type { ClientRunReceipt } from "./clientRuns";
 import { nativeInvoke } from "./clientRuns";
 
 const connection = () => ({ api_url: getApiUrl(), token: getJwt() ?? "" });
-
-/** Whether Orb desktop streams local runs to Core over the client link. */
-export async function clientLinkActive(): Promise<boolean> {
-  const invoke = nativeInvoke();
-  if (!invoke) return false;
-  try { return await invoke("client_link_active", { connection: connection() }) === true; }
-  catch { return false; }
-}
 
 /**
  * Wait until Core acknowledged everything the client link journaled for this
@@ -61,14 +55,14 @@ export async function connectClientLink(start: (request: RemoteStart) => Promise
   if (!invoke) return;
   try { if (await invoke("client_link_connect", { connection: connection() }) !== true) return; }
   catch { return; }
-  const events = (window as unknown as { __TAURI__?: { event?: { listen: (name: string, handler: (event: { payload: RemoteStart }) => void) => Promise<() => void> } } }).__TAURI__?.event;
+  const events = nativeEvents();
   if (!events || stopListening) return;
   const seen = new Set<string>();
-  stopListening = await events.listen("client-link-start", ({ payload }) => {
+  stopListening = await events.listen<RemoteStart>("client-link-start", ({ payload }) => {
     if (!payload?.request_id || seen.has(payload.request_id)) return;
     seen.add(payload.request_id);
     const answer = (ok: boolean, missionId?: string, error?: string) =>
-      invoke("client_link_start_result", { connection: connection(), requestId: payload.request_id, ok, missionId: missionId ?? null, error: error ?? null }).catch(() => {});
+      invoke("client_link_start_result", { connection: connection(), requestId: payload.request_id, ok, missionId: missionId ?? null, error: error ?? null }).catch(swallow("clientLink.startResult", { requestId: payload.request_id, ok }));
     void start(payload).then(id => answer(true, id), (e: unknown) => answer(false, undefined, e instanceof Error ? e.message : String(e)));
   });
 }

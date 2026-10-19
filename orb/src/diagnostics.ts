@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 /** Records why the app felt slow: stalls of the page's thread, slow requests,
  * stream load and a window the page does not fill. Entries are appended to
  * `~/.orb/logs/orb-<date>.jsonl` by the native side, which also notices when
@@ -19,8 +20,7 @@ let stalls = { count: 0, ms: 0, worst: 0 };
 let started = false;
 
 const invoke = (): Invoke | undefined => {
-  const g = window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } }; __TAURI_INTERNALS__?: { invoke?: Invoke } };
-  return g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke;
+  return nativeInvoke();
 };
 const round = (value: number) => Math.round(value);
 const view = () => `${location.pathname}${location.hash}`.slice(0, 120);

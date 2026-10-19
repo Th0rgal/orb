@@ -1,3 +1,4 @@
+import { missionAssignedNode } from "./machines/nodes";
 import { rememberImagePreview, imagePreviewScope } from "./imagePreviews";
 import { api, getApiUrl, connectionVersion, type Mission } from "./api";
 import { writeLocalFiles } from "./localAgents";
@@ -33,7 +34,7 @@ export async function stageLocalImages(root: string, images: DraftImage[]): Prom
   });
 }
 export async function stageRemoteImages(images: DraftImage[], mission?: Mission | null, destination?: string): Promise<string[]> {
-  const node = destination ?? mission?.remote_node_id ?? mission?.remote_job?.node_id ?? "core";
+  const node = destination ?? missionAssignedNode(mission) ?? "core";
   const version = connectionVersion();
   const scope = imagePreviewScope(getApiUrl(), version, node);
   const paths: string[] = [];

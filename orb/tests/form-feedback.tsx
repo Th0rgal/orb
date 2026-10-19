@@ -1,5 +1,5 @@
 import {render} from 'solid-js/web';
-import {Composer} from '../src/App';
+import {Composer} from '../src/composer/Composer';
 import {CronForm} from '../src/ControllerSettings';
 import {getProjectCronFromJob} from '../src/cronSchema';
 import fixtures from './fixtures/hermes-jobs.json';

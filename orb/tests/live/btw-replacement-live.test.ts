@@ -4,9 +4,9 @@ import {readFileSync,writeFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {File as NodeFile} from 'node:buffer';
 import {webcrypto} from 'node:crypto';
-import {setConnection,getMission} from '../src/api';
-import {askBtwAgent,btwSession} from '../src/btwAgent';
-import {sideQuestionKey} from '../src/sideQuestionStorage';
+import {setConnection,getMission} from '../../src/api';
+import {askBtwAgent,btwSession} from '../../src/btwAgent';
+import {sideQuestionKey} from '../../src/sideQuestionStorage';
 const live=process.env.ORB_BTW_REPAIR_LIVE==='1';
 const connection=live?JSON.parse(readFileSync(process.env.ORB_BTW_LIVE_CONNECTION??'/tmp/btw-test-connection.json','utf8')):null;
 it.skipIf(!live)('recovers the refused Verity btw session without an ordinary mission',async()=>{
@@ -26,7 +26,7 @@ it.skipIf(!live)('recovers the refused Verity btw session without an ordinary mi
  const id=process.env.ORB_BTW_LIVE_MISSION??'ebb2f1fe-8d03-4cc0-b966-68b3cb86077f';const source=await getMission(id);
 
  const original='1c06471d-1443-4e5d-848e-cd895cc8338d';
- const {btwConfig}=await import('../src/btwSettings');const config=btwConfig();
+ const {btwConfig}=await import('../../src/btwSettings');const config=btwConfig();
  const machine=source.machine_transfer?.destination;
  const node=machine?.kind==='node'?machine.id:source.remote_node_id??source.remote_job?.node_id;
  localStorage.setItem('agent:'+sideQuestionKey(id),JSON.stringify({id:original,question:'Previous side turn',harness:config.harness,model:config.model,local:false,active:false,baseline:0,placement:JSON.stringify([false,node,source.working_directory,source.workspace_id]),contextVersion:2,conversationCursor:{sequence:0,visibleHash:''}}));

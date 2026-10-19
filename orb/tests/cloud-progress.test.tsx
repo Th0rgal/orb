@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { CloudConversation } from '../src/CloudAgents';
 const fakes = vi.hoisted(() => ({ execution: vi.fn() }));
 vi.mock('../src/cloudAgentApi', async original => ({...await original<object>(), cloudAccounts: vi.fn(async () => []), cloudExecution: fakes.execution}));
-vi.mock('../src/App', () => ({Composer: () => null, floatingDock: () => {}}));
+vi.mock('../src/composer/Composer', () => ({Composer: () => null, floatingDock: () => {}}));
 vi.mock('../src/api', () => ({api: vi.fn(), getMission: vi.fn(async () => null), openExternalUrl: vi.fn()}));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 const turn = (phase: string, extra = {}) => ({key: 't1', prompt: 'Refais-moi un quiz', phase, artifacts: [], branches: [], model_params: [], ...extra});

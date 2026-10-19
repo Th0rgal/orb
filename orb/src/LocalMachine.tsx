@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { ResourceIcon } from "./ResourceIcon";
 import { readHistory, saveHistory, freshSamples } from "./resourceCache";
 import { ResourceHistory, appendSamples, type ResourceSample } from "./ResourceHistory";
@@ -22,7 +23,7 @@ export function LocalMachine() {
   const [sample, setSample] = createSignal<Snapshot>();
   const [error, setError] = createSignal("");
   onMount(() => {
-    const invoke = (window as Window & { __TAURI__?: { core?: { invoke: (name: string,args?:Record<string,unknown>) => Promise<Snapshot> } } }).__TAURI__?.core?.invoke;
+    const invoke = nativeInvoke();
     if (!invoke) { setError("Available in the Orb desktop app"); return; }
     let disposed = false;
     let pending = false;

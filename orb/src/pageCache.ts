@@ -58,11 +58,6 @@ export function cachePeek<T>(key: string): T | undefined {
 
 export function cacheDelete(key:string){remove(key);}
 
-export function cacheAge(key: string): number | undefined {
-  const hit = store.get(key);
-  return hit ? Date.now() - hit.at : undefined;
-}
-
 export function cachePut<T>(key: string, value: T): T {
   remove(key);
   const size = estimateCacheBytes(value);

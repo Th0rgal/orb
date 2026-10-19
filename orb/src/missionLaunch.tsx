@@ -1,3 +1,7 @@
+import { isRecord, readJson, writeJson } from "./storage";
+import { missionNode, nodeLabel } from "./machines/nodes";
+import { REMOTE_PROXY_HARNESSES } from "./harnesses";
+import { isQueued } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice } from "./ErrorNotice";
@@ -18,16 +22,8 @@ export function recalledLaunch(id: string): LaunchReceipt | undefined {
   if (cached) return cached;
   try { return JSON.parse(sessionStorage.getItem(receiptKey(id)) ?? "null") ?? undefined; } catch { return undefined; }
 }
-export const nodeLabel = (id: string) => id === "core" ? "Core" : id === "local" ? "This computer" : id === "dgx-spark" ? "DGX Spark" : id === "dgx-spark-admin" ? "DGX Spark · Administration" : id;
 export const isAdministrationNode = (node: { id: string; labels?: string[] }) => node.id === "dgx-spark-admin" && node.labels?.includes("administration") === true && node.labels.includes("manual-only");
 
-/** Statuses where PATCH /settings can change the next-turn model. A live turn returns 409. */
-const SETTINGS_IDLE = new Set([
-  "awaiting_user", "acknowledged", "interrupted", "failed", "paused", "blocked",
-]);
-export function missionSettingsIdle(status?: string | null): boolean {
-  return SETTINGS_IDLE.has((status ?? "").toLowerCase());
-}
 
 /** "Grok 4.6" next to harness "Grok" → "4.6". */
 export function dockModelLabel(harnessName: string, modelLabel: string): string {
@@ -41,7 +37,7 @@ export function dockModelLabel(harnessName: string, modelLabel: string): string 
 // workspace, so the label flipped to "host". Remember the last node per mission.
 const LAST_NODE_KEY = "orb.mission-node:v1";
 function lastNodes(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(LAST_NODE_KEY) || "{}"); } catch { return {}; }
+  return readJson<Record<string, string>>(LAST_NODE_KEY, {}, isRecord);
 }
 export function rememberMissionNode(id: string, node: string) {
   const nodes = lastNodes();
@@ -49,7 +45,7 @@ export function rememberMissionNode(id: string, node: string) {
   delete nodes[id]; nodes[id] = node;
   const keys = Object.keys(nodes);
   for (const key of keys.slice(0, Math.max(0, keys.length - 500))) delete nodes[key];
-  try { localStorage.setItem(LAST_NODE_KEY, JSON.stringify(nodes)); } catch { /* best effort */ }
+  writeJson(LAST_NODE_KEY, nodes);
 }
 export function lastMissionNode(id: string | undefined): string | undefined {
   return id ? lastNodes()[id] : undefined;
@@ -60,7 +56,7 @@ export function missionDestination(mission: Mission | null, receipt?: LaunchRece
   if (mission?.tags?.includes("placement:client") || receipt?.nodeId === "local") return "This computer";
   // Server-owned remote placement or the accepted selection takes precedence
   // over workspace_name, which can still name the host's bookkeeping workspace.
-  const node = mission?.remote_job?.node_id ?? mission?.remote_node_id;
+  const node = missionNode(mission);
   if (node && mission?.id) rememberMissionNode(mission.id, node);
   return nodeLabel(node ?? receipt?.nodeId ?? lastMissionNode(mission?.id) ?? mission?.workspace_name ?? "selected machine");
 }
@@ -139,7 +135,7 @@ export function remoteLaunchPreflight(fleet: RemoteNodesResponse, nodeId: string
 export function remoteHarnessNeedsProxy(capability: RemoteLaunchCapability, backend: string): boolean {
   const listed = capability.requires_proxy_harnesses;
   if (Array.isArray(listed)) return listed.includes(backend);
-  return backend === "claudecode" || backend === "opencode" || backend === "codex";
+  return REMOTE_PROXY_HARNESSES.has(backend);
 }
 /** The capability could not be read at all (network/server error): refuse rather than guess. */
 export function remoteLaunchUnconfirmed(nodeId: string, error: unknown): string {
@@ -269,6 +265,7 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
     if (job?.phase === "reconnecting" || job?.node_state === "reconnecting") return {label:"Reconnecting",moving:true,detail:"The node is temporarily unreachable. The existing job is preserved; no replacement will start until its outcome is known."};
     // Active means durable acceptance, not that the selected harness is running.
     if (["failed", "lost", "cancelled", "canceled"].includes(job?.node_state ?? "") || (job?.exit_code != null && job.exit_code !== 0)) return {label:"Remote job stopped",moving:false,failed:true,detail:job?.error ?? job?.terminal_reason ?? `Remote job ${job?.node_state ?? "exited"}${job?.exit_code != null ? ` (exit ${job.exit_code})` : ""}.`};
+    if ((job?.phase === "finished" || job?.finished_at) && job?.terminal_reason) return {label:"Remote job stopped",moving:false,failed:true,detail:job.error ?? job.terminal_reason.replaceAll("_", " ")};
     if (job?.phase === "finished" || job?.finished_at) return {label:"Remote job finished",moving:false,detail:"Waiting for the backend to finalize the mission."};
     if (job?.phase === "submit_ambiguous") return {label:"Checking submission",moving:true,detail:"The backend is checking whether the remote node accepted the job."};
     if (job?.phase === "unobserved" || job?.phase === "lease_only") return {label:"Checking remote job",moving:true,detail:"Waiting for a current remote job status. Execution is not confirmed."};
@@ -277,7 +274,7 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
     return {label:"Remote job accepted",moving:true,detail:"Waiting for the remote node to confirm execution."};
   }
   if (status === "resuming") return {label:"Resuming",moving:true,detail:"Waiting for the runner to resume."};
-  if (["pending","queued"].includes(status)) return {label:"Queued",moving:true,detail:"Request accepted. Waiting for the runner to start."};
+  if (isQueued(status)) return {label:"Queued",moving:true,detail:"Request accepted. Waiting for the runner to start."};
   if (["active","running","starting"].includes(status)) return {label:activity?"Running":"Starting",moving:true,detail:activity?"":"Request accepted. Waiting for the first output."};
   return {label:status.replaceAll("_"," "),moving:false,detail:""};
 }

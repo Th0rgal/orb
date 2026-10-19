@@ -4,9 +4,9 @@ import {readFileSync,writeFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {File as NodeFile} from 'node:buffer';
 import {webcrypto} from 'node:crypto';
-import {setConnection,getMission} from '../src/api';
-import {askBtwAgent,btwSession} from '../src/btwAgent';
-import {sideQuestionKey} from '../src/sideQuestionStorage';
+import {setConnection,getMission} from '../../src/api';
+import {askBtwAgent,btwSession} from '../../src/btwAgent';
+import {sideQuestionKey} from '../../src/sideQuestionStorage';
 const live=process.env.ORB_BTW_LIVE_CHECK==='1';
 const connection=live?JSON.parse(readFileSync(process.env.ORB_BTW_LIVE_CONNECTION??'/tmp/btw-test-connection.json','utf8')):null;
 it.skipIf(!live)('checks actual Verity side-agent archive access and follow-up payload',async()=>{
@@ -40,7 +40,7 @@ it.skipIf(!live)('checks actual Verity side-agent archive access and follow-up p
   return;
  }
  await askBtwAgent(id,'Read-only context delivery test. Do not modify files, start builds, publish, or message the main agent. Read the @conversation manifest with your tools, then inspect only a relevant tail of the transcript or event archive (do not load the full history). Identify the main objective, latest proven progress, and remaining work. Check the current status of the two existing Linux validation services/logs using read-only commands. Give a concise answer with exact file paths or event sequence numbers as evidence. Do not confuse completion of a turn with completion of the goal.',visible,[],new AbortController().signal,receive);
- const {getMissionEvents}=await import('../src/stream');
+ const {getMissionEvents}=await import('../../src/stream');
  const trace=await getMissionEvents(btwSession(id)!.id);
  expect(trace.some(e=>e.event_type==='tool_result'&&e.content.includes('transcript_parts')&&e.content.includes('through_sequence')&&!/rejected permission|\"status\":\"failed\"/.test(e.content))).toBe(true);
  expect(replies[0]).not.toContain('finished without assistant text');

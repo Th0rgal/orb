@@ -1,5 +1,7 @@
+import { isRecord, readJson } from "./storage";
+import { swallow } from "./log";
 import { writeInboxState } from "./inboxState";
-import { For, Show, createMemo, createSignal, onMount } from "solid-js";
+import { For, createMemo, createSignal, onMount } from "solid-js";
 import { isConnected } from "./api";
 import { listChains, routingCatalog, type ModelChain, type RoutingCatalog } from "./routingApi";
 import { RoutingPicker } from "./RoutingPicker";
@@ -24,9 +26,8 @@ export { inboxConfigVersion };
 export function inboxConfig(): InboxConfig {
   inboxConfigVersion();
   try {
-    const raw = localStorage.getItem(sideQuestionKey("settings:inbox"));
-    if (!raw) return { ...DEFAULT_INBOX_CONFIG };
-    const parsed = JSON.parse(raw) as Partial<InboxConfig>;
+    const parsed = readJson<Partial<InboxConfig> | null>(sideQuestionKey("settings:inbox"), null, isRecord);
+    if (!parsed) return { ...DEFAULT_INBOX_CONFIG };
     return {
       includeAutonomous: parsed.includeAutonomous === true,
       aiSummary: typeof parsed.aiSummary === "boolean" ? parsed.aiSummary : DEFAULT_INBOX_CONFIG.aiSummary,
@@ -76,10 +77,10 @@ export function InboxSettings() {
     if (!isConnected()) return;
     void listChains()
       .then((rows) => setChains(rows))
-      .catch(() => {});
+      .catch(swallow("inboxSettings.listChains"));
     void routingCatalog()
       .then((cat) => setCatalog(cat))
-      .catch(() => {});
+      .catch(swallow("inboxSettings.routingCatalog"));
   });
 
   const modelOptions = createMemo(() => {

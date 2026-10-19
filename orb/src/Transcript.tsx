@@ -1,4 +1,6 @@
-import { formatElapsed, turnStartedAt } from "./TurnStatus";
+import { swallow } from "./log";
+import { turnStartedAt } from "./TurnStatus";
+import { formatElapsed, useNow } from "./time";
 import {AutomaticReminder, reminderMessages} from "./AutomaticReminder";
 import { ErrorToast } from "./toast";
 import {PromptEditor} from "./PromptEditor";
@@ -216,7 +218,7 @@ function MessageImage(p: {path:string; index:number; onUrl:(url:string|null)=>vo
     void Promise.resolve(resolver?.loadImage?.(path)).then(value => {
       if(cancelled) { if(value?.startsWith("blob:"))URL.revokeObjectURL(value); return; }
       loaded=value ?? null;setUrl(value ?? null);
-    }).catch(() => {}).finally(() => {if(!cancelled)setLoading(false);});
+    }).catch(swallow("transcript.loadImage")).finally(() => {if(!cancelled)setLoading(false);});
     onCleanup(() => {cancelled=true;if(loaded?.startsWith("blob:"))URL.revokeObjectURL(loaded);});
   });
   createEffect(() => p.onUrl(url()));
@@ -371,7 +373,7 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
     void copyText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-    }).catch(() => {});
+    }).catch(swallow("transcript.copy"));
   };
   return (
     <div class={`st-tool ${open() ? "open" : ""} ${failed() ? "is-failed" : ""}`} data-kind={workKind(p.item.name)}>
@@ -599,7 +601,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
   );
 }
 
-export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; working?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
+export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; working?: boolean; workingLabel?: string; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -665,7 +667,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
           }
         }}
       </For>}</VirtualTurns></DisclosureState.Provider>
-      <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} /></Show>
+      <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} /></Show>
       <Show when={checklist()?.tasks.length}>
         <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} />
       </Show>
@@ -720,13 +722,12 @@ export function liveTail(items: StreamItem[]): boolean {
 
 /** The only "working" indicator: a transcript row shaped like "Thinking", shown
  * when no live row is visible, with the elapsed turn time. */
-function WorkingRow(p: { items: StreamItem[] }) {
-  const [now, setNow] = createSignal(Date.now());
+function WorkingRow(p: { items: StreamItem[]; label?: string }) {
+  const now = useNow(1000);
   const seen = Date.now();
-  const timer = setInterval(() => setNow(Date.now()), 1000);
-  onCleanup(() => clearInterval(timer));
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
-  return <div class="st-think st-working" role="status" aria-live="off">
-    <div class="st-think-head"><span class="shimmer">Working</span><span class="st-working-time">{formatElapsed(now() - started())}</span></div>
+  // The label is the announced status; the ticking time is not read out.
+  return <div class="st-think st-working">
+    <div class="st-think-head"><span class="shimmer agent-wait-status" role="status" aria-live="polite">{p.label || "Working"}</span><span class="st-working-time" aria-hidden="true">{formatElapsed(now() - started())}</span></div>
   </div>;
 }

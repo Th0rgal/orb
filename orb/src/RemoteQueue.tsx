@@ -1,3 +1,5 @@
+import { pollWhileVisible } from "./poll";
+import { swallow } from "./log";
 import { For, Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
 import { ErrorToast } from "./toast";
 import { messagePresentation } from "./messagePresentation";
@@ -87,8 +89,8 @@ export function RemoteQueue(p: {
       finally { loading = false; }
     };
     void refresh();
-    const timer = setInterval(() => void refresh(), 3000);
-    onCleanup(() => { disposed = true; clearInterval(timer); });
+    const stop = pollWhileVisible(refresh, 3000, "remoteQueue.refresh");
+    onCleanup(() => { disposed = true; stop(); });
   });
   const cancel = async (id: string) => {
     setError("");
@@ -192,7 +194,7 @@ export function RemoteQueue(p: {
     try {
       await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
       for (const r of after) {
-        await api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" }).catch(() => {});
+        await api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" }).catch(swallow("remoteQueue.delete", { message: r.id }));
       }
       revision++;
       for (const r of tail) deletedIds.add(r.id);

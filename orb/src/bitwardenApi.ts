@@ -1,7 +1,6 @@
+import { nativeInvoke } from "./native";
 import { api } from "./api";
 import { signedApi } from "./deviceApproval";
-
-export const PALOMA_BITWARDEN_PROJECT_ID = "297f3106-758f-43d5-8a4b-b460007558c8";
 
 export interface BitwardenStatus {
   configured: boolean;
@@ -56,11 +55,7 @@ type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 function tauriInvoke(): Invoke | null {
   if (typeof window === "undefined") return null;
-  const g = window as unknown as {
-    __TAURI__?: { core?: { invoke?: Invoke } };
-    __TAURI_INTERNALS__?: { invoke?: Invoke };
-  };
-  return g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke ?? null;
+  return nativeInvoke() ?? null;
 }
 
 export async function getBiometricStatus(): Promise<BiometricStatus> {

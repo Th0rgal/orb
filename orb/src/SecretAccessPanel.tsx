@@ -1,3 +1,5 @@
+import { pollWhileVisible } from "./poll";
+import { ago, useNow } from "./time";
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import {
   approveSecretRequest,
@@ -17,14 +19,9 @@ import { FingerprintIcon, SecretKindIcon } from "./secretRequestNotices";
 
 const POLL_MS = 5000;
 
-function ago(raw?: string | null): string {
+function since(raw?: string | null): string {
   const ts = raw ? Date.parse(raw) : NaN;
-  if (!Number.isFinite(ts)) return "";
-  const m = Math.round((Date.now() - ts) / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+  return Number.isFinite(ts) ? ago(ts, Date.now(), { round: true, days: true }) : "";
 }
 
 function until(raw: string): string {
@@ -57,15 +54,10 @@ export function SecretAccessPanel(p: {
   };
   onMount(() => {
     void load();
-    const t = setInterval(() => void load(), POLL_MS);
-    onCleanup(() => clearInterval(t));
+    onCleanup(pollWhileVisible(load, POLL_MS, "secretAccess.load"));
   });
 
-  const [now, setNow] = createSignal(Date.now());
-  onMount(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    onCleanup(() => clearInterval(t));
-  });
+  const now = useNow(1000);
   const graceText = () => {
     const left = Math.max(0, graceUntil() * 1000 - now());
     if (!left) return "Touch ID required";
@@ -140,7 +132,7 @@ export function SecretAccessPanel(p: {
                       <Show when={r.kind === "move"}>
                         <span class="bw-request-meta">→ {projectName(r.target_project_id)}</span>
                       </Show>
-                      <span class="bw-request-meta" title={who(r)}>{who(r)} · {ago(r.created_at)}</span>
+                      <span class="bw-request-meta" title={who(r)}>{who(r)} · {since(r.created_at)}</span>
                     </div>
                     <Show when={r.reason}>
                       <span class="secret-row-reason" title={r.reason!}>{r.reason}</span>
@@ -256,7 +248,7 @@ export function SecretAccessPanel(p: {
                   <span class={`bw-log-status ${r.status}`}>{r.status}</span>
                   <span>{describe(r)}</span>
                   <span class="s-row-desc">
-                    {who(r)} · {ago(r.resolved_at || r.created_at)}
+                    {who(r)} · {since(r.resolved_at || r.created_at)}
                     {r.error ? ` · ${r.error}` : ""}
                   </span>
                 </div>
@@ -269,7 +261,7 @@ export function SecretAccessPanel(p: {
                   <code class="bw-mono">{a.key}</code>
                   <span class="s-row-desc">
                     Mission {a.mission_id.slice(0, 8)}
-                    {a.paloma_project ? ` · ${a.paloma_project}` : ""} · {ago(a.at)}
+                    {a.paloma_project ? ` · ${a.paloma_project}` : ""} · {since(a.at)}
                   </span>
                 </div>
               )}

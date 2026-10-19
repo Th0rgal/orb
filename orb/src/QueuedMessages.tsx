@@ -1,6 +1,6 @@
 import {For,Show,createMemo,createSignal} from 'solid-js';
 import { ErrorToast } from "./toast";
-import {canDiscardQueuedMessage,queuedLocalMessages,prioritizeQueuedMessage,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
+import {canDiscardQueuedMessage,queuedLocalMessages,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
 import * as Ic from './icons';
 /** Follow-ups waiting for the current turn, shown like Cursor's queue: one line per
  * message, hover actions, and the row being edited marked in place. */

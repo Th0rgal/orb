@@ -1,3 +1,7 @@
+import { isRecord, readJson, writeJson } from "./storage";
+import { missionAssignedNode, missionNode } from "./machines/nodes";
+import { isQueued, WORKING_STATUSES } from "./missionStatus";
+import { swallow } from "./log";
 import {deliverAssistantText,flushClientLink} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
@@ -25,8 +29,8 @@ import type {LocalActivity} from './localAgents';
 const [remoteActivities,setRemoteActivities]=createSignal<Record<string,LocalActivity[]>>({});
 export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
-export function btwSession(parent:string):BtwSession|undefined{try{return JSON.parse(localStorage.getItem(storageKey(parent))??'null')??undefined;}catch{return undefined;}}
-function save(parent:string,s:BtwSession){localStorage.setItem(storageKey(parent),JSON.stringify(s));}
+export function btwSession(parent:string):BtwSession|undefined{const s=readJson<BtwSession|undefined>(storageKey(parent),undefined,isRecord);return s?{...s}:undefined;}
+function save(parent:string,s:BtwSession){writeJson(storageKey(parent),s);}
 
 // A turn is delimited by its latest user event, not an array offset: late
 // persistence or a resumed session can otherwise replay the previous answer.
@@ -38,11 +42,11 @@ export function btwTurnEvents(events:StoredEvent[],session:Pick<BtwSession,'base
 }
 
 export function btwQueueStatus(mission: Mission): string {
- const node = mission.remote_job?.node_id ?? mission.remote_node_id;
+ const node = missionNode(mission);
  if (mission.remote_job?.node_state === 'queued') return `Waiting for capacity${node ? ` on ${node}` : ''}…`;
  if (mission.status === 'paused') return 'Side agent paused';
  if (mission.status === 'waiting_background') return 'Waiting for background work…';
- if (['pending','queued','starting','resuming'].includes(mission.status)) return 'Waiting to start…';
+ if (isQueued(mission.status) || mission.status === 'starting' || mission.status === 'resuming') return 'Waiting to start…';
  return '';
 }
 export function isSyntheticRemoteAssistantNote(text: string): boolean {
@@ -51,7 +55,7 @@ export function isSyntheticRemoteAssistantNote(text: string): boolean {
   /^Native Codex goal stopped with status /.test(text)
  );
 }
-const ACTIVE=['active','running','pending','queued','starting','resuming','waiting_background','paused'];
+const ACTIVE=[...WORKING_STATUSES,'paused'];
 const RESUMABLE=['awaiting_user','completed','interrupted'];
 // Event sequences belong to one mission. Resolve the entire replacement chain
 // before changing the saved session, and never carry its predecessor's boundary.
@@ -91,7 +95,7 @@ function follow(id:string,receipt?:import('./clientRuns').ClientRunReceipt){
  if(finishing.has(id))return;
  const version=connectionVersion();
  const task=followLocal(id,()=>{}).then(async state=>{if(version!==connectionVersion())return;await deliverAssistantText(id,state.text,receipt);await setClientMissionStatus(id,state.exit_code||state.error||!state.text.trim()?'failed':'awaiting_user',receipt);}).finally(()=>finishing.delete(id));
- finishing.set(id,task);void task.catch(()=>{});
+ finishing.set(id,task);void task.catch(swallow("btw.followLocal", { mission: id }));
 }
 export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideEvent)=>void){
  const s=btwSession(parent);if(!s)throw new Error('Side session not found.');const version=connectionVersion();
@@ -101,7 +105,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   await restoreLocalBindings();
   await reconcileLocalRun(s.id);
   if(signal.aborted||connectionVersion()!==version)return;
-  await getMission(s.id).then(m=>{if(connectionVersion()===version&&['active','running','pending','queued','starting','resuming','waiting_background','paused'].includes(m.status))follow(s.id);}).catch(()=>{});
+  await getMission(s.id).then(m=>{if(connectionVersion()===version&&ACTIVE.includes(m.status))follow(s.id);}).catch(swallow("btw.watchStatus", { mission: s.id }));
   // The native receipt owns completion; Core synchronization must not keep the UI busy.
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
   if(signal.aborted||connectionVersion()!==version)return;
@@ -220,7 +224,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const source=await getMission(parent,{coreOnly:true}),config=btwConfig();
   const machine=source.machine_transfer?.destination;
   let local=machine?machine.kind==='client':source.tags?.includes('placement:client')??false;
-  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:source.remote_node_id??source.remote_job?.node_id;
+  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
   const destination=local?'local':node??'core';
   const placement=JSON.stringify([local,node,source.working_directory,source.workspace_id]);
   const paths=await upload(attachments,destination);

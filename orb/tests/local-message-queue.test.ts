@@ -178,12 +178,19 @@ it('makes a closed receipt recoverable without replaying it in the background',a
  expect(mocks.launch).toHaveBeenCalledTimes(2);
  expect(queuedLocalMessages('mission')).toHaveLength(0);
 });
-it('Send now recovers an already-ended run without trying to close a missing receipt',async()=>{
- mocks.active=false;mocks.status.mockRejectedValue(new Error('409 No active run on this computer'));
- await enqueueLocalMessage(request,'next');
- await expect(sendQueuedNow('mission')).resolves.toBeUndefined();
- expect(mocks.recover).toHaveBeenCalledWith('mission');
- expect(mocks.status).not.toHaveBeenCalled();
+// How Send now reacts to what it finds before stopping the current run.
+it.each([
+ {name:'recovers an already-ended run without trying to close a missing receipt',setup:()=>{mocks.active=false;mocks.status.mockRejectedValue(new Error('409 No active run on this computer'));},rejects:undefined,recover:true,status:false,stopNative:undefined,launch:undefined},
+ {name:'recovers an absent native runner without calling stop',setup:()=>{mocks.poll.mockRejectedValue(new Error('no local run'));},rejects:undefined,recover:true,status:undefined,stopNative:false,launch:false},
+ {name:'does not treat a transport failure as proof that the runner stopped',setup:()=>{mocks.poll.mockRejectedValue(new Error('IPC disconnected'));},rejects:'IPC disconnected',recover:false,status:undefined,stopNative:false,launch:undefined},
+])('Send now $name',async row=>{
+ row.setup();
+ await enqueueLocalMessage(request,'saved');
+ if(row.rejects)await expect(sendQueuedNow('mission')).rejects.toThrow(row.rejects);
+ else await expect(sendQueuedNow('mission')).resolves.toBeUndefined();
+ const called=(mock:{mock:{calls:unknown[]}},want:boolean|undefined)=>{if(want!==undefined)expect(mock.mock.calls.length>0).toBe(want);};
+ if(row.recover)expect(mocks.recover).toHaveBeenCalledWith('mission');else called(mocks.recover,false);
+ called(mocks.status,row.status);called(mocks.stopNative,row.stopNative);called(mocks.launch,row.launch);
 });
 
 it('removes an interrupted accepted send only after recovery and archives unsynced output',async()=>{
@@ -244,21 +251,6 @@ it('does not invalidate conversation subscribers when idle polls are unchanged',
  } finally {dispose();}
 });
 
-it('Send now recovers an absent native runner without calling stop',async()=>{
- await enqueueLocalMessage(request,'saved');
- mocks.poll.mockRejectedValue(new Error('no local run'));
- await sendQueuedNow('mission');
- expect(mocks.stopNative).not.toHaveBeenCalled();
- expect(mocks.recover).toHaveBeenCalledWith('mission');
- expect(mocks.launch).not.toHaveBeenCalled();
-});
-it('Send now does not treat a transport failure as proof that the runner stopped',async()=>{
- await enqueueLocalMessage(request,'saved');
- mocks.poll.mockRejectedValue(new Error('IPC disconnected'));
- await expect(sendQueuedNow('mission')).rejects.toThrow('IPC disconnected');
- expect(mocks.recover).not.toHaveBeenCalled();
- expect(mocks.stopNative).not.toHaveBeenCalled();
-});
 it('surfaces a persisted unconfirmed claim after restart without launching it again',async()=>{
  const id=await enqueueLocalMessage(request,'saved');
  for(const rows of mocks.store.values())if(Array.isArray(rows))for(const row of rows)if(row.id===id){row.state='dispatching';row.claimedAt=Date.now()-31000;}

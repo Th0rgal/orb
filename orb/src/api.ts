@@ -1,3 +1,8 @@
+import { nativeInvoke } from "./native";
+import { missionNode } from "./machines/nodes";
+import { harnessRank, isHarness } from "./harnesses";
+import { isArchivable, isReopenable } from "./missionStatus";
+import { swallow } from "./log";
 import { sharedRead, invalidateReads } from "./sharedReads";
 import { cacheReset } from "./pageCache";
 import type { ClientRunReceipt } from "./clientRuns";
@@ -28,11 +33,11 @@ export const [connectionVersion, bumpConnectionVersion] = createSignal(0);
 
 let connectionSave = Promise.resolve();
 function persistDesktopConnection(connection: {api_url:string;token:string}|null) {
-  const invoke=(window as any).__TAURI__?.core?.invoke;
-  if(invoke)connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(()=>{});
+  const invoke=nativeInvoke();
+  if(invoke)connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(swallow("api.connectionSave"));
 }
 export async function restoreDesktopConnection() {
-  const invoke=(window as any).__TAURI__?.core?.invoke;
+  const invoke=nativeInvoke();
   if(!invoke)return;
   // Migrate an existing web-origin login before consulting the desktop store.
   if(getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
@@ -41,10 +46,10 @@ export async function restoreDesktopConnection() {
 }
 
 function disconnectNativeSync(){
-  const invoke=(window as any).__TAURI_INTERNALS__?.invoke ?? (window as any).__TAURI__?.core?.invoke;
+  const invoke=nativeInvoke();
   if(!invoke||!getJwt())return;
-  void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(()=>{});
-  void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(()=>{});
+  void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(swallow("api.disconnect.projectContext"));
+  void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
 }
 export function setConnection(url: string, token: string) {
   if(getJwt() && (url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt()))disconnectNativeSync();
@@ -359,7 +364,7 @@ async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean
  }
 }
 
-export async function listBackends(): Promise<BackendInfo[]> {
+async function listBackends(): Promise<BackendInfo[]> {
   const data = await cachedCatalog<BackendInfo[] | { backends?: BackendInfo[] }>("/api/backends");
   return Array.isArray(data) ? data : (data.backends ?? []);
 }
@@ -375,18 +380,12 @@ export async function listBackendModels(): Promise<Record<string, BackendModelOp
   return {...data.backends, opencode: chains.map(chain => ({value:chain.id,label:`Routing — ${chain.name}`}))};
 }
 
-/** Harness order for the composer: the native agents first, then routers. */
-const HARNESS_ORDER = ["claudecode", "codex", "grok", "opencode", "antigravity", "vibe"];
 
 export async function listHarnessChoices(): Promise<HarnessChoice[]> {
   const [backends, models] = await Promise.all([listBackends(), listBackendModels()]);
   return backends
-    .filter((b) => HARNESS_ORDER.includes(b.id) && (models[b.id]?.length ?? 0) > 0)
-    .sort((a, b) => {
-      const ia = HARNESS_ORDER.indexOf(a.id);
-      const ib = HARNESS_ORDER.indexOf(b.id);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-    })
+    .filter((b) => isHarness(b.id) && (models[b.id]?.length ?? 0) > 0)
+    .sort((a, b) => harnessRank(a.id) - harnessRank(b.id))
     .map((b) => ({ backend: b, models: models[b.id] ?? [] }));
 }
 
@@ -555,11 +554,7 @@ export async function submitCliProxyLoginCallback(sessionId: string, url: string
 /** Open a URL in the system browser (tauri shell when native, tab in dev). */
 export async function openExternalUrl(url: string): Promise<void> {
   try {
-    const g = window as unknown as {
-      __TAURI_INTERNALS__?: { invoke?: (c: string, a?: Record<string, unknown>) => Promise<unknown> };
-      __TAURI__?: { core?: { invoke?: (c: string, a?: Record<string, unknown>) => Promise<unknown> } };
-    };
-    const invoke = g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke;
+    const invoke = nativeInvoke();
     if (invoke) {
       await invoke("open_url", { url });
       return;
@@ -641,7 +636,7 @@ export async function listProjects(force = false): Promise<ProjectSummary[]> {
       && (value as {projects: unknown[]}).projects.every(project => !!project && typeof project === "object" && typeof (project as {slug?: unknown}).slug === "string"),
     force);
   // Colors ride on the roster; applying them never fails the list.
-  try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(() => {}); } catch { /* keep the local colors */ }
+  try { void applyProjectRoster(data.projects ?? [], fetchedAt, url).catch(swallow("api.projectRoster")); } catch { /* keep the local colors */ }
   return (data.projects ?? []).filter(
     (p) => p.status !== "archived" && p.status !== "deleted" && !archivedSlugs.has(p.slug),
   );
@@ -956,13 +951,6 @@ export async function listQueuedMessages(missionId: string): Promise<QueuedMessa
 }
 
 /** Attempt to inject a queued message live into a running turn without cancelling it. */
-export async function sendQueuedMessageNow(queueId: string): Promise<boolean> {
-  const res = await api<{ ok: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(queueId)}/send-now`, {
-    method: "POST",
-  });
-  return res.delivered === true;
-}
-
 export class MessageRejectedError extends Error {}
 
 export interface MessageReceipt {
@@ -976,7 +964,7 @@ export interface MessageReceipt {
 // composer attempt must replay create admission, not resume a superseded mission.
 const remoteReplacements = new Map<string, CreateMissionBody>();
 function remoteReplacementBody(mission: Mission, text: string, attachments: MissionAttachment[] | undefined, clientMessageId: string): CreateMissionBody {
-  const node = mission.remote_job?.node_id ?? mission.remote_node_id;
+  const node = missionNode(mission);
   if (!node) throw new Error("Remote placement is missing. Your draft is kept.");
   const history = fitReplacementHistory(mission, text);
   return {
@@ -1146,7 +1134,7 @@ export async function archiveMission(id: string): Promise<void> {
   const version = connectionVersion();
   const mission = await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
-  if (!["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled"].includes(mission.status)
+  if (!isArchivable(mission.status)
     || mission.execution?.state === "running") throw new Error("Wait for the mission to stop before archiving it.");
   await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
     method: "POST",
@@ -1161,7 +1149,7 @@ export async function reopenMission(id: string): Promise<void> {
   const version = connectionVersion();
   const mission = await getMission(id);
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
-  if (!["completed", "failed", "interrupted", "acknowledged", "cancelled"].includes(mission.status)
+  if (!isReopenable(mission.status)
     || mission.execution?.state === "running") throw new Error("This mission is no longer finished. Refresh its status before reopening it.");
   await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -1358,11 +1346,4 @@ export async function getLibrarySkill(name: string): Promise<LibrarySkill> {
   return api<LibrarySkill>(`/api/library/skill/${encodeURIComponent(name)}`);
 }
 
-export async function saveLibrarySkill(name: string, content: string): Promise<void> {
-  await apiText(`/api/library/skill/${encodeURIComponent(name)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-  });
-}
 

@@ -1,5 +1,6 @@
+import { pollWhileVisible } from "./poll";
 import { Menu } from "./Menu";
-import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { api, connectionVersion, type Mission } from "./api";
 import "./cyberAccess.css";
 export type CyberMode = "standard" | "daybreak" | "automatic";
@@ -50,7 +51,7 @@ export function CyberPicker(p:{value:CyberMode;model:string;disabled?:boolean;re
 export function MissionCyber(p:{mission:Mission;onError?:(message:string)=>void}) {
  const [saving,setSaving]=createSignal(false);
  const [selection,{mutate,refetch}]=createResource(()=>[connectionVersion(),p.mission.id,p.mission.model_override,p.mission.status] as const,()=>getCyber(p.mission.id));
- createEffect(()=>{if(p.mission.status==='active'){const timer=setInterval(()=>void refetch(),8000);onCleanup(()=>clearInterval(timer));}});
+ createEffect(()=>{if(p.mission.status==='active')onCleanup(pollWhileVisible(()=>{void refetch();},8000,'cyber.refetch'));});
  const update=async(mode:CyberMode)=>{
   const id=p.mission.id;setSaving(true);
   try {const saved=await saveCyber(id,mode);if(id===p.mission.id)mutate(saved);}

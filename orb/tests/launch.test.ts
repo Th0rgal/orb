@@ -1,5 +1,6 @@
 import { describe,it,expect } from "vitest";
-import { initialPrompt,withInitialPrompt,missionDestination,missionPhase,launchError,missionSettingsIdle,dockModelLabel } from "../src/missionLaunch";
+import { initialPrompt,withInitialPrompt,missionDestination,missionPhase,launchError,dockModelLabel } from "../src/missionLaunch";
+import { isSettingsIdle as missionSettingsIdle } from "../src/missionStatus";
 import { ApiError,type Mission } from "../src/api";
 import { buildTranscript } from "../src/Transcript";
 const mission=(extra:Partial<Mission>={}):Mission=>({id:"m",title:null,status:"interrupted",history:[],created_at:"",updated_at:"",...extra});

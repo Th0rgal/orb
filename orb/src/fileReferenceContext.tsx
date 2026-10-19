@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import {
   createContext,
   useContext,
@@ -54,7 +55,7 @@ export function FileReference(p: { raw: string; children?: JSX.Element }) {
       .then((r) => {
         if (!cancelled) setMatches(r);
       })
-      .catch(() => {});
+      .catch(swallow("fileReference.resolve"));
     onCleanup(() => {
       cancelled = true;
     });

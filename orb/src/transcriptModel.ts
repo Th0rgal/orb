@@ -1,3 +1,4 @@
+import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
 import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
@@ -34,6 +35,10 @@ export class TranscriptReducer {
   private seq = new Map<string, number>();
   private revisions = new Map<string, number>();
   private next = 0;
+  /** Index of the last delivered (not queued) user message, or -1. */
+  private lastUser = -1;
+  /** Antigravity bubble ids, kept in transcript order as they are placed. */
+  private native: string[] = [];
   private lastFinal: number | undefined;
   private identity:string|undefined;
   private key(kind: string) { return this.identity ? `${kind}:${this.identity}:${++this.nextForEvent}` : `${kind}-${++this.next}`; }
@@ -43,15 +48,26 @@ export class TranscriptReducer {
     let index=this.items.length;
     if(bubble.startsWith('antigravity:')) {
       const [,conversation,,step]=bubble.split(':');
-      const lastUser=this.items.reduce((last,item,i)=>item.kind==='user'&&!item.queued?i:last,-1);
-      const boundary=this.items.findIndex((item,i)=>i>lastUser&&item.kind==='tool'&&item.callId.startsWith(conversation+':')&&Number(item.callId.slice(conversation.length+1))>Number(step));
-      if(boundary>=0)index=boundary;
+      for(let i=this.lastUser+1;i<this.items.length;i++){
+        const row=this.items[i];
+        if(row.kind==='tool'&&row.callId.startsWith(conversation+':')&&Number(row.callId.slice(conversation.length+1))>Number(step)){index=i;break;}
+      }
       item={...item,key:`text:${bubble}`};
     }
-    for(const map of [this.users,this.tools,this.bubbles])for(const [key,i] of map)if(i>=index)map.set(key,i+1);
-    if(this.lastFinal!=null&&this.lastFinal>=index)this.lastFinal++;
+    // Appending (the common case) moves no other item.
+    if(index<this.items.length){
+      for(const map of [this.users,this.tools,this.bubbles])for(const [key,i] of map)if(i>=index)map.set(key,i+1);
+      if(this.lastFinal!=null&&this.lastFinal>=index)this.lastFinal++;
+      if(this.lastUser>=index)this.lastUser++;
+    }
     this.items.splice(index,0,item);
     this.bubbles.set(bubble,index);
+    if(bubble.startsWith('antigravity:')){
+      // Insert by position so receipts compare bubbles in transcript order.
+      let at=this.native.length;
+      while(at>0&&(this.bubbles.get(this.native[at-1])??-1)>index)at--;
+      this.native.splice(at,0,bubble);
+    }
     return index;
   }
 
@@ -66,6 +82,7 @@ export class TranscriptReducer {
       if(item.kind==='think'&&!item.done)this.put(i,{...item,done:true});
     }
     this.bubbles.clear();
+    this.native = [];
   }
   apply(ev: StreamEvent) {
     this.identity=ev.eventId??(ev.storedId!==undefined?`stored:${ev.storedId}`:ev.sequence!==undefined?`seq:${ev.sequence}`:undefined);this.nextForEvent=0;
@@ -107,12 +124,15 @@ export class TranscriptReducer {
         for (const map of [this.users, this.tools, this.bubbles]) {
           for (const [key, position] of map) if (position > index) map.set(key, position - 1);
         }
+        if (this.lastFinal != null && this.lastFinal > index) this.lastFinal--;
+        this.lastUser = this.items.length;
         this.users.set(messageId!, this.items.length);
         this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, at: typeof d.at === "string" ? d.at : previous.at });
         return;
       }
       if (!queued) { this.close(); this.lastFinal = undefined; }
       if (messageId) this.users.set(messageId, this.items.length);
+      if (!queued) this.lastUser = this.items.length;
       this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(typeof d.at === "string" ? { at: d.at } : {}) });
       return;
     }
@@ -210,7 +230,7 @@ export class TranscriptReducer {
         }
         const index=this.bubbles.get(finalBubble);
         const previous=index == null ? undefined : this.items[index];
-        const native = [...this.bubbles].filter(([id])=>id.startsWith('antigravity:')).sort((a,b)=>a[1]-b[1]).map(([,i])=>this.items[i]).filter((i):i is Extract<StreamItem,{kind:'text'}>=>i?.kind==='text');
+        const native = this.native.map(id=>this.items[this.bubbles.get(id) ?? -1]).filter((i):i is Extract<StreamItem,{kind:'text'}>=>i?.kind==='text');
         const trimmed = text.trim();
         const isNativeReceipt = native.length > 0 && (trimmed === native.map(i=>i.text).join('').trim() || trimmed === native.at(-1)!.text.trim());
         this.close();
@@ -245,8 +265,8 @@ export class TranscriptReducer {
           this.close();
         }
         const summary = str(d.summary ?? d.content).trim();
-        if (["failed", "not_feasible"].includes(status) && summary) {
-          const lastUser = this.items.reduce((last, item, idx) => item.kind === "user" && !item.queued ? idx : last, -1);
+        if (isFailedStatus(status) && summary) {
+          const lastUser = this.lastUser;
           // The harness already reported the concrete failure; the status summary
           // ("Remote node 'x' finished") would only add a second, vaguer card.
           const alreadyShown = this.items.slice(lastUser + 1).some(item => item.kind === "error" && (item.terminal || item.text.trim() === summary));

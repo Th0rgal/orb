@@ -1,6 +1,6 @@
 import { Popover } from "./Popover";
 import { ErrorToast } from "./toast";
-import {createSignal,createEffect,onCleanup,For,Show} from 'solid-js';
+import {createSignal,onCleanup,For,Show} from 'solid-js';
 import {contextBlob,contextManifest,contextHistory,contextConflicts,restoreContext,type ContextChange,type ContextManifest,type ContextOperation} from './projectContext';
 export function ContextHistory(p:{slug:string;path:string;onRestore:()=>void}){
  const[open,setOpen]=createSignal(false),[busy,setBusy]=createSignal(false),[error,setError]=createSignal<string|null>(null);

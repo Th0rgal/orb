@@ -1,3 +1,5 @@
+import { nativeInvoke } from "./native";
+import { missionNode } from "./machines/nodes";
 import { imagePreview, imagePreviewScope } from "./imagePreviews";
 import {
   api,
@@ -70,7 +72,7 @@ export function createFileClient(scope: FileScope) {
   const transfer = mission?.machine_transfer?.destination;
   const destination = transfer ? (transfer.kind === "client" ? "local" : transfer.kind === "core" ? "core" : transfer.id)
     : mission?.tags?.includes("placement:client") || (mission && localBinding(mission.id)) ? "local"
-    : mission?.remote_job?.node_id ?? mission?.remote_node_id ?? "core";
+    : missionNode(mission) ?? "core";
   const previewScope = imagePreviewScope(endpoint, version, destination);
   const binding = scope.mission && (!scope.mission.machine_transfer || scope.mission.machine_transfer.destination.kind === "client") ? localBinding(scope.mission.id) : undefined;
   const server = (source: string, op: FileOp) =>
@@ -239,20 +241,12 @@ export function createFileClient(scope: FileScope) {
       );
       const reply = await (root.local
         ? (() => {
-            const invoke = (
-              window as unknown as {
-                __TAURI__?: {
-                  core?: {
-                    invoke: (name: string, args: unknown) => Promise<FileReply>;
-                  };
-                };
-              }
-            ).__TAURI__?.core?.invoke;
+            const invoke = nativeInvoke();
             if (!invoke || !binding)
               throw new Error(
                 "Open this mission on the computer that started it",
               );
-            return invoke("browse_local_files", {
+            return invoke<FileReply>("browse_local_files", {
               root: binding.cwd,
               request: {
                 path: "",
@@ -298,18 +292,10 @@ export function createFileClient(scope: FileScope) {
       };
     }
     if (root.local) {
-      const invoke = (
-        window as unknown as {
-          __TAURI__?: {
-            core?: {
-              invoke: (name: string, args: unknown) => Promise<FileReply>;
-            };
-          };
-        }
-      ).__TAURI__?.core?.invoke;
+      const invoke = nativeInvoke();
       if (!invoke || !binding)
         throw new Error("Open this mission on the computer that started it");
-      return invoke("browse_local_files", {
+      return invoke<FileReply>("browse_local_files", {
         root: binding.cwd,
         request: { path: "", query: "", paths: [], offset: 0, ...op },
       });

@@ -1,3 +1,4 @@
+import { swallow } from "./log";
 import { hasOverlay } from "./overlayLayer";
 import { nativeInvoke } from "./clientRuns";
 import * as TreeIcon from "./sidebarIcons";
@@ -302,7 +303,7 @@ export function FilePanelProvider(p: {
         .then((roots) => {
           for (const root of roots) if (root.available) void list(root.id, "");
         })
-        .catch(() => {});
+        .catch(swallow("filePanel.ensureRoots"));
   });
   createEffect(() => {
     for (const key of expanded()) {
@@ -1045,7 +1046,7 @@ export function FilePanelProvider(p: {
                     <button
                       onClick={() => {
                         rootPromise = undefined;
-                        void ensureRoots().catch(() => {});
+                        void ensureRoots().catch(swallow("filePanel.ensureRoots"));
                         void readSelected();
                       }}
                     >

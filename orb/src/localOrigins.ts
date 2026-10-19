@@ -1,3 +1,4 @@
+import { isLive } from "./missionStatus";
 import {getApiUrl,getJwt,connectionVersion,type Mission} from './api';
 import {nativeInvoke} from './clientRuns';
 // Concurrent list, queue and transcript reads share one native journal scan.
@@ -57,7 +58,7 @@ export async function unlistedCoreState(local:Mission[],listed:Mission[],read:(i
  const seen=new Set(listed.map(mission=>mission.id));
  const missing=local.filter(mission=>!seen.has(mission.id)&&!localPending(mission)).slice(0,20);
  // The list refreshes every few seconds; a conversation outside it is read far less often.
- const now=Date.now(),due=missing.filter(mission=>{const last=unlistedReads.get(mission.id);return !last||now-last.at>=(last.mission&&LIVE_STATUSES.has(last.mission.status)?UNLISTED_LIVE_MS:UNLISTED_SETTLED_MS);});
+ const now=Date.now(),due=missing.filter(mission=>{const last=unlistedReads.get(mission.id);return !last||now-last.at>=(last.mission&&isLive(last.mission.status)?UNLISTED_LIVE_MS:UNLISTED_SETTLED_MS);});
  const deletedIds:string[]=[];
  await Promise.allSettled(due.map(async mission=>{
   try{const value=await read(mission.id);unlistedReads.set(mission.id,{at:Date.now(),mission:value?.id?value:undefined});}
@@ -75,6 +76,5 @@ export async function unlistedCoreState(local:Mission[],listed:Mission[],read:(i
  return missing.flatMap(mission=>{const value=unlistedReads.get(mission.id)?.mission;return value?[value]:[];});
 }
 const UNLISTED_LIVE_MS=30_000,UNLISTED_SETTLED_MS=10*60_000;
-const LIVE_STATUSES=new Set(["active","running","pending","queued","starting","resuming"]);
 const unlistedReads=new Map<string,{at:number;mission?:Mission}>();
 export function forgetUnlistedReads(){unlistedReads.clear();}

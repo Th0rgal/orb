@@ -88,3 +88,20 @@ it("uses Core revisions and keeps a monotonic device identity across module relo
   expect(restored.clientId).toBe(first.clientId);
   expect(restored.mutationSeq).toBeGreaterThan(second.mutationSeq);
 });
+
+// Inbox settings migrate into the shared inbox state.
+it("seeds empty Core preferences from existing settings and imports existing remote choices without echoing", async () => {
+  const write = vi.fn();
+  vi.doMock("../src/inboxState", () => ({ writeInboxState: write }));
+  const { inboxConfig, saveInboxConfig, applySharedInboxPreferences } = await import("../src/inboxSettings");
+  const local = { aiSummary: false, includeAutonomous: true, model: "builtin/fast" };
+  saveInboxConfig(local, false);
+  applySharedInboxPreferences(undefined);
+  expect(inboxConfig()).toEqual(local);
+  expect(write).toHaveBeenCalledWith("preferences", local);
+  write.mockClear();
+  const remote = { aiSummary: true, includeAutonomous: false, model: "builtin/reasoning" };
+  applySharedInboxPreferences(remote);
+  expect(inboxConfig()).toEqual(remote);
+  expect(write).not.toHaveBeenCalled();
+});

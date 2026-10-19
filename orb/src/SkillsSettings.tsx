@@ -1,3 +1,5 @@
+import { HARNESS_IDS } from "./harnesses";
+import { swallow } from "./log";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { Select } from "./Select";
@@ -27,7 +29,7 @@ import {
   type SyncSkillPayload,
 } from "./localAgents";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
-import { AUDIENCES, newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
+import { newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
 import { buildSkillRows, filterSkillRows, type ProblemFilter, type ProjectContextSkill, type SkillRow } from "./skillRows";
 import { deleteLibrarySkill, fetchLibrarySkill, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile } from "./skillsApi";
 import { SkillBadges, SkillDetail } from "./SkillDetail";
@@ -119,7 +121,6 @@ const HARNESS_ORDER = [
   "chatgpt_ui",
 ] as const;
 
-const LOCAL_SYNC_HARNESS_IDS = ["claudecode", "codex", "antigravity", "opencode", "grok", "vibe"] as const;
 
 let cachedSkillNames: string[] = [
   "controllers-policy",
@@ -173,8 +174,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [syncNotice, setSyncNotice] = createSignal<string | null>(null);
   const [syncError, setSyncError] = createSignal<string | null>(null);
   const [search, setSearch] = createSignal("");
-  const [audienceFilter, setAudienceFilter] = createSignal("all");
-  const [scopeFilter, setScopeFilter] = createSignal("all");
+  const [audienceFilter] = createSignal("all");
+  const [scopeFilter] = createSignal("all");
   const [problemFilter, setProblemFilter] = createSignal<ProblemFilter>("all");
   const [openSkill, setOpenSkill] = createSignal<string | null>(null);
   const [confirmPrune, setConfirmPrune] = createSignal<string[] | null>(null);
@@ -184,7 +185,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [createBusy, setCreateBusy] = createSignal(false);
   const [createError, setCreateError] = createSignal<string | null>(null);
 
-  const harnessTotal = () => localReport()?.harnesses.length || LOCAL_SYNC_HARNESS_IDS.length;
+  const harnessTotal = () => localReport()?.harnesses.length || HARNESS_IDS.length;
 
   const payloadFor = (skill: LibrarySkill, summary?: LibrarySkillSummary, extra: SyncSkillPayload["files"] = []): SyncSkillPayload => ({
     name: skill.name,
@@ -228,13 +229,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     setLoading(true);
     setSyncError(null);
     try {
-      const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(() => {})];
+      const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(swallow("skills.refreshSoftware"))];
       if (isConnected()) {
         await loadLibrary().catch((e) => {
           setLibraryLoaded(false);
           setLibraryError(errorText(e));
         });
-        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(() => {}));
+        side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(swallow("skills.remoteNodes")));
         side.push(loadProjectSkills());
       } else {
         setLibrarySkills([]);
@@ -454,7 +455,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       summaries: librarySkills(),
       library: libraryFull(),
       projectSkills: projectSkills(),
-      localHarnessIds: LOCAL_SYNC_HARNESS_IDS,
+      localHarnessIds: HARNESS_IDS,
     }),
   );
   const membership = (name: string) => Object.entries(projectSelections()).filter(([, names]) => names.includes(name)).map(([slug]) => slug).sort();

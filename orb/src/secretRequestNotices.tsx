@@ -1,4 +1,5 @@
-import { For, Show, createSignal, onCleanup } from "solid-js";
+import { useNow } from "./time";
+import { For, Show, createSignal } from "solid-js";
 import { approveSecretRequest, listBitwardenProjects, rejectSecretRequest, secretChangeVerb, type SecretAccessRequest } from "./bitwardenApi";
 import { ApprovalCancelled, graceUntil } from "./deviceApproval";
 import { CloseIcon, TrashIcon } from "./icons";
@@ -91,9 +92,7 @@ function label(r: SecretAccessRequest) {
 }
 
 function SecretRequestsCard() {
-  const [now, setNow] = createSignal(Date.now());
-  const tick = setInterval(() => setNow(Date.now()), 250);
-  onCleanup(() => clearInterval(tick));
+  const now = useNow(250);
   const list = visible;
   const one = () => list().length === 1 ? list()[0] : undefined;
   const missions = () => [...new Set(list().map((r) => r.mission_title || `Mission ${r.mission_id.slice(0, 8)}`))];

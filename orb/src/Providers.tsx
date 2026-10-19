@@ -1,3 +1,5 @@
+import { pollWhileVisible } from "./poll";
+import { swallow } from "./log";
 import { AntigravityProvider } from "./AntigravityProvider";
 import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
@@ -8,10 +10,8 @@ import { PopupMenu } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { createStore, produce } from "solid-js/store";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
-import { Toggle } from "./Settings";
 import {
   api,
   connectionVersion,
@@ -35,8 +35,6 @@ import {
 import { nativeInvoke } from "./clientRuns";
 
 type AuthKind = "oauth" | "api";
-type Owner = "cliproxy" | "sandboxed";
-type Status = "connected" | "needs_reauth" | "not_configured";
 
 type Method = { label: string; kind: AuthKind; desc: string };
 
@@ -109,112 +107,8 @@ const KINDS: Kind[] = [
   { id: "custom", name: "Custom", methods: [{ label: "OpenAI-compatible", kind: "api", desc: "Base URL + key." }] },
 ];
 
-const BACKENDS: Record<string, string[]> = {
-  anthropic: ["claudecode", "opencode"],
-  openai: ["codex", "opencode"],
-  xai: ["grok", "opencode"],
-  google: ["opencode"],
-  kimi: ["opencode"],
-  "github-copilot": ["opencode"],
-};
-
-const BACKEND_LABEL: Record<string, string> = {
-  claudecode: "Claude Code",
-  opencode: "OpenCode",
-  codex: "Codex",
-  grok: "Grok",
-};
-
-type Account = {
-  id: string;
-  type: string;
-  name: string;
-  method: string;
-  auth: AuthKind;
-  owner: Owner;
-  status: Status;
-  email?: string;
-  backends: string[];
-  enabled: boolean;
-};
-
-function ownerFor(type: string, auth: AuthKind): Owner {
-  if (auth === "api") return "sandboxed";
-  if (type === "github-copilot") return "sandboxed";
-  if (type === "anthropic" || type === "openai" || type === "xai" || type === "kimi") return "cliproxy";
-  return "sandboxed";
-}
-
-function ownerLabel(o: Owner) {
-  if (o === "cliproxy") return "CLIProxyAPI";
-  return "sandboxed.sh";
-}
-
-const SEED: Account[] = [
-  {
-    id: "a-claude",
-    type: "anthropic",
-    name: "Anthropic",
-    method: "Claude Pro/Max",
-    auth: "oauth",
-    owner: "cliproxy",
-    status: "connected",
-    email: "claude.max",
-    backends: ["claudecode", "opencode"],
-    enabled: true,
-  },
-  {
-    id: "a-gpt",
-    type: "openai",
-    name: "OpenAI",
-    method: "ChatGPT Plus/Pro",
-    auth: "oauth",
-    owner: "cliproxy",
-    status: "connected",
-    email: "chatgpt.plus",
-    backends: ["codex", "opencode"],
-    enabled: true,
-  },
-  {
-    id: "a-xai",
-    type: "xai",
-    name: "xAI",
-    method: "SuperGrok OAuth",
-    auth: "oauth",
-    owner: "cliproxy",
-    status: "connected",
-    email: "grok.build",
-    backends: ["grok", "opencode"],
-    enabled: true,
-  },
-  {
-    id: "a-gem",
-    type: "google",
-    name: "Google",
-    method: "Google OAuth",
-    auth: "oauth",
-    owner: "sandboxed",
-    status: "connected",
-    backends: ["opencode"],
-    enabled: true,
-  },
-  {
-    id: "a-or",
-    type: "open-router",
-    name: "OpenRouter",
-    method: "API key",
-    auth: "api",
-    owner: "sandboxed",
-    status: "connected",
-    backends: ["opencode"],
-    enabled: true,
-  },
-];
-
 export function Providers() {
-  const [list, setList] = createStore<Account[]>(SEED.map((a) => ({ ...a })));
   const [remote, setRemote] = createSignal<AIProvider[] | null>(null);
-  const [add, setAdd] = createSignal(false);
 
   const [loading, setLoading] = createSignal(false);
   const [loadError, setLoadError] = createSignal<string | null>(null);
@@ -257,62 +151,6 @@ export function Providers() {
   onCleanup(() => { ++generation; request?.abort(); });
 
   const live = () => (isConnected() ? remote() : null);
-  const [step, setStep] = createSignal<"type" | "method" | "details">("type");
-  const [kindId, setKindId] = createSignal<string | null>(null);
-  const [methodI, setMethodI] = createSignal(0);
-  const [key, setKey] = createSignal("");
-  const [backends, setBackends] = createSignal<string[]>([]);
-  const [toast, setToast] = createSignal<string | null>(null);
-
-  const kind = createMemo(() => KINDS.find((k) => k.id === kindId()) ?? null);
-  const method = createMemo(() => kind()?.methods[methodI()] ?? null);
-  const oauth = () => list.filter((a) => a.auth === "oauth");
-  const keys = () => list.filter((a) => a.auth === "api");
-
-  const resetAdd = () => {
-    setAdd(false);
-    setStep("type");
-    setKindId(null);
-    setMethodI(0);
-    setKey("");
-    setBackends([]);
-  };
-
-  const pickType = (id: string) => {
-    setKindId(id);
-    setMethodI(0);
-    setBackends(BACKENDS[id] ?? ["opencode"]);
-    const k = KINDS.find((x) => x.id === id);
-    if (k && k.methods.length === 1) setStep("details");
-    else setStep("method");
-  };
-
-  const finish = () => {
-    const k = kind();
-    const m = method();
-    if (!k || !m) return;
-    if (m.kind === "api" && !key().trim()) return;
-    setList(list.length, {
-      id: "p" + Date.now(),
-      type: k.id,
-      name: k.name,
-      method: m.label,
-      auth: m.kind,
-      owner: ownerFor(k.id, m.kind),
-      status: "connected",
-      backends: backends(),
-      enabled: true,
-    });
-    setToast(m.kind === "oauth" ? "Would open the sandboxed.sh OAuth flow. Not connected yet." : "Would store this key in sandboxed.sh. Not saved yet.");
-    setTimeout(() => setToast(null), 2800);
-    resetAdd();
-  };
-
-  const signIn = (a: Account) => {
-    setToast(`Would start ${a.method} via ${ownerLabel(a.owner)}. Not connected yet.`);
-    setTimeout(() => setToast(null), 2800);
-  };
-
   return (
     <Show
       when={isConnected()}
@@ -406,9 +244,9 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
     } finally { fetching = false; }
   };
   onMount(() => {
-    void refreshUsage().catch(() => {});
-    const timer = setInterval(() => { void refreshUsage().catch(() => {}); }, 30_000);
-    onCleanup(() => { disposed = true; clearInterval(timer); });
+    void refreshUsage().catch(swallow("providers.usage"));
+    const stop = pollWhileVisible(refreshUsage, 30_000, "providers.usage");
+    onCleanup(() => { disposed = true; stop(); });
   });
 
   const confirmAddSubscription = () => {
@@ -431,7 +269,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
     <div class="page">
       <div class="page-head">
         <h2>Providers</h2>
-        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(() => {}); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
+        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(swallow("providers.usage")); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
           Refresh
         </button>
       </div>
@@ -568,7 +406,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
               p.onRefresh();
               if (id) void getProviderUsage(id, true).then(value => {
                 if (!disposed) setUsage(previous => ({ ...previous, [id]: value }));
-              }).catch(() => {});
+              }).catch(swallow("providers.usage", { provider: id }));
             }}
           />
         )}
@@ -733,7 +571,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
   };
-  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (polledLogin && s && !completed) void cancelSubscriptionLogin(s.id).catch(() => {}); });
+  onCleanup(() => { disposed = true; stopPolling(); const s = session(); if (polledLogin && s && !completed) void cancelSubscriptionLogin(s.id).catch(swallow("providers.cancelLogin")); });
 
   const startPolling = (id: string) => {
     stopPolling();
@@ -768,7 +606,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
     start
       .then((s) => {
-        if (disposed) { if (polledLogin) void cancelSubscriptionLogin(s.id).catch(() => {}); return; }
+        if (disposed) { if (polledLogin) void cancelSubscriptionLogin(s.id).catch(swallow("providers.cancelLogin")); return; }
         setSession(s);
         setPhase("awaiting");
         if (polledLogin) startPolling(s.id);
@@ -1124,37 +962,3 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onUsage?: (usage: Pr
   );
 }
 
-function AccountRow(p: { a: Account; onSignIn: () => void; onToggle: () => void; onRemove: () => void }) {
-  const a = p.a;
-  const st = a.status === "connected" ? "Connected" : a.status === "needs_reauth" ? "Reconnect" : "Not configured";
-  return (
-    <div class="s-row p-acc">
-      <ProviderLogo type={a.type} name={a.name} />
-      <div class="s-row-text">
-        <div class="s-row-title">
-          {a.name}
-          <span class="p-chip">{a.method}</span>
-        </div>
-        <div class="s-row-desc">
-          <span class={`p-st ${a.status}`}>{st}</span>
-          <span class="p-dot">·</span>
-          {ownerLabel(a.owner)}
-          <Show when={a.backends.length}>
-            <span class="p-dot">·</span>
-            {a.backends.map((b) => BACKEND_LABEL[b] ?? b).join(", ")}
-          </Show>
-        </div>
-      </div>
-      <Show when={a.status !== "connected"}>
-        <button class="s-btn" onClick={p.onSignIn}>{a.auth === "oauth" ? "Sign in" : "Add key"}</button>
-      </Show>
-      <Show when={a.status === "connected" && a.auth === "oauth"}>
-        <button class="s-btn" onClick={p.onSignIn}>Reconnect</button>
-      </Show>
-      <Toggle on={a.enabled} onClick={p.onToggle} />
-      <button class="icon-btn" title="Remove" onClick={p.onRemove}>
-        <Ic.CloseIcon size={14} />
-      </button>
-    </div>
-  );
-}

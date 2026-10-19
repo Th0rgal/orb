@@ -1,3 +1,4 @@
+import { missionNode } from "./machines/nodes";
 import { Show, createMemo, createRoot, createSignal } from "solid-js";
 import type { Mission, RemoteNodeView } from "./api";
 import { Bot } from "./sidebarIcons";
@@ -20,7 +21,7 @@ export const recordLocalMemory = (free: number | undefined) => { setLocalMemory(
 export function missionMachine(mission: Mission): string | undefined {
   if (mission.backend?.startsWith("cloud_")) return undefined;
   if (mission.tags?.includes("placement:client")) return "client";
-  return mission.remote_job?.node_id ?? mission.remote_node_id ?? "core";
+  return missionNode(mission) ?? "core";
 }
 
 const loads = createRoot(() => createMemo(() => {

@@ -26,10 +26,9 @@ import {
 } from "./voice";
 
 const [available, setAvailable] = createSignal(false);
-const [capability, setCapability] = createSignal<VoiceCapability | null>(null);
+const [, setCapability] = createSignal<VoiceCapability | null>(null);
 /** True once the native side reported a usable local voice runtime. */
 export const voiceAvailable = available;
-export const voiceCapability = capability;
 
 let probed = false;
 /** Ask the native side once; safe to call from every composer. */
