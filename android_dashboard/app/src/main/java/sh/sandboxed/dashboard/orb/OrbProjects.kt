@@ -2487,26 +2487,9 @@ fun serviceName(value: String): String = when (value.lowercase()) {
     else -> value
 }
 
-fun statusLabel(state: String): String = when (state.lowercase()) {
-    "active", "running", "starting" -> "Working"
-    "pending", "queued" -> "Queued"
-    "completed", "succeeded" -> "Completed"
-    "awaiting_user", "waiting_user" -> "Waiting for reply"
-    "blocked" -> "Blocked"
-    "failed" -> "Failed"
-    "interrupted", "cancelled" -> "Stopped"
-    "paused" -> "Paused"
-    "acknowledged" -> "Archived"
-    else -> state.replace("_", " ")
-}
+fun statusLabel(state: String): String = MissionState.label(state)
 
-private fun isNeedsAttention(mission: OrbRow): Boolean {
-    val status = (mission.str("status", "state") ?: "").lowercase()
-    return status in setOf(
-        "failed", "error", "errored", "blocked", "not_feasible",
-        "awaiting_approval", "needs_input", "waiting_for_user", "timed_out"
-    )
-}
+private fun isNeedsAttention(mission: OrbRow): Boolean = MissionState.of(mission)?.needsAttention == true
 
 fun missionsForProject(
     project: OrbRow,

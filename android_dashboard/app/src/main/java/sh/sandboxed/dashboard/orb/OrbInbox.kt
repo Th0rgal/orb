@@ -307,7 +307,7 @@ object OrbInboxDigestStore {
     fun request(core: OrbCore, mission: OrbRow, events: List<OrbRow>, priority: Int = 10) {
         if (!OrbInboxSettings.aiSummary || !core.isConfigured) return
         val status = (mission.str("status", "state") ?: "").lowercase()
-        if (status in setOf("active", "running", "starting", "pending", "queued", "resuming", "waiting_background")) {
+        if (MissionState.of(status)?.live == true) {
             return
         }
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
@@ -427,10 +427,6 @@ object OrbMissionUnreadStore {
     var revision by mutableIntStateOf(0)
         private set
 
-    private val unreadResponseStates = setOf(
-        "awaiting_user", "waiting_user", "completed", "succeeded",
-        "failed", "blocked", "not_feasible", "paused", "interrupted"
-    )
 
     fun init(context: Context) {
         if (prefs == null) {
@@ -449,7 +445,7 @@ object OrbMissionUnreadStore {
     fun isUnread(mission: OrbRow, hasInteraction: Boolean = false): Boolean {
         val _rev = revision
         val state = (mission.str("status", "state") ?: "").lowercase()
-        if (!hasInteraction && state !in unreadResponseStates) return false
+        if (!hasInteraction && MissionState.of(state)?.unreadResponse != true) return false
         OrbSharedInboxState.unread(mission)?.let { return it }
         if (manuallyUnreadIds.contains(mission.id)) return true
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
@@ -627,9 +623,6 @@ object OrbInboxModel {
     var revision by mutableIntStateOf(0)
         private set
 
-    private val workingStatuses = setOf(
-        "active", "running", "starting", "pending", "queued", "resuming", "waiting_background"
-    )
     private val hiddenStatuses = setOf(
         "acknowledged", "archived", "deleted", "cancelled"
     )
@@ -803,7 +796,7 @@ object OrbInboxModel {
             if (state in hiddenStatuses || OrbMissionTree.isArchived(mission)) continue
             if (isDismissed(mission)) continue
             if (isSubagent(mission)) continue
-            if (state in workingStatuses) continue
+            if (MissionState.of(state)?.live == true) continue
 
             val rawSlug = (mission.str("project", "project_slug") ?: "").trim().lowercase()
             val tags = OrbJSON.strList(mission.raw, "tags")
@@ -829,9 +822,9 @@ object OrbInboxModel {
             for (child in children) {
                 val cst = (child.str("status", "state") ?: "").lowercase()
                 when {
-                    cst in setOf("completed", "succeeded") -> completedKids += 1
-                    cst in workingStatuses -> runningKids += 1
-                    cst in setOf("failed", "not_feasible", "blocked") -> {
+                    MissionState.category(cst) == MissionCategory.Done -> completedKids += 1
+                    MissionState.of(cst)?.live == true -> runningKids += 1
+                    MissionState.category(cst).let { it == MissionCategory.Failed || it == MissionCategory.Blocked } -> {
                         failedKids += 1
                         val cTitle = cleanChildTrackLabel(child.str("title", "name") ?: "")
                         failedList.add(
@@ -864,9 +857,9 @@ object OrbInboxModel {
 
             val unread = OrbMissionUnreadStore.isUnread(mission, hasInteraction = classified.pendingInteraction != null) || hasUnreadFailure
             val attention = classified.quickOptions.isNotEmpty() ||
-                state in setOf("blocked", "failed", "not_feasible") ||
+                MissionState.category(state).let { it == MissionCategory.Failed || it == MissionCategory.Blocked } ||
                 hasUnreadFailure
-            val canRetry = state in setOf("failed", "not_feasible", "interrupted", "blocked")
+            val canRetry = MissionState.of(state)?.canRetry == true
 
             items.add(
                 OrbInboxItem(
@@ -929,7 +922,7 @@ object OrbInboxModel {
             if (!seen.add(m.id)) return@filter false
             if (!isMobile(m)) return@filter false
             val st = (m.str("status", "state") ?: "").lowercase()
-            if (st !in workingStatuses || isSubagent(m) || OrbMissionTree.isArchived(m)) return@filter false
+            if (MissionState.of(st)?.live != true || isSubagent(m) || OrbMissionTree.isArchived(m)) return@filter false
             val rawSlug = (m.str("project", "project_slug") ?: "").trim().lowercase()
             val tags = OrbJSON.strList(m.raw, "tags")
             val isClient = tags.contains("placement:client")
@@ -972,7 +965,7 @@ object OrbInboxModel {
         status: String,
         answeredCallIds: Set<String> = emptySet()
     ): OrbInboxPendingInteraction? {
-        if (status in hiddenStatuses || status in setOf("completed", "succeeded", "failed", "not_feasible")) {
+        if (status in hiddenStatuses || MissionState.of(status)?.terminal == true) {
             return null
         }
         val resolvedCalls = events.mapNotNull { ev ->
@@ -1090,7 +1083,7 @@ object OrbInboxModel {
         }
 
         val q = OrbQuestionExtractor.extract(cachedEvents, cachedMessages, status)
-        if (q != null && status !in setOf("completed", "succeeded", "failed", "not_feasible")) {
+        if (q != null && MissionState.of(status)?.terminal != true) {
             val badge = when (q.kind) {
                 OrbQuestion.Kind.Permission -> "Approval"
                 OrbQuestion.Kind.Plan -> "Plan review"
@@ -1313,7 +1306,7 @@ object OrbInboxModel {
 
         if (turns.isEmpty()) {
             val st = (mission.str("status", "state") ?: "").lowercase()
-            val role = if (st in setOf("failed", "not_feasible")) "error" else "assistant"
+            val role = if (MissionState.category(st) == MissionCategory.Failed) "error" else "assistant"
             turns.add(OrbInboxPeekTurn("fallback", role, summaryFallback, extractWorkReceipt(events)))
         }
 
@@ -1490,10 +1483,7 @@ fun OrbInboxView(
     LaunchedEffect(missions, filterMode, OrbInboxSettings.aiSummary, OrbInboxSettings.model, OrbInboxSettings.includeAutonomous) {
         val candidates = missions.filter { m ->
             val st = (m.str("status", "state") ?: "").lowercase()
-            st in setOf(
-                "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
-                "completed", "succeeded", "paused", "interrupted"
-            ) && !OrbInboxModel.isSubagent(m)
+            MissionState.of(st)?.unreadResponse == true && !OrbInboxModel.isSubagent(m)
         }.sortedByDescending { it.str("updated_at", "completed_at", "started_at", "created_at") ?: "" }
             .take(18)
 

@@ -210,9 +210,14 @@ object OrbJSON {
         }
     }
 
-    fun relative(raw: String?): String {
+    fun relative(raw: String?, nowMs: Long = System.currentTimeMillis()): String {
         val epochMs = dateEpochMs(raw) ?: return ""
-        val seconds = maxOf(0L, (System.currentTimeMillis() - epochMs) / 1000L).toInt()
+        return relativeSeconds(maxOf(0L, (nowMs - epochMs) / 1000L))
+    }
+
+    /** Elapsed seconds -> "now" / "Nm" (min 1) / "Nh" / "Nd" / "Nw"; see shared/orb-spec/fixtures/relative-time.json. */
+    fun relativeSeconds(elapsed: Long): String {
+        val seconds = elapsed.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
         if (seconds < 45) return "now"
         val minutes = maxOf(1, seconds / 60)
         if (seconds < 3600) return "${minutes}m"
@@ -308,8 +313,7 @@ object OrbMissionTree {
     }
 
     fun isLive(mission: OrbRow): Boolean {
-        val status = (mission.str("status", "state") ?: "").lowercase()
-        return status in setOf("active", "running", "working", "queued", "pending", "starting", "in_progress", "processing", "streaming")
+        return MissionState.of(mission)?.live == true
     }
 
     fun isGoal(mission: OrbRow): Boolean {
