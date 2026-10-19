@@ -2242,11 +2242,11 @@ select.orb-select-native:disabled { cursor: default; }
 .routing-option-row p { margin: 3px 0 0; color: var(--fg-3); font-size: 11px; }
 .routing-editor > fieldset > .routing-muted:first-child { margin-top: 0; }
 
-.execution-disclosure > summary { cursor: pointer; list-style: none; }
-.execution-disclosure > summary::-webkit-details-marker { display: none; }
-.execution-disclosure > summary .s-row-title, .execution-disclosure > summary .s-row-desc { display: block; }
-.execution-disclosure > summary > svg { flex: none; margin-left: auto; }
-.execution-disclosure[open] > summary > svg { transform: rotate(180deg); }
+.execution-disclosure > summary, .debug-disclosure > summary { cursor: pointer; list-style: none; }
+.execution-disclosure > summary::-webkit-details-marker, .debug-disclosure > summary::-webkit-details-marker { display: none; }
+.execution-disclosure > summary .s-row-title, .execution-disclosure > summary .s-row-desc, .debug-disclosure > summary .s-row-title, .debug-disclosure > summary .s-row-desc { display: block; }
+.execution-disclosure > summary > svg, .debug-disclosure > summary > svg { flex: none; margin-left: auto; }
+.execution-disclosure[open] > summary > svg, .debug-disclosure[open] > summary > svg { transform: rotate(180deg); }
 .execution-inline { border-top: 1px solid var(--stroke-soft); }
 .execution-inline .ps-cap-input { max-width: 80px; }
 .execution-inline .ps-saved { padding: 0 12px 12px; }
@@ -3800,3 +3800,10 @@ select.orb-select-native:disabled { cursor: default; }
 /* Working row: the transcript's own live indicator, shaped like "Thinking". */
 .st-working .st-think-head { cursor: default; gap: 8px; }
 .st-working-time { color: var(--fg-4); font-variant-numeric: tabular-nums; }
+.debug-logs-card { margin-bottom: 8px; }
+.debug-info { padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.debug-info-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 0; font-size: 12.5px; }
+.debug-info-facts dt { color: var(--fg-3); }
+.debug-info-facts dd { margin: 0; color: var(--fg); overflow-wrap: anywhere; user-select: text; }
+.debug-info-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.debug-info-log { margin: 0; max-height: 240px; overflow: auto; padding: 8px; border-radius: 6px; background: var(--bg-inset); font: 11px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

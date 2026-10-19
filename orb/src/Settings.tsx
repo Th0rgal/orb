@@ -8,6 +8,8 @@ import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import * as Ic from "./icons";
 import { clearConnection, getApiUrl, getJwt, isConnected, login, setApiUrl } from "./api";
 import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride, tauriInvoke } from "./localAgents";
+import { nativeInvoke } from "./native";
+import { DebugInfoPanel } from "./DebugInfo";
 import { getThemePref, setThemePref, type ThemePref } from "./theme";
 
 const THEME_LABELS: Record<ThemePref, string> = { auto: "Auto", light: "Light", dark: "Dark" };
@@ -225,6 +227,45 @@ function BackendTab() {
   );
 }
 
+/** Opens ~/.orb/logs in Finder via the native `reveal_logs` command. Desktop only. */
+export function ShowLogsButton() {
+  const [error, setError] = createSignal<string | null>(null);
+  const reveal = async () => {
+    const invoke = nativeInvoke();
+    if (!invoke) return;
+    setError(null);
+    try { await invoke("reveal_logs"); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+  };
+  return (
+    <Show when={nativeInvoke()}>
+      <Row title="Logs" desc={error() ?? "App and performance logs in ~/.orb/logs."}>
+        <button class="s-btn" onClick={() => void reveal()}>Show logs</button>
+      </Row>
+    </Show>
+  );
+}
+
+function DiagnosticsCard() {
+  const [debugMounted, setDebugMounted] = createSignal(false);
+  return (
+    <section class="s-sec">
+      <h3>Diagnostics</h3>
+      <Show when={nativeInvoke()}>
+        <div class="s-card debug-logs-card">
+          <ShowLogsButton />
+        </div>
+      </Show>
+      <details class="s-card debug-disclosure" onToggle={e => { if (e.currentTarget.open) setDebugMounted(true); }}>
+        <summary class="s-row">
+          <span class="s-row-text"><span class="s-row-title">Debug info</span><span class="s-row-desc">Versions, backend and recent log entries for bug reports.</span></span>
+          <Ic.ChevronDown size={14} />
+        </summary>
+        <Show when={debugMounted()}><DebugInfoPanel /></Show>
+      </details>
+    </section>
+  );
+}
+
 export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [executionMounted, setExecutionMounted] = createSignal(false);
   return (
@@ -256,6 +297,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
             ><option>Auto</option><option>Light</option><option>Dark</option></Select>
           </Row>
         </Card>
+        <DiagnosticsCard />
       </div>
     </div>
   );

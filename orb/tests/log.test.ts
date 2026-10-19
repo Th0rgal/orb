@@ -4,7 +4,7 @@ const notes: Array<{ kind: string; data: Record<string, unknown> }> = [];
 // The test setup already loaded the real module graph (toast → ErrorNotice → log).
 vi.resetModules();
 vi.doMock("../src/diagnostics", () => ({ note: (kind: string, data: Record<string, unknown>) => { notes.push({ kind, data }); } }));
-const { RATE_MS, errorText, log, resetLogForTests, swallow } = await import("../src/log");
+const { RATE_MS, RING_SIZE, errorText, log, recentLogs, resetLogForTests, swallow } = await import("../src/log");
 
 beforeEach(() => { notes.length = 0; resetLogForTests(); vi.useFakeTimers(); vi.setSystemTime(0); });
 afterEach(() => vi.useRealTimers());
@@ -33,4 +33,16 @@ it("describes non-Error values", () => {
   expect(errorText("plain")).toBe("plain");
   expect(errorText({ code: 1 })).toBe('{"code":1}');
   expect(errorText(new Error("x".repeat(400))).length).toBe(300);
+});
+
+it("keeps the last written entries in an in-memory ring, oldest first", () => {
+  log.warn("a", "first", { n: 1 });
+  log.error("b", "second");
+  log.warn("a", "rate limited");
+  expect(recentLogs().map(e => [e.level, e.scope, e.message])).toEqual([["warn", "a", "first"], ["error", "b", "second"]]);
+  expect(recentLogs()[0]).toMatchObject({ at: new Date(0).toISOString(), data: { n: 1 } });
+  for (let i = 0; i < RING_SIZE + 10; i++) log.debug(`s${i}`, `m${i}`);
+  expect(recentLogs(50)).toHaveLength(50);
+  expect(recentLogs(50).at(-1)?.message).toBe(`m${RING_SIZE + 9}`);
+  expect(recentLogs(RING_SIZE + 100)).toHaveLength(RING_SIZE);
 });
