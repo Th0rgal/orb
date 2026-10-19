@@ -57,7 +57,8 @@ it('shows sending and confirmed receipts without waiting for a slow queue poll',
   const [confirmed,setConfirmed]=createSignal<{id:string;content:string}[]>([]);
   render(()=><RemoteQueue mission="remote" pending={pending()} confirmed={confirmed()} onRows={()=>{}} onCancel={()=>{}}/>);
   expect(screen.getByText('Continue overnight')).toBeTruthy();
-  expect(screen.queryByRole('button',{name:/Remove queued message/})).toBeNull();
+  // Same row layout while sending, actions disabled until Core assigns an id.
+  expect((screen.getByRole('button',{name:/Remove queued message/}) as HTMLButtonElement).disabled).toBe(true);
   setConfirmed([{id:'next',content:'Continue overnight'}]);setPending(undefined);
   await screen.findByText('1 Queued');
   expect(screen.getAllByText('Continue overnight')).toHaveLength(1);
@@ -157,11 +158,25 @@ it('removes a queued message optimistically before the DELETE request resolves a
   // Optimistic DOM removal happens synchronously before resolveDelete() is called
   expect(screen.queryByText('First confirmed')).toBeNull();
   expect(cancel).not.toHaveBeenCalled();
-  expect(screen.getByText('2 Sending…')).toBeTruthy();
+  expect(screen.getByText('2 Queued')).toBeTruthy();
   resolveDelete();
   await waitFor(() => expect(cancel).toHaveBeenCalledWith('one'));
   setPending([{ id: 'p2', content: 'Stacked 2' }]);
-  await screen.findByText('1 Sending…');
+  await screen.findByText('1 Queued');
 });
 
 
+
+it('send now leaves the queue and shows in the thread before Core answers', async () => {
+  backend.list.mockResolvedValue([{ id: 'one', content: 'Go now', source: 'remote-queue' }]);
+  let resolve!: (v: unknown) => void;
+  backend.api.mockImplementation(() => new Promise(r => { resolve = r; }));
+  const sendImmediate = vi.fn().mockResolvedValue(undefined);
+  let handle!: RemoteQueueHandle;
+  render(() => <RemoteQueue mission="remote" ref={h => handle = h} onSendImmediate={sendImmediate} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('Go now');
+  void handle.sendNow();
+  await waitFor(() => expect(screen.queryByText('Go now')).toBeNull());
+  expect(sendImmediate).toHaveBeenCalledWith([], [{ id: 'one', content: 'Go now', attached: undefined }]);
+  resolve({ delivered: true });
+});

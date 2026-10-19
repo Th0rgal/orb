@@ -2273,6 +2273,11 @@ export default function App() {
                 </>
               )}
             </Match>
+            {/* Right after sending, title the view from the prompt instead of "New Agent"
+                for the seconds Core takes to create and title the mission. */}
+            <Match when={launchPreview()?.prompt?.trim()}>
+              {(prompt) => <span>{prompt().replace(/\s+/g, " ").slice(0, 80)}</span>}
+            </Match>
             <Match when={true}>
               <span>New Agent</span>
             </Match>

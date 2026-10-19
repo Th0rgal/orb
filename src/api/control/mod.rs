@@ -13521,13 +13521,19 @@ pub(crate) fn remote_execution_for_plan(
             prompt,
             resume_session_id,
         } => {
-            let staged = stdin_prompt(prompt);
-            let args = crate::antigravity::args_with_effort(
+            // `/plan …` maps to agy's `--mode plan` (shared args builder, local and remote).
+            let plan_body = crate::antigravity::plan_request(prompt);
+            let staged = stdin_prompt(plan_body.unwrap_or(prompt));
+            let mut args = crate::antigravity::args_with_effort(
                 model.as_deref(),
                 effort.as_deref(),
                 resume_session_id.as_deref(),
                 if staged.is_some() { "" } else { prompt },
             );
+            if staged.is_some() && plan_body.is_some() {
+                let at = args.len() - 1;
+                args.splice(at..at, ["--mode".to_string(), "plan".to_string()]);
+            }
             let mut env = HashMap::from([("NO_COLOR".into(), "1".into())]);
             let (prelude, quoted_args) = if let Some(staged) = staged {
                 let mut quoted: Vec<String> = args[..args.len() - 1]
@@ -40733,6 +40739,35 @@ Investigate <service/> failures.
         let execution = remote_execution_for_plan(&resumed, "https://core.example", "test");
         assert!(execution.command.contains(&format!("--resume '{id}'")));
         assert!(!execution.command.contains("--session-id"));
+    }
+
+    #[test]
+    fn remote_antigravity_plan_uses_native_plan_mode() {
+        let plan = RemoteHarnessPlan::Antigravity {
+            effort: None,
+            model: Some("gemini-4-argon-medium".into()),
+            prompt: "/plan split the work across agents".into(),
+            resume_session_id: None,
+        };
+        let execution = remote_execution_for_plan(&plan, "https://core.example", "test");
+        assert!(
+            execution
+                .command
+                .contains("'--mode' 'plan' '-p' 'split the work across agents'"),
+            "{}",
+            execution.command
+        );
+        let plain = RemoteHarnessPlan::Antigravity {
+            effort: None,
+            model: None,
+            prompt: "hello".into(),
+            resume_session_id: None,
+        };
+        assert!(
+            !remote_execution_for_plan(&plain, "https://core.example", "test")
+                .command
+                .contains("--mode")
+        );
     }
 
     #[test]

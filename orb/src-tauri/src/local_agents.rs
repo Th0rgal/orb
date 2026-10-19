@@ -621,11 +621,14 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
         if expected.is_none() {
             stop_orphan_mission_processes(id);
         }
-        run.text.wait_drained(Some(Duration::from_secs(2)));
-        if !run.text.drained() {
-            return Err(
-                "The local agent has not finished closing its output. Try Stop again.".into(),
-            );
+        // The process is gone; a grandchild may still hold the pipe open. Stop the mission's
+        // orphans and give the readers time, then finish anyway instead of failing the queued
+        // follow-up ("has not finished closing its output", which a user could only retry).
+        if !run.text.wait_drained(Some(Duration::from_secs(2))) {
+            stop_orphan_mission_processes(id);
+            if !run.text.wait_drained(Some(Duration::from_secs(8))) {
+                eprintln!("orb: local agent {id} output readers still open after stop; continuing");
+            }
         }
         run.done.store(true, Ordering::SeqCst);
     } else if expected.is_none() {
@@ -2871,6 +2874,7 @@ fn native_plan_supported(id: &str, version: &str) -> bool {
         "codex" => (0, 155, 0),
         "claudecode" => (2, 1, 278),
         "vibe" => (2, 19, 1),
+        "antigravity" => (1, 2, 0),
         _ => return false,
     };
     version

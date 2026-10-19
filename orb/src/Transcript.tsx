@@ -420,7 +420,9 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
 export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) {
   const [open, setOpen, isExplicit] = disclosure(`think:${p.item.key}`, !p.item.done);
   const shown = () => isExplicit() ? open() : !p.item.done;
+  // An in-progress block with no text only repeats the live status next to the composer.
   return (
+    <Show when={p.item.done || p.item.text.trim()}>
     <div class={`st-think ${shown() ? "open" : ""}`}>
       <button class="st-think-head" aria-expanded={shown()} onClick={() => setOpen(!shown())}>
         <Show when={p.item.done} fallback={<span class="shimmer">Thinking</span>}>
@@ -432,6 +434,7 @@ export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) 
         <div class="st-think-body">{thinkInline(p.item.text)}</div>
       </Show>
     </div>
+    </Show>
   );
 }
 

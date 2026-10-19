@@ -179,7 +179,8 @@ test("remote queue appears while the message request is still pending",async({pa
   const queue=page.getByRole("region",{name:"Queued messages",exact:true});
   await expect(queue).toContainText("Continue overnight despite a slow connection");
   await expect(queue).toContainText("Sending…");
-  await expect(queue.getByRole("button",{name:/Remove queued message/})).toHaveCount(0);
+  // Same row layout while sending; actions stay disabled until Core assigns the id.
+  await expect(queue.getByRole("button",{name:/Remove queued message/})).toBeDisabled();
   expect(state.posts).toHaveLength(0);
   release();
   await expect(queue).toContainText("1 Queued");

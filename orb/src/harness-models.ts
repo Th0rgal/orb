@@ -15,7 +15,7 @@ export function destinationHarnessChoices(
     });
   }
   if (accountModels.length) choices.push({
-    backend: { id: "antigravity", name: "Antigravity CLI" },
+    backend: { id: "antigravity", name: "Antigravity CLI", native_plan: true },
     models: accountModels.map(([value, label]) => ({ value, label })),
   });
   return choices;
