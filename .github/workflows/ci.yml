@@ -8,10 +8,13 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   # Run CI on a schedule to catch issues even without new commits
   schedule:
-    - cron: '0 */6 * * *' # Every 6 hours
+    - cron: '0 3 * * *' # Daily
+
+permissions:
+  contents: read
 
 # Cancel in-progress runs only on PR pushes — pushes to master and the
-# 6-hour scheduled cron share the same `ref` group, so blanket
+# scheduled cron share the same `ref` group, so blanket
 # `cancel-in-progress: true` had the schedule killing the post-merge
 # push run (e.g. PR #400's master push CI was cancelled by the cron
 # that fired ~1 min later, leaving master with a non-green badge).
@@ -20,7 +23,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CARGO_BUILD_JOBS: 2
+  CARGO_BUILD_JOBS: 4
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -37,26 +40,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo target
-        uses: actions/cache@v5
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-test-harness-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-test-harness-
-
-      - name: Test full-source transport (no Lean compilation)
-        run: python3 scripts/test_remote_lean_build_source.py -v
+          shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Run tests
         run: cargo test --locked --workspace
@@ -74,23 +61,10 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo target
-        uses: actions/cache@v5
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ github.job }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-${{ github.job }}-
+          shared-key: clippy
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Run clippy
         run: cargo clippy --locked --workspace -- -D clippy::all
@@ -122,23 +96,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo target
-        uses: actions/cache@v5
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-test-harness-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-test-harness-
+          shared-key: harness-contract
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Run harness contract tests
         run: scripts/harness_contract_tests.sh
@@ -165,38 +126,35 @@ jobs:
       - name: Lint ChatGPT UI pool policy
         run: python3 scripts/policy_lint.py
 
-      - name: Run policy lint unit tests
-        run: python3 -m unittest scripts/test_policy_lint.py
-
-      # Operational scripts shipped with the server; their tests were never run.
-      - name: Run script unit tests
-        run: >-
-          python3 -m unittest
-          scripts/test_chatgpt_cloud_resume.py
-          scripts/test_chatgpt_ui_pool_health.py
-          scripts/test_node_harness_updates.py
-          scripts/test_orb_stage_conversation.py
-          scripts/test_retag_project_missions.py
-          scripts/test_storage_inventory.py
-          scripts/test_remote_codex_app_server.py
-          scripts/test_development_identity.py
-
       - name: Test project skill preparation and ownership
         run: |
-          python3 -m pip install --user 'PyYAML>=6,<7'
+          python3 -m pip install --user 'PyYAML>=6,<7' 'ruamel.yaml' playwright
           python3 -m unittest discover -s tests -p project_skills_test.py
           python3 -m unittest discover -s tests -p library_skills_test.py
 
-      # The layout tests skip silently without Python Playwright and Chromium.
-      - name: Install Python Playwright
+      # One Chromium install, cached; the layout tests skip silently without it.
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-py-playwright-${{ hashFiles('scripts/policy_lint.py') }}-v1
+          restore-keys: ${{ runner.os }}-py-playwright-
+      - name: Install Chromium
         run: |
-          python3 -m pip install --user playwright
+          # Downloads only on a cache miss; always installs the apt deps.
           python3 -m playwright install --with-deps chromium
-      - name: Run ChatGPT message layout tests
+
+      # Every scripts/test_*.py. None reaches the network: remote-build tests use
+      # example.invalid, unified-MCP tests use a 127.0.0.1 server (and skip
+      # without the binary). Nothing is excluded.
+      - name: Run all script unit tests
         run: |
           set -o pipefail
-          python3 -m unittest -v scripts/test_chatgpt_message_layout.py 2>&1 | tee /tmp/layout.log
-          ! grep -q "skipped" /tmp/layout.log
+          python3 -m unittest discover -v -s scripts -p 'test_*.py' 2>&1 | tee /tmp/scripts.log
+          if grep -E "^test_.*\(test_chatgpt_message_layout\..*skipped" /tmp/scripts.log; then
+            echo "::error::ChatGPT layout tests skipped (Chromium missing)"; exit 1
+          fi
 
   dashboard-test:
     name: Dashboard Unit Tests
@@ -241,8 +199,8 @@ jobs:
       - name: Type check and build
         run: bun run build
 
-  orb:
-    name: Orb
+  orb-unit:
+    name: Orb unit
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     defaults:
@@ -258,17 +216,120 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: orb/pnpm-lock.yaml
-      - run: df -h . && df -ih .
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install --with-deps chromium webkit
       - run: pnpm build
       - run: pnpm test
-      - run: pnpm test:browser
+
+  orb-browser:
+    name: Orb browser (${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    defaults:
+      run:
+        working-directory: orb
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: orb/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: orb/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-orb-playwright-${{ hashFiles('orb/pnpm-lock.yaml') }}
+      # Downloads only on a cache miss; always installs the apt deps.
+      - run: pnpm exec playwright install --with-deps chromium webkit
+      - run: pnpm test:browser --shard=${{ matrix.shard }}/2
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: orb-browser-evidence
+          name: orb-browser-evidence-${{ matrix.shard }}
           path: orb/test-results
+          if-no-files-found: ignore
+
+  # Timing-sensitive specs: report-only on PRs, blocking on master.
+  orb-performance:
+    name: Orb performance
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    defaults:
+      run:
+        working-directory: orb
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: orb/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: orb/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-orb-playwright-${{ hashFiles('orb/pnpm-lock.yaml') }}
+      # Downloads only on a cache miss; always installs the apt deps.
+      - run: pnpm exec playwright install --with-deps chromium webkit
+      - run: pnpm exec playwright test -c playwright.performance.config.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: orb-performance-evidence
+          path: orb/test-results
+          if-no-files-found: ignore
+
+  orb-tauri:
+    name: Orb Tauri (Rust)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
+    defaults:
+      run:
+        working-directory: orb/src-tauri
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install WebKitGTK build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: orb/src-tauri
+          shared-key: orb-tauri
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # tauri-build checks that frontendDist and every externalBin exist. The
+      # sidecar is built by scripts/build-mcp.py in a real build; a stub is
+      # enough to compile and unit-test the app. gen/app-icon is macOS-only
+      # (tauri.macos.conf.json) and is not read on Linux.
+      - name: Stub frontend dist and sidecar binaries
+        run: |
+          mkdir -p ../dist binaries
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          for bin in sandboxed-mcp orb-signer; do
+            printf '#!/bin/sh\nexit 1\n' > "binaries/$bin-$host"
+            chmod +x "binaries/$bin-$host"
+          done
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --bin orb
 
   docker:
     name: Docker image

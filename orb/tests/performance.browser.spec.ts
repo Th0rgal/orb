@@ -1,4 +1,18 @@
-import {test,expect} from '@playwright/test';
+import {test,expect,type Page} from '@playwright/test';
+// Scroll the transcript one viewport at a time, waiting for each scroll event
+// and a frame, so virtualization mounts turns as it would for a user.
+async function scrollToBottom(page:Page){
+ for(let i=0;i<200;i++){
+  const done=await page.evaluate(()=>new Promise<boolean>(resolve=>{
+   const el=document.querySelector('.scroll') as HTMLElement;
+   const max=el.scrollHeight-el.clientHeight;
+   if(el.scrollTop>=max-1)return resolve(true);
+   el.addEventListener('scroll',()=>requestAnimationFrame(()=>resolve(false)),{once:true});
+   el.scrollTop=Math.min(max,el.scrollTop+el.clientHeight);
+  }));
+  if(done)return;
+ }
+}
 test('long histories stay bounded and preserve live text',async({page})=>{
  const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
  await page.goto('/tests/performance-native.html');
@@ -8,7 +22,7 @@ test('long histories stay bounded and preserve live text',async({page})=>{
  console.log('VIRTUAL_TRANSCRIPT',JSON.stringify(samples));
  expect(samples.every(sample=>sample.nodes<5000)).toBe(true);
  expect(errors).toEqual([]);
- await page.evaluate(()=>document.querySelector('.scroll')!.scrollTo(0,document.querySelector('.scroll')!.scrollHeight));
+ await scrollToBottom(page);
  await expect(page.locator('.st-text').last()).toContainText('A streamed fragment.');
 });
 test('focus survives repeated native-shaped question snapshots',async({page})=>{
@@ -23,7 +37,7 @@ test('finds an unmounted turn and preserves an edited prompt while scrolling',as
  await page.evaluate(()=>(window as any).perfHarness.transcript(1000,1));
  await page.locator('.user').first().dblclick();
  const editor=page.getByRole('textbox',{name:'Edit prompt text'});await editor.fill('Keep this draft');
- await page.evaluate(()=>{const scroller=document.querySelector('.scroll')!;scroller.scrollTop=scroller.scrollHeight;});
+ await scrollToBottom(page);
  await expect(editor).toHaveValue('Keep this draft');
  await page.keyboard.press('Escape');
  await page.keyboard.press('Meta+f');

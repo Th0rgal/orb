@@ -2,8 +2,7 @@ name: Android APK
 
 on:
   push:
-    branches:
-      - "**"
+    branches: [master, main]
     tags:
       - "android-v*"
       - "v*"
@@ -43,8 +42,26 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug --no-daemon
+
+      # Report-only until the existing lint baseline is cleaned up.
+      - name: Lint (non-blocking)
+        continue-on-error: true
+        run: ./gradlew :app:lintDebug --no-daemon
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-reports
+          path: |
+            android_dashboard/app/build/reports/tests
+            android_dashboard/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v7

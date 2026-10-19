@@ -27,8 +27,9 @@ env:
 jobs:
   ios-build:
     name: iOS Build
-    # Use the runner’s current Xcode, including the iOS 26 SDK.
-    runs-on: macos-15
+    # The project targets iOS 26 / Swift 6: needs Xcode 26, which is the
+    # default on macos-26. The step below pins the newest Xcode_26 installed.
+    runs-on: macos-26
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     defaults:
@@ -36,6 +37,22 @@ jobs:
         working-directory: ios_dashboard
     steps:
       - uses: actions/checkout@v6
+
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          xcode="$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)"
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      - name: Cache DerivedData
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/DerivedData
+          key: ${{ runner.os }}-ios-dd-${{ hashFiles('ios_dashboard/project.yml', 'ios_dashboard/**/Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ios-dd-${{ hashFiles('ios_dashboard/project.yml', 'ios_dashboard/**/Package.resolved') }}-
+            ${{ runner.os }}-ios-dd-
 
       - name: Regenerate Xcode project using the Xcode Cloud hook
         env:
@@ -49,4 +66,28 @@ jobs:
             -project SandboxedDashboard.xcodeproj \
             -scheme SandboxedDashboard \
             -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Unit tests (SandboxedDashboardTests)
+        run: |
+          set -euo pipefail
+          udid="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devs = json.load(sys.stdin)["devices"]
+          for runtime in sorted(devs, reverse=True):
+              if "iOS-26" not in runtime:
+                  continue
+              for d in devs[runtime]:
+                  if d["name"].startswith("iPhone"):
+                      print(d["udid"]); sys.exit()
+          sys.exit("no iOS 26 iPhone simulator")
+          ')"
+          echo "Simulator: $udid"
+          xcodebuild test \
+            -project SandboxedDashboard.xcodeproj \
+            -scheme SandboxedDashboard \
+            -destination "id=$udid" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -only-testing:SandboxedDashboardTests \
             CODE_SIGNING_ALLOWED=NO
