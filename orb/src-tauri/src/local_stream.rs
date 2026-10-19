@@ -838,6 +838,7 @@ mod tests {
             retryable: false,
             resumed: false,
             waiting_since: None,
+            stopping: false,
         }
     }
     #[test]

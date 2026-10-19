@@ -54,48 +54,89 @@ pub(crate) fn has_orphan_mission_processes(id: &str) -> bool {
     !find_orphan_mission_pids(id, session_id.as_deref()).is_empty()
 }
 
+/// Stop the processes a mission left behind, without blocking: SIGTERM now,
+/// SIGKILL after a grace period on a background thread.
+///
+/// Only processes Orb recorded for this mission are signalled, and only
+/// while their pid still carries the recorded start time. A process that
+/// merely names the mission in its argv, but was never recorded by Orb, is
+/// logged and left alone: its pid may have been recycled, or it may belong
+/// to someone else.
 pub(crate) fn stop_orphan_mission_processes(id: &str) {
+    stop_orphans_with_grace(id, Duration::from_secs(3));
+}
+
+pub(crate) fn stop_orphans_with_grace(id: &str, grace: Duration) {
+    let owned = groups::owned_by(id);
     let session_id = crate::local_bindings(None, None)
         .ok()
         .and_then(|b| b[id]["sessionId"].as_str().map(str::to_owned));
-    let pids = find_orphan_mission_pids(id, session_id.as_deref());
-    if pids.is_empty() {
+    let unrecorded: Vec<u32> = find_orphan_mission_pids(id, session_id.as_deref())
+        .into_iter()
+        .filter(|pid| !owned.iter().any(|o| o.pid as u32 == *pid))
+        .collect();
+    if !unrecorded.is_empty() {
+        crate::orb_log!(
+            warn,
+            "orphan_skip",
+            mission = id,
+            extra = json!({"pids": unrecorded, "reason": "not recorded by Orb"})
+        );
+    }
+    if owned.is_empty() {
         return;
     }
+    let signalled: Vec<&groups::Owned> = owned.iter().filter(|o| o.signal(libc_term())).collect();
     crate::orb_log!(
         warn,
         "orphan_kill",
         mission = id,
-        extra = json!({"pids": pids, "signal": "SIGTERM"})
+        extra = json!({
+            "pids": signalled.iter().map(|o| o.pid).collect::<Vec<_>>(),
+            "pgids": signalled.iter().filter_map(|o| o.pgid).collect::<Vec<_>>(),
+            "signal": "SIGTERM",
+        })
     );
-    #[cfg(unix)]
-    {
-        for &pid in &pids {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-                libc::kill(-(pid as i32), libc::SIGTERM);
-            }
-        }
-        let deadline = Instant::now() + Duration::from_secs(3);
+    let id = id.to_owned();
+    thread::spawn(move || {
+        let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
-            if find_orphan_mission_pids(id, session_id.as_deref()).is_empty() {
+            if !owned.iter().any(groups::Owned::alive) {
                 return;
             }
             thread::sleep(Duration::from_millis(50));
         }
-        crate::orb_log!(
-            warn,
-            "orphan_kill",
-            mission = id,
-            extra = json!({"pids": pids, "signal": "SIGKILL"})
-        );
-        for &pid in &pids {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
+        let killed: Vec<i32> = owned
+            .iter()
+            .filter(|o| o.signal(libc_kill()))
+            .map(|o| o.pid)
+            .collect();
+        if !killed.is_empty() {
+            crate::orb_log!(
+                warn,
+                "orphan_kill",
+                mission = id,
+                extra = json!({"pids": killed, "signal": "SIGKILL"})
+            );
         }
-    }
+    });
+}
+
+#[cfg(unix)]
+fn libc_term() -> i32 {
+    libc::SIGTERM
+}
+#[cfg(unix)]
+fn libc_kill() -> i32 {
+    libc::SIGKILL
+}
+#[cfg(not(unix))]
+fn libc_term() -> i32 {
+    15
+}
+#[cfg(not(unix))]
+fn libc_kill() -> i32 {
+    9
 }
 
 /// Follow an Antigravity conversation still running from before a restart.
@@ -289,7 +330,7 @@ pub(crate) fn try_reattach_orphan_antigravity(id: &str) -> bool {
                 }
             }
             let alive = !find_orphan_mission_pids(&mission_id, Some(&session)).is_empty();
-            if !alive || done.load(Ordering::SeqCst) {
+            if !alive || done.load(Ordering::SeqCst) || run.stopped.load(Ordering::SeqCst) {
                 break;
             }
             thread::sleep(Duration::from_millis(500));
@@ -355,12 +396,29 @@ mod tests {
             "other",
         ]);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while find_orphan_mission_pids(&mission, None).is_empty() {
+        // The forked `sleep` briefly shares the shell's argv before it execs.
+        while find_orphan_mission_pids(&mission, None) != vec![orphan.id()] {
             assert!(Instant::now() < deadline, "the orphan never appeared");
             thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(find_orphan_mission_pids(&mission, None), vec![orphan.id()]);
+        // Named in argv but never recorded by Orb: left alone.
+        stop_orphans_with_grace(&mission, Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(400));
+        assert!(
+            orphan.try_wait().unwrap().is_none(),
+            "an unrecorded process was signalled"
+        );
+        // The bystander names another mission and *is* recorded, for it.
+        let bystander_owned = groups::describe("other", bystander.id() as i32).unwrap();
+        groups::record(std::slice::from_ref(&bystander_owned));
+        groups::record(&[groups::describe(&mission, orphan.id() as i32).unwrap()]);
+        let started = Instant::now();
         stop_orphan_mission_processes(&mission);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "orphan cleanup must not block its caller"
+        );
         let status = orphan.wait().unwrap();
         assert!(!status.success(), "the orphan was signalled");
         let orphan_group = orphan.id() as i32;
@@ -379,5 +437,37 @@ mod tests {
             libc::kill(-(bystander.id() as i32), libc::SIGKILL);
         }
         let _ = bystander.wait();
+        groups::forget(&bystander_owned);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_escalates_to_sigkill() {
+        use std::os::unix::process::CommandExt;
+        let mission = uuid::Uuid::new_v4().to_string();
+        // Ignores SIGTERM; only SIGKILL ends it.
+        let mut stubborn = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+        groups::record(&[groups::describe(&mission, stubborn.id() as i32).unwrap()]);
+        stop_orphans_with_grace(&mission, Duration::from_millis(300));
+        thread::sleep(Duration::from_millis(150));
+        assert!(
+            stubborn.try_wait().unwrap().is_none(),
+            "SIGTERM was ignored"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = stubborn.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "no SIGKILL escalation");
+            thread::sleep(Duration::from_millis(20));
+        };
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 }

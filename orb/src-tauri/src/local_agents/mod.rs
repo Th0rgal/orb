@@ -10,12 +10,14 @@
 //! - `registry`: the run table, launch fences, `Slot` and `RunCtx`.
 //! - `lifecycle`: start, exit watching, poll and stop.
 //! - `orphans`: processes a previous Orb left behind.
+//! - `groups`: the process groups Orb launched, persisted with start times.
 //! - `command`: building and probing harness commands.
 //! - `io`: bounded pipe readers shared by every harness.
 //! - `paths`: workspace and attachment path rules.
 //! - `harness::*`: one module per native protocol.
 
 mod command;
+mod groups;
 mod harness;
 mod io;
 mod lifecycle;
@@ -44,7 +46,7 @@ use registry::*;
 
 pub(crate) use lifecycle::{
     poll_generation, start_with_env, start_with_env_fenced, stop_generation, subscribe_native,
-    DIRECTORY_BUSY,
+    wait_stopped, DIRECTORY_BUSY,
 };
 pub(crate) use orphans::{has_orphan_mission_processes, stop_orphan_mission_processes};
 pub(crate) use registry::{
@@ -140,6 +142,9 @@ pub struct PollState {
     pub resumed: bool,
     /// Set while the turn has answered and only its background tasks remain.
     pub waiting_since: Option<u64>,
+    /// Stop signalled the process group; `done` follows once it has exited.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopping: bool,
 }
 
 #[tauri::command]

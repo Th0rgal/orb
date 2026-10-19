@@ -62,6 +62,14 @@ pub(crate) fn start_with_options(
     }
     let software_execution =
         crate::agent_software::begin(&request.id, &request.harness, Some(&bin))?;
+    let stopping = lock(runs())
+        .get(&request.id)
+        .is_some_and(|previous| previous.stopping.load(Ordering::SeqCst) && !previous.is_done());
+    if stopping {
+        // Stop returns before the old process is gone; a follow-up sent
+        // right after it waits for that exit instead of failing.
+        wait_stopped(&request.id, WRAPPED_STOP_GRACE + Duration::from_secs(2));
+    }
     let mut map = lock(runs());
     if let Some(previous) = map.get(&request.id) {
         if !previous.is_done() {
@@ -104,6 +112,9 @@ pub(crate) fn start_with_options(
         }
     };
     let mut run = Run::new(ctx, child, cwd, resumed);
+    if let Some(owned) = &run.owned {
+        groups::record(std::slice::from_ref(owned));
+    }
     run.mcp_wrapped = env.iter().any(|(key, _)| key == "SANDBOXED_MCP_WRAPPER");
     run.shared_cwd_with = shared_parent.map(str::to_owned);
     crate::orb_log!(
@@ -113,7 +124,11 @@ pub(crate) fn start_with_options(
         harness = request.harness,
         pid = lock(&run.child).id(),
         generation = run.generation,
-        extra = json!({"resumed": resumed, "mcp_wrapped": run.mcp_wrapped})
+        extra = json!({
+            "resumed": resumed,
+            "mcp_wrapped": run.mcp_wrapped,
+            "pgid": run.owned.as_ref().and_then(|o| o.pgid),
+        })
     );
     watch_exit(
         software_execution,
@@ -196,8 +211,14 @@ pub(crate) fn watch_exit(
         crate::interactions::finish(&mission_id);
         run.exit_code
             .replace(status.and_then(|status| status.code()));
+        if let Some(owned) = &run.owned {
+            groups::forget(owned);
+        }
         let output = &run.ctx.output;
-        output.wait_drained(None);
+        // Stop may give up on readers a grandchild keeps open.
+        while !output.wait_drained(Some(Duration::from_millis(500)))
+            && !run.abandon_readers.load(Ordering::SeqCst)
+        {}
         settle_exit(
             &run.ctx,
             strict_terminal,
@@ -310,76 +331,45 @@ pub fn subscribe_native(
     run_of(id)?.ctx.output.subscribe_native(sink)
 }
 
+/// How long a stopped group gets to exit on SIGTERM before SIGKILL. The
+/// trusted MCP wrapper forwards termination to the CLI's own group and reaps
+/// it, so it gets longer.
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const WRAPPED_STOP_GRACE: Duration = Duration::from_secs(6);
+/// After the process is gone, how long readers may hold the pipe open
+/// before Orb stops the mission's recorded orphans, then finishes anyway.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+const ABANDON_AFTER: Duration = Duration::from_secs(8);
+
+/// Stop a run without blocking the caller: signal its process group, then
+/// escalate and clean up on a background thread. The exit watcher publishes
+/// the final state; pollers see `stopping` until then.
 pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
+    stop_with_grace(id, expected, None)
+}
+
+pub(crate) fn stop_with_grace(
+    id: &str,
+    expected: Option<&str>,
+    grace: Option<Duration>,
+) -> Result<(), String> {
     let run = lock(runs()).get(id).cloned();
-    // Waiting for this run must not block polling or stopping other missions.
-    if let Some(run) = run {
-        if expected.is_some_and(|token| token != run.generation) {
-            return Ok(());
-        }
-        crate::interactions::cancel(id);
-        run.stopped.store(true, Ordering::SeqCst);
-        let started = Instant::now();
-        let mut path = Vec::new();
-        let mut child = lock(&run.child);
-        let pid = child.id();
-        // The trusted wrapper owns the CLI's child process group. Give it
-        // time to forward termination and reap that group before escalation.
-        #[cfg(unix)]
-        if run.mcp_wrapped && !run.is_done() {
-            path.push("wrapper_sigterm");
-            unsafe {
-                libc::kill(child.id() as i32, libc::SIGTERM);
-            }
-            let deadline = Instant::now() + Duration::from_secs(6);
-            while child.try_wait().map_err(|e| e.to_string())?.is_none()
-                && Instant::now() < deadline
-            {
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-        // Completed runs stay cached for their transcript. Their old process
-        // group ID may have been reused, so never signal it after completion.
-        #[cfg(unix)]
-        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
-            path.push("group_sigkill");
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-        }
-        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
-            path.push("kill");
-            child.kill().map_err(|e| e.to_string())?;
-        }
-        let status = child.wait().map_err(|e| e.to_string())?;
-        let reaped_ms = started.elapsed().as_millis() as u64;
-        run.exit_code.replace(status.code());
-        drop(child);
+    let Some(run) = run else {
         if expected.is_none() {
-            stop_orphan_mission_processes(id);
+            let id = id.to_owned();
+            thread::spawn(move || stop_orphan_mission_processes(&id));
         }
-        // The process is gone; a grandchild may still hold the pipe open. Stop the mission's
-        // orphans and give the readers time, then finish anyway instead of failing the queued
-        // follow-up ("has not finished closing its output", which a user could only retry).
-        let mut drained = run.ctx.output.wait_drained(Some(Duration::from_secs(2)));
-        if !drained {
-            path.push("orphans_after_drain_timeout");
-            stop_orphan_mission_processes(id);
-            drained = run.ctx.output.wait_drained(Some(Duration::from_secs(8)));
-            if !drained {
-                crate::orb_log!(
-                    warn,
-                    "stop_readers_open",
-                    mission = id,
-                    harness = run.ctx.harness,
-                    pid = pid,
-                    extra = json!({"message": "output readers still open after stop; continuing"})
-                );
-            }
-        }
-        if path.is_empty() {
-            path.push("already_exited");
-        }
+        return Ok(());
+    };
+    if expected.is_some_and(|token| token != run.generation) {
+        return Ok(());
+    }
+    crate::interactions::cancel(id);
+    run.stopped.store(true, Ordering::SeqCst);
+    let pid = lock(&run.child).id();
+    // Completed runs stay cached for their transcript. Their process is
+    // reaped, so its pid and group may belong to someone else now.
+    if run.is_done() || exited(&run) {
         crate::orb_log!(
             info,
             "stop",
@@ -387,19 +377,178 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
             harness = run.ctx.harness,
             pid = pid,
             generation = run.generation,
-            extra = json!({
-                "path": path,
-                "reaped_ms": reaped_ms,
-                "total_ms": started.elapsed().as_millis() as u64,
-                "drained": drained,
-                "code": status.code(),
-            })
+            extra = json!({"path": ["already_exited"]})
         );
-        run.ctx.done.store(true, Ordering::SeqCst);
-    } else if expected.is_none() {
+        if expected.is_none() {
+            let id = id.to_owned();
+            thread::spawn(move || stop_orphan_mission_processes(&id));
+        }
+        return Ok(());
+    }
+    if run.stopping.swap(true, Ordering::SeqCst) {
+        // A second Stop: the escalation already running covers it.
+        return Ok(());
+    }
+    signal_run(&run, libc_signal::TERM);
+    crate::orb_log!(
+        info,
+        "stop",
+        mission = id,
+        harness = run.ctx.harness,
+        pid = pid,
+        generation = run.generation,
+        extra = json!({"path": ["group_sigterm"], "pgid": run.owned.as_ref().and_then(|o| o.pgid)})
+    );
+    let grace = grace.unwrap_or(if run.mcp_wrapped {
+        WRAPPED_STOP_GRACE
+    } else {
+        STOP_GRACE
+    });
+    let sweep_orphans = expected.is_none();
+    let id = id.to_owned();
+    thread::spawn(move || escalate(&id, run, grace, sweep_orphans));
+    Ok(())
+}
+
+/// Signal numbers without sprinkling `cfg(unix)` through Stop.
+mod libc_signal {
+    #[cfg(unix)]
+    pub(crate) const TERM: i32 = libc::SIGTERM;
+    #[cfg(unix)]
+    pub(crate) const KILL: i32 = libc::SIGKILL;
+    #[cfg(not(unix))]
+    pub(crate) const TERM: i32 = 15;
+    #[cfg(not(unix))]
+    pub(crate) const KILL: i32 = 9;
+}
+
+/// True once the child has exited. Checked without reaping it, so its pid
+/// (and the group it leads) stays reserved until the exit watcher reaps it.
+fn exited(run: &Run) -> bool {
+    let child = lock(&run.child);
+    #[cfg(unix)]
+    {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        // ECHILD: already reaped. Otherwise si_pid is set once it exited.
+        result != 0 || unsafe { info.si_pid() } != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let mut child = child;
+        !matches!(child.try_wait(), Ok(None))
+    }
+}
+
+/// Signal the run's own process group while its leader is unreaped (so the
+/// group id cannot have been recycled). A child that does not lead its own
+/// group (the Antigravity placeholder) is signalled alone.
+fn signal_run(run: &Run, signal: i32) {
+    let child = lock(&run.child);
+    if run.is_done() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        let group = run.owned.as_ref().and_then(|owned| owned.pgid);
+        unsafe {
+            match group {
+                Some(group) if group == pid => libc::kill(-group, signal),
+                _ => libc::kill(pid, signal),
+            };
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let mut child = child;
+        if signal == libc_signal::KILL {
+            let _ = child.kill();
+        }
+    }
+}
+
+fn wait_until(deadline: Instant, done: impl Fn() -> bool) -> bool {
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Stop's background half: SIGKILL after the grace period, then make sure
+/// the exit watcher can finish even if a grandchild keeps the pipe open.
+fn escalate(id: &str, run: Run, grace: Duration, sweep_orphans: bool) {
+    let started = Instant::now();
+    let mut path = vec!["group_sigterm"];
+    if !wait_until(started + grace, || exited(&run)) {
+        // The wrapper may have moved the CLI into a group of its own: record
+        // the tree before killing, so orphan cleanup may target it later.
+        let tree = groups::descendants(id, lock(&run.child).id());
+        groups::record(&tree);
+        path.push("group_sigkill");
+        signal_run(&run, libc_signal::KILL);
+        for owned in &tree {
+            owned.signal(libc_signal::KILL);
+        }
+        wait_until(Instant::now() + Duration::from_secs(2), || exited(&run));
+    }
+    let reaped_ms = started.elapsed().as_millis() as u64;
+    if sweep_orphans {
         stop_orphan_mission_processes(id);
     }
-    Ok(())
+    let output = &run.ctx.output;
+    let mut drained = output.wait_drained(Some(DRAIN_GRACE));
+    if !drained {
+        path.push("orphans_after_drain_timeout");
+        stop_orphan_mission_processes(id);
+        drained = output.wait_drained(Some(ABANDON_AFTER));
+        if !drained {
+            crate::orb_log!(
+                warn,
+                "stop_readers_open",
+                mission = id,
+                harness = run.ctx.harness,
+                extra = json!({"message": "output readers still open after stop; continuing"})
+            );
+            run.abandon_readers.store(true, Ordering::SeqCst);
+        }
+    }
+    crate::orb_log!(
+        info,
+        "stop_settled",
+        mission = id,
+        harness = run.ctx.harness,
+        generation = run.generation,
+        extra = json!({
+            "path": path,
+            "reaped_ms": reaped_ms,
+            "total_ms": started.elapsed().as_millis() as u64,
+            "drained": drained,
+        })
+    );
+}
+
+/// Wait (blocking) until a stopped run has published its terminal state.
+/// Only for callers already off the UI thread that must sequence after Stop.
+pub(crate) fn wait_stopped(id: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    wait_until(deadline, || {
+        lock(runs())
+            .get(id)
+            .is_none_or(|run| run.is_done() && run.finished.get().is_some())
+    })
 }
 
 /// Block until the run publishes its terminal state, then poll it. The
@@ -719,7 +868,7 @@ mod tests {
         stop_generation(&id, Some("old-generation")).unwrap();
         assert!(!local_agents_poll(id.clone()).unwrap().done);
         stop_generation(&id, Some(&generation)).unwrap();
-        assert!(local_agents_poll(id.clone()).unwrap().done);
+        assert!(wait_for_terminal(&id, Duration::from_secs(5)).done);
         runs().lock().unwrap().remove(&id);
     }
 
@@ -770,6 +919,7 @@ mod tests {
             let stopped = local_agents_stop(id.clone());
             assert_eq!(group, pid, "{harness} inherited Orb's process group");
             stopped.unwrap();
+            assert!(wait_for_terminal(&id, Duration::from_secs(10)).done);
             assert!(
                 run.ctx.output.drained(),
                 "{harness} left a reader waiting for EOF"
@@ -777,5 +927,120 @@ mod tests {
             assert!(local_agents_poll(id.clone()).unwrap().done);
             runs().lock().unwrap().remove(&id);
         }
+    }
+
+    #[cfg(unix)]
+    fn start_fixture(script: &str) -> (String, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agent");
+        // Absolute paths: a version probe may run the script from elsewhere.
+        let script = script.replace("ready", &dir.path().join("ready").to_string_lossy());
+        let script = script.replace("child.pid", &dir.path().join("child.pid").to_string_lossy());
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let id = format!("native-stop-{}", uuid_like());
+        local_agents_start(StartRequest {
+            id: id.clone(),
+            harness: "grok".into(),
+            bin: bin.to_string_lossy().into_owned(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: "test".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.path().join("ready").exists() {
+            assert!(Instant::now() < deadline, "fixture did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        (id, dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_returns_immediately_and_escalates_to_sigkill() {
+        // The agent and its background child both ignore SIGTERM.
+        let (id, dir) = start_fixture(
+            "#!/bin/sh\ntrap '' TERM\n(trap '' TERM; while :; do sleep 1; done) &\necho $! > child.pid\ntouch ready\nwhile :; do sleep 1; done\n",
+        );
+        let run = run_of(&id).unwrap();
+        let pid = lock(&run.child).id() as i32;
+        let owned = run.owned.clone().expect("the run records its group");
+        assert_eq!(owned.pgid, Some(pid), "the agent leads its own group");
+        assert!(
+            groups::owned_by(&id).contains(&owned),
+            "the group is persisted"
+        );
+        let started = Instant::now();
+        stop_with_grace(&id, Some(&run.generation), Some(Duration::from_millis(300))).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "stop blocked for {:?}",
+            started.elapsed()
+        );
+        let state = poll_generation(&id, None).unwrap();
+        assert!(state.stopping && !state.done, "stop reports stopping first");
+        let state = wait_for_terminal(&id, Duration::from_secs(10));
+        assert!(state.done && !state.stopping);
+        let grandchild: i32 = std::fs::read_to_string(dir.path().join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(-pid, 0) } == 0 || unsafe { libc::kill(grandchild, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the group survived SIGKILL");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !groups::owned_by(&id).contains(&owned),
+            "a reaped group is forgotten"
+        );
+        lock(runs()).remove(&id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_spares_unrelated_process_groups() {
+        use std::os::unix::process::CommandExt;
+        let (id, _dir) = start_fixture("#!/bin/sh\ntouch ready\nsleep 30\n");
+        // Another program that even names this mission in its argv.
+        let mut bystander = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & wait", "bystander", "--mission-id", &id])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        local_agents_stop(id.clone()).unwrap();
+        assert!(wait_for_terminal(&id, Duration::from_secs(10)).done);
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "an unrelated process was signalled"
+        );
+        assert_eq!(unsafe { libc::kill(-(bystander.id() as i32), 0) }, 0);
+        unsafe {
+            libc::kill(-(bystander.id() as i32), libc::SIGKILL);
+        }
+        let _ = bystander.wait();
+        lock(runs()).remove(&id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_followup_right_after_stop_waits_for_the_old_process() {
+        let (id, dir) = start_fixture("#!/bin/sh\ntouch ready\nsleep 30\n");
+        let request = StartRequest {
+            id: id.clone(),
+            harness: "grok".into(),
+            bin: "/usr/bin/true".into(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: "again".into(),
+            ..Default::default()
+        };
+        local_agents_stop(id.clone()).unwrap();
+        local_agents_start(request).expect("a follow-up after Stop is accepted");
+        assert!(wait_for_terminal(&id, Duration::from_secs(5)).done);
+        lock(runs()).remove(&id);
     }
 }

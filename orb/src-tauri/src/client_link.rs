@@ -978,6 +978,7 @@ mod tests {
                     retryable: true,
                     resumed: false,
                     waiting_since: None,
+                    stopping: false,
                 }),
                 ..event("!", false)
             },

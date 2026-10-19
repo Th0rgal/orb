@@ -111,11 +111,22 @@ pub(crate) struct Run {
     pub(crate) stopped: Arc<AtomicBool>,
     /// When the run reached its terminal state; finished runs are pruned.
     pub(crate) finished: Arc<OnceLock<Instant>>,
+    /// The child's pid, process group and start time, captured at spawn.
+    pub(crate) owned: Option<groups::Owned>,
+    /// Set when Stop has signalled the group and the exit is not yet final.
+    pub(crate) stopping: Arc<AtomicBool>,
+    /// Set by Stop's escalation when output readers outlive the process
+    /// (a grandchild outside Orb's groups holds the pipe): finish anyway.
+    pub(crate) abandon_readers: Arc<AtomicBool>,
 }
 
 impl Run {
     pub(crate) fn new(ctx: RunCtx, child: Child, cwd: PathBuf, resumed: bool) -> Self {
+        let owned = groups::describe(&ctx.mission, child.id() as i32);
         Self {
+            owned,
+            stopping: Arc::new(AtomicBool::new(false)),
+            abandon_readers: Arc::new(AtomicBool::new(false)),
             mcp_wrapped: false,
             generation: uuid::Uuid::new_v4().to_string(),
             cwd,
@@ -143,6 +154,7 @@ impl Run {
             retryable,
             resumed: self.resumed,
             waiting_since,
+            stopping: self.stopping.load(Ordering::SeqCst) && !self.is_done(),
         }
     }
 }
