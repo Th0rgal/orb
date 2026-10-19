@@ -57,45 +57,76 @@ struct OrbFleetLiveActivity: Widget {
 }
 
 enum FleetTone {
-    static let done = Color(red: 0.204, green: 0.780, blue: 0.349)     // systemGreen
-    static let running = Color(red: 0.039, green: 0.518, blue: 1.0)    // systemBlue
-    static let waiting = Color(red: 1.0, green: 0.584, blue: 0.0)      // systemOrange
-    static let failed = Color(red: 1.0, green: 0.231, blue: 0.188)     // systemRed
+    // System hues, softened so the Lock Screen reads calm; red stays legible.
+    static let done = Color(red: 0.204, green: 0.780, blue: 0.349).opacity(0.75)     // systemGreen
+    static let running = Color(red: 0.039, green: 0.518, blue: 1.0).opacity(0.85)    // systemBlue
+    static let waiting = Color(red: 1.0, green: 0.584, blue: 0.0)                    // systemOrange
+    static let failed = Color(red: 1.0, green: 0.231, blue: 0.188).opacity(0.85)     // systemRed
 }
 
+/// Header (mark, title, elapsed time top right), a thin bar, then the counts as
+/// one line of text and the most useful sentence, with room to breathe.
 private struct FleetLockScreen: View {
     let state: OrbFleetActivityAttributes.ContentState
     let stale: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                FleetMark()
+                FleetMark(size: 18)
                 Text(state.allDone ? "Tout est terminé" : "Flotte Orb")
                     .font(.system(.subheadline, design: .rounded).weight(.semibold))
                 Spacer(minLength: 4)
-                FleetCounters(state: state, compact: false)
+                Text(state.updatedAt, style: .timer)
+                    .font(.caption.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: 64, alignment: .trailing)
             }
             FleetBar(state: state)
+            FleetSummary(state: state)
             if let next = NextItem(state: state) {
                 next
             } else {
-                HStack(spacing: 6) {
-                    Image(systemName: state.allDone ? "checkmark.seal.fill" : "sparkles")
-                        .foregroundStyle(state.allDone ? FleetTone.done : FleetTone.running)
-                    Text(state.allDone ? "\(state.done) missions terminées · rien ne t’attend" : "Rien ne t’attend · les agents travaillent")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(state.updatedAt, style: .relative)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
-                .font(.footnote)
-                .lineLimit(1)
+                Text(state.allDone ? "Rien ne t’attend." : "Rien ne t’attend · les agents travaillent.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
         .padding(16)
         .opacity(stale ? 0.55 : 1)
+    }
+}
+
+/// "9 terminées · 2 en cours · 3 en échec": only non-zero states, a small dot
+/// each instead of a row of coloured icons that repeated the bar.
+private struct FleetSummary: View {
+    let state: OrbFleetActivityAttributes.ContentState
+
+    var body: some View {
+        let parts: [(Int, String, Color)] = [
+            (state.running, "en cours", FleetTone.running),
+            (state.waiting, state.waiting > 1 ? "t’attendent" : "t’attend", FleetTone.waiting),
+            (state.failed, "en échec", FleetTone.failed),
+            (state.done, state.done > 1 ? "terminées" : "terminée", FleetTone.done),
+        ].filter { $0.0 > 0 }
+        HStack(spacing: 10) {
+            ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                HStack(spacing: 4) {
+                    Circle().fill(part.2).frame(width: 6, height: 6)
+                    Text("\(part.0) \(part.1)")
+                        .monospacedDigit()
+                        .contentTransition(.numericText(value: Double(part.0)))
+                }
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -158,14 +189,14 @@ private struct FleetBar: View {
             HStack(spacing: gap) {
                 ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
                     Capsule(style: .continuous)
-                        .fill(part.1.gradient)
+                        .fill(part.1)
                         .frame(width: max(usable * CGFloat(part.0) / CGFloat(total), 6))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Capsule(style: .continuous).fill(.quaternary))
         }
-        .frame(height: 6)
+        .frame(height: 4)
     }
 }
 
