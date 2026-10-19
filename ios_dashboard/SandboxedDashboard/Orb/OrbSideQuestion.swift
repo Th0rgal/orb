@@ -305,9 +305,8 @@ struct OrbSideQuestionSheet: View {
 
     private func follow() async {
         guard phase == .active else { return }
-        while !Task.isCancelled {
-            do { try await load() } catch is CancellationError { return } catch { self.error = error.localizedDescription }
-            do { try await Task.sleep(for: .seconds(running || busy || pending != nil ? 2 : 15)) } catch { return }
+        await Poller.run(every: { .seconds(running || busy || pending != nil ? 2 : 15) }) {
+            do { try await load(); return true } catch is CancellationError { return true } catch { self.error = error.localizedDescription; return false }
         }
     }
 

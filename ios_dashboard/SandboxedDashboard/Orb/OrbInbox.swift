@@ -321,9 +321,7 @@ final class OrbInboxDigestStore {
         ensureScope()
         let settings = OrbInboxSettings.shared
         guard settings.aiSummary else { return }
-        if ["active", "running", "starting", "pending", "queued", "resuming", "waiting_background"].contains(row.state) {
-            return
-        }
+        if row.missionState?.isActive == true { return }
         let model = settings.model
         let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: model)
         if cache[key] != nil || inFlight.contains(key) { return }
@@ -487,10 +485,7 @@ final class OrbMissionUnreadStore: @unchecked Sendable {
     private var seenByMissionID: [String: String] = [:]
     private var manuallyUnreadIDs: Set<String> = []
 
-    static let unreadResponseStates: Set<String> = [
-        "awaiting_user", "waiting_user", "completed", "succeeded",
-        "failed", "blocked", "not_feasible", "paused", "interrupted",
-    ]
+    static let unreadResponseStates: Set<String> = Set(MissionState.allCases.filter(\.awaitsReview).map(\.rawValue))
 
     private init() {
         if let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] {
@@ -673,12 +668,8 @@ struct OrbInboxItem: Identifiable, Equatable {
 enum OrbInboxModel {
     static let maxSummaryChars = 320
 
-    private static let workingStatuses: Set<String> = [
-        "active", "running", "starting", "pending", "queued", "resuming", "waiting_background",
-    ]
-    private static let hiddenStatuses: Set<String> = [
-        "acknowledged", "archived", "deleted", "cancelled",
-    ]
+    private static let workingStatuses: Set<String> = Set(MissionState.allCases.filter { $0.category == .working }.map(\.rawValue))
+    private static let hiddenStatuses: Set<String> = Set(MissionState.allCases.filter { $0.category == .hidden }.map(\.rawValue))
     private static let interactiveTools: Set<String> = [
         "ui_native_request", "AskUserQuestion", "question",
     ]
@@ -845,7 +836,7 @@ enum OrbInboxModel {
         events: [StoredEvent],
         answered: Set<String> = []
     ) -> OrbInboxInteraction? {
-        if hiddenStatuses.contains(row.state) || ["completed", "succeeded", "failed", "not_feasible"].contains(row.state) {
+        if hiddenStatuses.contains(row.state) || row.missionState.map({ $0.isSuccess || $0 == .failed || $0 == .notFeasible }) == true {
             return nil
         }
         let resolvedCalls = Set(events.compactMap { $0.eventType == "tool_result" ? $0.toolCallId : nil })
@@ -990,13 +981,11 @@ enum OrbInboxModel {
         if isSubagent(row: row, includeAutonomous: includeAutonomous) { return .hidden }
         if interaction != nil { return .needsYou }
         if workingStatuses.contains(status) { return .working }
-        if ["blocked", "failed", "not_feasible", "awaiting_user", "waiting_user"].contains(status) {
-            return .needsYou
+        switch MissionState(rawValue: status)?.category {
+        case .needsYou: return .needsYou
+        case .ready: return .ready
+        default: return .hidden
         }
-        if ["completed", "succeeded", "paused", "interrupted"].contains(status) {
-            return .ready
-        }
-        return .hidden
     }
 
     static func extractSummary(
@@ -1125,7 +1114,7 @@ enum OrbInboxModel {
         }
 
         if turns.isEmpty {
-            let role = ["failed", "not_feasible"].contains(row.state) ? "error" : "assistant"
+            let role = (row.missionState == .failed || row.missionState == .notFeasible) ? "error" : "assistant"
             turns.append(
                 OrbInboxPeekTurn(
                     id: "fallback",
@@ -1221,7 +1210,7 @@ enum OrbInboxModel {
             guard cat == .needsYou || cat == .ready else { continue }
             var isRowUnread = unreadStore.isUnread(row: row)
             if !isRowUnread, let children = childrenByParent[row.id] {
-                for child in children where ["failed", "not_feasible", "blocked"].contains(child.state) {
+                for child in children where child.missionState?.needsAttention == true {
                     if unreadStore.isUnread(row: child) {
                         isRowUnread = true
                         break
@@ -1272,8 +1261,8 @@ enum OrbInboxModel {
         let (badge, tone) = resolveBadgeAndTone(row: row, summary: summary, interaction: interaction)
         let isGoal = row.raw["goal_mode"].flag || OrbStyle.goalObjective(row.raw["title"].text) != nil
         let unread = OrbMissionUnreadStore.shared.isUnread(row: row, hasInteraction: interaction != nil)
-        let attention = interaction != nil || ["blocked", "failed", "not_feasible"].contains(row.state)
-        let canRetry = ["failed", "not_feasible", "interrupted", "blocked"].contains(row.state)
+        let attention = interaction != nil || row.missionState?.needsAttention == true
+        let canRetry = row.missionState?.canRetry ?? false
         let peekTurns = includePeekTurns ? extractPeekTurns(row: row, events: events, summaryFallback: summary) : []
 
         return OrbInboxItem(
@@ -1303,12 +1292,7 @@ enum OrbInboxModel {
 
     private static func urgencyRank(_ item: OrbInboxItem) -> Int {
         if item.interaction != nil { return 0 }
-        switch item.row.state {
-        case "blocked": return 1
-        case "awaiting_user", "waiting_user": return 2
-        case "failed", "not_feasible": return 3
-        default: return 4
-        }
+        return item.row.missionState?.sortRank ?? 4
     }
 
     @MainActor
@@ -1366,11 +1350,11 @@ enum OrbInboxModel {
 
                 for child in children {
                     let st = child.state
-                    if ["completed", "succeeded"].contains(st) {
+                    if MissionState(rawValue: st)?.isSuccess == true {
                         completed += 1
                     } else if workingStatuses.contains(st) {
                         running += 1
-                    } else if ["failed", "not_feasible", "blocked"].contains(st) {
+                    } else if MissionState(rawValue: st)?.needsAttention == true {
                         failed += 1
                         let childTitle = cleanChildTrackLabel(child.raw["title"].text)
                         failedChildren.append(
@@ -1530,10 +1514,9 @@ struct OrbInboxView: View {
             digestStore.request(row: matchedRow, events: eventsByMission[resolvedID] ?? [], priority: 0)
             if eventsByMission[resolvedID] == nil {
                 Task {
-                    if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: resolvedID, limit: 120, sinceSeq: nil) {
-                        OrbReadCache.saveEvents(resolvedID, events: batch.events)
-                        eventsByMission[resolvedID] = batch.events
-                        digestStore.request(row: matchedRow, events: batch.events, priority: 0)
+                    if let fetched = await Log.attempt(.network, "focused mission events", path: resolvedID, { try await OrbReadCache.events(resolvedID) }) {
+                        eventsByMission[resolvedID] = fetched
+                        digestStore.request(row: matchedRow, events: fetched, priority: 0)
                         recomputeSections()
                     }
                 }
@@ -1579,9 +1562,8 @@ struct OrbInboxView: View {
                 recomputeSections()
                 if eventsByMission[item.id] == nil {
                     Task {
-                        if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: item.id, limit: 120, sinceSeq: nil) {
-                            OrbReadCache.saveEvents(item.id, events: batch.events)
-                            eventsByMission[item.id] = batch.events
+                        if let fetched = await Log.attempt(.network, "peek events", path: item.id, { try await OrbReadCache.events(item.id) }) {
+                            eventsByMission[item.id] = fetched
                             recomputeSections()
                         }
                     }
@@ -1740,12 +1722,7 @@ struct OrbInboxView: View {
         }
         .task {
             await load(force: false)
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                if !Task.isCancelled {
-                    await load(force: true)
-                }
-            }
+            await Poller.run(every: .seconds(10), immediately: false) { await load(force: true); return true }
         }
         .onDisappear { dictation.cancel() }
         .onChange(of: replyingMissionID) { _, _ in dictation.cancel() }
@@ -2736,10 +2713,7 @@ struct OrbInboxView: View {
 
     private func prefetchActiveEvents(for rows: [OrbRow]) async {
         let candidates = rows.filter {
-            [
-                "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
-                "completed", "succeeded", "paused", "interrupted",
-            ].contains($0.state) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
+            ($0.missionState?.awaitsReview ?? false) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
         }
         .sorted { $0.updatedAt > $1.updatedAt }
         .prefix(16)
@@ -2753,10 +2727,9 @@ struct OrbInboxView: View {
                     eventsByMission[row.id] = diskCached
                     events = diskCached
                 } else if idx < 10 {
-                    if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 120, sinceSeq: nil) {
-                        OrbReadCache.saveEvents(row.id, events: batch.events)
-                        eventsByMission[row.id] = batch.events
-                        events = batch.events
+                    if let fetched = await Log.attempt(.network, "inbox events", path: row.id, { try await OrbReadCache.events(row.id) }) {
+                        eventsByMission[row.id] = fetched
+                        events = fetched
                     }
                 }
             }

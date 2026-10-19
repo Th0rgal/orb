@@ -45,22 +45,22 @@ final class OrbSecretRequestMonitor {
     private(set) var projects: [OrbJSON] = []
     private var endpoint = ""
 
-    func refresh() async {
+    @discardableResult
+    func refresh() async -> Bool {
         let current = OrbCore.shared.endpoint
         if current != endpoint { pending = []; projects = []; endpoint = current }
-        guard let snap = try? await OrbCore.shared.call("/api/bitwarden/broker"), current == OrbCore.shared.endpoint else { return }
+        guard let snap = await Log.attempt(.network, "secret requests", { try await OrbCore.shared.call("/api/bitwarden/broker") }) else { return false }
+        guard current == OrbCore.shared.endpoint else { return true }
         pending = snap["requests"].items.filter { $0["status"].text == "pending" }
         if !pending.isEmpty && projects.isEmpty {
             projects = (try? await OrbCore.shared.call("/api/bitwarden/projects").items) ?? []
         }
+        return true
     }
 
     /// Polls until the calling task is cancelled (the view leaves or the app backgrounds).
     func poll() async {
-        while !Task.isCancelled {
-            await refresh()
-            do { try await Task.sleep(for: .seconds(10)) } catch { return }
-        }
+        await Poller.run(every: .seconds(10)) { await refresh() }
     }
 
     func projectName(_ id: String) -> String {

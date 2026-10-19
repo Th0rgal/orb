@@ -132,10 +132,7 @@ struct OrbProvidersSettings: View {
         .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.disabled(loading) }
         .task {
             await load()
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(30)) } catch { break }
-                if scenePhase == .active { await load() }
-            }
+            await Poller.run(every: .seconds(30), immediately: false, while: { scenePhase == .active }) { await load(); return true }
         }
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await load() } } }
         .sheet(isPresented: $keySheet, onDismiss: { editKey = nil }) {

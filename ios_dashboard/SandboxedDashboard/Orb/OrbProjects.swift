@@ -33,20 +33,7 @@ enum OrbStyle {
         ][value] ?? value
     }
 
-    static func statusLabel(_ state: String) -> String {
-        switch state {
-        case "active", "running", "starting": return "Working"
-        case "pending", "queued": return "Queued"
-        case "completed", "succeeded": return "Completed"
-        case "awaiting_user", "waiting_user": return "Waiting for reply"
-        case "blocked": return "Blocked"
-        case "failed": return "Failed"
-        case "interrupted", "cancelled": return "Stopped"
-        case "paused": return "Paused"
-        case "acknowledged": return "Archived"
-        default: return state.replacingOccurrences(of: "_", with: " ")
-        }
-    }
+    static func statusLabel(_ state: String) -> String { MissionState.label(state) }
 
     nonisolated(unsafe) private static let isoFractionalFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -1191,7 +1178,7 @@ struct OrbProjectPage: View {
         (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)) &&
         (filter == "Archived" ? row.state == "acknowledged" : row.state != "acknowledged") &&
         (filter != "Working" || row.active) &&
-        (filter != "Needs attention" || ["blocked", "failed", "interrupted"].contains(row.state))
+        (filter != "Needs attention" || row.missionState.map { $0.needsAttention || $0 == .interrupted } == true)
     }
     private var visible: [OrbRow] {
         if !search.isEmpty {
@@ -1484,7 +1471,7 @@ struct OrbProjectPage: View {
         } else {
             OrbListIcon(symbol: row.backend.hasPrefix("cloud_") ? "cloud" : "cpu")
                 .overlay(alignment: .bottomTrailing) {
-                    if ["failed", "blocked", "not_feasible"].contains(row.state) {
+                    if row.missionState?.needsAttention == true {
                         Circle().fill(OrbStyle.warning).frame(width: 6, height: 6)
                     } else if OrbMissionUnreadStore.shared.isUnread(row: row) {
                         Circle().fill(Color.blue).frame(width: 6, height: 6)
@@ -1611,7 +1598,7 @@ struct OrbProjectPage: View {
         Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
         Button { moveClipboard.pick(row, from: project.id) } label: { Label("Move…", systemImage: "folder") }
         Divider()
-        if ["completed", "failed", "interrupted", "acknowledged", "cancelled"].contains(row.state) {
+        if row.missionState?.isTerminal == true {
             Button { Task { await setStatus(row, "paused") } } label: {
                 Label(row.state == "acknowledged" ? "Restore" : "Reopen", systemImage: "arrow.uturn.backward")
             }

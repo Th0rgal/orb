@@ -94,13 +94,7 @@ struct OrbNotificationPayload: Equatable, Sendable {
                 default: return "Question for you"
                 }
             }
-            switch item.row.state {
-            case "blocked": return "Blocked"
-            case "failed", "not_feasible": return "Failed"
-            case "awaiting_user", "waiting_user": return "Waiting for you"
-            case "completed", "succeeded": return "Done"
-            default: return item.badge
-            }
+            return item.row.missionState?.notificationLabel ?? item.badge
         }()
 
         let title = item.headline
@@ -456,23 +450,17 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     private func startMonitorLoop() {
         backgroundLoopTask?.cancel()
         backgroundLoopTask = Task { @MainActor in
-            var first = true
-            while !Task.isCancelled {
-                // Poll at launch too: a finished mission shouldn't wait 15 s to show up.
-                if !first { try? await Task.sleep(for: .seconds(15)) }
-                first = false
-                guard !Task.isCancelled,
-                      APIService.shared.isConfigured,
-                      APIService.shared.isAuthenticated,
-                      !APIService.shared.authSessionExpired else { continue }
-                await pollHybridMissionsOnce()
-            }
+            // Poll at launch too: a finished mission shouldn't wait 15 s to show up.
+            await Poller.run(every: .seconds(15), while: {
+                APIService.shared.isConfigured && APIService.shared.isAuthenticated && !APIService.shared.authSessionExpired
+            }) { await pollHybridMissionsOnce() }
         }
     }
 
-    func pollHybridMissionsOnce() async {
+    @discardableResult
+    func pollHybridMissionsOnce() async -> Bool {
         await OrbSharedInboxState.shared.refresh()
-        guard let rawMissions = await Log.attempt(.notifications, "hybrid missions poll", { try await OrbCore.shared.call("/api/control/missions?limit=100&all=true") }) else { return }
+        guard let rawMissions = await Log.attempt(.notifications, "hybrid missions poll", { try await OrbCore.shared.call("/api/control/missions?limit=100&all=true") }) else { return false }
         OrbReadCache.seedFromGlobalMissions(rawMissions.items)
         OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
         let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
@@ -482,10 +470,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
 
         var eventsByMission: [String: [StoredEvent]] = [:]
         let candidates = rows.filter {
-            [
-                "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
-                "completed", "succeeded", "paused", "interrupted",
-            ].contains($0.state) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
+            ($0.missionState?.awaitsReview ?? false) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
         }
         .sorted { $0.updatedAt > $1.updatedAt }
         .prefix(8)
@@ -493,9 +478,8 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         for (idx, row) in candidates.enumerated() {
             var events = OrbReadCache.readEvents(row.id)
             if events.isEmpty && OrbMissionUnreadStore.shared.isUnread(row: row) && idx < 4 {
-                if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 120, sinceSeq: nil) {
-                    OrbReadCache.saveEvents(row.id, events: batch.events)
-                    events = batch.events
+                if let fetched = await Log.attempt(.notifications, "events for notification", path: row.id, { try await OrbReadCache.events(row.id) }) {
+                    events = fetched
                 }
             }
             eventsByMission[row.id] = events
@@ -510,6 +494,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
             eventsByMission: eventsByMission
         )
         reconcile(needsYou: sections.needsYou, ready: sections.ready, working: sections.working)
+        return true
     }
 }
 

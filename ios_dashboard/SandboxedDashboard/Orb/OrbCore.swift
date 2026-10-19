@@ -80,7 +80,7 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         return cp.isEmpty ? nil : cp
     }
     var mobile: Bool { !raw["tags"].items.contains(where: { $0.text.hasPrefix("btw-parent:") }) }
-    var active: Bool { ["active", "pending", "running", "starting"].contains(state) }
+    var active: Bool { missionState?.isActive ?? false }
 }
 
 struct OrbNestedMission: Identifiable, Hashable {
@@ -410,6 +410,12 @@ enum OrbReadCache {
     private struct Entry { let value: OrbJSON; let date: Date }
     private static var values: [String: Entry] = [:]
     private static var eventValues: [String: [StoredEvent]] = [:]
+    private static var eventFetchedAt: [String: Date] = [:]
+    private static var eventPending: [String: Task<[StoredEvent], Error>] = [:]
+    /// Network source for `events(_:)`; tests replace it.
+    static var eventsFetcher: @MainActor (_ missionID: String, _ limit: Int) async throws -> [StoredEvent] = { id, limit in
+        try await APIService.shared.getMissionEventsWithMeta(id: id, limit: limit, sinceSeq: nil).events
+    }
     private struct Pending { let id = UUID(); let task: Task<OrbJSON, Error> }
     private static var pending: [String: Pending] = [:]
     private static func key(_ name: String) -> String { OrbDisk.url(name).absoluteString }
@@ -486,6 +492,24 @@ enum OrbReadCache {
         eventValues[scope] = capped
         OrbDisk.saveAsync(capped, key: cacheName)
     }
+    /// The one way to fetch a mission's recent events: account-scoped, TTL-bounded, and
+    /// concurrent callers share one request. Results also land in the disk cache.
+    static func events(_ missionID: String, limit: Int = 120, ttl: TimeInterval = 30, force: Bool = false, now: @MainActor () -> Date = { Date() }) async throws -> [StoredEvent] {
+        let scope = key("events:\(missionID)")
+        if !force, let fetched = eventFetchedAt[scope], now().timeIntervalSince(fetched) < ttl, let cached = eventValues[scope] {
+            return cached
+        }
+        if let task = eventPending[scope] { return try await task.value }
+        let task = Task { @MainActor in try await eventsFetcher(missionID, limit) }
+        eventPending[scope] = task
+        defer { eventPending[scope] = nil }
+        let events = try await task.value
+        // The account may have changed while the request was in flight.
+        guard scope == key("events:\(missionID)") else { throw CancellationError() }
+        saveEvents(missionID, events: events)
+        eventFetchedAt[scope] = now()
+        return events
+    }
     static func load(_ name: String, ttl: TimeInterval = 30, force: Bool = false, fetch: @escaping @MainActor () async throws -> OrbJSON) async throws -> OrbJSON {
         let scope = key(name)
         if !force, let entry = values[scope], Date().timeIntervalSince(entry.date) < ttl { return entry.value }
@@ -511,6 +535,9 @@ enum OrbReadCache {
         pending.removeAll()
         values.removeAll()
         eventValues.removeAll()
+        eventFetchedAt.removeAll()
+        for task in eventPending.values { task.cancel() }
+        eventPending.removeAll()
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
         let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         for file in files where file.pathExtension == "json" {
@@ -572,9 +599,7 @@ enum OrbReadCache {
                 if row.cloud {
                     _ = try? await cloud(row.id)
                 } else if readEvents(row.id).isEmpty {
-                    if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 150, sinceSeq: nil) {
-                        saveEvents(row.id, events: batch.events)
-                    }
+                    _ = await Log.attempt(.cache, "events prefetch", path: row.id) { try await events(row.id, limit: 150) }
                 }
             }
         }

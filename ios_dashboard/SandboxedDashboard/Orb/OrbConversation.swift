@@ -70,7 +70,7 @@ struct OrbConversation: View {
     static let workingPhases: Set<String> = ["queued", "submitting", "running", "cancel_requested"]
     static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode"]
     private var supportsMode: Bool { !isCloud && (selection.backend.isEmpty || Self.goalHarnesses.contains(selection.backend)) }
-    private var working: Bool { optimisticPrompt != nil || (isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : ["active", "pending", "running", "starting"].contains(mission["status"].text)) }
+    private var working: Bool { optimisticPrompt != nil || (isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : (MissionState(rawValue: mission["status"].text)?.isActive ?? false)) }
 
     private func rebuildWorkModel() {
         let next = OrbWorkModel.build(from: events, working: working)
@@ -317,12 +317,12 @@ struct OrbConversation: View {
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
                         OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
                     }
-                    while !Task.isCancelled {
-                        // When SSE stream is connected for local/remote agents, poll lightly (12s);
-                        // for cloud turns without SSE, poll every 3s while working.
-                        let interval: Duration = (stream != nil && !isCloud) ? .seconds(12) : .seconds(3)
-                        do { try await Task.sleep(for: interval) } catch { break }
-                        if phase == .active && (working || isCloud) { await refresh(force: working) }
+                    // When SSE stream is connected for local/remote agents, poll lightly (12s);
+                    // for cloud turns without SSE, poll every 3s while working.
+                    await Poller.run(every: { (stream != nil && !isCloud) ? .seconds(12) : .seconds(3) }, immediately: false,
+                                     while: { phase == .active && (working || isCloud) }) {
+                        await refresh(force: working)
+                        return true
                     }
                 }
                 .onChange(of: text) { _, value in
@@ -1003,7 +1003,7 @@ struct OrbConversation: View {
                 }
                 Button("Rename") { title = mission["title"].text; rename = true }
                 Button("Move") { destinationProject = mission["project"].text; destinationFolder = OrbRow(mission).folder; moving = true }
-                if ["completed", "failed", "interrupted", "acknowledged", "cancelled"].contains(currentStatus) {
+                if MissionState(rawValue: currentStatus)?.isTerminal == true {
                     Button(currentStatus == "acknowledged" ? "Restore" : "Reopen") {
                         Task { await mutate(["status": .string("paused")]) }
                     }
