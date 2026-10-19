@@ -232,8 +232,10 @@ impl JobRunner {
             managed_auth,
         });
         // Side questions must be able to inspect a busy main mission. They
-        // share one extra permit, never an unbounded bypass of node admission.
-        let side_admission = Arc::new(Semaphore::new(1));
+        // share a small bounded pool (SANDBOXED_NODE_SIDE_CAPACITY, default
+        // 2), never an unbounded bypass of node admission. One slow /btw on
+        // one mission must not block every other mission's side question.
+        let side_admission = Arc::new(Semaphore::new(side_question_capacity()));
         // A mission that launched long background jobs must still be able to
         // answer its operator. One extra permit, shared by all workspaces.
         let companion_admission = Arc::new(Semaphore::new(1));
@@ -996,7 +998,36 @@ fn job_memory_limit() -> std::io::Result<u64> {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(1);
-    Ok(default_job_memory_limit(total, capacity))
+    // Every concurrent permit can hold a job: main slots plus the side lane.
+    Ok(default_job_memory_limit(
+        total,
+        capacity + side_question_capacity() as u64 - 1,
+    ))
+}
+
+/// Concurrent side questions per node: light read-mostly jobs (they inspect
+/// a parent mission), so a few may run beside the main slots.
+fn side_question_capacity() -> usize {
+    parse_side_capacity(
+        std::env::var("SANDBOXED_NODE_SIDE_CAPACITY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_side_capacity(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| (1..=16).contains(n))
+        .unwrap_or(2)
+}
+
+#[test]
+fn side_question_capacity_defaults_to_two_and_is_bounded() {
+    assert_eq!(parse_side_capacity(None), 2);
+    assert_eq!(parse_side_capacity(Some("4")), 4);
+    assert_eq!(parse_side_capacity(Some("0")), 2);
+    assert_eq!(parse_side_capacity(Some("999")), 2);
+    assert_eq!(parse_side_capacity(Some("x")), 2);
 }
 
 #[cfg(target_os = "linux")]
@@ -2212,6 +2243,9 @@ mod tests {
 
     #[tokio::test]
     async fn side_questions_have_one_independent_cancellable_slot() {
+        // This test pins a one-slot side lane; the lane size is configurable.
+        // Only node runners read this variable, and 1 is valid for all of them.
+        std::env::set_var("SANDBOXED_NODE_SIDE_CAPACITY", "1");
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::open(dir.path()).await.unwrap();
         let admission = Arc::new(Semaphore::new(1));
