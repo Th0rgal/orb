@@ -1,3 +1,4 @@
+import { readJson, writeJson } from "./storage";
 import { missionNode } from "./machines/nodes";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
@@ -29,8 +30,7 @@ const RECENT_PREFIX = "orb.recentDirs:";
 
 function loadRecentDirs(machine: string): string[] {
   try {
-    const raw = localStorage.getItem(`${RECENT_PREFIX}${machine}`);
-    const parsed = raw ? JSON.parse(raw) : [];
+    const parsed = readJson<unknown>(`${RECENT_PREFIX}${machine}`, []);
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0) : [];
   } catch {
     return [];
@@ -42,7 +42,7 @@ function saveRecentDir(machine: string, dir: string) {
   if (!clean) return;
   try {
     const next = [clean, ...loadRecentDirs(machine).filter((x) => x !== clean)].slice(0, 8);
-    localStorage.setItem(`${RECENT_PREFIX}${machine}`, JSON.stringify(next));
+    writeJson(`${RECENT_PREFIX}${machine}`, next);
   } catch {}
 }
 

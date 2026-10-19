@@ -1,3 +1,4 @@
+import { isRecord, readJson, writeJson } from "./storage";
 import { createMemo, createSignal, onCleanup, Show } from "solid-js";
 import type { StreamItem } from "./transcriptModel";
 import { latestTaskList } from "./taskList";
@@ -6,7 +7,7 @@ import { latestTaskList } from "./taskList";
 // seen (its send time when observed live) so leaving and reopening a mission keeps the count.
 const SEEN_KEY = "orb.turn-started:v1";
 function seenStore(): Record<string, number> {
-  try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "{}"); } catch { return {}; }
+  return readJson<Record<string, number>>(SEEN_KEY, {}, isRecord);
 }
 export function rememberTurnStart(key: string, now = Date.now()): number {
   const store = seenStore();
@@ -14,7 +15,7 @@ export function rememberTurnStart(key: string, now = Date.now()): number {
   store[key] = now;
   const keys = Object.keys(store);
   if (keys.length > 200) for (const k of keys.sort((a, b) => store[a] - store[b]).slice(0, keys.length - 200)) delete store[k];
-  try { localStorage.setItem(SEEN_KEY, JSON.stringify(store)); } catch { /* best effort */ }
+  writeJson(SEEN_KEY, store);
   return now;
 }
 

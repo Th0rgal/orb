@@ -1,3 +1,4 @@
+import { isRecord, readJson, writeJson } from "./storage";
 import { missionAssignedNode, missionNode } from "./machines/nodes";
 import { isQueued, WORKING_STATUSES } from "./missionStatus";
 import { swallow } from "./log";
@@ -28,8 +29,8 @@ import type {LocalActivity} from './localAgents';
 const [remoteActivities,setRemoteActivities]=createSignal<Record<string,LocalActivity[]>>({});
 export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
-export function btwSession(parent:string):BtwSession|undefined{try{return JSON.parse(localStorage.getItem(storageKey(parent))??'null')??undefined;}catch{return undefined;}}
-function save(parent:string,s:BtwSession){localStorage.setItem(storageKey(parent),JSON.stringify(s));}
+export function btwSession(parent:string):BtwSession|undefined{const s=readJson<BtwSession|undefined>(storageKey(parent),undefined,isRecord);return s?{...s}:undefined;}
+function save(parent:string,s:BtwSession){writeJson(storageKey(parent),s);}
 
 // A turn is delimited by its latest user event, not an array offset: late
 // persistence or a resumed session can otherwise replay the previous answer.

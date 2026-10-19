@@ -1,3 +1,4 @@
+import { isRecord, readJson } from "./storage";
 import { swallow } from "./log";
 import { writeInboxState } from "./inboxState";
 import { For, createMemo, createSignal, onMount } from "solid-js";
@@ -25,9 +26,8 @@ export { inboxConfigVersion };
 export function inboxConfig(): InboxConfig {
   inboxConfigVersion();
   try {
-    const raw = localStorage.getItem(sideQuestionKey("settings:inbox"));
-    if (!raw) return { ...DEFAULT_INBOX_CONFIG };
-    const parsed = JSON.parse(raw) as Partial<InboxConfig>;
+    const parsed = readJson<Partial<InboxConfig> | null>(sideQuestionKey("settings:inbox"), null, isRecord);
+    if (!parsed) return { ...DEFAULT_INBOX_CONFIG };
     return {
       includeAutonomous: parsed.includeAutonomous === true,
       aiSummary: typeof parsed.aiSummary === "boolean" ? parsed.aiSummary : DEFAULT_INBOX_CONFIG.aiSummary,

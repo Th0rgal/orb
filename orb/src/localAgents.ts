@@ -1,3 +1,4 @@
+import { isRecord, readJson, writeJson } from "./storage";
 import { HARNESS_IDS, type HarnessId } from "./harnesses";
 import { getCyber, requireCyberSupport, type CyberMode } from "./cyberAccess";
 import {followNative} from "./nativeInteractionStream";
@@ -13,14 +14,14 @@ import { scanMentions, type AttachChip } from "./attach";
 import { getApiUrl, getJwt, listProjectFiles, readProjectFile, getProjectController } from "./api";
 
 function savedLocalFailures(): Record<string,string> {
-  try { return JSON.parse(localStorage.getItem("orb.localFailures") ?? "{}"); } catch { return {}; }
+  return readJson<Record<string,string>>("orb.localFailures", {}, isRecord);
 }
 const [localFailures, setLocalFailures] = createSignal<Record<string,string>>(savedLocalFailures());
 export const localFailure = (id:string) => localFailures()[id];
 export function recordLocalFailure(id:string, error:unknown) {
   const message = error == null ? "" : error instanceof Error ? error.message : String(error);
   setLocalFailures(previous => { const next={...previous}; if(message)next[id]=message;else delete next[id];
-    try {localStorage.setItem("orb.localFailures",JSON.stringify(next));} catch {} return next; });
+    writeJson("orb.localFailures", next); return next; });
 }
 export const LOCAL_HARNESSES = HARNESS_IDS;
 export type LocalHarnessId = HarnessId;
@@ -78,13 +79,7 @@ export const localActivities = (id: string) => activities()[id] ?? [];
 export const localLiveText = (id: string) => liveText()[id] ?? "";
 
 export function pathOverrides(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(PATH_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
-  } catch {
-    return {};
-  }
+  return { ...readJson<Record<string, string>>(PATH_KEY, {}, value => typeof value === "object") };
 }
 
 export function setPathOverride(id: string, path: string) {
@@ -92,7 +87,7 @@ export function setPathOverride(id: string, path: string) {
   const trimmed = path.trim();
   if (trimmed) next[id] = trimmed;
   else delete next[id];
-  localStorage.setItem(PATH_KEY, JSON.stringify(next));
+  writeJson(PATH_KEY, next);
 }
 
 const [bindings, setBindings] = createSignal<Record<string, LocalBinding>>({});

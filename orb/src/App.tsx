@@ -1,3 +1,4 @@
+import { jsonSignal, readString, writeString } from "./storage";
 import { missionAssignedNode, missionNode, nodeLabel } from "./machines/nodes";
 import { isFailedStatus, isLive, isRunning, isSettingsIdle } from "./missionStatus";
 import { errorText, log, swallow } from "./log";
@@ -153,14 +154,6 @@ const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "A
  * harness does not accept that level (see `effort.ts`). */
 export type HarnessPick = { backend: string; model: string; effort?: string; service_tier?: CodexServiceTier };
 const PICK_KEY = "orb.harnessPick";
-const loadPick = (): HarnessPick | null => {
-  try {
-    const raw = localStorage.getItem(PICK_KEY);
-    return raw ? (JSON.parse(raw) as HarnessPick) : null;
-  } catch {
-    return null;
-  }
-};
 const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<HarnessChoice[]>([]);
 const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
@@ -183,15 +176,7 @@ const harnessChoices = (machine = "core"): HarnessChoice[] => {
   const models = machine === "local" ? (localInstalled().find(row => row.id === "antigravity")?.models ?? []) : (nodeAntigravityModels()[`${connectionVersion()}:${machine}`] ?? []);
   return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed));
 };
-const [harnessPick, setHarnessPickRaw] = createSignal<HarnessPick | null>(loadPick());
-const setHarnessPick = (p: HarnessPick) => {
-  setHarnessPickRaw(p);
-  try {
-    localStorage.setItem(PICK_KEY, JSON.stringify(p));
-  } catch {
-    /* ignore */
-  }
-};
+const [harnessPick, setHarnessPick] = jsonSignal<HarnessPick | null>(PICK_KEY, null);
 /** Preserve an explicit selection; launch validation reports unavailable models.
  * A stored effort is normalized against the stored harness on every read, so a
  * level that harness never accepted can't survive into a create payload. */
@@ -1120,8 +1105,8 @@ export default function App() {
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
-  const [selected, setSelected] = createSignal<string | null>((() => { const saved = localStorage.getItem("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? saved : null; })());
-  createEffect(() => { localStorage.setItem("orb.selectedConversation",selected() ?? ""); });
+  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? saved : null; })());
+  createEffect(() => { writeString("orb.selectedConversation", selected() ?? ""); });
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
   const [sbWidth, setSbWidth] = createSignal(220);
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
@@ -1166,22 +1151,22 @@ export default function App() {
   let launchAttempt: { signature: string; key: string } | undefined;
   const MACHINE_KEY = "orb.machine";
   const [explicitMachine, setExplicitMachine] = createSignal(false);
-  const [newMachine, setNewMachine] = createSignal((localStorage.getItem(MACHINE_KEY) === "dgx-spark-admin" ? "core" : localStorage.getItem(MACHINE_KEY)) || "core");
+  const [newMachine, setNewMachine] = createSignal((readString(MACHINE_KEY) === "dgx-spark-admin" ? "core" : readString(MACHINE_KEY)) || "core");
   const chooseMachine = (id: string) => {
     setExplicitMachine(true);
     setNewMachine(id);
-    try { localStorage.setItem(MACHINE_KEY, id === "dgx-spark-admin" ? "core" : id); } catch { /* ignore */ }
+    writeString(MACHINE_KEY, id === "dgx-spark-admin" ? "core" : id);
     if (id === "local") void refreshLocalAgents(false);
   };
   const [workingDirectory, setWorkingDirectory] = createSignal("");
   const directoryKey = () => `orb.directory:${getApiUrl()}:${effectiveNewProject()}:${newMachine()}`;
   createEffect(() => {
     const key = directoryKey();
-    try { setWorkingDirectory(localStorage.getItem(key) ?? ""); } catch { setWorkingDirectory(""); }
+    setWorkingDirectory(readString(key) ?? "");
   });
   const chooseDirectory = (value: string) => {
     setWorkingDirectory(value);
-    try { localStorage.setItem(directoryKey(), value); } catch { /* Keep the draft in memory. */ }
+    writeString(directoryKey(), value); // Kept in memory when storage refuses it.
   };
   const [envOpen, setEnvOpen] = createSignal<"machine" | "project" | null>(null);
   const [history, setHistory] = createSignal<(string | null)[]>([selected()]);

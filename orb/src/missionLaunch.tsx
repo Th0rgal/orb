@@ -1,3 +1,4 @@
+import { isRecord, readJson, writeJson } from "./storage";
 import { missionNode, nodeLabel } from "./machines/nodes";
 import { REMOTE_PROXY_HARNESSES } from "./harnesses";
 import { isQueued } from "./missionStatus";
@@ -36,7 +37,7 @@ export function dockModelLabel(harnessName: string, modelLabel: string): string 
 // workspace, so the label flipped to "host". Remember the last node per mission.
 const LAST_NODE_KEY = "orb.mission-node:v1";
 function lastNodes(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(LAST_NODE_KEY) || "{}"); } catch { return {}; }
+  return readJson<Record<string, string>>(LAST_NODE_KEY, {}, isRecord);
 }
 export function rememberMissionNode(id: string, node: string) {
   const nodes = lastNodes();
@@ -44,7 +45,7 @@ export function rememberMissionNode(id: string, node: string) {
   delete nodes[id]; nodes[id] = node;
   const keys = Object.keys(nodes);
   for (const key of keys.slice(0, Math.max(0, keys.length - 500))) delete nodes[key];
-  try { localStorage.setItem(LAST_NODE_KEY, JSON.stringify(nodes)); } catch { /* best effort */ }
+  writeJson(LAST_NODE_KEY, nodes);
 }
 export function lastMissionNode(id: string | undefined): string | undefined {
   return id ? lastNodes()[id] : undefined;

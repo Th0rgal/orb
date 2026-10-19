@@ -1,3 +1,4 @@
+import { isRecord, readJson, writeJson } from "./storage";
 import { swallow } from "./log";
 import { connectionVersion, getApiUrl, getJwt, isConnected } from "./api";
 import { sideQuestionKey } from "./sideQuestionStorage";
@@ -14,11 +15,11 @@ function loadOutbox(): string {
   const key = sideQuestionKey("inbox-state:outbox:v1");
   if (key !== loadedKey) {
     loadedKey = key; outbox = {}; versions = {};
-    try { const saved = JSON.parse(localStorage.getItem(key) ?? "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) outbox = saved; } catch {}
+    outbox = { ...readJson<typeof outbox>(key, {}, isRecord) };
   }
   return key;
 }
-function persist(): void { try { localStorage.setItem(loadedKey, JSON.stringify(outbox)); } catch {} }
+function persist(): void { writeJson(loadedKey, outbox); }
 
 export function writeInboxState(path: string, input: unknown): void {
   const key = loadOutbox(), serial = ++mutation;
