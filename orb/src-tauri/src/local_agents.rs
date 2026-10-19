@@ -159,6 +159,51 @@ struct Run {
     session_id: Arc<Mutex<Option<String>>>,
     error: Arc<Mutex<Option<String>>>,
     resumed: bool,
+    /// Set by Stop before it signals the process: its exit is not a crash.
+    stopped: Arc<AtomicBool>,
+    /// When the run reached its terminal state; finished runs are pruned.
+    finished: Arc<OnceLock<Instant>>,
+}
+
+/// Finished runs stay cached for reconnect snapshots; only this many are kept.
+const KEPT_FINISHED_RUNS: usize = 32;
+
+/// Human name of a harness, for user-facing messages.
+pub(crate) fn harness_label(harness: &str) -> &'static str {
+    match harness {
+        "claudecode" => "Claude",
+        "codex" => "Codex",
+        "grok" => "Grok",
+        "opencode" => "OpenCode",
+        "antigravity" => "Antigravity",
+        "vibe" => "Vibe",
+        _ => "The harness",
+    }
+}
+
+/// Drop the oldest finished runs beyond `KEPT_FINISHED_RUNS`, then launch
+/// fences nobody holds that were never advanced by a Stop. A fence at 0 is
+/// recreated identically on demand, so forgetting it cannot admit a stale
+/// launch; an advanced fence must persist for as long as the process runs.
+fn prune_finished_runs() {
+    {
+        let mut map = crate::sync_util::lock(runs());
+        let mut finished: Vec<(Instant, String)> = map
+            .iter()
+            .filter(|(_, run)| run.done.load(Ordering::SeqCst))
+            .filter_map(|(id, run)| run.finished.get().map(|at| (*at, id.clone())))
+            .collect();
+        if finished.len() > KEPT_FINISHED_RUNS {
+            finished.sort();
+            let excess = finished.len() - KEPT_FINISHED_RUNS;
+            for (_, id) in finished.into_iter().take(excess) {
+                map.remove(&id);
+            }
+        }
+    }
+    crate::sync_util::lock(fences()).retain(|_, fence| {
+        Arc::strong_count(fence) > 1 || fence.try_lock().map_or(true, |value| *value != 0)
+    });
 }
 
 fn runs() -> &'static Mutex<HashMap<String, Run>> {
@@ -168,12 +213,13 @@ fn runs() -> &'static Mutex<HashMap<String, Run>> {
 
 // Serialize Stop with the synchronous spawn boundary, while network preparation
 // holds only a captured generation. A stopped preparation must never spawn later.
-pub(crate) fn launch_fence(id: &str) -> Arc<Mutex<u64>> {
+fn fences() -> &'static Mutex<HashMap<String, Arc<Mutex<u64>>>> {
     static FENCES: OnceLock<Mutex<HashMap<String, Arc<Mutex<u64>>>>> = OnceLock::new();
-    FENCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap()
+    FENCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn launch_fence(id: &str) -> Arc<Mutex<u64>> {
+    crate::sync_util::lock(fences())
         .entry(id.into())
         .or_insert_with(|| Arc::new(Mutex::new(0)))
         .clone()
@@ -392,7 +438,7 @@ pub(crate) fn start_with_env_fenced(
     let error = Arc::new(Mutex::new(None));
     let resumed = request.session_id.as_deref().is_some_and(|s| !s.is_empty());
     let interaction = crate::interactions::begin(&request.id);
-    let child = match spawn_harness(&request, &text, &session_id, &error, &done, env) {
+    let child = match spawn_harness(&request, &text, &session_id, &error, env) {
         Ok(child) => child,
         Err(error) => {
             crate::interactions::finish(&interaction);
@@ -412,11 +458,14 @@ pub(crate) fn start_with_env_fenced(
         session_id,
         error,
         resumed,
+        stopped: Arc::new(AtomicBool::new(false)),
+        finished: Arc::new(OnceLock::new()),
     };
     watch_exit(
         software_execution,
         interaction,
         run.clone(),
+        harness_label(&request.harness),
         request.harness == "antigravity",
     );
     map.insert(request.id, run);
@@ -427,8 +476,10 @@ fn watch_exit(
     software_execution: crate::agent_software::Execution,
     mission_id: crate::interactions::Session,
     run: Run,
+    harness: &'static str,
     strict_terminal: bool,
 ) {
+    use crate::sync_util::lock;
     let Run {
         child,
         done,
@@ -437,6 +488,8 @@ fn watch_exit(
         session_id,
         error,
         resumed,
+        stopped,
+        finished,
         ..
     } = run;
     thread::spawn(move || {
@@ -445,7 +498,7 @@ fn watch_exit(
         // through Child's mutex, so a recycled PID is never signalled.
         #[cfg(unix)]
         {
-            let pid = child.lock().unwrap().id();
+            let pid = lock(&child).id();
             loop {
                 let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
                 let result = unsafe {
@@ -465,52 +518,95 @@ fn watch_exit(
             unsafe extern "system" {
                 fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
             }
-            let handle = child.lock().unwrap().as_raw_handle();
+            let handle = lock(&child).as_raw_handle();
             unsafe {
                 WaitForSingleObject(handle, u32::MAX);
             }
         }
-        let status = child.lock().ok().and_then(|mut child| child.wait().ok());
+        let status = lock(&child).wait().ok();
         crate::interactions::finish(&mission_id);
-        if let Ok(mut slot) = exit_code.lock() {
-            *slot = status.and_then(|status| status.code());
-        }
+        let code = status.and_then(|status| status.code());
+        *lock(&exit_code) = code;
         output.wait_drained(None);
-        // stderr is diagnostic, not an outcome. Claude emits informational
-        // gateway/connector notices here even after a successful native result.
-        if *exit_code.lock().unwrap() != Some(0) {
-            if let Some(diagnostic) = output.diagnostic() {
-                let mut slot = error.lock().unwrap();
-                if slot.is_none()
-                    || slot.as_deref() == Some("Claude stopped without a final result")
-                {
-                    *slot = Some(format!("Claude process failed: {diagnostic}"));
-                }
-            }
-        }
-        if strict_terminal {
-            let failed = error.lock().is_ok_and(|error| error.is_some());
-            if let Ok(mut slot) = exit_code.lock() {
-                if failed {
-                    *slot = Some(1);
-                } else if *slot != Some(0) {
-                    *slot = Some(0);
-                }
-            }
-        }
+        settle_exit(
+            harness,
+            strict_terminal,
+            stopped.load(Ordering::SeqCst),
+            status.and_then(exit_signal),
+            &output,
+            &exit_code,
+            &error,
+        );
         done.store(true, Ordering::SeqCst);
+        let _ = finished.set(Instant::now());
         output.finish(PollState {
             text: output.snapshot(),
             activities: output.activities(),
             done: true,
-            exit_code: *exit_code.lock().unwrap(),
-            session_id: session_id.lock().unwrap().clone(),
-            error: error.lock().unwrap().clone(),
+            exit_code: *lock(&exit_code),
+            session_id: lock(&session_id).clone(),
+            error: lock(&error).clone(),
             retryable: output.retryable(),
             resumed,
             waiting_since: None,
         });
+        prune_finished_runs();
     });
+}
+
+#[cfg(unix)]
+fn exit_signal(status: std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+#[cfg(not(unix))]
+fn exit_signal(_: std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+/// Decide the terminal error and exit code once the process is reaped.
+fn settle_exit(
+    harness: &str,
+    strict_terminal: bool,
+    stopped: bool,
+    signal: Option<i32>,
+    output: &Output,
+    exit_code: &Mutex<Option<i32>>,
+    error: &Mutex<Option<String>>,
+) {
+    use crate::sync_util::lock;
+    let code = *lock(exit_code);
+    // stderr is diagnostic, not an outcome. Claude emits informational
+    // gateway/connector notices here even after a successful native result.
+    if code != Some(0) {
+        if let Some(diagnostic) = output.diagnostic() {
+            let mut slot = lock(error);
+            if slot.is_none() || slot.as_deref() == Some("Claude stopped without a final result") {
+                *slot = Some(format!("{harness} process failed: {diagnostic}"));
+            }
+        }
+    }
+    if strict_terminal {
+        let mut slot = lock(error);
+        let mut code_slot = lock(exit_code);
+        if slot.is_some() {
+            // A parsed error is a failure, whatever the process reported.
+            if matches!(*code_slot, None | Some(0)) {
+                *code_slot = Some(1);
+            }
+        } else if *code_slot != Some(0) && !stopped {
+            // A crash without a parsed error must not read as success.
+            *slot = Some(match (*code_slot, signal) {
+                (Some(code), _) => format!("{harness} exited with code {code}"),
+                (None, Some(signal)) => format!("{harness} was terminated by signal {signal}"),
+                (None, None) => format!("{harness} exited without a status"),
+            });
+            code_slot.get_or_insert(1);
+        } else if *code_slot != Some(0) {
+            // Stopped by the user: a deliberate end, not a failure.
+            *code_slot = Some(0);
+        }
+    }
 }
 
 #[tauri::command]
@@ -601,7 +697,8 @@ pub fn stop_generation(id: &str, expected: Option<&str>) -> Result<(), String> {
             return Ok(());
         }
         crate::interactions::cancel(id);
-        let mut child = run.child.lock().map_err(|e| e.to_string())?;
+        run.stopped.store(true, Ordering::SeqCst);
+        let mut child = crate::sync_util::lock(&run.child);
         // The trusted wrapper owns the CLI's child process group. Give it
         // time to forward termination and reap that group before escalation.
         #[cfg(unix)]
@@ -787,6 +884,7 @@ fn try_reattach_orphan_antigravity(id: &str) -> bool {
     let session_id = Arc::new(Mutex::new(Some(session.clone())));
     let error = Arc::new(Mutex::new(None));
     let child = Arc::new(Mutex::new(dummy_child));
+    let finished = Arc::new(OnceLock::new());
     let run = Run {
         mcp_wrapped: false,
         generation: uuid::Uuid::new_v4().to_string(),
@@ -799,6 +897,8 @@ fn try_reattach_orphan_antigravity(id: &str) -> bool {
         session_id: Arc::clone(&session_id),
         error: Arc::clone(&error),
         resumed: true,
+        stopped: Arc::new(AtomicBool::new(false)),
+        finished: Arc::clone(&finished),
     };
     map.insert(id.to_owned(), run);
     drop(map);
@@ -944,18 +1044,20 @@ fn try_reattach_orphan_antigravity(id: &str) -> bool {
             }
         }
         done.store(true, Ordering::SeqCst);
+        let _ = finished.set(Instant::now());
         let final_state = PollState {
             text: text.snapshot(),
             activities: text.activities(),
             done: true,
-            exit_code: *exit_code.lock().unwrap(),
-            session_id: session_id.lock().unwrap().clone(),
-            error: error.lock().unwrap().clone(),
+            exit_code: *crate::sync_util::lock(&exit_code),
+            session_id: crate::sync_util::lock(&session_id).clone(),
+            error: crate::sync_util::lock(&error).clone(),
             retryable: stream.is_retryable(),
             resumed: true,
             waiting_since: None,
         };
         text.finish(final_state);
+        prune_finished_runs();
     });
     true
 }
@@ -978,14 +1080,13 @@ fn spawn_harness(
     text: &Arc<Output>,
     session_id: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>,
-    done: &Arc<AtomicBool>,
     env: &[(String, String)],
 ) -> Result<Child, String> {
     match request.harness.as_str() {
         "antigravity" => spawn_antigravity(request, text, session_id, error, env),
         "vibe" => spawn_vibe(request, text, session_id, error, env),
         "claudecode" => spawn_claude(request, text, session_id, error, env),
-        "codex" => spawn_codex(request, text, session_id, error, done, env),
+        "codex" => spawn_codex(request, text, session_id, error, env),
         "grok" => spawn_piped(
             request,
             grok_args(request),
@@ -1998,7 +2099,6 @@ fn spawn_codex(
     text: &Arc<Output>,
     session_out: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>,
-    done: &Arc<AtomicBool>,
     env: &[(String, String)],
 ) -> Result<Child, String> {
     let mut command = mission_command(request, env);
@@ -2060,7 +2160,6 @@ fn spawn_codex(
     let text_bg = Arc::clone(text);
     let session_bg = Arc::clone(session_out);
     let error_bg = Arc::clone(error);
-    let done_bg = Arc::clone(done);
     if let Some(stderr) = stderr {
         thread::spawn(move || {
             // Diagnostics are not turn outcomes. In particular app-server shutdown
@@ -2099,7 +2198,7 @@ fn spawn_codex(
                 });
             }
         }
-        done_bg.store(true, Ordering::SeqCst);
+        // The exit watcher marks the run done once app-server is reaped.
     });
     Ok(child)
 }
@@ -3227,7 +3326,6 @@ mod tests {
             &Arc::new(Output::default()),
             &Arc::new(Mutex::new(None)),
             &Arc::new(Mutex::new(None)),
-            &Arc::new(AtomicBool::new(false)),
             &[],
         )
         .unwrap_err();
@@ -3290,15 +3388,7 @@ mod tests {
             let output = Arc::new(Output::default());
             let session = Arc::new(Mutex::new(None));
             let error = Arc::new(Mutex::new(None));
-            let mut child = spawn_harness(
-                &request,
-                &output,
-                &session,
-                &error,
-                &Arc::new(AtomicBool::new(false)),
-                &[],
-            )
-            .unwrap();
+            let mut child = spawn_harness(&request, &output, &session, &error, &[]).unwrap();
             let status = child.wait().unwrap();
             if outcome != "ERROR" {
                 assert!(status.success());

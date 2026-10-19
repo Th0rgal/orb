@@ -1,4 +1,5 @@
 //! Ordered, push-based output; a subscriber receives one snapshot, then deltas.
+use crate::sync_util::{lock, wait_timeout_while, wait_while};
 use serde::Serialize;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -140,17 +141,17 @@ pub struct Output(
 pub struct ReaderGuard(Arc<Output>);
 impl Drop for ReaderGuard {
     fn drop(&mut self) {
-        let _guard = self.0 .3.lock().unwrap();
+        let _guard = lock(&self.0 .3);
         self.0 .1.fetch_sub(1, Ordering::SeqCst);
         self.0 .4.notify_all();
     }
 }
 impl Output {
     pub fn set_diagnostic(&self, message: String) {
-        *self.7.lock().unwrap() = Some(message);
+        *lock(&self.7) = Some(message);
     }
     pub fn diagnostic(&self) -> Option<String> {
-        self.7.lock().unwrap().clone()
+        lock(&self.7).clone()
     }
     pub fn set_retryable(&self, retryable: bool) {
         self.6.store(retryable, Ordering::SeqCst);
@@ -176,10 +177,10 @@ impl Output {
         Some(self.5.load(Ordering::SeqCst)).filter(|at| *at > 0)
     }
     pub fn activities(&self) -> Vec<Activity> {
-        self.2.lock().unwrap().clone()
+        lock(&self.2).clone()
     }
     pub fn codex_reconnecting(&self, message: Option<&str>) {
-        let mut activities = self.2.lock().unwrap();
+        let mut activities = lock(&self.2);
         let index = activities.iter().position(|a| a.id == "codex:connection");
         if let Some(message) = message {
             let item = Activity::new(
@@ -207,7 +208,7 @@ impl Output {
     }
     /// A status snapshot, not a tool or a fabricated reasoning message.
     pub fn antigravity_progress(&self, stream: &crate::antigravity::Stream) {
-        let mut activities = self.2.lock().unwrap();
+        let mut activities = lock(&self.2);
         let index = activities
             .iter()
             .position(|a| a.id == "antigravity:status")
@@ -252,7 +253,7 @@ impl Output {
             event["conversation_id"].as_str().unwrap_or(""),
             event["step_index"]
         );
-        let mut activities = self.2.lock().unwrap();
+        let mut activities = lock(&self.2);
         let index = activities
             .iter()
             .position(|a| a.id == id)
@@ -280,7 +281,7 @@ impl Output {
             };
             let raw_id = part["id"].as_str().unwrap_or("opencode");
             let id = format!("native:reasoning:{raw_id}");
-            let mut activities = self.2.lock().unwrap();
+            let mut activities = lock(&self.2);
             let index = activities
                 .iter()
                 .position(|a| a.id == id)
@@ -300,7 +301,7 @@ impl Output {
                 return;
             };
             let id = format!("native:{id}");
-            let mut activities = self.2.lock().unwrap();
+            let mut activities = lock(&self.2);
             let index = activities
                 .iter()
                 .position(|a| a.id == id)
@@ -357,7 +358,7 @@ impl Output {
             let Some(plan) = normalized else {
                 return;
             };
-            let mut activities = self.2.lock().unwrap();
+            let mut activities = lock(&self.2);
             let id = format!("native:plan:{}", activities.len());
             let mut item = Activity::new(id, "update_plan".into(), "tool", false);
             let mut payload = serde_json::json!({ "input": { "plan": plan } });
@@ -414,7 +415,7 @@ impl Output {
         } else {
             format!("native:{raw_call_id}")
         };
-        let mut activities = self.2.lock().unwrap();
+        let mut activities = lock(&self.2);
         let index = activities
             .iter()
             .position(|a| a.id == id)
@@ -471,7 +472,7 @@ impl Output {
         }
     }
     pub fn claude_activity(&self, value: &serde_json::Value) {
-        let mut activities = self.2.lock().unwrap();
+        let mut activities = lock(&self.2);
         if value["type"] == "system" {
             match value["subtype"].as_str() {
                 Some("task_started" | "task_progress") => {
@@ -652,7 +653,7 @@ impl Output {
             state: None,
             activities: Some(activities),
         };
-        let mut state = self.0.lock().unwrap();
+        let mut state = lock(&self.0);
         state.sink(&event);
         state
             .listeners
@@ -663,14 +664,13 @@ impl Output {
         ReaderGuard(self.clone())
     }
     pub fn wait_drained(&self, timeout: Option<std::time::Duration>) -> bool {
-        let guard = self.3.lock().unwrap();
+        let guard = lock(&self.3);
         if let Some(timeout) = timeout {
-            let _ = self
-                .4
-                .wait_timeout_while(guard, timeout, |_| !self.drained())
-                .unwrap();
+            drop(wait_timeout_while(&self.4, guard, timeout, |_| {
+                !self.drained()
+            }));
         } else {
-            drop(self.4.wait_while(guard, |_| !self.drained()).unwrap());
+            drop(wait_while(&self.4, guard, |_| !self.drained()));
         }
         self.drained()
     }
@@ -678,13 +678,13 @@ impl Output {
         self.1.load(Ordering::SeqCst) == 0
     }
     pub fn snapshot(&self) -> String {
-        self.0.lock().unwrap().text.clone()
+        lock(&self.0).text.clone()
     }
     pub fn append(&self, text: &str) {
         if text.is_empty() {
             return;
         }
-        let mut state = self.0.lock().unwrap();
+        let mut state = lock(&self.0);
         state.text.push_str(text);
         let event = Event {
             text: text.into(),
@@ -698,7 +698,7 @@ impl Output {
             .retain(|(_, channel)| channel.send(event.clone()).is_ok());
     }
     pub fn replace(&self, text: String) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = lock(&self.0);
         if state.text == text {
             return;
         }
@@ -715,7 +715,7 @@ impl Output {
             .retain(|(_, channel)| channel.send(event.clone()).is_ok());
     }
     pub fn finish(&self, terminal: crate::local_agents::PollState) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = lock(&self.0);
         if state.terminal.is_some() {
             return;
         }
@@ -734,7 +734,7 @@ impl Output {
     }
     pub fn subscribe(&self, channel: Channel<Event>) -> Result<u64, String> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let mut state = self.0.lock().unwrap();
+        let mut state = lock(&self.0);
         channel
             .send(Event {
                 text: state.text.clone(),
@@ -753,7 +753,7 @@ impl Output {
     /// deltas, then the terminal state (after which the sender is dropped).
     pub fn subscribe_native(&self, sink: std::sync::mpsc::Sender<Event>) -> Result<u64, String> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let mut state = self.0.lock().unwrap();
+        let mut state = lock(&self.0);
         sink.send(Event {
             text: state.text.clone(),
             reset: true,
@@ -768,14 +768,10 @@ impl Output {
         Ok(token)
     }
     pub fn clear_subscriptions(&self) {
-        self.0.lock().unwrap().listeners.clear();
+        lock(&self.0).listeners.clear();
     }
     pub fn unsubscribe(&self, id: u64) {
-        self.0
-            .lock()
-            .unwrap()
-            .listeners
-            .retain(|(key, _)| *key != id);
+        lock(&self.0).listeners.retain(|(key, _)| *key != id);
     }
 }
 

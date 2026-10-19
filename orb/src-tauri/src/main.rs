@@ -43,6 +43,7 @@ mod machine_metrics;
 mod routed_opencode;
 mod session_preview;
 mod skills;
+mod sync_util;
 mod transfers;
 mod uploads;
 mod voice;
