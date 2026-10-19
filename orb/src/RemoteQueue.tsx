@@ -17,6 +17,10 @@ export type PendingRemoteQueueItem = { id: string; content: string; attached?: b
 export function RemoteQueue(p: {
   mission: string;
   confirmed?: (QueuedMessage & {attached?:boolean})[];
+  /** Ids already shown as sent in the transcript. Core keeps a remote follow-up in
+   * its inbox until the node accepts the job, which can be long when the node is
+   * full; a delivered message must not also be listed as queued. */
+  delivered?: string[];
   pending?: PendingRemoteQueueItem | PendingRemoteQueueItem[];
   editing?: string;
   onEdit?: (row: {id: string; text: string; remote: true}) => void;
@@ -33,10 +37,12 @@ export function RemoteQueue(p: {
     if (!p.pending) return [];
     return Array.isArray(p.pending) ? p.pending : [p.pending];
   };
+  const delivered = () => new Set(p.delivered ?? []);
   const visibleRows = () => {
+    const sent = delivered();
     const known = new Map<string,QueuedMessage & {attached?:boolean}>();
-    for (const row of rows()) if (!deletedIds.has(row.id)) known.set(row.id, row);
-    for (const row of p.confirmed ?? []) if (!deletedIds.has(row.id)) known.set(row.id, {...known.get(row.id), ...row});
+    for (const row of rows()) if (!deletedIds.has(row.id) && !sent.has(row.id)) known.set(row.id, row);
+    for (const row of p.confirmed ?? []) if (!deletedIds.has(row.id) && !sent.has(row.id)) known.set(row.id, {...known.get(row.id), ...row});
     return [...known.values()];
   };
   const displayRows = () => {
@@ -49,7 +55,7 @@ export function RemoteQueue(p: {
       out.push({ ...row, sending: false });
     }
     for (const item of pendingList()) {
-      if (deletedIds.has(item.id) || seen.has(item.id)) continue;
+      if (deletedIds.has(item.id) || seen.has(item.id) || delivered().has(item.id)) continue;
       seen.add(item.id);
       const confirmed = confirmedMap.get(item.id);
       if (confirmed) out.push({ ...confirmed, sending: false });
@@ -73,7 +79,8 @@ export function RemoteQueue(p: {
       try {
         const pending = (await listQueuedMessages(mission)).filter(row => !row.inflight && !deletedIds.has(row.id) && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
         if (disposed || started !== revision || version !== connectionVersion()) return;
-        setRows(pending); p.onRows(pending.map(row => row.id));
+        const sent = untrack(delivered);
+        setRows(pending); p.onRows(pending.filter(row => !sent.has(row.id)).map(row => row.id));
       } catch { /* Keep the last confirmed inbox during a network interruption. */ }
       finally { loading = false; }
     };

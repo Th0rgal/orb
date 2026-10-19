@@ -3214,7 +3214,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const phase = missionPhase(mission(), activity());
     return (optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
-  const phaseLabel = () => sendingImmediate() ? "Stopping the current turn…" : mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
+  // A remote job queued for capacity has not started: say so instead of "Working".
+  const phaseLabel = () => sendingImmediate() ? "Stopping the current turn…" : mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
@@ -3617,6 +3618,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             onSendImmediate={sendRemoteImmediate}
             pending={!clientPlaced() && !sendError() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,content:item.text})) : undefined}
             confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
+            delivered={items().flatMap(item => item.kind === "user" && !item.queued && item.messageId ? [item.messageId] : [])}
             onRows={reconcileRemoteQueue} onCancel={id=>{
             setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||item.messageId!==id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
