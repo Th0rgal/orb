@@ -242,3 +242,62 @@ pub async fn approval_sign(
         .map(str::to_string)
         .ok_or_else(|| "No signature returned".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stand-in for `orb-signer serve`: it "signs" by returning the payload
+    /// it decoded, so the test verifies what reached the helper.
+    #[cfg(unix)]
+    fn fake_server(script: &str) -> Server {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Server {
+            stdin: child.stdin.take().unwrap(),
+            stdout: std::io::BufReader::new(child.stdout.take().unwrap()),
+            child,
+            key: PathBuf::from("/nonexistent/approval-key.bin"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signing_request_carries_the_exact_payload_and_verifies_the_reply() {
+        use base64::Engine;
+        let mut server = fake_server(
+            r#"while read -r line; do printf '{"signature":"%s","grace_until":"42"}\n' "$line"; done"#,
+        );
+        let payload = r#"{"op":"approve","summary":"Déployer ✓","nonce":7}"#;
+        let reply = request(&mut server, payload).unwrap();
+        let signature = reply["signature"].as_str().unwrap();
+        let signed = base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .unwrap();
+        assert_eq!(
+            signed,
+            payload.as_bytes(),
+            "the helper signed another payload"
+        );
+        assert_eq!(reply["grace_until"], "42");
+        // A tampered payload does not verify against the first signature.
+        let other = request(&mut server, &payload.replace('7', "8")).unwrap();
+        assert_ne!(other["signature"], reply["signature"]);
+        let _ = server.child.kill();
+        let _ = server.child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_exits_is_an_error_not_a_signature() {
+        let mut server = fake_server("read -r line; exit 0");
+        let error = request(&mut server, "{}").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        let _ = server.child.wait();
+    }
+}

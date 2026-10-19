@@ -260,3 +260,38 @@ pub async fn pick_working_directory() -> Result<Option<String>, String> {
     let path = folder.path().canonicalize().map_err(|e| e.to_string())?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_dropped_or_picked_files_are_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let allowed = root.join("allowed.txt");
+        let other = root.join("other.txt");
+        std::fs::write(&allowed, "ok").unwrap();
+        std::fs::write(&other, "secret").unwrap();
+        std::fs::create_dir(root.join("folder")).unwrap();
+        let dropped = allow_drop(&[allowed.clone(), root.join("folder"), root.join("missing")]);
+        assert_eq!(dropped, vec![allowed.to_string_lossy().into_owned()]);
+        assert_eq!(
+            verify_allowed_file(&allowed.to_string_lossy()).unwrap(),
+            allowed
+        );
+        // A file nobody chose, a directory, a missing path.
+        assert!(verify_allowed_file(&other.to_string_lossy()).is_err());
+        assert!(verify_allowed_file(&root.join("folder").to_string_lossy()).is_err());
+        assert!(verify_allowed_file(&root.join("missing").to_string_lossy()).is_err());
+        // The chosen file reached through another spelling or a link.
+        let dotted = root.join("folder").join("..").join("allowed.txt");
+        assert!(verify_allowed_file(&dotted.to_string_lossy()).is_err());
+        #[cfg(unix)]
+        {
+            let link = root.join("link.txt");
+            std::os::unix::fs::symlink(&allowed, &link).unwrap();
+            assert!(verify_allowed_file(&link.to_string_lossy()).is_err());
+        }
+    }
+}

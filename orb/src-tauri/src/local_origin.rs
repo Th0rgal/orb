@@ -158,8 +158,7 @@ async fn start_worker(path: PathBuf, c: Connection) {
             .build()
             .unwrap();
         let mut last_session = None;
-        loop {
-            let Ok(mut record) = read(&path) else { break };
+        while let Ok(mut record) = read(&path) {
             if record.rejected() {
                 break;
             }
@@ -271,7 +270,17 @@ async fn start_worker(path: PathBuf, c: Connection) {
                             record.rejected = true;
                             // Never stop a successor or an unidentifiable legacy execution.
                             if let Some(generation) = generation.as_deref() {
-                                let _ = local_agents::stop_generation(&id, Some(generation));
+                                if let Err(error) =
+                                    local_agents::stop_generation(&id, Some(generation))
+                                {
+                                    crate::orb_log!(
+                                        error,
+                                        "rejected_origin_stop_failed",
+                                        mission = id,
+                                        generation = generation,
+                                        extra = serde_json::json!({"error": error})
+                                    );
+                                }
                             }
                         }
                         let _ = write(&path, &record);

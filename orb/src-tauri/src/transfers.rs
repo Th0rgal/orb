@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 #[path = "../../../shared/machine_transfer.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 pub mod checkpoint;
 fn home() -> Result<PathBuf, String> {
     Ok(PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?).join(".orb"))
@@ -127,10 +128,17 @@ pub async fn local_agents_start_authorized(
                 // receipt stops this particular native generation.
                 if response.is_ok_and(|r| r.status().as_u16() == 409) {
                     if crate::local_agents::native_generation(&mission_id) == generation {
-                        let _ = crate::local_agents::stop_generation(
-                            &mission_id,
-                            generation.as_deref(),
-                        );
+                        if let Err(error) =
+                            crate::local_agents::stop_generation(&mission_id, generation.as_deref())
+                        {
+                            crate::orb_log!(
+                                error,
+                                "stale_permit_stop_failed",
+                                mission = mission_id,
+                                generation = generation,
+                                extra = serde_json::json!({"error": error})
+                            );
+                        }
                     }
                     break;
                 }

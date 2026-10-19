@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #[path = "../../../shared/agent_software.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod agent_software;
 #[path = "../../../shared/antigravity.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod antigravity;
 #[path = "../../../shared/codex_speed.rs"]
 pub mod codex_speed;
@@ -10,8 +12,10 @@ pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
 #[path = "../../../shared/harness_attribution.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod harness_attribution;
 #[path = "../../../shared/vibe.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod vibe;
 
 mod connection_store;
@@ -23,6 +27,7 @@ mod local_origin_confirmed;
 mod local_origin_wire;
 mod mcp_launch;
 #[path = "../../../shared/project_context.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod project_context_store;
 mod run_recovery;
 mod software;
@@ -43,6 +48,7 @@ mod machine_metrics;
 mod routed_opencode;
 mod session_preview;
 mod skills;
+mod sync_util;
 mod transfers;
 mod uploads;
 mod voice;
@@ -164,10 +170,17 @@ fn main() {
             {
                 use tauri::Emitter;
                 let paths = uploads::allow_drop(paths);
-                let _ = window.emit(
+                let count = paths.len();
+                if let Err(error) = window.emit(
                     "orb-upload-drop",
                     serde_json::json!({"paths":paths,"x":position.x,"y":position.y}),
-                );
+                ) {
+                    orb_log!(
+                        warn,
+                        "upload_drop_emit_failed",
+                        extra = serde_json::json!({"paths": count, "error": error.to_string()})
+                    );
+                }
             }
         })
         .setup(|app| {
@@ -200,6 +213,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             diagnostics::diagnostics_append,
+            diagnostics::reveal_logs,
             approval_key::approval_key_status,
             approval_key::approval_key_create,
             approval_key::approval_sign,
@@ -241,7 +255,6 @@ fn main() {
             voice::voice_prewarm,
             voice::voice_transcribe,
             voice::voice_cancel,
-            voice::voice_release,
             context_service::project_context_file,
             context_service::project_context_prepare,
             context_service::project_skills_prepare,

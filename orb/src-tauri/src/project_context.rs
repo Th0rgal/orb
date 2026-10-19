@@ -73,7 +73,10 @@ pub fn project_context_status(request: Request) -> Result<serde_json::Value, Str
 /// so the local replica stays fresh. Listed in Settings so they are never invisible.
 #[tauri::command]
 pub fn project_context_workers(request: Request) -> Result<serde_json::Value, String> {
-    let replica = replica(&Request { project: "list".into(), ..request })?;
+    let replica = replica(&Request {
+        project: "list".into(),
+        ..request
+    })?;
     let account = replica
         .store
         .metadata
@@ -85,7 +88,9 @@ pub fn project_context_workers(request: Request) -> Result<serde_json::Value, St
         for item in std::fs::read_dir(account).map_err(|e| e.to_string())? {
             let path = item.map_err(|e| e.to_string())?.path();
             let state = path.join("state");
-            let Some(project) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else { continue };
+            let Some(project) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                continue;
+            };
             if !state.is_dir() || project == "list" {
                 continue;
             }
@@ -96,7 +101,9 @@ pub fn project_context_workers(request: Request) -> Result<serde_json::Value, St
                 .open(state.join("worker.lock"))
                 .map(|lock| lock.try_lock_exclusive().is_err())
                 .unwrap_or(false);
-            rows.push(serde_json::json!({"project": project, "connected": connected, "running": running}));
+            rows.push(
+                serde_json::json!({"project": project, "connected": connected, "running": running}),
+            );
         }
     }
     rows.sort_by(|a, b| a["project"].as_str().cmp(&b["project"].as_str()));
@@ -342,10 +349,7 @@ pub fn worker_entry() -> bool {
             })?;
             let mut credentials = request.clone();
             let mut remote = context_listener(credentials.clone(), wake_tx.clone());
-            loop {
-                let Ok(bytes) = std::fs::read(&config) else {
-                    break;
-                };
+            while let Ok(bytes) = std::fs::read(&config) {
                 let current: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 if current.token != credentials.token || current.endpoint != credentials.endpoint {
                     remote.abort();

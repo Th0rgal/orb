@@ -478,8 +478,11 @@ impl Account {
             .entry(mission.to_string())
             .or_insert_with(|| Journal::load(&self.dir, mission));
         if let Err(error) = journal.append_or_stop(frames) {
-            eprintln!(
-                "[client-link] journal write failed for {mission}; falling back to HTTP: {error}"
+            crate::orb_log!(
+                warn,
+                "client_link_journal_failed",
+                mission = mission,
+                extra = serde_json::json!({"error": error.to_string(), "fallback": "http"})
             );
         }
         drop(journals);
@@ -585,7 +588,12 @@ pub fn attach(mission: &str, permit: &crate::transfers::Permit) {
     };
     let (tx, rx) = std::sync::mpsc::channel::<Event>();
     if let Err(error) = crate::local_agents::subscribe_native(mission, tx) {
-        eprintln!("[client-link] cannot follow {mission}: {error}");
+        crate::orb_log!(
+            warn,
+            "client_link_follow_failed",
+            mission = mission,
+            extra = serde_json::json!({"error": error})
+        );
         return;
     }
     let (mission, run_id, generation) = (
@@ -665,11 +673,15 @@ async fn uplink(api: String, acc: Arc<Account>) {
                 }
                 acc.accepted
                     .store(false, std::sync::atomic::Ordering::SeqCst);
-                eprintln!("[client-link] Core does not support the client link; uplink stopped");
+                crate::orb_log!(warn, "client_link_unsupported");
                 return;
             }
             Ok(Stop::Closed) => backoff = Duration::from_secs(1),
-            Err(error) => eprintln!("[client-link] {error}"),
+            Err(error) => crate::orb_log!(
+                warn,
+                "client_link_error",
+                extra = serde_json::json!({"error": error.to_string(), "retry_ms": backoff.as_millis() as u64})
+            ),
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -786,7 +798,7 @@ async fn session(api: &str, acc: &Arc<Account>) -> Result<Stop, String> {
                     // A refusal consumes its sequence on Core, like an ack.
                     Some("ack" | "rejected") => {
                         if reply["type"] == "rejected" {
-                            eprintln!("[client-link] {mission}: Core refused event {}: {reason}", reply["seq"]);
+                            crate::orb_log!(warn, "client_link_event_refused", mission = mission, extra = serde_json::json!({"seq": reply["seq"], "reason": reason}));
                         }
                         if let Some(seq) = reply["seq"].as_u64() {
                             let _ = journal.ack(seq);

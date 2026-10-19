@@ -1320,8 +1320,10 @@ mod tests {
 
     #[test]
     fn responses_have_stable_step_ids_and_survive_tool_boundaries_and_short_final_receipts() {
-        let mut stream = Stream::default();
-        stream.turn_id = "turn".into();
+        let mut stream = Stream {
+            turn_id: "turn".into(),
+            ..Default::default()
+        };
         stream.feed(&json!({"event":"init","conversation_id":"session"}));
         let first = stream.feed(&json!({"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"First 🦀"}}));
         assert_eq!(first[0]["bubble_id"], "antigravity:session:turn:1");
@@ -2016,8 +2018,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut stream = Stream::default();
-        stream.session = Some(session.to_owned());
+        let mut stream = Stream {
+            session: Some(session.to_owned()),
+            ..Default::default()
+        };
         stream.reconcile_orphan_transcript_turn(home.path(), Some(2642));
         let err = stream.finish().unwrap_err();
         assert!(err.contains(&task_id), "unexpected err: {err}");
@@ -2060,8 +2064,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut clean_stream = Stream::default();
-        clean_stream.session = Some(session.to_owned());
+        let mut clean_stream = Stream {
+            session: Some(session.to_owned()),
+            ..Default::default()
+        };
         clean_stream.reconcile_orphan_transcript_turn(home.path(), Some(2642));
         assert!(clean_stream.finish().is_ok());
     }

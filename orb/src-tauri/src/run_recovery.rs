@@ -258,6 +258,7 @@ async fn recover(
     .await
 }
 
+#[cfg(test)]
 async fn inspect_and_settle(
     c: &Connection,
     id: &str,
@@ -301,7 +302,8 @@ async fn inspect_and_settle_for(
     if local_agents::has_orphan_mission_processes(id) {
         local_agents::stop_orphan_mission_processes(id);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        while local_agents::has_orphan_mission_processes(id) && std::time::Instant::now() < deadline {
+        while local_agents::has_orphan_mission_processes(id) && std::time::Instant::now() < deadline
+        {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         if local_agents::has_orphan_mission_processes(id) {
