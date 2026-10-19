@@ -282,6 +282,16 @@ pub struct MissionFacts {
     pub already_tagged_orphaned: bool,
 }
 
+/// A `pending` mission is stranded when nothing holds a run for it and its
+/// latest run ended, long enough ago, because the remote dispatch failed.
+pub fn stranded_pending(
+    active_run: bool,
+    latest_reason: Option<&str>,
+    ended_long_ago: bool,
+) -> bool {
+    !active_run && ended_long_ago && latest_reason == Some(super::control::REMOTE_DISPATCH_FAILED)
+}
+
 pub fn classify_mission(facts: &MissionFacts) -> MissionVerdict {
     if facts.is_client_placed {
         return MissionVerdict::Keep;
@@ -656,6 +666,80 @@ pub async fn run(state: &Arc<AppState>) -> ReconcileReport {
                     report.errors += 1;
                 }
             }
+        }
+
+        // 2a'. Pending missions stranded by a remote dispatch that never
+        // completed (e.g. Core restarted between "pending" and submit). Nothing
+        // owns them: show them interrupted so the client offers Resume, instead
+        // of a permanent "Working". No auto-resume: the dispatch already failed.
+        let pending = match store
+            .list_missions_filtered(
+                &crate::api::mission_store::MissionFilter {
+                    status: Some("pending".into()),
+                    ..Default::default()
+                },
+                500,
+                0,
+            )
+            .await
+        {
+            Ok(missions) => missions,
+            Err(err) => {
+                tracing::warn!(%err, "reconcile: could not list pending missions");
+                report.errors += 1;
+                Vec::new()
+            }
+        };
+        for mission in pending {
+            if running_ids.contains(&mission.id)
+                || super::control::client_placement::is_tagged(&mission.project.tags)
+            {
+                continue;
+            }
+            let active_run = matches!(store.get_active_mission_run(mission.id).await, Ok(Some(_)));
+            let latest = store
+                .get_latest_mission_run(mission.id)
+                .await
+                .ok()
+                .flatten();
+            let ended_long_ago = latest
+                .as_ref()
+                .and_then(|run| run.ended_at.as_deref())
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .is_some_and(|t| now - t.with_timezone(&chrono::Utc) >= grace);
+            if !stranded_pending(
+                active_run,
+                latest
+                    .as_ref()
+                    .and_then(|run| run.terminal_reason.as_deref()),
+                ended_long_ago,
+            ) {
+                continue;
+            }
+            tracing::warn!(mission_id = %mission.id, "reconcile: pending mission stranded by a failed remote dispatch; interrupting");
+            if let Err(err) = store
+                .update_mission_status_with_reason(
+                    mission.id,
+                    MissionStatus::Interrupted,
+                    Some(super::control::REMOTE_DISPATCH_FAILED),
+                )
+                .await
+            {
+                tracing::warn!(mission_id = %mission.id, %err, "reconcile: interrupt failed");
+                report.errors += 1;
+                continue;
+            }
+            report.missions_interrupted += 1;
+            let _ = session.events_tx.send(AgentEvent::MissionStatusChanged {
+                completion: None,
+                execution: None,
+                mission_id: mission.id,
+                status: MissionStatus::Interrupted,
+                summary: Some(
+                    "Interrupted: the run could not be dispatched to its machine. Resume to retry."
+                        .to_string(),
+                ),
+            });
         }
 
         // 2b. AwaitingUser missions whose harness session state is gone.
@@ -1093,6 +1177,22 @@ mod tests {
         facts.status = MissionStatus::AwaitingUser;
         facts.has_events = true;
         assert_eq!(classify_mission(&facts), MissionVerdict::Keep);
+    }
+
+    #[test]
+    fn only_long_failed_remote_dispatches_strand_a_pending_mission() {
+        let failed = Some(crate::api::control::REMOTE_DISPATCH_FAILED);
+        assert!(stranded_pending(false, failed, true));
+        assert!(!stranded_pending(true, failed, true), "a live run owns it");
+        assert!(
+            !stranded_pending(false, failed, false),
+            "within the grace window"
+        );
+        assert!(
+            !stranded_pending(false, None, true),
+            "never dispatched: the scheduler owns it"
+        );
+        assert!(!stranded_pending(false, Some("completed"), true));
     }
 
     #[test]
