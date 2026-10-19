@@ -1,3 +1,4 @@
+import { useNow } from "./time";
 import {createEffect, createMemo, createSignal, onCleanup, Show} from 'solid-js';
 import {api, connectionVersion, isConnected} from './api';
 import {copyText} from './clipboard';
@@ -40,7 +41,7 @@ export function nextReminder(rows: Wakeup[]): number | undefined {
   return dates.length ? Math.min(...dates) : undefined;
 }
 export function NextReminder(p: {mission: string; busy: boolean}) {
-  const [due, setDue] = createSignal<number>(), [now, setNow] = createSignal(Date.now());
+  const [due, setDue] = createSignal<number>(); const now = useNow(10000);
   createEffect(() => {
     const mission = p.mission; connectionVersion(); setDue(undefined);
     if (!mission || !isConnected()) return;
@@ -51,8 +52,7 @@ export function NextReminder(p: {mission: string; busy: boolean}) {
       if (alive) timer = setTimeout(refresh, 30000);
     };
     void refresh();
-    const clock = setInterval(() => setNow(Date.now()), 10000);
-    onCleanup(() => {alive = false; clearTimeout(timer); clearInterval(clock);});
+    onCleanup(() => {alive = false; clearTimeout(timer);});
   });
   const remaining = createMemo(() => due() === undefined ? 0 : Math.max(0, Math.ceil((due()! - now()) / 60000)));
   return <Show when={due() !== undefined && !p.busy}><div class="next-reminder"><span aria-hidden="true">◷</span> Next reminder at {new Date(due()!).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · {remaining() ? `in ${remaining()} min` : 'waiting to run'}</div></Show>;

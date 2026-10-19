@@ -1,3 +1,4 @@
+import { useNow } from "./time";
 import { swallow } from "./log";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
@@ -30,9 +31,7 @@ function tickProgress(job: ControllerJob | null | undefined, now: number): numbe
 
 /** Clock-ring glyph: the arc fills toward the next tick; spins while ticking. */
 export function CronGlyph(p: { job: ControllerJob | null | undefined; running?: boolean; size?: number }) {
-  const [now, setNow] = createSignal(Date.now());
-  const t = window.setInterval(() => setNow(Date.now()), 30000);
-  onCleanup(() => clearInterval(t));
+  const now = useNow(30000);
   const size = () => p.size ?? 16;
   const r = 6;
   const c = 2 * Math.PI * r;
@@ -264,7 +263,7 @@ export function ControllerView(p: { slug: string; id?: string }) {
   const [view, setView] = createSignal<View | null>(cachePeek<View>(viewKey()) ?? null);
   const [error, setError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal<string | null>(null);
-  const [now, setNow] = createSignal(Date.now());
+  const now = useNow(15000);
   const [tab, setTab] = createSignal<"runs" | "settings">("runs");
   const [steers, setSteers] = createSignal<ProjectSteers | null>(null);
   cacheRemember(viewKey());
@@ -297,8 +296,6 @@ export function ControllerView(p: { slug: string; id?: string }) {
   };
   void load();
   onCleanup(pollWhileVisible(load, 15000));
-  const clock = window.setInterval(() => setNow(Date.now()), 15000);
-  onCleanup(() => clearInterval(clock));
 
   const job = () => view()?.job ?? null;
   const running = () => (view()?.runs ?? []).some((r) => r.status === "running" || r.status === "claimed");

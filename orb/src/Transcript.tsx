@@ -1,5 +1,6 @@
 import { swallow } from "./log";
-import { formatElapsed, turnStartedAt } from "./TurnStatus";
+import { turnStartedAt } from "./TurnStatus";
+import { formatElapsed, useNow } from "./time";
 import {AutomaticReminder, reminderMessages} from "./AutomaticReminder";
 import { ErrorToast } from "./toast";
 import {PromptEditor} from "./PromptEditor";
@@ -722,10 +723,8 @@ export function liveTail(items: StreamItem[]): boolean {
 /** The only "working" indicator: a transcript row shaped like "Thinking", shown
  * when no live row is visible, with the elapsed turn time. */
 function WorkingRow(p: { items: StreamItem[] }) {
-  const [now, setNow] = createSignal(Date.now());
+  const now = useNow(1000);
   const seen = Date.now();
-  const timer = setInterval(() => setNow(Date.now()), 1000);
-  onCleanup(() => clearInterval(timer));
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
   return <div class="st-think st-working" role="status" aria-live="off">
     <div class="st-think-head"><span class="shimmer">Working</span><span class="st-working-time">{formatElapsed(now() - started())}</span></div>

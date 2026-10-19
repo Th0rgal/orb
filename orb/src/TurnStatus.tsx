@@ -1,5 +1,6 @@
+import { formatElapsed, useNow } from "./time";
 import { isRecord, readJson, writeJson } from "./storage";
-import { createMemo, createSignal, onCleanup, Show } from "solid-js";
+import { createMemo, Show } from "solid-js";
 import type { StreamItem } from "./transcriptModel";
 import { latestTaskList } from "./taskList";
 
@@ -54,21 +55,13 @@ export function currentStep(items: StreamItem[]): string {
   }
   return "Working";
 }
-export function formatElapsed(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s} s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min ${String(s % 60).padStart(2, "0")} s`;
-  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")}`;
-}
+export { formatElapsed };
 
 /** Compact live status above the composer (Codex goal chip / Claude Code spinner):
  * elapsed turn time, the current step and checklist progress, without scrolling. */
 export function TurnStatus(p: { items: StreamItem[] }) {
-  const [now, setNow] = createSignal(Date.now());
+  const now = useNow(1000);
   const seen = Date.now();
-  const timer = setInterval(() => setNow(Date.now()), 1000);
-  onCleanup(() => clearInterval(timer));
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
   const checklist = createMemo(() => latestTaskList(p.items));
   const done = () => checklist()?.tasks.filter((t) => t.status === "completed").length ?? 0;

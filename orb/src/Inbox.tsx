@@ -1,3 +1,4 @@
+import { useNow } from "./time";
 import { missionAssignedNode } from "./machines/nodes";
 import { isLive } from "./missionStatus";
 import { swallow } from "./log";
@@ -335,7 +336,7 @@ export function InboxPage(p: {
     wasUnread: boolean;
   } | null>(null);
   const [error, setError] = createSignal<string | null>(null);
-  const [nowMs, setNowMs] = createSignal(Date.now());
+  const nowMs = useNow(30_000);
 
   let undoTimer: ReturnType<typeof setTimeout> | undefined;
   let listContainerRef: HTMLDivElement | undefined;
@@ -348,9 +349,7 @@ export function InboxPage(p: {
     };
     void refreshSharedState();
     const sync = setInterval(() => void refreshSharedState(), 10_000);
-    const clock = setInterval(() => setNowMs(Date.now()), 30_000);
     onCleanup(() => {
-      clearInterval(clock);
       clearInterval(sync);
       if (undoTimer) clearTimeout(undoTimer);
     });

@@ -1,3 +1,4 @@
+import { ago, useNow } from "./time";
 import { Popover } from "./Popover";
 import {createEffect,createMemo,createSignal,createUniqueId,onCleanup,Show} from 'solid-js';
 import {subscribeProjectContext,contextConflicts} from './projectContext';
@@ -14,7 +15,7 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
  const[expanded,setExpanded]=createSignal(false),[retrying,setRetrying]=createSignal(false);
  const[retryError,setRetryError]=createSignal('');
  const[lastSynced,setLastSynced]=createSignal<number>();
- const[attempt,setAttempt]=createSignal(0),[retryAt,setRetryAt]=createSignal(0),[now,setNow]=createSignal(Date.now());
+ const[attempt,setAttempt]=createSignal(0),[retryAt,setRetryAt]=createSignal(0);const now=useNow(1000);
  const[showDetails,setShowDetails]=createSignal(false);
  const id=createUniqueId();
  // Clicked buttons don't take focus in WebKit, so the popover needs an explicit anchor.
@@ -29,7 +30,6 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
  const failure=()=>gaveUp()?'Sync offline':'Sync failed';
  const label=()=>conflicts().length?`${conflicts().length} context conflict${conflicts().length===1?'':'s'}`:
   retrying()?'Syncing context':error()?(authError()?'Context access required':retryAt()&&countdown()?`${failure()} · retrying in ${countdown()}s`:failure()):pending()?'Syncing context':'';
- const ago=(t:number)=>{const m=Math.floor((now()-t)/60000);return m<1?'just now':m<60?`${m} min ago`:`${Math.floor(m/60)} h ago`;};
  const errorDetail=()=>{const m=/\((\d{3})\)|HTTP (\d{3})/.exec(error());const code=m?.[1]??m?.[2];return code?`Server error ${code}`:'Connection error';};
  createEffect(()=>{
   const slug=p.slug,version=connectionVersion();
@@ -73,8 +73,7 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
    setRetryAt(Date.now()+RETRY_DELAYS[n]*1000);
    timer=setTimeout(()=>{setAttempt(n+1);void retry();},RETRY_DELAYS[n]*1000);
   });
-  const tick=setInterval(()=>setNow(Date.now()),1000);
-  onCleanup(()=>{clearTimeout(timer);clearInterval(tick);disposed=true;stop();window.removeEventListener('online',wake);window.removeEventListener('focus',wake);document.removeEventListener('visibilitychange',visibility);});
+  onCleanup(()=>{clearTimeout(timer);disposed=true;stop();window.removeEventListener('online',wake);window.removeEventListener('focus',wake);document.removeEventListener('visibilitychange',visibility);});
  });
  const title=()=>conflicts().length?'Changes need review':authError()?'Reconnect to sync context':error()?(gaveUp()?'Sync offline':"Couldn't reach the server"):'Synchronizing context';
  const body=()=>conflicts().length?'Open file history to compare and resolve conflicting versions.':
@@ -90,7 +89,7 @@ export function ContextBadge(p:{slug:string;compact?:boolean}){
    <Show when={conflicts().length}><p>{conflicts().join('\n')}</p></Show>
    <Show when={error()}>
     <div class="context-sync-meta">
-     <Show when={lastSynced()}>{t=><span>Last synced {ago(t())}</span>}</Show>
+     <Show when={lastSynced()}>{t=><span>Last synced {ago(t(), now())}</span>}</Show>
      <Show when={authError()} fallback={<>
       <button type="button" class="context-sync-more" aria-expanded={showDetails()} onClick={()=>setShowDetails(!showDetails())}>{errorDetail()} · Details {showDetails()?'▾':'▸'}</button>
       <Show when={showDetails()}><code class="context-sync-raw">{error()}</code></Show>
