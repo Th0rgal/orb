@@ -515,8 +515,8 @@ object OrbDisk {
     private fun currentScope(): String = accountScope
 
     private fun rootDir(): File {
-        val ctx = appContext ?: return File(System.getProperty("java.io.tmpdir"), "Orb")
-        val dir = File(ctx.filesDir, "Orb")
+        val ctx = appContext
+        val dir = if (ctx != null) File(ctx.filesDir, "Orb") else File(System.getProperty("java.io.tmpdir"), "Orb")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }

@@ -64,6 +64,12 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+    testOptions {
+        unitTests.all {
+            // Tests read the cross-platform tables in shared/orb-spec straight from the repo.
+            it.systemProperty("orb.spec.dir", rootProject.file("../shared/orb-spec").absolutePath)
+        }
+    }
     lint {
         abortOnError = false
         checkReleaseBuilds = false
