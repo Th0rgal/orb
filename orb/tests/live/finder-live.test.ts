@@ -3,8 +3,8 @@ import {it,expect,vi} from 'vitest';
 import {readFileSync,writeFileSync,mkdtempSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {api,setConnection,createProject,createMission} from '../src/api';
-import {transferFile,uploadToken} from '../src/uploads';
+import {api,setConnection,createProject,createMission} from '../../src/api';
+import {transferFile,uploadToken} from '../../src/uploads';
 const live=process.env.ORB_FINDER_LIVE==='1';
 it.skipIf(!live)('reads Finder attachments from shared context on a real remote mission',async()=>{
  const connection=JSON.parse(readFileSync('/tmp/orb-finder-connection.json','utf8'));

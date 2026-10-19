@@ -99,11 +99,9 @@ describe("caret insertion", () => {
 });
 
 describe("tauri bridge", () => {
-  it("is absent outside Tauri and the probe resolves to null", async () => {
-    expect(tauriVoiceBridge()).toBeNull();
-    expect(await probeVoice()).toBeNull();
-  });
   it("sends the WAV as a raw body with the language header", async () => {
+    // Probe availability is covered through VoiceButton in voice.test.tsx.
+    expect(tauriVoiceBridge()).toBeNull();
     const invoke = vi.fn(async (cmd: string) => {
       if (cmd === "voice_capability") return { supported: true, languages: ["en"] };
       if (cmd === "voice_transcribe") return { text: "bonjour", language: "fr", duration_secs: 1, infer_secs: 0.1, load_secs: 0 };
@@ -119,10 +117,6 @@ describe("tauri bridge", () => {
     await b.prewarm();
     await b.cancel();
     expect(invoke.mock.calls.map((c) => c[0])).toEqual(["voice_transcribe", "voice_capability", "voice_prewarm", "voice_cancel"]);
-  });
-  it("hides the microphone when the native side says unsupported", async () => {
-    tauri(async () => ({ supported: false, reason: "Linux" }));
-    expect(await probeVoice()).toBeNull();
   });
   it("maps native errors onto VoiceError codes", async () => {
     tauri(async () => {
