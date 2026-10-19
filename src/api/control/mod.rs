@@ -4990,6 +4990,16 @@ impl ControlHub {
         self.sessions.read().await.values().cloned().collect()
     }
 
+    /// Sessions with the user that owns each one.
+    pub(crate) async fn all_sessions_with_users(&self) -> Vec<(String, ControlState)> {
+        self.sessions
+            .read()
+            .await
+            .iter()
+            .map(|(user, session)| (user.clone(), session.clone()))
+            .collect()
+    }
+
     /// Resolve a mission capability against the store that owns it.  Never use
     /// `get_mission_store` for this: that convenience method intentionally
     /// chooses an arbitrary desktop/default session and is not an authority
@@ -13611,7 +13621,13 @@ pub(crate) fn remote_execution_for_plan(
             };
             RemoteExecution {
                 managed_auth: vec!["antigravity".into()],
-                command: format!("{prelude}exec agy {quoted_args} 2>/dev/null"),
+                // stderr used to go to /dev/null, so a resume that died before
+                // its first event left an empty job log. Keep it in the log
+                // (Core parses `AGY_ERROR:` markers and shows diagnostics) but
+                // drop lines that could carry OAuth URLs or tokens.
+                command: format!(
+                    "{prelude}exec agy {quoted_args} 2> >({ANTIGRAVITY_STDERR_FILTER} >&2)"
+                ),
                 env: Some(env),
                 label,
             }
@@ -15913,13 +15929,13 @@ async fn replay_remote_mission_after_usage_limit(
 ) {
     let working_dir = state.config.working_dir.clone();
     let mut owner = None;
-    for session in state.control.all_sessions().await {
+    for (user_id, session) in state.control.all_sessions_with_users().await {
         if let Ok(Some(mission)) = session.mission_store.get_mission(mission_id).await {
-            owner = Some((session, mission));
+            owner = Some((user_id, session, mission));
             break;
         }
     }
-    let Some((control, mission)) = owner else {
+    let Some((user_id, control, mission)) = owner else {
         tracing::debug!(%mission_id, "usage-limit replay deferred: owning session not booted");
         return;
     };
@@ -15949,30 +15965,51 @@ async fn replay_remote_mission_after_usage_limit(
         }
         return;
     }
-    let started =
-        match remote_grok::placement(&working_dir, &control.mission_store, mission_id).await {
-            Ok(Some(placement)) => {
-                // A goal resumes natively (`/goal resume`).
-                let content = (!mission.goal_mode)
-                    .then(|| usage_limit_wait::remote_resume_prompt(&wait.limit));
-                remote_grok::continue_on_node(
-                    state,
-                    &control,
-                    "usage-limit-replay",
-                    mission_id,
-                    placement,
-                    content,
-                    None,
-                )
-                .await
-                .map(|_| ())
+    let started = match remote_grok::placement(&working_dir, &control.mission_store, mission_id)
+        .await
+    {
+        Ok(Some(placement)) if wait.limit == usage_limit_wait::FRESH_SESSION_FALLBACK => {
+            match replace_remote_mission_with_fresh_session(
+                state,
+                &control,
+                &user_id,
+                &mission,
+                &placement.node_id,
+                wait.failed_job_id,
+            )
+            .await
+            {
+                Ok(replacement) => {
+                    tracing::info!(%mission_id, %replacement, node = %placement.node_id,
+                            "native resume failed; continued in a fresh replacement session");
+                    usage_limit_wait::update_remote_wait(&working_dir, mission_id, |_| None).await;
+                    return;
+                }
+                Err(error) => Err(error),
             }
-            Ok(None) => Err((
-                StatusCode::CONFLICT,
-                "the mission has no remote placement any more".to_string(),
-            )),
-            Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
-        };
+        }
+        Ok(Some(placement)) => {
+            // A goal resumes natively (`/goal resume`).
+            let content =
+                (!mission.goal_mode).then(|| usage_limit_wait::remote_resume_prompt(&wait.limit));
+            remote_grok::continue_on_node(
+                state,
+                &control,
+                "usage-limit-replay",
+                mission_id,
+                placement,
+                content,
+                None,
+            )
+            .await
+            .map(|_| ())
+        }
+        Ok(None) => Err((
+            StatusCode::CONFLICT,
+            "the mission has no remote placement any more".to_string(),
+        )),
+        Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
+    };
     let (status, message) = match started {
         Ok(()) => {
             tracing::info!(%mission_id, limit = %wait.limit, "remote mission replayed after its usage limit");
@@ -16046,6 +16083,104 @@ async fn replay_remote_mission_after_usage_limit(
             }
         }
     }
+}
+
+/// Node-side stderr filter for `agy`: line-buffered, so diagnostics reach the
+/// job log as they happen, without OAuth URLs or token material.
+pub(crate) const ANTIGRAVITY_STDERR_FILTER: &str = "grep --line-buffered -viE 'accounts\\.google\\.com|oauth2|access_token|refresh_token|client_secret|authorization:|bearer '";
+
+/// The one fresh-session fallback of a failure chain: a native resume died
+/// before producing output, so a replacement mission (`supersedes_mission_id`)
+/// starts a new conversation on the same node, carrying the history. The
+/// original mission is closed as replaced; it never falls back twice because
+/// the replacement is a new mission and the chain record is consumed here.
+async fn replace_remote_mission_with_fresh_session(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    user_id: &str,
+    mission: &Mission,
+    node_id: &str,
+    failed_job_id: Option<Uuid>,
+) -> Result<Uuid, (StatusCode, String)> {
+    let prompt = usage_limit_wait::fresh_session_fallback_prompt(
+        mission,
+        state.config.context.max_history_total_chars,
+    );
+    let title = mission
+        .title
+        .as_deref()
+        .map(|t| format!("{t} (fresh session)"))
+        .unwrap_or_else(|| "Fresh session".to_string());
+    let request: CreateMissionRequest = serde_json::from_value(serde_json::json!({
+        "title": title,
+        "workspace_id": mission.workspace_id,
+        "backend": mission.backend,
+        "agent": mission.agent,
+        "model_override": mission.model_override,
+        "model_effort": mission.model_effort,
+        "config_profile": mission.config_profile,
+        "project": mission.project.project,
+        "track": mission.project.track,
+        "intent": mission.project.intent,
+        "github_pr": mission.project.github_pr,
+        "tags": mission.project.tags,
+        "supersedes_mission_id": mission.id,
+        "remote_node_id": node_id,
+        "prompt": prompt,
+        "idempotency_key": format!(
+            "native-resume-fallback:{}:{}",
+            mission.id,
+            failed_job_id.map(|id| id.to_string()).unwrap_or_default()
+        ),
+    }))
+    .map_err(internal_error)?;
+    let user = AuthUser {
+        id: user_id.to_string(),
+        username: user_id.to_string(),
+    };
+    let (_, Json(created)) = create_mission_inner(
+        State(state.clone()),
+        Extension(user),
+        Some(Json(request)),
+        false,
+        None,
+    )
+    .await?;
+    let replacement = created["id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(|| internal_error("replacement mission has no id"))?;
+    let summary = format!(
+        "The native conversation could not be resumed (the CLI exited before producing output). \
+         The work continues in fresh replacement mission {replacement} on node '{node_id}', which \
+         carries this mission's history."
+    );
+    let note = AgentEvent::Error {
+        message: summary.clone(),
+        mission_id: Some(mission.id),
+        resumable: false,
+    };
+    let _ = control.mission_store.log_event(mission.id, &note).await;
+    let _ = control.events_tx.send(note);
+    if control
+        .mission_store
+        .update_mission_status_with_reason(
+            mission.id,
+            MissionStatus::Failed,
+            Some("native_resume_replaced"),
+        )
+        .await
+        .is_ok()
+    {
+        let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+            completion: None,
+            execution: None,
+            mission_id: mission.id,
+            status: MissionStatus::Failed,
+            summary: Some(summary),
+        });
+    }
+    Ok(replacement)
 }
 
 /// The store that persists `mission_id`, live session first, then an offline
@@ -40742,6 +40877,23 @@ Investigate <service/> failures.
     }
 
     #[test]
+    fn antigravity_stderr_reaches_the_job_log_without_oauth_material() {
+        let script = format!(
+            "exec sh -c 'echo AGY_ERROR: boom >&2; echo see https://accounts.google.com/o/oauth2 >&2; echo out' 2> >({ANTIGRAVITY_STDERR_FILTER} >&2)"
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .expect("bash");
+        // Process substitution may flush just after the leader exits.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "out");
+        assert!(stderr.contains("AGY_ERROR: boom"), "{stderr}");
+        assert!(!stderr.contains("accounts.google.com"), "{stderr}");
+    }
+
+    #[test]
     fn retired_gemini_remote_launch_is_rejected_without_fallback() {
         let error = plan_remote_harness(None, "gemini", Some("gemini-old"), Some("hello"))
             .expect_err("retired harness must not run");
@@ -40755,6 +40907,8 @@ Investigate <service/> failures.
         let plan = plan_remote_harness(None, "antigravity", Some("agy-demo"), Some(&large_prompt))
             .expect("40 KiB antigravity prompt should be accepted");
         let execution = remote_execution_for_plan(&plan, "", "");
+        assert!(!execution.command.contains("2>/dev/null"));
+        assert!(execution.command.contains(ANTIGRAVITY_STDERR_FILTER));
         assert!(
             execution.command.contains("exec agy ") && execution.command.contains("\"$(cat <&3)\""),
             "{}",

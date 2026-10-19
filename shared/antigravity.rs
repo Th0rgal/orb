@@ -414,6 +414,41 @@ pub struct Stream {
     tools: HashSet<String>,
     active_command_steps: BTreeSet<u64>,
     pub background_tasks: BTreeMap<String, bool>,
+    /// A native `schedule` tool call that was the last step of the turn. In
+    /// headless `agy -p` the CLI exits instead of waking itself, so the host
+    /// must turn it into a durable wake-up.
+    pub native_schedule: Option<NativeSchedule>,
+}
+
+/// Antigravity's built-in `schedule` tool (`DurationSeconds`, `Prompt`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSchedule {
+    pub step: u64,
+    pub delay_seconds: u64,
+    pub prompt: String,
+}
+
+fn parse_native_schedule(step: u64, parameters: &Value) -> Option<NativeSchedule> {
+    let delay = &parameters["DurationSeconds"];
+    let delay_seconds = delay
+        .as_u64()
+        .or_else(|| {
+            delay
+                .as_f64()
+                .filter(|v| *v >= 0.0)
+                .map(|v| v.ceil() as u64)
+        })
+        .or_else(|| {
+            delay
+                .as_str()
+                .and_then(|v| v.trim().trim_matches('"').parse().ok())
+        })?;
+    let prompt = parameters["Prompt"].as_str()?.trim();
+    (delay_seconds > 0 && !prompt.is_empty()).then(|| NativeSchedule {
+        step,
+        delay_seconds,
+        prompt: prompt.to_owned(),
+    })
 }
 
 fn parse_background_task_started(output: &str) -> Option<String> {
@@ -676,6 +711,14 @@ impl Stream {
         if self.completed_steps.contains_key(&step) {
             return vec![];
         }
+        // Only a schedule that is the turn's last step is a deliberate wake-up.
+        if self
+            .native_schedule
+            .as_ref()
+            .is_some_and(|s| s.step != step)
+        {
+            self.native_schedule = None;
+        }
         if matches!(body["state"].as_str(), Some("DONE" | "ERROR")) {
             self.input_tokens += body["usage"]["input_tokens"].as_u64().unwrap_or(0);
             self.output_tokens += body["usage"]["output_tokens"].as_u64().unwrap_or(0);
@@ -732,6 +775,16 @@ impl Stream {
             .unwrap_or("tool");
         if self.tools.insert(id.clone()) {
             events.push(json!({"type":"tool_call","toolCallId":id,"name":name,"toolName":name,"rawInput":info["parameters"]}));
+        }
+        if name == "schedule" {
+            let parameters = if info["parameters"].is_object() {
+                &info["parameters"]
+            } else {
+                &body["parameters"]
+            };
+            self.native_schedule = (body["state"] != "ERROR" && info["error"].is_null())
+                .then(|| parse_native_schedule(step, parameters))
+                .flatten();
         }
         if name == "run_command" && body["state"] == "ACTIVE" {
             self.active_command_steps.insert(step);
@@ -1131,6 +1184,10 @@ impl Stream {
             if let Some(short) = marker_error {
                 return Err(short.to_owned());
             }
+            if self.native_schedule.is_some() {
+                // The turn ended on a deliberate native wake-up, not a crash.
+                return Ok(());
+            }
             return Err("Antigravity ended without a SUCCESS result; resume this conversation before retrying work".into());
         }
         let unfinished = self.unfinished_background_tasks();
@@ -1425,6 +1482,49 @@ mod tests {
         assert!(s.finish().is_err());
         s.feed(&json!({"event":"result","result":{"conversation_id":"two","status":"SUCCESS"}}));
         assert!(s.finish().is_err());
+    }
+    #[test]
+    fn trailing_native_schedule_is_a_clean_end_of_turn() {
+        let mut s = Stream::default();
+        s.feed(&json!({"event":"init","conversation_id":"c"}));
+        s.feed(
+            &json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":4,
+            "state":"DONE","step_type":"tool","tool_name":"schedule","tool_info":{"parameters":
+            {"DurationSeconds":1800,"Prompt":"30-minute supervision check-in"}}}}),
+        );
+        assert_eq!(
+            s.native_schedule,
+            Some(NativeSchedule {
+                step: 4,
+                delay_seconds: 1800,
+                prompt: "30-minute supervision check-in".into()
+            })
+        );
+        assert!(s.finish().is_ok());
+        // A later step means the schedule was not what ended the turn.
+        s.feed(
+            &json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":5,
+            "state":"DONE","step_type":"agent_response","text_delta":"more"}}),
+        );
+        assert!(s.native_schedule.is_none());
+        assert!(s.finish().unwrap_err().contains("without a SUCCESS result"));
+        // String durations and a failed schedule call.
+        let mut s = Stream::default();
+        s.feed(
+            &json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":1,
+            "state":"DONE","step_type":"tool","tool_name":"schedule","tool_info":{"parameters":
+            {"DurationSeconds":"60","Prompt":"p"}}}}),
+        );
+        assert_eq!(
+            s.native_schedule.as_ref().map(|s| s.delay_seconds),
+            Some(60)
+        );
+        s.feed(
+            &json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":2,
+            "state":"ERROR","step_type":"tool","tool_name":"schedule","tool_info":{"parameters":
+            {"DurationSeconds":60,"Prompt":"p"}}}}),
+        );
+        assert!(s.native_schedule.is_none());
     }
     #[test]
     fn resume_requires_reported_matching_identity() {
