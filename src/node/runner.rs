@@ -998,7 +998,11 @@ fn job_memory_limit() -> std::io::Result<u64> {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(1);
-    Ok(default_job_memory_limit(total, capacity))
+    // Every concurrent permit can hold a job: main slots plus the side lane.
+    Ok(default_job_memory_limit(
+        total,
+        capacity + side_question_capacity() as u64 - 1,
+    ))
 }
 
 /// Concurrent side questions per node: light read-mostly jobs (they inspect
