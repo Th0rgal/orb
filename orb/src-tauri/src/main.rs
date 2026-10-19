@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #[path = "../../../shared/agent_software.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod agent_software;
 #[path = "../../../shared/antigravity.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod antigravity;
 #[path = "../../../shared/codex_speed.rs"]
 pub mod codex_speed;
@@ -10,8 +12,10 @@ pub mod cyber_access;
 #[path = "../../../shared/file_notifications.rs"]
 pub mod file_notifications;
 #[path = "../../../shared/harness_attribution.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod harness_attribution;
 #[path = "../../../shared/vibe.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod vibe;
 
 mod connection_store;
@@ -23,6 +27,7 @@ mod local_origin_confirmed;
 mod local_origin_wire;
 mod mcp_launch;
 #[path = "../../../shared/project_context.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 mod project_context_store;
 mod run_recovery;
 mod software;

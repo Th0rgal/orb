@@ -158,8 +158,7 @@ async fn start_worker(path: PathBuf, c: Connection) {
             .build()
             .unwrap();
         let mut last_session = None;
-        loop {
-            let Ok(mut record) = read(&path) else { break };
+        while let Ok(mut record) = read(&path) {
             if record.rejected() {
                 break;
             }

@@ -47,26 +47,6 @@ impl Tier {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn explicit_standard_overrides_legacy_fast_and_ultrafast_is_distinct() {
-        assert_eq!(Tier::from_legacy(None, true), Tier::Fast);
-        assert_eq!(
-            Tier::from_legacy(Some(Tier::Standard), true),
-            Tier::Standard
-        );
-        assert_eq!(
-            Tier::from_legacy(Some(Tier::Ultrafast), true).wire(),
-            "ultrafast"
-        );
-        assert!(Tier::Ultrafast.supports_model("openai/gpt-6.1-sol"));
-        assert!(!Tier::Ultrafast.supports_model("gpt-6-luna"));
-    }
-}
-
 /// An account-specific catalog is capability evidence; a model name or an
 /// ambiguous `pro` plan alone cannot grant Ultrafast.
 pub fn catalog_advertises(catalog: &serde_json::Value, model: &str, tier: Tier) -> bool {
@@ -110,4 +90,24 @@ pub fn eligible_ultrafast_plan(plan: Option<&str>) -> bool {
                 | "edu_pro"
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_standard_overrides_legacy_fast_and_ultrafast_is_distinct() {
+        assert_eq!(Tier::from_legacy(None, true), Tier::Fast);
+        assert_eq!(
+            Tier::from_legacy(Some(Tier::Standard), true),
+            Tier::Standard
+        );
+        assert_eq!(
+            Tier::from_legacy(Some(Tier::Ultrafast), true).wire(),
+            "ultrafast"
+        );
+        assert!(Tier::Ultrafast.supports_model("openai/gpt-6.1-sol"));
+        assert!(!Tier::Ultrafast.supports_model("gpt-6-luna"));
+    }
 }

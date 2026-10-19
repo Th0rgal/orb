@@ -621,7 +621,7 @@ mod tests {
                 &mut sent,
                 &mut std::io::Cursor::new(input),
                 Turn {
-                    prompt: prompt,
+                    prompt,
                     image_paths: &[],
                     model: Some("gpt-6.1-sol"),
                     cyber_access: crate::cyber_access::Mode::Standard,

@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 #[path = "../../../shared/machine_transfer.rs"]
+#[allow(dead_code)] // Shared with other binaries; not every item is used here.
 pub mod checkpoint;
 fn home() -> Result<PathBuf, String> {
     Ok(PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?).join(".orb"))

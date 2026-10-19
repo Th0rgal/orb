@@ -349,10 +349,7 @@ pub fn worker_entry() -> bool {
             })?;
             let mut credentials = request.clone();
             let mut remote = context_listener(credentials.clone(), wake_tx.clone());
-            loop {
-                let Ok(bytes) = std::fs::read(&config) else {
-                    break;
-                };
+            while let Ok(bytes) = std::fs::read(&config) {
                 let current: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 if current.token != credentials.token || current.endpoint != credentials.endpoint {
                     remote.abort();

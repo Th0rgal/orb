@@ -806,7 +806,8 @@ mod tests {
             || stream(json!({"type":"content_block_start","content_block":{"type":"text"}}));
         let snapshot = |id: &str, text: &str| json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":text}]}});
         let ok_result = |text: &str| json!({"type":"result","is_error":false,"result":text});
-        let cases: Vec<(&str, Vec<(Value, Option<&str>)>)> = vec![
+        type Steps<'a> = Vec<(Value, Option<&'a str>)>;
+        let cases: Vec<(&str, Steps)> = vec![
             (
                 "a final result fills a missing stream once",
                 vec![

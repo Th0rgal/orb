@@ -36,7 +36,7 @@ pub(crate) fn scan_local_agents(request: ScanRequest) -> Vec<ScanRow> {
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty());
             let path = override_path
-                .map(|p| PathBuf::from(p))
+                .map(PathBuf::from)
                 .filter(|p| p.is_file())
                 .or_else(|| crate::agent_software::resolve(bin));
             let version = path.as_ref().and_then(|p| version_of(p));

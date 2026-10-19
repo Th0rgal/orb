@@ -231,6 +231,9 @@ pub fn local_agents_write(request: WriteRequest) -> Result<WriteReport, String> 
     })
 }
 
+/// Not registered with the webview: launches go through `local_run_launch`
+/// (run_recovery), which fences and verifies them first.
+#[cfg_attr(not(test), allow(dead_code))]
 #[tauri::command]
 pub fn local_agents_start(request: StartRequest) -> Result<(), String> {
     start_with_env(request, &[])

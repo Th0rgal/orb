@@ -257,6 +257,7 @@ fn apple_gpu_usage() -> Option<f32> {
             .next()?
             .parse::<f32>()
             .ok()?;
+        #[allow(clippy::needless_return)] // The non-macOS branch follows.
         return (0.0..=100.0).contains(&value).then_some(value);
     }
     #[cfg(not(target_os = "macos"))]

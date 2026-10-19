@@ -6,6 +6,7 @@ use crate::sync_util::lock;
 pub(crate) const DIRECTORY_BUSY: &str =
     "This directory already has a running local mission. Choose a separate directory or worktree.";
 
+#[cfg_attr(not(test), allow(dead_code))] // Only `local_agents_start` and tests.
 pub(crate) fn start_with_env(
     request: StartRequest,
     env: &[(String, String)],

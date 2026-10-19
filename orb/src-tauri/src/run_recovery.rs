@@ -258,6 +258,7 @@ async fn recover(
     .await
 }
 
+#[cfg(test)]
 async fn inspect_and_settle(
     c: &Connection,
     id: &str,

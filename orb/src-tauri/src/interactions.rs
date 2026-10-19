@@ -179,6 +179,13 @@ pub fn ask(session: &Session, method: &str, params: Value) -> Result<Value, Stri
     }
     rx.recv().map_err(|_| "The request was cancelled.".into())
 }
+
+pub fn clear_subscriptions() {
+    if let Ok(mut store) = pending().lock() {
+        store.subscribers.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,11 +295,5 @@ mod tests {
         cancel("cancel-test");
         assert!(worker.join().unwrap().is_err());
         assert!(local_interaction("cancel-test".into()).unwrap().is_none());
-    }
-}
-
-pub fn clear_subscriptions() {
-    if let Ok(mut store) = pending().lock() {
-        store.subscribers.clear();
     }
 }

@@ -125,6 +125,7 @@ pub struct Transcript {
 
 #[derive(Debug, Clone)]
 pub struct Paths {
+    #[cfg_attr(not(test), allow(dead_code))] // Read by the layout test only.
     pub home: PathBuf,
     pub python: PathBuf,
     pub model_dir: PathBuf,
