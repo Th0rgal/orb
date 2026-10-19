@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 import sh.sandboxed.dashboard.orb.OrbAppRoot
 import sh.sandboxed.dashboard.orb.OrbCore
 import sh.sandboxed.dashboard.orb.OrbDeepLink
+import sh.sandboxed.dashboard.orb.OrbGitHubSignIn
 import sh.sandboxed.dashboard.orb.OrbLog
 import sh.sandboxed.dashboard.orb.OrbMaterialTheme
 import sh.sandboxed.dashboard.orb.OrbNotifications
@@ -64,9 +65,34 @@ class MainActivity : FragmentActivity() {
             is OrbDeepLink.Project -> orbCore.requestProjectFocus(link.slug)
             is OrbDeepLink.Mission -> orbCore.requestMissionFocus(link.id)
             is OrbDeepLink.Documents -> orbCore.requestDocumentsFocus(link.slug)
-            is OrbDeepLink.GitHubCallback -> {
-                if (link.token != null) orbCore.token = link.token
-                else OrbLog.w(OrbLog.Category.Auth, "GitHub sign-in callback without token: ${link.error ?: "no error"}")
+            is OrbDeepLink.GitHubCallback -> acceptGitHubCallback(orbCore, link)
+        }
+    }
+
+    private fun acceptGitHubCallback(orbCore: OrbCore, link: OrbDeepLink.GitHubCallback) {
+        val signIn = OrbGitHubSignIn(OrbGitHubSignIn.prefsStore(applicationContext))
+        when (val decision = signIn.onCallback(orbCore.baseURL, link.token, link.error)) {
+            is OrbGitHubSignIn.Decision.Reject ->
+                OrbLog.w(OrbLog.Category.Auth, "GitHub callback ignored: ${decision.reason}")
+            is OrbGitHubSignIn.Decision.Accept -> lifecycleScope.launch {
+                // Save only a token Core itself accepts.
+                val valid = try {
+                    orbCore.request(
+                        OrbGitHubSignIn.VALIDATE_PATH,
+                        headers = mapOf("Authorization" to "Bearer ${decision.token}"),
+                        allowAuthRetry = false
+                    )
+                    true
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    OrbLog.w(OrbLog.Category.Auth, "GitHub token rejected by Core", t)
+                    false
+                }
+                if (valid && orbCore.baseURL.trim().trimEnd('/').lowercase() == decision.endpoint) {
+                    orbCore.token = decision.token
+                    orbCore.refreshAll()
+                }
             }
         }
     }
