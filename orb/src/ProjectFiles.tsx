@@ -1,5 +1,5 @@
-import { fileMoveKey, missionMoveKey, previewMove, filesMovedAway, filesMovedInto, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
-import { renamedTitle, renameOptimistically } from "./renames";
+import { fileMoveKey, missionMoveKey, previewMove, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
+import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
@@ -17,7 +17,7 @@ import { ProviderLogo } from "./ProviderLogo";
 import { ContextBadge } from "./ContextBadge";
 import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
-import { cutMission, readCutMission, moveMission } from "./missionMove";
+import { moveMission } from "./missionMove";
 import { ForkMission } from "./ForkMission";
 import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
 import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
@@ -29,13 +29,10 @@ import { pendingMissionInteraction } from "./missionAttention";
 import { MissionGlyph, missionStatusPresentation } from "./MissionGlyph";
 import { isMissionUnread } from "./missionUnread";
 import { MdSource, MdView, mdSource, setMdSource } from "./Markdown";
-import { displayTitle } from "./goal";
 import { missionDestination } from "./missionLaunch";
-import { missionNode, nodeLabel } from "./machines/nodes";
 import {
   api,
   isConnected,
-  getApiUrl,
   ApiError,
   connectionVersion,
   listProjectFiles,
@@ -44,8 +41,6 @@ import {
   updateProject,
   renameMission,
   archiveMission,
-  listArchivedMissions,
-  isBtwMission,
   reopenMission,
   archiveProject,
   bumpProjects,
@@ -77,40 +72,17 @@ import { getProjectCronFromJob } from "./cronSchema";
 import { loadTranscript, prefetchTranscript } from "./missionCache";
 import { cacheCanPrefetch, cachePeek, cachePrefetch, cachePut, cacheRemember } from "./pageCache";
 import { SidebarTree } from "./Tree";
-import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
+import { type TreeRow } from "./treeModel";
+import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
+import { createArchivePager } from "./tree/archivePager";
+import { createMissionMoves } from "./tree/moves";
+import { createProjectTree, missionFolder, type Node, type RowData } from "./tree/TreeView";
+import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
-import { countNested, countVersions, forkTitle, versionLabel, holds, nestMissions, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants, type NestedMission } from "./missionTree";
+import { missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "./missionTree";
 
-const [deletingIds, setDeletingIds] = createSignal<ReadonlySet<string>>(new Set());
-export const isMissionDeleting = (id: string): boolean => deletingIds().has(id);
-
-/** Sidebar section listing the core backend's projects with their missions
- * and hosted files. Replaces the demo projects when connected. */
-/** Known placement only: remote node, then workspace. Never invented. */
-export function missionMachine(m: { backend?: string; remote_job?: { node_id?: string } | null; remote_node_id?: string | null; workspace_name?: string | null }): string | undefined {
-  if (m.backend?.startsWith("cloud_")) return ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[m.backend];
-  const id = missionNode(m) ?? m.workspace_name;
-  return id ? nodeLabel(id) : undefined;
-}
-
-export type RowTipContent = { title: string; meta: string[] };
-const ROW_TIP_ID = "orb-row-tip";
-
-/** Full title plus known repo/branch/machine lines. Never invented. */
-export function rowDetail(title: string, extra: Array<string | undefined | null> = []): RowTipContent {
-  return { title, meta: extra.map((part) => part?.trim()).filter((part): part is string => !!part) };
-}
-
-/**
- * The id to put on the clipboard for a sidebar agent row: the sandboxed mission
- * UUID exactly as the core stores it. Never the `m:` sidebar routing prefix,
- * never the durable remote job id (`remote_job.job_id`), and never a harness
- * session id — those identify an execution attempt, not the mission the
- * `/api/control/missions/:id` endpoints take.
- */
-export function missionCopyId(mission: { id: string }): string {
-  return mission.id;
-}
+export { isMissionDeleting } from "./tree/selection";
+export { missionMachine, rowDetail, missionCopyId, type RowTipContent } from "./tree/missionRow";
 
 /** Default extension for a new reference file: these are Markdown notes. */
 export const REFERENCE_FILE_EXT = ".md";
@@ -140,17 +112,6 @@ export function newFilePath(dir: string, raw: string): { path: string; name: str
   return { path: dir ? `${dir}/${cleaned.join("/")}` : cleaned.join("/"), name: cleaned[cleaned.length - 1] };
 }
 
-/** Where an agent runs: the workspace/machine name behind a server glyph.
- * Per agent, not per project — one project can run on several machines. */
-function MachineBadge(p: { name?: string | null }) {
-  return (
-    <Show when={p.name}>
-      <span class="row-machine" aria-hidden="true">
-        <SidebarIcon.Server size={16} />
-      </span>
-    </Show>
-  );
-}
 
 
 
@@ -180,16 +141,7 @@ export function LiveProjectsSection(p: {
   const [projects, setProjects] = createSignal<ProjectSummary[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
-  const [archivesOpen, setArchivesOpen] = createSignal(false);
-  const [archiveExpanded, setArchiveExpanded] = createStore<Record<string, boolean>>({});
-  const [archivedMissions, setArchivedMissions] = createSignal<Mission[]>([]);
-  const [archivesLoading, setArchivesLoading] = createSignal(false);
-  const [archivesError, setArchivesError] = createSignal<string | null>(null);
-  const [archivesMore, setArchivesMore] = createSignal(false);
   const [archiveMenu, setArchiveMenu] = createSignal<{ x: number; y: number; slug?: string } | null>(null);
-  let archivesOffset = 0;
-  let archivesLoaded = false;
-  let archivesRequest: Promise<void> | null = null;
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const visibleMissions = (slug: string) => {
@@ -252,23 +204,9 @@ export function LiveProjectsSection(p: {
   /** The context menu targets the selected group without opening its conversation. */
   const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission } | null>(null);
   const [multiSelectMenu, setMultiSelectMenu] = createSignal<{ x: number; y: number; treeIds: string[] } | null>(null);
-  const [selectedTreeIds, setSelectedTreeIds] = createSignal<string[]>([]);
-  const selectedAgents = createMemo(() => selectedTreeIds().filter(id => id.startsWith("m:")).map(id => id.slice(2)));
-  const setSelectedAgents = (next: string[] | ((prev: string[]) => string[])) => {
-    setSelectedTreeIds(prev => {
-      const currentMissions = prev.filter(id => id.startsWith("m:")).map(id => id.slice(2));
-      const updated = typeof next === "function" ? next(currentMissions) : next;
-      return updated.map(id => `m:${id}`);
-    });
-  };
-  const [selectionActive, setSelectionActive] = createSignal(false);
-  const selectedTreeSet = createMemo(() => new Set(selectedTreeIds()));
-  const selectedRowIds = createMemo(() => selectionActive() ? selectedTreeSet() : undefined);
   const [deleteTargets, setDeleteTargets] = createSignal<string[]>([]);
   const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);
   const [batchBusy, setBatchBusy] = createSignal(false);
-  const [pendingMoves, setPendingMoves] = createSignal<string[]>([]);
-  let selectionAnchor: string | null = null;
   const deletedInSession = new Set<string>();
   const deleteQueue: string[] = [];
   const queuedDeletes = new Set<string>();
@@ -278,39 +216,27 @@ export function LiveProjectsSection(p: {
   let pendingRemoved = new Set<string>();
   let pendingUnmark = new Set<string>();
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  let missionRevision = 0;
+  const archiving = new Map<string, string>();
+  const { archivesOpen, setArchivesOpen, archiveExpanded, setArchiveExpanded, archivedMissions, setArchivedMissions, archivesLoading, archivesError, archivesMore, archivesLoaded, archivesRequest, loadArchives, removeArchived, reset: resetArchives } =
+    createArchivePager({ revision: () => missionRevision, archiving, deleted: deletedInSession, currentConnection: version => currentConnection(version) });
+  const { setSelectedTreeIds, setSelectedAgents, selectionActive, setSelectionActive, selectedTreeSet, selectedRowIds, selectionAnchor, setSelectionAnchor, clickSelectableRow, selectedFor, selectedTreeFor } =
+    createTreeSelection({ visibleNodes: () => [...tree(), ...(archivesOpen() ? archiveNodes() : [])] });
+  const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, pasteMission, isMoving, hasCutClipboard } = createMissionMoves({
+    allKnownMissions: () => allKnownMissions(),
+    removeRow: id => removeRow(id),
+    dropFromProjects: id => { for (const source of Object.keys(missions)) setMissions(source, list => list.filter(m => m.id !== id)); },
+    revealDestination: (slug, path) => { setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true); },
+    loadMissions: slug => loadMissions(slug),
+    setActionError: error => setActionError(error),
+  });
+  const { tree, archiveNodes, controllerRow, controllerLaunched } = createProjectTree({
+    projects, expanded, missions, dirs, dirErrors, crons, controllers, cronUnsupported, cronErrors, archiveExpanded,
+    visibleMissions: slug => visibleMissions(slug), archivedMissionRows: () => archivedMissionRows(), selected: () => p.selected(),
+  });
   setDeletingIds(new Set<string>());
   onCleanup(() => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
-  });
-  const isSelectableRow = (row: TreeRow<RowData>, deleting = deletingIds()) => {
-    const d = row.data;
-    if (d.kind === "mission") return !!d.mission && !deleting.has(d.mission.id);
-    if (d.kind === "cron") return !d.controller && !!d.job?.id;
-    return d.kind === "file" || d.kind === "folder";
-  };
-  const clickSelectableRow = (e: MouseEvent, treeId: string, onPlainClick: () => void) => batch(() => {
-    if (treeId.startsWith("m:") && deletingIds().has(treeId.slice(2))) return;
-    setSelectionActive(true);
-    const deleting = deletingIds();
-    const anchorValid = selectionAnchor && (!selectionAnchor.startsWith("m:") || !deleting.has(selectionAnchor.slice(2)));
-    if (e.shiftKey && anchorValid) {
-      const visible = visibleTree([...tree(), ...(archivesOpen() ? archiveNodes() : [])])
-        .filter(row => isSelectableRow(row, deleting))
-        .map(row => row.id);
-      const a = visible.indexOf(selectionAnchor!), b = visible.indexOf(treeId);
-      if (a >= 0 && b >= 0) {
-        const range = visible.slice(Math.min(a, b), Math.max(a, b) + 1);
-        const kept = selectedTreeIds().filter(x => !x.startsWith("m:") || !deleting.has(x.slice(2)));
-        setSelectedTreeIds(e.metaKey || e.ctrlKey ? [...new Set([...kept, ...range])] : range);
-        return;
-      }
-    }
-    if (e.metaKey || e.ctrlKey) {
-      setSelectedTreeIds(ids => ids.includes(treeId) ? ids.filter(x => x !== treeId) : [...ids, treeId]);
-      selectionAnchor = treeId;
-    } else {
-      setSelectedTreeIds([treeId]); selectionAnchor = treeId; onPlainClick();
-    }
   });
   const clickAgent = (e: MouseEvent, id: string) => clickSelectableRow(e, `m:${id}`, () => p.open(`m:${id}`));
   const removeRows = (ids: readonly string[]) => {
@@ -324,12 +250,7 @@ export function LiveProjectsSection(p: {
           setMissions(slug, rows => rows.filter(m => !removed.has(m.id)));
         }
       }
-      setArchivedMissions(rows => {
-        if (!rows.some(m => removed.has(m.id))) return rows;
-        const next = rows.filter(m => !removed.has(m.id));
-        archivesOffset = Math.max(0, archivesOffset - (rows.length - next.length));
-        return next;
-      });
+      removeArchived(removed);
       setSelectedTreeIds(current => current.some(x => x.startsWith("m:") && removed.has(x.slice(2))) ? current.filter(x => !x.startsWith("m:") || !removed.has(x.slice(2))) : current);
     });
   };
@@ -341,7 +262,7 @@ export function LiveProjectsSection(p: {
     setDeleteTargets(current => current.some(id => removed.has(id)) ? current.filter(id => !removed.has(id)) : current);
     setPendingMoves(current => current.some(id => removed.has(id)) ? current.filter(id => !removed.has(id)) : current);
     if (cutId() && removed.has(cutId()!)) setCutId(null);
-    if (selectionAnchor && selectionAnchor.startsWith("m:") && removed.has(selectionAnchor.slice(2))) selectionAnchor = null;
+    { const anchor = selectionAnchor(); if (anchor && anchor.startsWith("m:") && removed.has(anchor.slice(2))) setSelectionAnchor(null); }
     if (p.onDeleted) p.onDeleted(ids);
     else if (ids.some(id => p.selected() === `m:${id}`)) p.open(null);
   };
@@ -497,7 +418,7 @@ export function LiveProjectsSection(p: {
         if (!next.length) setSelectionActive(false);
         return next;
       });
-      if (selectionAnchor && selectionAnchor.startsWith("m:") && targetSet.has(selectionAnchor.slice(2))) selectionAnchor = null;
+      { const anchor = selectionAnchor(); if (anchor && anchor.startsWith("m:") && targetSet.has(anchor.slice(2))) setSelectionAnchor(null); }
       setPendingMoves(current => current.some(id => targetSet.has(id)) ? current.filter(id => !targetSet.has(id)) : current);
       if (cutId() && targetSet.has(cutId()!)) setCutId(null);
       if (missionMenu() && targetSet.has(missionMenu()!.mission.id)) {
@@ -519,16 +440,6 @@ export function LiveProjectsSection(p: {
     while (activeDeleteWorkers < desiredWorkers && deleteQueue.length > 0) {
       void runDeleteWorker(version);
     }
-  };
-  const selectedFor = (id: string) => {
-    const deleting = deletingIds();
-    const current = selectedAgents().filter(x => !deleting.has(x));
-    return current.includes(id) ? current : (deleting.has(id) ? [] : [id]);
-  };
-  const selectedTreeFor = (treeId: string) => {
-    const deleting = deletingIds();
-    const current = selectedTreeIds().filter(x => !x.startsWith("m:") || !deleting.has(x.slice(2)));
-    return current.includes(treeId) ? current : (treeId.startsWith("m:") && deleting.has(treeId.slice(2)) ? [] : [treeId]);
   };
   const startMoveSelection = (id: string) => {
     setFileClipboard("");
@@ -704,8 +615,8 @@ export function LiveProjectsSection(p: {
     setDeletingIds(new Set<string>());
     setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard(""); setArchiveMenu(null); setControllerMenu(null); setDeleteCronTarget(null); setDeletingCron(false); setDeleteCronError(null);
     setMovingCron(false); setCutCron(null); setMultiSelectMenu(null);
-    setSelectionActive(false); setSelectedAgents([]); selectionAnchor = null; setPendingMoves([]); setDeleteTargets([]); setMissionMenu(null);
-    setArchiveExpanded({}); setArchivesOpen(false); setArchivedMissions([]); setArchivesLoading(false); setArchivesError(null); setArchivesMore(false); archivesOffset = 0; archivesLoaded = false; archivesRequest = null;
+    setSelectionActive(false); setSelectedAgents([]); setSelectionAnchor(null); setPendingMoves([]); setDeleteTargets([]); setMissionMenu(null);
+    resetArchives();
     setCronUnsupported(false);
     setCronChecking(false);
     setCronInfo(null);
@@ -829,8 +740,6 @@ export function LiveProjectsSection(p: {
     });
   });
 
-  let missionRevision = 0;
-  const archiving = new Map<string, string>();
   const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
@@ -1170,7 +1079,7 @@ export function LiveProjectsSection(p: {
   };
   const pasteItems = async (targetSlug: string, targetPath: string, text: string) => {
     const bundle = readItemsReference(text), version = connectionVersion();
-    if (!bundle || fileBusy() || movingCron() || moving || text === consumedFileClipboard) return;
+    if (!bundle || fileBusy() || movingCron() || isMoving() || text === consumedFileClipboard) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     // Show every moved item at its destination at once; each is settled or
     // reverted as its own request finishes (see moves.ts).
@@ -1421,7 +1330,7 @@ export function LiveProjectsSection(p: {
             if (!next.length) setSelectionActive(false);
             return next;
           });
-          if (selectionAnchor && deletedTreeIds.has(selectionAnchor)) selectionAnchor = null;
+          { const anchor = selectionAnchor(); if (anchor && deletedTreeIds.has(anchor)) setSelectionAnchor(null); }
           bumpProjects();
         }
         if (failures.length) {
@@ -1460,7 +1369,7 @@ export function LiveProjectsSection(p: {
           if (!next.length) setSelectionActive(false);
           return next;
         });
-        if (selectionAnchor === treeId) selectionAnchor = null;
+        if (selectionAnchor() === treeId) setSelectionAnchor(null);
       }
       setDeleteCronTarget(null);
       bumpProjects();
@@ -1575,7 +1484,7 @@ export function LiveProjectsSection(p: {
       for (const s of slugs) setArchiveExpanded(s, true);
       setSelectionActive(ids.length > 0);
       setSelectedAgents(ids);
-      selectionAnchor = ids[0] ? `m:${ids[0]}` : null;
+      setSelectionAnchor(ids[0] ? `m:${ids[0]}` : null);
       setDeleteTargets(ids);
     });
   };
@@ -1583,11 +1492,11 @@ export function LiveProjectsSection(p: {
     setArchiveMenu(null); setMissionMenu(null); setMultiSelectMenu(null); setForkTarget(null);
     setArchivesOpen(true);
     if (slug !== undefined) setArchiveExpanded(slug, true);
-    if (!archivesLoaded || archivesLoading() || archivesMore()) {
+    if (!archivesLoaded() || archivesLoading() || archivesMore()) {
       const version = connectionVersion();
-      if (archivesLoading() && archivesRequest) await archivesRequest;
+      if (archivesLoading() && archivesRequest()) await archivesRequest();
       if (!currentConnection(version)) return;
-      if (!archivesLoaded) await loadArchives(false);
+      if (!archivesLoaded()) await loadArchives(false);
       while (currentConnection(version) && archivesMore() && !archivesError()) {
         await loadArchives(true);
       }
@@ -1610,7 +1519,7 @@ export function LiveProjectsSection(p: {
     setControllerMenu(null);
     setFileMenu(null);
     setForkTarget(null);
-    if (!archivesLoaded && !archivesLoading()) void loadArchives();
+    if (!archivesLoaded() && !archivesLoading()) void loadArchives();
     setArchiveMenu({ x: e.clientX, y: e.clientY, slug });
   };
   /** Fork the clicked mission without changing the currently open conversation. */
@@ -1645,7 +1554,7 @@ export function LiveProjectsSection(p: {
     setForkTarget(null);
     setSelectionActive(true);
     const treeId = `m:${mission.id}`;
-    if (!selectedTreeSet().has(treeId)) { setSelectedTreeIds([treeId]); selectionAnchor = treeId; }
+    if (!selectedTreeSet().has(treeId)) { setSelectedTreeIds([treeId]); setSelectionAnchor(treeId); }
     const group = selectedTreeFor(treeId);
     if (group.length > 1 && group.some(id => !id.startsWith("m:"))) {
       setMultiSelectMenu({ x: e.clientX, y: e.clientY, treeIds: group });
@@ -1682,75 +1591,8 @@ export function LiveProjectsSection(p: {
     if (next) loadDir(slug, path);
   };
 
-  type RowData = {
-    kind: "archive-project" | "project" | "folder" | "file" | "mission" | "cron" | "cron-error" | "note";
-    slug: string; label: string; path?: string; mission?: Mission;
-    job?: import("./api").ControllerJob; controller?: boolean;
-    /** Missions launched by this one, at any depth, and how many still run. */
-    launched?: number; launchedLive?: number;
-    /** Earlier versions of this conversation (forks), listed inside it; `version` marks one of them. */
-    versions?: number; version?: boolean;
-  };
-  type Node = TreeNode<RowData>;
-  const [cutId, setCutId] = createSignal<string | null>(null);
-  let moving = false;
-  let consumedCut = "";
-  let cutClipboard = "";
-  const beginMove = (id: string) => {
-    if (moving) return;
-    const version = connectionVersion();
-    void cutMission(id).then(text => {
-      if (version !== connectionVersion()) return;
-      cutClipboard = text; setCutId(id); setActionError(null);
-    }).catch(e => setActionError(String(e)));
-  };
-  /** `clipboardText` is what Cmd+V already read; without it the in-app cut is used. */
-  const pasteMission = (slug: string, path: string, clipboardText?: string) => {
-    if (moving) return;
-    if (pendingMoves().length) {
-      moving = true;
-      const ids = [...pendingMoves()], version = connectionVersion();
-      // The whole selection shows in its new place at once.
-      const from = new Map(ids.map(id => [id, allKnownMissions().find(m => m.id === id)?.project ?? null]));
-      for (const id of ids) previewMove(missionMoveKey(id), { kind: "mission", fromProject: from.get(id) ?? null, toProject: slug, path });
-      void (async () => {
-        const failed: string[] = [];
-        for (const id of ids) {
-          if (version !== connectionVersion()) { settleMove(missionMoveKey(id)); continue; }
-          try {
-            await moveMission(id, slug, path, from.get(id) ?? null);
-            if (version !== connectionVersion()) break;
-            removeRow(id);
-          } catch (error) { failed.push(id); setActionError(`Couldn’t move ${id.slice(0, 8)}: ${String(error)}`); }
-        }
-        if (version !== connectionVersion()) return;
-        setPendingMoves(failed); setCutId(failed[0] ?? null);
-        setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true);
-        await loadMissions(slug); bumpProjects();
-      })().finally(() => { moving = false; });
-      return;
-    }
-    moving = true;
-    const version = connectionVersion();
-    void (async () => {
-      // A second clipboard read in the same gesture is refused by WebKit (NotAllowedError).
-      let clipboard = clipboardText ?? cutClipboard;
-      let missionId = clipboard === consumedCut ? null : readCutMission(clipboard, getApiUrl());
-      if (!missionId && cutClipboard && clipboard !== cutClipboard) { clipboard = cutClipboard; missionId = readCutMission(clipboard, getApiUrl()); }
-      if (!missionId || version !== connectionVersion()) return;
-      await moveMission(missionId, slug, path, allKnownMissions().find(m => m.id === missionId)?.project ?? null);
-      if (version !== connectionVersion()) return;
-      consumedCut = clipboard; cutClipboard = "";
-      setCutId(null); setActionError(null);
-      for (const source of Object.keys(missions)) setMissions(source, list => list.filter(m => m.id !== missionId));
-      setExpanded(slug, true);
-      if (path) setExpanded(`${slug}:${path}`, true);
-      await loadMissions(slug);
-      bumpProjects();
-    })().catch(e => setActionError(`Couldn’t move conversation: ${String(e)}`)).finally(() => { moving = false; });
-  };
   const moveKey = (event: KeyboardEvent) => {
-    if (event.key === "Escape") { if (cutFile() || cutItems().length || readCronReference(fileClipboard())) consumedFileClipboard = fileClipboard(); setFileClipboard(""); setSelectedTreeIds([]); setSelectionActive(false); setPendingMoves([]); setCutId(null); setCutCron(null); selectionAnchor = null; return; }
+    if (event.key === "Escape") { if (cutFile() || cutItems().length || readCronReference(fileClipboard())) consumedFileClipboard = fileClipboard(); setFileClipboard(""); setSelectedTreeIds([]); setSelectionActive(false); setPendingMoves([]); setCutId(null); setCutCron(null); setSelectionAnchor(null); return; }
     if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
     const target = event.target as HTMLElement;
     if (target.closest('input, textarea, [contenteditable="true"]')) return;
@@ -1796,125 +1638,10 @@ export function LiveProjectsSection(p: {
         // Clipboard read refused (no permission or gesture): fall back to in-app cuts.
         if (version !== connectionVersion()) return;
         if (cutCron()) void pasteCron(destSlug, destPath);
-        else if (cutClipboard) pasteMission(destSlug, destPath);
+        else if (hasCutClipboard()) pasteMission(destSlug, destPath);
         else setActionError("Clipboard access was refused. Use Move here from the menu.");
       });
     }
-  };
-  const missionFolder = (mission: Mission) => mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice("orb-folder:".length) ?? "";
-  const workNodes = (slug: string, path: string): Node[] => {
-    const out: Node[] = (crons[slug] ?? []).filter(job => (job.folder ?? "") === path).map(job => ({ id: `pc:${slug}:${job.id}`, data: { kind: "cron", slug, label: job.name, job } }));
-    out.push(...rootMissions(slug).filter(root => missionFolder(root.mission) === path && !(controllerRow(slug) && controllerLaunched(root.mission))).map(root => missionNode(slug, root)));
-    return out;
-  };
-  const fileNodes = (slug: string, path: string): Node[] => {
-    const key = `${slug}:${path}`;
-    const work = path ? workNodes(slug, path) : [];
-    if (dirErrors[key] && !dirs[key]) return [...work, { id: `error:${key}`, data: { kind: "note", slug, path, label: `Files unavailable: ${dirErrors[key]}` } }];
-    if (!dirs[key]) return [...work, { id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
-    const away = filesMovedAway(slug, path);
-    const entries = dirs[key].filter(e => !away.has(e.name));
-    for (const arriving of filesMovedInto(slug, path)) if (!entries.some(e => e.name === arriving.name)) entries.push(arriving);
-    // Preserve visibility if a referenced folder listing is stale or its physical directory was removed.
-    const paths = [...rootMissions(slug).map(root => missionFolder(root.mission)), ...(crons[slug] ?? []).map(j => j.folder ?? "")];
-    for (const folder of paths) {
-      const relative = path ? (folder.startsWith(path + "/") ? folder.slice(path.length + 1) : "") : folder;
-      const name = relative.split("/")[0];
-      if (name && !entries.some(e => e.name === name)) entries.push({ name, kind: "dir" });
-    }
-    if (!entries.length && !work.length && !dirErrors[key]) return path ? [{ id: `empty:${key}`, data: { kind: "note", slug, path, label: "Empty folder" } }] : [];
-    return [...work, ...(dirErrors[key] ? [{ id: `error:${key}`, data: { kind: "note" as const, slug, path, label: "Couldn’t refresh files. Showing saved list." } }] : []), ...entries.map((entry): Node => {
-      const childPath = path ? `${path}/${entry.name}` : entry.name;
-      const open = !!expanded[`${slug}:${childPath}`];
-      return { id: `pf:${slug}:${childPath}`, data: { kind: entry.kind === "dir" ? "folder" : "file", slug, path: childPath, label: entry.kind === "dir" ? folderLabel(slug, childPath) : entry.name },
-        ...(entry.kind === "dir" ? { expanded: open, children: open ? fileNodes(slug, childPath) : [] } : {}) };
-    })];
-  };
-  // Missions a mission launched are listed inside it. Closed by default,
-  // except around the conversation that is open.
-  const rootMissions = (slug: string) => nestMissions(visibleMissions(slug));
-  // A mission the project's controller created (a Hermes session, no parent
-  // mission) is listed under the controller, like a child under its parent.
-  const controllerLaunched = (mission: Mission) => !missionParent(mission) && mission.origin === "hermes" && !!mission.origin_session_id;
-  const controllerRow = (slug: string) => { const job = controllers[slug]?.job; return !!job && !job.archived; };
-  const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
-  const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
-    const mission = nested.mission, id = `m:${mission.id}`;
-    const data: RowData = { kind: "mission", slug, mission, label: nested.version ? versionLabel(mission) : displayTitle(forkTitle(renamedTitle("mission", mission.id, mission.title))) || mission.id, ...(nested.version ? { version: true } : {}) };
-    if (!nested.children.length) return { id, data };
-    const selected = p.selected();
-    const open = expanded[id] ?? (!!selected?.startsWith("m:") && holds(nested, selected.slice(2)));
-    return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, child => isWorking(child.status)), versions: countVersions(nested) },
-      expanded: open, children: open ? nested.children.map(child => missionNode(slug, child)) : [] };
-  };
-  const tree = (): Node[] => projects().map(project => {
-    const slug = project.slug, open = !!expanded[slug];
-    const children: Node[] = [];
-    if (open) {
-      const job = controllers[slug]?.job;
-      if (job && !job.archived) {
-        const launched = controllerRoots(slug), id = `c:${slug}`, selected = p.selected();
-        const inside = !!selected?.startsWith("m:") && launched.some(root => root.mission.id === selected.slice(2) || holds(root, selected.slice(2)));
-        const open = launched.length ? (expanded[id] ?? inside) : undefined;
-        const count = launched.reduce((sum, root) => sum + 1 + countNested(root), 0);
-        const live = launched.reduce((sum, root) => sum + Number(isWorking(root.mission.status)) + countNested(root, child => isWorking(child.status)), 0);
-        children.push({ id, data: { kind: "cron", slug, label: job.name, job, controller: true, ...(launched.length ? { launched: count, launchedLive: live } : {}) },
-          ...(launched.length ? { expanded: open, children: open ? launched.map(root => missionNode(slug, root)) : [] } : {}) });
-      }
-      if (cronUnsupported() || cronErrors[slug]) children.push({ id: `crons-error:${slug}`, data: { kind: "cron-error", slug, label: "Crons unavailable" } });
-
-      if (missions[slug] === undefined) children.push({ id: `loading-missions:${slug}`, data: { kind: "note", slug, label: "Loading missions…" } });
-      children.push(...workNodes(slug, ""));
-      children.push(...fileNodes(slug, ""));
-      if (!children.length) children.push({ id: `empty:${slug}`, data: { kind: "note", slug, label: "No missions or files yet." } });
-    }
-    return { id: `project:${slug}`, data: { kind: "project", slug, label: renamedTitle("project", slug, project.title) || slug }, expanded: open, children };
-  });
-  const archiveNodes = (): Node[] => {
-    const byProject = new Map<string, Mission[]>();
-    for (const m of archivedMissionRows()) {
-      const slug = m.project ?? "";
-      byProject.set(slug, [...(byProject.get(slug) ?? []), m]);
-    }
-    const groups = new Map<string, Node[]>();
-    for (const [slug, rows] of byProject) {
-      groups.set(slug, nestMissions(rows).map(root => missionNode(slug, root)));
-    }
-    for (const project of projects()) {
-      const job = controllers[project.slug]?.job;
-      if (job?.archived) {
-        const node: Node = {id:`c:${project.slug}`,data:{kind:"cron",slug:project.slug,label:job.name,job,controller:true}};
-        groups.set(project.slug, [...(groups.get(project.slug) ?? []), node]);
-      }
-    }
-    return [...groups].map(([slug, children]) => ({
-      id: `archive-project:${slug}`,
-      data: {kind: "archive-project" as const, slug, label: projects().find(project => project.slug === slug)?.title || slug || "No project"},
-      expanded: !!archiveExpanded[slug], children,
-    })).sort((a,b) => a.data.label.localeCompare(b.data.label));
-  };
-  const loadArchives = (more = false): Promise<void> => {
-    if (archivesLoading()) return archivesRequest ?? Promise.resolve();
-    const version = connectionVersion(), revision = missionRevision;
-    setArchivesLoading(true); setArchivesError(null);
-    let run: Promise<void> | undefined;
-    run = (async () => {
-      try {
-        const rows = await listArchivedMissions(more ? archivesOffset : 0);
-        if (!currentConnection(version) || revision !== missionRevision) return;
-        const projected = rows.filter(m => !isBtwMission(m) && !deletedInSession.has(m.id)).map(m => archiving.has(m.id) ? {...m,status:archiving.get(m.id)!} : m);
-        setArchivedMissions(previous => { if (!more) return projected; const known = new Set(previous.map(old => old.id)); return [...previous, ...projected.filter(m => !known.has(m.id))]; });
-        archivesOffset = (more ? archivesOffset : 0) + rows.length;
-        archivesLoaded = true;
-        setArchivesMore(rows.length === 100);
-      } catch (error) { if (currentConnection(version)) setArchivesError(String(error)); }
-      finally {
-        if (archivesRequest === run) archivesRequest = null;
-        if (currentConnection(version)) setArchivesLoading(false);
-      }
-    })();
-    archivesRequest = run;
-    return run;
   };
   const toggleArchives = () => {
     const open = !archivesOpen(); setArchivesOpen(open);
@@ -1973,10 +1700,10 @@ export function LiveProjectsSection(p: {
   // Navigation (fork, search, history) owns the current selection. An old
   // range selection must not keep highlighting a different conversation.
   createEffect(on(p.selected, selected => {
-    setSelectionActive(false); setSelectedTreeIds([]); selectionAnchor = null;
+    setSelectionActive(false); setSelectedTreeIds([]); setSelectionAnchor(null);
     if (!selected) return;
     if (selected.startsWith("m:") || selected.startsWith("pc:") || selected.startsWith("pf:")) {
-      selectionAnchor = selected; setSelectedTreeIds([selected]);
+      setSelectionAnchor(selected); setSelectedTreeIds([selected]);
     }
   }));
   const currentMission = createMemo(() => {
@@ -2032,15 +1759,7 @@ export function LiveProjectsSection(p: {
     const [, parents] = JSON.parse(value) as [string, string[]];
     for (const id of parents) setExpanded(id, true);
   }));
-  const versionsText = (n: number) => `${n} earlier version${n === 1 ? "" : "s"}`;
-  const launchedToggle = (row: TreeRow<RowData>, d: RowData) => <Show when={d.launched || d.versions}><button class={`launched-toggle ${d.launchedLive ? "live" : ""}`} tabindex={-1} aria-expanded={row.expanded}
-    disabled={d.mission ? deletingIds().has(d.mission.id) : false}
-    aria-label={d.launched ? `${row.expanded ? "Hide" : "Show"} the ${d.launched} mission${d.launched === 1 ? "" : "s"} launched by ${d.label}` : `${row.expanded ? "Hide" : "Show"} ${versionsText(d.versions!)} of ${d.label}`}
-    title={[d.launched ? `${d.launched} launched mission${d.launched === 1 ? "" : "s"}${d.launchedLive ? ` · ${d.launchedLive} running` : ""}` : "", d.versions ? versionsText(d.versions) : ""].filter(Boolean).join(" · ")}
-    onClick={e => { e.stopPropagation(); setExpanded(row.id, !row.expanded); }}>
-    <Show when={d.launched} fallback={<SidebarIcon.Clock size={12} class="launched-history" />}><span class="launched-count">{d.launchedLive ? `${d.launchedLive}/${d.launched}` : d.launched}</span></Show>
-    <SidebarIcon.ChevronRight size={12} class={`launched-chevron ${row.expanded ? "open" : ""}`} />
-  </button></Show>;
+  const launchedToggle = (row: TreeRow<RowData>, d: RowData) => launchedToggleView(row, d, { deleting: id => deletingIds().has(id), setExpanded: (id, open) => setExpanded(id, open) });
   const renderRow = (row: TreeRow<RowData>) => {
     const d = row.data;
     const contextMenu = (e: MouseEvent) => {
@@ -2074,7 +1793,7 @@ export function LiveProjectsSection(p: {
       <Show when={!cronUnsupported() && cronRetryable[d.slug]}><button class="cron-retry" aria-label="Retry crons" title="Retry crons" onClick={() => void loadCrons(d.slug, true)}>↻</button></Show>
     </div>;
     if (d.kind === "folder") return <div class={`row folder ${(cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id) ? "mission-cut" : ""} ${selectionActive() && selectedTreeSet().has(row.id) ? "active" : ""}`} data-drop-project={d.slug} data-drop-folder={d.path ?? ""} onContextMenu={contextMenu}>
-      <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onPointerEnter={() => warmIntent(d.slug, d.path!)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug, d.path!)} onBlur={cancelIntent} onClick={e => { if (e.metaKey || e.ctrlKey || e.shiftKey) clickSelectableRow(e, row.id, () => toggleDir(d.slug, d.path!)); else { selectionAnchor = row.id; toggleDir(d.slug, d.path!); } }}>
+      <button class="row-main" aria-label={d.label} aria-expanded={row.expanded} {...rowTip.bind(rowDetail(d.label))} onPointerEnter={() => warmIntent(d.slug, d.path!)} onPointerLeave={cancelIntent} onFocus={() => warmIntent(d.slug, d.path!)} onBlur={cancelIntent} onClick={e => { if (e.metaKey || e.ctrlKey || e.shiftKey) clickSelectableRow(e, row.id, () => toggleDir(d.slug, d.path!)); else { setSelectionAnchor(row.id); toggleDir(d.slug, d.path!); } }}>
         <FolderActivityIcon expanded={row.expanded} color={projectColor(d.slug)} count={activity().get(d.slug)?.get(d.path ?? "") ?? 0} scheduled={scheduledActivity().get(d.slug)?.get(d.path ?? "") ?? 0} /><span class="row-label">{d.label}</span>
       </button>
       <button class="row-action" aria-label={`Folder actions for ${d.label}`} title="Folder actions"
@@ -2092,7 +1811,7 @@ export function LiveProjectsSection(p: {
         setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setFileMenu(null); setMultiSelectMenu(null);
         if (!d.controller && d.job?.id) {
           setSelectionActive(true);
-          if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); selectionAnchor = row.id; }
+          if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); setSelectionAnchor(row.id); }
           const group = selectedTreeFor(row.id);
           if (group.length > 1) {
             setMultiSelectMenu({ x: e.clientX, y: e.clientY, treeIds: group });
@@ -2115,7 +1834,7 @@ export function LiveProjectsSection(p: {
       onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } onMissionContext(e, d.mission); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
         setSelectionActive(true);
-        if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); selectionAnchor = row.id; }
+        if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); setSelectionAnchor(row.id); }
         const group = selectedTreeFor(row.id);
         if (group.length > 1) {
           setMultiSelectMenu({ x: e.clientX, y: e.clientY, treeIds: group });
