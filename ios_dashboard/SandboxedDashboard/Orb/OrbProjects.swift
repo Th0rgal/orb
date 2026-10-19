@@ -33,20 +33,7 @@ enum OrbStyle {
         ][value] ?? value
     }
 
-    static func statusLabel(_ state: String) -> String {
-        switch state {
-        case "active", "running", "starting": return "Working"
-        case "pending", "queued": return "Queued"
-        case "completed", "succeeded": return "Completed"
-        case "awaiting_user", "waiting_user": return "Waiting for reply"
-        case "blocked": return "Blocked"
-        case "failed": return "Failed"
-        case "interrupted", "cancelled": return "Stopped"
-        case "paused": return "Paused"
-        case "acknowledged": return "Archived"
-        default: return state.replacingOccurrences(of: "_", with: " ")
-        }
-    }
+    static func statusLabel(_ state: String) -> String { MissionState.label(state) }
 
     nonisolated(unsafe) private static let isoFractionalFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -64,7 +51,8 @@ enum OrbStyle {
         guard let date = parseDate(raw) else { return "" }
         let delta = max(0, Int(now.timeIntervalSince(date)))
         if delta < 45 { return "now" }
-        if delta < 3600 { return "\(delta / 60)m" }
+        // 45-59 s rounds down to 0 minutes; never show "0m" (matches Android).
+        if delta < 3600 { return "\(max(1, delta / 60))m" }
         if delta < 86_400 { return "\(delta / 3600)h" }
         if delta < 604_800 { return "\(delta / 86_400)d" }
         return "\(delta / 604_800)w"
@@ -1133,7 +1121,7 @@ struct OrbHome: View {
             OrbDisk.saveAsync(value, key: "projects"); error = ""
             let roster = nextProjects
             Task {
-                if let rawMissions = try? await api.call("/api/control/missions?limit=100") {
+                if let rawMissions = await Log.attempt(.network, "home missions", { try await api.call("/api/control/missions?limit=100") }) {
                     OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
                     OrbReadCache.seedFromGlobalMissions(rawMissions.items)
                     let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
@@ -1147,9 +1135,9 @@ struct OrbHome: View {
             // Warm the top projects and the agent picker catalog so opening a project or composer feels instant.
             let topProjects = Array(nextProjects.prefix(3))
             Task {
-                _ = try? await OrbReadCache.agentCatalog()
+                _ = await Log.attempt(.cache, "agent catalog prefetch") { try await OrbReadCache.agentCatalog() }
                 for proj in topProjects {
-                    _ = try? await OrbReadCache.project(proj.id)
+                    _ = await Log.attempt(.cache, "project prefetch", path: proj.id) { try await OrbReadCache.project(proj.id) }
                 }
             }
         } catch { self.error = error.localizedDescription }
@@ -1190,7 +1178,7 @@ struct OrbProjectPage: View {
         (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)) &&
         (filter == "Archived" ? row.state == "acknowledged" : row.state != "acknowledged") &&
         (filter != "Working" || row.active) &&
-        (filter != "Needs attention" || ["blocked", "failed", "interrupted"].contains(row.state))
+        (filter != "Needs attention" || row.missionState.map { $0.isProblem || $0 == .interrupted } == true)
     }
     private var visible: [OrbRow] {
         if !search.isEmpty {
@@ -1483,7 +1471,7 @@ struct OrbProjectPage: View {
         } else {
             OrbListIcon(symbol: row.backend.hasPrefix("cloud_") ? "cloud" : "cpu")
                 .overlay(alignment: .bottomTrailing) {
-                    if ["failed", "blocked", "not_feasible"].contains(row.state) {
+                    if row.missionState?.isProblem == true {
                         Circle().fill(OrbStyle.warning).frame(width: 6, height: 6)
                     } else if OrbMissionUnreadStore.shared.isUnread(row: row) {
                         Circle().fill(Color.blue).frame(width: 6, height: 6)
@@ -1610,7 +1598,7 @@ struct OrbProjectPage: View {
         Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
         Button { moveClipboard.pick(row, from: project.id) } label: { Label("Move…", systemImage: "folder") }
         Divider()
-        if ["completed", "failed", "interrupted", "acknowledged", "cancelled"].contains(row.state) {
+        if row.missionState?.canReopen == true {
             Button { Task { await setStatus(row, "paused") } } label: {
                 Label(row.state == "acknowledged" ? "Restore" : "Reopen", systemImage: "arrow.uturn.backward")
             }

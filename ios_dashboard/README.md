@@ -51,7 +51,7 @@ xcodebuild -project SandboxedDashboard.xcodeproj \
 1. `ci_scripts/ci_post_clone.sh` runs automatically in Xcode Cloud and GitHub Actions (`iOS Build`).
 2. It downloads pinned XcodeGen `2.46.0`, regenerates `SandboxedDashboard.xcodeproj`, and fails if the committed project file is out of sync with `project.yml`.
 3. GitHub’s `iOS Build` workflow compiles without signing (`CODE_SIGNING_ALLOWED=NO`). TestFlight distribution is handled by Xcode Cloud on the `master` branch.
-4. `ci_scripts/ci_pre_xcodebuild.sh` stamps archives as `<CFBundleVersion>.<Xcode Cloud run>` so each upload has a new build number; App Store Connect rejects a repeated one. Keep "Manage Version and Build Number" off in the workflow's Archive action.
+4. `ci_scripts/ci_pre_xcodebuild.sh` stamps archives as `<CURRENT_PROJECT_VERSION>.<Xcode Cloud run>` (the version lives once, in `project.yml`; both Info.plists read `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`) so each upload has a new build number; App Store Connect rejects a repeated one. Keep "Manage Version and Build Number" off in the workflow's Archive action.
 
 ## Project Structure
 
@@ -79,8 +79,8 @@ ios_dashboard/
 │   │   ├── OrbSettings.swift
 │   │   ├── OrbMachinesSettings.swift
 │   │   └── OrbProvidersSettings.swift
-│   ├── Services/                    # APIService (HTTP + SSE), Keychain, Haptics
-│   └── Views/                       # Legacy tab views & shared components
+│   ├── Models/                      # StoredEvent, AnyCodable, FIDO request models
+│   └── Services/                    # APIService (auth + events + control stream), FIDO approvals
 ├── SandboxedDashboardTests/         # Unit tests
 └── SandboxedDashboardUITests/       # UI & fixture server tests
 ```

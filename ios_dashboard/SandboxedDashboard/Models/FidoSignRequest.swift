@@ -25,6 +25,40 @@ struct FidoSignRequest: Identifiable, Codable, Equatable {
     }
 }
 
+extension FidoSignRequest {
+    /// Maps a `fido_sign_request` control-stream event to a request. Missing
+    /// required fields yield nil; an unparseable expiry falls back to 30 s.
+    static func parse(_ data: [String: Any], now: Date = Date()) -> FidoSignRequest? {
+        guard let requestId = data["request_id"] as? String, !requestId.isEmpty,
+              let keyType = data["key_type"] as? String,
+              let keyFingerprint = data["key_fingerprint"] as? String,
+              let origin = data["origin"] as? String,
+              let expiresAtString = data["expires_at"] as? String else {
+            return nil
+        }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expiresAt = fractional.date(from: expiresAtString)
+            ?? ISO8601DateFormatter().date(from: expiresAtString)
+            ?? now.addingTimeInterval(30)
+        return FidoSignRequest(
+            id: requestId,
+            keyType: keyType,
+            keyFingerprint: keyFingerprint,
+            origin: origin,
+            hostname: data["hostname"] as? String,
+            workspace: data["workspace"] as? String,
+            expiresAt: expiresAt
+        )
+    }
+}
+
+/// Body of `POST /api/fido/respond` (src/api/fido.rs `FidoRespondRequest`).
+struct FidoRespondBody: Encodable, Equatable {
+    let request_id: String
+    let approved: Bool
+}
+
 enum AutoApprovalRuleType: String, Codable, CaseIterable {
     case allSSH = "all_ssh"
     case hostname = "hostname"

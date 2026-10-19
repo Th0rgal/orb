@@ -74,7 +74,7 @@ private struct FleetLockScreen: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 FleetMark(size: 18)
-                Text(state.allDone ? "Tout est terminé" : "Flotte Orb")
+                Text(state.headline)
                     .font(.system(.subheadline, design: .rounded).weight(.semibold))
                 Spacer(minLength: 4)
                 Text(state.updatedAt, style: .timer)
@@ -89,7 +89,7 @@ private struct FleetLockScreen: View {
             if let next = NextItem(state: state) {
                 next
             } else {
-                Text(state.allDone ? "Rien ne t’attend." : "Rien ne t’attend · les agents travaillent.")
+                Text(state.idleText)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -106,12 +106,7 @@ private struct FleetSummary: View {
     let state: OrbFleetActivityAttributes.ContentState
 
     var body: some View {
-        let parts: [(Int, String, Color)] = [
-            (state.running, "en cours", FleetTone.running),
-            (state.waiting, state.waiting > 1 ? "t’attendent" : "t’attend", FleetTone.waiting),
-            (state.failed, "en échec", FleetTone.failed),
-            (state.done, state.done > 1 ? "terminées" : "terminée", FleetTone.done),
-        ].filter { $0.0 > 0 }
+        let parts: [(Int, String, Color)] = state.summaryParts.map { ($0.count, $0.label, Self.tone($0.part)) }
         HStack(spacing: 10) {
             ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
                 HStack(spacing: 4) {
@@ -127,6 +122,15 @@ private struct FleetSummary: View {
         .lineLimit(1)
         .minimumScaleFactor(0.85)
         .accessibilityElement(children: .combine)
+    }
+
+    private static func tone(_ part: OrbFleetActivityAttributes.ContentState.Part) -> Color {
+        switch part {
+        case .running: FleetTone.running
+        case .waiting: FleetTone.waiting
+        case .failed: FleetTone.failed
+        case .done: FleetTone.done
+        }
     }
 }
 
@@ -209,9 +213,7 @@ private struct NextItem: View {
     init?(state: OrbFleetActivityAttributes.ContentState) {
         guard let title = state.nextTitle, !title.isEmpty else { return nil }
         self.title = title
-        self.detail = [state.nextProject, state.nextReason]
-            .compactMap { $0?.isEmpty == false ? $0 : nil }
-            .joined(separator: " · ")
+        self.detail = state.nextDetail ?? ""
         self.since = state.nextSince
     }
 

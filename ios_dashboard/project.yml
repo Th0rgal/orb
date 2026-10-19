@@ -3,11 +3,16 @@ options:
   bundleIdPrefix: md.thomas.openagent
   deploymentTarget:
     iOS: "26.0"
-  xcodeVersion: "16.0"
+  xcodeVersion: "27.0"
   generateEmptyDirectories: true
 
 settings:
   base:
+    # Single source of the app version for the app and the Live Activity extension
+    # (both Info.plists read these). Bump CURRENT_PROJECT_VERSION (YYYYMMDDNN) for a
+    # release; Xcode Cloud appends its run number (ci_scripts/ci_pre_xcodebuild.sh).
+    MARKETING_VERSION: "1.5.0"
+    CURRENT_PROJECT_VERSION: "2026101601"
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: "Automatic"
     ENABLE_PREVIEWS: "YES"

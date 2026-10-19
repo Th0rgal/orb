@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import os
 @preconcurrency import UserNotifications
 import SwiftUI
 
@@ -93,13 +94,7 @@ struct OrbNotificationPayload: Equatable, Sendable {
                 default: return "Question for you"
                 }
             }
-            switch item.row.state {
-            case "blocked": return "Blocked"
-            case "failed", "not_feasible": return "Failed"
-            case "awaiting_user", "waiting_user": return "Waiting for you"
-            case "completed", "succeeded": return "Done"
-            default: return item.badge
-            }
+            return item.row.missionState?.notificationLabel ?? item.badge
         }()
 
         let title = item.headline
@@ -254,7 +249,12 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         let settings = await center.notificationSettings()
         authorizationStatus = settings.authorizationStatus
         guard settings.authorizationStatus == .notDetermined else { return }
-        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        do {
+            let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            Log.notifications.notice("notification authorization granted=\(granted)")
+        } catch {
+            Log.error(.notifications, "requestAuthorization", error)
+        }
         await refreshAuthorizationStatus()
     }
 
@@ -450,23 +450,17 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     private func startMonitorLoop() {
         backgroundLoopTask?.cancel()
         backgroundLoopTask = Task { @MainActor in
-            var first = true
-            while !Task.isCancelled {
-                // Poll at launch too: a finished mission shouldn't wait 15 s to show up.
-                if !first { try? await Task.sleep(for: .seconds(15)) }
-                first = false
-                guard !Task.isCancelled,
-                      APIService.shared.isConfigured,
-                      APIService.shared.isAuthenticated,
-                      !APIService.shared.authSessionExpired else { continue }
-                await pollHybridMissionsOnce()
-            }
+            // Poll at launch too: a finished mission shouldn't wait 15 s to show up.
+            await Poller.run(every: .seconds(15), while: {
+                APIService.shared.isConfigured && APIService.shared.isAuthenticated && !APIService.shared.authSessionExpired
+            }) { await pollHybridMissionsOnce() }
         }
     }
 
-    func pollHybridMissionsOnce() async {
+    @discardableResult
+    func pollHybridMissionsOnce() async -> Bool {
         await OrbSharedInboxState.shared.refresh()
-        guard let rawMissions = try? await OrbCore.shared.call("/api/control/missions?limit=100&all=true") else { return }
+        guard let rawMissions = await Log.attempt(.notifications, "hybrid missions poll", { try await OrbCore.shared.call("/api/control/missions?limit=100&all=true") }) else { return false }
         OrbReadCache.seedFromGlobalMissions(rawMissions.items)
         OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
         let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
@@ -476,10 +470,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
 
         var eventsByMission: [String: [StoredEvent]] = [:]
         let candidates = rows.filter {
-            [
-                "awaiting_user", "waiting_user", "blocked", "failed", "not_feasible",
-                "completed", "succeeded", "paused", "interrupted",
-            ].contains($0.state) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
+            ($0.missionState?.awaitsReview ?? false) && !OrbInboxModel.isSubagent(row: $0, includeAutonomous: OrbInboxSettings.shared.includeAutonomous)
         }
         .sorted { $0.updatedAt > $1.updatedAt }
         .prefix(8)
@@ -487,9 +478,8 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         for (idx, row) in candidates.enumerated() {
             var events = OrbReadCache.readEvents(row.id)
             if events.isEmpty && OrbMissionUnreadStore.shared.isUnread(row: row) && idx < 4 {
-                if let batch = try? await APIService.shared.getMissionEventsWithMeta(id: row.id, limit: 120, sinceSeq: nil) {
-                    OrbReadCache.saveEvents(row.id, events: batch.events)
-                    events = batch.events
+                if let fetched = await Log.attempt(.notifications, "events for notification", path: row.id, { try await OrbReadCache.events(row.id) }) {
+                    events = fetched
                 }
             }
             eventsByMission[row.id] = events
@@ -504,6 +494,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
             eventsByMission: eventsByMission
         )
         reconcile(needsYou: sections.needsYou, ready: sections.ready, working: sections.working)
+        return true
     }
 }
 
@@ -537,12 +528,17 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         let secondaryJSON = userInfo["secondary_payload"] as? String
         let actionID = response.actionIdentifier
         let replyText = (response as? UNTextInputNotificationResponse)?.userText
+        let isFailure = userInfo["failed_reply"] != nil
 
         nonisolated(unsafe) let done = completionHandler
         Task { @MainActor in
             // Finish the action (e.g. Done/Approve while backgrounded) before
             // telling iOS we're done, which may suspend the app; still on main.
             defer { done() }
+            if isFailure {
+                if !missionID.isEmpty { self.focusInbox(missionID: missionID, expandPeek: true, openReply: true) }
+                return
+            }
             await self.handleNotificationAction(
                 actionID: actionID,
                 missionID: missionID,
@@ -572,80 +568,56 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
 
         switch actionID {
         case Self.actionDone:
-            OrbMissionUnreadStore.shared.markRead(id: missionID)
-            _ = try? await OrbCore.shared.call(
-                "/api/control/missions/\(OrbCore.escape(missionID))/status",
-                method: "POST",
-                body: .object(["status": .string("acknowledged")])
-            )
+            if await performAction("Mark done", missionID: missionID, call: {
+                _ = try await OrbCore.shared.call(
+                    "/api/control/missions/\(OrbCore.escape(missionID))/status",
+                    method: "POST",
+                    body: .object(["status": .string("acknowledged")])
+                )
+            }) {
+                OrbMissionUnreadStore.shared.markRead(id: missionID)
+            }
             await pollHybridMissionsOnce()
 
-        case Self.actionApprove:
-            if let callID, let toolName, let primaryJSON,
-               let data = primaryJSON.data(using: .utf8),
+        case Self.actionApprove, Self.actionDecline:
+            let approving = actionID == Self.actionApprove
+            if let callID, let toolName, let json = approving ? primaryJSON : secondaryJSON,
+               let data = json.data(using: .utf8),
                let payload = try? JSONDecoder().decode(OrbJSON.self, from: data) {
-                _ = try? await OrbCore.shared.call(
-                    "/api/control/tool_result",
-                    method: "POST",
-                    body: .object([
-                        "tool_call_id": .string(callID),
-                        "name": .string(toolName),
-                        "result": payload,
-                    ])
-                )
-                OrbMissionUnreadStore.shared.markRead(id: missionID)
+                if await performAction(approving ? "Approve" : "Decline", missionID: missionID, call: {
+                    _ = try await OrbCore.shared.call(
+                        "/api/control/tool_result",
+                        method: "POST",
+                        body: .object([
+                            "tool_call_id": .string(callID),
+                            "name": .string(toolName),
+                            "result": payload,
+                        ])
+                    )
+                }) {
+                    OrbMissionUnreadStore.shared.markRead(id: missionID)
+                }
                 await pollHybridMissionsOnce()
             } else {
-                focusInbox(missionID: missionID, expandPeek: true)
-            }
-
-        case Self.actionDecline:
-            if let callID, let toolName, let secondaryJSON,
-               let data = secondaryJSON.data(using: .utf8),
-               let payload = try? JSONDecoder().decode(OrbJSON.self, from: data) {
-                _ = try? await OrbCore.shared.call(
-                    "/api/control/tool_result",
-                    method: "POST",
-                    body: .object([
-                        "tool_call_id": .string(callID),
-                        "name": .string(toolName),
-                        "result": payload,
-                    ])
-                )
-                OrbMissionUnreadStore.shared.markRead(id: missionID)
-                await pollHybridMissionsOnce()
-            } else {
-                focusInbox(missionID: missionID, expandPeek: true, openReply: true)
+                focusInbox(missionID: missionID, expandPeek: true, openReply: !approving)
             }
 
         case Self.actionRetry:
-            OrbMissionUnreadStore.shared.markRead(id: missionID)
-            _ = try? await OrbCore.shared.call(
-                "/api/control/message",
-                method: "POST",
-                body: .object([
-                    "mission_id": .string(missionID),
-                    "content": .string("Continue from where you left off."),
-                    "queue_followup": .bool(true),
-                    "client_message_id": .string(UUID().uuidString.lowercased()),
-                ])
-            )
+            if await performAction("Retry", missionID: missionID, call: {
+                try await self.sendMessage(missionID: missionID, content: "Continue from where you left off.")
+            }) {
+                OrbMissionUnreadStore.shared.markRead(id: missionID)
+            }
             await pollHybridMissionsOnce()
 
         case Self.actionReply:
             let trimmed = (replyText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
-                OrbMissionUnreadStore.shared.markRead(id: missionID)
-                _ = try? await OrbCore.shared.call(
-                    "/api/control/message",
-                    method: "POST",
-                    body: .object([
-                        "mission_id": .string(missionID),
-                        "content": .string(trimmed),
-                        "queue_followup": .bool(true),
-                        "client_message_id": .string(UUID().uuidString.lowercased()),
-                    ])
-                )
+                if await performAction("Reply", missionID: missionID, text: trimmed, call: {
+                    try await self.sendMessage(missionID: missionID, content: trimmed)
+                }) {
+                    OrbMissionUnreadStore.shared.markRead(id: missionID)
+                }
                 await pollHybridMissionsOnce()
             } else {
                 focusInbox(missionID: missionID, expandPeek: true, openReply: true)
@@ -657,6 +629,62 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         default:
             // Default tap on the notification banner: open Inbox directly on this mission card with AI summary expanded!
             focusInbox(missionID: missionID, expandPeek: true)
+        }
+    }
+}
+
+extension OrbNotificationCenter {
+    static let categoryActionFailed = "ORB_ACTION_FAILED"
+
+    fileprivate func sendMessage(missionID: String, content: String) async throws {
+        _ = try await OrbCore.shared.call(
+            "/api/control/message",
+            method: "POST",
+            body: .object([
+                "mission_id": .string(missionID),
+                "content": .string(content),
+                "queue_followup": .bool(true),
+                "client_message_id": .string(UUID().uuidString.lowercased()),
+            ])
+        )
+    }
+
+    /// Runs a notification quick action. On failure the error is logged and a
+    /// "not sent" notification is posted (carrying the reply text) so nothing is lost silently.
+    fileprivate func performAction(_ label: String, missionID: String, text: String? = nil, call: () async throws -> Void) async -> Bool {
+        do {
+            try await call()
+            return true
+        } catch {
+            Log.error(.notifications, "notification action \(label)", path: missionID, error)
+            Self.postActionFailure(label: label, missionID: missionID, text: text, error: error)
+            return false
+        }
+    }
+
+    static func failureContent(label: String, missionID: String, text: String?, error: Error) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = label == "Reply" ? "Reply not sent" : "\(label) failed"
+        var lines: [String] = []
+        if let text, !text.isEmpty { lines.append("\u{201C}\(text)\u{201D}") }
+        lines.append(error.localizedDescription)
+        lines.append("Tap to open the conversation and try again.")
+        content.body = lines.joined(separator: "\n")
+        content.sound = .default
+        content.categoryIdentifier = categoryActionFailed
+        content.userInfo = [
+            "mission_id": missionID,
+            "url": "orb://inbox/\(OrbCore.escape(missionID))?peek=1&reply=1",
+            "failed_reply": text ?? "",
+        ]
+        return content
+    }
+
+    static func postActionFailure(label: String, missionID: String, text: String?, error: Error) {
+        let content = failureContent(label: label, missionID: missionID, text: text, error: error)
+        let request = UNNotificationRequest(identifier: "orb.action.failed.\(missionID).\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { addError in
+            if let addError { Log.notifications.error("Could not post failure notification: \(addError.localizedDescription, privacy: .public)") }
         }
     }
 }
@@ -688,11 +716,18 @@ enum OrbBackgroundRefresh {
     static func schedule() {
         let request = BGAppRefreshTaskRequest(identifier: identifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: interval)
-        try? BGTaskScheduler.shared.submit(request)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            // Simulator and Background App Refresh disabled both land here.
+            Task { @MainActor in Log.error(.background, "BGTaskScheduler.submit", error) }
+        }
     }
 
     @MainActor static func run() async {
         schedule()
+        OrbDiagnosticsClock.lastBackgroundRefresh = Date()
+        Log.background.notice("background refresh started")
         guard APIService.shared.isConfigured, APIService.shared.isAuthenticated,
               !APIService.shared.authSessionExpired else { return }
         await OrbNotificationCenter.shared.pollHybridMissionsOnce()

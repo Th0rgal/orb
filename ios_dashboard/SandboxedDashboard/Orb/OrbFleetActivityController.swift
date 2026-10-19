@@ -11,7 +11,7 @@ final class OrbFleetActivityController {
     static let shared = OrbFleetActivityController()
 
     private var lastState: OrbFleetActivityAttributes.ContentState?
-    private static let log = Logger(subsystem: "md.thomas.openagent.dashboard", category: "live-activity")
+    private static let log = Log.liveActivity
     private let maxAge: TimeInterval = 7 * 3600 + 50 * 60
     private var startedAt: Date?
 
@@ -85,7 +85,7 @@ final class OrbFleetActivityController {
             startedAt = .now
         } catch {
             // Disabled by the user or over the system limit: nothing to show.
-            Self.log.error("fleet live activity not started: \(error.localizedDescription, privacy: .public)")
+            Log.error(.liveActivity, "fleet live activity start", error)
         }
     }
 

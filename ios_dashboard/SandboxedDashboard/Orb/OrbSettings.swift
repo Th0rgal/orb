@@ -46,6 +46,8 @@ struct OrbSettingsHome: View {
                     .accessibilityIdentifier("settings.inbox")
                 NavigationLink { OrbDictationSettingsView() } label: { Label("Dictation", systemImage: "mic") }
                     .accessibilityIdentifier("settings.dictation")
+                NavigationLink { OrbDebugInfoView() } label: { Label("Debug info", systemImage: "ladybug") }
+                    .accessibilityIdentifier("settings.debug")
             }
             .scrollContentBackground(.hidden).background(OrbStyle.background)
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
