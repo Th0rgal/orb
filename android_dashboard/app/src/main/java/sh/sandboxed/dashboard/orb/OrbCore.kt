@@ -210,9 +210,14 @@ object OrbJSON {
         }
     }
 
-    fun relative(raw: String?): String {
+    fun relative(raw: String?, nowMs: Long = System.currentTimeMillis()): String {
         val epochMs = dateEpochMs(raw) ?: return ""
-        val seconds = maxOf(0L, (System.currentTimeMillis() - epochMs) / 1000L).toInt()
+        return relativeSeconds(maxOf(0L, (nowMs - epochMs) / 1000L))
+    }
+
+    /** Elapsed seconds -> "now" / "Nm" (min 1) / "Nh" / "Nd" / "Nw"; see shared/orb-spec/fixtures/relative-time.json. */
+    fun relativeSeconds(elapsed: Long): String {
+        val seconds = elapsed.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
         if (seconds < 45) return "now"
         val minutes = maxOf(1, seconds / 60)
         if (seconds < 3600) return "${minutes}m"
@@ -308,8 +313,7 @@ object OrbMissionTree {
     }
 
     fun isLive(mission: OrbRow): Boolean {
-        val status = (mission.str("status", "state") ?: "").lowercase()
-        return status in setOf("active", "running", "working", "queued", "pending", "starting", "in_progress", "processing", "streaming")
+        return MissionState.of(mission)?.live == true
     }
 
     fun isGoal(mission: OrbRow): Boolean {
@@ -511,8 +515,8 @@ object OrbDisk {
     private fun currentScope(): String = accountScope
 
     private fun rootDir(): File {
-        val ctx = appContext ?: return File(System.getProperty("java.io.tmpdir"), "Orb")
-        val dir = File(ctx.filesDir, "Orb")
+        val ctx = appContext
+        val dir = if (ctx != null) File(ctx.filesDir, "Orb") else File(System.getProperty("java.io.tmpdir"), "Orb")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
@@ -528,7 +532,8 @@ object OrbDisk {
             val f = file(key)
             if (!f.exists()) return null
             OrbJSON.parse(f.readBytes())
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            OrbLog.w(OrbLog.Category.Cache, "disk read $key failed", t)
             null
         }
     }
@@ -537,7 +542,8 @@ object OrbDisk {
         try {
             val f = file(key)
             f.writeText(OrbJSON.stringify(value))
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            OrbLog.w(OrbLog.Category.Cache, "disk write $key failed", t)
         }
     }
 
@@ -547,7 +553,8 @@ object OrbDisk {
             rootDir().listFiles()?.forEach { f ->
                 if (f.name.startsWith(prefix)) f.delete()
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            OrbLog.w(OrbLog.Category.Cache, "clearing disk cache failed", t)
         }
     }
 }
@@ -760,8 +767,20 @@ class OrbCore private constructor(context: Context) {
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+    /** Log attached to the current error notice. Every value set here also lands in [OrbLog.ring]. */
     private val _lastErrorLog = MutableStateFlow<String?>(null)
     val lastErrorLog: StateFlow<String?> = _lastErrorLog.asStateFlow()
+
+    /** Last successful [refreshAll], epoch ms (shown on Debug info). */
+    private val _lastRefreshAtMs = MutableStateFlow<Long?>(null)
+    val lastRefreshAtMs: StateFlow<Long?> = _lastRefreshAtMs.asStateFlow()
+
+    private fun recordErrorLog(log: String?, message: String? = null) {
+        _lastErrorLog.value = log
+        if (log != null || message != null) {
+            OrbLog.e(OrbLog.Category.Network, message ?: log!!.lineSequence().first(), detail = log)
+        }
+    }
 
     init {
         OrbDisk.init(context)
@@ -883,7 +902,7 @@ class OrbCore private constructor(context: Context) {
 
     fun setError(message: String?, log: String? = null) {
         _lastError.value = message
-        _lastErrorLog.value = log
+        recordErrorLog(log, message)
     }
 
     private fun resetInMemoryAccountState() {
@@ -994,7 +1013,8 @@ class OrbCore private constructor(context: Context) {
                     OrbDisk.write("projects", p.map { it.raw })
                 }
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            if (t !is CancellationException) OrbLog.w(OrbLog.Category.Network, "quiet missions refresh failed", t)
         }
     }
 
@@ -1005,13 +1025,13 @@ class OrbCore private constructor(context: Context) {
         _lastErrorLog.value = null
 
         coroutineScope {
-            val pTask = async { runCatching { fetchRows("/api/projects", "projects") } }
-            val mTask = async { runCatching { fetchRows("/api/control/missions?limit=100&all=true", null) } }
-            val wTask = async { runCatching { fetchRows("/api/workspaces", null) } }
-            val bTask = async { runCatching { fetchRows("/api/backends", null) } }
-            val prTask = async { runCatching { fetchRows("/api/ai/providers", "providers") } }
-            val nTask = async { runCatching { fetchDict("/api/remote-nodes") } }
-            val aTask = async { runCatching { fetchDict("/api/system/hermes-assistant/status") } }
+            val pTask = async { orbTry(OrbLog.Category.Network, "/api/projects") { fetchRows("/api/projects", "projects") } }
+            val mTask = async { orbTry(OrbLog.Category.Network, "/api/control/missions") { fetchRows("/api/control/missions?limit=100&all=true", null) } }
+            val wTask = async { orbTry(OrbLog.Category.Network, "/api/workspaces") { fetchRows("/api/workspaces", null) } }
+            val bTask = async { orbTry(OrbLog.Category.Network, "/api/backends") { fetchRows("/api/backends", null) } }
+            val prTask = async { orbTry(OrbLog.Category.Network, "/api/ai/providers") { fetchRows("/api/ai/providers", "providers") } }
+            val nTask = async { orbTry(OrbLog.Category.Network, "/api/remote-nodes") { fetchDict("/api/remote-nodes") } }
+            val aTask = async { orbTry(OrbLog.Category.Network, "/api/system/hermes-assistant/status") { fetchDict("/api/system/hermes-assistant/status") } }
 
             val pResult = pTask.await()
             val mResult = mTask.await()
@@ -1031,7 +1051,7 @@ class OrbCore private constructor(context: Context) {
                     for (row in m.take(5)) {
                         val evKey = "mission_events_${row.id}"
                         if (OrbReadCache.loadRows(evKey).isEmpty()) {
-                            val evs = runCatching {
+                            val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                                 fetchRows("/api/control/missions/${encodeComponent(row.id)}/events?limit=150", "events")
                             }.getOrDefault(emptyList())
                             if (evs.isNotEmpty()) {
@@ -1064,6 +1084,7 @@ class OrbCore private constructor(context: Context) {
             }
 
             if (anyCoreSuccess) {
+                _lastRefreshAtMs.value = System.currentTimeMillis()
                 _hasLoadedSuccessfully.value = true
                 _lastError.value = null
                 _lastErrorLog.value = null
@@ -1071,7 +1092,7 @@ class OrbCore private constructor(context: Context) {
                 val err = pResult.exceptionOrNull() ?: mResult.exceptionOrNull()
                 if (err != null) {
                     _lastError.value = err.message ?: "Request failed"
-                    _lastErrorLog.value = "baseURL=${_baseURL.value}\nerror=${err.message}"
+                    recordErrorLog("baseURL=${_baseURL.value}\nerror=${err.message}", "refresh failed: ${err.message}")
                 }
             }
         }
@@ -1140,7 +1161,7 @@ class OrbCore private constructor(context: Context) {
             val parsed = OrbJSON.dict(OrbJSON.parse(bytes))
             val message = OrbJSON.str(parsed, "error", "message", "detail")
                 ?: if (raw.isEmpty()) "HTTP $code" else raw.take(240)
-            _lastErrorLog.value = "$method $path -> HTTP $code\n$raw"
+            recordErrorLog("$method $path -> HTTP $code\n${raw.take(2000)}", "$method $path -> HTTP $code")
             throw OrbError(message, status = code)
         }
         if (bytes.isEmpty()) return@withContext emptyMap<String, Any?>()
@@ -1174,7 +1195,8 @@ class OrbCore private constructor(context: Context) {
                 persistSession()
             }
             true
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            if (t !is CancellationException) OrbLog.w(OrbLog.Category.Auth, "session renewal failed", t)
             false
         }
     }

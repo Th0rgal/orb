@@ -584,7 +584,7 @@ fun OrbConversationPage(
                         val existingForCid = if (cid == targetId) events else OrbReadCache.loadRows("mission_events_$cid")
                         val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
                         val detailDef = async {
-                            runCatching { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}") }.getOrNull()
+                            orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}") }.getOrNull()
                         }
                         val evPath = if (lastSeq != null && lastSeq > 0) {
                             "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&since_seq=$lastSeq"
@@ -592,7 +592,7 @@ fun OrbConversationPage(
                             "/api/control/missions/${core.encodeComponent(cid)}/events?limit=150"
                         }
                         val eventsDef = async {
-                            runCatching { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
+                            orbTry(OrbLog.Category.Network, "core.fetchRows") { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
                         }
                         val detail = detailDef.await()
                         if (detail != null) anyFetchOk = true
@@ -639,7 +639,8 @@ fun OrbConversationPage(
                 OrbReadCache.saveRows(eventsCacheKey, allEvs)
             }
             liveRow?.let { OrbMissionUnreadStore.markSeen(it) }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            if (t !is kotlinx.coroutines.CancellationException) OrbLog.w(OrbLog.Category.Network, "conversation history load failed", t)
         }
         // Surface a failed first load instead of a silent empty screen; later polls
         // keep failing quietly while cached turns are on screen.
@@ -655,7 +656,7 @@ fun OrbConversationPage(
     DisposableEffect(missionId) {
         var sse: EventSource? = null
         if (missionId != null) {
-            sse = runCatching {
+            sse = orbTry(OrbLog.Category.Network, "core.openSSE") {
                 core.openSSE(
                     path = "/api/control/stream?mission_id=${core.encodeComponent(missionId)}",
                     onEvent = { type, data ->
@@ -864,7 +865,7 @@ fun OrbConversationPage(
         isStopping = true
         scope.launch {
             try {
-                runCatching {
+                orbTry(OrbLog.Category.Network, "/api/control/missions") {
                     core.request("/api/control/missions/$id/cancel", method = "POST")
                 }.onFailure {
                     core.request("/api/control/missions/$id/stop", method = "POST")
@@ -1032,7 +1033,7 @@ fun OrbConversationPage(
     LaunchedEffect(project.id) {
         val slug = core.encodeComponent(project.str("slug", "id") ?: project.id)
         val loaded = mutableListOf<String>()
-        runCatching {
+        orbTry(OrbLog.Category.Network, "/api/projects") {
             val manifest = core.fetchDict("/api/projects/$slug/context/manifest")
             val entries = OrbJSON.dict(manifest["entries"]) ?: emptyMap()
             for ((path, meta) in entries) {
@@ -1280,7 +1281,7 @@ fun OrbConversationPage(
                 item(key = "conv_error") {
                     OrbRemoteLog(
                         title = err,
-                        log = core.lastErrorLog.value,
+                        log = core.lastErrorLog.collectAsState().value,
                         onRetry = {
                             errorMessage = null
                             missionId?.let { scope.launch { loadHistory(it) } }

@@ -37,7 +37,6 @@
             android:launchMode="singleTask"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:supportsPictureInPicture="true"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboard|keyboardHidden|navigation|uiMode"
             android:theme="@style/Theme.SandboxedDashboard"
             android:windowSoftInputMode="adjustResize">

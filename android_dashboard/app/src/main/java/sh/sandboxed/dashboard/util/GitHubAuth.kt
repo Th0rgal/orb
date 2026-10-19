@@ -29,6 +29,8 @@ object GitHubAuth {
     const val REDIRECT_URI = "$REDIRECT_SCHEME://$REDIRECT_HOST$REDIRECT_PATH"
 
     fun launch(context: Context, baseUrl: String) {
+        // Only a callback following this launch (same endpoint, within 10 min) is accepted.
+        sh.sandboxed.dashboard.orb.OrbGitHubSignIn(sh.sandboxed.dashboard.orb.OrbGitHubSignIn.prefsStore(context)).begin(baseUrl)
         val authorizeUrl = "${baseUrl.trimEnd('/')}/api/auth/github/start" +
                 "?redirect=" + Uri.encode(REDIRECT_URI)
         val tabsIntent = CustomTabsIntent.Builder()

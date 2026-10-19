@@ -103,6 +103,28 @@ object OrbNotifications {
         nm.createNotificationChannel(readyChannel)
     }
 
+    data class ChannelState(val id: String, val name: String, val importance: Int, val enabled: Boolean)
+
+    /** Permission + channel state for Settings → Debug info. */
+    fun diagnostics(context: Context): Pair<Boolean, List<ChannelState>> {
+        val permitted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            NotificationManagerCompat.from(context).areNotificationsEnabled()
+        }
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        val channels = listOf(CHANNEL_NEEDS_YOU, CHANNEL_READY).map { id ->
+            val ch = nm?.getNotificationChannel(id)
+            ChannelState(
+                id = id,
+                name = ch?.name?.toString() ?: "(missing)",
+                importance = ch?.importance ?: -1,
+                enabled = ch != null && ch.importance != NotificationManager.IMPORTANCE_NONE
+            )
+        }
+        return permitted to channels
+    }
+
     private fun canPostNotifications(context: Context): Boolean {
         if (!notificationsEnabled) return false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -271,8 +293,14 @@ object OrbNotifications {
             .addAction(0, "Inspect Summary", contentPendingIntent)
             .addAction(0, "Reply", replyPendingIntent)
 
-        runCatching {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            OrbLog.w(OrbLog.Category.Notify, "notification for ${item.id} skipped: permission not granted")
+            return
+        }
+        try {
             nm.notify(notificationIdFor(item.id), builder.build())
+        } catch (e: SecurityException) {
+            OrbLog.w(OrbLog.Category.Notify, "post notification failed", e)
         }
     }
 }

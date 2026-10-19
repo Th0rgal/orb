@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -203,7 +204,7 @@ fun OrbProjectDocumentsPage(
             ) {
                 error?.let { err ->
                     item(key = "error") {
-                        OrbNotice(title = err, log = core.lastErrorLog.value)
+                        OrbNotice(title = err, log = core.lastErrorLog.collectAsState().value)
                     }
                 }
 
@@ -881,7 +882,7 @@ fun OrbProjectDocumentViewer(
             }
             error != null && content.isEmpty() -> {
                 Box(modifier = Modifier.padding(20.dp)) {
-                    OrbNotice(title = error!!, log = core.lastErrorLog.value)
+                    OrbNotice(title = error!!, log = core.lastErrorLog.collectAsState().value)
                 }
             }
             isEditing -> {
@@ -889,7 +890,7 @@ fun OrbProjectDocumentViewer(
                     error?.let { err ->
                         OrbNotice(
                             title = err,
-                            log = core.lastErrorLog.value,
+                            log = core.lastErrorLog.collectAsState().value,
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
                         )
                     }
@@ -921,7 +922,7 @@ fun OrbProjectDocumentViewer(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     error?.let { err ->
-                        OrbNotice(title = err, log = core.lastErrorLog.value)
+                        OrbNotice(title = err, log = core.lastErrorLog.collectAsState().value)
                     }
                     if (isMarkdown) {
                         OrbRichText(markdown = content, tone = OrbRichTextTone.Primary)

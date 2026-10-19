@@ -31,6 +31,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -196,7 +197,7 @@ object OrbApprovalKey {
     }
 }
 
-private fun Context.fragmentActivity(): FragmentActivity? {
+internal fun Context.fragmentActivity(): FragmentActivity? {
     var c: Context? = this
     while (c is ContextWrapper) {
         if (c is FragmentActivity) return c
@@ -209,7 +210,7 @@ private fun Context.fragmentActivity(): FragmentActivity? {
 fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val activity = LocalContext.current.fragmentActivity()
-    val baseURL = core.baseURLFlow.value
+    val baseURL = core.baseURLFlow.collectAsState().value
     var requests by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var grants by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }

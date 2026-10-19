@@ -5,4 +5,3 @@
     *** Companion;
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep class sh.sandboxed.dashboard.data.** { *; }
