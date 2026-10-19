@@ -1,3 +1,4 @@
+import { pollWhileVisible } from "./poll";
 import { Select } from "./Select";
 import { ErrorToast } from "./toast";
 import { RoutingPicker } from "./RoutingPicker";
@@ -177,24 +178,17 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     setCatalogLoading(false);
     if (connected) untrack(() => void refresh(true));
   });
-  const poll = setInterval(() => {
-    if (document.visibilityState !== "hidden" && (tab() === "health" || tab() === "events")) void refresh();
-  }, 10000);
-  const onVisibility = () => {
-    if (document.visibilityState !== "hidden" && (tab() === "health" || tab() === "events")) void refresh();
-  };
+  const stopPoll = pollWhileVisible(() => (tab() === "health" || tab() === "events") ? refresh() : undefined, 10000, "routing.refresh");
   const beforeUnload = (e: BeforeUnloadEvent) => {
     if (dirty()) {
       e.preventDefault();
       e.returnValue = "";
     }
   };
-  document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("beforeunload", beforeUnload);
   onCleanup(() => {
     generation++;
-    clearInterval(poll);
-    document.removeEventListener("visibilitychange", onVisibility);
+    stopPoll();
     window.removeEventListener("beforeunload", beforeUnload);
     setDirty(false);
     setLeaveRequest(null);

@@ -1,3 +1,4 @@
+import { pollWhileVisible } from "./poll";
 import { invokeNative } from "./native";
 import { useNow } from "./time";
 import { missionAssignedNode } from "./machines/nodes";
@@ -340,9 +341,9 @@ export function InboxPage(p: {
       if (state) { applySharedInboxSeen(state); applySharedInboxPreferences(state.preferences); }
     };
     void refreshSharedState();
-    const sync = setInterval(() => void refreshSharedState(), 10_000);
+    const stopSync = pollWhileVisible(refreshSharedState, 10_000, "inbox.sharedState");
     onCleanup(() => {
-      clearInterval(sync);
+      stopSync();
       if (undoTimer) clearTimeout(undoTimer);
     });
   });

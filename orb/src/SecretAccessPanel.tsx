@@ -1,3 +1,4 @@
+import { pollWhileVisible } from "./poll";
 import { ago, useNow } from "./time";
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import {
@@ -53,8 +54,7 @@ export function SecretAccessPanel(p: {
   };
   onMount(() => {
     void load();
-    const t = setInterval(() => void load(), POLL_MS);
-    onCleanup(() => clearInterval(t));
+    onCleanup(pollWhileVisible(load, POLL_MS, "secretAccess.load"));
   });
 
   const now = useNow(1000);

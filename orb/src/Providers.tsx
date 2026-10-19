@@ -1,3 +1,4 @@
+import { pollWhileVisible } from "./poll";
 import { swallow } from "./log";
 import { AntigravityProvider } from "./AntigravityProvider";
 import { ErrorToast } from "./toast";
@@ -244,8 +245,8 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
   };
   onMount(() => {
     void refreshUsage().catch(swallow("providers.usage"));
-    const timer = setInterval(() => { void refreshUsage().catch(swallow("providers.usage")); }, 30_000);
-    onCleanup(() => { disposed = true; clearInterval(timer); });
+    const stop = pollWhileVisible(refreshUsage, 30_000, "providers.usage");
+    onCleanup(() => { disposed = true; stop(); });
   });
 
   const confirmAddSubscription = () => {
