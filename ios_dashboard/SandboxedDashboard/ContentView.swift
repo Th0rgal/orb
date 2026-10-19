@@ -12,14 +12,16 @@ struct ContentView: View {
     @State private var isCheckingAuth = true
     @State private var authRequired = false
     @State private var showSetupSheet = false
+    @Environment(\.scenePhase) private var scenePhase
 
     private let api = APIService.shared
 
     var body: some View {
         Group {
             if isCheckingAuth || api.authRefreshing {
-                LoadingView(message: "Connecting...")
-                    .background(Theme.backgroundPrimary.ignoresSafeArea())
+                ProgressView("Connecting...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(OrbStyle.background.ignoresSafeArea())
             } else if api.authSessionExpired {
                 ReconnectView()
             } else if authRequired && !isAuthenticated {
@@ -38,6 +40,10 @@ struct ContentView: View {
                             FidoApprovalOverlay()
                         }
                     }
+                    .onAppear { OrbFidoMonitor.shared.update(active: scenePhase == .active) }
+                    .onDisappear { OrbFidoMonitor.shared.stop() }
+                    .onChange(of: scenePhase) { _, phase in OrbFidoMonitor.shared.update(active: phase == .active) }
+                    .onChange(of: api.connectionGeneration) { _, _ in OrbFidoMonitor.shared.update(active: scenePhase == .active) }
             }
         }
         .task {
@@ -268,7 +274,7 @@ struct LoginView: View {
                     
                     // Logo
                     VStack(spacing: 16) {
-                        PhosphorIcon(symbol: .brain, weight: .light, color: Theme.accent)
+                        Image(systemName: "brain").resizable().scaledToFit().foregroundStyle(Theme.accent)
                             .frame(width: 40, height: 40)
                         
                         VStack(spacing: 4) {
@@ -280,9 +286,9 @@ struct LoginView: View {
                     }
 
                     if sessionExpired {
-                        GlassCard(padding: 16, cornerRadius: 18) {
+                        LoginCard(padding: 16, cornerRadius: 18) {
                             HStack(spacing: 10) {
-                                PhosphorIcon(symbol: .warning, weight: .fill, color: Theme.warning)
+                                Image(systemName: "exclamationmark.triangle.fill").resizable().scaledToFit().foregroundStyle(Theme.warning)
                                     .frame(width: 18, height: 18)
                                 Text("Session expired. Sign in again to continue.")
                                     .font(.subheadline)
@@ -294,7 +300,7 @@ struct LoginView: View {
                     }
                     
                     // Login form
-                    GlassCard(padding: 20, cornerRadius: 22) {
+                    LoginCard(padding: 20, cornerRadius: 22) {
                         VStack(spacing: 20) {
                             // Server URL field
                             VStack(alignment: .leading, spacing: 8) {
@@ -364,7 +370,7 @@ struct LoginView: View {
                             // Error message
                             if let error = errorMessage {
                                 HStack(spacing: 8) {
-                                    PhosphorIcon(symbol: .xCircle, weight: .fill, color: Theme.error)
+                                    Image(systemName: "xmark.circle.fill").resizable().scaledToFit().foregroundStyle(Theme.error)
                                         .frame(width: 14, height: 14)
                                     Text(error)
                                         .font(.caption)
@@ -374,14 +380,16 @@ struct LoginView: View {
                             }
                             
                             // Login button
-                            GlassPrimaryButton(
-                                "Sign In",
-                                phosphorIcon: .signIn,
-                                isLoading: isLoading,
-                                isDisabled: password.isEmpty || (api.authMode == .multiUser && username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            ) {
-                                login()
+                            Button { login() } label: {
+                                HStack(spacing: 8) {
+                                    if isLoading { ProgressView() } else { Image(systemName: "arrow.right.circle.fill") }
+                                    Text("Sign In").fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
                             }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isLoading || password.isEmpty || (api.authMode == .multiUser && username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
                         }
                     }
                     .padding(.horizontal, 24)
@@ -451,69 +459,18 @@ struct LoginView: View {
     }
 }
 
-// MARK: - Main Tab View
-
-struct MainTabView: View {
-    private var nav = NavigationState.shared
-    
-    enum TabItem: String, CaseIterable {
-        case control = "Control"
-        case projects = "Projects"
-        case terminal = "Terminal"
-        case files = "Files"
-
-        var icon: String {
-            switch self {
-            case .control: return "message.fill"
-            case .projects: return "square.stack.3d.up.fill"
-            case .terminal: return "terminal.fill"
-            case .files: return "folder.fill"
-            }
-        }
-    }
-    
+private struct LoginCard<Content: View>: View {
+    var padding: CGFloat
+    var cornerRadius: CGFloat
+    @ViewBuilder var content: Content
     var body: some View {
-        TabView(selection: Binding(
-            get: { nav.selectedTab },
-            set: { nav.selectedTab = $0 }
-        )) {
-            ForEach(TabItem.allCases, id: \.rawValue) { tab in
-                NavigationStack {
-                    tabContent(for: tab)
-                }
-                .tabItem {
-                    Label(tab.rawValue, systemImage: tab.icon)
-                }
-                .tag(tab)
-            }
-        }
-        .tint(Theme.accent)
-        .overlay {
-            if !FidoApprovalState.shared.pendingRequests.isEmpty {
-                FidoApprovalOverlay()
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private func tabContent(for tab: TabItem) -> some View {
-        switch tab {
-        case .control:
-            ControlView()
-        case .projects:
-            ProjectsView()
-        case .terminal:
-            TerminalView()
-        case .files:
-            FilesView()
-        }
+        content
+            .padding(padding)
+            .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).stroke(OrbStyle.border, lineWidth: 1))
     }
 }
 
 #Preview("Login") {
     LoginView(onLogin: {})
-}
-
-#Preview("Main") {
-    MainTabView()
 }

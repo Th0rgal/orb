@@ -79,8 +79,8 @@ ios_dashboard/
 │   │   ├── OrbSettings.swift
 │   │   ├── OrbMachinesSettings.swift
 │   │   └── OrbProvidersSettings.swift
-│   ├── Services/                    # APIService (HTTP + SSE), Keychain, Haptics
-│   └── Views/                       # Legacy tab views & shared components
+│   ├── Models/                      # StoredEvent, AnyCodable, FIDO request models
+│   └── Services/                    # APIService (auth + events + control stream), FIDO approvals
 ├── SandboxedDashboardTests/         # Unit tests
 └── SandboxedDashboardUITests/       # UI & fixture server tests
 ```

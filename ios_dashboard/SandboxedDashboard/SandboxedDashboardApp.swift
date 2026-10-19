@@ -19,10 +19,9 @@ struct SandboxedDashboardApp: App {
             if UserDefaults.standard.bool(forKey: "orb_test_reset_auth") { APIService.shared.logout() }
         }
         #endif
-        // Drain legacy in-UserDefaults mission cache blobs into the on-disk
-        // Caches store. Each blob was a multi-KB-to-multi-MB JSON payload
-        // held resident by cfprefsd; the migration runs at most once.
-        ControlView.migrateMissionCacheIfNeeded()
+        // Drop the legacy Control-tab mission caches (UserDefaults blobs and
+        // Caches/missions files); Orb keeps its own account-scoped store.
+        OrbLegacyCleanup.purgeLegacyMissionCacheIfNeeded()
     }
 
     @Environment(\.scenePhase) private var scenePhase
@@ -31,9 +30,6 @@ struct SandboxedDashboardApp: App {
         WindowGroup {
             ContentView()
                 .preferredColorScheme(.dark)
-                .onOpenURL { url in
-                    NavigationState.shared.handle(url: url)
-                }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { OrbBackgroundRefresh.schedule() }
