@@ -975,11 +975,6 @@ pub fn voice_cancel(state: tauri::State<'_, VoiceState>) -> bool {
     state.0.cancel()
 }
 
-#[tauri::command]
-pub fn voice_release(state: tauri::State<'_, VoiceState>) -> bool {
-    state.0.release()
-}
-
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

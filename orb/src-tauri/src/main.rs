@@ -242,7 +242,6 @@ fn main() {
             voice::voice_prewarm,
             voice::voice_transcribe,
             voice::voice_cancel,
-            voice::voice_release,
             context_service::project_context_file,
             context_service::project_context_prepare,
             context_service::project_skills_prepare,

@@ -372,6 +372,17 @@ pub(crate) fn start_with_env_fenced(
     env: &[(String, String)],
     expected_stop: Option<u64>,
 ) -> Result<(), String> {
+    start_with_options(request, env, expected_stop, &RECHECK_DELAYS)
+}
+
+/// The full launch: `recheck_delays` are how long a Claude turn waits on the
+/// same background tasks before Orb asks about them again.
+fn start_with_options(
+    request: StartRequest,
+    env: &[(String, String)],
+    expected_stop: Option<u64>,
+    recheck_delays: &[Duration],
+) -> Result<(), String> {
     let fence = launch_fence(&request.id);
     let generation = fence.lock().map_err(|e| e.to_string())?;
     if expected_stop.is_some_and(|expected| expected != *generation) {
@@ -438,7 +449,7 @@ pub(crate) fn start_with_env_fenced(
     let error = Arc::new(Mutex::new(None));
     let resumed = request.session_id.as_deref().is_some_and(|s| !s.is_empty());
     let interaction = crate::interactions::begin(&request.id);
-    let child = match spawn_harness(&request, &text, &session_id, &error, env) {
+    let child = match spawn_harness(&request, &text, &session_id, &error, env, recheck_delays) {
         Ok(child) => child,
         Err(error) => {
             crate::interactions::finish(&interaction);
@@ -1081,11 +1092,12 @@ fn spawn_harness(
     session_id: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>,
     env: &[(String, String)],
+    recheck_delays: &[Duration],
 ) -> Result<Child, String> {
     match request.harness.as_str() {
         "antigravity" => spawn_antigravity(request, text, session_id, error, env),
         "vibe" => spawn_vibe(request, text, session_id, error, env),
-        "claudecode" => spawn_claude(request, text, session_id, error, env),
+        "claudecode" => spawn_claude(request, text, session_id, error, env, recheck_delays),
         "codex" => spawn_codex(request, text, session_id, error, env),
         "grok" => spawn_piped(
             request,
@@ -1531,6 +1543,7 @@ fn spawn_claude(
     session_id: &Arc<Mutex<Option<String>>>,
     error: &Arc<Mutex<Option<String>>>,
     env: &[(String, String)],
+    recheck_delays: &[Duration],
 ) -> Result<Child, String> {
     let plan = request
         .prompt
@@ -1602,7 +1615,7 @@ fn spawn_claude(
         {
             let recheck = Arc::clone(&recheck);
             let stdin = Arc::clone(&stdin);
-            let delays = recheck_delays(&request.id);
+            let delays = recheck_delays.to_vec();
             thread::spawn(move || recheck.run(&stdin, &delays));
         }
         let mission_id = crate::interactions::session(&request.id);
@@ -2586,14 +2599,6 @@ const RECHECK_DELAYS: [Duration; 3] = [
     Duration::from_secs(12 * 3600),
 ];
 
-fn recheck_delays(_id: &str) -> Vec<Duration> {
-    #[cfg(test)]
-    if let Some(delays) = tests::recheck_delays().lock().unwrap().get(_id) {
-        return delays.clone();
-    }
-    RECHECK_DELAYS.to_vec()
-}
-
 #[derive(Clone)]
 struct BackgroundTask {
     id: String,
@@ -3327,6 +3332,7 @@ mod tests {
             &Arc::new(Mutex::new(None)),
             &Arc::new(Mutex::new(None)),
             &[],
+            &RECHECK_DELAYS,
         )
         .unwrap_err();
         assert_eq!(error, "unknown local harness gemini");
@@ -3388,7 +3394,8 @@ mod tests {
             let output = Arc::new(Output::default());
             let session = Arc::new(Mutex::new(None));
             let error = Arc::new(Mutex::new(None));
-            let mut child = spawn_harness(&request, &output, &session, &error, &[]).unwrap();
+            let mut child =
+                spawn_harness(&request, &output, &session, &error, &[], &RECHECK_DELAYS).unwrap();
             let status = child.wait().unwrap();
             if outcome != "ERROR" {
                 assert!(status.success());
@@ -4011,12 +4018,6 @@ printf '%s\n' '{"type":"result"}'
         assert!(!state.running());
     }
 
-    /// Shorter delays for the run of one test.
-    pub(super) fn recheck_delays() -> &'static Mutex<HashMap<String, Vec<Duration>>> {
-        static DELAYS: OnceLock<Mutex<HashMap<String, Vec<Duration>>>> = OnceLock::new();
-        DELAYS.get_or_init(Default::default)
-    }
-
     #[test]
     fn claude_background_asks_once_about_each_command_and_never_about_agents() {
         let dir = tempfile::tempdir().unwrap();
@@ -4109,26 +4110,27 @@ printf '%s\n' '{"type":"result"}'
 "#).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let id = format!("claude-recheck-{}", uuid_like());
-        recheck_delays()
-            .lock()
-            .unwrap()
-            .insert(id.clone(), vec![Duration::from_millis(150)]);
         let started = Instant::now();
-        local_agents_start(StartRequest {
-            service_tier: None,
-            effort: None,
-            cyber_revision: None,
-            cyber_access: None,
-            id: id.clone(),
-            harness: "claudecode".into(),
-            bin: bin.to_string_lossy().into_owned(),
-            cwd: dir.path().to_string_lossy().into_owned(),
-            prompt: "Release".into(),
-            model: None,
-            session_id: None,
-            image_paths: vec![],
-            shared_cwd_with: None,
-        })
+        start_with_options(
+            StartRequest {
+                service_tier: None,
+                effort: None,
+                cyber_revision: None,
+                cyber_access: None,
+                id: id.clone(),
+                harness: "claudecode".into(),
+                bin: bin.to_string_lossy().into_owned(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                prompt: "Release".into(),
+                model: None,
+                session_id: None,
+                image_paths: vec![],
+                shared_cwd_with: None,
+            },
+            &[],
+            None,
+            &[Duration::from_millis(150)],
+        )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut waited = false;
@@ -4161,7 +4163,6 @@ printf '%s\n' '{"type":"result"}'
                 && !second.contains("Wait for release builds"),
             "{second}"
         );
-        recheck_delays().lock().unwrap().remove(&id);
         runs().lock().unwrap().remove(&id);
     }
 
