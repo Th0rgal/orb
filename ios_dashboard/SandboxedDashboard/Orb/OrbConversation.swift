@@ -1683,6 +1683,7 @@ struct OrbConversation: View {
             if !OrbRow(value).cloud {
                 if stream == nil && phase == .active {
                     stream = APIService.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
+                        if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data); return }
                         if type == "text_delta", let delta = data["delta"] as? String ?? data["content"] as? String {
                             liveText += delta
                         } else if type == "text_op" {

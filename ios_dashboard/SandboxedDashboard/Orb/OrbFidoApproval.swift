@@ -26,7 +26,7 @@ struct FidoApprovalOverlay: View {
                     Spacer()
 
                     // Card slides from bottom
-                    GlassCard(padding: 24, cornerRadius: 28) {
+                    OrbFidoCard {
                         VStack(spacing: 20) {
                             // Header with lock icon
                             HStack {
@@ -250,5 +250,17 @@ struct GlassDenyButtonStyle: ButtonStyle {
     ZStack {
         Theme.backgroundPrimary.ignoresSafeArea()
         FidoApprovalOverlay()
+    }
+}
+
+/// Self-contained card so the overlay no longer depends on the legacy Views/ components.
+private struct OrbFidoCard<Content: View>: View {
+    @ViewBuilder let content: Content
+    var body: some View {
+        content
+            .padding(24)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(.white.opacity(0.2), lineWidth: 0.5))
     }
 }

@@ -31,6 +31,13 @@ struct ContentView: View {
                 )
             } else {
                 OrbHome()
+                    .overlay {
+                        // FIDO sign requests arrive on the control stream; the
+                        // overlay used to live only in the legacy MainTabView.
+                        if !FidoApprovalState.shared.pendingRequests.isEmpty {
+                            FidoApprovalOverlay()
+                        }
+                    }
             }
         }
         .task {

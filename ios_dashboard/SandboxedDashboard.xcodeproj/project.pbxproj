@@ -47,7 +47,6 @@
 		4D1C2019BB5F366370CDFF53 /* Ask.swift in Sources */ = {isa = PBXBuildFile; fileRef = A99DCA3D66FD93467432EA1C /* Ask.swift */; };
 		4F14A189BFE75A1CA225B797 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D6534BE4C1B5E0BEA90A5A /* Workspace.swift */; };
 		50AD3F51FCD5F045B1715B24 /* OrbMachinesSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5BB808D250AF7F06FD9AC7 /* OrbMachinesSettings.swift */; };
-		50EBDCFBA58915481F5EC995 /* FidoApprovalOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B73495CB5FE8A01851005A /* FidoApprovalOverlay.swift */; };
 		51E9D9F51934DFC8EAD58CDC /* QueueSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EAAE29E81F160F8E8409B7D /* QueueSheet.swift */; };
 		57464CF87C1C599592030E8A /* OrbProjectAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E26C0B52815B686DE4AE0804 /* OrbProjectAppearance.swift */; };
 		58A71FAA4BF80A3C1C866EF2 /* Hermes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7868B572B7E5DBED9E52D160 /* Hermes.swift */; };
@@ -57,6 +56,7 @@
 		66E208F9D4759B79ED653374 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B74AB5DF6829813AE79229D /* ContentView.swift */; };
 		66F676EDC1A217D788AF9656 /* ProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16444DBBDC6D78A5324C783D /* ProjectTests.swift */; };
 		6846AB79778CDF4CC216B7D1 /* SandboxedDashboardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8080D5ADF84794AFE484FE17 /* SandboxedDashboardApp.swift */; };
+		6910CB167E64FEF98032B70B /* OrbFidoApproval.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DFB584F067682DA1324F346 /* OrbFidoApproval.swift */; };
 		692C694570F45D74CCBAC75B /* TerminalState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6922E2F0E17EDB3A8400D473 /* TerminalState.swift */; };
 		6A15DF1CBD6B0A3716B9FE94 /* WorkerSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081ACA60E04DBCB6E7313072 /* WorkerSheetView.swift */; };
 		6DC6CC0049892748B787B5A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F47BD46D6393291DC560EA07 /* Assets.xcassets */; };
@@ -198,12 +198,12 @@
 		4802677F01F1504267EC2BE2 /* SandboxedDashboardTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SandboxedDashboardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		492E8CF2E0A3AEF64A472C85 /* FileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileEntry.swift; sourceTree = "<group>"; };
 		4CC2B6E9848FF220F103DED2 /* LoadingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingView.swift; sourceTree = "<group>"; };
+		4DFB584F067682DA1324F346 /* OrbFidoApproval.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFidoApproval.swift; sourceTree = "<group>"; };
 		52C96EACDC68FCCABE9820AE /* OrbProvidersSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProvidersSettings.swift; sourceTree = "<group>"; };
 		54A0C852566E4DC6B1E9620D /* OrbLiveUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbLiveUITests.swift; sourceTree = "<group>"; };
 		555F14279E1F8E312FB9231C /* OrbAdminSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbAdminSettings.swift; sourceTree = "<group>"; };
 		55F4658A2D65748FC7AC5DE3 /* APIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIService.swift; sourceTree = "<group>"; };
 		56259348FCD0E21FC531D8E9 /* OrbInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbInbox.swift; sourceTree = "<group>"; };
-		62B73495CB5FE8A01851005A /* FidoApprovalOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FidoApprovalOverlay.swift; sourceTree = "<group>"; };
 		6922E2F0E17EDB3A8400D473 /* TerminalState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalState.swift; sourceTree = "<group>"; };
 		6E793D17A373009D35033D9E /* OrbMessageImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMessageImages.swift; sourceTree = "<group>"; };
 		717FFF091D1EDB3F27D08712 /* OrbCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbCore.swift; sourceTree = "<group>"; };
@@ -311,15 +311,13 @@
 			children = (
 				9331F1134F0091DB717302CC /* OrbFleetActivity.swift */,
 			);
-			name = Shared;
-			path = OrbLiveActivity/Shared;
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		39B9469E602F8BD41799B337 /* FidoApproval */ = {
 			isa = PBXGroup;
 			children = (
 				22EA3B4E94755F7712ED534F /* AutoApprovalRulesView.swift */,
-				62B73495CB5FE8A01851005A /* FidoApprovalOverlay.swift */,
 			);
 			path = FidoApproval;
 			sourceTree = "<group>";
@@ -412,6 +410,7 @@
 				717FFF091D1EDB3F27D08712 /* OrbCore.swift */,
 				94B98C32C31466233A2EFB2B /* OrbDictation.swift */,
 				CB1276147AB3D26931AC35DA /* OrbDocuments.swift */,
+				4DFB584F067682DA1324F346 /* OrbFidoApproval.swift */,
 				728F8E4967094E618F0B595B /* OrbFleetActivityController.swift */,
 				7FF9EF2372E04C65A688DF58 /* OrbForkSheet.swift */,
 				56259348FCD0E21FC531D8E9 /* OrbInbox.swift */,
@@ -466,7 +465,6 @@
 				6DBC9AF3F2EFD0B5057A2EB6 /* SandboxedDashboard */,
 				A5A307A24CE6E469C4A2FA0D /* SandboxedDashboardTests */,
 				69E84F6BBDAEC47870846B46 /* SandboxedDashboardUITests */,
-				35EE4E34BE8C2BF15EEDF6F8 /* Shared */,
 				057719CAD3366030137C44B3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -681,6 +679,7 @@
 				};
 			};
 			buildConfigurationList = 210E554B4D49DD6F4EE7F3FD /* Build configuration list for PBXProject "SandboxedDashboard" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -690,12 +689,11 @@
 			mainGroup = 9402FD943158ED3148A81A0C;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 057719CAD3366030137C44B3 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
 				14C19B3219EFE4065FBC9952 /* OrbLiveActivity */,
+				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
 				C50B6EE186DD640BD408EEA7 /* SandboxedDashboardTests */,
 				8A8DCA11CAC3A5FFA56DC86C /* SandboxedDashboardUITests */,
 			);
@@ -746,7 +744,6 @@
 				5D1FB1BE4D58CC95A500B684 /* ControlView.swift in Sources */,
 				B3680EB29951C459A8C8A35A /* DesktopStreamService.swift in Sources */,
 				8573A897FBBC1697AE1AA7BA /* DesktopStreamView.swift in Sources */,
-				50EBDCFBA58915481F5EC995 /* FidoApprovalOverlay.swift in Sources */,
 				D057B578B2884C4B2B36B1C3 /* FidoApprovalState.swift in Sources */,
 				FF9AD27CB2EDBA4E942F09D4 /* FidoSignRequest.swift in Sources */,
 				C7C23F6559C34034D1680FC2 /* FileEntry.swift in Sources */,
@@ -773,6 +770,7 @@
 				86C9D56D2E0A4F576734B3F1 /* OrbCore.swift in Sources */,
 				FA899996474B9DD43915EC48 /* OrbDictation.swift in Sources */,
 				A302B87C0F47502BF4719F5F /* OrbDocuments.swift in Sources */,
+				6910CB167E64FEF98032B70B /* OrbFidoApproval.swift in Sources */,
 				061FAD94D1FD6DB4854BC51C /* OrbFleetActivity.swift in Sources */,
 				AC1BFAA77BFF45A70AE7453D /* OrbFleetActivityController.swift in Sources */,
 				AA652180F4784273CC4B4BBF /* OrbForkSheet.swift in Sources */,

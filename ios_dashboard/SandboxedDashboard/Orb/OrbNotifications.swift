@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import os
 @preconcurrency import UserNotifications
 import SwiftUI
 
@@ -179,6 +180,7 @@ struct OrbNotificationPayload: Equatable, Sendable {
 @Observable
 final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     static let shared = OrbNotificationCenter()
+    nonisolated static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "md.thomas.openagent.dashboard", category: "notifications")
 
     static let categoryInteractiveApproval = "ORB_INBOX_APPROVAL"
     static let categoryInboxReady = "ORB_INBOX_READY"
@@ -537,12 +539,17 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         let secondaryJSON = userInfo["secondary_payload"] as? String
         let actionID = response.actionIdentifier
         let replyText = (response as? UNTextInputNotificationResponse)?.userText
+        let isFailure = userInfo["failed_reply"] != nil
 
         nonisolated(unsafe) let done = completionHandler
         Task { @MainActor in
             // Finish the action (e.g. Done/Approve while backgrounded) before
             // telling iOS we're done, which may suspend the app; still on main.
             defer { done() }
+            if isFailure {
+                if !missionID.isEmpty { self.focusInbox(missionID: missionID, expandPeek: true, openReply: true) }
+                return
+            }
             await self.handleNotificationAction(
                 actionID: actionID,
                 missionID: missionID,
@@ -572,80 +579,56 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
 
         switch actionID {
         case Self.actionDone:
-            OrbMissionUnreadStore.shared.markRead(id: missionID)
-            _ = try? await OrbCore.shared.call(
-                "/api/control/missions/\(OrbCore.escape(missionID))/status",
-                method: "POST",
-                body: .object(["status": .string("acknowledged")])
-            )
+            if await performAction("Mark done", missionID: missionID, call: {
+                _ = try await OrbCore.shared.call(
+                    "/api/control/missions/\(OrbCore.escape(missionID))/status",
+                    method: "POST",
+                    body: .object(["status": .string("acknowledged")])
+                )
+            }) {
+                OrbMissionUnreadStore.shared.markRead(id: missionID)
+            }
             await pollHybridMissionsOnce()
 
-        case Self.actionApprove:
-            if let callID, let toolName, let primaryJSON,
-               let data = primaryJSON.data(using: .utf8),
+        case Self.actionApprove, Self.actionDecline:
+            let approving = actionID == Self.actionApprove
+            if let callID, let toolName, let json = approving ? primaryJSON : secondaryJSON,
+               let data = json.data(using: .utf8),
                let payload = try? JSONDecoder().decode(OrbJSON.self, from: data) {
-                _ = try? await OrbCore.shared.call(
-                    "/api/control/tool_result",
-                    method: "POST",
-                    body: .object([
-                        "tool_call_id": .string(callID),
-                        "name": .string(toolName),
-                        "result": payload,
-                    ])
-                )
-                OrbMissionUnreadStore.shared.markRead(id: missionID)
+                if await performAction(approving ? "Approve" : "Decline", missionID: missionID, call: {
+                    _ = try await OrbCore.shared.call(
+                        "/api/control/tool_result",
+                        method: "POST",
+                        body: .object([
+                            "tool_call_id": .string(callID),
+                            "name": .string(toolName),
+                            "result": payload,
+                        ])
+                    )
+                }) {
+                    OrbMissionUnreadStore.shared.markRead(id: missionID)
+                }
                 await pollHybridMissionsOnce()
             } else {
-                focusInbox(missionID: missionID, expandPeek: true)
-            }
-
-        case Self.actionDecline:
-            if let callID, let toolName, let secondaryJSON,
-               let data = secondaryJSON.data(using: .utf8),
-               let payload = try? JSONDecoder().decode(OrbJSON.self, from: data) {
-                _ = try? await OrbCore.shared.call(
-                    "/api/control/tool_result",
-                    method: "POST",
-                    body: .object([
-                        "tool_call_id": .string(callID),
-                        "name": .string(toolName),
-                        "result": payload,
-                    ])
-                )
-                OrbMissionUnreadStore.shared.markRead(id: missionID)
-                await pollHybridMissionsOnce()
-            } else {
-                focusInbox(missionID: missionID, expandPeek: true, openReply: true)
+                focusInbox(missionID: missionID, expandPeek: true, openReply: !approving)
             }
 
         case Self.actionRetry:
-            OrbMissionUnreadStore.shared.markRead(id: missionID)
-            _ = try? await OrbCore.shared.call(
-                "/api/control/message",
-                method: "POST",
-                body: .object([
-                    "mission_id": .string(missionID),
-                    "content": .string("Continue from where you left off."),
-                    "queue_followup": .bool(true),
-                    "client_message_id": .string(UUID().uuidString.lowercased()),
-                ])
-            )
+            if await performAction("Retry", missionID: missionID, call: {
+                try await self.sendMessage(missionID: missionID, content: "Continue from where you left off.")
+            }) {
+                OrbMissionUnreadStore.shared.markRead(id: missionID)
+            }
             await pollHybridMissionsOnce()
 
         case Self.actionReply:
             let trimmed = (replyText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
-                OrbMissionUnreadStore.shared.markRead(id: missionID)
-                _ = try? await OrbCore.shared.call(
-                    "/api/control/message",
-                    method: "POST",
-                    body: .object([
-                        "mission_id": .string(missionID),
-                        "content": .string(trimmed),
-                        "queue_followup": .bool(true),
-                        "client_message_id": .string(UUID().uuidString.lowercased()),
-                    ])
-                )
+                if await performAction("Reply", missionID: missionID, text: trimmed, call: {
+                    try await self.sendMessage(missionID: missionID, content: trimmed)
+                }) {
+                    OrbMissionUnreadStore.shared.markRead(id: missionID)
+                }
                 await pollHybridMissionsOnce()
             } else {
                 focusInbox(missionID: missionID, expandPeek: true, openReply: true)
@@ -657,6 +640,62 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         default:
             // Default tap on the notification banner: open Inbox directly on this mission card with AI summary expanded!
             focusInbox(missionID: missionID, expandPeek: true)
+        }
+    }
+}
+
+extension OrbNotificationCenter {
+    static let categoryActionFailed = "ORB_ACTION_FAILED"
+
+    fileprivate func sendMessage(missionID: String, content: String) async throws {
+        _ = try await OrbCore.shared.call(
+            "/api/control/message",
+            method: "POST",
+            body: .object([
+                "mission_id": .string(missionID),
+                "content": .string(content),
+                "queue_followup": .bool(true),
+                "client_message_id": .string(UUID().uuidString.lowercased()),
+            ])
+        )
+    }
+
+    /// Runs a notification quick action. On failure the error is logged and a
+    /// "not sent" notification is posted (carrying the reply text) so nothing is lost silently.
+    fileprivate func performAction(_ label: String, missionID: String, text: String? = nil, call: () async throws -> Void) async -> Bool {
+        do {
+            try await call()
+            return true
+        } catch {
+            OrbNotificationCenter.log.error("Notification action \(label, privacy: .public) failed for \(missionID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            Self.postActionFailure(label: label, missionID: missionID, text: text, error: error)
+            return false
+        }
+    }
+
+    static func failureContent(label: String, missionID: String, text: String?, error: Error) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = label == "Reply" ? "Reply not sent" : "\(label) failed"
+        var lines: [String] = []
+        if let text, !text.isEmpty { lines.append("\u{201C}\(text)\u{201D}") }
+        lines.append(error.localizedDescription)
+        lines.append("Tap to open the conversation and try again.")
+        content.body = lines.joined(separator: "\n")
+        content.sound = .default
+        content.categoryIdentifier = categoryActionFailed
+        content.userInfo = [
+            "mission_id": missionID,
+            "url": "orb://inbox/\(OrbCore.escape(missionID))?peek=1&reply=1",
+            "failed_reply": text ?? "",
+        ]
+        return content
+    }
+
+    static func postActionFailure(label: String, missionID: String, text: String?, error: Error) {
+        let content = failureContent(label: label, missionID: missionID, text: text, error: error)
+        let request = UNNotificationRequest(identifier: "orb.action.failed.\(missionID).\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { addError in
+            if let addError { OrbNotificationCenter.log.error("Could not post failure notification: \(addError.localizedDescription, privacy: .public)") }
         }
     }
 }

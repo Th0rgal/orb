@@ -64,7 +64,8 @@ enum OrbStyle {
         guard let date = parseDate(raw) else { return "" }
         let delta = max(0, Int(now.timeIntervalSince(date)))
         if delta < 45 { return "now" }
-        if delta < 3600 { return "\(delta / 60)m" }
+        // 45-59 s rounds down to 0 minutes; never show "0m" (matches Android).
+        if delta < 3600 { return "\(max(1, delta / 60))m" }
         if delta < 86_400 { return "\(delta / 3600)h" }
         if delta < 604_800 { return "\(delta / 86_400)d" }
         return "\(delta / 604_800)w"
