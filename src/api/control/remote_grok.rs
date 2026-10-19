@@ -799,6 +799,8 @@ pub(crate) struct NativeGrokObserver {
     /// Offset reached at a past instant, saved once it is old enough that the
     /// event logger has stored everything below it.
     offset_checkpoint: Option<(u64, std::time::Instant)>,
+    /// A native Antigravity `schedule` already became a Core wake-up.
+    native_wakeup_registered: bool,
 }
 
 /// Jobs that allocated their Claude session (`--session-id`) rather than
@@ -886,6 +888,7 @@ impl NativeGrokObserver {
                 .await
                 .unwrap_or(0),
             offset_checkpoint: None,
+            native_wakeup_registered: false,
         })
     }
 
@@ -1433,8 +1436,37 @@ impl NativeGrokObserver {
         // Raw remote commands predate stream-json. Require a Claude result only
         // after the native protocol has actually been observed.
         let legacy_claude = self.stream.claude && self.stream.json_events == 0;
+        // A resume that dies before its first event used to surface only as
+        // "identity was not durably persisted" (a configuration failure), which
+        // hid the real exit and stopped automatic recovery.
+        let native_label = if self.stream.antigravity.is_some() {
+            Some("Antigravity")
+        } else if self.stream.vibe.is_some() {
+            Some("Vibe")
+        } else {
+            None
+        };
+        let exited_before_output = native_label.is_some()
+            && !succeeded
+            && self.stream.error.is_none()
+            && self.stream.json_events == 0
+            && self.stream.session_id.is_none();
+        if exited_before_output {
+            self.stream.error = Some(exited_before_output_message(
+                native_label.unwrap_or_default(),
+                exit,
+                self.session_persisted.as_deref(),
+            ));
+        }
+        let native_schedule = self
+            .stream
+            .antigravity
+            .as_ref()
+            .and_then(|s| s.native_schedule.clone())
+            .filter(|_| self.stream.error.is_none() && !auth_required);
         if self.stream.antigravity.is_some()
             && self.stream.error.is_none()
+            && (succeeded || native_schedule.is_some())
             && (self.stream.session_id.is_none()
                 || self.session_persisted != self.stream.session_id)
         {
@@ -1455,10 +1487,39 @@ impl NativeGrokObserver {
             if self.stream.error.is_none() {
                 self.stream.error = stream.finish().err();
             }
-            if self.session_persisted != stream.session {
+            if !exited_before_output && self.session_persisted != stream.session {
                 self.stream.error = Some("Vibe identity was not durably persisted".into());
             }
         }
+        // Headless `agy -p` exits after its native `schedule` tool instead of
+        // sleeping. Turn that into a durable Core wake-up so the turn is a clean
+        // wait; if registration fails, the error asks recovery to resume the
+        // conversation when the schedule is due.
+        if let Some(schedule) = native_schedule
+            .as_ref()
+            .filter(|_| self.stream.error.is_none())
+        {
+            if !self.native_wakeup_registered {
+                match crate::api::mission_runner::register_claude_builtin_wakeup(
+                    self.mission_id,
+                    format!("antigravity-schedule:{}:{}", self.job_id, schedule.step),
+                    schedule.delay_seconds,
+                    schedule.prompt.clone(),
+                    "Antigravity native schedule tool".to_string(),
+                )
+                .await
+                {
+                    Ok(_) => self.native_wakeup_registered = true,
+                    Err(error) => {
+                        tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, %error,
+                            "Antigravity native schedule could not become a Core wake-up; recovery will resume it");
+                        self.stream.error =
+                            Some(native_schedule_error(schedule.delay_seconds, &error));
+                    }
+                }
+            }
+        }
+        let scheduled_end = native_schedule.is_some() && self.native_wakeup_registered;
         // Before the native protocol starts, the CLI can only report setup
         // failures through stderr and the node's terminal process status.
         let startup_evidence = if !succeeded && self.stream.json_events == 0 {
@@ -1473,7 +1534,7 @@ impl NativeGrokObserver {
         let failure = super::remote_failure::classify(
             self.stream.error.as_deref().unwrap_or(&startup_evidence),
         );
-        let success = succeeded
+        let success = (succeeded || scheduled_end)
             && self
                 .stream
                 .antigravity
@@ -1614,6 +1675,15 @@ impl NativeGrokObserver {
             self.owner.publish_native(event).await;
         }
 
+        if success && scheduled_end {
+            if let Some(schedule) = &native_schedule {
+                content.push_str(&format!(
+                    "\n\nAntigravity scheduled a wake-up: this mission resumes in {}s with: {}",
+                    schedule.delay_seconds, schedule.prompt
+                ));
+            }
+        }
+
         TerminalVerdict {
             success,
             content,
@@ -1621,6 +1691,27 @@ impl NativeGrokObserver {
             cli_error: self.stream.error.clone(),
         }
     }
+}
+
+/// Marker shared with recovery: a resume that died before any event.
+pub(crate) const EXITED_BEFORE_OUTPUT: &str = "before producing output (resume of conversation ";
+
+fn exited_before_output_message(label: &str, exit: Option<i32>, resumed: Option<&str>) -> String {
+    let code = exit.map_or_else(
+        || "without an exit code".to_string(),
+        |code| format!("with code {code}"),
+    );
+    match resumed.filter(|s| !s.trim().is_empty()) {
+        Some(session) => format!("{label} exited {code} {EXITED_BEFORE_OUTPUT}{session})"),
+        None => format!("{label} exited {code} before producing output (new conversation)"),
+    }
+}
+
+/// Marker shared with recovery: a native schedule Core could not register.
+pub(crate) const NATIVE_SCHEDULE_PREFIX: &str = "Antigravity scheduled a native wake-up in ";
+
+fn native_schedule_error(delay_seconds: u64, error: &str) -> String {
+    format!("{NATIVE_SCHEDULE_PREFIX}{delay_seconds}s; Core could not register it ({error})")
 }
 
 fn mission_model(mission: &Mission) -> Option<String> {
@@ -2481,6 +2572,78 @@ mod tests {
         stream.auth_required = false;
         stream.feed("{\"event\":\"init\",\"conversation_id\":\"wrong-session\"}\n");
         assert!(stream.requires_error_cancellation());
+    }
+
+    async fn resumed_antigravity_observer(session: &str) -> (NativeGrokObserver, Uuid, Uuid) {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.keep().join("missions"), "agy-resume")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("resume"),
+                None,
+                None,
+                None,
+                None,
+                Some("antigravity"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_session_id(mission.id, session, "antigravity", None)
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job_id = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "babylon", mission.id, job_id)
+            .await
+            .unwrap();
+        observer.streaming = LogStreaming::Supported;
+        (observer, mission.id, job_id)
+    }
+
+    #[tokio::test]
+    async fn empty_failed_resume_reports_the_exit_instead_of_identity_persistence() {
+        let (mut observer, mission_id, job_id) = resumed_antigravity_observer("87d01cec").await;
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({"job_id":job_id,"mission_id":mission_id,"state":"failed","exit_code":1,"created_at":"2026-10-18T06:52:05Z"})).unwrap();
+        let verdict = observer.verdict(&status, "babylon").await;
+        assert!(!verdict.success);
+        assert_eq!(
+            verdict.cli_error.as_deref(),
+            Some("Antigravity exited with code 1 before producing output (resume of conversation 87d01cec)")
+        );
+        assert!(!verdict.content.contains("durably persisted"));
+        assert_eq!(verdict.status_reason, "remote_node_job");
+    }
+
+    #[tokio::test]
+    async fn trailing_native_schedule_is_not_an_interrupted_turn() {
+        let (mut observer, mission_id, job_id) = resumed_antigravity_observer("c").await;
+        observer.stream.feed(&format!("{}\n{}\n",
+            serde_json::json!({"event":"init","conversation_id":"c"}),
+            serde_json::json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":7,
+                "state":"DONE","step_type":"tool","tool_name":"schedule","tool_info":{"parameters":
+                {"DurationSeconds":1800,"Prompt":"30-minute supervision check-in"}}}})));
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({"job_id":job_id,"mission_id":mission_id,"state":"failed","exit_code":null,"created_at":"2026-10-18T06:52:05Z"})).unwrap();
+        let verdict = observer.verdict(&status, "babylon").await;
+        // Without a reachable Core API the wake-up cannot be registered, so
+        // the verdict asks recovery to resume when the schedule is due.
+        assert!(!verdict.success);
+        let error = verdict.cli_error.unwrap();
+        assert!(error.starts_with(NATIVE_SCHEDULE_PREFIX), "{error}");
+        assert_eq!(
+            crate::api::control::usage_limit_wait::native_schedule_delay(&error),
+            Some(1800)
+        );
+        assert!(!error.contains("without a SUCCESS result"));
     }
 
     #[tokio::test]

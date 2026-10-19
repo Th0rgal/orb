@@ -366,6 +366,34 @@ pub(crate) struct RemoteWait {
     /// Fence duplicate terminal observations, including after a Core restart.
     #[serde(default)]
     pub failed_job_id: Option<Uuid>,
+    /// Fresh-session fallbacks already made in this failure chain (at most one).
+    #[serde(default)]
+    pub fallbacks: u32,
+}
+
+/// A native resume died before producing output: replace the conversation
+/// with a fresh run on the same node that carries the mission history.
+pub(crate) const FRESH_SESSION_FALLBACK: &str = "Native resume failure";
+/// Antigravity ended its turn on its native `schedule` tool.
+pub(crate) const NATIVE_SCHEDULE_WAIT: &str = "Antigravity native schedule";
+
+/// The delay of a native `schedule` that Core could not register directly.
+pub(crate) fn native_schedule_delay(failure: &str) -> Option<i64> {
+    let rest = failure
+        .split(super::remote_grok::NATIVE_SCHEDULE_PREFIX)
+        .nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits
+        .parse::<i64>()
+        .ok()
+        .filter(|d| (1..=7 * 24 * 60 * 60).contains(d))
+}
+
+/// A native resume that exited before any event, with no fallback used yet.
+pub(crate) fn wants_fresh_session_fallback(backend: &str, failure: &str, fallbacks: u32) -> bool {
+    fallbacks == 0
+        && matches!(backend, "antigravity" | "vibe")
+        && failure.contains(super::remote_grok::EXITED_BEFORE_OUTPUT)
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -659,13 +687,33 @@ pub(crate) async fn plan_remote(
         ) {
             return None;
         }
-        if mission.backend == "antigravity"
-            && mission
-                .session_id
-                .as_deref()
-                .is_some_and(|s| !s.trim().is_empty())
-            && replays < MAX_REMOTE_REPLAYS
+        let has_session = mission
+            .session_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        if mission.backend == "antigravity" && has_session {
+            if let Some(delay) = native_schedule_delay(failure) {
+                return Some(UsageLimitWait {
+                    limit: NATIVE_SCHEDULE_WAIT.to_string(),
+                    resume_at: now + Duration::seconds(delay),
+                    announced: false,
+                });
+            }
+        }
+        if has_session
+            && wants_fresh_session_fallback(
+                &mission.backend,
+                failure,
+                previous.as_ref().map_or(0, |wait| wait.fallbacks),
+            )
         {
+            return Some(UsageLimitWait {
+                limit: FRESH_SESSION_FALLBACK.to_string(),
+                resume_at: now + Duration::seconds(IMMEDIATE_REPLAY_SECS),
+                announced: false,
+            });
+        }
+        if mission.backend == "antigravity" && has_session && replays < MAX_REMOTE_REPLAYS {
             if let Some(interruption) = antigravity_resumable_interruption(failure) {
                 let delay = recovery_delay_secs(replays, mission_id);
                 return Some(UsageLimitWait {
@@ -736,10 +784,12 @@ pub(crate) async fn plan_remote(
             replays: if sustained_progress {
                 0
             } else {
-                previous.map_or(0, |previous| previous.replays)
+                previous.as_ref().map_or(0, |previous| previous.replays)
             },
             retries: 0,
             failed_job_id: Some(job_id),
+            fallbacks: previous.as_ref().map_or(0, |previous| previous.fallbacks)
+                + u32::from(wait.limit == FRESH_SESSION_FALLBACK),
         })
     })
     .await;
@@ -748,6 +798,23 @@ pub(crate) async fn plan_remote(
 
 /// What the operator reads under the failed remote job.
 pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> String {
+    if wait.limit == FRESH_SESSION_FALLBACK {
+        return format!(
+            "{}\n\nThe native conversation could not be resumed. This mission is waiting and \
+             will continue once in a fresh replacement session on the same node, carrying its \
+             history, at {}.",
+            output.trim_end(),
+            resume_time(wait),
+        );
+    }
+    if wait.limit == NATIVE_SCHEDULE_WAIT {
+        return format!(
+            "{}\n\nAntigravity scheduled a wake-up. This mission is waiting and its conversation \
+             will be resumed on the node at {}.",
+            output.trim_end(),
+            resume_time(wait),
+        );
+    }
     if is_transient_wait(&wait.limit) {
         return format!(
             "{}\n\n{} detected. This mission is waiting and its conversation will be resumed \
@@ -769,6 +836,12 @@ pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> Str
 /// The prompt a remote mission is continued with. Its native session on the
 /// node already holds the message it was handling.
 pub(crate) fn remote_resume_prompt(limit: &str) -> String {
+    if limit == NATIVE_SCHEDULE_WAIT {
+        return format!(
+            "{RECOVERY_PROMPT_MARKER} The wake-up you scheduled with your native schedule tool is \
+             due. Continue with the check-in you scheduled."
+        );
+    }
     if limit == "Antigravity response truncated" {
         return format!(
             "{RECOVERY_PROMPT_MARKER} Your previous response exceeded the provider output token limit. \
@@ -788,6 +861,43 @@ pub(crate) fn remote_resume_prompt(limit: &str) -> String {
         "{RESUME_PROMPT_MARKER} The {limit} stopped your previous turn and has now reset. Resume \
          your work where it stopped, and check the state of anything you had started."
     )
+}
+
+/// First prompt of the fresh replacement run: the mission history, framed the
+/// same way as a native handoff, plus why the conversation was replaced.
+pub(crate) fn fresh_session_fallback_prompt(mission: &Mission, max_history_chars: usize) -> String {
+    let history: Vec<(String, String)> = mission
+        .history
+        .iter()
+        .map(|entry| (entry.role.clone(), entry.content.clone()))
+        .collect();
+    let history = crate::util::build_history_context(&history, max_history_chars);
+    let mut message = format!(
+        "{RECOVERY_PROMPT_MARKER} Mission {} could not resume its native {} conversation{} on \
+         this node: the CLI exited before producing any output. This fresh session replaces it. \
+         Review the conversation history above and the current workspace state (including \
+         anything you had started), then continue the work where it stopped. Do not redo \
+         finished work.",
+        mission.id,
+        mission.backend,
+        mission
+            .session_id
+            .as_deref()
+            .map(|s| format!(" {s}"))
+            .unwrap_or_default(),
+    );
+    if let Some(objective) = mission
+        .goal_objective
+        .as_deref()
+        .filter(|_| mission.goal_mode)
+    {
+        message = format!("/goal {objective}\n\n{message}");
+    }
+    if mission.backend == "antigravity" {
+        crate::api::mission_runner::antigravity_handoff_prompt(&history, &message, "")
+    } else {
+        crate::util::frame_turn_prompt(&history, &message)
+    }
 }
 
 /// True for a remote mission waiting for its replay.
@@ -1245,6 +1355,7 @@ mod tests {
             replays,
             retries: 0,
             failed_job_id: None,
+            fallbacks: 0,
         };
         update_remote_wait(dir.path(), mission_id, |_| Some(record(Some(due_at), 0))).await;
         update_remote_wait(dir.path(), other, |_| {
@@ -1403,6 +1514,7 @@ mod tests {
             replays: 0,
             retries: 0,
             failed_job_id: None,
+            fallbacks: 0,
         };
         let still_running = format!(
             "{}: mission still owns job",
@@ -1485,6 +1597,91 @@ mod tests {
         assert!(prompt.contains("Antigravity interrupted turn stopped your previous turn"));
         assert!(prompt.contains("background tasks or systemd units"));
     }
+    #[tokio::test]
+    async fn failed_native_resume_falls_back_to_one_fresh_session() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "antigravity").await;
+        store
+            .update_mission_session_id(mission.id, "87d01cec", "antigravity", None)
+            .await
+            .unwrap();
+        let failure =
+            "Antigravity exited with code 1 before producing output (resume of conversation 87d01cec)";
+        assert_eq!(
+            super::super::remote_failure::classify(failure).kind,
+            super::super::remote_failure::FailureKind::Unknown
+        );
+        let first = Uuid::new_v4();
+        let wait = plan_remote(dir.path(), &store, mission.id, false, failure, first, false)
+            .await
+            .expect("first immediate resume failure falls back");
+        assert_eq!(wait.limit, FRESH_SESSION_FALLBACK);
+        assert!(annotate_remote_output("x", &wait).contains("fresh replacement session"));
+        let record = remote_wait(dir.path(), mission.id).await.unwrap();
+        assert_eq!(record.fallbacks, 1);
+        // The chain is bounded: a second immediate failure is not retried.
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            failure,
+            Uuid::new_v4(),
+            false
+        )
+        .await
+        .is_none());
+        // Other harnesses never take this path.
+        assert!(!wants_fresh_session_fallback("codex", failure, 0));
+        assert!(wants_fresh_session_fallback("vibe", failure, 0));
+
+        let mut mission = store.get_mission(mission.id).await.unwrap().unwrap();
+        mission.history = vec![
+            crate::api::mission_store::MissionHistoryEntry {
+                role: "user".into(),
+                content: "Supervise the fleet".into(),
+            },
+            crate::api::mission_store::MissionHistoryEntry {
+                role: "assistant".into(),
+                content: "Scheduled a check-in".into(),
+            },
+        ];
+        let prompt = fresh_session_fallback_prompt(&mission, 30_000);
+        assert!(prompt.contains("Supervise the fleet"));
+        assert!(prompt.contains("Scheduled a check-in"));
+        assert!(prompt.contains("could not resume its native antigravity conversation 87d01cec"));
+    }
+
+    #[tokio::test]
+    async fn unregistered_native_schedule_resumes_when_it_is_due() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "antigravity").await;
+        store
+            .update_mission_session_id(mission.id, "87d01cec", "antigravity", None)
+            .await
+            .unwrap();
+        let failure = format!(
+            "{}1800s; Core could not register it (PORT is unset)",
+            super::super::remote_grok::NATIVE_SCHEDULE_PREFIX
+        );
+        assert_eq!(native_schedule_delay(&failure), Some(1800));
+        let before = Utc::now();
+        let wait = plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            &failure,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .expect("native schedule waits");
+        assert_eq!(wait.limit, NATIVE_SCHEDULE_WAIT);
+        assert!(wait.resume_at >= before + Duration::seconds(1800));
+        assert!(remote_resume_prompt(&wait.limit).contains("wake-up you scheduled"));
+    }
+
     #[tokio::test]
     async fn opencode_gateway_retry_is_durable_fenced_and_respects_stops() {
         let (dir, store) = sqlite_store().await;
@@ -1607,6 +1804,7 @@ mod tests {
                 replays: 0,
                 retries: 0,
                 failed_job_id: None,
+                fallbacks: 0,
             }),
         );
         assert_eq!(value["recovery"]["kind"], "output_limit");
