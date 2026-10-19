@@ -1,3 +1,4 @@
+import { renamedTitle, renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking } from "./missionStatus";
 import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
@@ -642,7 +643,6 @@ export function LiveProjectsSection(p: {
   const [rename, setRename] = createSignal<({ slug: string; title: string; path?: string } | { missionId: string; title: string }) | null>(null);
   const [renameValue, setRenameValue] = createSignal("");
   const [renameError, setRenameError] = createSignal<string | null>(null);
-  const [renaming, setRenaming] = createSignal(false);
   const [actionError, setActionError] = createSignal<string | null>(null);
   createEffect(on(() => p.deleteRequest, id => {
     if (!id) return;
@@ -1011,26 +1011,21 @@ export function LiveProjectsSection(p: {
   const saveRename = async () => {
     const target = rename();
     const title = renameValue().trim();
-    if (!target || renaming()) return;
+    if (!target) return;
     if (!title) { setRenameError("Enter a name."); return; }
-    setRenaming(true);
+    // Optimistic: every view shows the new name now; a failure restores the
+    // old one and reports it in a toast (see renames.ts).
+    setRename(null);
     setRenameError(null);
-    try {
-      if ("missionId" in target) {
-        await renameMission(target.missionId, title);
-        for (const slug of Object.keys(missions)) {
-          setMissions(slug, m => m.id === target.missionId, "title", title);
-        }
-      } else {
-        await updateProject({ slug: target.slug, title });
+    if ("missionId" in target) {
+      void renameOptimistically("mission", target.missionId, title, target.title, () => renameMission(target.missionId, title)).then(() => {
+        for (const slug of Object.keys(missions)) setMissions(slug, m => m.id === target.missionId, "title", title);
+      }, swallow("projectFiles.renameMission", { mission: target.missionId }));
+    } else {
+      void renameOptimistically("project", target.slug, title, target.title, () => updateProject({ slug: target.slug, title })).then(() => {
         setProjects(list => list.map(project => project.slug === target.slug ? {...project, title} : project));
         bumpProjects();
-      }
-      setRename(null);
-    } catch (e) {
-      setRenameError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRenaming(false);
+      }, swallow("projectFiles.renameProject", { slug: target.slug }));
     }
   };
   const archive = async (slug: string) => {
@@ -1804,7 +1799,7 @@ export function LiveProjectsSection(p: {
   const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
   const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
     const mission = nested.mission, id = `m:${mission.id}`;
-    const data: RowData = { kind: "mission", slug, mission, label: nested.version ? versionLabel(mission) : displayTitle(forkTitle(mission.title)) || mission.id, ...(nested.version ? { version: true } : {}) };
+    const data: RowData = { kind: "mission", slug, mission, label: nested.version ? versionLabel(mission) : displayTitle(forkTitle(renamedTitle("mission", mission.id, mission.title))) || mission.id, ...(nested.version ? { version: true } : {}) };
     if (!nested.children.length) return { id, data };
     const selected = p.selected();
     const open = expanded[id] ?? (!!selected?.startsWith("m:") && holds(nested, selected.slice(2)));
@@ -1832,7 +1827,7 @@ export function LiveProjectsSection(p: {
       children.push(...fileNodes(slug, ""));
       if (!children.length) children.push({ id: `empty:${slug}`, data: { kind: "note", slug, label: "No missions or files yet." } });
     }
-    return { id: `project:${slug}`, data: { kind: "project", slug, label: project.title || slug }, expanded: open, children };
+    return { id: `project:${slug}`, data: { kind: "project", slug, label: renamedTitle("project", slug, project.title) || slug }, expanded: open, children };
   });
   const archiveNodes = (): Node[] => {
     const byProject = new Map<string, Mission[]>();
@@ -2242,11 +2237,10 @@ export function LiveProjectsSection(p: {
             value={renameValue()}
             onInput={setRenameValue}
             action="Rename"
-            busy={renaming()}
             disabled={!renameValue().trim()}
             error={renameError()}
             onAction={() => void saveRename()}
-            onClose={() => !renaming() && setRename(null)}
+            onClose={() => setRename(null)}
           />
         )}
       </Show>

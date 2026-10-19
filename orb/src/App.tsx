@@ -1,3 +1,4 @@
+import { renamedTitle, withRenamedTitles } from "./renames";
 import { jsonSignal, readString, writeString } from "./storage";
 import { missionAssignedNode, missionNode, nodeLabel } from "./machines/nodes";
 import { isFailedStatus, isLive, isRunning, isSettingsIdle } from "./missionStatus";
@@ -1131,7 +1132,9 @@ export default function App() {
     setNewProjectDraft(false);
     window.dispatchEvent(new CustomEvent("orb:project-created", { detail: created }));
   };
-  const [liveProjects, setLiveProjects] = createSignal<ProjectSummary[]>([]);
+  const [rawLiveProjects, setLiveProjects] = createSignal<ProjectSummary[]>([]);
+  // Pending renames show in every view before the next project list arrives.
+  const liveProjects = createMemo(() => withRenamedTitles("project", rawLiveProjects(), project => project.slug));
   const effectiveNewProject = createMemo(() => isConnected()
     ? (liveProjects().find(p => p.slug === newProject())?.slug ?? DEFAULT_PROJECT.slug)
     : newProject());
@@ -1332,7 +1335,7 @@ export default function App() {
     for (const m of completedMissions()) put(m);
     for (const m of missions()) put(m);
     prevInboxMissions = mergeById(prevInboxMissions, Array.from(byId.values()));
-    return prevInboxMissions;
+    return withRenamedTitles("mission", prevInboxMissions, m => m.id);
   });
   const currentMissionId = createMemo(() => {
     const id = selected();
@@ -1443,7 +1446,7 @@ export default function App() {
   const sessionPreview = createMemo<SessionPreviewData>(() => {
     const id = currentMissionId() ?? "";
     const mission = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
-    if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(mission.title) || "Cloud agent", local: false, destination: ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
+    if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(renamedTitle("mission", id, mission.title)) || "Cloud agent", local: false, destination: ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
     const binding = localBinding(id);
     const local = !!binding || !!mission?.tags?.includes("placement:client");
     const backend = mission?.backend || binding?.harness;
@@ -1451,7 +1454,7 @@ export default function App() {
     const model = mission?.model_override || binding?.model;
     const modelLabel = choice?.models.find(m => m.value === model)?.label;
     const effort = normalizeEffort(mission?.model_effort, backend);
-    return { id, title: displayTitle(mission?.title) || "Mission", local,
+    return { id, title: displayTitle(renamedTitle("mission", id, mission?.title)) || "Mission", local,
       destination: local ? "This computer" : missionDestination(mission ?? null, recalledLaunch(id)),
       directory: binding?.cwd || mission?.working_directory,
       parent: mission && missionParent(mission) ? missions().find(m => m.id === missionParent(mission))?.title || missionParent(mission) : undefined,

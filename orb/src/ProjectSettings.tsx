@@ -1,3 +1,4 @@
+import { renamedTitle } from "./renames";
 import { swallow } from "./log";
 import { projectColor, projectColors, projectColorsSynced, setProjectColor } from "./projectAppearance";
 import { ErrorToast } from "./toast";
@@ -180,7 +181,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
     <div class="scroll">
       <div class="col ps-page">
         <div class="page-head">
-          <h2>{title() || p.slug}</h2>
+          <h2>{renamedTitle("project", p.slug, title()) || p.slug}</h2>
         </div>
         <p class="s-lead">
           Project settings
