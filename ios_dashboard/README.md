@@ -80,7 +80,7 @@ ios_dashboard/
 │   │   ├── OrbMachinesSettings.swift
 │   │   └── OrbProvidersSettings.swift
 │   ├── Models/                      # StoredEvent, AnyCodable, FIDO request models
-│   └── Services/                    # APIService (auth + events + control stream), FIDO approvals
+│   └── Services/                    # FIDO approvals (the HTTP client is Orb/OrbClient.swift: OrbCore)
 ├── SandboxedDashboardTests/         # Unit tests
 └── SandboxedDashboardUITests/       # UI & fixture server tests
 ```

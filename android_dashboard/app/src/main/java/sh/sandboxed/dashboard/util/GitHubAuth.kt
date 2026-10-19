@@ -28,7 +28,8 @@ object GitHubAuth {
     const val REDIRECT_PATH = "/callback"
     const val REDIRECT_URI = "$REDIRECT_SCHEME://$REDIRECT_HOST$REDIRECT_PATH"
 
-    fun launch(context: Context, baseUrl: String) {
+    /** Returns false when no browser could open the sign-in page. */
+    fun launch(context: Context, baseUrl: String): Boolean {
         // Only a callback following this launch (same endpoint, within 10 min) is accepted.
         sh.sandboxed.dashboard.orb.OrbGitHubSignIn(sh.sandboxed.dashboard.orb.OrbGitHubSignIn.prefsStore(context)).begin(baseUrl)
         val authorizeUrl = "${baseUrl.trimEnd('/')}/api/auth/github/start" +
@@ -38,7 +39,7 @@ object GitHubAuth {
             .setUrlBarHidingEnabled(false)
             .build()
         tabsIntent.intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        runCatching { tabsIntent.launchUrl(context, authorizeUrl.toUri()) }
+        return runCatching { tabsIntent.launchUrl(context, authorizeUrl.toUri()) }.isSuccess
     }
 
     /** True iff the intent looks like our OAuth callback. */

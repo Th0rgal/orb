@@ -29,8 +29,8 @@ enum Log {
     }
 
     /// Logs the error and records it in the ErrorRing.
-    /// Network-layer errors are already recorded (with their real path) by OrbCore.call and
-    /// APIService, so they are only logged here.
+    /// Network-layer errors are already recorded (with their real path) by the OrbCore transport,
+    /// so they are only logged here.
     @MainActor
     static func error(_ category: Category, _ what: String, path: String? = nil, _ error: Error) {
         let status = ErrorRing.status(of: error)
@@ -83,7 +83,7 @@ final class ErrorRing {
     func clear() { entries.removeAll() }
 
     nonisolated static func isNetworkLayer(_ error: Error) -> Bool {
-        error is OrbHTTPError || error is APIError || error is URLError
+        error is OrbHTTPError || error is URLError
     }
 
     /// Records a failed request from the network layer. Cancellations are expected noise.
@@ -101,14 +101,7 @@ final class ErrorRing {
     }
 
     nonisolated static func status(of error: Error) -> Int? {
-        if let error = error as? OrbHTTPError { return error.status }
-        if let error = error as? APIError {
-            switch error {
-            case .httpError(let code, _): return code
-            case .unauthorized: return 401
-            default: return nil
-            }
-        }
+        if let error = error as? OrbHTTPError, error.status > 0 { return error.status }
         return nil
     }
 }

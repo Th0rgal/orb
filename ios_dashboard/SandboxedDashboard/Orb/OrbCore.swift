@@ -228,12 +228,6 @@ enum OrbMissionTree {
     }
 }
 
-struct OrbHTTPError: LocalizedError {
-    let status: Int
-    let detail: String
-    var errorDescription: String? { "\(status): \(detail)" }
-}
-
 enum OrbKeychain {
     struct Credentials: Codable { let password: String; let username: String? }
     static func credentials(for endpoint: String) -> Credentials? {
@@ -271,84 +265,6 @@ enum OrbKeychain {
     }
 }
 
-@MainActor
-final class OrbCore {
-    static let shared = OrbCore()
-    var endpoint: String { APIService.shared.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-    /// `rawBody` sends exact bytes (device-signed requests hash them); `headers` are added as-is.
-    func call(_ path: String, method: String = "GET", body: OrbJSON? = nil, rawBody: Data? = nil, headers: [String: String] = [:]) async throws -> OrbJSON {
-        do {
-            return try await perform(path, method: method, body: body, rawBody: rawBody, headers: headers)
-        } catch {
-            ErrorRing.shared.recordRequest(path: "\(method) \(path)", error: error)
-            throw error
-        }
-    }
-    private func perform(_ path: String, method: String, body: OrbJSON?, rawBody: Data?, headers: [String: String]) async throws -> OrbJSON {
-        guard let url = URL(string: endpoint + path) else { throw URLError(.badURL) }
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.timeoutInterval = 45
-        request.setValue("Bearer \(APIService.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
-        if let rawBody { request.httpBody = rawBody; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        else if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        if http.statusCode == 401 {
-            let api = APIService.shared
-            if url.absoluteString.hasPrefix(endpoint + "/"),
-               request.value(forHTTPHeaderField: "Authorization") == "Bearer \(api.authToken ?? "")" {
-                api.markSessionExpired()
-            }
-            throw APIError.unauthorized
-        }
-        guard (200..<300).contains(http.statusCode) else { throw OrbHTTPError(status: http.statusCode, detail: String(data: data, encoding: .utf8) ?? "Request failed") }
-        if data.isEmpty { return .null }
-        return try await Task.detached(priority: .userInitiated) {
-            try JSONDecoder().decode(OrbJSON.self, from: data)
-        }.value
-    }
-    func transcribe(_ wav: Data, language: String) async throws -> String {
-        guard wav.count <= 4 * 1024 * 1024,
-              let url = URL(string: endpoint + "/api/voice/transcribe?language=" + Self.escape(language)) else { throw URLError(.badURL) }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 100
-        request.setValue("Bearer \(APIService.shared.authToken ?? "")", forHTTPHeaderField: "Authorization")
-        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
-        request.httpBody = wav
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        if http.statusCode == 401 {
-            let api = APIService.shared
-            if url.absoluteString.hasPrefix(endpoint + "/"),
-               request.value(forHTTPHeaderField: "Authorization") == "Bearer \(api.authToken ?? "")" { api.markSessionExpired() }
-            throw APIError.unauthorized
-        }
-        guard (200..<300).contains(http.statusCode) else { throw OrbHTTPError(status: http.statusCode, detail: String(data: data, encoding: .utf8) ?? "Transcription failed") }
-        return try JSONDecoder().decode(OrbJSON.self, from: data)["text"].text
-    }
-    static func escape(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }
-    func missions(_ project: String, includeArchived: Bool = false) async throws -> [OrbRow] {
-        var rows: [OrbRow] = [], offset = 0
-        while true {
-            let page = try await call("/api/control/missions?project=\(Self.escape(project))&all=true&limit=100&offset=\(offset)").items
-            for raw in page {
-                let mid = raw["id"].text
-                if !mid.isEmpty {
-                    OrbReadCache.seedMemory("mission:\(mid)", value: raw)
-                }
-            }
-            let fresh = page.map { OrbRow($0) }.filter { row in !rows.contains(where: { $0.id == row.id }) }
-            rows += fresh
-            if !includeArchived || page.count < 100 || fresh.isEmpty { break }
-            offset += page.count
-        }
-        return rows.filter(\.mobile)
-    }
-}
-
 /// Persist the exact request before submitting. An uncertain response never creates a new identity.
 struct OrbPending: Codable, Sendable {
     let path: String
@@ -370,7 +286,7 @@ private actor OrbDiskWriter {
 enum OrbDisk {
     private static var urlCache: [String: URL] = [:]
     static func url(_ key: String, accountScope: String? = nil) -> URL {
-        let scope = (accountScope ?? (OrbCore.shared.endpoint + ":" + (APIService.shared.authToken ?? ""))) + ":" + key
+        let scope = (accountScope ?? (OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? ""))) + ":" + key
         if let cached = urlCache[scope] { return cached }
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -414,7 +330,7 @@ enum OrbReadCache {
     private static var eventPending: [String: Task<[StoredEvent], Error>] = [:]
     /// Network source for `events(_:)`; tests replace it.
     static var eventsFetcher: @MainActor (_ missionID: String, _ limit: Int) async throws -> [StoredEvent] = { id, limit in
-        try await APIService.shared.getMissionEventsWithMeta(id: id, limit: limit, sinceSeq: nil).events
+        try await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: limit, sinceSeq: nil).events
     }
     private struct Pending { let id = UUID(); let task: Task<OrbJSON, Error> }
     private static var pending: [String: Pending] = [:]

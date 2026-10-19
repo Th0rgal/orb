@@ -8,6 +8,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -94,6 +96,7 @@ object OrbFido {
 
     fun clear() {
         _pending.value = emptyList()
+        OrbFidoSettings.trust.clear()
     }
 
     /**
@@ -186,6 +189,15 @@ fun OrbFidoApprovalDialog(core: OrbCore) {
     val req = pending.firstOrNull() ?: return
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    remember(context) { OrbFidoSettings.init(context); true }
+    // Opt-in trust window (default off): same key + host, shortly after a biometric approval.
+    if (OrbFidoSettings.trust.isTrusted(req)) {
+        LaunchedEffect(req.requestId) {
+            OrbLog.d(OrbLog.Category.Auth, "FIDO request approved by trust window")
+            OrbFido.respond(core, req.requestId, approved = true)
+        }
+        return
+    }
     AlertDialog(
         onDismissRequest = { /* explicit decision required */ },
         containerColor = OrbStyle.card,
@@ -204,6 +216,7 @@ fun OrbFidoApprovalDialog(core: OrbCore) {
                 scope.launch {
                     val activity = context.fragmentActivity()
                     if (activity != null && OrbFido.authenticate(activity, req)) {
+                        OrbFidoSettings.trust.recordBiometricApproval(req)
                         OrbFido.respond(core, req.requestId, approved = true)
                     }
                     // Cancelled prompt: keep the request on screen so the user can retry or deny.

@@ -23,9 +23,9 @@ final class NetworkResilienceTests: XCTestCase {
     /// big mission tail on cellular, small enough that the user sees
     /// feedback if the server is gone.
     func testRequestTimeoutIsBounded() {
-        XCTAssertLessThanOrEqual(APIService.requestTimeout, 15)
-        XCTAssertGreaterThanOrEqual(APIService.requestTimeout, 5)
-        XCTAssertLessThanOrEqual(APIService.resourceTimeout, 90)
+        XCTAssertLessThanOrEqual(OrbCore.requestTimeout, 15)
+        XCTAssertGreaterThanOrEqual(OrbCore.requestTimeout, 5)
+        XCTAssertLessThanOrEqual(OrbCore.resourceTimeout, 90)
     }
 
     /// SSE inactivity threshold drives the URLSession.timeoutIntervalForRequest
@@ -33,15 +33,15 @@ final class NetworkResilienceTests: XCTestCase {
     /// a half-open socket (cell→wifi handoff, NAT idle reset) errors out
     /// within this window so the reconnect loop fires.
     func testStreamInactivityTimeoutIsBounded() {
-        XCTAssertLessThanOrEqual(APIService.streamInactivityTimeout, 60)
-        XCTAssertGreaterThanOrEqual(APIService.streamInactivityTimeout, 10)
+        XCTAssertLessThanOrEqual(OrbCore.streamInactivityTimeout, 60)
+        XCTAssertGreaterThanOrEqual(OrbCore.streamInactivityTimeout, 10)
     }
 
     /// SSE buffer cap exists at all — without it a server that never emits
     /// a blank line could grow the parser buffer unbounded.
     func testStreamBufferCapIsBounded() {
-        XCTAssertLessThanOrEqual(APIService.streamMaxBufferBytes, 4 * 1024 * 1024)
-        XCTAssertGreaterThanOrEqual(APIService.streamMaxBufferBytes, 64 * 1024)
+        XCTAssertLessThanOrEqual(OrbCore.streamMaxBufferBytes, 4 * 1024 * 1024)
+        XCTAssertGreaterThanOrEqual(OrbCore.streamMaxBufferBytes, 64 * 1024)
     }
 
     /// A missing/blank saved server URL must not silently connect to a
@@ -63,12 +63,30 @@ final class NetworkResilienceTests: XCTestCase {
         }
 
         defaults.removeObject(forKey: key)
-        XCTAssertEqual(APIService.shared.baseURL, APIService.defaultBaseURL)
-        XCTAssertEqual(APIService.defaultBaseURL, "")
-        XCTAssertFalse(APIService.shared.isConfigured)
+        XCTAssertEqual(OrbCore.shared.baseURL, OrbCore.defaultBaseURL)
+        XCTAssertEqual(OrbCore.defaultBaseURL, "")
+        XCTAssertFalse(OrbCore.shared.isConfigured)
 
         defaults.set("   ", forKey: key)
-        XCTAssertEqual(APIService.shared.baseURL, APIService.defaultBaseURL)
-        XCTAssertFalse(APIService.shared.isConfigured)
+        XCTAssertEqual(OrbCore.shared.baseURL, OrbCore.defaultBaseURL)
+        XCTAssertFalse(OrbCore.shared.isConfigured)
+    }
+
+    /// One error type for every backend request: HTTP failures keep the
+    /// "status: detail" text, transport failures keep their old messages.
+    func testOrbHTTPErrorIsTheSingleErrorType() {
+        XCTAssertEqual(OrbHTTPError(status: 404, detail: "Not Found").errorDescription, "404: Not Found")
+        XCTAssertEqual(OrbHTTPError.unauthorized.status, 401)
+        XCTAssertEqual(OrbHTTPError.unauthorized.errorDescription, "Authentication required")
+        XCTAssertEqual(OrbHTTPError.invalidURL.errorDescription, "Invalid URL")
+        XCTAssertEqual(ErrorRing.status(of: OrbHTTPError.unauthorized), 401)
+        XCTAssertNil(ErrorRing.status(of: OrbHTTPError.invalidResponse))
+        XCTAssertTrue(ErrorRing.isNetworkLayer(OrbHTTPError.decoding(URLError(.cannotParseResponse))))
+    }
+
+    func testDebugInfoDescribesBackendVersion() {
+        XCTAssertEqual(OrbDebugInfoView.describeBackend("0.42.1"), "0.42.1")
+        XCTAssertEqual(OrbDebugInfoView.describeBackend(nil), "Unknown")
+        XCTAssertEqual(OrbDebugInfoView.describeBackend(""), "Unknown")
     }
 }

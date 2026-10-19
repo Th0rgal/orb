@@ -5,8 +5,8 @@ import SwiftUI
 struct OrbSettingsClient {
     let endpoint: String
     let generation: Int
-    init() { endpoint = OrbCore.shared.endpoint; generation = APIService.shared.connectionGeneration }
-    var current: Bool { endpoint == OrbCore.shared.endpoint && generation == APIService.shared.connectionGeneration }
+    init() { endpoint = OrbCore.shared.endpoint; generation = OrbCore.shared.connectionGeneration }
+    var current: Bool { endpoint == OrbCore.shared.endpoint && generation == OrbCore.shared.connectionGeneration }
     func call(_ path: String, method: String = "GET", body: OrbJSON? = nil) async throws -> OrbJSON {
         guard current else { throw CancellationError() }
         try Task.checkCancellation()
@@ -53,7 +53,7 @@ struct OrbSettingsHome: View {
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }
-        .id(APIService.shared.connectionGeneration)
+        .id(OrbCore.shared.connectionGeneration)
         .presentationDetents([.large]).presentationDragIndicator(.visible)
     }
 }

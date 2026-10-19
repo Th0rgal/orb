@@ -14,7 +14,7 @@ struct ContentView: View {
     @State private var showSetupSheet = false
     @Environment(\.scenePhase) private var scenePhase
 
-    private let api = APIService.shared
+    private let api = OrbCore.shared
 
     var body: some View {
         Group {
@@ -133,7 +133,7 @@ struct SetupSheet: View {
     @State private var username = UserDefaults.standard.string(forKey: "last_username") ?? ""
     @State private var errorMessage: String?
 
-    private let api = APIService.shared
+    private let api = OrbCore.shared
 
     var allowsDismissal = false
     var embedded = false
@@ -226,7 +226,7 @@ struct SetupSheet: View {
         } catch {
             // Restore original URL on failure
             api.baseURL = originalURL
-            if case APIError.unauthorized = error {
+            if (error as? OrbHTTPError)?.status == 401 {
                 errorMessage = "Incorrect password. Please try again."
             } else {
                 errorMessage = "Could not connect. Check the server address and your connection."
@@ -253,12 +253,12 @@ struct LoginView: View {
     @FocusState private var isUsernameFocused: Bool
     @FocusState private var isPasswordFocused: Bool
     
-    private let api = APIService.shared
+    private let api = OrbCore.shared
     
     init(sessionExpired: Bool = false, onLogin: @escaping () -> Void) {
         self.sessionExpired = sessionExpired
         self.onLogin = onLogin
-        _serverURL = State(initialValue: APIService.shared.baseURL)
+        _serverURL = State(initialValue: OrbCore.shared.baseURL)
         _username = State(initialValue: UserDefaults.standard.string(forKey: "last_username") ?? "")
     }
     
@@ -436,19 +436,10 @@ struct LoginView: View {
                 HapticService.success()
                 onLogin()
             } catch {
-                if let apiError = error as? APIError {
-                    switch apiError {
-                    case .httpError(let code, _):
-                        if code == 401 {
-                            errorMessage = api.authMode == .multiUser ? "Invalid username or password" : "Invalid password"
-                        } else {
-                            errorMessage = apiError.errorDescription
-                        }
-                    case .unauthorized:
-                        errorMessage = api.authMode == .multiUser ? "Invalid username or password" : "Invalid password"
-                    default:
-                        errorMessage = apiError.errorDescription
-                    }
+                if let apiError = error as? OrbHTTPError {
+                    errorMessage = apiError.status == 401
+                        ? (api.authMode == .multiUser ? "Invalid username or password" : "Invalid password")
+                        : apiError.errorDescription
                 } else {
                     errorMessage = error.localizedDescription
                 }

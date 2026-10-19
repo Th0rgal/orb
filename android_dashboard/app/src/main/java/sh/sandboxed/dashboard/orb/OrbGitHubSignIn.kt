@@ -29,6 +29,13 @@ class OrbGitHubSignIn(private val store: Store, private val clock: () -> Long = 
         store.save(Pending(normalize(endpoint), clock()))
     }
 
+    /** True while a sign-in for [endpoint] was started and its callback has not arrived or expired. */
+    fun isPending(endpoint: String): Boolean {
+        val pending = store.load() ?: return false
+        val age = clock() - pending.startedAtMs
+        return age in 0..MAX_AGE_MS && pending.endpoint == normalize(endpoint)
+    }
+
     /** Consumes the pending sign-in (whatever the outcome) and says whether to try [token]. */
     fun onCallback(currentEndpoint: String, token: String?, error: String?): Decision {
         val pending = store.load()
@@ -61,4 +68,31 @@ class OrbGitHubSignIn(private val store: Store, private val clock: () -> Long = 
             }
         }
     }
+}
+
+/**
+ * The "Sign in with GitHub" button on the server screen: validates the URL, opens the browser
+ * through [launch] (which records the pending sign-in via [OrbGitHubSignIn.begin]) and reports
+ * the pending state until the secured callback in MainActivity consumes it.
+ */
+class OrbGitHubSignInButton(private val signIn: OrbGitHubSignIn, private val launch: (String) -> Boolean) {
+    sealed class State {
+        object Idle : State()
+        data class Pending(val endpoint: String) : State()
+        data class Failed(val message: String) : State()
+    }
+
+    fun start(urlInput: String): State {
+        val clean = urlInput.trim().trimEnd('/')
+        val uri = runCatching { java.net.URI(clean) }.getOrNull()
+        if (clean.isEmpty() || uri?.scheme?.lowercase() !in setOf("http", "https") || uri?.host.isNullOrEmpty()) {
+            return State.Failed("Enter the backend URL first.")
+        }
+        if (!launch(clean)) return State.Failed("Could not open a browser for GitHub sign-in.")
+        return State.Pending(clean)
+    }
+
+    /** Re-reads the stored sign-in, e.g. when the screen resumes after the browser. */
+    fun refresh(state: State): State =
+        if (state is State.Pending && !signIn.isPending(state.endpoint)) State.Idle else state
 }

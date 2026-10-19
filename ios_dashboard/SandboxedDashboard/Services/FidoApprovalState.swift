@@ -31,7 +31,7 @@ final class FidoApprovalState {
         set { UserDefaults.standard.set(newValue, forKey: "fido_require_biometric_all") }
     }
 
-    private let api = APIService.shared
+    private let api = OrbCore.shared
 
     private init() {
         loadRules()

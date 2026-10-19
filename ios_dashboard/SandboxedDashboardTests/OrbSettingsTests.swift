@@ -26,10 +26,10 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertNil(OrbProvidersSettings.loginSpec(foreign))
     }
     func testSettingsClientRejectsAnOldConnectionBeforeSending() async {
-        let generation = APIService.shared.connectionGeneration
-        defer { APIService.shared.connectionGeneration = generation }
+        let generation = OrbCore.shared.connectionGeneration
+        defer { OrbCore.shared.connectionGeneration = generation }
         let client = OrbSettingsClient()
-        APIService.shared.connectionGeneration += 1
+        OrbCore.shared.connectionGeneration += 1
         do { _ = try await client.call("/should-not-send"); XCTFail("Old connection should not send") }
         catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
     }
