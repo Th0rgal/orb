@@ -277,6 +277,14 @@ final class OrbCore {
     var endpoint: String { APIService.shared.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
     /// `rawBody` sends exact bytes (device-signed requests hash them); `headers` are added as-is.
     func call(_ path: String, method: String = "GET", body: OrbJSON? = nil, rawBody: Data? = nil, headers: [String: String] = [:]) async throws -> OrbJSON {
+        do {
+            return try await perform(path, method: method, body: body, rawBody: rawBody, headers: headers)
+        } catch {
+            ErrorRing.shared.recordRequest(path: "\(method) \(path)", error: error)
+            throw error
+        }
+    }
+    private func perform(_ path: String, method: String, body: OrbJSON?, rawBody: Data?, headers: [String: String]) async throws -> OrbJSON {
         guard let url = URL(string: endpoint + path) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -496,6 +504,19 @@ enum OrbReadCache {
         values[scope] = Entry(value: value, date: Date())
         OrbDisk.saveAsync(value, key: name)
         return value
+    }
+    /// Settings → Debug info → Clear caches: drops memory and disk copies for every account.
+    static func clearAll() {
+        for item in pending.values { item.task.cancel() }
+        pending.removeAll()
+        values.removeAll()
+        eventValues.removeAll()
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
+        let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.pathExtension == "json" {
+            do { try FileManager.default.removeItem(at: file) } catch { Log.error(.cache, "clear cache file", path: file.lastPathComponent, error) }
+        }
+        Log.cache.notice("cleared \(files.count) cache files")
     }
     static func invalidate(_ name: String) {
         let scope = key(name)

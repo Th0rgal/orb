@@ -782,6 +782,15 @@ final class APIService {
     }
 
     private func executeWithResponse<T: Decodable>(_ request: URLRequest, session: URLSession? = nil) async throws -> (T, HTTPURLResponse) {
+        do {
+            return try await performRequest(request, session: session)
+        } catch {
+            ErrorRing.shared.recordRequest(path: "\(request.httpMethod ?? "GET") \(request.url?.path ?? "?")", error: error)
+            throw error
+        }
+    }
+
+    private func performRequest<T: Decodable>(_ request: URLRequest, session: URLSession?) async throws -> (T, HTTPURLResponse) {
         let urlSession = session ?? Self.jsonSession
         let (data, response) = try await urlSession.data(for: request)
 

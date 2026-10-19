@@ -1134,7 +1134,7 @@ struct OrbHome: View {
             OrbDisk.saveAsync(value, key: "projects"); error = ""
             let roster = nextProjects
             Task {
-                if let rawMissions = try? await api.call("/api/control/missions?limit=100") {
+                if let rawMissions = await Log.attempt(.network, "home missions", { try await api.call("/api/control/missions?limit=100") }) {
                     OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
                     OrbReadCache.seedFromGlobalMissions(rawMissions.items)
                     let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
@@ -1148,9 +1148,9 @@ struct OrbHome: View {
             // Warm the top projects and the agent picker catalog so opening a project or composer feels instant.
             let topProjects = Array(nextProjects.prefix(3))
             Task {
-                _ = try? await OrbReadCache.agentCatalog()
+                _ = await Log.attempt(.cache, "agent catalog prefetch") { try await OrbReadCache.agentCatalog() }
                 for proj in topProjects {
-                    _ = try? await OrbReadCache.project(proj.id)
+                    _ = await Log.attempt(.cache, "project prefetch", path: proj.id) { try await OrbReadCache.project(proj.id) }
                 }
             }
         } catch { self.error = error.localizedDescription }

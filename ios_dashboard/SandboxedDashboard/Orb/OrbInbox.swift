@@ -115,7 +115,7 @@ final class OrbSharedInboxState {
             return
         }
         let expected = account, serial = mutation
-        guard let raw = try? await OrbCore.shared.call("/api/control/inbox-state"), expected == account, serial == mutation else { return }
+        guard let raw = await Log.attempt(.network, "inbox-state refresh", { try await OrbCore.shared.call("/api/control/inbox-state") }), expected == account, serial == mutation else { return }
         if case let .object(values) = raw["_versions"] { revisions = values.compactMapValues { $0.doubleValue } }
         let changedAccount = scope != expected
         var changedSeen = changedAccount

@@ -180,7 +180,6 @@ struct OrbNotificationPayload: Equatable, Sendable {
 @Observable
 final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     static let shared = OrbNotificationCenter()
-    nonisolated static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "md.thomas.openagent.dashboard", category: "notifications")
 
     static let categoryInteractiveApproval = "ORB_INBOX_APPROVAL"
     static let categoryInboxReady = "ORB_INBOX_READY"
@@ -256,7 +255,12 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
         let settings = await center.notificationSettings()
         authorizationStatus = settings.authorizationStatus
         guard settings.authorizationStatus == .notDetermined else { return }
-        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        do {
+            let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            Log.notifications.notice("notification authorization granted=\(granted)")
+        } catch {
+            Log.error(.notifications, "requestAuthorization", error)
+        }
         await refreshAuthorizationStatus()
     }
 
@@ -468,7 +472,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
 
     func pollHybridMissionsOnce() async {
         await OrbSharedInboxState.shared.refresh()
-        guard let rawMissions = try? await OrbCore.shared.call("/api/control/missions?limit=100&all=true") else { return }
+        guard let rawMissions = await Log.attempt(.notifications, "hybrid missions poll", { try await OrbCore.shared.call("/api/control/missions?limit=100&all=true") }) else { return }
         OrbReadCache.seedFromGlobalMissions(rawMissions.items)
         OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
         let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
@@ -667,7 +671,7 @@ extension OrbNotificationCenter {
             try await call()
             return true
         } catch {
-            OrbNotificationCenter.log.error("Notification action \(label, privacy: .public) failed for \(missionID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            Log.error(.notifications, "notification action \(label)", path: missionID, error)
             Self.postActionFailure(label: label, missionID: missionID, text: text, error: error)
             return false
         }
@@ -695,7 +699,7 @@ extension OrbNotificationCenter {
         let content = failureContent(label: label, missionID: missionID, text: text, error: error)
         let request = UNNotificationRequest(identifier: "orb.action.failed.\(missionID).\(UUID().uuidString)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { addError in
-            if let addError { OrbNotificationCenter.log.error("Could not post failure notification: \(addError.localizedDescription, privacy: .public)") }
+            if let addError { Log.notifications.error("Could not post failure notification: \(addError.localizedDescription, privacy: .public)") }
         }
     }
 }
@@ -727,11 +731,18 @@ enum OrbBackgroundRefresh {
     static func schedule() {
         let request = BGAppRefreshTaskRequest(identifier: identifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: interval)
-        try? BGTaskScheduler.shared.submit(request)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            // Simulator and Background App Refresh disabled both land here.
+            Task { @MainActor in Log.error(.background, "BGTaskScheduler.submit", error) }
+        }
     }
 
     @MainActor static func run() async {
         schedule()
+        OrbDiagnosticsClock.lastBackgroundRefresh = Date()
+        Log.background.notice("background refresh started")
         guard APIService.shared.isConfigured, APIService.shared.isAuthenticated,
               !APIService.shared.authSessionExpired else { return }
         await OrbNotificationCenter.shared.pollHybridMissionsOnce()
