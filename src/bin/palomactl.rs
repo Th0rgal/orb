@@ -88,6 +88,27 @@ fn run(args: Vec<String>) -> Result<()> {
             let plan = dispatch_plan(&root, project)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
+        "repair-borrowed-tracks" => {
+            let api = value_after_flag(&args, "--api")
+                .map(str::to_string)
+                .or_else(|| env::var("SANDBOXED_API_URL").ok())
+                .ok_or_else(|| anyhow!("missing --api <url> (or SANDBOXED_API_URL)"))?;
+            let apply = args.iter().any(|arg| arg == "--apply");
+            let (status, body) = api_request(
+                "POST",
+                &format!(
+                    "{}/api/control/repair/borrowed-tracks?dry_run={}",
+                    api.trim_end_matches('/'),
+                    !apply
+                ),
+                api_token(&args).as_deref(),
+                None,
+            )?;
+            if status != 200 {
+                bail!("HTTP {status}: {body}");
+            }
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
         "validation-matrix" => {
             let path = args
                 .get(1)
@@ -116,7 +137,7 @@ fn run(args: Vec<String>) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "usage:\n  palomactl models discover|export|diff|validate|snapshot update\n  palomactl status\n  palomactl reconcile [--api <url> [--token <jwt>] [--dir <trackers>] [slug...]]\n  palomactl import-trackers --api <url> [--token <jwt>] [--dir <trackers>] [--dry-run] [slug...]\n  palomactl pr-gates <owner/repo> <number> [--worker-head <sha>]\n  palomactl set-mode <project> <mode> --until <iso>\n  palomactl dispatch-plan --project <slug>\n  palomactl validation-matrix [path]\n  palomactl cluster-lean-errors <log-path>"
+        "usage:\n  palomactl models discover|export|diff|validate|snapshot update\n  palomactl status\n  palomactl reconcile [--api <url> [--token <jwt>] [--dir <trackers>] [slug...]]\n  palomactl import-trackers --api <url> [--token <jwt>] [--dir <trackers>] [--dry-run] [slug...]\n  palomactl pr-gates <owner/repo> <number> [--worker-head <sha>]\n  palomactl set-mode <project> <mode> --until <iso>\n  palomactl dispatch-plan --project <slug>\n  palomactl repair-borrowed-tracks --api <url> [--token <jwt>] [--apply]\n  palomactl validation-matrix [path]\n  palomactl cluster-lean-errors <log-path>"
     );
 }
 

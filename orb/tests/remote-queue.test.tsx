@@ -114,7 +114,7 @@ it('injects the selected queued message live without deleting remaining queued m
     { id: 'two', content: 'Steer live now', source: 'remote-queue' },
   ]);
   backend.api.mockImplementation((path: string, init?: RequestInit) => {
-    if (path === '/api/control/queue/two/send-now' && init?.method === 'POST') {
+    if (path === '/api/control/queue/two/send-now?interrupt=true' && init?.method === 'POST') {
       return Promise.resolve({ ok: true, delivered: true });
     }
     return Promise.resolve({ ok: true });
@@ -129,7 +129,7 @@ it('injects the selected queued message live without deleting remaining queued m
     [],
     [{ id: 'two', content: 'Steer live now', attached: undefined }],
   ));
-  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/two/send-now', { method: 'POST' });
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/two/send-now?interrupt=true', { method: 'POST' });
   expect(backend.api).not.toHaveBeenCalledWith('/api/control/queue/one', { method: 'DELETE' });
   expect(backend.api).not.toHaveBeenCalledWith('/api/control/queue/two', { method: 'DELETE' });
   expect(cancel).toHaveBeenCalledWith('two');
@@ -200,7 +200,7 @@ it('a lost send-now response keeps the row and its id, and never deletes or rese
   expect((await screen.findByRole('alert')).textContent).toContain('Connection interrupted');
   expect(screen.getByText('First')).toBeTruthy();
   expect(backend.api).toHaveBeenCalledTimes(1);
-  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/one/send-now',{method:'POST'});
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/one/send-now?interrupt=true',{method:'POST'});
   expect(retract).toHaveBeenCalledWith('one');
   expect(cancel).not.toHaveBeenCalled();
   expect(send).toHaveBeenCalledTimes(1); // only the optimistic injection, no stop-then-send
@@ -208,11 +208,26 @@ it('a lost send-now response keeps the row and its id, and never deletes or rese
 });
 it('without live delivery it withdraws the optimistic copy, then stops and sends in order', async () => {
   backend.list.mockResolvedValue([{id:'one',content:'First',source:'remote-queue'},{id:'two',content:'Second',source:'remote-queue'}]);
-  backend.api.mockImplementation(async (url: string) => url.endsWith('/send-now') ? {ok:true,delivered:false} : {ok:true});
+  backend.api.mockImplementation(async (url: string) => url.endsWith('/send-now?interrupt=true') ? {ok:true,delivered:false} : {ok:true});
   const send = vi.fn().mockResolvedValue(undefined), retract = vi.fn();
   render(() => <RemoteQueue mission="remote" onSendImmediate={send} onRetract={retract} onRows={()=>{}} onCancel={()=>{}}/>);
   await screen.findByText('2 Queued');
   await fireEvent.click(screen.getByRole('button',{name:'Send now: Second'}));
   await waitFor(() => expect(send).toHaveBeenLastCalledWith([{id:'two',content:'Second',attached:undefined},{id:'one',content:'First',attached:undefined}]));
   expect(retract).toHaveBeenCalledWith('two');
+});
+it('promoted by Core: keeps the same id, stops via Core, and never deletes or resends', async () => {
+  backend.list.mockResolvedValue([{id:'one',content:'First',source:'remote-queue'},{id:'two',content:'Second',source:'remote-queue'}]);
+  backend.api.mockImplementation(async (url: string) => url.includes('/send-now') ? {ok:true,delivered:false,promoted:true} : {ok:true});
+  const send = vi.fn().mockResolvedValue(undefined), retract = vi.fn(), cancel = vi.fn();
+  render(() => <RemoteQueue mission="remote" onSendImmediate={send} onRetract={retract} onRows={()=>{}} onCancel={cancel}/>);
+  await screen.findByText('2 Queued');
+  await fireEvent.click(screen.getByRole('button',{name:'Send now: Second'}));
+  await waitFor(() => expect(cancel).toHaveBeenCalledWith('two'));
+  expect(backend.api).toHaveBeenCalledTimes(1);
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/two/send-now?interrupt=true',{method:'POST'});
+  expect(retract).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith([], [{id:'two',content:'Second',attached:undefined}]);
+  expect(screen.getByText('First')).toBeTruthy();
 });

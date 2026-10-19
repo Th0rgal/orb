@@ -146,15 +146,18 @@ export function RemoteQueue(p: {
       // A network error or timeout does not prove the message was not delivered:
       // it must never fall through to delete-and-resend. Only an explicit
       // `delivered: false` from Core means "no live injection, stop then send".
-      const live = await api<{ ok?: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now`, { method: "POST" });
-      if (live?.delivered) {
+      // `interrupt=true`: when there is no live injection, Core stops the turn and
+      // delivers THIS queued message next under its same id (`promoted`).
+      const live = await api<{ ok?: boolean; delivered?: boolean; promoted?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now?interrupt=true`, { method: "POST" });
+      if (live?.delivered || live?.promoted) {
         if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
         revision++;
         p.onRows(rows().map(row => row.id));
         p.onCancel(target.id);
         return;
       }
-      // The fallback below shows its own copy while it stops the turn and sends.
+      // Older Core without promote: the fallback below shows its own copy while
+      // it stops the turn and sends.
       p.onRetract?.(target.id);
       const ordered = [target, ...list.filter(r => r.id !== target.id)];
       const payload = ordered.map(r => {

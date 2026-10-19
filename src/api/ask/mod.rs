@@ -1185,6 +1185,7 @@ async fn cancel_working_agent(turn: &AskTurn) -> Result<(), String> {
         .send(crate::api::control::ControlCommand::CancelMission {
             mission_id: turn.mission_id,
             min_idle: None,
+            keep_remote_queue: false,
             respond: tx,
         })
         .await

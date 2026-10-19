@@ -93,6 +93,7 @@ pub(crate) mod supervision;
 pub mod system;
 pub mod telegram;
 pub mod track_leases;
+pub mod track_repair;
 pub mod tracker_import;
 pub mod types;
 pub(crate) mod uploads;

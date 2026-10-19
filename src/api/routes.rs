@@ -887,6 +887,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::send_queued_now),
         )
         .route(
+            "/api/control/repair/borrowed-tracks",
+            post(control::repair_borrowed_tracks),
+        )
+        .route(
             "/api/control/queue",
             axum::routing::delete(control::clear_queue),
         )
