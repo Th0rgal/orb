@@ -26,6 +26,34 @@ struct OrbFleetActivityAttributes: ActivityAttributes {
     var account: String
 }
 
+/// Text drawn by the Lock Screen activity, kept here so the app's unit tests pin it.
+extension OrbFleetActivityAttributes.ContentState {
+    enum Part: String, Sendable { case running, waiting, failed, done }
+
+    var headline: String { allDone ? "Tout est terminé" : "Flotte Orb" }
+
+    /// "2 en cours · 1 t’attend · 9 terminées": only non-zero states, in this order.
+    var summaryParts: [(count: Int, label: String, part: Part)] {
+        [
+            (running, "en cours", Part.running),
+            (waiting, waiting > 1 ? "t’attendent" : "t’attend", Part.waiting),
+            (failed, "en échec", Part.failed),
+            (done, done > 1 ? "terminées" : "terminée", Part.done),
+        ].filter { $0.0 > 0 }
+    }
+
+    var summaryText: String { summaryParts.map { "\($0.count) \($0.label)" }.joined(separator: " · ") }
+
+    /// Shown when no mission is waiting on the user.
+    var idleText: String { allDone ? "Rien ne t’attend." : "Rien ne t’attend · les agents travaillent." }
+
+    /// Project and reason of the next waiting mission, nil when there is none.
+    var nextDetail: String? {
+        guard let title = nextTitle, !title.isEmpty else { return nil }
+        return [nextProject, nextReason].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · ")
+    }
+}
+
 enum OrbFleetActivityLink {
     static let inbox = URL(string: "orb://inbox")!
 }
