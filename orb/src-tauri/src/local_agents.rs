@@ -688,7 +688,7 @@ pub(crate) fn has_orphan_mission_processes(id: &str) -> bool {
     !find_orphan_mission_pids(id, session_id.as_deref()).is_empty()
 }
 
-fn stop_orphan_mission_processes(id: &str) {
+pub(crate) fn stop_orphan_mission_processes(id: &str) {
     let session_id = crate::local_bindings(None, None)
         .ok()
         .and_then(|b| b[id]["sessionId"].as_str().map(str::to_owned));
