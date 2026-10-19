@@ -338,6 +338,19 @@ fun OrbAppRoot(
         }
     }
 
+    // FIDO / SSH signing approvals: listen only while signed in and visible.
+    val fidoToken by core.tokenFlow.collectAsState()
+    LaunchedEffect(baseURL, fidoToken, lifecycleOwner) {
+        if (baseURL.trim().isEmpty() || fidoToken.isNullOrBlank()) {
+            OrbFido.clear()
+            return@LaunchedEffect
+        }
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            OrbFido.listen(core)
+        }
+    }
+    OrbFidoApprovalDialog(core = core)
+
     if (showSettingsSheet) {
         OrbSettingsSheet(
             core = core,

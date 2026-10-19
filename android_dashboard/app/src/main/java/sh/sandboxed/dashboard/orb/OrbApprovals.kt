@@ -196,7 +196,7 @@ object OrbApprovalKey {
     }
 }
 
-private fun Context.fragmentActivity(): FragmentActivity? {
+internal fun Context.fragmentActivity(): FragmentActivity? {
     var c: Context? = this
     while (c is ContextWrapper) {
         if (c is FragmentActivity) return c
