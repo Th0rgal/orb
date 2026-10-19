@@ -5,14 +5,14 @@ test.setTimeout(90000);
 test('older history preserves scroll and remains accessible in WebKit',async({page},info)=>{
  const id='aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
  const mission={id,title:'History performance',backend:'claudecode',project:'demo',status:'awaiting_user',history:[],created_at:'',updated_at:''};
- const limits:number[]=[];let release!:()=>void;const olderGate=new Promise<void>(r=>release=r);
+ const limits:number[]=[];let release!:()=>void;let olderServed=0;const olderGate=new Promise<void>(r=>release=r);
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
  await page.route('**/api/**',async route=>{
   const url=new URL(route.request().url()),path=url.pathname;
   if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
   if(path.endsWith('/events')){
    limits.push(Number(url.searchParams.get('limit')));
-   if(url.searchParams.has('before_seq'))await olderGate;
+   if(url.searchParams.has('before_seq')){await olderGate;olderServed++;}
    const start=url.searchParams.has('before_seq')?1:201;
    const events=Array.from({length:200},(_,n)=>({id:start+n,sequence:start+n,event_id:`event-${start+n}`,event_type:n%2===0?'user_message':'assistant_message',content:`Message ${start+n}. `+'A paragraph of history. '.repeat(12),timestamp:''}));
    const reply=eventPage(route,events);reply.headers['X-Has-More']=!url.searchParams.has('since_seq')&&start===201?'true':'false';
@@ -37,8 +37,14 @@ test('older history preserves scroll and remains accessible in WebKit',async({pa
  await scroller.evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
  const target=page.getByText(/^Message 201\./).first();
  await expect(target).toBeVisible();const before=(await target.boundingBox())!.y;
- release();await page.waitForTimeout(500);
- const after=(await target.boundingBox())!.y;expect(Math.abs(after-before)).toBeLessThan(12);
+ release();
+ // Wait for the older page to be served, then for two frames so the prepend
+ // and the anchor correction have both painted before measuring.
+ await expect.poll(()=>olderServed).toBeGreaterThan(0);
+ const settle=()=>page.evaluate(()=>new Promise<void>(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r()))));
+ await settle();
+ let after=before;
+ await expect.poll(async()=>{await settle();after=(await target.boundingBox())!.y;return Math.abs(after-before);}).toBeLessThan(12);
  expect(limits.every(limit=>limit===200)).toBe(true);
  await scroller.evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
  await expect(page.getByText(/^Message 1\./).first()).toBeInViewport();
