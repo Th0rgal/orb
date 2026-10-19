@@ -11251,6 +11251,30 @@ fn verify_coalesced_attachments(
     Ok(())
 }
 
+/// Follow `superseded_by:` tags from a coordinator to the conversation that
+/// currently continues it, so a replacement worker is not attached to a retired
+/// coordinator (which then cannot be deleted while the worker runs).
+async fn live_successor(store: &Arc<dyn MissionStore>, mut id: Option<Uuid>) -> Option<Uuid> {
+    for _ in 0..64 {
+        let current = id?;
+        let Ok(Some(mission)) = store.get_mission(current).await else {
+            return id;
+        };
+        let next = mission
+            .project
+            .tags
+            .iter()
+            .rev()
+            .find_map(|tag| tag.strip_prefix("superseded_by:"))
+            .and_then(|raw| Uuid::parse_str(raw).ok());
+        match next {
+            Some(next) if next != current => id = Some(next),
+            _ => return id,
+        }
+    }
+    id
+}
+
 pub async fn create_mission(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -11337,7 +11361,8 @@ pub(super) async fn create_mission_inner(
                 .await
                 .map_err(internal_error)?
             {
-                req.parent_mission_id = prior.parent_mission_id;
+                req.parent_mission_id =
+                    live_successor(&parent_control.mission_store, prior.parent_mission_id).await;
             }
         }
     }
