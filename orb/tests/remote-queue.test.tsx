@@ -190,3 +190,29 @@ it('does not list a follow-up as queued once the transcript shows it delivered',
   expect(screen.queryByText('Review this plan')).toBeNull();
   expect(rows).toHaveBeenLastCalledWith(['later']);
 });
+it('a lost send-now response keeps the row and its id, and never deletes or resends', async () => {
+  backend.list.mockResolvedValue([{id:'one',content:'First',source:'remote-queue'},{id:'two',content:'Second',source:'remote-queue'}]);
+  backend.api.mockRejectedValue(new Error('Connection interrupted'));
+  const send = vi.fn().mockResolvedValue(undefined), retract = vi.fn(), cancel = vi.fn();
+  render(() => <RemoteQueue mission="remote" onSendImmediate={send} onRetract={retract} onRows={()=>{}} onCancel={cancel}/>);
+  await screen.findByText('2 Queued');
+  await fireEvent.click(screen.getByRole('button',{name:'Send now: First'}));
+  expect((await screen.findByRole('alert')).textContent).toContain('Connection interrupted');
+  expect(screen.getByText('First')).toBeTruthy();
+  expect(backend.api).toHaveBeenCalledTimes(1);
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/one/send-now',{method:'POST'});
+  expect(retract).toHaveBeenCalledWith('one');
+  expect(cancel).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledTimes(1); // only the optimistic injection, no stop-then-send
+  expect(send).toHaveBeenCalledWith([], [{id:'one',content:'First',attached:undefined}]);
+});
+it('without live delivery it withdraws the optimistic copy, then stops and sends in order', async () => {
+  backend.list.mockResolvedValue([{id:'one',content:'First',source:'remote-queue'},{id:'two',content:'Second',source:'remote-queue'}]);
+  backend.api.mockImplementation(async (url: string) => url.endsWith('/send-now') ? {ok:true,delivered:false} : {ok:true});
+  const send = vi.fn().mockResolvedValue(undefined), retract = vi.fn();
+  render(() => <RemoteQueue mission="remote" onSendImmediate={send} onRetract={retract} onRows={()=>{}} onCancel={()=>{}}/>);
+  await screen.findByText('2 Queued');
+  await fireEvent.click(screen.getByRole('button',{name:'Send now: Second'}));
+  await waitFor(() => expect(send).toHaveBeenLastCalledWith([{id:'two',content:'Second',attached:undefined},{id:'one',content:'First',attached:undefined}]));
+  expect(retract).toHaveBeenCalledWith('two');
+});

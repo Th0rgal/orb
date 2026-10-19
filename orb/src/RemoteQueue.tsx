@@ -27,6 +27,8 @@ export function RemoteQueue(p: {
   onSendImmediate?: (ordered: {id: string; content: string; attached?: boolean}[], liveInjected?: {id: string; content: string; attached?: boolean}[]) => Promise<void>;
   onRows: (ids: string[]) => void;
   onCancel: (id: string) => void;
+  /** Withdraw a message shown optimistically as sent, when it was not delivered live. */
+  onRetract?: (id: string) => void;
   ref?: (handle: RemoteQueueHandle) => void;
 }) {
   let revision = 0, destroyed = false;
@@ -139,7 +141,10 @@ export function RemoteQueue(p: {
     setRows(previous => previous.filter(row => row.id !== target.id));
     void p.onSendImmediate?.([], [injected]);
     try {
-      const live = await api<{ ok?: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now`, { method: "POST" }).catch(() => ({ delivered: false }));
+      // A network error or timeout does not prove the message was not delivered:
+      // it must never fall through to delete-and-resend. Only an explicit
+      // `delivered: false` from Core means "no live injection, stop then send".
+      const live = await api<{ ok?: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now`, { method: "POST" });
       if (live?.delivered) {
         if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
         revision++;
@@ -147,6 +152,8 @@ export function RemoteQueue(p: {
         p.onCancel(target.id);
         return;
       }
+      // The fallback below shows its own copy while it stops the turn and sends.
+      p.onRetract?.(target.id);
       const ordered = [target, ...list.filter(r => r.id !== target.id)];
       const payload = ordered.map(r => {
         const presented = messagePresentation(r.content);
@@ -161,7 +168,9 @@ export function RemoteQueue(p: {
       await p.onSendImmediate?.(payload);
     } catch (e) {
       if (version === connectionVersion() && mission === p.mission) {
-        // Refused: put the queue back as it was so nothing looks sent that was not.
+        // Refused or unconfirmed: put the queue back as it was, same id, so nothing
+        // looks sent that was not. The next queue read reconciles a late delivery.
+        p.onRetract?.(target.id);
         deletedIds.delete(target.id);
         setRows(before);
         setError(e instanceof Error ? e.message : String(e));

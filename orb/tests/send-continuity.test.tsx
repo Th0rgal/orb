@@ -191,18 +191,18 @@ it('never leaks an in-flight Send now retry to another mission when the selected
   updated_at:'',
  }));
  const sentTargets:string[]=[];
- let releaseCancelPoll!:()=>void;
- const cancelPollGate=new Promise<void>(r=>{releaseCancelPoll=r;});
+ let finishSendNow!:(response:Response)=>void;
+ const sendNowGate=new Promise<Response>(resolve=>{finishSendNow=resolve;});
+ const cancelRequests:string[]=[];
  vi.mocked(sendMissionMessage).mockImplementation(async(id,_text,_attachments,clientMessageId)=>{
   sentTargets.push(id);
   return {id:clientMessageId??'msg',queued:true};
  });
  vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
   const u=String(url);
-  if(u.endsWith('/send-now')&&options?.method==='POST')return Response.json({ok:true,delivered:false});
+  if(u.endsWith('/send-now')&&options?.method==='POST')return sendNowGate;
   if(u.endsWith('/cancel')&&options?.method==='POST'){
-   setMissionId('mission-unrelated');
-   releaseCancelPoll();
+   cancelRequests.push(u);
    return Response.json({ok:true});
   }
   if(options?.method==='DELETE')return Response.json({ok:true});
@@ -213,8 +213,11 @@ it('never leaks an in-flight Send now retry to another mission when the selected
  await screen.findByText('Do not leak this prompt');
  const {fireEvent}=await import('@solidjs/testing-library');
  await fireEvent.click(screen.getByRole('button',{name:'Send now: Do not leak this prompt'}));
- await cancelPollGate;
+ await waitFor(()=>expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/send-now'),expect.anything()));
+ setMissionId('mission-unrelated');
+ finishSendNow(Response.json({ok:true,delivered:false}));
  await new Promise(r=>setTimeout(r,50));
+ expect(cancelRequests).toEqual([]);
  expect(sentTargets).not.toContain('mission-unrelated');
  expect(sentTargets).toEqual([]);
 });

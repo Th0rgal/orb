@@ -3497,9 +3497,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         const cleanText = presented.text;
         const attachments = (project ? mentionedChips(cleanText, attachItems) : []).map(chipToAttachment);
         let sent = false;
+        // One id per message for every retry: Core ignores a repeated id, so a
+        // retry after a lost response can never deliver the message twice.
+        const freshId = crypto.randomUUID();
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
           if (staleMission() || p.id !== targetMissionId) return;
-          const freshId = crypto.randomUUID();
           try {
             const result = await sendMissionMessage(targetMissionId, cleanText, attachments, freshId);
             if (staleMission() || p.id !== targetMissionId) return;
@@ -3515,11 +3517,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               p.onFork?.(replacement);
               return;
             }
-            if (i === 0 && wasBusy && result.queued && attempt < maxAttempts - 1) {
-              await api(`/api/control/queue/${encodeURIComponent(result.id)}`, { method: "DELETE" }).catch(() => {});
-              await new Promise(r => setTimeout(r, 250));
-              continue;
-            }
+            // Queued behind a turn that is still stopping is accepted delivery:
+            // Core sends it next. Deleting and resending would risk losing it.
             setOptimisticList(prev => prev.filter(item => item.id !== row.id));
             const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: cleanText, queued: result.queued, receipt: true, attached: Boolean(row.attached || presented.attached || attachments.length > 0) } };
             if (replaying) held.push(event);
@@ -3619,6 +3618,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             pending={!clientPlaced() && !sendError() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,content:item.text})) : undefined}
             confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
             delivered={items().flatMap(item => item.kind === "user" && !item.queued && item.messageId ? [item.messageId] : [])}
+            onRetract={id=>{
+              setItems(previous=>previous.filter(item=>item.kind!=="user"||item.queued||item.messageId!==id));
+              liveEvents=liveEvents.filter(event=>event.type!=="user_message"||event.data?.queued||event.data?.id!==id);
+              held=held.filter(event=>event.type!=="user_message"||event.data?.queued||event.data?.id!==id);
+            }}
             onRows={reconcileRemoteQueue} onCancel={id=>{
             setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||item.messageId!==id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
