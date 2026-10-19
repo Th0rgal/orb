@@ -557,6 +557,34 @@ fn validate_job_payload(
     Ok(())
 }
 
+/// Read a job, first verifying that a `running` job still has a live
+/// process. Core advances its heartbeat on every `running` observation, so a
+/// vanished process must not keep reporting `running`.
+async fn observed_job(state: &NodeState, id: Uuid) -> Result<JobRecord, (StatusCode, String)> {
+    let record = state
+        .jobs
+        .get(id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job {id} not found")))?;
+    if record.state != sandboxed_sh::node::JobState::Running {
+        return Ok(record);
+    }
+    match state.runner.reconcile_job(id).await {
+        Ok(true) => state
+            .jobs
+            .get(id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job {id} not found"))),
+        Ok(false) => Ok(record),
+        Err(error) => {
+            warn!(job_id = %id, %error, "job liveness check failed");
+            Ok(record)
+        }
+    }
+}
+
 /// `GET /jobs/:id` — full job status including up to 64 KiB of log tail.
 async fn get_job(
     State(state): State<Arc<NodeState>>,
@@ -564,12 +592,7 @@ async fn get_job(
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<NodeJobStatus>, (StatusCode, String)> {
     check_auth(&headers, &state)?;
-    let record = state
-        .jobs
-        .get(id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job {id} not found")))?;
+    let record = observed_job(&state, id).await?;
     let log_tail = match record.log_path.as_deref() {
         Some(path) => read_log_tail(Path::new(path)).await,
         None => None,
@@ -593,12 +616,7 @@ async fn get_job_log(
     axum::extract::Query(query): axum::extract::Query<JobLogQuery>,
 ) -> Result<Json<sandboxed_sh::remote_node::JobLogChunk>, (StatusCode, String)> {
     check_auth(&headers, &state)?;
-    let record = state
-        .jobs
-        .get(id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job {id} not found")))?;
+    let record = observed_job(&state, id).await?;
     let max_bytes = query
         .max_bytes
         .unwrap_or(sandboxed_sh::node::LOG_CHUNK_MAX_BYTES);

@@ -71,7 +71,7 @@ enum SystemdScopeMode {
     User,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct SystemdScope {
     unit: String,
@@ -80,6 +80,187 @@ struct SystemdScope {
     /// carried explicitly because a system service's `%U` specifier expands
     /// to the system manager (root), not necessarily to `User=`.
     user_runtime_dir: Option<PathBuf>,
+}
+
+/// Default period of the running-job liveness sweep
+/// (`SANDBOXED_NODE_LIVENESS_SECS`).
+const DEFAULT_LIVENESS_SWEEP: Duration = Duration::from_secs(30);
+
+/// A job must be observed without any live process for this long before the
+/// node finalizes it. This absorbs the window between a leader exiting and
+/// its supervisor persisting the real outcome.
+const VANISH_GRACE: Duration = Duration::from_secs(20);
+
+tokio::task_local! {
+    /// Set by [`JobRunner::run_one`] so the shared supervised-command path can
+    /// publish the identity of the process it is waiting on.
+    static JOB_PROBE: Arc<Mutex<ProcessProbe>>;
+}
+
+/// What the node knows about the process that currently backs a job.
+#[derive(Debug, Default, Clone)]
+struct ProcessProbe {
+    /// A supervised command is between spawn and the end of its cleanup.
+    /// Outside that window (slot admission, between lean steps) the job has
+    /// no process to check and is never judged dead.
+    in_command: bool,
+    pid: Option<u32>,
+    /// `/proc/<pid>/stat` start time, so a reused pid is not mistaken for
+    /// the job's process.
+    start_ticks: Option<u64>,
+    scope: Option<SystemdScope>,
+    /// Exit status once the leader was reaped (`Some(None)`: killed by a
+    /// signal).
+    exit: Option<Option<i32>>,
+}
+
+struct TrackedJob {
+    probe: Arc<Mutex<ProcessProbe>>,
+    /// Cancelled once the node finalized the job out of band; the stuck
+    /// supervisor then stops without overwriting that outcome.
+    reaped: CancellationToken,
+}
+
+/// Liveness of a `running` job's process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobLiveness {
+    Alive,
+    /// No process to check yet, or the evidence is inconclusive (e.g. the
+    /// scope manager did not answer). Never treated as dead.
+    Unknown,
+    /// No process, process group or scope remains.
+    Dead {
+        exited: bool,
+        exit_code: Option<i32>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_fields(pid: u32) -> Option<Result<Vec<String>, ()>> {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => Some(
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| rest.split_whitespace().map(str::to_string).collect())
+                .ok_or(()),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(Err(())),
+    }
+}
+
+fn process_start_ticks(_pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // Field 22 of /proc/<pid>/stat; index 19 after the command name.
+        proc_stat_fields(_pid)?.ok()?.get(19)?.parse().ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Whether `pid` is still the (non-zombie) process that was spawned.
+fn pid_is_alive(pid: u32, start_ticks: Option<u64>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        match proc_stat_fields(pid) {
+            None => false,
+            // Unreadable: inconclusive, so keep the job alive.
+            Some(Err(())) => true,
+            Some(Ok(fields)) => {
+                if matches!(fields.first().map(String::as_str), Some("Z" | "X")) {
+                    return false;
+                }
+                match (
+                    start_ticks,
+                    fields.get(19).and_then(|v| v.parse::<u64>().ok()),
+                ) {
+                    (Some(expected), Some(actual)) => expected == actual,
+                    _ => true,
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = start_ticks;
+        let result = unsafe { libc::kill(pid as i32, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+}
+
+/// `Some(true)` while the unit still runs, `Some(false)` once it is gone or
+/// inactive, `None` when the manager could not be asked.
+#[cfg(target_os = "linux")]
+async fn scope_is_active(scope: &SystemdScope) -> Option<bool> {
+    let mut show = tokio::process::Command::new("systemctl");
+    show.kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    if scope.mode == SystemdScopeMode::User {
+        show.arg("--user");
+        if let Some(runtime_dir) = &scope.user_runtime_dir {
+            show.env("XDG_RUNTIME_DIR", runtime_dir).env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", runtime_dir.join("bus").display()),
+            );
+        }
+    }
+    show.args(["show", "--property=ActiveState", "--value", &scope.unit]);
+    match tokio::time::timeout(Duration::from_secs(5), show.output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Some(!matches!(state.as_str(), "inactive" | "failed"))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn scope_is_active(_scope: &SystemdScope) -> Option<bool> {
+    None
+}
+
+async fn probe_liveness(probe: ProcessProbe) -> JobLiveness {
+    if !probe.in_command {
+        return JobLiveness::Unknown;
+    }
+    let Some(pid) = probe.pid else {
+        return JobLiveness::Unknown;
+    };
+    if probe.exit.is_none() && pid_is_alive(pid, probe.start_ticks) {
+        return JobLiveness::Alive;
+    }
+    if process_group_has_live_members(pid) {
+        return JobLiveness::Alive;
+    }
+    if let Some(scope) = &probe.scope {
+        match scope_is_active(scope).await {
+            Some(true) => return JobLiveness::Alive,
+            Some(false) => {}
+            None => return JobLiveness::Unknown,
+        }
+    }
+    JobLiveness::Dead {
+        exited: probe.exit.is_some(),
+        exit_code: probe.exit.flatten(),
+    }
+}
+
+fn update_probe(update: impl FnOnce(&mut ProcessProbe)) {
+    let _ =
+        JOB_PROBE.try_with(|probe| update(&mut probe.lock().unwrap_or_else(|e| e.into_inner())));
+}
+
+/// Marks the end of a supervised command on every exit path, including a
+/// dropped future.
+struct ProbeCommandGuard;
+
+impl Drop for ProbeCommandGuard {
+    fn drop(&mut self) {
+        update_probe(|probe| probe.in_command = false);
+    }
 }
 
 /// Counts one ordinary job against its workspace until the job task ends.
@@ -156,6 +337,10 @@ pub struct JobRunner {
     /// Operator-configured credential profiles raw jobs may request by name
     /// (`SANDBOXED_NODE_GROK_HOME`, ...). See `super::managed_auth`.
     managed_auth: super::managed_auth::ManagedAuth,
+    /// Jobs whose supervisor is inside `run_one`, with their process probe.
+    tracked: Mutex<HashMap<Uuid, TrackedJob>>,
+    /// First observation of a `running` job without any live process.
+    dead_since: Mutex<HashMap<Uuid, Instant>>,
 }
 
 impl JobRunner {
@@ -230,7 +415,10 @@ impl JobRunner {
                 }
             },
             managed_auth,
+            tracked: Mutex::new(HashMap::new()),
+            dead_since: Mutex::new(HashMap::new()),
         });
+        runner.spawn_liveness_sweep();
         // Side questions must be able to inspect a busy main mission. They
         // share a small bounded pool (SANDBOXED_NODE_SIDE_CAPACITY, default
         // 2), never an unbounded bypass of node admission. One slow /btw on
@@ -441,6 +629,20 @@ impl JobRunner {
                     }
                     return self.store.cancel_if_lost(job_id).await;
                 }
+                // `running` with no supervisor at all: nothing can ever
+                // finish this row, so the cancel finalizes it.
+                if record.state == JobState::Running && !self.is_tracked(job_id) {
+                    return self
+                        .finalize_vanished(
+                            job_id,
+                            JobLiveness::Dead {
+                                exited: false,
+                                exit_code: None,
+                            },
+                            true,
+                        )
+                        .await;
+                }
             }
             return Ok(false);
         };
@@ -451,8 +653,194 @@ impl JobRunner {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&job_id);
+        } else {
+            // A supervisor whose process is already gone may never observe
+            // the token (e.g. stuck in cleanup). Finalize now.
+            let liveness = self.liveness(job_id).await;
+            if matches!(liveness, JobLiveness::Dead { .. }) {
+                self.finalize_vanished(job_id, liveness, true).await?;
+            }
         }
         Ok(true)
+    }
+
+    fn is_tracked(&self, job_id: Uuid) -> bool {
+        self.tracked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&job_id)
+    }
+
+    /// Liveness of a job's backing process, as far as this node can tell.
+    pub async fn liveness(&self, job_id: Uuid) -> JobLiveness {
+        let probe = self
+            .tracked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&job_id)
+            .map(|tracked| {
+                tracked
+                    .probe
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            });
+        match probe {
+            Some(probe) => probe_liveness(probe).await,
+            // Claimed but not yet inside `run_one`: it still owns its token.
+            None if self
+                .cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&job_id) =>
+            {
+                JobLiveness::Unknown
+            }
+            // A `running` row nobody supervises (a lost outcome write, a
+            // dropped task): no process can be behind it.
+            None => JobLiveness::Dead {
+                exited: false,
+                exit_code: None,
+            },
+        }
+    }
+
+    /// Verify a `running` job still has a live process; finalize it once it
+    /// has had none for [`VANISH_GRACE`]. Returns whether it was finalized.
+    pub async fn reconcile_job(&self, job_id: Uuid) -> anyhow::Result<bool> {
+        self.reconcile_job_with_grace(job_id, VANISH_GRACE).await
+    }
+
+    async fn reconcile_job_with_grace(
+        &self,
+        job_id: Uuid,
+        grace: Duration,
+    ) -> anyhow::Result<bool> {
+        if !self
+            .store
+            .get(job_id)
+            .await?
+            .is_some_and(|record| record.state == JobState::Running)
+        {
+            self.clear_dead_since(job_id);
+            return Ok(false);
+        }
+        let liveness = self.liveness(job_id).await;
+        if !matches!(liveness, JobLiveness::Dead { .. }) {
+            self.clear_dead_since(job_id);
+            return Ok(false);
+        }
+        let first = *self
+            .dead_since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(job_id)
+            .or_insert_with(Instant::now);
+        if first.elapsed() < grace {
+            return Ok(false);
+        }
+        self.finalize_vanished(job_id, liveness, false).await
+    }
+
+    fn clear_dead_since(&self, job_id: Uuid) {
+        self.dead_since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job_id);
+    }
+
+    /// Persist the terminal outcome of a job whose process is gone and stop
+    /// its supervisor. First terminal outcome wins.
+    async fn finalize_vanished(
+        &self,
+        job_id: Uuid,
+        liveness: JobLiveness,
+        cancel_requested: bool,
+    ) -> anyhow::Result<bool> {
+        let JobLiveness::Dead { exited, exit_code } = liveness else {
+            return Ok(false);
+        };
+        let cancelled = cancel_requested
+            || self
+                .store
+                .get(job_id)
+                .await?
+                .is_some_and(|record| record.cancellation.is_some());
+        let exit_detail = match (exited, exit_code) {
+            (true, Some(code)) => format!("exit code {code}"),
+            (true, None) => "terminated by a signal".to_string(),
+            (false, _) => "exit status unrecoverable".to_string(),
+        };
+        let (state, error) = if cancelled {
+            (
+                JobState::Cancelled,
+                format!("cancelled; the job process was no longer running ({exit_detail})"),
+            )
+        } else if exited {
+            (
+                JobState::Failed,
+                format!(
+                    "job process exited ({exit_detail}) but its supervisor never completed; finalized by the liveness sweep"
+                ),
+            )
+        } else {
+            (JobState::Lost, "process vanished".to_string())
+        };
+        let finalized = self
+            .store
+            .finalize_running(job_id, state, exit_code, Some(error.clone()))
+            .await?;
+        if finalized {
+            tracing::warn!(%job_id, state = state.as_str(), %error, "finalized node job without a live process");
+            if let Some(tracked) = self
+                .tracked
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&job_id)
+            {
+                tracked.reaped.cancel();
+            }
+        }
+        self.clear_dead_since(job_id);
+        Ok(finalized)
+    }
+
+    /// Periodically verify every `running` job still has a live process.
+    fn spawn_liveness_sweep(self: &Arc<Self>) {
+        let period = std::env::var("SANDBOXED_NODE_LIVENESS_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_LIVENESS_SWEEP);
+        let runner = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(runner) = runner.upgrade() else {
+                    break;
+                };
+                if let Err(error) = runner.sweep_running_jobs().await {
+                    tracing::warn!(%error, "node job liveness sweep failed");
+                }
+            }
+        });
+    }
+
+    async fn sweep_running_jobs(&self) -> anyhow::Result<()> {
+        let running = self.store.running_ids().await?;
+        self.dead_since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id, _| running.contains(id));
+        for job_id in running {
+            if let Err(error) = self.reconcile_job(job_id).await {
+                tracing::warn!(%job_id, %error, "node job liveness check failed");
+            }
+        }
+        Ok(())
     }
 
     fn take_cancel_token(&self, job_id: Uuid) -> CancellationToken {
@@ -477,29 +865,67 @@ impl JobRunner {
 
     async fn run_one(&self, job: QueuedJob) {
         let token = self.take_cancel_token(job.id);
-        let (state, exit_code, error, artifacts_json) = if token.is_cancelled() {
-            (
+        let probe = Arc::new(Mutex::new(ProcessProbe::default()));
+        let reaped = CancellationToken::new();
+        self.tracked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                job.id,
+                TrackedJob {
+                    probe: Arc::clone(&probe),
+                    reaped: reaped.clone(),
+                },
+            );
+        let outcome = if token.is_cancelled() {
+            Some((
                 JobState::Cancelled,
                 None,
                 Some("cancelled before start".to_string()),
                 None,
-            )
+            ))
         } else {
-            match self.execute(&job, &token).await {
-                Ok(outcome) => outcome,
-                Err(err) => (JobState::Failed, None, Some(err.to_string()), None),
+            tokio::select! {
+                biased;
+                // The node already finalized this job because its process
+                // vanished; abandon the supervisor without a second outcome.
+                _ = reaped.cancelled() => None,
+                result = JOB_PROBE.scope(probe, self.execute(&job, &token)) => Some(match result {
+                    Ok(outcome) => outcome,
+                    Err(err) => (JobState::Failed, None, Some(err.to_string()), None),
+                }),
             }
         };
         // Execution is over, so cancellation must no longer report that it
         // reached a live job even while the terminal row is being persisted.
         self.drop_cancel_token(job.id);
-        if let Err(err) = self
-            .store
-            .finish_with_artifacts(job.id, state, exit_code, error, artifacts_json)
-            .await
-        {
-            tracing::warn!(job_id = %job.id, "failed to persist job outcome: {err}");
+        if let Some((state, exit_code, error, artifacts_json)) = outcome {
+            // A lost write would leave a `running` row with no supervisor.
+            for attempt in 1..=5 {
+                match self
+                    .store
+                    .finish_with_artifacts(
+                        job.id,
+                        state,
+                        exit_code,
+                        error.clone(),
+                        artifacts_json.clone(),
+                    )
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(err) => {
+                        tracing::warn!(job_id = %job.id, attempt, "failed to persist job outcome: {err}");
+                        tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
+                    }
+                }
+            }
         }
+        self.tracked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job.id);
+        self.clear_dead_since(job.id);
     }
 
     async fn execute(
@@ -550,6 +976,8 @@ impl JobRunner {
                     Some(clamp_timeout(*timeout_secs, self.max_job_secs))
                 };
                 let thought_stop = CancellationToken::new();
+                // Stop the monitor even when the supervisor is abandoned.
+                let _thought_stop_guard = thought_stop.clone().drop_guard();
                 let thought_monitor = managed_auth
                     .iter()
                     .any(|profile| profile == "antigravity")
@@ -738,6 +1166,16 @@ async fn run_supervised_command(
         .process_group(0);
     let mut child = cmd.spawn()?;
     let pid = child.id();
+    let _probe_guard = ProbeCommandGuard;
+    update_probe(|probe| {
+        *probe = ProcessProbe {
+            in_command: true,
+            pid,
+            start_ticks: pid.and_then(process_start_ticks),
+            scope: systemd_scope.clone(),
+            exit: None,
+        };
+    });
 
     let outcome = tokio::select! {
         _ = token.cancelled() => {
@@ -759,6 +1197,10 @@ async fn run_supervised_command(
             RunOutcome::TimedOut { limit_secs: limit_secs.expect("deadline enabled"), observed_oom }
         }
         waited = child.wait() => {
+            if let Ok(status) = &waited {
+                let code = status.code();
+                update_probe(|probe| probe.exit = Some(code));
+            }
             let oom = cleanup_and_observe_oom(systemd_scope.as_ref(), pid, &mut child).await;
             let code = waited?.code();
             if oom && code != Some(0) { RunOutcome::ExitedAfterChildOom(code) } else { RunOutcome::Exited(code) }
@@ -1827,6 +2269,143 @@ mod tests {
         assert_eq!(record.state, JobState::Cancelled);
         // Cancelling an already-finished (deregistered) job reports false.
         assert!(!runner.cancel(job_id).await.unwrap());
+    }
+
+    fn sleep_job(command: &str) -> JobPayload {
+        JobPayload::RawCommand {
+            side_question: false,
+            companion_of: None,
+            long_running: true,
+            command: command.to_string(),
+            timeout_secs: None,
+            env: None,
+            managed_auth: Vec::new(),
+        }
+    }
+
+    async fn ghost_running_job(store: &JobStore) -> Uuid {
+        let id = Uuid::new_v4();
+        store
+            .create(id, Uuid::new_v4(), "{}".into(), "log".into())
+            .await
+            .unwrap();
+        store.mark_running(id).await.unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn liveness_sweep_finalizes_running_job_without_a_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn(store.clone(), dir.path().to_path_buf(), 1, 60);
+        let id = ghost_running_job(&store).await;
+        // The first dead observation only starts the grace period.
+        assert!(!runner.reconcile_job(id).await.unwrap());
+        assert_eq!(
+            store.get(id).await.unwrap().unwrap().state,
+            JobState::Running
+        );
+        assert!(runner
+            .reconcile_job_with_grace(id, Duration::ZERO)
+            .await
+            .unwrap());
+        let record = store.get(id).await.unwrap().unwrap();
+        assert_eq!(record.state, JobState::Lost);
+        assert_eq!(record.error.as_deref(), Some("process vanished"));
+    }
+
+    #[tokio::test]
+    async fn liveness_sweep_never_finalizes_a_live_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn(store.clone(), dir.path().to_path_buf(), 1, 60);
+        let id = Uuid::new_v4();
+        runner
+            .submit(id, Uuid::new_v4(), sleep_job("sleep 30"))
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if runner.liveness(id).await == JobLiveness::Alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(runner.liveness(id).await, JobLiveness::Alive);
+        for _ in 0..3 {
+            assert!(!runner
+                .reconcile_job_with_grace(id, Duration::ZERO)
+                .await
+                .unwrap());
+        }
+        assert_eq!(
+            store.get(id).await.unwrap().unwrap().state,
+            JobState::Running
+        );
+        assert!(runner.cancel(id).await.unwrap());
+        assert_eq!(
+            wait_for_terminal(&store, id).await.state,
+            JobState::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn stuck_supervisor_after_exit_is_finalized_with_its_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn(store.clone(), dir.path().to_path_buf(), 1, 60);
+        let id = ghost_running_job(&store).await;
+        // A reaped leader whose cleanup never returned (the ashur incident).
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "exit 3"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let status = child.wait().await.unwrap();
+        let reaped = CancellationToken::new();
+        runner.tracked.lock().unwrap().insert(
+            id,
+            TrackedJob {
+                probe: Arc::new(Mutex::new(ProcessProbe {
+                    in_command: true,
+                    pid,
+                    start_ticks: None,
+                    scope: None,
+                    exit: Some(status.code()),
+                })),
+                reaped: reaped.clone(),
+            },
+        );
+        assert!(matches!(
+            runner.liveness(id).await,
+            JobLiveness::Dead {
+                exited: true,
+                exit_code: Some(3)
+            }
+        ));
+        assert!(runner
+            .reconcile_job_with_grace(id, Duration::ZERO)
+            .await
+            .unwrap());
+        let record = store.get(id).await.unwrap().unwrap();
+        assert_eq!(record.state, JobState::Failed);
+        assert_eq!(record.exit_code, Some(3));
+        assert!(reaped.is_cancelled(), "the stuck supervisor is released");
+    }
+
+    #[tokio::test]
+    async fn cancel_finalizes_a_running_job_with_no_live_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn(store.clone(), dir.path().to_path_buf(), 1, 60);
+        let id = ghost_running_job(&store).await;
+        assert!(runner
+            .cancel_with_reason(id, "core", "operator cancelled")
+            .await
+            .unwrap());
+        let record = store.get(id).await.unwrap().unwrap();
+        assert_eq!(record.state, JobState::Cancelled);
+        assert!(record.cancellation.is_some());
     }
 
     #[tokio::test]

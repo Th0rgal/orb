@@ -1757,6 +1757,101 @@ pub(crate) struct RemotePlacement {
     pub(crate) live: bool,
 }
 
+/// Grace between a run lease turning terminal and Core asking the node to
+/// finalize a job that still reports `running` for it.
+const ORPHANED_NODE_JOB_GRACE_SECS: i64 = 60;
+/// Minimum spacing between finalize requests for the same node job.
+const ORPHANED_NODE_JOB_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+static ORPHAN_FINALIZE_ATTEMPTS: LazyLock<
+    Mutex<std::collections::HashMap<Uuid, std::time::Instant>>,
+> = LazyLock::new(Default::default);
+
+/// Whether the mission's latest run lease is terminal (operator cancelled or
+/// finished) for `job_id` long enough that a node still reporting the job
+/// `running` must be told to finalize it.
+pub(crate) fn run_lease_orphans_job(
+    run: Option<&crate::api::mission_store::MissionRun>,
+    job_id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(run) = run else { return false };
+    if !run.execution_state.is_terminal()
+        || run.owner_actor_id.strip_prefix("remote-job:") != Some(job_id.to_string().as_str())
+    {
+        return false;
+    }
+    run.ended_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|ended| {
+            now.signed_duration_since(ended.with_timezone(&chrono::Utc))
+                >= chrono::Duration::seconds(ORPHANED_NODE_JOB_GRACE_SECS)
+        })
+}
+
+/// A live placement whose run lease Core already closed is a ghost: ask the
+/// node to finalize (cancel) that job so queued follow-ups can be delivered
+/// once the node confirms a terminal state. Returns whether a request was sent.
+pub(crate) async fn finalize_orphaned_node_job(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    placement: &RemotePlacement,
+) -> bool {
+    if !placement.live || placement.job_id.is_nil() {
+        return false;
+    }
+    let run = match store.get_latest_mission_run(mission_id).await {
+        Ok(run) => run,
+        Err(error) => {
+            tracing::debug!(%mission_id, %error, "cannot read run lease for orphaned node job check");
+            return false;
+        }
+    };
+    if !run_lease_orphans_job(run.as_ref(), placement.job_id, chrono::Utc::now()) {
+        return false;
+    }
+    {
+        let mut attempts = ORPHAN_FINALIZE_ATTEMPTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        attempts.retain(|_, at| at.elapsed() < ORPHANED_NODE_JOB_RETRY);
+        if attempts.contains_key(&placement.job_id) {
+            return false;
+        }
+        attempts.insert(placement.job_id, std::time::Instant::now());
+    }
+    let Some(node) = state.config.remote_nodes.node(&placement.node_id) else {
+        return false;
+    };
+    let Ok(token) = std::env::var(&node.token_env) else {
+        return false;
+    };
+    match RemoteNodeClient::default()
+        .cancel_job_with_reason(
+            node,
+            &token,
+            placement.job_id,
+            "core",
+            "Core run lease is terminal; finalize the orphaned node job",
+        )
+        .await
+    {
+        Ok(response) => {
+            tracing::warn!(%mission_id, job_id = %placement.job_id, node = %placement.node_id,
+                node_state = %response.state, cancel_requested = response.cancel_requested,
+                "asked node to finalize a job whose run lease is already terminal");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%mission_id, job_id = %placement.job_id, %error,
+                "finalize request for orphaned node job failed");
+            false
+        }
+    }
+}
+
 /// Remote placement of a mission from the durable ledger, falling back to
 /// the (possibly settled) `remote-job:*` run lease. `None` means the mission
 /// never dispatched a raw/typed remote job.
@@ -2113,6 +2208,15 @@ async fn continue_inner(
     // A live job must never produce a replacement hint, even for a harness
     // or track that cannot resume. Clients act on that hint by creating a job.
     let job_running = placement.live || mission.status == MissionStatus::Active;
+    if job_running && placement.live {
+        // Never block forever on a node job Core already closed. The request
+        // runs in the background; the caller's retry (or the remote queue)
+        // delivers once the node confirms a terminal state.
+        let (state, store, placement) = (Arc::clone(state), store.clone(), placement.clone());
+        tokio::spawn(async move {
+            finalize_orphaned_node_job(&state, &store, mission_id, &placement).await;
+        });
+    }
     if job_running {
         return Err((
             StatusCode::CONFLICT,
@@ -2470,6 +2574,59 @@ fn vibe_continuation_plan(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_run_lease_orphans_its_node_job_after_grace() {
+        use crate::api::mission_store::{MissionExecutionState, MissionRun};
+        let job = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let run = |state, owner: String, ended: Option<chrono::DateTime<chrono::Utc>>| MissionRun {
+            run_id: Uuid::new_v4(),
+            mission_id: Uuid::new_v4(),
+            generation: 1,
+            execution_state: state,
+            owner_actor_id: owner,
+            scope_unit: Some("remote-node:ashur".into()),
+            started_at: now.to_rfc3339(),
+            heartbeat_at: now.to_rfc3339(),
+            stopping_at: None,
+            ended_at: ended.map(|at| at.to_rfc3339()),
+            terminal_reason: Some("operator_cancelled_detached_run".into()),
+        };
+        let owner = format!("remote-job:{job}");
+        let old = Some(now - chrono::Duration::minutes(5));
+        assert!(run_lease_orphans_job(
+            Some(&run(MissionExecutionState::Terminal, owner.clone(), old)),
+            job,
+            now
+        ));
+        // Within the grace period the node may still be reporting its exit.
+        assert!(!run_lease_orphans_job(
+            Some(&run(
+                MissionExecutionState::Terminal,
+                owner.clone(),
+                Some(now)
+            )),
+            job,
+            now
+        ));
+        // A live lease, or a lease owned by another job, never orphans it.
+        assert!(!run_lease_orphans_job(
+            Some(&run(MissionExecutionState::WaitingRemoteJob, owner, old)),
+            job,
+            now
+        ));
+        assert!(!run_lease_orphans_job(
+            Some(&run(
+                MissionExecutionState::Terminal,
+                format!("remote-job:{}", Uuid::new_v4()),
+                old
+            )),
+            job,
+            now
+        ));
+        assert!(!run_lease_orphans_job(None, job, now));
+    }
+
     use super::*;
 
     #[test]

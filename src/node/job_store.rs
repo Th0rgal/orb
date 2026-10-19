@@ -268,9 +268,11 @@ impl JobStore {
     ) -> anyhow::Result<()> {
         self.with_conn(move |conn| {
             conn.execute(
+                // First terminal outcome wins: a liveness sweep or a cancel
+                // of a vanished process may already have finalized the row.
                 "UPDATE jobs SET state = ?2, exit_code = ?3, error = ?4, finished_at = ?5,
                         artifacts_json = ?6
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND state IN ('queued', 'running')",
                 params![
                     id.to_string(),
                     state.as_str(),
@@ -281,6 +283,45 @@ impl JobStore {
                 ],
             )
             .map(|_| ())
+        })
+        .await
+    }
+
+    /// Finalize a job only while it is still `running`. Used when the node
+    /// proves its process is gone; returns whether this call made it terminal.
+    pub async fn finalize_running(
+        &self,
+        id: Uuid,
+        state: JobState,
+        exit_code: Option<i32>,
+        error: Option<String>,
+    ) -> anyhow::Result<bool> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE jobs SET state = ?2, exit_code = ?3, error = ?4, finished_at = ?5
+                 WHERE id = ?1 AND state = 'running'",
+                params![
+                    id.to_string(),
+                    state.as_str(),
+                    exit_code,
+                    error,
+                    now_rfc3339()
+                ],
+            )
+            .map(|updated| updated == 1)
+        })
+        .await
+    }
+
+    /// Ids of every job currently recorded as `running`.
+    pub async fn running_ids(&self) -> anyhow::Result<Vec<Uuid>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM jobs WHERE state = 'running'")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows
+                .filter_map(|row| row.ok())
+                .filter_map(|raw| Uuid::parse_str(&raw).ok())
+                .collect())
         })
         .await
     }
@@ -424,6 +465,35 @@ mod tests {
 
         // Unknown job ids read as None.
         assert!(store.get(Uuid::new_v4()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_outcome_is_first_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        store
+            .create(id, Uuid::new_v4(), "{}".into(), "log".into())
+            .await
+            .unwrap();
+        assert!(!store
+            .finalize_running(id, JobState::Lost, None, None)
+            .await
+            .unwrap());
+        store.mark_running(id).await.unwrap();
+        assert_eq!(store.running_ids().await.unwrap(), vec![id]);
+        assert!(store
+            .finalize_running(id, JobState::Lost, None, Some("process vanished".into()))
+            .await
+            .unwrap());
+        store
+            .finish(id, JobState::Succeeded, Some(0), None)
+            .await
+            .unwrap();
+        let record = store.get(id).await.unwrap().unwrap();
+        assert_eq!(record.state, JobState::Lost);
+        assert_eq!(record.error.as_deref(), Some("process vanished"));
+        assert!(store.running_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]
