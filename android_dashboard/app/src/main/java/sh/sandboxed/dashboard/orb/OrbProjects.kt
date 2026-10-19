@@ -2482,6 +2482,7 @@ fun statusLabel(state: String): String = when (state.lowercase()) {
     "blocked" -> "Blocked"
     "failed" -> "Failed"
     "interrupted", "cancelled" -> "Stopped"
+    "paused" -> "Paused"
     "acknowledged" -> "Archived"
     else -> state.replace("_", " ")
 }
