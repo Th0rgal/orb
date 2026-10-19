@@ -83,6 +83,8 @@ export async function snapshotTransfer(action: TransferAction): Promise<Transfer
   if (manifest.links?.length && !(await inspectTransfer(action.mission_id)).features?.includes("links")) throw new Error("Update the connected backend to move a workspace containing links. The conversation has not moved.");
   return transferRequest(action.mission_id, { op: "client_snapshot", transfer_id: action.id, client_id: await machineIdentity(), root: binding.cwd, manifest });
 }
+const TRANSFER_BLOCK = 1024 * 1024;
+const TRANSFER_WORKERS = 8;
 export async function copyTransfer(action: TransferAction, progress: (done: number, total: number) => void, cancelled: () => boolean = () => false): Promise<TransferAction> {
   if (action.phase === "verified" || action.phase === "activated") return action;
   const manifest = action.manifest;
@@ -90,17 +92,26 @@ export async function copyTransfer(action: TransferAction, progress: (done: numb
   const staged = await transferFiles<{ sealed: boolean; received: Record<string, number> }>(action, "destination", { op: "stage", manifest });
   if (staged.sealed) return action;
   let done = 0;
-  for (const file of manifest.files) {
+  // Each block is a source read plus a destination write, relayed through Core.
+  // Copy files concurrently so many small files don't serialize on latency;
+  // blocks inside one file stay ordered.
+  const copyFile = async (file: TransferFile) => {
     const received = staged.received?.[file.path] ?? 0;
     done += received; progress(done, manifest.bytes);
-    for (let offset = received; offset < file.bytes || (file.bytes === 0 && offset === 0); offset += 1024 * 1024) {
+    for (let offset = received; offset < file.bytes || (file.bytes === 0 && offset === 0); offset += TRANSFER_BLOCK) {
       if (cancelled()) throw new Error("Transfer cancelled before activation.");
       const { data } = file.bytes === 0 ? { data: "" } : await transferFiles<{ data: string }>(action, "source", { op: "read", path: file.path, offset });
       await transferFiles(action, "destination", { op: "write", path: file.path, offset, data });
-      done += Math.min(1024 * 1024, file.bytes - offset); progress(done, manifest.bytes);
+      done += Math.min(TRANSFER_BLOCK, file.bytes - offset); progress(done, manifest.bytes);
       if (file.bytes === 0) break;
     }
-  }
+  };
+  const queue = manifest.files.filter(file => file.bytes === 0 || (staged.received?.[file.path] ?? 0) < file.bytes);
+  for (const file of manifest.files) if (!queue.includes(file)) { done += file.bytes; }
+  progress(done, manifest.bytes);
+  let next = 0;
+  const worker = async () => { while (next < queue.length) await copyFile(queue[next++]); };
+  await Promise.all(Array.from({ length: Math.min(TRANSFER_WORKERS, queue.length) }, worker));
   return action;
 }
 export async function verifyTransfer(action: TransferAction): Promise<TransferAction> {

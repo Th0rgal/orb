@@ -56,3 +56,22 @@ it("writes an empty file on resume even when stage reports 0 received bytes", as
   expect(calls.map(c => c.operation.op)).toEqual(["stage", "write"]);
   expect(calls[1].operation).toEqual({ op: "write", path: "empty.txt", offset: 0, data: "" });
 });
+it("copies many files concurrently, never more than eight at once", async () => {
+  const files = Array.from({ length: 20 }, (_, i) => ({ path: `f${i}`, bytes: 3, sha256: "h", executable: false }));
+  const many: TransferAction = { ...action, manifest: { bytes: 60, excluded: [], files } };
+  let inFlight = 0, peak = 0; const written: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const op = JSON.parse(String(init?.body)).operation;
+    if (op.op === "stage") return new Response(JSON.stringify({ received: { f0: 3 } }));
+    inFlight++; peak = Math.max(peak, inFlight);
+    await new Promise(r => setTimeout(r, 2));
+    inFlight--;
+    if (op.op === "write") written.push(op.path);
+    return new Response(JSON.stringify(op.op === "read" ? { data: "AQID" } : {}));
+  });
+  const progress = vi.fn();
+  await copyTransfer(many, progress);
+  expect(peak).toBeGreaterThan(1); expect(peak).toBeLessThanOrEqual(8);
+  expect(written.sort()).toEqual(files.slice(1).map(f => f.path).sort());
+  expect(progress).toHaveBeenLastCalledWith(60, 60);
+});
