@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,7 +23,17 @@ function palomaPub(): Plugin {
   };
 }
 
+/** Short commit of the checkout being built, or "dev" outside git. */
+function buildId(): string {
+  try { return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || "dev"; } catch { return "dev"; }
+}
+const pkg = JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string };
+
 export default defineConfig({
+  define: {
+    "import.meta.env.VITE_ORB_VERSION": JSON.stringify(pkg.version),
+    "import.meta.env.VITE_ORB_BUILD": JSON.stringify(buildId()),
+  },
   plugins: [solid(), palomaPub()],
   clearScreen: false,
   // Polling also detects edits made by agent processes without macOS file events.

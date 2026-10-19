@@ -1,4 +1,5 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
+import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
 import { isFailedStatus, isRunning, isSettingsIdle } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
@@ -689,8 +690,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           return false;
         }
       }
-      const binding = localBinding(sendMission);
-      if (!binding) {
+      if (!localBinding(sendMission)) {
         setSendError("This session runs on the computer that started it. Your draft is kept.");
         return false;
       }
@@ -700,14 +700,19 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         return false;
       }
       try {
+        // After a project move, the next turn runs in the new project's folder.
+        const next = await followProjectFolder(sendMission, project);
+        const binding = next?.binding;
+        if (!binding) throw new Error("This session runs on the computer that started it. Your draft is kept.");
         const plan = await materializeMentions(project, text, chips);
         await prepareProjectSkills(project, binding.cwd, binding.harness, binding.bin);
         if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
         const imagePaths = await stageLocalImages(binding.cwd, images);
-        const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
+        const sent = seededPrompt(imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images), next?.seed);
         if(connectionVersion()!==sendVersion||staleMission()||p.id!==sendMission)throw new Error("Conversation changed. Your draft is kept.");
         if (optEntry && !drafts.has(attemptId)) return true;
         await enqueueLocalMessage({id:sendMission,harness:binding.harness,bin:binding.bin,cwd:binding.cwd,prompt:sent,model:mission()?.model_override ?? binding.model,effort:binding.harness === "antigravity" ? normalizeEffort(mission()?.model_effort,binding.harness) ?? undefined : undefined,service_tier:binding.harness === "codex" ? missionSpeed(mission()??{}) : undefined,imagePaths},imagePrompt(text,imagePaths,images),{id:attemptId,replace,waiting:explicitId ? busy() : optEntry?.waiting??busy()});
+        if (next?.seed) seedDelivered(sendMission);
         drafts.remove(attemptId);
         if (chips === followAttach()) setFollowAttach([]);
         return true;

@@ -1,4 +1,5 @@
 import { pollWhileVisible } from "./poll";
+import { followProjectFolder, seedDelivered, seededPrompt } from "./localFolder";
 import { invokeNative } from "./native";
 import { useNow } from "./time";
 import { missionAssignedNode } from "./machines/nodes";
@@ -872,19 +873,24 @@ export function InboxPage(p: {
       if (clientPlaced) {
         const sendVersion = connectionVersion();
         await refreshLocalBindings().catch(swallow("inbox.refreshLocalBindings"));
-        const binding = localBinding(item.id);
-        if (!binding) {
+        if (!localBinding(item.id)) {
           throw new Error("This session runs on the computer that started it. Your draft is kept.");
         }
         const project = mission.project;
         if (!project) {
           throw new Error("This mission has no project, so its files cannot be copied. Your draft is kept.");
         }
+        // After a project move, the next turn runs in the new project's folder.
+        const next = await followProjectFolder(item.id, project);
+        const binding = next?.binding;
+        if (!binding) {
+          throw new Error("This session runs on the computer that started it. Your draft is kept.");
+        }
         const plan = await materializeMentions(project, text, chips);
         await prepareProjectSkills(project, binding.cwd, binding.harness, binding.bin);
         if (plan.files.length) await writeLocalFiles(binding.cwd, plan.files);
         const imagePaths = await stageLocalImages(binding.cwd, images);
-        const sent = imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images);
+        const sent = seededPrompt(imagePrompt(bindWorkspace(plan.prompt, binding.cwd), imagePaths, images), next?.seed);
         if (connectionVersion() !== sendVersion) {
           throw new Error("Connection changed. Your draft is kept.");
         }
@@ -902,6 +908,7 @@ export function InboxPage(p: {
           displaySent,
           { id: msgId, replace: false, waiting: false },
         );
+        if (next?.seed) seedDelivered(item.id);
         appendUserEventToTranscript(item.id, msgId, displaySent, false, chips.length > 0);
       } else {
         const attachments = chips.map(chipToAttachment);

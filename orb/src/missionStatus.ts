@@ -9,7 +9,7 @@ type Status = string | null | undefined;
 const set = (...statuses: string[]) => new Set(statuses);
 
 /** Started on a runner: the turn is executing (or about to resume). */
-export const RUNNING_STATUSES = set("active", "running", "starting", "resuming");
+export const RUNNING_STATUSES = set("active", "running", "starting", "resuming", "working", "in_progress", "processing", "streaming");
 /** Accepted by Core, waiting for a runner. */
 export const QUEUED_STATUSES = set("pending", "queued");
 /** A turn is in flight: queued or running. The composer is busy. */
@@ -23,9 +23,13 @@ export const ARCHIVABLE_STATUSES = set("awaiting_user", "blocked", "paused", "in
 /** Finished: reopening moves it back to paused for a manual follow-up. */
 export const REOPENABLE_STATUSES = set("completed", "failed", "interrupted", "acknowledged", "cancelled");
 /** Ended with an error the user should see. */
-export const FAILED_STATUSES = set("failed", "not_feasible");
+export const FAILED_STATUSES = set("failed", "not_feasible", "error", "errored", "timed_out");
 /** The turn ended and the conversation waits for the user. */
-export const READY_STATUSES = set("awaiting_user", "waiting_user", "acknowledged");
+export const READY_STATUSES = set("awaiting_user", "waiting_user", "waiting_for_user", "needs_input", "awaiting_approval", "acknowledged");
+/** Finished its work successfully. */
+export const DONE_STATUSES = set("completed", "succeeded");
+/** Archived: acknowledged by the user (or auto-archived by Core). */
+export const ARCHIVED_STATUSES = set("acknowledged", "archived");
 
 const has = (statuses: ReadonlySet<string>) => (status: Status) => !!status && statuses.has(status);
 
@@ -40,6 +44,37 @@ export const isReady = has(READY_STATUSES);
 /** Case-insensitive: settings are offered from any casing Core reports. */
 export const isSettingsIdle = (status: Status) => SETTINGS_IDLE_STATUSES.has((status ?? "").toLowerCase());
 
+/**
+ * The state categories shared with the iOS and Android apps
+ * (shared/orb-spec/mission-states.json), in list order: a lower rank sorts first.
+ */
+export const STATUS_CATEGORIES = ["waiting", "blocked", "failed", "live", "queued", "paused", "stopped", "done", "archived"] as const;
+export type StatusCategory = typeof STATUS_CATEGORIES[number] | "unknown";
+
+/** Shared category of a Core status string (case-insensitive). */
+export function statusCategory(status: Status): StatusCategory {
+  const s = (status ?? "").toLowerCase();
+  if (ARCHIVED_STATUSES.has(s)) return "archived";
+  if (READY_STATUSES.has(s)) return "waiting";
+  if (s === "blocked") return "blocked";
+  if (FAILED_STATUSES.has(s)) return "failed";
+  if (RUNNING_STATUSES.has(s) || s === "waiting_background") return "live";
+  if (QUEUED_STATUSES.has(s)) return "queued";
+  if (s === "paused") return "paused";
+  if (s === "interrupted" || s === "cancelled") return "stopped";
+  if (DONE_STATUSES.has(s)) return "done";
+  return "unknown";
+}
+
+/** Sort rank of a status: its category's index, unknown statuses last. */
+export function statusSortRank(status: Status): number {
+  const index = STATUS_CATEGORIES.indexOf(statusCategory(status) as typeof STATUS_CATEGORIES[number]);
+  return index < 0 ? STATUS_CATEGORIES.length : index;
+}
+
+/** The run ended for good: failed or completed (not paused, stopped or waiting). */
+export const isTerminalStatus = (status: Status) => ["failed", "done"].includes(statusCategory(status));
+
 export type StatusTone = "running" | "quiet" | "attention" | "success";
 export type StatusIcon = "loader" | "clock" | "alert" | "pause" | "check" | null;
 
@@ -52,8 +87,9 @@ export function statusPresentation(status: string): { label: string; tone: Statu
     case "waiting_background": return { label: "Background work running", tone: "running", icon: "clock" };
     case "blocked": return { label: "Blocked", tone: "attention", icon: "alert" };
     case "paused": return { label: "Paused", tone: "quiet", icon: "pause" };
-    case "completed": return { label: "Completed", tone: "success", icon: "check" };
-    case "failed": return { label: "Failed", tone: "attention", icon: "alert" };
+    case "completed": case "succeeded": return { label: "Completed", tone: "success", icon: "check" };
+    case "failed": case "error": case "errored": return { label: "Failed", tone: "attention", icon: "alert" };
+    case "timed_out": return { label: "Timed out", tone: "attention", icon: "alert" };
     case "not_feasible": return { label: "Not feasible", tone: "attention", icon: "alert" };
     case "interrupted": case "cancelled": return { label: "Interrupted", tone: "quiet", icon: "pause" };
     case "idle": return { label: "Idle", tone: "quiet", icon: null };
