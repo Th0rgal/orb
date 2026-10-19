@@ -11367,6 +11367,22 @@ pub(super) async fn create_mission_inner(
         }
     }
 
+    // A generated track ("mission-<8 hex>") belongs to the mission that
+    // created it. A replacement that carries its predecessor's (or an older
+    // ancestor's) generated track would fail the remote queue's writer check:
+    // follow-ups were refused with REMOTE_JOB_STILL_RUNNING instead of queued.
+    if let (Some(prior_id), Some(track)) = (req.supersedes_mission_id, req.track.clone()) {
+        let prior_track = parent_control
+            .mission_store
+            .get_mission(prior_id)
+            .await
+            .map_err(internal_error)?
+            .and_then(|prior| prior.project.track);
+        if replacement_drops_track(prior_id, prior_track.as_deref(), &track) {
+            req.track = None;
+        }
+    }
+
     if let Some(prompt) = req.prompt.as_deref() {
         crate::api::mission_payload::validate_user_content(prompt)
             .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
@@ -19378,6 +19394,17 @@ pub struct CloneMissionRequest {
 /// A clone keeps an explicit project track but not the source's own generated track
 /// (`mission-<source id prefix>`): that one belongs to the source alone, and inheriting it
 /// made the clone fail the remote queue's writer check (mission 27b29974).
+/// True when `track` is a generated per-mission track inherited along a
+/// replacement chain, which the replacement must not keep.
+fn replacement_drops_track(prior_id: Uuid, prior_track: Option<&str>, track: &str) -> bool {
+    let generated = |t: &str| {
+        t.strip_prefix("mission-")
+            .is_some_and(|rest| rest.len() == 8 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+    };
+    track == super::track_leases::generated_track_key(&prior_id.to_string())
+        || (generated(track) && prior_track == Some(track))
+}
+
 fn inherited_track(source_id: Uuid, track: Option<&str>) -> Option<String> {
     track
         .filter(|t| *t != super::track_leases::generated_track_key(&source_id.to_string()))
@@ -19387,6 +19414,33 @@ fn inherited_track(source_id: Uuid, track: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod inherited_track_tests {
     use super::*;
+    #[test]
+    fn replacements_drop_generated_tracks_along_the_chain_only() {
+        let prior = Uuid::parse_str("2b26c1a2-0000-4000-8000-000000000000").unwrap();
+        assert!(replacement_drops_track(
+            prior,
+            Some("mission-2b26c1a2"),
+            "mission-2b26c1a2"
+        ));
+        // An older ancestor's generated track carried by the prior mission.
+        assert!(replacement_drops_track(
+            prior,
+            Some("mission-0aa11b22"),
+            "mission-0aa11b22"
+        ));
+        // Real project tracks are writer identities and stay.
+        assert!(!replacement_drops_track(
+            prior,
+            Some("import-dynamic-event-abi"),
+            "import-dynamic-event-abi"
+        ));
+        // A generated-looking track the prior mission does not carry stays.
+        assert!(!replacement_drops_track(
+            prior,
+            Some("other"),
+            "mission-0aa11b22"
+        ));
+    }
     #[test]
     fn clones_drop_only_the_sources_generated_track() {
         let id = Uuid::parse_str("9888cd20-6191-45a5-b1cb-cea8b24a9eec").unwrap();
