@@ -658,7 +658,7 @@ fun OrbHomeScreen(
                                                 onClick = {
                                                     contextMenuProject = null
                                                     scope.launch {
-                                                        runCatching {
+                                                        orbTry(OrbLog.Category.Network, "OrbMoveClipboard.drop") {
                                                             OrbMoveClipboard.drop(core, dropSlug, "")
                                                             core.refreshMissionsQuietly()
                                                         }
@@ -697,7 +697,7 @@ fun OrbHomeScreen(
                                                 contextMenuProject = null
                                                 val slug = proj.str("slug", "id") ?: proj.id
                                                 scope.launch {
-                                                    runCatching {
+                                                    orbTry(OrbLog.Category.Network, "core.request") {
                                                         core.request(
                                                             "/api/projects/${core.encodeComponent(slug)}/action",
                                                             method = "POST",
@@ -814,7 +814,7 @@ fun OrbHomeScreen(
                             val slug = name.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
                             showNewProjectDialog = false
                             scope.launch {
-                                runCatching {
+                                orbTry(OrbLog.Category.Network, "core.request") {
                                     core.request(
                                         "/api/projects",
                                         method = "PUT",
@@ -871,7 +871,7 @@ fun OrbHomeScreen(
                         renameProjectTarget = null
                         if (nextName.isNotEmpty()) {
                             scope.launch {
-                                runCatching {
+                                orbTry(OrbLog.Category.Network, "core.request") {
                                     core.request(
                                         "/api/projects",
                                         method = "PUT",
@@ -1039,12 +1039,12 @@ fun OrbProjectPage(
         val encoded = core.encodeComponent(projectSlug)
         kotlinx.coroutines.coroutineScope {
             val missionsTask = async {
-                runCatching {
+                orbTry(OrbLog.Category.Network, "/api/control/missions") {
                     core.fetchRows("/api/control/missions?project=$encoded&all=true&limit=100&offset=0", null)
                 }.getOrNull()
             }
             val manifestTask = async {
-                runCatching {
+                orbTry(OrbLog.Category.Network, "/api/projects") {
                     core.fetchDict("/api/projects/$encoded/context/manifest")
                 }.getOrNull()
             }
@@ -1066,7 +1066,7 @@ fun OrbProjectPage(
                     for (m in mobile.take(5)) {
                         val evKey = "mission_events_${m.id}"
                         if (OrbReadCache.loadRows(evKey).isEmpty()) {
-                            val evs = runCatching {
+                            val evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                                 core.fetchRows("/api/control/missions/${core.encodeComponent(m.id)}/events?limit=150", "events")
                             }.getOrDefault(emptyList())
                             if (evs.isNotEmpty()) {
@@ -1220,7 +1220,7 @@ fun OrbProjectPage(
     fun pauseOrResumeMission(mission: OrbRow) {
         val paused = (mission.str("status", "state") ?: "").lowercase() == "paused"
         scope.launch {
-            runCatching {
+            orbTry(OrbLog.Category.Network, "core.request") {
                 core.request(
                     path = "/api/control/missions/${core.encodeComponent(mission.id)}/${if (paused) "resume" else "pause"}",
                     method = "POST"
@@ -1237,7 +1237,7 @@ fun OrbProjectPage(
         scope.launch {
             runCatching {
                 val path = "/api/control/missions/${core.encodeComponent(mission.id)}"
-                val latest = runCatching { core.fetchDict(path) }.getOrElse { e ->
+                val latest = orbTry(OrbLog.Category.Network, "core.fetchDict") { core.fetchDict(path) }.getOrElse { e ->
                     if ((e as? OrbError)?.status == 404) emptyMap() else throw e
                 }
                 val status = (OrbJSON.str(latest, "status") ?: "").lowercase()
@@ -1265,7 +1265,7 @@ fun OrbProjectPage(
         val title = rawTitle.trim()
         if (title.isEmpty()) return
         scope.launch {
-            runCatching {
+            orbTry(OrbLog.Category.Network, "core.request") {
                 core.request(
                     path = "/api/control/missions/${core.encodeComponent(mission.id)}/title",
                     method = "POST",
@@ -1279,7 +1279,7 @@ fun OrbProjectPage(
 
     fun dropMovedMission(folder: String) {
         scope.launch {
-            runCatching {
+            orbTry(OrbLog.Category.Network, "OrbMoveClipboard.drop") {
                 OrbMoveClipboard.drop(core, projectSlug, folder)
                 loadProjectData()
                 core.refreshMissionsQuietly()
@@ -1302,7 +1302,7 @@ fun OrbProjectPage(
             if (targetFolder.isNotEmpty()) {
                 tags.add("orb-folder:$targetFolder")
             }
-            runCatching {
+            orbTry(OrbLog.Category.Network, "core.request") {
                 core.request(
                     path = "/api/control/missions/${core.encodeComponent(m.id)}/project",
                     method = "POST",
@@ -1967,7 +1967,7 @@ fun OrbProjectPage(
                             customFolders[fullPath] = true
                             val slug = liveProject.str("slug", "id") ?: liveProject.id
                             scope.launch {
-                                runCatching {
+                                orbTry(OrbLog.Category.Network, "core.request") {
                                     core.request(
                                         "/api/projects/${core.encodeComponent(slug)}/file/mkdir",
                                         method = "POST",

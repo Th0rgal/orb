@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
@@ -87,7 +89,8 @@ enum class OrbSettingsRoute {
     Secrets,
     Bitwarden,
     Dictation,
-    SideQuestions
+    SideQuestions,
+    DebugInfo
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -124,6 +127,7 @@ fun OrbSettingsSheet(
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
+                            .verticalScroll(androidx.compose.foundation.rememberScrollState())
                             .padding(horizontal = 20.dp, vertical = 16.dp),
                         verticalArrangement = Arrangement.spacedBy(20.dp)
                     ) {
@@ -247,6 +251,16 @@ fun OrbSettingsSheet(
                                 subtitle = "${serviceName(OrbBtwSettings.harness)} · ${OrbBtwSettings.model}",
                                 onClick = { route = OrbSettingsRoute.SideQuestions }
                             )
+                            HorizontalDivider(
+                                color = OrbStyle.border,
+                                modifier = Modifier.padding(start = 52.dp)
+                            )
+                            OrbSettingsRow(
+                                icon = Icons.Default.Info,
+                                title = "Debug info",
+                                subtitle = "Version, endpoint, recent errors",
+                                onClick = { route = OrbSettingsRoute.DebugInfo }
+                            )
                         }
                     }
                 }
@@ -293,6 +307,9 @@ fun OrbSettingsSheet(
                 }
                 OrbSettingsRoute.SideQuestions -> {
                     OrbBtwSettingsPage(onBack = { route = OrbSettingsRoute.Root })
+                }
+                OrbSettingsRoute.DebugInfo -> {
+                    OrbDebugInfoPage(core = core, onBack = { route = OrbSettingsRoute.Root })
                 }
             }
         }
@@ -691,7 +708,7 @@ fun OrbProvidersSettingsPage(
             }
             for (target in targets) {
                 val id = target.id
-                val detail = runCatching {
+                val detail = orbTry(OrbLog.Category.Network, "/api/ai/providers") {
                     core.fetchDict("/api/ai/providers/${core.encodeComponent(id)}/usage")
                 }.getOrNull()
                 if (detail != null && detail.isNotEmpty()) {
@@ -753,7 +770,7 @@ fun OrbProvidersSettingsPage(
     fun cancelOauthFlow() {
         oauthSessionId?.let { sid ->
             scope.launch {
-                runCatching {
+                orbTry(OrbLog.Category.Network, "/api/ai/providers/cli-proxy-login") {
                     core.request("/api/ai/providers/cli-proxy-login/${core.encodeComponent(sid)}", method = "DELETE")
                 }
             }
@@ -818,7 +835,7 @@ fun OrbProvidersSettingsPage(
         val pType = oauthProviderType ?: return@LaunchedEffect
         while (isActive && oauthSessionId == sid) {
             delay(2000)
-            val state = runCatching {
+            val state = orbTry(OrbLog.Category.Network, "/api/ai/providers/cli-proxy-login") {
                 OrbJSON.dict(core.request("/api/ai/providers/cli-proxy-login/${core.encodeComponent(sid)}"))
             }.getOrNull() ?: continue
             if (oauthSessionId == sid) applyProxyState(pType, state)

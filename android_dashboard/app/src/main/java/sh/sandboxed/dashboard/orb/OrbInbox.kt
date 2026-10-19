@@ -142,7 +142,7 @@ object OrbSharedInboxState {
         val previous = tail
         tail = core.scope.launch {
             previous?.join()
-            if (expected == account()) runCatching {
+            if (expected == account()) orbTry(OrbLog.Category.Network, "/api/control/inbox-state") {
                 core.request("/api/control/inbox-state/$path", method = "PUT", body = body)
                 if (expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
             }.onFailure { error ->
@@ -173,7 +173,7 @@ object OrbSharedInboxState {
         ensureScope()
         if (outbox.isNotEmpty()) { for ((path, body) in outbox.toMap()) write(path, body); return }
         val expected = account(); val serial = mutation
-        val raw = runCatching { OrbCore.shared.request("/api/control/inbox-state") as? Map<*, *> }.getOrNull() ?: return
+        val raw = orbTry(OrbLog.Category.Network, "/api/control/inbox-state") { OrbCore.shared.request("/api/control/inbox-state") as? Map<*, *> }.getOrNull() ?: return
         if (expected != account() || serial != mutation) return
         (raw["_versions"] as? Map<*, *>)?.let { values -> revisions.clear(); for ((key, value) in values) if (key is String && value is Number) revisions[key] = value.toLong() }
         val changedAccount = scope != expected
@@ -339,7 +339,8 @@ object OrbInboxDigestStore {
                     } else {
                         failedAtMs[key] = System.currentTimeMillis()
                     }
-                } catch (_: Throwable) {
+                } catch (t: Throwable) {
+                    if (t !is kotlinx.coroutines.CancellationException) OrbLog.w(OrbLog.Category.Network, "inbox fetch $key failed", t)
                     failedAtMs[key] = System.currentTimeMillis()
                 } finally {
                     inFlight.remove(key)
@@ -478,7 +479,7 @@ object OrbMissionUnreadStore {
             runCatching {
                 val core = OrbCore.shared
                 core.scope.launch {
-                    runCatching {
+                    orbTry(OrbLog.Category.Network, "/api/control/missions") {
                         core.request("/api/control/missions/${core.encodeComponent(mission.id)}/opened", method = "POST")
                     }
                 }
@@ -518,7 +519,7 @@ object OrbMissionUnreadStore {
                 OrbSharedInboxState.writeSeen(m.id, maxOf(System.currentTimeMillis(), runCatching { Instant.parse(updated).toEpochMilli() }.getOrDefault(0)))
                 val id = m.id
                 core.scope.launch {
-                    runCatching {
+                    orbTry(OrbLog.Category.Network, "/api/control/missions") {
                         core.request("/api/control/missions/${core.encodeComponent(id)}/opened", method = "POST")
                     }
                 }
@@ -658,7 +659,7 @@ object OrbInboxModel {
             runCatching {
                 val core = OrbCore.shared
                 core.scope.launch {
-                    runCatching {
+                    orbTry(OrbLog.Category.Network, "core.request") {
                         core.request(
                             path = "/api/control/missions/${core.encodeComponent(item.id)}/status",
                             method = "POST",
@@ -680,7 +681,7 @@ object OrbInboxModel {
             if (core != null) {
                 val id = item.id
                 core.scope.launch {
-                    runCatching {
+                    orbTry(OrbLog.Category.Network, "core.request") {
                         core.request(
                             path = "/api/control/missions/${core.encodeComponent(id)}/status",
                             method = "POST",
@@ -702,7 +703,7 @@ object OrbInboxModel {
         runCatching {
             val core = OrbCore.shared
             core.scope.launch {
-                runCatching {
+                orbTry(OrbLog.Category.Network, "core.request") {
                     core.request(
                         path = "/api/control/missions/${core.encodeComponent(item.id)}/status",
                         method = "POST",
@@ -1500,7 +1501,7 @@ fun OrbInboxView(
         for ((idx, row) in candidates.withIndex()) {
             var evs = OrbReadCache.loadRows("mission_events_${row.id}")
             if (evs.isEmpty() && idx < 12) {
-                evs = runCatching {
+                evs = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                     core.fetchRows("/api/control/missions/${core.encodeComponent(row.id)}/events?limit=120", "events")
                 }.getOrDefault(emptyList())
                 if (evs.isNotEmpty()) {
@@ -1596,7 +1597,7 @@ fun OrbInboxView(
         }
         loadingPeekId = item.id
         scope.launch {
-            val rows = runCatching {
+            val rows = orbTry(OrbLog.Category.Network, "/api/control/missions") {
                 core.fetchRows("/api/control/missions/${core.encodeComponent(item.id)}/events?limit=120", "events")
             }.getOrDefault(emptyList())
             if (rows.isNotEmpty()) {
