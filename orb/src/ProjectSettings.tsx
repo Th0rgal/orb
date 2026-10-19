@@ -1,3 +1,4 @@
+import { movingOutOf } from "./moves";
 import { renamedTitle } from "./renames";
 import { swallow } from "./log";
 import { projectColor, projectColors, projectColorsSynced, setProjectColor } from "./projectAppearance";
@@ -67,7 +68,8 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
   const [dirty, setDirty] = createSignal(false);
 
   /** The project's unfinished missions — the ones the limit is counted against. */
-  const unfinished = () => missions().filter((m) => holdsCapSlot(m.status));
+  // A mission being moved to another project no longer holds a slot here.
+  const unfinished = () => missions().filter((m) => holdsCapSlot(m.status) && !movingOutOf(m.id, p.slug));
   /** The enforced limit, or null when there is none. A stored 0 is "no limit". */
   const limit = () => projectLimitOf(grant());
   /** What the input shows for a grant: blank when no limit is enforced. */
