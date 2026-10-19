@@ -1793,6 +1793,7 @@ async fn health(State(state): State<Arc<AppState>>) -> (HeaderMap, Json<HealthRe
             library_remote,
             github_enabled: state.config.auth.github_enabled(),
             dashboard_github_login_enabled: state.config.auth.github_enabled(),
+            github_oauth_client_state: true,
         }),
     )
 }

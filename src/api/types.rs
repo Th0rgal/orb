@@ -265,6 +265,11 @@ pub struct HealthResponse {
     /// `GET /api/capabilities` instead.
     #[serde(default)]
     pub dashboard_github_login_enabled: bool,
+
+    /// `/api/auth/github/start` accepts a client `state` and echoes it back
+    /// on the final redirect. Clients that see this should require it.
+    #[serde(default)]
+    pub github_oauth_client_state: bool,
 }
 
 /// Login request for dashboard auth.

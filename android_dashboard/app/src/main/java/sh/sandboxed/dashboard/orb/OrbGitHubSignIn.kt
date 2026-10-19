@@ -8,9 +8,10 @@ import android.content.Context
  * same endpoint, within [MAX_AGE_MS]; the pending sign-in is single use. The caller must then
  * validate the token against an authenticated Core endpoint before saving it.
  *
- * Core does not round-trip a client nonce through /api/auth/github/start (its redirect
- * allowlist is an exact match), so the time window + server validation is the best the
- * client can do today; see the PR notes for the Core follow-up.
+ * [begin] also generates a random `state` that is sent to /api/auth/github/start. Cores that
+ * advertise `github_oauth_client_state` on /api/health echo it back on the callback; against
+ * those the callback is rejected unless it carries the same state. Older Cores (no echo) fall
+ * back to the time window + server validation.
  */
 class OrbGitHubSignIn(private val store: Store, private val clock: () -> Long = System::currentTimeMillis) {
     interface Store {
@@ -18,15 +19,17 @@ class OrbGitHubSignIn(private val store: Store, private val clock: () -> Long = 
         fun save(pending: Pending?)
     }
 
-    data class Pending(val endpoint: String, val startedAtMs: Long)
+    data class Pending(val endpoint: String, val startedAtMs: Long, val state: String? = null)
 
     sealed class Decision {
         data class Accept(val endpoint: String, val token: String) : Decision()
         data class Reject(val reason: String) : Decision()
     }
 
-    fun begin(endpoint: String) {
-        store.save(Pending(normalize(endpoint), clock()))
+    /** Records a sign-in for [endpoint] and returns the `state` to send to Core. */
+    fun begin(endpoint: String, state: String = newState()): String {
+        store.save(Pending(normalize(endpoint), clock(), state))
+        return state
     }
 
     /** True while a sign-in for [endpoint] was started and its callback has not arrived or expired. */
@@ -37,13 +40,31 @@ class OrbGitHubSignIn(private val store: Store, private val clock: () -> Long = 
     }
 
     /** Consumes the pending sign-in (whatever the outcome) and says whether to try [token]. */
-    fun onCallback(currentEndpoint: String, token: String?, error: String?): Decision {
+    /**
+     * [serverEchoesState] is Core's `github_oauth_client_state` health flag: when true the
+     * callback must carry the state this app generated.
+     */
+    fun onCallback(
+        currentEndpoint: String,
+        token: String?,
+        error: String?,
+        state: String? = null,
+        serverEchoesState: Boolean = false
+    ): Decision {
         val pending = store.load()
         store.save(null)
         if (pending == null) return Decision.Reject("no sign-in in progress")
         val age = clock() - pending.startedAtMs
         if (age < 0 || age > MAX_AGE_MS) return Decision.Reject("sign-in expired")
         if (pending.endpoint != normalize(currentEndpoint)) return Decision.Reject("endpoint changed")
+        val got = state?.takeIf { it.isNotEmpty() }
+        if (got != null || serverEchoesState) {
+            val expected = pending.state ?: return Decision.Reject("state not recorded")
+            if (got == null) return Decision.Reject("missing state")
+            if (!java.security.MessageDigest.isEqual(expected.toByteArray(), got.toByteArray())) {
+                return Decision.Reject("state mismatch")
+            }
+        }
         if (!error.isNullOrBlank()) return Decision.Reject("server error: $error")
         val clean = token?.trim()?.takeIf { it.isNotEmpty() } ?: return Decision.Reject("missing token")
         return Decision.Accept(pending.endpoint, clean)
@@ -55,15 +76,25 @@ class OrbGitHubSignIn(private val store: Store, private val clock: () -> Long = 
 
         private fun normalize(endpoint: String) = endpoint.trim().trimEnd('/').lowercase()
 
+        /** 32 random bytes as URL-safe base64 (43 chars, within Core's 16..128 limit). */
+        fun newState(): String {
+            val bytes = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        }
+
+        /** Core's `/api/health` flag saying it echoes the client state. */
+        fun serverEchoesState(health: Any?): Boolean =
+            OrbJSON.bool(OrbJSON.dict(health), "github_oauth_client_state") == true
+
         fun prefsStore(context: Context): Store = object : Store {
             private val prefs = context.applicationContext.getSharedPreferences("orb_github_signin", Context.MODE_PRIVATE)
             override fun load(): Pending? {
                 val ep = prefs.getString("endpoint", null) ?: return null
-                return Pending(ep, prefs.getLong("started", 0L))
+                return Pending(ep, prefs.getLong("started", 0L), prefs.getString("state", null))
             }
             override fun save(pending: Pending?) {
                 prefs.edit().apply {
-                    if (pending == null) clear() else putString("endpoint", pending.endpoint).putLong("started", pending.startedAtMs)
+                    if (pending == null) clear() else putString("endpoint", pending.endpoint).putLong("started", pending.startedAtMs).putString("state", pending.state)
                 }.apply()
             }
         }
