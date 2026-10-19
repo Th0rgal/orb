@@ -79,14 +79,8 @@ impl Hermes {
     }
     async fn capabilities(&self) -> Result<(), String> {
         let c = self.get("/v1/capabilities").await?;
-        if c.pointer("/features/runs_idempotency/durable")
-            .and_then(Value::as_bool)
-            != Some(true)
-            || c.pointer("/features/run_events_replay")
-                .and_then(Value::as_bool)
-                != Some(true)
-        {
-            return Err("Update Hermes to support durable run submission and event replay".into());
+        if !c.is_object() {
+            return Err("Invalid Hermes capabilities response".into());
         }
         Ok(())
     }

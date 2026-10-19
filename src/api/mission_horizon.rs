@@ -441,15 +441,31 @@ pub fn bound_session_from_projects_db(working_dir: &Path, slug: &str) -> Option<
     None
 }
 
+/// True when a mission is an interactive `/btw` side-question fork (`btw-parent:<uuid>`).
+/// Side-question turns answer the operator inline in Orb and must never wake Paloma
+/// or project conversations on completion.
+pub fn is_btw_side_mission(mission: &Mission) -> bool {
+    mission
+        .project
+        .tags
+        .iter()
+        .any(|tag| tag.starts_with("btw-parent:"))
+}
+
 /// Shipped wake decision for a mission-status webhook: project binding,
 /// then origin, else isolated.
-/// A worker started by another mission reports to that mission. It wakes a
-/// Hermes conversation only when it has one of its own or its project has one
-/// bound; an isolated webhook session acting on its own is never wanted.
-pub fn reports_to_parent_mission(mission: &Mission, wake: Option<&WakeTarget>) -> bool {
-    mission.parent_mission_id.is_some()
-        && mission.origin_session_id.is_none()
-        && wake.is_none_or(|target| target.session.is_none())
+/// A worker started by another mission reports to that mission unless it has its own
+/// direct `origin_session_id` (not merely a project-level binding). Interactive `/btw`
+/// side missions also never wake Paloma.
+pub fn reports_to_parent_mission(mission: &Mission, _wake: Option<&WakeTarget>) -> bool {
+    is_btw_side_mission(mission)
+        || (mission.parent_mission_id.is_some()
+            && mission
+                .origin_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none())
 }
 
 pub fn wake_fields_for_mission(mission: &Mission, working_dir: &Path) -> WakeTarget {
@@ -493,17 +509,23 @@ mod tests {
             Some(&WakeTarget::isolated())
         ));
         assert!(reports_to_parent_mission(&worker, None));
-        // A bound project conversation or an origin of its own still wakes Hermes.
+        // A project-level binding does not turn a child worker into a chat-waking mission;
+        // only an explicit origin_session_id on the worker itself wakes that conversation.
         let bound = WakeTarget {
             session: Some("s1".into()),
             source: "project",
         };
-        assert!(!reports_to_parent_mission(&worker, Some(&bound)));
+        assert!(reports_to_parent_mission(&worker, Some(&bound)));
         worker.origin_session_id = Some("hermes-session".into());
         assert!(!reports_to_parent_mission(
             &worker,
             Some(&WakeTarget::isolated())
         ));
+        // An interactive /btw side-question mission never wakes Hermes even without parent_mission_id.
+        let mut btw = parent.clone();
+        btw.project.tags.push(format!("btw-parent:{}", parent.id));
+        assert!(is_btw_side_mission(&btw));
+        assert!(reports_to_parent_mission(&btw, Some(&bound)));
         // A mission without a parent is not a worker.
         assert!(!reports_to_parent_mission(
             &parent,
