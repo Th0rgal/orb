@@ -1,3 +1,4 @@
+import { formatElapsed, turnStartedAt } from "./TurnStatus";
 import {AutomaticReminder, reminderMessages} from "./AutomaticReminder";
 import { ErrorToast } from "./toast";
 import {PromptEditor} from "./PromptEditor";
@@ -598,7 +599,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
   );
 }
 
-export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
+export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; working?: boolean; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -664,6 +665,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
           }
         }}
       </For>}</VirtualTurns></DisclosureState.Provider>
+      <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} /></Show>
       <Show when={checklist()?.tasks.length}>
         <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} />
       </Show>
@@ -705,4 +707,26 @@ function AssistantText(p: { text: string; live?: boolean }) {
       </div>
     </Show>
   </>;
+}
+
+/** True when the newest item is itself a live row (thinking, a running tool or
+ * text being written): that row already says what the agent is doing. */
+export function liveTail(items: StreamItem[]): boolean {
+  const last = items[items.length - 1];
+  if (!last) return false;
+  if (last.kind === "think" || last.kind === "tool") return !last.done;
+  return last.kind === "text" && !!last.live;
+}
+
+/** The only "working" indicator: a transcript row shaped like "Thinking", shown
+ * when no live row is visible, with the elapsed turn time. */
+function WorkingRow(p: { items: StreamItem[] }) {
+  const [now, setNow] = createSignal(Date.now());
+  const seen = Date.now();
+  const timer = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(timer));
+  const started = createMemo(() => turnStartedAt(p.items) ?? seen);
+  return <div class="st-think st-working" role="status" aria-live="off">
+    <div class="st-think-head"><span class="shimmer">Working</span><span class="st-working-time">{formatElapsed(now() - started())}</span></div>
+  </div>;
 }
