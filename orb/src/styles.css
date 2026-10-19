@@ -3797,3 +3797,6 @@ select.orb-select-native:disabled { cursor: default; }
 .queue-sending { width:10px; height:10px; flex:none; margin-right:6px; border-radius:50%; border:1.5px solid var(--fg-3); border-top-color:transparent; animation:queue-spin .8s linear infinite; }
 @keyframes queue-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .queue-sending { animation:none; } }
+/* Working row: the transcript's own live indicator, shaped like "Thinking". */
+.st-working .st-think-head { cursor: default; gap: 8px; }
+.st-working-time { color: var(--fg-4); font-variant-numeric: tabular-nums; }
