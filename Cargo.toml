@@ -75,6 +75,8 @@ base64 = "0.22"
 # System monitoring
 sysinfo = "0.32"
 bytes = "1"
+tar = "0.4"
+zstd = "0.13"
 portable-pty = "0.9"
 md5 = "0.7"
 tokio-util = { version = "0.7", features = ["io"] }

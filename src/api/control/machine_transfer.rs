@@ -544,7 +544,7 @@ pub async fn inspect(
     // megabytes and is read through the file operations, never from here.
     let actions: Vec<Value> = actions.iter().map(listed_action).collect();
     Ok(Json(
-        json!({"version":1,"features":["links","selection"],"actions":actions,"destinations":capabilities(&state).await}),
+        json!({"version":1,"features":["links","selection",crate::machine_transfer_archive::FEATURE],"actions":actions,"destinations":capabilities(&state).await}),
     ))
 }
 
@@ -590,6 +590,13 @@ pub enum Request {
     Cancel {
         transfer_id: Uuid,
     },
+    /// Copy the snapshot to a node destination as one archive stream, Core to
+    /// node or node to node, never through the client. Starts the copy on the
+    /// first call; each call reports progress until `state` is `done` (then
+    /// run the destination `verify`) or `failed`.
+    BulkCopy {
+        transfer_id: Uuid,
+    },
 }
 async fn adapter(
     state: &AppState,
@@ -621,6 +628,225 @@ async fn adapter(
         }
     }
 }
+/// Progress of one server-side archive copy, keyed by transfer id.
+#[derive(Default)]
+struct BulkProgress {
+    /// Archive bytes relayed so far (compressed, so at most about `total`).
+    bytes: std::sync::atomic::AtomicU64,
+    outcome: std::sync::Mutex<Option<Result<(), String>>>,
+}
+static BULK_COPIES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, Arc<BulkProgress>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn bulk_status(progress: &BulkProgress, total: u64) -> Value {
+    let bytes = progress
+        .bytes
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .min(total);
+    match &*progress.outcome.lock().unwrap() {
+        None => json!({"state":"running","bytes":bytes,"total":total}),
+        Some(Ok(())) => json!({"state":"done","bytes":total,"total":total}),
+        Some(Err(e)) => json!({"state":"failed","bytes":bytes,"total":total,"error":e}),
+    }
+}
+
+async fn node_supports_bulk(state: &AppState, id: &str) -> Result<(), Error> {
+    let capabilities = node_transfer_capabilities(state, id).await?;
+    if capabilities["features"].as_array().is_some_and(|f| {
+        f.iter()
+            .any(|f| f == crate::machine_transfer_archive::FEATURE)
+    }) {
+        Ok(())
+    } else {
+        Err(conflict(UNSUPPORTED_OPERATION))
+    }
+}
+
+fn node_endpoint(state: &AppState, id: &str) -> Result<(String, String), Error> {
+    let node = state
+        .config
+        .remote_nodes
+        .node(id)
+        .ok_or_else(|| conflict("Machine is no longer configured"))?;
+    let token = std::env::var(&node.token_env)
+        .map_err(|_| conflict("Machine authentication unavailable"))?;
+    Ok((node.base_url.clone(), token))
+}
+
+/// `op: bulk_copy`: start (or report) the archive copy of `a`'s snapshot.
+async fn bulk_copy(state: &Arc<AppState>, a: Transfer) -> Result<Value, Error> {
+    let manifest = a
+        .manifest
+        .clone()
+        .ok_or_else(|| conflict("Prepare a workspace snapshot first"))?;
+    if a.phase == "verified" {
+        return Ok(json!({"state":"done","bytes":manifest.bytes,"total":manifest.bytes}));
+    }
+    let existing = BULK_COPIES.lock().unwrap().get(&a.id).cloned();
+    if let Some(progress) = existing {
+        let status = bulk_status(&progress, manifest.bytes);
+        if status["state"] != "running" {
+            // Reported once; a later call starts a fresh copy.
+            BULK_COPIES.lock().unwrap().remove(&a.id);
+        }
+        return Ok(status);
+    }
+    // Refuse up front, so the client falls back to the per-file path.
+    let Machine::Node { id: destination } = &a.destination else {
+        return Err(conflict(UNSUPPORTED_OPERATION));
+    };
+    match &a.source {
+        Machine::Core => {}
+        Machine::Node { id } => node_supports_bulk(state, id).await?,
+        Machine::Client { .. } => return Err(conflict(UNSUPPORTED_OPERATION)),
+    }
+    node_supports_bulk(state, destination).await?;
+    let staged = adapter(
+        state,
+        &a,
+        "destination",
+        Operation::Stage {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    if staged["sealed"] == true {
+        return Ok(json!({"state":"done","bytes":manifest.bytes,"total":manifest.bytes}));
+    }
+    let progress = {
+        let mut map = BULK_COPIES.lock().unwrap();
+        if let Some(running) = map.get(&a.id) {
+            return Ok(bulk_status(running, manifest.bytes));
+        }
+        let progress = Arc::new(BulkProgress::default());
+        map.insert(a.id, progress.clone());
+        progress
+    };
+    let state = state.clone();
+    let task_progress = progress.clone();
+    tokio::spawn(async move {
+        let result = run_bulk_copy(&state, &a, &task_progress).await;
+        if let Err(e) = &result {
+            tracing::warn!(transfer_id = %a.id, error = %e, "machine transfer bulk copy failed");
+        }
+        *task_progress.outcome.lock().unwrap() = Some(result);
+    });
+    Ok(bulk_status(&progress, manifest.bytes))
+}
+
+async fn run_bulk_copy(
+    state: &Arc<AppState>,
+    a: &Transfer,
+    progress: &Arc<BulkProgress>,
+) -> Result<(), String> {
+    use futures::StreamExt;
+    let Machine::Node { id: destination } = &a.destination else {
+        return Err(UNSUPPORTED_OPERATION.into());
+    };
+    let source_mission_id = a
+        .source_root
+        .as_deref()
+        .and_then(|r| r.strip_prefix("mission:"))
+        .and_then(|r| Uuid::parse_str(r).ok());
+    let archive: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> =
+        match &a.source {
+            Machine::Core => crate::machine_transfer_archive::pack_stream(
+                state
+                    .config
+                    .working_dir
+                    .join(".sandboxed-sh/transfers")
+                    .join(a.id.to_string())
+                    .join("source"),
+            )
+            .boxed(),
+            Machine::Node { id } => {
+                let (base, token) = node_endpoint(state, id).map_err(|e| e.1)?;
+                let response = state
+                    .http_client
+                    .post(format!("{base}/machine-transfer/archive/pack"))
+                    .bearer_auth(token)
+                    .json(&json!({"mission_id":a.mission_id,"transfer_id":a.id,"source_mission_id":source_mission_id}))
+                    .send()
+                    .await
+                    .map_err(|_| "Source machine unreachable; retry when it reconnects".to_string())?;
+                if !response.status().is_success() {
+                    let status = response.status();
+                    return Err(node_refusal(
+                        status,
+                        &response.text().await.unwrap_or_default(),
+                    ));
+                }
+                response
+                    .bytes_stream()
+                    .map(|r| r.map_err(std::io::Error::other))
+                    .boxed()
+            }
+            Machine::Client { .. } => return Err(UNSUPPORTED_OPERATION.into()),
+        };
+    let counter = progress.clone();
+    let counted = archive.inspect(move |chunk| {
+        if let Ok(chunk) = chunk {
+            counter
+                .bytes
+                .fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    let (base, token) = node_endpoint(state, destination).map_err(|e| e.1)?;
+    let response = state
+        .http_client
+        .post(format!(
+            "{base}/machine-transfer/archive/unpack?mission_id={}&transfer_id={}",
+            a.mission_id, a.id
+        ))
+        .bearer_auth(token)
+        .header("content-type", "application/zstd")
+        .body(reqwest::Body::wrap_stream(counted))
+        .send()
+        .await
+        .map_err(|e| format!("Archive copy interrupted: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(node_refusal(
+            status,
+            &response.text().await.unwrap_or_default(),
+        ));
+    }
+    // Core owns the archived conversation; it is not in the source checkpoint.
+    if archive_context(a) {
+        let path = context_path(a.id);
+        let mut offset = 0u64;
+        loop {
+            let read = Operation::Read {
+                path: path.clone(),
+                offset,
+            };
+            let block = context_block(a, &read)
+                .map_err(|e| e.1)?
+                .ok_or("Conversation archive unavailable")?;
+            let data = block["data"].as_str().unwrap_or_default().to_string();
+            let len = (a.context.len() as u64 - offset).min(crate::machine_transfer::BLOCK as u64);
+            adapter(
+                state,
+                a,
+                "destination",
+                Operation::Write {
+                    path: path.clone(),
+                    offset,
+                    data,
+                },
+            )
+            .await
+            .map_err(|e| e.1)?;
+            offset += len;
+            if offset >= a.context.len() as u64 {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An adapter that predates transferable links verifies the files and silently
 /// leaves the links out; its receipt does not count them.
 fn check_links(manifest: &Manifest, receipt: &Value, machine: &Machine) -> Result<(), Error> {
@@ -839,7 +1065,8 @@ pub async fn operate(
         | Request::ClientSnapshot { transfer_id, .. }
         | Request::ClientVerified { transfer_id, .. }
         | Request::Activate { transfer_id, .. }
-        | Request::Cancel { transfer_id } => *transfer_id,
+        | Request::Cancel { transfer_id }
+        | Request::BulkCopy { transfer_id } => *transfer_id,
         _ => unreachable!(),
     };
     let mut a = control
@@ -858,6 +1085,7 @@ pub async fn operate(
     }
     let rev = a.revision;
     match req {
+        Request::BulkCopy { .. } => return bulk_copy(&state, a).await.map(Json),
         Request::Cancel { .. } => a.phase = "cancelled".into(),
         Request::Activate {
             client_source_verified,

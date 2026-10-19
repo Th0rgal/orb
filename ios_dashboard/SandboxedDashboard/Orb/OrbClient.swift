@@ -323,6 +323,13 @@ final class OrbCore {
         )
     }
 
+    /// Signing requests still waiting for an answer (`GET /api/fido/pending`),
+    /// as payloads shaped like the `fido_sign_request` stream event.
+    func fidoPending() async throws -> [[String: Any]] {
+        let list: FidoPendingResponse = try await get("/api/fido/pending")
+        return list.payloads
+    }
+
     // MARK: - Control Streaming
 
     /// After this many consecutive WebSocket open failures, stop trying WS
@@ -336,6 +343,7 @@ final class OrbCore {
     func streamControl(
         missionId: String?,
         sinceSeq: Int64? = nil,
+        kinds: [String]? = nil,
         preferWebSocket: Bool = true,
         generation: Int = 0,
         onDiagnostic: ((ControlStreamDiagnostic) -> Void)? = nil,
@@ -345,7 +353,8 @@ final class OrbCore {
 
         return Task { [weak self] in
             guard let self else { return }
-            if preferWebSocket, token != nil, self.webSocketOpenFailureStreak < Self.webSocketMaxOpenFailures {
+            // The WebSocket transport has no kind filter; a filtered stream is SSE only.
+            if preferWebSocket, kinds == nil, token != nil, self.webSocketOpenFailureStreak < Self.webSocketMaxOpenFailures {
                 let opened = await self.runControlWebSocket(
                     missionId: missionId,
                     sinceSeq: sinceSeq,
@@ -376,6 +385,7 @@ final class OrbCore {
             await self.runControlSSE(
                 missionId: missionId,
                 sinceSeq: sinceSeq,
+                kinds: kinds,
                 token: token,
                 generation: generation,
                 onDiagnostic: onDiagnostic,
@@ -387,6 +397,7 @@ final class OrbCore {
     private func runControlSSE(
         missionId: String?,
         sinceSeq: Int64?,
+        kinds: [String]? = nil,
         token: String?,
         generation: Int,
         onDiagnostic: ((ControlStreamDiagnostic) -> Void)?,
@@ -398,6 +409,9 @@ final class OrbCore {
         var queryItems = missionId.map { [URLQueryItem(name: "mission", value: $0)] } ?? []
         if let sinceSeq {
             queryItems.append(URLQueryItem(name: "since_seq", value: String(sinceSeq)))
+        }
+        if let kinds, !kinds.isEmpty {
+            queryItems.append(URLQueryItem(name: "kinds", value: kinds.joined(separator: ",")))
         }
         guard let url = makeURL("/api/control/stream", queryItems: queryItems) else {
             emitDiagnostic(transport: .sse, phase: .error, host: nil, status: nil, bytes: nil, error: "Invalid server URL", eventType: nil, generation: generation, onDiagnostic: onDiagnostic)

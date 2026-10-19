@@ -265,9 +265,10 @@ private struct OrbFidoCard<Content: View>: View {
     }
 }
 
-/// Core only delivers `fido_sign_request` on the control stream (no poll endpoint),
-/// and the legacy Control tab that used to hold that stream is gone. While Orb is
-/// in the foreground and signed in, keep one global stream open just for FIDO.
+/// While Orb is in the foreground and signed in, keep one control stream open
+/// filtered to FIDO events (`kinds=fido`), and on every (re)connect — app launch,
+/// return to foreground, reconnect — fetch `GET /api/fido/pending` so a request
+/// made while the app was closed is shown on open. Core has no push channel.
 @MainActor
 final class OrbFidoMonitor {
     static let shared = OrbFidoMonitor()
@@ -287,7 +288,11 @@ final class OrbFidoMonitor {
             var delay: Double = 2
             while !Task.isCancelled {
                 let started = Date()
-                let stream = OrbCore.shared.streamControl(missionId: nil, generation: generation) { type, data in
+                if let pending = try? await OrbCore.shared.fidoPending() {
+                    for payload in pending { FidoApprovalState.shared.handleSignRequest(payload) }
+                }
+                if Task.isCancelled { break }
+                let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["fido"], preferWebSocket: false, generation: generation) { type, data in
                     if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data) }
                 }
                 await withTaskCancellationHandler { await stream.value } onCancel: { stream.cancel() }

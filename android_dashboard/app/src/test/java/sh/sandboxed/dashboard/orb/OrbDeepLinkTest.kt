@@ -34,6 +34,7 @@ class OrbDeepLinkTest {
     fun githubCallback() {
         assertEquals(OrbDeepLink.GitHubCallback("jwt.a.b", null), OrbDeepLink.parse("sandboxed://auth/callback?token=jwt.a.b&exp=1"))
         assertEquals(OrbDeepLink.GitHubCallback(null, "denied"), OrbDeepLink.parse("sandboxed://auth/callback?error=denied"))
+        assertEquals(OrbDeepLink.GitHubCallback("jwt", null, "s_t-1"), OrbDeepLink.parse("sandboxed://auth/callback?token=jwt&exp=1&state=s_t-1"))
         assertNull(OrbDeepLink.parse("orb://auth/callback?token=x"))
     }
 }

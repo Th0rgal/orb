@@ -10,7 +10,7 @@ sealed class OrbDeepLink {
     data class Project(val slug: String) : OrbDeepLink()
     data class Mission(val id: String) : OrbDeepLink()
     data class Documents(val slug: String) : OrbDeepLink()
-    data class GitHubCallback(val token: String?, val error: String?) : OrbDeepLink()
+    data class GitHubCallback(val token: String?, val error: String?, val state: String? = null) : OrbDeepLink()
 
     companion object {
         fun parse(raw: String?): OrbDeepLink? {
@@ -25,7 +25,7 @@ sealed class OrbDeepLink {
             val segments = (uri.rawPath ?: "").split('/').map { decode(it).trim() }.filter { it.isNotEmpty() }
             val query = parseQuery(uri.rawQuery)
             if (scheme == "sandboxed" && host == "auth" && uri.path == "/callback") {
-                return GitHubCallback(query["token"]?.takeIf { it.isNotEmpty() }, query["error"])
+                return GitHubCallback(query["token"]?.takeIf { it.isNotEmpty() }, query["error"], query["state"]?.takeIf { it.isNotEmpty() })
             }
             return when (host) {
                 "inbox" -> {

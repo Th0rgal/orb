@@ -85,10 +85,42 @@ export async function snapshotTransfer(action: TransferAction): Promise<Transfer
 }
 const TRANSFER_BLOCK = 1024 * 1024;
 const TRANSFER_WORKERS = 8;
-export async function copyTransfer(action: TransferAction, progress: (done: number, total: number) => void, cancelled: () => boolean = () => false): Promise<TransferAction> {
+export const BULK_COPY_FEATURE = "bulk_copy";
+export interface BulkCopyStatus { state: "running" | "done" | "failed"; bytes: number; total: number; error?: string }
+/**
+ * Core streams one archive from the source (Core or a node) straight into a node destination,
+ * never through this client. Resolves false when the backend cannot, or the copy failed and
+ * ended, so the caller falls back to the per-file path (which resumes from what was written;
+ * the destination verify stays authoritative either way).
+ */
+export async function bulkCopyTransfer(action: TransferAction, progress: (done: number, total: number) => void, cancelled: () => boolean = () => false, pollMs = 1000): Promise<boolean> {
+  if (action.source.kind === "client" || action.destination.kind !== "node") return false;
+  let failures = 0;
+  for (let first = true; ; first = false) {
+    if (cancelled()) throw new Error("Transfer cancelled before activation.");
+    let status: BulkCopyStatus;
+    try {
+      status = await transferRequest<BulkCopyStatus>(action.mission_id, { op: "bulk_copy", transfer_id: action.id });
+      failures = 0;
+    } catch (error) {
+      // Refused before starting: nothing was written by Core, use the per-file path.
+      if (first) return false;
+      // A copy may still be running in Core; do not race it with per-file writes.
+      if (++failures >= 3) throw error;
+      await new Promise(resolve => setTimeout(resolve, pollMs));
+      continue;
+    }
+    progress(status.bytes, status.total);
+    if (status.state === "done") return true;
+    if (status.state === "failed") return false;
+    await new Promise(resolve => setTimeout(resolve, pollMs));
+  }
+}
+export async function copyTransfer(action: TransferAction, progress: (done: number, total: number) => void, cancelled: () => boolean = () => false, features?: string[], pollMs?: number): Promise<TransferAction> {
   if (action.phase === "verified" || action.phase === "activated") return action;
   const manifest = action.manifest;
   if (!manifest) throw new Error("Prepare a workspace snapshot first.");
+  if (features?.includes(BULK_COPY_FEATURE) && await bulkCopyTransfer(action, progress, cancelled, pollMs)) return action;
   const staged = await transferFiles<{ sealed: boolean; received: Record<string, number> }>(action, "destination", { op: "stage", manifest });
   if (staged.sealed) return action;
   let done = 0;

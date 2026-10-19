@@ -9,8 +9,14 @@
 //!  Android  --(user signs in)--> github.com --302 ...?code=&state=--> Server
 //!  Server   --POST /login/oauth/access_token--> github.com
 //!  Server   --GET /user--> github.com
-//!  Server   --302 sandboxed://auth/callback?token=<jwt>&exp=<ts>--> Android
+//!  Server   --302 sandboxed://auth/callback?token=<jwt>&exp=<ts>[&state=<s>]--> Android
 //! ```
+//!
+//! The client may pass an optional, client-generated `state` to `start`
+//! (`[A-Za-z0-9_-]`, 16..=128 chars). It is echoed back verbatim on the final
+//! redirect (success or error) so the client can bind the callback to the
+//! sign-in it started. `GET /api/health` advertises this with
+//! `github_oauth_client_state: true`.
 //!
 //! Required env vars (see `AuthConfig`):
 //! - `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`: the GitHub OAuth App.
@@ -40,6 +46,8 @@ use super::routes::AppState;
 #[derive(Debug, Clone)]
 pub struct PendingGithubOAuth {
     pub redirect_uri: String,
+    /// Client-supplied `state`, echoed back on the final redirect.
+    pub client_state: Option<String>,
     pub expires_at: i64,
 }
 
@@ -50,6 +58,39 @@ const STATE_TTL_SECONDS: i64 = 600;
 pub struct StartParams {
     /// Redirect target after the OAuth dance. Must be on the allowlist.
     pub redirect: String,
+    /// Optional client-generated nonce echoed back on the final redirect.
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+/// A client `state` must be an opaque URL-safe token of reasonable length.
+pub(crate) fn valid_client_state(state: &str) -> bool {
+    (16..=128).contains(&state.len())
+        && state
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Append `key=value` query parameters to `redirect_uri`.
+pub(crate) fn append_query(redirect_uri: &str, params: &[(&str, &str)]) -> String {
+    let mut out = redirect_uri.to_string();
+    for (key, value) in params {
+        out.push(if out.contains('?') { '&' } else { '?' });
+        out.push_str(key);
+        out.push('=');
+        out.push_str(&urlencoding::encode(value));
+    }
+    out
+}
+
+fn with_client_state<'a>(
+    mut params: Vec<(&'a str, &'a str)>,
+    client_state: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    if let Some(s) = client_state {
+        params.push(("state", s));
+    }
+    params
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +163,17 @@ pub async fn start(
         ));
     }
 
+    let client_state = match params.state.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(s) if valid_client_state(s) => Some(s.to_string()),
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "state must be 16-128 URL-safe characters".into(),
+            ))
+        }
+    };
+
     let client_id = state.config.auth.github_oauth_client_id.as_deref().ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
         "missing client id".into(),
@@ -137,6 +189,7 @@ pub async fn start(
             nonce.clone(),
             PendingGithubOAuth {
                 redirect_uri: params.redirect.clone(),
+                client_state,
                 expires_at: cutoff + STATE_TTL_SECONDS,
             },
         );
@@ -184,11 +237,11 @@ pub async fn callback(
 
     if let Some(err) = params.error.as_deref() {
         let msg = params.error_description.as_deref().unwrap_or(err);
-        return redirect_with_error(&pending.redirect_uri, msg);
+        return redirect_with_error(&pending, msg);
     }
 
     let Some(code) = params.code.as_deref() else {
-        return redirect_with_error(&pending.redirect_uri, "missing authorization code");
+        return redirect_with_error(&pending, "missing authorization code");
     };
 
     let token_url = "https://github.com/login/oauth/access_token";
@@ -219,13 +272,9 @@ pub async fn callback(
     {
         Ok(r) => match r.json().await {
             Ok(parsed) => parsed,
-            Err(e) => {
-                return redirect_with_error(&pending.redirect_uri, &format!("token parse: {e}"))
-            }
+            Err(e) => return redirect_with_error(&pending, &format!("token parse: {e}")),
         },
-        Err(e) => {
-            return redirect_with_error(&pending.redirect_uri, &format!("token exchange: {e}"))
-        }
+        Err(e) => return redirect_with_error(&pending, &format!("token exchange: {e}")),
     };
 
     let access_token = match token_resp.access_token {
@@ -235,7 +284,7 @@ pub async fn callback(
                 .error_description
                 .or(token_resp.error)
                 .unwrap_or_else(|| "no access token".to_string());
-            return redirect_with_error(&pending.redirect_uri, &msg);
+            return redirect_with_error(&pending, &msg);
         }
     };
 
@@ -250,15 +299,13 @@ pub async fn callback(
     {
         Ok(r) => match r.json().await {
             Ok(parsed) => parsed,
-            Err(e) => {
-                return redirect_with_error(&pending.redirect_uri, &format!("user parse: {e}"))
-            }
+            Err(e) => return redirect_with_error(&pending, &format!("user parse: {e}")),
         },
-        Err(e) => return redirect_with_error(&pending.redirect_uri, &format!("fetch user: {e}")),
+        Err(e) => return redirect_with_error(&pending, &format!("fetch user: {e}")),
     };
 
     if !state.config.auth.github_user_allowed(&user.login) {
-        return redirect_with_error(&pending.redirect_uri, "GitHub login not in allowlist");
+        return redirect_with_error(&pending, "GitHub login not in allowlist");
     }
 
     let auth_user = AuthUser {
@@ -268,34 +315,92 @@ pub async fn callback(
 
     let secret = match state.config.auth.jwt_secret.as_deref() {
         Some(s) if !s.is_empty() => s,
-        _ => return redirect_with_error(&pending.redirect_uri, "JWT_SECRET not configured"),
+        _ => return redirect_with_error(&pending, "JWT_SECRET not configured"),
     };
 
     let (jwt, exp) = match issue_jwt(secret, state.config.auth.jwt_ttl_days, &auth_user) {
         Ok(v) => v,
-        Err(e) => return redirect_with_error(&pending.redirect_uri, &format!("issue jwt: {e}")),
+        Err(e) => return redirect_with_error(&pending, &format!("issue jwt: {e}")),
     };
 
-    let target = format!(
-        "{}{}token={}&exp={}",
-        pending.redirect_uri,
-        if pending.redirect_uri.contains('?') {
-            "&"
-        } else {
-            "?"
-        },
-        urlencoding::encode(&jwt),
-        exp,
-    );
+    let exp = exp.to_string();
+    let target = success_redirect(&pending, &jwt, &exp);
     Redirect::to(&target).into_response()
 }
 
-fn redirect_with_error(redirect_uri: &str, message: &str) -> Response {
-    let target = format!(
-        "{}{}error={}",
-        redirect_uri,
-        if redirect_uri.contains('?') { "&" } else { "?" },
-        urlencoding::encode(message),
-    );
-    Redirect::to(&target).into_response()
+fn success_redirect(pending: &PendingGithubOAuth, jwt: &str, exp: &str) -> String {
+    append_query(
+        &pending.redirect_uri,
+        &with_client_state(
+            vec![("token", jwt), ("exp", exp)],
+            pending.client_state.as_deref(),
+        ),
+    )
+}
+
+fn error_redirect(pending: &PendingGithubOAuth, message: &str) -> String {
+    append_query(
+        &pending.redirect_uri,
+        &with_client_state(vec![("error", message)], pending.client_state.as_deref()),
+    )
+}
+
+fn redirect_with_error(pending: &PendingGithubOAuth, message: &str) -> Response {
+    Redirect::to(&error_redirect(pending, message)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(uri: &str, client_state: Option<&str>) -> PendingGithubOAuth {
+        PendingGithubOAuth {
+            redirect_uri: uri.into(),
+            client_state: client_state.map(Into::into),
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn client_state_validation() {
+        assert!(valid_client_state("abcdefABCDEF0123-_xy"));
+        assert!(!valid_client_state("short"));
+        assert!(!valid_client_state(&"a".repeat(129)));
+        assert!(!valid_client_state("abcdefghijklmnop&token=x"));
+    }
+
+    #[test]
+    fn success_redirect_echoes_client_state() {
+        let s = "0123456789abcdef0123";
+        assert_eq!(
+            success_redirect(
+                &pending("sandboxed://auth/callback", Some(s)),
+                "j.w.t",
+                "42"
+            ),
+            format!("sandboxed://auth/callback?token=j.w.t&exp=42&state={s}")
+        );
+        assert_eq!(
+            success_redirect(&pending("sandboxed://auth/callback", None), "jwt", "42"),
+            "sandboxed://auth/callback?token=jwt&exp=42"
+        );
+    }
+
+    #[test]
+    fn error_redirect_echoes_client_state() {
+        let s = "0123456789abcdef0123";
+        assert_eq!(
+            error_redirect(&pending("app://cb?x=1", Some(s)), "denied by user"),
+            format!("app://cb?x=1&error=denied%20by%20user&state={s}")
+        );
+    }
+
+    #[test]
+    fn start_params_state_is_optional() {
+        let p: StartParams = serde_json::from_str(r#"{"redirect":"a://b"}"#).unwrap();
+        assert!(p.state.is_none());
+        let p: StartParams =
+            serde_json::from_str(r#"{"redirect":"a://b","state":"0123456789abcdef"}"#).unwrap();
+        assert_eq!(p.state.as_deref(), Some("0123456789abcdef"));
+    }
 }

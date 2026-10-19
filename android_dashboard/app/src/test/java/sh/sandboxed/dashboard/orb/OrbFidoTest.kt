@@ -58,4 +58,19 @@ class OrbFidoTest {
         assertEquals(4_000L, OrbFido.backoffMs(2))
         assertEquals(30_000L, OrbFido.backoffMs(10))
     }
+
+    @Test
+    fun streamIsFilteredToFido() = assertEquals("/api/control/stream?kinds=fido", OrbFido.STREAM_PATH)
+
+    @Test
+    fun parsesPendingList() {
+        val body = OrbJSON.parse(
+            """{"requests":[{"request_id":"p1","key_type":"ed25519-sk","key_fingerprint":"SHA256:x","origin":"ssh","hostname":null,"workspace":"w","expires_at":"2026-10-19T12:01:00Z"},{"key_type":"no id"}]}"""
+        )
+        val list = OrbFido.parsePending(body)
+        assertEquals(listOf("p1"), list.map { it.requestId })
+        assertEquals("w", list[0].workspace)
+        assertTrue(OrbFido.parsePending(null).isEmpty())
+        assertTrue(OrbFido.parsePending(OrbJSON.parse("""{"requests":[]}""")).isEmpty())
+    }
 }

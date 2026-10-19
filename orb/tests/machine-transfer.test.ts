@@ -75,3 +75,46 @@ it("copies many files concurrently, never more than eight at once", async () => 
   expect(written.sort()).toEqual(files.slice(1).map(f => f.path).sort());
   expect(progress).toHaveBeenLastCalledWith(60, 60);
 });
+it("uses the server-side archive copy when advertised and skips the client relay", async () => {
+  const calls: Record<string, any>[] = [];
+  let polls = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); calls.push(body);
+    if (body.op === "bulk_copy") return new Response(JSON.stringify(++polls < 2 ? { state: "running", bytes: 1, total: 3 } : { state: "done", bytes: 3, total: 3 }));
+    return new Response(JSON.stringify(body.operation?.op === "verify" ? { ...action, phase: "verified" } : {}));
+  });
+  const progress = vi.fn();
+  await copyTransfer(action, progress, () => false, ["links", "bulk_copy"], 1);
+  expect(calls.map(c => c.op)).toEqual(["bulk_copy", "bulk_copy"]);
+  expect(progress).toHaveBeenNthCalledWith(1, 1, 3);
+  expect(progress).toHaveBeenLastCalledWith(3, 3);
+  // Verify still runs as its own step.
+  const verified = await verifyTransfer(action);
+  expect(verified.phase).toBe("verified");
+  expect(calls.at(-1)?.operation).toEqual({ op: "verify" });
+});
+it("falls back to per-file copy when the archive copy is refused or fails", async () => {
+  for (const bulk of [new Response("Machine does not support this transfer operation; update it", { status: 409 }), new Response(JSON.stringify({ state: "failed", bytes: 0, total: 3, error: "boom" }))]) {
+    const calls: Record<string, any>[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)); calls.push(body);
+      if (body.op === "bulk_copy") return bulk.clone();
+      const op = body.operation?.op;
+      return new Response(JSON.stringify(op === "read" ? { data: "AQID" } : op === "stage" ? { received: {} } : {}));
+    });
+    await copyTransfer(action, vi.fn(), () => false, ["bulk_copy"], 1);
+    expect(calls.map(c => c.op === "bulk_copy" ? "bulk_copy" : c.operation.op)).toEqual(["bulk_copy", "stage", "read", "write"]);
+    vi.restoreAllMocks();
+  }
+});
+it("never asks for an archive copy without the feature or from this computer", async () => {
+  const calls: Record<string, any>[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); calls.push(body);
+    return new Response(JSON.stringify(body.operation?.op === "stage" ? { sealed: true, received: {} } : {}));
+  });
+  await copyTransfer(action, vi.fn());
+  const { bulkCopyTransfer } = await import("../src/machineTransfer");
+  expect(await bulkCopyTransfer({ ...action, destination: { kind: "core" } }, vi.fn())).toBe(false);
+  expect(calls.some(c => c.op === "bulk_copy")).toBe(false);
+});

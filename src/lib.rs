@@ -89,6 +89,7 @@ pub mod file_browser;
 
 #[path = "../shared/machine_transfer.rs"]
 pub mod machine_transfer;
+pub mod machine_transfer_archive;
 
 pub mod model_catalog;
 pub mod model_discovery;

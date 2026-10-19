@@ -78,4 +78,38 @@ class OrbGitHubSignInTest {
         assertTrue(noBrowser.start("https://core.example") is OrbGitHubSignInButton.State.Failed)
         assertEquals(1, calls)
     }
+
+    @Test
+    fun stateIsRequiredWhenCoreEchoesIt() {
+        val st = signIn.begin("https://core.example")
+        assertTrue(st.length in 16..128)
+        assertEquals(
+            OrbGitHubSignIn.Decision.Accept("https://core.example", "jwt"),
+            signIn.onCallback("https://core.example", "jwt", null, st, serverEchoesState = true)
+        )
+        signIn.begin("https://core.example"); reject(signIn.onCallback("https://core.example", "jwt", null, null, serverEchoesState = true))
+        signIn.begin("https://core.example"); reject(signIn.onCallback("https://core.example", "jwt", null, "forged-state-000000", serverEchoesState = true))
+    }
+
+    @Test
+    fun mismatchedStateIsRejectedEvenFromOldCore() {
+        signIn.begin("https://core.example")
+        reject(signIn.onCallback("https://core.example", "jwt", null, "forged-state-000000", serverEchoesState = false))
+    }
+
+    @Test
+    fun oldCoreWithoutEchoStillWorks() {
+        signIn.begin("https://core.example")
+        assertEquals(
+            OrbGitHubSignIn.Decision.Accept("https://core.example", "jwt"),
+            signIn.onCallback("https://core.example", "jwt", null, null, serverEchoesState = false)
+        )
+    }
+
+    @Test
+    fun healthFlagParsing() {
+        assertTrue(OrbGitHubSignIn.serverEchoesState(mapOf("github_oauth_client_state" to true)))
+        assertTrue(!OrbGitHubSignIn.serverEchoesState(mapOf("github_enabled" to true)))
+        assertTrue(!OrbGitHubSignIn.serverEchoesState(null))
+    }
 }

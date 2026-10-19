@@ -69,12 +69,22 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    private fun acceptGitHubCallback(orbCore: OrbCore, link: OrbDeepLink.GitHubCallback) {
+    private fun acceptGitHubCallback(orbCore: OrbCore, link: OrbDeepLink.GitHubCallback) = lifecycleScope.launch {
         val signIn = OrbGitHubSignIn(OrbGitHubSignIn.prefsStore(applicationContext))
-        when (val decision = signIn.onCallback(orbCore.baseURL, link.token, link.error)) {
+        // A Core that echoes the client state must send it back; if /api/health cannot be read
+        // and the callback carries no state, fail closed.
+        val echoes = try {
+            OrbGitHubSignIn.serverEchoesState(orbCore.request("/api/health", allowAuthRetry = false))
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            OrbLog.w(OrbLog.Category.Auth, "GitHub callback: /api/health unavailable", t)
+            true
+        }
+        when (val decision = signIn.onCallback(orbCore.baseURL, link.token, link.error, link.state, echoes)) {
             is OrbGitHubSignIn.Decision.Reject ->
                 OrbLog.w(OrbLog.Category.Auth, "GitHub callback ignored: ${decision.reason}")
-            is OrbGitHubSignIn.Decision.Accept -> lifecycleScope.launch {
+            is OrbGitHubSignIn.Decision.Accept -> {
                 // Save only a token Core itself accepts.
                 val valid = try {
                     orbCore.request(

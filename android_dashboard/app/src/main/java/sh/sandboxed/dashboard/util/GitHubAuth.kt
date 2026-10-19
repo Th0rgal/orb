@@ -31,9 +31,9 @@ object GitHubAuth {
     /** Returns false when no browser could open the sign-in page. */
     fun launch(context: Context, baseUrl: String): Boolean {
         // Only a callback following this launch (same endpoint, within 10 min) is accepted.
-        sh.sandboxed.dashboard.orb.OrbGitHubSignIn(sh.sandboxed.dashboard.orb.OrbGitHubSignIn.prefsStore(context)).begin(baseUrl)
+        val state = sh.sandboxed.dashboard.orb.OrbGitHubSignIn(sh.sandboxed.dashboard.orb.OrbGitHubSignIn.prefsStore(context)).begin(baseUrl)
         val authorizeUrl = "${baseUrl.trimEnd('/')}/api/auth/github/start" +
-                "?redirect=" + Uri.encode(REDIRECT_URI)
+                "?redirect=" + Uri.encode(REDIRECT_URI) + "&state=" + Uri.encode(state)
         val tabsIntent = CustomTabsIntent.Builder()
             .setShowTitle(true)
             .setUrlBarHidingEnabled(false)

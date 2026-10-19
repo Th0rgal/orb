@@ -68,4 +68,18 @@ final class FidoApprovalTests: XCTestCase {
         state.handleSignRequest(event)
         XCTAssertEqual(state.pendingRequests.map(\.id), ["6f1c0e8a-0000-4000-8000-000000000001"])
     }
+
+    func testPendingListDecodesIntoSignRequests() throws {
+        let json = Data("""
+        {"requests":[{"request_id":"6f1c0e8a-0000-4000-8000-000000000002","key_type":"ssh-ed25519",
+        "key_fingerprint":"SHA256:abc","origin":"ssh","hostname":null,"workspace":"verity",
+        "expires_at":"2026-10-19T12:00:30.500Z"}]}
+        """.utf8)
+        let list = try JSONDecoder().decode(FidoPendingResponse.self, from: json)
+        let request = try XCTUnwrap(list.payloads.first.flatMap { FidoSignRequest.parse($0) })
+        XCTAssertEqual(request.id, "6f1c0e8a-0000-4000-8000-000000000002")
+        XCTAssertNil(request.hostname)
+        XCTAssertEqual(request.workspace, "verity")
+        XCTAssertEqual(try JSONDecoder().decode(FidoPendingResponse.self, from: Data(#"{"requests":[]}"#.utf8)).payloads.count, 0)
+    }
 }
