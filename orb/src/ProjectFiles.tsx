@@ -1,3 +1,4 @@
+import { fileMoveKey, missionMoveKey, previewMove, filesMovedAway, filesMovedInto, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
 import { renamedTitle, renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -192,7 +193,10 @@ export function LiveProjectsSection(p: {
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const visibleMissions = (slug: string) => {
-    const rows = missions[slug] ?? [];
+    // Pending moves: rows leave their old project and appear in the new one at once.
+    const own = (missions[slug] ?? []).filter(m => !movingOutOf(m.id, slug));
+    const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !own.some(o => o.id === m.id)) : [];
+    const rows = withMovedMissions([...arriving, ...own]);
     const current = currentMission();
     // A paginated project list may not contain an older open conversation, and
     // the open conversation's live status updates ahead of the project poll.
@@ -629,11 +633,18 @@ export function LiveProjectsSection(p: {
       const other = item.slug !== slug;
       const destination = other ? [path, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, path, false);
       // Agents and crons belong to their project: only documents cross over.
-      if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
-      await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
+      const transfer = async () => {
+        if (other && item.directory && !item.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
+        await transferProjectFile(item.slug, item.path, destination, item.copy, slug);
+      };
+      const moveKey = fileMoveKey(item.slug, item.path);
+      // A move shows at its destination at once; a copy waits for the server.
+      if (item.copy) await transfer();
+      else await moveOptimistically(moveKey, { kind: "file", fromProject: item.slug, toProject: slug, path: destination, fromPath: item.path, directory: item.directory }, transfer, fileBaseName(item.path));
       if (version !== connectionVersion()) return;
       if (!item.copy) { consumedFileClipboard = text; setFileClipboard(""); }
       await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
+      if (!item.copy) settleMove(moveKey);
       setExpanded(path ? `${slug}:${path}` : slug, true);
       if (item.copy) return;
       if (item.directory) await folderMoved(item.slug, item.path, destination, slug);
@@ -1161,6 +1172,24 @@ export function LiveProjectsSection(p: {
     const bundle = readItemsReference(text), version = connectionVersion();
     if (!bundle || fileBusy() || movingCron() || moving || text === consumedFileClipboard) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
+    // Show every moved item at its destination at once; each is settled or
+    // reverted as its own request finishes (see moves.ts).
+    const previewed: string[] = [];
+    if (!bundle.copy) for (const item of bundle.items) {
+      if (item.kind === "file") {
+        const destination = item.slug !== targetSlug ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
+        const key = fileMoveKey(item.slug, item.path);
+        previewMove(key, { kind: "file", fromProject: item.slug, toProject: targetSlug, path: destination, fromPath: item.path, directory: !!item.directory });
+        previewed.push(key);
+      } else if (item.kind === "mission") {
+        const known = allKnownMissions().find(m => m.id === item.id);
+        const key = missionMoveKey(item.id);
+        previewMove(key, { kind: "mission", fromProject: known?.project ?? null, toProject: targetSlug, path: targetPath });
+        previewed.push(key);
+      }
+    }
+    const moveFile = (item: { slug: string; path: string; directory?: boolean }, destination: string, run: () => Promise<unknown>) => bundle.copy ? run()
+      : moveOptimistically(fileMoveKey(item.slug, item.path), { kind: "file", fromProject: item.slug, toProject: targetSlug, path: destination, fromPath: item.path, directory: !!item.directory }, run, fileBaseName(item.path));
     try {
       const movedFolders = new Map<string, { destSlug: string; destPath: string }>();
       const folderItems = bundle.items.filter((i): i is Extract<ClipboardItem, { kind: "file" }> => i.kind === "file" && !!i.directory)
@@ -1184,8 +1213,10 @@ export function LiveProjectsSection(p: {
         try {
           const other = item.slug !== targetSlug;
           const destination = other ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
-          if (other && !bundle.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
-          await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
+          await moveFile(item, destination, async () => {
+            if (other && !bundle.copy) await assertFolderHasNoWork(item.slug, item.path, "moving");
+            await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
+          });
           if (!bundle.copy) {
             movedFolders.set(`${item.slug}:${item.path}`, { destSlug: targetSlug, destPath: destination });
             await folderMoved(item.slug, item.path, destination, targetSlug);
@@ -1199,7 +1230,7 @@ export function LiveProjectsSection(p: {
         try {
           const other = item.slug !== targetSlug;
           const destination = other ? [targetPath, fileBaseName(item.path)].filter(Boolean).join("/") : fileDestination(item.path, targetPath, false);
-          await transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug);
+          await moveFile(item, destination, () => transferProjectFile(item.slug, item.path, destination, bundle.copy, targetSlug));
           await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(targetSlug, targetPath, true)]);
           if (!bundle.copy && p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${targetSlug}:${destination}`);
         } catch (err) { failures.push(`${fileBaseName(item.path)}: ${err instanceof Error ? err.message : String(err)}`); }
@@ -1220,7 +1251,7 @@ export function LiveProjectsSection(p: {
           const parentMove = m?.project && mFolder ? underMovedFolder(m.project, mFolder) : null;
           if (parentMove && parentMove.destSlug === m?.project) continue;
           try {
-            await moveMission(item.id, targetSlug, parentMove ? parentMove.destPath : targetPath);
+            await moveMission(item.id, targetSlug, parentMove ? parentMove.destPath : targetPath, m?.project ?? null);
             if (m?.project && m.project !== targetSlug) removeRow(item.id);
           } catch (err) { failures.push(`${item.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`); }
         }
@@ -1235,7 +1266,11 @@ export function LiveProjectsSection(p: {
       if (failures.length) setActionError(failures.join("; "));
       bumpProjects();
     } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
-    finally { setFileBusy(false); }
+    finally {
+      setFileBusy(false);
+      // Files were reloaded from the server; items skipped inside a moved folder never ran.
+      for (const key of previewed) { const move = pendingPlaceMoves().get(key); if (move && (move.kind === "file" || move.acceptedAt === undefined)) settleMove(key); }
+    }
   };
   const multiSelectMenuItems = (treeIds: string[]): MenuEntry[] => {
     const items = treeIds.map(treeIdToClipboardItem).filter((x): x is ClipboardItem => !!x);
@@ -1675,12 +1710,15 @@ export function LiveProjectsSection(p: {
     if (pendingMoves().length) {
       moving = true;
       const ids = [...pendingMoves()], version = connectionVersion();
+      // The whole selection shows in its new place at once.
+      const from = new Map(ids.map(id => [id, allKnownMissions().find(m => m.id === id)?.project ?? null]));
+      for (const id of ids) previewMove(missionMoveKey(id), { kind: "mission", fromProject: from.get(id) ?? null, toProject: slug, path });
       void (async () => {
         const failed: string[] = [];
         for (const id of ids) {
-          if (version !== connectionVersion()) break;
+          if (version !== connectionVersion()) { settleMove(missionMoveKey(id)); continue; }
           try {
-            await moveMission(id, slug, path);
+            await moveMission(id, slug, path, from.get(id) ?? null);
             if (version !== connectionVersion()) break;
             removeRow(id);
           } catch (error) { failed.push(id); setActionError(`Couldn’t move ${id.slice(0, 8)}: ${String(error)}`); }
@@ -1700,7 +1738,7 @@ export function LiveProjectsSection(p: {
       let missionId = clipboard === consumedCut ? null : readCutMission(clipboard, getApiUrl());
       if (!missionId && cutClipboard && clipboard !== cutClipboard) { clipboard = cutClipboard; missionId = readCutMission(clipboard, getApiUrl()); }
       if (!missionId || version !== connectionVersion()) return;
-      await moveMission(missionId, slug, path);
+      await moveMission(missionId, slug, path, allKnownMissions().find(m => m.id === missionId)?.project ?? null);
       if (version !== connectionVersion()) return;
       consumedCut = clipboard; cutClipboard = "";
       setCutId(null); setActionError(null);
@@ -1774,7 +1812,9 @@ export function LiveProjectsSection(p: {
     const work = path ? workNodes(slug, path) : [];
     if (dirErrors[key] && !dirs[key]) return [...work, { id: `error:${key}`, data: { kind: "note", slug, path, label: `Files unavailable: ${dirErrors[key]}` } }];
     if (!dirs[key]) return [...work, { id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
-    const entries = [...dirs[key]];
+    const away = filesMovedAway(slug, path);
+    const entries = dirs[key].filter(e => !away.has(e.name));
+    for (const arriving of filesMovedInto(slug, path)) if (!entries.some(e => e.name === arriving.name)) entries.push(arriving);
     // Preserve visibility if a referenced folder listing is stale or its physical directory was removed.
     const paths = [...rootMissions(slug).map(root => missionFolder(root.mission)), ...(crons[slug] ?? []).map(j => j.folder ?? "")];
     for (const folder of paths) {

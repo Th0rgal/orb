@@ -1,3 +1,4 @@
+import { movedMission, withMovedMissions } from "./moves";
 import { renamedTitle, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
 import { nodeLabel } from "./machines/nodes";
@@ -183,7 +184,9 @@ export default function App() {
   // Shared with ProjectFileView so ⌘/ reaches core-hosted reference files too.
   const mdSrc = mdSource;
 
-  const [missions, setMissions] = createSignal<Mission[]>([]);
+  const [rawMissions, setMissions] = createSignal<Mission[]>([]);
+  // Pending moves show every mission in its new project before Core confirms.
+  const missions = createMemo(() => withMovedMissions(rawMissions()));
   const [missionsLoading, setMissionsLoading] = createSignal(true);
   const [previewContext, setPreviewContext] = createSignal<{id: string; pct: number | null} | null>(null);
   const [previewPlan, setPreviewPlan] = createSignal<{id:string; data:PlanProgressData | undefined}>();
@@ -336,7 +339,7 @@ export default function App() {
     for (const m of completedMissions()) put(m);
     for (const m of missions()) put(m);
     prevInboxMissions = mergeById(prevInboxMissions, Array.from(byId.values()));
-    return withRenamedTitles("mission", prevInboxMissions, m => m.id);
+    return withMovedMissions(withRenamedTitles("mission", prevInboxMissions, m => m.id));
   });
   const currentMissionId = createMemo(() => {
     const id = selected();
@@ -446,7 +449,8 @@ export default function App() {
   }));
   const sessionPreview = createMemo<SessionPreviewData>(() => {
     const id = currentMissionId() ?? "";
-    const mission = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
+    const found = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
+    const mission = found ? movedMission(found) : found;
     if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(renamedTitle("mission", id, mission.title)) || "Cloud agent", local: false, destination: ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
     const binding = localBinding(id);
     const local = !!binding || !!mission?.tags?.includes("placement:client");
@@ -860,7 +864,7 @@ export default function App() {
                     deleteRequest={deleteMissionRequest()}
                     onDeleteRequestHandled={() => setDeleteMissionRequest(null)}
                     activityMissions={missions()}
-                    currentMission={openMission()?.id === currentMissionId() ? openMission() ?? undefined : undefined}
+                    currentMission={openMission()?.id === currentMissionId() && openMission() ? movedMission(openMission()!) : undefined}
                     harnessChoices={harnessChoices()}
                     forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
                     onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
