@@ -1,3 +1,4 @@
+import { nativeEvents } from "./native";
 import { swallow } from "./log";
 import { appendClientTranscript, getApiUrl, getJwt } from "./api";
 import type { ClientRunReceipt } from "./clientRuns";
@@ -54,10 +55,10 @@ export async function connectClientLink(start: (request: RemoteStart) => Promise
   if (!invoke) return;
   try { if (await invoke("client_link_connect", { connection: connection() }) !== true) return; }
   catch { return; }
-  const events = (window as unknown as { __TAURI__?: { event?: { listen: (name: string, handler: (event: { payload: RemoteStart }) => void) => Promise<() => void> } } }).__TAURI__?.event;
+  const events = nativeEvents();
   if (!events || stopListening) return;
   const seen = new Set<string>();
-  stopListening = await events.listen("client-link-start", ({ payload }) => {
+  stopListening = await events.listen<RemoteStart>("client-link-start", ({ payload }) => {
     if (!payload?.request_id || seen.has(payload.request_id)) return;
     seen.add(payload.request_id);
     const answer = (ok: boolean, missionId?: string, error?: string) =>

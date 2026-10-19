@@ -1,3 +1,4 @@
+import { invokeNative } from "./native";
 import { useNow } from "./time";
 import { missionAssignedNode } from "./machines/nodes";
 import { isLive } from "./missionStatus";
@@ -113,17 +114,8 @@ function InboxInline(p: { text: string }) {
 
 export type InboxViewMode = "unread" | "attention" | "all";
 
-const invokeLocalInteraction = (command: string, args: Record<string, unknown>) => {
-  const host = window as unknown as {
-    __TAURI_INTERNALS__?: {
-      invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
-    };
-  };
-  if (!host.__TAURI_INTERNALS__) {
-    return Promise.reject(new Error("Open this session in Orb desktop to answer local tool requests."));
-  }
-  return host.__TAURI_INTERNALS__.invoke(command, args);
-};
+const invokeLocalInteraction = (command: string, args: Record<string, unknown>) =>
+  invokeNative(command, args, "Open this session in Orb desktop to answer local tool requests.");
 
 function MissionFileScope(p: {
   mission: Mission;

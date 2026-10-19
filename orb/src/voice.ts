@@ -6,6 +6,7 @@
  * to the Tauri side as a raw invoke body, and the Python worker there
  * transcribes on-device. Nothing is uploaded. See ../voice/README.md.
  */
+import { nativeInvoke } from "./native";
 import { createSignal } from "solid-js";
 
 // ---------------------------------------------------------------------------
@@ -118,11 +119,7 @@ export interface VoiceBridge {
 type Invoke = (cmd: string, args?: unknown, options?: { headers?: Record<string, string> }) => Promise<unknown>;
 
 function tauriInvoke(): Invoke | null {
-  const g = window as unknown as {
-    __TAURI__?: { core?: { invoke?: Invoke } };
-    __TAURI_INTERNALS__?: { invoke?: Invoke };
-  };
-  return g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke ?? null;
+  return nativeInvoke() ?? null;
 }
 
 /** Normalize whatever `invoke` rejected with into a VoiceError. */

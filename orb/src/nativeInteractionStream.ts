@@ -1,15 +1,12 @@
+import { nativeChannel, nativeInvoke } from "./native";
 /** Ordered native snapshot and changes. Disposal also handles late registration. */
 export function followNative<T>(command: string, args: Record<string, unknown>, publish: (value: T) => void, fail: (error: unknown) => void): () => void {
-  const host = window as unknown as {
-    __TAURI_INTERNALS__?: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };
-    __TAURI__?: { core?: { invoke?: (command:string,args:Record<string,unknown>)=>Promise<unknown>; Channel?: new () => { onmessage: (value: T) => void } } };
-  };
-  const invoke = host.__TAURI_INTERNALS__?.invoke ?? host.__TAURI__?.core?.invoke, Channel = host.__TAURI__?.core?.Channel;
+  const invoke = nativeInvoke(), Channel = nativeChannel();
   let stopped = false, token: number | undefined;
   const unsubscribe = (token: number) => void invoke?.(`${command}_unsubscribe`, {...args, token}).catch(fail);
   if (!invoke || !Channel) { queueMicrotask(() => { if (!stopped) fail(new Error('Native event transport unavailable.')); }); }
   else {
-    const channel = new Channel();
+    const channel = new Channel<T>();
     channel.onmessage = value => { if (!stopped) publish(value); };
     void invoke(`${command}_subscribe`, {...args, onEvent: channel}).then(value => {
       token = value as number;

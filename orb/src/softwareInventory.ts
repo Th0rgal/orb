@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { readJson, writeJson } from "./storage";
 import { createSignal } from "solid-js";
 import { api, getRemoteNodes, connectionVersion, isConnected } from "./api";
@@ -11,7 +12,7 @@ export type SoftwareMachine={id:string;name:string;online:boolean;inventory?:Sof
 const [machines,setMachines]=createSignal<SoftwareMachine[]>([]);
 const [refreshing,setRefreshing]=createSignal(false);
 export {machines as softwareMachines,refreshing as softwareRefreshing};
-const native=()=> (window as any).__TAURI__?.core?.invoke as undefined|((command:string,args:unknown)=>Promise<any>);
+const native=nativeInvoke;
 const cacheKey=()=>`orb.software.inventory.v1:${historyScope()}`;
 export const softwareVersion=(s:string|null)=>s?.match(/(?:^|\s|v)(\d+)\.(\d+)\.(\d+)(?:\s|$)/)?.slice(1).map(Number);
 export function newer(latest:string|null,current:string|null){

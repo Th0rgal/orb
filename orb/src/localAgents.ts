@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { isRecord, readJson, writeJson } from "./storage";
 import { HARNESS_IDS, type HarnessId } from "./harnesses";
 import { getCyber, requireCyberSupport, type CyberMode } from "./cyberAccess";
@@ -106,11 +107,7 @@ export async function rememberBinding(id: string, binding: LocalBinding) {
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 export function tauriInvoke(): Invoke | null {
-  const g = window as unknown as {
-    __TAURI__?: { core?: { invoke?: Invoke } };
-    __TAURI_INTERNALS__?: { invoke?: Invoke };
-  };
-  return g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke ?? null;
+  return nativeInvoke() ?? null;
 }
 
 export async function refreshLocalBindings(): Promise<void> {

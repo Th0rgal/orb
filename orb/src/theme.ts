@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 export type ThemePref = "auto" | "light" | "dark";
 
 const KEY = "orb-theme";
@@ -17,8 +18,7 @@ function apply(pref: ThemePref) {
   // `withGlobalTauri` is enabled in tauri.conf.json. Keep this optional so
   // the same bundle remains a faithful web preview instead of requiring a
   // desktop-only import at startup.
-  const invoke = (window as Window & { __TAURI__?: { core?: { invoke?: (cmd: string, args: unknown) => Promise<unknown> } } })
-    .__TAURI__?.core?.invoke;
+  const invoke = nativeInvoke();
   void invoke?.("set_window_theme", { theme: pref }).catch(() => {
     // The browser preview and older desktop shells have no native bridge.
   });

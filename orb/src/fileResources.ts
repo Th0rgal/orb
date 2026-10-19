@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
 import { imagePreview, imagePreviewScope } from "./imagePreviews";
 import {
@@ -240,20 +241,12 @@ export function createFileClient(scope: FileScope) {
       );
       const reply = await (root.local
         ? (() => {
-            const invoke = (
-              window as unknown as {
-                __TAURI__?: {
-                  core?: {
-                    invoke: (name: string, args: unknown) => Promise<FileReply>;
-                  };
-                };
-              }
-            ).__TAURI__?.core?.invoke;
+            const invoke = nativeInvoke();
             if (!invoke || !binding)
               throw new Error(
                 "Open this mission on the computer that started it",
               );
-            return invoke("browse_local_files", {
+            return invoke<FileReply>("browse_local_files", {
               root: binding.cwd,
               request: {
                 path: "",
@@ -299,18 +292,10 @@ export function createFileClient(scope: FileScope) {
       };
     }
     if (root.local) {
-      const invoke = (
-        window as unknown as {
-          __TAURI__?: {
-            core?: {
-              invoke: (name: string, args: unknown) => Promise<FileReply>;
-            };
-          };
-        }
-      ).__TAURI__?.core?.invoke;
+      const invoke = nativeInvoke();
       if (!invoke || !binding)
         throw new Error("Open this mission on the computer that started it");
-      return invoke("browse_local_files", {
+      return invoke<FileReply>("browse_local_files", {
         root: binding.cwd,
         request: { path: "", query: "", paths: [], offset: 0, ...op },
       });

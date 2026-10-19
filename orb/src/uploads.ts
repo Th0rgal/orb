@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { swallow } from "./log";
 import { createSignal } from "solid-js";
 import { api, connectionVersion, getApiUrl } from "./api";
@@ -13,10 +14,6 @@ export const HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
 export const RESUMABLE_CHUNK_BYTES = 4 * 1024 * 1024; // 4 MiB
 const MAX = SOFT_DIRECT_BYTES;
 
-type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-function nativeInvoke(): Invoke | undefined {
-  return (window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } } }).__TAURI__?.core?.invoke;
-}
 export function hasNativePicker() { return !!nativeInvoke(); }
 export async function pickNativeFiles(): Promise<UploadSource[]> {
   const invoke = nativeInvoke();

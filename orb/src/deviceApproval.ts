@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { createSignal } from "solid-js";
 import { api, ApiError, getApiUrl } from "./api";
 
@@ -27,8 +28,7 @@ export interface ApprovalDevices {
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 function invoke(): Invoke | null {
-  const g = window as unknown as { __TAURI__?: { core?: { invoke?: Invoke } }; __TAURI_INTERNALS__?: { invoke?: Invoke } };
-  return g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke ?? null;
+  return nativeInvoke() ?? null;
 }
 
 const deviceKey = () => `orb.approvalDevice.${getApiUrl()}`;

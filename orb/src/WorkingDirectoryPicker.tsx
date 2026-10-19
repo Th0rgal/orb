@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { readJson, writeJson } from "./storage";
 import { missionNode } from "./machines/nodes";
 import { navigateOverlayItems } from "./overlayNavigation";
@@ -289,7 +290,7 @@ export function WorkingDirectoryPicker(p: {
       setOpen(!open());
       return;
     }
-    const invoke = (window as any).__TAURI__?.core?.invoke;
+    const invoke = nativeInvoke();
     if (!invoke) {
       setOpen(!open());
       return;

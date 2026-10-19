@@ -1,3 +1,4 @@
+import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
 import { harnessRank, isHarness } from "./harnesses";
 import { isArchivable, isReopenable } from "./missionStatus";
@@ -32,11 +33,11 @@ export const [connectionVersion, bumpConnectionVersion] = createSignal(0);
 
 let connectionSave = Promise.resolve();
 function persistDesktopConnection(connection: {api_url:string;token:string}|null) {
-  const invoke=(window as any).__TAURI__?.core?.invoke;
+  const invoke=nativeInvoke();
   if(invoke)connectionSave=connectionSave.catch(()=>{}).then(()=>invoke('desktop_connection_save',{connection})).catch(swallow("api.connectionSave"));
 }
 export async function restoreDesktopConnection() {
-  const invoke=(window as any).__TAURI__?.core?.invoke;
+  const invoke=nativeInvoke();
   if(!invoke)return;
   // Migrate an existing web-origin login before consulting the desktop store.
   if(getJwt()){persistDesktopConnection({api_url:getApiUrl(),token:getJwt()!});return;}
@@ -45,7 +46,7 @@ export async function restoreDesktopConnection() {
 }
 
 function disconnectNativeSync(){
-  const invoke=(window as any).__TAURI_INTERNALS__?.invoke ?? (window as any).__TAURI__?.core?.invoke;
+  const invoke=nativeInvoke();
   if(!invoke||!getJwt())return;
   void invoke("project_context_disconnect",{request:{endpoint:getApiUrl(),token:getJwt(),project:"disconnect"}}).catch(swallow("api.disconnect.projectContext"));
   void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
@@ -553,11 +554,7 @@ export async function submitCliProxyLoginCallback(sessionId: string, url: string
 /** Open a URL in the system browser (tauri shell when native, tab in dev). */
 export async function openExternalUrl(url: string): Promise<void> {
   try {
-    const g = window as unknown as {
-      __TAURI_INTERNALS__?: { invoke?: (c: string, a?: Record<string, unknown>) => Promise<unknown> };
-      __TAURI__?: { core?: { invoke?: (c: string, a?: Record<string, unknown>) => Promise<unknown> } };
-    };
-    const invoke = g.__TAURI__?.core?.invoke ?? g.__TAURI_INTERNALS__?.invoke;
+    const invoke = nativeInvoke();
     if (invoke) {
       await invoke("open_url", { url });
       return;
