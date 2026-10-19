@@ -365,9 +365,15 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // Resize notifications run after streaming Markdown has changed layout.
   onMount(() => {
     if (!scroller) return;
-    const older=()=>{if(scroller!.scrollTop<800&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().catch(e=>setError(String(e)));};
+    // Near the top, or too short to scroll at all (a page of folded tool rows),
+    // keep fetching older pages: a scroll event alone never fires otherwise.
+    const older=()=>{
+      const el=scroller!;
+      const short=el.scrollHeight<=el.clientHeight+800;
+      if((el.scrollTop<800||short)&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(older)).catch(e=>setError(String(e)));
+    };
     scroller.addEventListener('scroll',older,{passive:true});onCleanup(()=>scroller?.removeEventListener('scroll',older));
-    const observer = new ResizeObserver(() => { if (nearBottom) scrollIfPinned(); });
+    const observer = new ResizeObserver(() => { if (nearBottom) scrollIfPinned(); older(); });
     const content = scroller.querySelector(".col");
     // Border box: the dock height is bottom padding, which a content-box observer misses.
     if (content) observer.observe(content, { box: "border-box" });
