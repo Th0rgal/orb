@@ -164,7 +164,7 @@ it('allows rapidly stacking multiple follow-up messages while earlier sends are 
   expect(input.value).toBe('');
  }
  // All 3 appear immediately in the queue in chronological order
- await screen.findByText('3 Sending…');
+ await screen.findByText('3 Queued');
  const texts=Array.from(document.querySelectorAll('.queue-text')).map(el=>el.textContent);
  expect(texts).toEqual(['First rapid message','Second rapid message','Third rapid message']);
  // Drain serialized sends one by one

@@ -3,11 +3,31 @@ import type { StreamItem } from "./transcriptModel";
 import { latestTaskList } from "./taskList";
 import { toolTarget } from "./Transcript";
 
-/** Turn start: the latest delivered user message's server time. */
+// Live events and cached transcripts carry no timestamp. Remember when each message was first
+// seen (its send time when observed live) so leaving and reopening a mission keeps the count.
+const SEEN_KEY = "orb.turn-started:v1";
+function seenStore(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "{}"); } catch { return {}; }
+}
+export function rememberTurnStart(key: string, now = Date.now()): number {
+  const store = seenStore();
+  if (store[key]) return store[key];
+  store[key] = now;
+  const keys = Object.keys(store);
+  if (keys.length > 200) for (const k of keys.sort((a, b) => store[a] - store[b]).slice(0, keys.length - 200)) delete store[k];
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(store)); } catch { /* best effort */ }
+  return now;
+}
+
+/** Turn start: the latest delivered user message's server time, else when it was first seen. */
 export function turnStartedAt(items: StreamItem[]): number | undefined {
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i];
-    if (item.kind === "user" && !item.queued) { const t = item.at ? Date.parse(item.at) : NaN; return Number.isFinite(t) ? t : undefined; }
+    if (item.kind === "user" && !item.queued) {
+      const t = item.at ? Date.parse(item.at) : NaN;
+      if (Number.isFinite(t)) return t;
+      return rememberTurnStart(item.messageId ?? item.key);
+    }
   }
 }
 /** What the agent is doing right now, from the newest unfinished item. */

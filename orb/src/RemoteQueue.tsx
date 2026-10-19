@@ -124,16 +124,20 @@ export function RemoteQueue(p: {
     if (!target) return;
     setWorking(true); setError("");
     const version = connectionVersion(), mission = p.mission;
+    // Optimistic: the message leaves the queue and shows in the thread right away (same id, so
+    // the later receipt dedupes); it returns to the queue only if Core refuses.
+    const injected = { id: target.id, content: messagePresentation(target.content).text, attached: target.attached || messagePresentation(target.content).attached || undefined };
+    const before = rows();
+    deletedIds.add(target.id);
+    setRows(previous => previous.filter(row => row.id !== target.id));
+    void p.onSendImmediate?.([], [injected]);
     try {
       const live = await api<{ ok?: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now`, { method: "POST" }).catch(() => ({ delivered: false }));
       if (live?.delivered) {
         if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
         revision++;
-        deletedIds.add(target.id);
-        setRows(previous => previous.filter(row => row.id !== target.id));
         p.onRows(rows().map(row => row.id));
         p.onCancel(target.id);
-        await p.onSendImmediate?.([], [{ id: target.id, content: messagePresentation(target.content).text, attached: target.attached || messagePresentation(target.content).attached || undefined }]);
         return;
       }
       const ordered = [target, ...list.filter(r => r.id !== target.id)];
@@ -149,7 +153,12 @@ export function RemoteQueue(p: {
       for (const r of ordered) p.onCancel(r.id);
       await p.onSendImmediate?.(payload);
     } catch (e) {
-      if (version === connectionVersion() && mission === p.mission) setError(e instanceof Error ? e.message : String(e));
+      if (version === connectionVersion() && mission === p.mission) {
+        // Refused: put the queue back as it was so nothing looks sent that was not.
+        deletedIds.delete(target.id);
+        setRows(before);
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setWorking(false);
     }
@@ -201,26 +210,29 @@ export function RemoteQueue(p: {
   });
   return <Show when={displayRows().length || error()}>
     <section class="followup-queue" classList={{collapsed:collapsed()}} aria-label="Queued messages" aria-live="polite">
+      {/* The header text and the row layout stay the same from send to delivery, so the dock
+          height changes once instead of once per phase ("Sending…" → "Queued"). */}
+      <Show when={true}>
       <header>
-        <span class="queue-count">{visibleRows().length ? `${displayRows().length} Queued` : `${displayRows().length} Sending…`}</span>
+        <span class="queue-count">{`${displayRows().length} Queued`}</span>
         <Show when={visibleRows().length > 0 && !p.editing}><span class="queue-hint"><Ic.ReturnIcon size={13}/> to Send</span></Show>
-        <Show when={displayRows().length > 0}>
-          <div class="queue-options">
-            <button type="button" class="queue-collapse" aria-label={collapsed()?"Show queued messages":"Hide queued messages"} aria-expanded={!collapsed()} onClick={()=>setCollapsed(!collapsed())}><Ic.ChevronDown size={14}/></button>
-          </div>
-        </Show>
+        <div class="queue-options">
+          <button type="button" class="queue-collapse" aria-label={collapsed()?"Show queued messages":"Hide queued messages"} aria-expanded={!collapsed()} onClick={()=>setCollapsed(!collapsed())}><Ic.ChevronDown size={14}/></button>
+        </div>
       </header>
+      </Show>
       <Show when={!collapsed()}><ol classList={{scrollable:displayRows().length>6}}><For each={displayRows()}>{row => {
         const text = () => messagePresentation(row.content).text;
         const attached = () => row.attached || messagePresentation(row.content).attached;
         return <li class="queue-row" classList={{editing:p.editing===row.id,sending:!!row.sending,failed:!!row.queue_error}}>
           <div class="queue-line">
             <div class="queue-text" title={text()}><span>{text()}</span><Show when={attached()}><small class="user-context">Attached context</small></Show></div>
-            <Show when={!row.sending} fallback={<span class="queue-editing" role="status">Sending…</span>}>
-              <Show when={p.editing===row.id} fallback={<span class="queue-row-actions">
-                <button type="button" class="queue-action-btn" aria-label={`Edit queued message: ${text()}`} disabled={working()||!!p.editing||cancelling()===row.id} onClick={()=>p.onEdit?.({id:row.id,text:text(),remote:true})}><Ic.PencilIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Edit</span><kbd>→</kbd></span></button>
-                <button type="button" class="queue-action-btn" aria-label={`Send now: ${text()}`} disabled={working()||!!p.editing||cancelling()===row.id} onClick={()=>void sendNow(row.id)}><Ic.ArrowUpIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Send now</span><kbd>↵</kbd></span></button>
-                <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${text()}`} disabled={working()||cancelling()===row.id||p.editing===row.id} onClick={()=>void cancel(row.id)}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>
+            <Show when={row.sending}><span class="queue-sending" role="status"><span class="sr-only">Sending…</span></span></Show>
+            <Show when={true}>
+              <Show when={p.editing===row.id} fallback={<span class="queue-row-actions" classList={{pending:!!row.sending}}>
+                <button type="button" class="queue-action-btn" aria-label={`Edit queued message: ${text()}`} disabled={!!row.sending||working()||!!p.editing||cancelling()===row.id} onClick={()=>p.onEdit?.({id:row.id,text:text(),remote:true})}><Ic.PencilIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Edit</span><kbd>→</kbd></span></button>
+                <button type="button" class="queue-action-btn" aria-label={`Send now: ${text()}`} disabled={!!row.sending||working()||!!p.editing||cancelling()===row.id} onClick={()=>void sendNow(row.id)}><Ic.ArrowUpIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Send now</span><kbd>↵</kbd></span></button>
+                <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${text()}`} disabled={!!row.sending||working()||cancelling()===row.id||p.editing===row.id} onClick={()=>void cancel(row.id)}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>
               </span>}><span class="queue-editing">Editing</span></Show>
             </Show>
           </div>

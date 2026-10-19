@@ -1856,13 +1856,13 @@ button.fork-trigger:hover { color: var(--fg); }
 /* Response actions reveal on hover inside the turn's right edge, avoiding a permanent floating gutter column. */
 .st-text { position:relative;overflow:visible; }
 .st-text .md { min-width:0; }
-.response-actions { position:absolute;right:0;bottom:2px;margin:0;min-height:0;opacity:0;transition:opacity .14s ease; }
+.response-actions { position:absolute;right:6px;bottom:4px;margin:0;min-height:0;opacity:0;transition:opacity .14s ease; }
 .st-text:hover .response-actions, .st-text:focus-within .response-actions, .response-actions:has(.response-copy[aria-label="Response copied"]), .response-actions:has(.response-copy-error) { opacity:1; }
-.response-actions .response-copy { width:24px;height:24px;padding:0;background:var(--bg-elev);border:1px solid var(--stroke-soft);box-shadow:0 2px 8px rgb(0 0 0 / 12%); }
+.response-actions .response-copy { width:24px;height:24px;padding:0;background:var(--bg-elev);border:1px solid var(--stroke-soft);box-shadow:0 1px 4px rgb(0 0 0 / 10%); }
 .response-actions .response-copy:hover { background:var(--bg-active);border-color:var(--stroke); }
 .response-copy-error { position:absolute;right:28px;bottom:0;width:240px;background:var(--bg);padding:6px 8px;border:1px solid var(--stroke);border-radius: var(--radius-sm); }
 @media (hover:none) { .response-actions { opacity:.75; } }
-@media(max-width:720px) { .response-actions { right:0; } .st-text { padding-right:30px; } }
+@media(max-width:720px) { .response-actions { right:6px; } .st-text { padding-right:34px; } }
 
 .composer-upload-status { grid-column: 1 / -1; grid-row: 2; padding: 4px 4px 0; font-size: 12px; color: var(--fg-2); }
 .composer.tall .composer-upload-status { grid-row: 3; }
@@ -3718,7 +3718,10 @@ select.orb-select-native:disabled { cursor: default; }
 .soul-preview { font-size: 13px; line-height: 1.55; }
 
 /* Live turn status above the composer. */
-.turn-status { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0 auto 6px; padding: 0 14px; max-width: var(--col-w, 760px); font-size: 12px; color: var(--fg-3); }
+/* Overlaid just above the dock: appearing or leaving never changes the dock height,
+   so a pinned transcript does not jump when a turn starts or ends. */
+.dock > .col:has(> .turn-status) { position: relative; }
+.turn-status { position: absolute; left: 14px; right: 14px; bottom: calc(100% + 4px); display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; color: var(--fg-3); pointer-events: none; }
 .turn-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; animation: turn-pulse 1.6s ease-in-out infinite; }
 .turn-status-step { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-family: var(--mono); font-size: 11.5px; }
 .turn-status-meta { flex: none; font-variant-numeric: tabular-nums; }
@@ -3793,3 +3796,11 @@ select.orb-select-native:disabled { cursor: default; }
 .panel-switch button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; color: var(--fg-3); }
 .panel-switch button:hover { color: var(--fg); background: var(--hover-1); }
 .panel-switch button.on { color: var(--fg); background: var(--hover-2, var(--hover-1)); font-weight: 500; }
+
+/* Queue: a single row keeps one layout from send to delivery. */
+.followup-queue:not(:has(header)) { padding:6px 8px; }
+.followup-queue:not(:has(header)) ol { margin:0; }
+.queue-row-actions.pending { opacity:.35; }
+.queue-sending { width:10px; height:10px; flex:none; margin-right:6px; border-radius:50%; border:1.5px solid var(--fg-3); border-top-color:transparent; animation:queue-spin .8s linear infinite; }
+@keyframes queue-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .queue-sending { animation:none; } }

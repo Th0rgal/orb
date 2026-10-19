@@ -227,7 +227,10 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <ol><For each={queue()}>{row=><li class="queue-row"><div class="queue-line"><span class="queue-text" title={row.question}>{row.question}</span><span class="queue-row-actions"><button type="button" title="Remove" aria-label={`Remove queued side question: ${row.question}`} onClick={()=>setQueue(rows=>rows.filter(other=>other.id!==row.id))}><Ic.TrashIcon size={14}/></button></span></div></li>}</For></ol>
     </section></Show>
     <Show when={!history().length&&!question()}><p class="dim">Ask a question or give the side agent a task. It shares the main agent’s workspace.</p></Show>
-    <Show when={busy() && (runStatus() || !answer())}><p class="dim btw-progress" role="status">{runStatus() || "Thinking…"}<Show when={elapsed() >= 3}> · {elapsed()} s</Show></p></Show>
+    <Show when={busy() && (runStatus() || !answer())}><p class="dim btw-progress" role="status">{
+      // Queue states ("Waiting to start…") are stale once the side agent has acted.
+      btwActivities(p.mission).length || answer() ? "Working…" : runStatus() || "Thinking…"
+    }<Show when={elapsed() >= 3}> · {elapsed()} s</Show></p></Show>
     <AgentActivity items={btwActivities(p.mission)} running={busy()} completed={!busy() && !error()}/>
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>

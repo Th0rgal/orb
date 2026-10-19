@@ -55,8 +55,30 @@ pub fn args_with_effort(
     if let Some(session) = session.filter(|s| !s.is_empty()) {
         args.extend(["--conversation".into(), session.into()]);
     }
+    // `/plan …` (first turn or a follow-up) runs agy's native plan mode on the request body.
+    let prompt = match plan_request(prompt) {
+        Some(body) => {
+            args.extend(["--mode".into(), "plan".into()]);
+            body
+        }
+        None => prompt,
+    };
     args.extend(["-p".into(), prompt.into()]);
     args
+}
+
+/// The request body of a `/plan` message, or None for an ordinary message.
+pub fn plan_request(prompt: &str) -> Option<&str> {
+    let rest = prompt.trim_start().strip_prefix("/plan")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let body = rest.trim_start();
+    Some(if body.is_empty() {
+        "Review the conversation and workspace, then propose an implementation plan before making changes."
+    } else {
+        body
+    })
 }
 
 /// Provider failures that can be continued in the same native conversation.
