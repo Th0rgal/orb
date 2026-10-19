@@ -7485,6 +7485,19 @@ async fn native_grok_auto_track_continuation(
     assert_eq!(retry["queued"], false);
     assert_eq!(fixture.submissions.lock().unwrap().len(), 6);
     crate::remote_node::job_ledger::remove(&h.state.config.working_dir, bound_job).await;
+    // The fixture's job state is shared by every job it ever accepted. Flipping
+    // it back to "running" before the monitor has observed the last delivered
+    // job as terminal resurrects that job, and the next follow-up then waits
+    // behind it forever (the pre-fix flake under CPU contention). Wait for the
+    // terminal observation to settle first.
+    wait_until("last delivered native job settles", 20, || async {
+        store.get_active_mission_run(id).await.unwrap().is_none()
+            && crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+                .await
+                .unwrap()
+                .is_empty()
+    })
+    .await;
     // Stop must revoke queued follow-ups before a terminal observation can
     // let the background pump start another generation.
     fixture.set_state("running");
