@@ -3183,11 +3183,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       recordLocalFailure(p.id, null);
     }
   });
-  const [sendingImmediate, setSendingImmediate] = createSignal(false);
   const localQueueActive = () => clientPlaced() && queuedLocalMessages(p.id).some(row => !row.error && !row.interrupted && (row.state === "queued" || row.state === "dispatching" || row.state === "accepted"));
   const busy = () => {
     if(!p.id)return !p.launchError;
-    if (sendingImmediate()) return true;
     if (localRunActive(p.id)) return true;
     if(clientPlaced()&&localRunKnown(p.id))return queuedLocalMessages(p.id).some(row=>row.state==='dispatching');
     const s = mission()?.status;
@@ -3215,7 +3213,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     return (optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted')) || localRunActive(p.id) || phase.moving) && !activity();
   };
   // A remote job queued for capacity has not started: say so instead of "Working".
-  const phaseLabel = () => sendingImmediate() ? "Stopping the current turn…" : mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
+  const phaseLabel = () => mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : mission()?.backend === "claudecode" ? "Waiting for Claude Code" : "Working";
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
@@ -3455,98 +3453,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         else applyLive(event);
       }
     }
-    if (!ordered.length) return;
-    const wasBusy = busy();
-    setSendingImmediate(true);
-    setSendError(null);
-    // Show the messages as sent right away: stopping a remote turn can take
-    // several seconds, and the queue row has already disappeared.
-    const projected = ordered.map(row => row.id as ReturnType<typeof crypto.randomUUID>);
-    setOptimisticList(prev => [...prev.filter(item => !projected.includes(item.id)), ...ordered.map(row => ({ id: row.id as ReturnType<typeof crypto.randomUUID>, text: messagePresentation(row.content).text, images: [], waiting: false }))]);
-    nearBottom = true;
-    queueMicrotask(scrollIfPinned);
-    try {
-      if (wasBusy) {
-        await cancelMission(targetMissionId).catch(() => {});
-        for (let poll = 0; poll < 75; poll++) {
-          if (staleMission() || p.id !== targetMissionId) return;
-          try {
-            const current = await getMission(targetMissionId);
-            if (staleMission() || p.id !== targetMissionId) return;
-            setMission(current);
-            const stillStopping =
-              ["active", "running", "starting", "resuming"].includes(current.status) ||
-              current.execution?.state === "stopping" ||
-              (!!current.remote_job && current.remote_job.phase !== "finished");
-            if (!stillStopping) break;
-          } catch {
-            break;
-          }
-          await new Promise(r => setTimeout(r, 200));
-        }
-      }
-      if (staleMission() || p.id !== targetMissionId) return;
-      const project = mission()?.project;
-      const attachItems = project ? await loadAttachItems(project).catch(() => []) : [];
-      if (staleMission() || p.id !== targetMissionId) return;
-      const maxAttempts = wasBusy ? 30 : 1;
-      for (let i = 0; i < ordered.length; i++) {
-        if (staleMission() || p.id !== targetMissionId) return;
-        const row = ordered[i];
-        const presented = messagePresentation(row.content);
-        const cleanText = presented.text;
-        const attachments = (project ? mentionedChips(cleanText, attachItems) : []).map(chipToAttachment);
-        let sent = false;
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          if (staleMission() || p.id !== targetMissionId) return;
-          const freshId = crypto.randomUUID();
-          try {
-            const result = await sendMissionMessage(targetMissionId, cleanText, attachments, freshId);
-            if (staleMission() || p.id !== targetMissionId) return;
-            if (result.replacement) {
-              const replacement = result.replacement;
-              const nodeId = replacement.remote_job?.node_id ?? replacement.remote_node_id ?? mission()?.remote_job?.node_id ?? mission()?.remote_node_id ?? "";
-              rememberLaunch(replacement.id, { prompt: cleanText, nodeId, destination: nodeLabel(nodeId), replacement: true });
-              for (const rest of ordered.slice(i + 1)) {
-                const restText = messagePresentation(rest.content).text;
-                const restAttach = (project ? mentionedChips(restText, attachItems) : []).map(chipToAttachment);
-                await sendMissionMessage(replacement.id, restText, restAttach, crypto.randomUUID()).catch(() => {});
-              }
-              p.onFork?.(replacement);
-              return;
-            }
-            if (i === 0 && wasBusy && result.queued && attempt < maxAttempts - 1) {
-              await api(`/api/control/queue/${encodeURIComponent(result.id)}`, { method: "DELETE" }).catch(() => {});
-              await new Promise(r => setTimeout(r, 250));
-              continue;
-            }
-            setOptimisticList(prev => prev.filter(item => item.id !== row.id));
-            const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: cleanText, queued: result.queued, receipt: true, attached: Boolean(row.attached || presented.attached || attachments.length > 0) } };
-            if (replaying) held.push(event);
-            else applyLive(event);
-            sent = true;
-            break;
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            if (attempt < maxAttempts - 1 && /still has a remote job|stopping|409/i.test(msg)) {
-              await new Promise(r => setTimeout(r, 250));
-              continue;
-            }
-            throw e;
-          }
-        }
-        if (!sent) break;
-      }
-      if (!staleMission()) await refresh();
-    } catch (e) {
-      if (!staleMission()) setSendError(launchError(e));
-      // Keep what was not delivered visible as failed rather than losing it.
-      setOptimisticList(prev => prev.map(item => projected.includes(item.id) ? { ...item, failed: true } : item));
-      throw e;
-    } finally {
-      setSendingImmediate(false);
-      setOptimisticList(prev => prev.filter(item => !projected.includes(item.id) || item.failed));
-    }
+    // Delivery belongs to Core's queue endpoint. Never cancel a running turn
+    // or recreate queued messages after an unconfirmed send-now response.
+    if (ordered.length) throw new Error("Your messages remain queued. Live delivery was not confirmed.");
   };
 
   return (
@@ -3624,7 +3533,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>
           <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => setOptimisticList(prev => prev.filter(item => item.id !== id))} onEdit={row=>void queuedEdit.start(row)}/>
-          <Show when={busy() && activity() && !sendingImmediate()}><TurnStatus items={viewItems()} /></Show>
+          <Show when={busy() && activity()}><TurnStatus items={viewItems()} /></Show>
           <Composer
             allowConcurrentSend
             revision={sideRevision()}

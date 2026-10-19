@@ -131,39 +131,23 @@ export function RemoteQueue(p: {
     if (!target) return;
     setWorking(true); setError("");
     const version = connectionVersion(), mission = p.mission;
-    // Optimistic: the message leaves the queue and shows in the thread right away (same id, so
-    // the later receipt dedupes); it returns to the queue only if Core refuses.
-    const injected = { id: target.id, content: messagePresentation(target.content).text, attached: target.attached || messagePresentation(target.content).attached || undefined };
-    const before = rows();
-    deletedIds.add(target.id);
-    setRows(previous => previous.filter(row => row.id !== target.id));
-    void p.onSendImmediate?.([], [injected]);
     try {
-      const live = await api<{ ok?: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now`, { method: "POST" }).catch(() => ({ delivered: false }));
+      const live = await api<{ ok?: boolean; delivered?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now`, { method: "POST" });
+      if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
       if (live?.delivered) {
-        if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
         revision++;
+        deletedIds.add(target.id);
+        setRows(previous => previous.filter(row => row.id !== target.id));
         p.onRows(rows().map(row => row.id));
         p.onCancel(target.id);
+        await p.onSendImmediate?.([], [{ id: target.id, content: messagePresentation(target.content).text, attached: target.attached || messagePresentation(target.content).attached || undefined }]);
         return;
       }
-      const ordered = [target, ...list.filter(r => r.id !== target.id)];
-      const payload = ordered.map(r => {
-        const presented = messagePresentation(r.content);
-        return { id: r.id, content: presented.text, attached: r.attached || presented.attached || undefined };
-      });
-      await Promise.allSettled(ordered.map(r => api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" })));
-      if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
-      revision++;
-      for (const r of ordered) deletedIds.add(r.id);
-      setRows([]); p.onRows([]);
-      for (const r of ordered) p.onCancel(r.id);
-      await p.onSendImmediate?.(payload);
+      setError("This run cannot accept a live message right now. Your message is still queued; it will be sent when the run is ready.");
     } catch (e) {
-      if (version === connectionVersion() && mission === p.mission) {
-        // Refused: put the queue back as it was so nothing looks sent that was not.
-        deletedIds.delete(target.id);
-        setRows(before);
+      // A lost response does not prove delivery failed. Keep the original queue
+      // identity and let the next queue read reconcile it; never delete/resend.
+      if (!destroyed && version === connectionVersion() && mission === p.mission) {
         setError(e instanceof Error ? e.message : String(e));
       }
     } finally {
