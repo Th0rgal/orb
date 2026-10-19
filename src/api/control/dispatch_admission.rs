@@ -377,25 +377,54 @@ pub(super) async fn require_quiescent(
     mission: &Mission,
     actor_busy: bool,
 ) -> Result<(), String> {
-    if actor_busy
-        || matches!(
-            mission.status,
-            MissionStatus::Active | MissionStatus::Pending
-        )
-        || store.get_active_mission_run(mission.id).await?.is_some()
-        || store
-            .get_deferred_goal(mission.id)
-            .await?
-            .is_some_and(|goal| !goal.trim().is_empty())
-        || crate::remote_node::job_ledger::load(&state.config.working_dir)
-            .await
-            .map_err(|error| error.to_string())?
-            .iter()
-            .any(|handle| handle.mission_id == mission.id)
-    {
-        return Err("assignment_busy: stop and drain old running, queued, or Pending work before changing assignment".into());
+    if let Some(reason) = busy_reason(state, store, mission, actor_busy).await? {
+        return Err(format!(
+            "assignment_busy: {reason}; stop and drain old running, queued, or Pending work before changing assignment"
+        ));
     }
     Ok(())
+}
+
+/// The first condition that keeps a mission's current assignment in use, if
+/// any. Reported verbatim so clients can say which one fired.
+pub(super) async fn busy_reason(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    mission: &Mission,
+    actor_busy: bool,
+) -> Result<Option<&'static str>, String> {
+    if store.get_active_mission_run(mission.id).await?.is_some() {
+        return Ok(Some("mission has an active run"));
+    }
+    if crate::remote_node::job_ledger::load(&state.config.working_dir)
+        .await
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|handle| handle.mission_id == mission.id)
+    {
+        return Ok(Some("mission has a remote job"));
+    }
+    if store
+        .get_deferred_goal(mission.id)
+        .await?
+        .is_some_and(|goal| !goal.trim().is_empty())
+    {
+        return Ok(Some("mission has a deferred goal"));
+    }
+    if actor_busy {
+        return Ok(Some("mission has queued or running work"));
+    }
+    if matches!(
+        mission.status,
+        MissionStatus::Active | MissionStatus::Pending
+    ) {
+        return Ok(Some(if mission.status == MissionStatus::Pending {
+            "mission is Pending"
+        } else {
+            "mission is Active"
+        }));
+    }
+    Ok(None)
 }
 
 async fn prepare(

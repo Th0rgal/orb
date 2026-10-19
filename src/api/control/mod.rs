@@ -17335,6 +17335,71 @@ async fn update_mission_project_locked(
     // old ones. A held writer lease is a 409 and the patch is not applied.
     let effective_project = effective_string(&project, &current.project.project);
     let effective_track = effective_string(&track, &current.project.track);
+    // A pure project move (generated per-mission tracks and Orb folder tags
+    // follow the mission) keeps the holder, mode, PR and real track. Leases
+    // are only revalidated at turn start, so a running mission can move as
+    // long as the lease moves atomically; its run, queue and deferred goal
+    // stay untouched and the next turn starts under the new project.
+    if effective_project != current.project.project && effective_project.is_some() {
+        let generated = super::track_leases::generated_track_key(&id.to_string());
+        let generated_shape = |t: &str| {
+            t.strip_prefix("mission-")
+                .is_some_and(|rest| rest.len() == 8 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+        };
+        let track_follows = effective_track == current.project.track
+            || (effective_track.as_deref() == Some(generated.as_str())
+                && current.project.track.as_deref().is_none_or(generated_shape));
+        let folder_only = |a: &[String], b: &[String]| {
+            a.iter()
+                .filter(|tag| !b.contains(tag))
+                .chain(b.iter().filter(|tag| !a.contains(tag)))
+                .all(|tag| tag.starts_with("orb-folder:"))
+        };
+        let move_only = track_follows
+            && effective_github_pr == current.project.github_pr
+            && effective_intent == current.project.intent
+            && folder_only(&effective_tags, &current.project.tags)
+            && state
+                .projects
+                .dispatch_admission(&id.to_string())
+                .map_err(internal_error)?
+                .is_none();
+        let busy = if move_only {
+            dispatch_admission::busy_reason(&state, &control.mission_store, &current, actor_busy)
+                .await
+                .map_err(internal_error)?
+        } else {
+            None
+        };
+        if busy.is_some() {
+            if let Some(moved) = move_running_mission_project(
+                &state,
+                &control.mission_store,
+                &current,
+                MoveTarget {
+                    project: effective_project.clone().unwrap_or_default(),
+                    track: effective_track.clone(),
+                    mode: if becomes_writer {
+                        "writer"
+                    } else {
+                        super::track_leases::lease_mode(
+                            req.writer,
+                            &effective_tags,
+                            effective_intent.as_deref(),
+                        )
+                    },
+                    pr: super::track_leases::pr_number(effective_github_pr.as_deref()),
+                    tags: tags.clone(),
+                    desired_state: desired_state.clone(),
+                    next_check_at: next_check_at.clone(),
+                },
+            )
+            .await?
+            {
+                return Ok(Json(moved));
+            }
+        }
+    }
     if effective_project != current.project.project
         || effective_track != current.project.track
         || effective_github_pr != current.project.github_pr
@@ -17464,6 +17529,123 @@ async fn update_mission_project_locked(
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
     Ok(Json(updated))
+}
+
+struct MoveTarget {
+    project: String,
+    track: Option<String>,
+    mode: &'static str,
+    pr: Option<i64>,
+    tags: Option<Vec<String>>,
+    desired_state: Option<Option<String>>,
+    next_check_at: Option<Option<String>>,
+}
+
+/// Move a running mission to another project: transfer its track lease in
+/// one transaction, then persist the metadata. Returns `Ok(None)` when the
+/// move would change the held lease mode (writer status), so the caller
+/// falls back to the quiescence-guarded identity change.
+async fn move_running_mission_project(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    current: &Mission,
+    target: MoveTarget,
+) -> Result<Option<Mission>, (StatusCode, String)> {
+    use super::projects_store::MoveLeaseError;
+    let id = current.id;
+    let attempt = id.to_string();
+    let source = current
+        .project
+        .project
+        .as_deref()
+        .zip(current.project.track.as_deref());
+    let mut new_track = None;
+    if let Some(key) = target.track.as_deref() {
+        match state.projects.move_track_lease(
+            source,
+            &target.project,
+            key,
+            &attempt,
+            target.mode,
+            current.title.as_deref(),
+            target.pr,
+        ) {
+            Ok((outcome, _)) => new_track = Some(outcome.key),
+            Err(MoveLeaseError::ModeChange { .. }) => return Ok(None),
+            Err(error @ MoveLeaseError::Conflict { .. }) => {
+                let MoveLeaseError::Conflict {
+                    ref project,
+                    ref track,
+                    pr_number,
+                    ref holder_mission_id,
+                } = error
+                else {
+                    unreachable!()
+                };
+                return Err((
+                    StatusCode::CONFLICT,
+                    serde_json::json!({
+                        "error": "writer_conflict",
+                        "project": project,
+                        "track": track,
+                        "pr_number": pr_number,
+                        "holder_mission_id": holder_mission_id,
+                        "message": error.to_string(),
+                    })
+                    .to_string(),
+                ));
+            }
+            Err(MoveLeaseError::Store(error)) => return Err(internal_error(error)),
+        }
+    }
+    let patch = crate::api::mission_store::MissionProjectPatch {
+        preserve_updated_at: false,
+        title: None,
+        project: Some(Some(target.project.clone())),
+        track: new_track
+            .clone()
+            .filter(|key| current.project.track.as_deref() != Some(key.as_str()))
+            .map(Some),
+        intent: None,
+        github_pr: None,
+        tags: None,
+        tag_patch: target.tags.as_ref().map(|tags| {
+            crate::api::mission_store::MissionTagPatch::between(&current.project.tags, tags)
+        }),
+        desired_state: target.desired_state,
+        next_check_at: target.next_check_at,
+    };
+    if let Err(error) = store.update_mission_project(id, patch).await {
+        // Compensate: hand the lease back to the source project.
+        if let (Some(key), Some((slug, old_key))) = (new_track.as_deref(), source) {
+            if let Err(rollback) = state.projects.move_track_lease(
+                Some((&target.project, key)),
+                slug,
+                old_key,
+                &attempt,
+                target.mode,
+                current.title.as_deref(),
+                target.pr,
+            ) {
+                tracing::error!(mission_id = %id, %rollback, "Project move lease rollback failed");
+            }
+        } else if new_track.is_some() {
+            let _ = state.projects.release_leases_for_attempt(&attempt);
+        }
+        return Err(internal_error(error));
+    }
+    tracing::info!(
+        mission_id = %id,
+        from = ?current.project.project,
+        to = %target.project,
+        "Moved running mission between projects; next turn uses the new project"
+    );
+    store
+        .get_mission(id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {id} not found")))
+        .map(Some)
 }
 
 /// Update mission run settings for future turns.
