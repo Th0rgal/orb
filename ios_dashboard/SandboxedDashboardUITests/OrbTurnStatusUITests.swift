@@ -59,4 +59,28 @@ final class OrbTurnStatusUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["btw.progress"].exists)
         capture(app, "btw-answer")
     }
+
+    /// Queue while running -> Core delivers it -> the queued row becomes the transcript
+    /// bubble, the reply streams in and the Working row goes away once the mission completes.
+    @MainActor func testQueuedFollowUpBecomesBubbleWithReply() async throws {
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18766/__reset")!)
+        reset.httpMethod = "POST"
+        _ = try await URLSession.shared.data(for: reset) // the fixture's turn runs again
+        let app = open("queue-run")
+        let composer = app.textFields["composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        if !app.descendants(matching: .any)["agent-working"].waitForExistence(timeout: 10) { capture(app, "queue-run-not-working"); XCTFail("the turn is running") }
+        composer.tap()
+        composer.typeText("third message while running")
+        app.buttons["Send message"].tap()
+        XCTAssertTrue(app.staticTexts["1 Queued"].waitForExistence(timeout: 5), "a follow-up during a turn is queued")
+        capture(app, "queue-while-running")
+        XCTAssertTrue(app.staticTexts["QUEUED_REPLY_OK"].waitForExistence(timeout: 25), "the reply to the delivered message shows")
+        XCTAssertTrue(app.staticTexts["third message while running"].exists, "the delivered message is a transcript bubble")
+        let gone = NSPredicate(format: "exists == false")
+        let queuedGone = expectation(for: gone, evaluatedWith: app.staticTexts["1 Queued"])
+        let workingGone = expectation(for: gone, evaluatedWith: app.descendants(matching: .any)["agent-working"])
+        await fulfillment(of: [queuedGone, workingGone], timeout: 10)
+        capture(app, "queue-delivered")
+    }
 }

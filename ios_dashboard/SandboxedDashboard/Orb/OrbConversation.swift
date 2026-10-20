@@ -44,6 +44,9 @@ struct OrbConversation: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var mode = "Message"
     @State private var refreshing = false
+    /// An event arrived while a refresh was running; run once more after it.
+    @State private var refreshAgain = false
+    @State private var streamToken = UUID()
     @State private var lastRefresh = Date.distantPast
     @State private var stream: Task<Void, Never>?
     @State private var draftSaveTask: Task<Void, Never>?
@@ -1705,6 +1708,14 @@ struct OrbConversation: View {
         .accessibilityIdentifier("conversation-composer")
     }
 
+    /// User messages Core delivered: events (id = client_message_id) and stored history.
+    private var deliveredUserMessages: [OrbDeliveredMessage] {
+        events.compactMap { e in
+            guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
+            return OrbDeliveredMessage(id: (e.eventId?.isEmpty ?? true) ? nil : e.eventId, content: e.content, sequence: e.sequence)
+        }
+    }
+
     private func scheduleCoalescedRefresh() {
         eventRefreshTask?.cancel()
         eventRefreshTask = Task {
@@ -1714,7 +1725,21 @@ struct OrbConversation: View {
         }
     }
 
+    /// Refreshes are coalesced, never dropped: a forced refresh requested while one
+    /// runs (a user_message, assistant_message or status event) runs right after it,
+    /// so the delivered queued message, the reply and the final status all land.
     private func refresh(force: Bool = false) async {
+        guard id != nil else { return }
+        if refreshing { if force { refreshAgain = true }; return }
+        var force = force
+        repeat {
+            refreshAgain = false
+            await refreshOnce(force: force)
+            force = true
+        } while refreshAgain && !Task.isCancelled
+    }
+
+    private func refreshOnce(force: Bool) async {
         guard let id, !refreshing else { return }
         if !force && !working && Date().timeIntervalSince(lastRefresh) < 30 { return }
         refreshing = true; defer { refreshing = false; loading = false }
@@ -1723,6 +1748,7 @@ struct OrbConversation: View {
             let sinceSeq = events.last?.sequence
             async let valueTask = OrbReadCache.conversation(id, force: force)
             async let batchTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
+            let queueFetchedAt = Date()
             async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue")) ?? .null)
 
             var value = try await valueTask
@@ -1746,7 +1772,9 @@ struct OrbConversation: View {
             } else if OrbRow(value).cloud { execution = try await OrbReadCache.cloud(id, force: force) }
             if !OrbRow(value).cloud {
                 if stream == nil && phase == .active {
-                    stream = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
+                    let token = UUID()
+                    streamToken = token
+                    let inner = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
                         if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data); return }
                         if type == "text_delta", let delta = data["delta"] as? String ?? data["content"] as? String {
                             liveText += delta
@@ -1762,6 +1790,16 @@ struct OrbConversation: View {
                             scheduleCoalescedRefresh()
                         }
                     }
+                    // The SSE task ends when Core closes or idles the stream. Forget it so the
+                    // next refresh reconnects; a stale non-nil handle stopped all live updates.
+                    stream = Task {
+                        await withTaskCancellationHandler { await inner.value } onCancel: { inner.cancel() }
+                        guard !Task.isCancelled else { return }
+                        try? await Task.sleep(for: .seconds(2))
+                        guard !Task.isCancelled, streamToken == token else { return }
+                        stream = nil
+                        if phase == .active { await refresh(force: true) }
+                    }
                 }
                 if !working { liveText = "" }
                 selection.backend = value["backend"].text
@@ -1776,7 +1814,12 @@ struct OrbConversation: View {
                 let queueResp = await queueTask
                 if queueResp != .null {
                     queued = queueResp.items.filter { $0["mission_id"].text == id }
-                    let next = followUps.withServer(OrbFollowUpQueue.parse(queueResp.items, missionID: id))
+                    let next = followUps.withServer(OrbFollowUpQueue.parse(queueResp.items, missionID: id), fetchedAt: queueFetchedAt, lastSequence: sinceSeq)
+                        .reconciled(with: deliveredUserMessages)
+                    if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+                }
+                else {
+                    let next = followUps.reconciled(with: deliveredUserMessages)
                     if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
                 }
                 if let current = handoff {
@@ -1854,7 +1897,7 @@ struct OrbConversation: View {
                 // Optimistic UI: show the user bubble immediately and clear composer text while sending.
                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
                     if queueing {
-                        followUps = followUps.enqueue(clientID, prompt)
+                        followUps = followUps.enqueue(clientID, prompt, lastSequence: events.last?.sequence)
                         text = ""
                     } else {
                         optimisticPrompt = prompt
@@ -1930,7 +1973,7 @@ struct OrbConversation: View {
                 if receiptID.isEmpty || receiptID == clientID { followUps = followUps.posted(clientID, queued: queuedNow) }
                 else {
                     followUps = followUps.postFailed(clientID)
-                    if queuedNow { followUps = followUps.enqueue(receiptID, savedDraft.trimmingCharacters(in: .whitespacesAndNewlines)).posted(receiptID, queued: true) }
+                    if queuedNow { followUps = followUps.enqueue(receiptID, savedDraft.trimmingCharacters(in: .whitespacesAndNewlines), lastSequence: events.last?.sequence).posted(receiptID, queued: true) }
                 }
             }
             if let id {
@@ -2034,7 +2077,7 @@ struct OrbConversation: View {
             followUps = followUps.editReverted(queueID).hide(queueID)
             _ = try? await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
             let clientID = UUID().uuidString
-            followUps = followUps.enqueue(clientID, content)
+            followUps = followUps.enqueue(clientID, content, lastSequence: events.last?.sequence)
             do {
                 let result = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(content), "client_message_id": .string(clientID), "queue_followup": .bool(true)]))
                 followUps = followUps.posted(clientID, queued: result["queued"] == .bool(true))
