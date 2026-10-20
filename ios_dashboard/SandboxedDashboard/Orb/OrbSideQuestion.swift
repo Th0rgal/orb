@@ -181,9 +181,13 @@ enum OrbBtwThreads {
 
     /// Every thread's turns, in the order they were asked.
     static func merge(_ perThread: [[Turn]]) -> [Turn] {
-        perThread.flatMap { $0 }.enumerated().sorted { a, b in
-            a.element.at == b.element.at ? a.offset < b.offset : a.element.at < b.element.at
-        }.map(\.element)
+        let all: [Turn] = perThread.flatMap { $0 }
+        let indexed: [(offset: Int, turn: Turn)] = all.enumerated().map { ($0.offset, $0.element) }
+        let sorted = indexed.sorted { (a: (offset: Int, turn: Turn), b: (offset: Int, turn: Turn)) -> Bool in
+            if a.turn.at != b.turn.at { return a.turn.at < b.turn.at }
+            return a.offset < b.offset
+        }
+        return sorted.map { $0.turn }
     }
 }
 
