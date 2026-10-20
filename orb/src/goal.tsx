@@ -2,7 +2,7 @@ import { GOAL_HARNESSES } from "./harnesses";
 import * as Ic from "./icons";
 
 /**
- * Client-side mirror of the server's `parse_goal_objective` (control/mod.rs):
+ * Client-side mirror of the server's `parse_goal_objective` (control/goal.rs):
  * `/goal` followed by whitespace, then a non-empty objective. `/goals …` and
  * plain text are not goals. The backend derives `goal_mode` + `goal_objective`
  * from the prompt itself; there is no dedicated create field, so the composer

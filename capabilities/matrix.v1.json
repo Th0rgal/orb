@@ -40,7 +40,7 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "src/api/control/mod.rs",
+            "path": "src/api/control/actor.rs",
             "pattern": "AgentEvent::Thinking { done, mission_id, .. } => {"
           }
         ]

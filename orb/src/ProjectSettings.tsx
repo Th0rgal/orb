@@ -49,7 +49,7 @@ const READ_ONLY_FIELDS: Array<{ key: keyof ProjectGrant; label: string }> = [
  *
  * The server-backed writable field is this project's limit on unfinished agents, which
  * `create_mission` enforces by counting the project's own unfinished missions
- * (`campaign_slot_held_by` in `src/api/control/mod.rs`). It is a different
+ * (`campaign_slot_held_by` in `src/api/control/mission_create.rs`). It is a different
  * limit from the backend-wide one in Execution settings, which this page only
  * links to.
  */
