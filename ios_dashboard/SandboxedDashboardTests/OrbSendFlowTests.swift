@@ -151,4 +151,11 @@ final class OrbSendFlowTests: XCTestCase {
         XCTAssertEqual(OrbSendFlow.turnStart(server: stale, localSend: nil), stale, "reopening keeps a long turn's clock")
         XCTAssertEqual(OrbSendFlow.turnStart(server: nil, localSend: now), now)
     }
+
+    func testDeferredSendGoesOutRightAfterTheAck() {
+        XCTAssertFalse(OrbSendFlow.canDrain(awaitingAck: true, draining: false, pending: 1), "not before the first POST returns")
+        XCTAssertTrue(OrbSendFlow.canDrain(awaitingAck: false, draining: false, pending: 1), "right after it, not after its refresh")
+        XCTAssertFalse(OrbSendFlow.canDrain(awaitingAck: false, draining: true, pending: 1), "one drain at a time keeps order")
+        XCTAssertFalse(OrbSendFlow.canDrain(awaitingAck: false, draining: false, pending: 0))
+    }
 }

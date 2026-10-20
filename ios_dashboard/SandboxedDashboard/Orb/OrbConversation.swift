@@ -21,6 +21,9 @@ struct OrbConversation: View {
     @State private var busy = false
     /// Follow-ups tapped while a send was in flight, posted once it settles (never dropped).
     @State private var deferredSends: [(id: String, content: String)] = []
+    /// The send being acknowledged: deferred follow-ups wait only for its POST, not for its refresh.
+    @State private var awaitingAck = false
+    @State private var draining = false
     /// When this device last started a turn (idle send), for the Working clock.
     @State private var localTurnStart: Date?
     @State private var unavailable = false
@@ -1747,6 +1750,7 @@ struct OrbConversation: View {
     }
 
     private func refreshOnce(force: Bool) async {
+        defer { if !deferredSends.isEmpty { Task { await drainDeferredSends() } } }
         guard let id, !refreshing else { return }
         if !force && !working && Date().timeIntervalSince(lastRefresh) < 30 { return }
         refreshing = true; defer { refreshing = false; loading = false }
@@ -1882,6 +1886,7 @@ struct OrbConversation: View {
                 text = ""
             }
             deferredSends.append((clientID, content))
+            Task { await drainDeferredSends() }
             return true
         }
         let sent = await sendNow()
@@ -1890,28 +1895,30 @@ struct OrbConversation: View {
     }
 
     /// Posts follow-ups accepted while a send was in flight, in order, as queued follow-ups.
+    /// Runs as soon as the in-flight POST returned (2xx or not), independently of the
+    /// refresh that follows it; also retried by every refresh, so a tap is never stranded.
     private func drainDeferredSends() async {
-        guard let id, !busy else { return }
+        guard let id, OrbSendFlow.canDrain(awaitingAck: awaitingAck, draining: draining, pending: deferredSends.count) else { return }
+        draining = true; defer { draining = false }
+        var posted = false
         while !deferredSends.isEmpty {
             let next = deferredSends.removeFirst()
-            busy = true
             do {
                 let result = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(next.content), "client_message_id": .string(next.id), "queue_followup": .bool(true)]))
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false) else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance.") }
                 followUps = followUps.posted(next.id, queued: result["queued"] == .bool(true))
                 if result["queued"] != .bool(true) { localTurnStart = Date() }
+                posted = true
             } catch {
                 followUps = followUps.postFailed(next.id)
                 if text.isEmpty { text = next.content }
                 self.error = "Message kept. \(error.localizedDescription)"
-                busy = false
                 for rest in deferredSends { followUps = followUps.postFailed(rest.id); text += (text.isEmpty ? "" : "\n") + rest.content }
                 deferredSends.removeAll()
                 return
             }
-            busy = false
         }
-        await refresh(force: true)
+        if posted { await refresh(force: true) }
     }
 
     @discardableResult private func sendNow() async -> Bool {
@@ -1927,7 +1934,11 @@ struct OrbConversation: View {
             await editQueued(editing, content: content)
             return true
         }
-        busy = true; defer { busy = false }
+        busy = true; awaitingAck = true
+        defer {
+            busy = false
+            if awaitingAck { awaitingAck = false; Task { await drainDeferredSends() } }
+        }
         let clientID = UUID().uuidString
         // A follow-up during a turn shows at once as a queued row, not as a bubble that jumps away.
         let queueing = working && id != nil && !isCloud && attachments.isEmpty && OrbDisk.read(pendingKey, as: OrbPending.self) == nil
@@ -2014,7 +2025,11 @@ struct OrbConversation: View {
                     )
                 }
             }
-            let result = try await api.call(pending.path, method: "POST", body: pending.body)
+            let result: OrbJSON
+            do { result = try await api.call(pending.path, method: "POST", body: pending.body); awaitingAck = false }
+            catch { awaitingAck = false; Task { await drainDeferredSends() }; throw error }
+            // Acknowledged: follow-ups tapped meanwhile go out now, not after the refresh below.
+            Task { await drainDeferredSends() }
             if pending.path == "/api/control/message" {
                 guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false), result["queued"] != .null else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance. The saved request is retained.") }
             }

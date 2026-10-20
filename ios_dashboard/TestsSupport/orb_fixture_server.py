@@ -15,6 +15,7 @@ PROVIDERS = {}
 CORDONED = False
 INBOX_STATE = {}
 QUEUE = []
+RECEIVED = []
 QUEUE_EVENTS = {}
 PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
@@ -22,7 +23,7 @@ PROMPT = "Please test the new interface"
 def reset():
     global CORDONED
     CORDONED = False
-    QUEUE.clear(); QUEUE_EVENTS.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
+    QUEUE.clear(); RECEIVED.clear(); QUEUE_EVENTS.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
     PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
@@ -58,6 +59,22 @@ def deliver_queue():
         m['history'] += [{'role':'assistant','content':'first reply'},{'role':'user','content':item['content']},{'role':'assistant','content':'QUEUED_REPLY_OK'}]
         qadd(m['id'],'assistant_message','first reply'); qadd(m['id'],'user_message',item['content'],item['id']); qadd(m['id'],'assistant_message','QUEUED_REPLY_OK')
         m['status']='completed'
+
+def idle_turn(content, key):
+    m=MISSIONS['idle-send']
+    def step(delay, fn): time.sleep(delay); fn()
+    def start():
+        with LOCK: m['status']='running'; m['history'].append({'role':'user','content':content}); qadd('idle-send','user_message',content,key)
+    def finish():
+        with LOCK:
+            m['history'].append({'role':'assistant','content':'ok'}); qadd('idle-send','assistant_message','ok')
+            queued=[q for q in QUEUE if q['mission_id']=='idle-send']
+            if not queued: m['status']='completed'; m['turn']=False; return
+            for q in queued:
+                QUEUE.remove(q); m['history'] += [{'role':'user','content':q['content']},{'role':'assistant','content':'QUEUED_REPLY_OK'}]
+                qadd('idle-send','user_message',q['content'],q['id']); qadd('idle-send','assistant_message','QUEUED_REPLY_OK')
+            m['status']='completed'; m['turn']=False
+    step(3, start); step(2, finish)
 
 def iso(t): return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))
 def agent_events(mid):
@@ -95,6 +112,7 @@ class Handler(BaseHTTPRequestHandler):
         u=urlparse(self.path); p=unquote(u.path)
         COUNTS[p] = COUNTS.get(p, 0) + 1
         if p=='/__counts': return self.send(COUNTS)
+        if p=='/__received': return self.send(RECEIVED)
         if p=='/api/health': return self.send({'status':'ok','auth_required':REQUIRE_AUTH})
         if (REQUIRE_AUTH or EXPIRE_SESSION) and self.headers.get('Authorization') != 'Bearer '+VALID_TOKEN:
             REQUIRE_AUTH = True
@@ -192,9 +210,16 @@ class Handler(BaseHTTPRequestHandler):
             mid=str(uuid.uuid4()); cloud=body.get('cloud'); m=dict(body,id=mid,status='awaiting_user',backend=('cloud_'+cloud['provider']) if cloud else body['backend'],history=[{'role':'user','content':body['prompt']},{'role':'assistant','content':'**ORB_TEST_OK**\n\nA response from the test agent.'}])
             if cloud: m['cloud_execution']={'mission_id':mid,'selection':cloud,'turns':[{'key':key,'prompt':body['prompt'],'result':'**ORB_TEST_OK**','phase':'response_complete','artifacts':[],'branches':[]}]}
             MISSIONS[mid]=m; RECEIPTS[key]=m; return self.send(m)
-        if p=='/api/control/message' and body['mission_id']=='idle-send' and MISSIONS['idle-send']['status']!='running' and not body.get('queue_followup'):
-            time.sleep(2.5); m=MISSIONS['idle-send']; m['status']='running'; m['history'].append({'role':'user','content':body['content']})
-            qadd('idle-send','user_message',body['content'],key)
+        if p=='/api/control/message' and body['mission_id']=='idle-send':
+            # Prod timing: remote dispatch acks before the turn starts; user_message ~3 s
+            # later, the agent answers and the job finishes quickly. A message posted
+            # during the turn is queued and delivered when it ends.
+            m=MISSIONS['idle-send']; RECEIVED.append(body['content'])
+            if m.get('turn'):
+                QUEUE.append(dict(id=key,mission_id='idle-send',content=body['content'],source='remote-queue',deliver_at=float('inf')))
+                RECEIPTS[key]={'id':key,'queued':True}; return self.send(RECEIPTS[key])
+            time.sleep(2.5); m['turn']=True
+            threading.Thread(target=idle_turn, args=(body['content'], key), daemon=True).start()
             RECEIPTS[key]={'id':key,'queued':False}; return self.send(RECEIPTS[key])
         if p=='/api/control/message' and body.get('queue_followup') and MISSIONS[body['mission_id']]['status']=='running':
             QUEUE.append(dict(id=key,mission_id=body['mission_id'],content=body['content'],source='remote-queue',deliver_at=time.time()+4))
