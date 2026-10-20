@@ -7015,8 +7015,9 @@ async fn native_grok_auto_track_continuation(
     let duplicate = h.request(true, id, json!({})).await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
-    // A live job on an explicit track must refuse without suggesting a
-    // replacement: Orb treats that suggestion as authorization to dispatch.
+    // A live job on an explicit writer track queues the follow-up: it waits
+    // for the job and is never a replacement hint (Orb treats that hint as
+    // authorization to dispatch) nor a "still running" refusal.
     store
         .update_mission_project(
             id,
@@ -7030,11 +7031,45 @@ async fn native_grok_auto_track_continuation(
     let live_followup = h
         .request(false, id, json!({"content":"latest request"}))
         .await;
-    assert_eq!(live_followup.status(), StatusCode::CONFLICT);
-    let refusal = live_followup.text().await.unwrap();
-    assert!(refusal.contains("REMOTE_JOB_STILL_RUNNING"), "{refusal}");
-    assert!(!refusal.contains(remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT));
+    let status = live_followup.status();
+    let accepted: serde_json::Value = live_followup.json().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["queued"], true, "{accepted}");
     assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    let queued_id = Uuid::parse_str(accepted["id"].as_str().unwrap()).unwrap();
+    assert!(remote_queue::is_waiting(&h.state.projects, &h.user.id, queued_id).unwrap());
+    // Tagged pr-writer as well (the prod case): still queued.
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let tagged = h.request(false, id, json!({"content":"one more"})).await;
+    let tagged: serde_json::Value = tagged.json().await.unwrap();
+    assert_eq!(tagged["queued"], true, "{tagged}");
+    assert_eq!(fixture.submissions.lock().unwrap().len(), 2);
+    // Withdraw both so the rest of this scenario keeps its job count.
+    for queued in [
+        queued_id,
+        Uuid::parse_str(tagged["id"].as_str().unwrap()).unwrap(),
+    ] {
+        assert!(remote_queue::finish(&h.state.projects, &h.user.id, queued, "cancelled").unwrap());
+    }
+    store
+        .update_mission_project(
+            id,
+            crate::api::mission_store::MissionProjectPatch {
+                tags: Some(Vec::new()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     store
         .update_mission_project(
             id,

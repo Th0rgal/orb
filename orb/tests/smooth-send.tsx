@@ -31,6 +31,8 @@ Object.assign(window,{STEPS,REPLY});
 // `?idle`: a finished mission with a long transcript; a follow-up starts a
 // turn the way Core does (receipt, then user_message and status ~1 s later).
 const idle=new URLSearchParams(location.search).has('idle');
+const conflict=new URLSearchParams(location.search).has('conflict');
+(core as any).conflicts=2;
 if(idle){
  core.mission={...core.mission,backend:'claudecode',status:'completed',remote_job:null};
  core.rows=[];
@@ -80,6 +82,9 @@ window.fetch=async(input,init)=>{
  if(path==='/api/control/message'&&method==='POST'){
   const body=JSON.parse(String(init!.body));const mid=body.client_message_id??body.id??crypto.randomUUID();
   await new Promise(r=>setTimeout(r,300));
+  // `?conflict`: an older Core refusing the follow-up while an automatic
+  // resume runs on the node, then accepting it.
+  if(conflict&&(core as any).conflicts-->0)return new Response(`REMOTE_JOB_STILL_RUNNING: mission ${id} still owns job old on remote node 'babylon'; wait for it to finish or cancel the mission first`,{status:409});
   if(idle){
    setTimeout(()=>{
     core.events=[...core.events,{id:40,event_id:mid,sequence:40,event_type:'user_message',timestamp:'',content:body.content,metadata:{queued:false}}];

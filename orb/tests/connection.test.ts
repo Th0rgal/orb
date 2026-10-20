@@ -206,7 +206,16 @@ it("replays the same replacement create after a lost response without sending th
   expect(bodies[0]).toEqual(bodies[1]);
 });
 
-it.each([['REMOTE_JOB_STILL_RUNNING: wait',409],['REMOTE_RESUME_REQUIRES_REPLACEMENT: unknown outcome',503]])('does not replace for %s',async(detail,status)=>{
+it('does not replace for REMOTE_JOB_STILL_RUNNING: re-posts the same message until Core queues it',async()=>{
+  setConnection('http://no-replacement.test','token');
+  let refusals=1;
+  const fetcher=vi.fn(async(url:string)=>url.endsWith('/source')?Response.json({id:'source',remote_node_id:'dgx-spark'}):refusals-->0?new Response('REMOTE_JOB_STILL_RUNNING: wait',{status:409}):Response.json({id:'m1',queued:true,message_accepted:true}));vi.stubGlobal('fetch',fetcher);
+  await expect(sendMissionMessage('source','Follow up',undefined,'m1')).resolves.toMatchObject({id:'m1',queued:true});
+  const posts=fetcher.mock.calls.filter(([url])=>url.endsWith('/message'));
+  expect(posts).toHaveLength(2);
+  expect(fetcher.mock.calls.some(([url])=>url.endsWith('/missions'))).toBe(false);
+});
+it.each([['REMOTE_RESUME_REQUIRES_REPLACEMENT: unknown outcome',503]])('does not replace for %s',async(detail,status)=>{
   setConnection('http://no-replacement.test','token');
   const fetcher=vi.fn(async(url:string)=>url.endsWith('/source')?Response.json({id:'source',remote_node_id:'dgx-spark'}):new Response(detail as string,{status:status as number}));vi.stubGlobal('fetch',fetcher);
   await expect(sendMissionMessage('source','Follow up')).rejects.toThrow(detail as string);
