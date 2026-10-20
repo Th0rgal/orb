@@ -11,8 +11,8 @@ settings:
     # Single source of the app version for the app and the Live Activity extension
     # (both Info.plists read these). Bump CURRENT_PROJECT_VERSION (YYYYMMDDNN) for a
     # release; Xcode Cloud appends its run number (ci_scripts/ci_pre_xcodebuild.sh).
-    MARKETING_VERSION: "1.6.0"
-    CURRENT_PROJECT_VERSION: "2026102002"
+    MARKETING_VERSION: "1.6.1"
+    CURRENT_PROJECT_VERSION: "2026102101"
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: "Automatic"
     ENABLE_PREVIEWS: "YES"
