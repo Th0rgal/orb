@@ -740,6 +740,13 @@ fn append_bounded(target: &mut String, text: &str) {
     }
 }
 
+fn is_goal_turn(mission: &Mission, antigravity: Option<&crate::antigravity::Stream>) -> bool {
+    match antigravity {
+        Some(stream) => mission.goal_mode && stream.goal_mode,
+        None => mission.goal_mode,
+    }
+}
+
 fn goal_objective(mission: &Mission) -> Option<String> {
     if !mission.goal_mode {
         return None;
@@ -885,6 +892,14 @@ impl NativeGrokObserver {
                 cache_read_input_tokens: Some(stream.cache_read_tokens),
                 cache_creation_input_tokens: None,
             })
+    }
+
+    /// Whether this job runs a goal turn. Antigravity says so itself: `agy`
+    /// expands its native `/goal` command only for a `/goal` prompt, so a
+    /// plain reply in a mission that once had a goal is an ordinary turn and
+    /// must not report (and re-persist) the old goal's status.
+    fn goal_turn(&self) -> bool {
+        is_goal_turn(&self.mission, self.stream.antigravity.as_ref())
     }
 
     /// Attach to a native Grok job without a host goal driver.
@@ -1595,7 +1610,7 @@ impl NativeGrokObserver {
             && (!self.stream.claude || legacy_claude || self.stream.ended)
             && !auth_required
             && self.stream.error.is_none()
-            && (!self.mission.goal_mode || legacy_claude || native_end)
+            && (!self.goal_turn() || legacy_claude || native_end)
             && (!codex_goal || self.stream.native_goal_status.as_deref() == Some("complete"));
         let allocated = take_allocated_claude_session(self.job_id);
         if self.stream.claude && !success {
@@ -1708,8 +1723,8 @@ impl NativeGrokObserver {
             );
         }
 
-        if let Some(objective) =
-            goal_objective(&self.mission).filter(|_| self.mission.backend != "codex")
+        if let Some(objective) = goal_objective(&self.mission)
+            .filter(|_| self.mission.backend != "codex" && self.goal_turn())
         {
             let status = if success {
                 self.stream
@@ -3818,6 +3833,33 @@ mod tests {
             vec![StreamUpdate::TextSnapshot("tail".into())]
         );
         assert_eq!(stream.text, "tail");
+    }
+
+    #[test]
+    fn antigravity_plain_reply_in_goal_mission_is_not_a_goal_turn() {
+        // Prod 3fe5c5a3 / 9304baf4: each plain reply re-emitted the old goal's
+        // `goal_status` because the observer trusted the sticky mission flag.
+        let mut mission: Mission = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(),
+            "status": "active",
+            "workspace_id": Uuid::nil(),
+            "backend": "antigravity",
+            "history": [],
+            "created_at": "",
+            "updated_at": "",
+        }))
+        .unwrap();
+        mission.goal_mode = true;
+        mission.goal_objective = Some("old goal".into());
+        let mut plain = crate::antigravity::Stream::default();
+        assert!(!is_goal_turn(&mission, Some(&plain)));
+        plain.goal_mode = true; // agy expanded its native `/goal`
+        assert!(is_goal_turn(&mission, Some(&plain)));
+        mission.goal_mode = false; // finished or stopped
+        assert!(!is_goal_turn(&mission, Some(&plain)));
+        mission.goal_mode = true;
+        mission.backend = "codex".into();
+        assert!(is_goal_turn(&mission, None));
     }
 
     #[test]

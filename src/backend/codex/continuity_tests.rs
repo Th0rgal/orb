@@ -868,3 +868,46 @@ fn a_thread_that_ran_a_tool_or_is_attached_keeps_its_account() {
     // Nothing to release for a mission that never started a thread.
     assert!(!continuity::release_unused(&dir.path().join("absent.json")).unwrap());
 }
+
+#[test]
+fn native_goal_continues_only_when_not_finished_or_stopped() {
+    use super::native_goal_continues;
+    assert!(!native_goal_continues("complete", false));
+    assert!(!native_goal_continues("paused", false));
+    assert!(native_goal_continues("paused", true));
+    assert!(native_goal_continues("active", false));
+    assert!(native_goal_continues("blocked", false));
+}
+
+#[tokio::test]
+async fn codex_continuity_plain_reply_after_stop_is_one_turn_and_keeps_goal_paused() {
+    let mut f = Fixture::new();
+    let cancel = CancellationToken::new();
+    let (mut rx, handle) = f
+        .start(
+            f.backend_config("hold", cancel.clone()),
+            "/goal synthetic objective",
+        )
+        .await
+        .unwrap();
+    wait_file(&f.dir.path().join("started")).await;
+    cancel.cancel();
+    while rx.recv().await.is_some() {}
+    handle.await.unwrap();
+    assert_eq!(f.state()["goal"]["status"], "paused");
+    let goal_sets = f.requests("thread/goal/set").len();
+
+    f.config.current_message = "just answer this question".into();
+    let events = f.run("normal", "just answer this question").await;
+    // No reactivation: the reply ran as an ordinary turn.
+    assert_eq!(f.requests("thread/goal/set").len(), goal_sets);
+    assert_eq!(f.state()["inputs"], json!(["just answer this question"]));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ExecutionEvent::CodexSessionBound {
+            goal_mode: false,
+            ..
+        }
+    )));
+    f.assert_processes_stopped();
+}

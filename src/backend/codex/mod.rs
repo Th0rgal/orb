@@ -130,6 +130,14 @@ impl Backend for CodexBackend {
 // Pure helpers (testable without spawning codex)
 // ---------------------------------------------------------------------------
 
+/// Whether a turn continues the thread's existing native goal. A completed
+/// goal never continues on its own, and a paused one (the user stopped it)
+/// only on an explicit `/goal`; other suspended states (blocked, limited)
+/// take the current message as a hint, as before.
+fn native_goal_continues(status: &str, requested_goal: bool) -> bool {
+    requested_goal || !matches!(status, "complete" | "paused")
+}
+
 /// Strip a leading `/goal ` prefix from a user message.
 ///
 /// Returns `(is_goal_mission, payload)`. Single-pass via `strip_prefix`
@@ -501,7 +509,9 @@ async fn send_message_streaming_app_server(
                 }
                 if planning && goal.status != "complete" { return Err(anyhow::anyhow!("Finish the active goal or start the plan in a separate session")); }
                 lease.note_goal()?;
-                if goal.status != "complete" || requested_goal {
+                // A user Stop pauses the native goal. A plain reply afterwards
+                // is one ordinary turn: only an explicit `/goal` resumes it.
+                if native_goal_continues(&goal.status, requested_goal) {
                     if cyber_program.is_some() { return Err(anyhow::anyhow!("unsupported_access_program: native goal continuation requires an explicit Automatic selection")); }
                     if goal.status == "complete" {
                         return Err(anyhow::anyhow!("codex_continuity_goal_complete: existing goal is already complete; refusing to reset its usage"));

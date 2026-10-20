@@ -19715,6 +19715,12 @@ pub async fn cancel_mission(
     machine_transfer::guard(&control.mission_store, mission_id)
         .await
         .map_err(internal_error)?;
+    // Disarm before cancelling: Stop must end the goal loop even when no turn
+    // is running (between two goal iterations), and the trailing `paused`
+    // status of the cancelled turn no longer re-arms it.
+    disarm_goal_on_user_stop(&control.mission_store, &control.events_tx, mission_id)
+        .await
+        .map_err(internal_error)?;
     control
         .cmd_tx
         .send(ControlCommand::CancelMission {
@@ -23647,6 +23653,62 @@ fn mission_status_summary_for_terminal_reason(reason: TerminalReason) -> Option<
         TerminalReason::CapacityLimited => Some("Provider capacity limit reached".to_string()),
         TerminalReason::AuthError => Some("Authentication failed".to_string()),
     }
+}
+
+/// How a native goal status changes the persisted `goal_mode` flag.
+///
+/// `Some(true)`: the loop is running. `Some(false)`: the loop ended for good
+/// (completed, cleared, aborted, budget exhausted), so no resume path may
+/// rebuild a `/goal` prompt from it. `None`: the loop is suspended (paused,
+/// blocked, usage limited) and keeps whatever state it had: an automatic
+/// recovery may continue it, unless the user stopped it (see
+/// [`disarm_goal_on_user_stop`]).
+pub(crate) fn goal_mode_after_status(status: &str) -> Option<bool> {
+    match status {
+        "active" => Some(true),
+        "complete" | "completed" | "cleared" | "budget_limited" => Some(false),
+        s if s.starts_with("aborted") => Some(false),
+        _ => None,
+    }
+}
+
+/// A user Stop ends the goal loop: persisted goal mode is disarmed (the
+/// objective stays for display) and a server-driven Grok goal automation is
+/// disabled, so neither automatic recovery nor the AgentFinished hook starts
+/// another goal turn. Only a new `/goal` re-arms it.
+pub(crate) async fn disarm_goal_on_user_stop(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+) -> Result<(), String> {
+    let Some(mission) = mission_store.get_mission(mission_id).await? else {
+        return Ok(());
+    };
+    if mission.goal_mode {
+        mission_store
+            .update_mission_goal(mission_id, false, mission.goal_objective.as_deref())
+            .await?;
+    }
+    if let Some(mut row) =
+        super::grok_goal::active_goal_for_mission(mission_store, mission_id).await
+    {
+        let objective = super::grok_goal::objective_of(&row);
+        super::grok_goal::disable_goal(mission_store, &mut row).await?;
+        let _ = events_tx.send(AgentEvent::GoalStatus {
+            status: "aborted:cancelled".to_string(),
+            objective,
+            mission_id: Some(mission_id),
+        });
+    } else if mission.goal_mode {
+        if let Some(objective) = mission.goal_objective {
+            let _ = events_tx.send(AgentEvent::GoalStatus {
+                status: "aborted:cancelled".to_string(),
+                objective,
+                mission_id: Some(mission_id),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_goal_objective(message: &str) -> Option<String> {
@@ -31404,12 +31466,24 @@ async fn control_actor_loop(
                                 mission_id: Some(mid),
                             } = &event
                             {
-                                let goal_mode = status != "cleared";
-                                let objective = goal_mode.then_some(objective.as_str());
-                                if let Err(err) = mission_store
-                                    .update_mission_goal(*mid, goal_mode, objective)
-                                    .await
-                                {
+                                // Only an active loop arms goal mode; a finished
+                                // loop disarms it (keeping the objective for
+                                // display). Paused/blocked keep the current state
+                                // so a user Stop, which disarmed it, is not undone
+                                // by the runner's trailing `paused` event.
+                                let update = match goal_mode_after_status(status) {
+                                    Some(goal_mode) => {
+                                        let objective = (status != "cleared")
+                                            .then_some(objective.as_str());
+                                        Some(
+                                            mission_store
+                                                .update_mission_goal(*mid, goal_mode, objective)
+                                                .await,
+                                        )
+                                    }
+                                    None => None,
+                                };
+                                if let Some(Err(err)) = update {
                                     tracing::warn!(
                                         mission_id = %mid,
                                         status = %status,
@@ -35208,6 +35282,73 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn goal_completion_disarms_and_suspension_never_rearms() {
+        // 1. Completion ends the loop: no resume path may rebuild `/goal`.
+        for status in [
+            "complete",
+            "cleared",
+            "budget_limited",
+            "aborted",
+            "aborted:cancelled",
+        ] {
+            assert_eq!(goal_mode_after_status(status), Some(false), "{status}");
+        }
+        assert_eq!(goal_mode_after_status("active"), Some(true));
+        // 2./3. The trailing `paused` of a stopped turn (or a plain reply's
+        // turn) leaves the state untouched, so a Stop's disarm survives.
+        for status in ["paused", "blocked", "usageLimited", "budgetLimited"] {
+            assert_eq!(goal_mode_after_status(status), None, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn user_stop_disarms_goal_and_grok_goal_automation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            mission_store::SqliteMissionStore::new(dir.path().to_path_buf(), "goal-stop-test")
+                .await
+                .unwrap(),
+        );
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let mission = store
+            .create_mission(Some("goal"), None, None, None, None, Some("grok"), None)
+            .await
+            .unwrap();
+        store
+            .update_mission_goal(mission.id, true, Some("ship it"))
+            .await
+            .unwrap();
+        super::super::grok_goal::create_goal_automation(&store, mission.id, "ship it")
+            .await
+            .unwrap();
+
+        disarm_goal_on_user_stop(&store, &events_tx, mission.id)
+            .await
+            .unwrap();
+
+        let after = store.get_mission(mission.id).await.unwrap().unwrap();
+        assert!(!after.goal_mode, "Stop must disarm automatic goal resumes");
+        assert_eq!(after.goal_objective.as_deref(), Some("ship it"));
+        assert!(
+            super::super::grok_goal::active_goal_for_mission(&store, mission.id)
+                .await
+                .is_none(),
+            "the AgentFinished continuation must not fire after Stop"
+        );
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(AgentEvent::GoalStatus { status, .. }) if status == "aborted:cancelled"
+        ));
+        // The cancelled turn's trailing `paused` does not re-arm it.
+        assert_eq!(goal_mode_after_status("paused"), None);
+        // A Stop with no goal is a no-op.
+        disarm_goal_on_user_stop(&store, &events_tx, mission.id)
+            .await
+            .unwrap();
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[test]
