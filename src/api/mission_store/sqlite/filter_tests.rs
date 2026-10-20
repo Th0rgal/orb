@@ -136,7 +136,7 @@ async fn project_filter_stays_exact() {
 #[tokio::test]
 async fn attention_only_hides_acknowledged_completed_and_superseded() {
     use crate::api::control::events::MissionStatus;
-    use crate::api::mission_store::{MissionStore, SUPERSEDED_TAG};
+    use crate::api::mission_store::SUPERSEDED_TAG;
 
     let dir = tempfile::tempdir().expect("temp dir");
     let store = store(&dir).await;

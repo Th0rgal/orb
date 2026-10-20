@@ -1,5 +1,4 @@
 use super::SqliteMissionStore;
-use crate::api::mission_store::MissionStore;
 
 async fn store(dir: &tempfile::TempDir) -> SqliteMissionStore {
     SqliteMissionStore::new(dir.path().to_path_buf(), "prefix-user")
