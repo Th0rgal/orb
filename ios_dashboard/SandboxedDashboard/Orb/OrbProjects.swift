@@ -315,6 +315,8 @@ struct OrbHome: View {
     @State private var projects: [OrbRow] = []
     @State private var loading = true
     @State private var error = ""
+    @State private var connectionIssue: OrbConnectionIssue?
+    @State private var changingServer = false
     @State private var search = ""
     @State private var settings = false
     @State private var creating = false
@@ -424,6 +426,9 @@ struct OrbHome: View {
                 }
             }
             .sheet(isPresented: $settings) { OrbSettingsHome(onBackendChanged: { settings = false; Task { await load() } }) }
+            .sheet(isPresented: $changingServer) {
+                SetupSheet(onComplete: { changingServer = false; Task { await load() } }, allowsDismissal: true)
+            }
             .alert("New project", isPresented: $creating) {
                 TextField("Project name", text: $name)
                 Button("Create") { Task { await create() } }; Button("Cancel", role: .cancel) {}
@@ -854,7 +859,10 @@ struct OrbHome: View {
     private var projectsScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
+                if let issue = connectionIssue {
+                    OrbConnectionIssueCard(issue: issue, onChangeServer: { changingServer = true }, onUseDefault: useDefaultServer)
+                        .padding(.vertical, 6)
+                } else if !error.isEmpty { OrbNotice(message: error).padding(.vertical, 6) }
                 ForEach(projects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { project in
                     NavigationLink { OrbProjectPage(project: project) } label: {
                         HStack(spacing: 14) {
@@ -1118,7 +1126,7 @@ struct OrbHome: View {
             Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
             let nextProjects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             if projects != nextProjects { projects = nextProjects }
-            OrbDisk.saveAsync(value, key: "projects"); error = ""
+            OrbDisk.saveAsync(value, key: "projects"); error = ""; connectionIssue = nil
             let roster = nextProjects
             Task {
                 if let rawMissions = await Log.attempt(.network, "home missions", { try await api.call("/api/control/missions?limit=100") }) {
@@ -1140,7 +1148,29 @@ struct OrbHome: View {
                     _ = await Log.attempt(.cache, "project prefetch", path: proj.id) { try await OrbReadCache.project(proj.id) }
                 }
             }
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            self.error = error.localizedDescription
+            await reportConnectionIssue(error)
+        }
+    }
+    /// Turns an unreachable-server failure into the actionable card; probes the default server for LAN URLs.
+    private func reportConnectionIssue(_ error: Error) async {
+        let base = api.baseURL, detail = error.localizedDescription
+        let unreachable = OrbConnection.isUnreachable(error)
+        let proxy = OrbConnection.systemProxy()
+        connectionIssue = OrbConnection.issue(serverURL: base, error: detail, unreachable: unreachable, defaultReachable: nil, proxy: proxy)
+        guard connectionIssue != nil, OrbConnection.shouldProbeDefault(serverURL: base, unreachable: unreachable) else { return }
+        let reachable = await OrbConnection.probeDefault()
+        if api.baseURL == base, connectionIssue != nil {
+            connectionIssue = OrbConnection.issue(serverURL: base, error: detail, unreachable: unreachable, defaultReachable: reachable, proxy: proxy)
+        }
+    }
+    private func useDefaultServer() {
+        api.baseURL = OrbConnection.defaultBaseURL
+        api.connectionGeneration += 1
+        connectionIssue = nil
+        error = ""
+        Task { await load() }
     }
     private func create() async {
         let slug = name.folding(options: .diacriticInsensitive, locale: .current).lowercased().split(whereSeparator: { !$0.isLetter && !($0.isNumber) }).joined(separator: "-")
@@ -1840,5 +1870,49 @@ struct OrbMoveBanner: View {
 struct OrbSwitchStyle: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         Toggle(configuration).toggleStyle(.switch).tint(OrbStyle.success)
+    }
+}
+
+/// Connection failure card: plain-language message, the failing URL, and two ways out.
+struct OrbConnectionIssueCard: View {
+    let issue: OrbConnectionIssue
+    let onChangeServer: () -> Void
+    let onUseDefault: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(issue.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+            Text(issue.serverURL)
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(OrbStyle.textSecondary)
+                .lineLimit(1).truncationMode(.middle)
+                .textSelection(.enabled)
+            Text(issue.message).font(.footnote).foregroundStyle(OrbStyle.textSecondary)
+            HStack(spacing: 8) {
+                if issue.offerUseDefault {
+                    button("Use default", primary: issue.recommendDefault, action: onUseDefault)
+                        .accessibilityIdentifier("orb.connection.useDefault")
+                }
+                button("Change server", primary: !issue.recommendDefault, action: onChangeServer)
+                    .accessibilityIdentifier("orb.connection.changeServer")
+            }
+            if !issue.technicalDetail.isEmpty {
+                OrbNotice(message: "Details\n\nlog tail:\n\(issue.technicalDetail)")
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(OrbStyle.border, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("orb.connectionIssue")
+    }
+    private func button(_ label: String, primary: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(primary ? Color.black : Color.white)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(primary ? Color.white : Color.white.opacity(0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
