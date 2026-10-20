@@ -61,7 +61,6 @@ struct OrbConversation: View {
     @State private var optimisticPrompt: String?
     @State private var liveText = ""
     @State private var answered: Set<String> = []
-    @State private var copiedItemID: String?
     @State private var expandedLogIDs: Set<String> = []
     @State private var expandedUserMessageIDs: Set<String> = []
     @State private var queueExpanded = true
@@ -281,6 +280,12 @@ struct OrbConversation: View {
                 .sheet(isPresented: $moving) { moveConversationSheet }
                 .sheet(isPresented: $forking) { OrbForkSheet(mission: mission) { forkedMission = $0["id"].text } }
                 .sheet(item: $sideQuestion) { OrbSideQuestionSheet(parentID: $0.parent, question: $0.question) }
+                // Warm the /btw history so the side sheet opens on it, not on a spinner.
+                .task(id: id) {
+                    guard let id, !id.isEmpty else { return }
+                    try? await Task.sleep(for: .seconds(1))
+                    try? await OrbBtwStore.shared(id).refresh()
+                }
                 .confirmationDialog("Clone conversation", isPresented: $cloning, titleVisibility: .visible) { cloneActions }
                 .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
                 .task {
@@ -712,89 +717,69 @@ struct OrbConversation: View {
                 let planObj = goalObj == nil ? OrbStyle.planObjective(images.text) : nil
                 let displayBody = goalObj ?? planObj ?? images.text
                 let isPendingTurn = working && item.0 == lastUserItemID
-                HStack {
-                    Spacer(minLength: 40)
-                    VStack(alignment: .leading, spacing: 8) {
-                        if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
-                        if goalObj != nil || planObj != nil || presentation.attached {
-                            HStack(spacing: 6) {
-                                if goalObj != nil {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "target")
-                                            .font(.system(size: 10, weight: .semibold))
-                                        Text("Goal")
-                                            .font(.caption2.weight(.semibold))
-                                            .lineLimit(1)
-                                            .fixedSize(horizontal: true, vertical: false)
-                                    }
-                                    .foregroundStyle(.primary.opacity(0.9))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3)
-                                    .background(Color.white.opacity(0.1), in: Capsule())
-                                } else if planObj != nil {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "list.bullet.clipboard")
-                                            .font(.system(size: 10, weight: .semibold))
-                                        Text("Plan")
-                                            .font(.caption2.weight(.semibold))
-                                            .lineLimit(1)
-                                            .fixedSize(horizontal: true, vertical: false)
-                                    }
-                                    .foregroundStyle(.primary.opacity(0.9))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3)
-                                    .background(Color.white.opacity(0.1), in: Capsule())
+                OrbUserBubble(copyText: displayBody, pending: isPendingTurn) {
+                    if !images.paths.isEmpty { OrbImageStrip(images: images, missionID: id) }
+                    if goalObj != nil || planObj != nil || presentation.attached {
+                        HStack(spacing: 6) {
+                            if goalObj != nil {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "target")
+                                        .font(.system(size: 10, weight: .semibold))
+                                    Text("Goal")
+                                        .font(.caption2.weight(.semibold))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 }
-                                if presentation.attached {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "paperclip")
-                                            .font(.system(size: 10, weight: .medium))
-                                        Text("Attached context")
-                                            .font(.caption2)
-                                            .lineLimit(1)
-                                            .fixedSize(horizontal: true, vertical: false)
-                                    }
-                                    .foregroundStyle(OrbStyle.textSecondary)
+                                .foregroundStyle(.primary.opacity(0.9))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.1), in: Capsule())
+                            } else if planObj != nil {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "list.bullet.clipboard")
+                                        .font(.system(size: 10, weight: .semibold))
+                                    Text("Plan")
+                                        .font(.caption2.weight(.semibold))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 }
+                                .foregroundStyle(.primary.opacity(0.9))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.1), in: Capsule())
                             }
-                        }
-                        if !displayBody.isEmpty {
-                            let isLongUserMsg = displayBody.count > 4000 && !expandedUserMessageIDs.contains(item.0)
-                            let shownUserText = isLongUserMsg ? String(displayBody.prefix(4000)) + "…" : displayBody
-                            Text(shownUserText)
-                                .font(.subheadline)
-                                .foregroundStyle(.primary)
-                                .textSelection(.enabled)
-                                .orbShimmer(active: isPendingTurn)
-                            if isLongUserMsg {
-                                Button {
-                                    withAnimation(.snappy(duration: 0.18)) {
-                                        _ = expandedUserMessageIDs.insert(item.0)
-                                    }
-                                } label: {
-                                    Text("Show full message")
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(OrbStyle.textSecondary)
+                            if presentation.attached {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "paperclip")
+                                        .font(.system(size: 10, weight: .medium))
+                                    Text("Attached context")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 }
-                                .buttonStyle(.plain)
+                                .foregroundStyle(OrbStyle.textSecondary)
                             }
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(isPendingTurn ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
-                    )
-                    .contextMenu {
-                        if !displayBody.isEmpty {
+                    if !displayBody.isEmpty {
+                        let isLongUserMsg = displayBody.count > 4000 && !expandedUserMessageIDs.contains(item.0)
+                        let shownUserText = isLongUserMsg ? String(displayBody.prefix(4000)) + "…" : displayBody
+                        Text(shownUserText)
+                            .font(.subheadline)
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                            .orbShimmer(active: isPendingTurn)
+                        if isLongUserMsg {
                             Button {
-                                UIPasteboard.general.string = displayBody
-                                OrbHaptics.light()
+                                withAnimation(.snappy(duration: 0.18)) {
+                                    _ = expandedUserMessageIDs.insert(item.0)
+                                }
                             } label: {
-                                Label("Copy message", systemImage: "doc.on.doc")
+                                Text("Show full message")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(OrbStyle.textSecondary)
                             }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -811,39 +796,9 @@ struct OrbConversation: View {
         } else {
             let parsedRemote = OrbRemoteLog.parse(item.2)
             VStack(alignment: .leading, spacing: 4) {
-                OrbRichText(source: parsedRemote.text, onArtifact: { path in
+                OrbAssistantMessage(text: parsedRemote.text, onArtifact: { path in
                     Task { await openWorkspaceOrArtifact(path) }
-                })
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                HStack(spacing: 12) {
-                    Button {
-                        UIPasteboard.general.string = parsedRemote.text
-                        OrbHaptics.light()
-                        withAnimation(.snappy(duration: 0.15)) { copiedItemID = item.0 }
-                        Task {
-                            try? await Task.sleep(for: .seconds(1.4))
-                            if copiedItemID == item.0 {
-                                withAnimation(.snappy(duration: 0.15)) { copiedItemID = nil }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: copiedItemID == item.0 ? "checkmark" : "doc.on.doc")
-                                .font(.system(size: 10, weight: .medium))
-                            if copiedItemID == item.0 {
-                                Text("Copied")
-                                    .font(.caption2)
-                            }
-                        }
-                        .foregroundStyle(copiedItemID == item.0 ? OrbStyle.success : OrbStyle.textMuted)
-                        .padding(.vertical, 2)
-                        .padding(.horizontal, 4)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(copiedItemID == item.0 ? "Copied response" : "Copy response")
-
+                }) {
                     if parsedRemote.details != nil {
                         Button {
                             withAnimation(.snappy(duration: 0.18)) {
@@ -865,7 +820,6 @@ struct OrbConversation: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    Spacer()
                 }
 
                 if let details = parsedRemote.details, expandedLogIDs.contains(item.0) {
@@ -1502,54 +1456,6 @@ struct OrbConversation: View {
         (!busy || canDeferSend) && !cloudBlocked && modeQuery == nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var sendButton: some View {
-        Button {
-            OrbHaptics.light()
-            Task { await send() }
-        } label: {
-            ZStack {
-                Circle()
-                    .fill(canSend ? Color.white : Color.white.opacity(busy ? 0.12 : 0.06))
-                    .frame(width: 32, height: 32)
-                if busy {
-                    ProgressView().controlSize(.small).tint(.white.opacity(0.85))
-                } else {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(canSend ? OrbStyle.background : Color.white.opacity(0.25))
-                }
-            }
-            .frame(width: 38, height: 40)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!canSend)
-        .accessibilityIdentifier("composer.send")
-        .accessibilityLabel(busy ? "Sending message" : "Send message")
-        .accessibilityValue(busy ? "Sending" : canSend ? "Ready" : "Unavailable")
-    }
-
-    private var stopButton: some View {
-        Button {
-            OrbHaptics.light()
-            Task { await cancel() }
-        } label: {
-            ZStack {
-                Circle()
-                    .fill(Color.white.opacity(0.08))
-                    .frame(width: 30, height: 30)
-                    .overlay(Circle().stroke(OrbStyle.borderStrong, lineWidth: 1))
-                Image(systemName: "stop.fill")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.9))
-            }
-            .frame(width: 34, height: 40)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Stop agent")
-    }
-
     private var composer: some View {
         VStack(spacing: 0) {
             if activeAtMentionQuery != nil {
@@ -1558,18 +1464,24 @@ struct OrbConversation: View {
                 modePicker
             }
             if followUps.count > 0 || editingQueuedID != nil { queuedDrawer }
-            if dictation.active {
-                OrbDictationCapsule(dictation: dictation)
-            } else {
-                composerInput
-            }
+            composerInput
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 6)
     }
 
     private var composerInput: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        OrbComposerBox(
+            placeholder: id == nil ? (mode == "Goal" ? "Describe the goal objective…" : mode == "Plan" ? "What should we plan?" : "Plan, ask, build… (@ for context)") : (working ? "Queue a follow-up…" : "Follow up… (@ for context)"),
+            text: $text,
+            focused: $composerFocused,
+            dictation: dictation,
+            busy: busy,
+            canSend: canSend,
+            showStop: working && (!isCloud || selection.canCancel),
+            onSend: { Task { await send() } },
+            onStop: { Task { await cancel() } }
+        ) {
             if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
             let mentioned = mentionedContextItems
             if (mode != "Message" && supportsMode) || !mentioned.isEmpty {
@@ -1618,104 +1530,81 @@ struct OrbConversation: View {
                     .padding(.top, 2)
                 }
             }
-            TextField(id == nil ? (mode == "Goal" ? "Describe the goal objective…" : mode == "Plan" ? "What should we plan?" : "Plan, ask, build… (@ for context)") : (working ? "Queue a follow-up…" : "Follow up… (@ for context)"), text: $text, axis: .vertical)
-                .lineLimit(1...6)
-                .font(.subheadline)
-                .padding(.horizontal, 4)
-                .padding(.top, 6)
-                .focused($composerFocused)
-                .accessibilityIdentifier("composer")
-            HStack(spacing: 5) {
-                if !effectiveProjectSlug.isEmpty && !isCloud {
-                    OrbAttachments(
-                        files: $attachments,
-                        error: $error,
-                        showContextMention: {
-                            if activeAtMentionQuery == nil {
-                                text += (text.isEmpty || text.last?.isWhitespace == true ? "" : " ") + "@"
-                            }
-                            composerFocused = true
-                        },
-                        showMode: supportsMode ? {
-                            if modeQuery == nil {
-                                text = "/"
-                            }
-                            composerFocused = true
-                        } : nil,
-                        showFiles: false
+        } leading: {
+            if !effectiveProjectSlug.isEmpty && !isCloud {
+                OrbAttachments(
+                    files: $attachments,
+                    error: $error,
+                    showContextMention: {
+                        if activeAtMentionQuery == nil {
+                            text += (text.isEmpty || text.last?.isWhitespace == true ? "" : " ") + "@"
+                        }
+                        composerFocused = true
+                    },
+                    showMode: supportsMode ? {
+                        if modeQuery == nil {
+                            text = "/"
+                        }
+                        composerFocused = true
+                    } : nil,
+                    showFiles: false
+                )
+            }
+            Button {
+                composerFocused = false
+                showSelection = true
+            } label: {
+                HStack(spacing: 6) {
+                    HStack(spacing: 4) {
+                        Image(systemName: selection.primaryIcon)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                        Text(selection.primaryPillLabel)
+                            .font(.caption.weight(selection.needsAgentSelection ? .semibold : .medium))
+                            .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(OrbStyle.textMuted)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5.5)
+                    .background(
+                        selection.needsAgentSelection ? Color.white.opacity(0.09) : Color.white.opacity(0.05),
+                        in: Capsule()
                     )
-                }
-                Button {
-                    composerFocused = false
-                    showSelection = true
-                } label: {
-                    HStack(spacing: 6) {
-                        HStack(spacing: 4) {
-                            Image(systemName: selection.primaryIcon)
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
-                            Text(selection.primaryPillLabel)
-                                .font(.caption.weight(selection.needsAgentSelection ? .semibold : .medium))
-                                .foregroundStyle(selection.needsAgentSelection ? .white : OrbStyle.textSecondary)
+                    .overlay(
+                        Capsule().stroke(
+                            selection.needsAgentSelection ? OrbStyle.borderStrong : OrbStyle.border,
+                            lineWidth: 1
+                        )
+                    )
+
+                    if let nodeBadge = selection.machinePillLabel {
+                        HStack(spacing: 3.5) {
+                            Image(systemName: "server.rack")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(OrbStyle.textMuted)
+                            Text(nodeBadge)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(OrbStyle.textSecondary)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 8.5, weight: .semibold))
-                                .foregroundStyle(OrbStyle.textMuted)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5.5)
-                        .background(
-                            selection.needsAgentSelection ? Color.white.opacity(0.09) : Color.white.opacity(0.05),
-                            in: Capsule()
-                        )
-                        .overlay(
-                            Capsule().stroke(
-                                selection.needsAgentSelection ? OrbStyle.borderStrong : OrbStyle.border,
-                                lineWidth: 1
-                            )
-                        )
-
-                        if let nodeBadge = selection.machinePillLabel {
-                            HStack(spacing: 3.5) {
-                                Image(systemName: "server.rack")
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(OrbStyle.textMuted)
-                                Text(nodeBadge)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(OrbStyle.textSecondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 5)
-                            .background(Color.white.opacity(0.04), in: Capsule())
-                            .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
-                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.04), in: Capsule())
+                        .overlay(Capsule().stroke(OrbStyle.border, lineWidth: 1))
                     }
-                    .frame(minHeight: 38)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Agent and model: \(selection.label)")
-                .accessibilityIdentifier("agent-selection")
-
-                Spacer(minLength: 2)
-
-                OrbDictationButton(dictation: dictation, text: $text, onStart: { composerFocused = false }, onComplete: { composerFocused = true })
-                    .disabled(busy)
-                if working && (!isCloud || selection.canCancel) {
-                    stopButton
-                }
-                sendButton
+                .frame(minHeight: 38)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Agent and model: \(selection.label)")
+            .accessibilityIdentifier("agent-selection")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.borderStrong, lineWidth: 1))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("conversation-composer")
     }
 
     /// User messages Core delivered: events (id = client_message_id) and stored history.
@@ -2530,6 +2419,7 @@ struct OrbWorkFold: View {
     let headline: (action: String, detail: String)
     let elapsed: String
     let accessibilityStatus: String
+    var identifier = "agent-working"
     @State private var expanded = false
     @State private var expandedItemIDs: Set<String> = []
 
@@ -2602,7 +2492,7 @@ struct OrbWorkFold: View {
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(accessibilityStatus)
-                .accessibilityIdentifier("agent-working")
+                .accessibilityIdentifier(identifier)
             } else if !model.isEmpty {
                 Button {
                     withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
@@ -3202,4 +3092,209 @@ struct OrbDoubleTapDismissesKeyboard: UIViewRepresentable {
 /// one still awaiting Core for a failed send.
 @MainActor enum OrbSendsInFlight {
     static var keys: Set<String> = []
+}
+
+// MARK: - Shared message and composer components (conversation tab and /btw sheet)
+
+/// The user's message bubble: right-aligned card, copy from the context menu.
+struct OrbUserBubble<Content: View>: View {
+    let copyText: String
+    var pending = false
+    @ViewBuilder let content: Content
+    var body: some View {
+        HStack {
+            Spacer(minLength: 40)
+            VStack(alignment: .leading, spacing: 8) { content }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(pending ? OrbStyle.borderStrong : OrbStyle.border, lineWidth: 1)
+                )
+                .contextMenu {
+                    if !copyText.isEmpty {
+                        Button {
+                            UIPasteboard.general.string = copyText
+                            OrbHaptics.light()
+                        } label: {
+                            Label("Copy message", systemImage: "doc.on.doc")
+                        }
+                    }
+                }
+        }
+    }
+}
+
+extension OrbUserBubble where Content == OrbUserBubbleText {
+    /// A plain-text question bubble.
+    init(text: String, pending: Bool = false) {
+        self.init(copyText: text, pending: pending) { OrbUserBubbleText(text: text, pending: pending) }
+    }
+}
+
+struct OrbUserBubbleText: View {
+    let text: String
+    var pending = false
+    var body: some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            .textSelection(.enabled)
+            .orbShimmer(active: pending)
+    }
+}
+
+/// An assistant answer: the shared Markdown renderer, then the copy button and
+/// any extra controls (e.g. the remote log toggle).
+struct OrbAssistantMessage<Trailing: View>: View {
+    let text: String
+    var onArtifact: (String) -> Void = { _ in }
+    @ViewBuilder let trailing: Trailing
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            OrbRichText(source: text, onArtifact: onArtifact)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 12) {
+                Button {
+                    UIPasteboard.general.string = text
+                    OrbHaptics.light()
+                    withAnimation(.snappy(duration: 0.15)) { copied = true }
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.4))
+                        withAnimation(.snappy(duration: 0.15)) { copied = false }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10, weight: .medium))
+                        if copied {
+                            Text("Copied")
+                                .font(.caption2)
+                        }
+                    }
+                    .foregroundStyle(copied ? OrbStyle.success : OrbStyle.textMuted)
+                    .padding(.vertical, 2)
+                    .padding(.horizontal, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(copied ? "Copied response" : "Copy response")
+                trailing
+                Spacer()
+            }
+        }
+    }
+}
+
+extension OrbAssistantMessage where Trailing == EmptyView {
+    init(text: String, onArtifact: @escaping (String) -> Void = { _ in }) {
+        self.init(text: text, onArtifact: onArtifact) { EmptyView() }
+    }
+}
+
+/// The message composer: field, leading accessories (attachments, agent picker),
+/// dictation, stop and send. The dictation capsule replaces it while recording.
+struct OrbComposerBox<Top: View, Leading: View>: View {
+    let placeholder: String
+    @Binding var text: String
+    var focused: FocusState<Bool>.Binding
+    let dictation: OrbDictation
+    let busy: Bool
+    let canSend: Bool
+    var showStop = false
+    var fieldIdentifier = "composer"
+    var sendIdentifier = "composer.send"
+    var sendLabel = "Send message"
+    var stopLabel = "Stop agent"
+    var containerIdentifier = "conversation-composer"
+    let onSend: () -> Void
+    var onStop: () -> Void = {}
+    @ViewBuilder let top: Top
+    @ViewBuilder let leading: Leading
+
+    var body: some View {
+        if dictation.active {
+            OrbDictationCapsule(dictation: dictation)
+        } else {
+            box
+        }
+    }
+
+    private var box: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            top
+            TextField(placeholder, text: $text, axis: .vertical)
+                .lineLimit(1...6)
+                .font(.subheadline)
+                .padding(.horizontal, 4)
+                .padding(.top, 6)
+                .focused(focused)
+                .accessibilityIdentifier(fieldIdentifier)
+            HStack(spacing: 5) {
+                leading
+                Spacer(minLength: 2)
+                OrbDictationButton(dictation: dictation, text: $text, onStart: { focused.wrappedValue = false }, onComplete: { focused.wrappedValue = true })
+                    .disabled(busy)
+                if showStop { stopButton }
+                sendButton
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius, style: .continuous).stroke(OrbStyle.borderStrong, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(containerIdentifier)
+    }
+
+    private var sendButton: some View {
+        Button {
+            OrbHaptics.light()
+            onSend()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(canSend ? Color.white : Color.white.opacity(busy ? 0.12 : 0.06))
+                    .frame(width: 32, height: 32)
+                if busy {
+                    ProgressView().controlSize(.small).tint(.white.opacity(0.85))
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(canSend ? OrbStyle.background : Color.white.opacity(0.25))
+                }
+            }
+            .frame(width: 38, height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSend)
+        .accessibilityIdentifier(sendIdentifier)
+        .accessibilityLabel(busy ? "Sending message" : sendLabel)
+        .accessibilityValue(busy ? "Sending" : canSend ? "Ready" : "Unavailable")
+    }
+
+    private var stopButton: some View {
+        Button {
+            OrbHaptics.light()
+            onStop()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 30, height: 30)
+                    .overlay(Circle().stroke(OrbStyle.borderStrong, lineWidth: 1))
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+            .frame(width: 34, height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(stopLabel)
+    }
 }

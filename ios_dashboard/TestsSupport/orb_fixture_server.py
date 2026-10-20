@@ -6,6 +6,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 REQUIRE_AUTH = False
 EXPIRE_SESSION = False
 LIST_DELAY = 0
+HEALTH_DELAY = 0
 COUNTS = {}
 VALID_TOKEN = "orb-fixture-" + str(uuid.uuid4())
 LOCK = threading.Lock()
@@ -17,13 +18,14 @@ INBOX_STATE = {}
 QUEUE = []
 RECEIVED = []
 QUEUE_EVENTS = {}
+SCHEDULE = []
 PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
 PROMPT = "Please test the new interface"
 def reset():
-    global CORDONED
-    CORDONED = False
-    QUEUE.clear(); RECEIVED.clear(); QUEUE_EVENTS.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
+    global CORDONED, HEALTH_DELAY
+    CORDONED = False; HEALTH_DELAY = 0
+    QUEUE.clear(); RECEIVED.clear(); QUEUE_EVENTS.clear(); SCHEDULE.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
     PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
@@ -46,6 +48,39 @@ def reset():
     MISSIONS['idle-send']=dict(id='idle-send',title='Idle send',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='old turn'),dict(role='assistant',content='old reply')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:06:00Z')
     QUEUE_EVENTS['idle-send']=[]
     qadd('idle-send','user_message','old turn','old-id',at=time.time()-2150); qadd('idle-send','assistant_message','old reply',at=time.time()-2140)
+    # /btw: a conversation with two side threads, one answered (narration, an
+    # opencode compaction block, Markdown answer) and one live that answers ~8 s
+    # after a reset. Side questions sent to a thread stream, then complete.
+    MISSIONS['btw-chat']=dict(id='btw-chat',title='Side questions',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='Build the app'),dict(role='assistant',content='The app is built.')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:01:00Z')
+    now=time.time()
+    side('btw-done','completed',now-3600)
+    qadd('btw-done','user_message','<main_conversation_update>ctx</main_conversation_update>\n\nCurrent request:\nSummarise the build',at=now-3600)
+    qadd('btw-done','assistant_message_canonical','Reading the logs…',at=now-3590)
+    qadd('btw-done','assistant_message_canonical','Checking the tests.',at=now-3580)
+    qadd('btw-done','assistant_message',BTW_COMPACTION+'\n\n**BTW_DONE_OK** the build is green.\n\n- `swift build` passed\n- 12 tests ran\n\n```sh\nswift test\n```',at=now-3570)
+    side('btw-live','running',now-60)
+    qadd('btw-live','user_message','Current request:\nWhat is running now?',at=now-60)
+    later('btw-live',4,'assistant_message_canonical','Looking at the running job…')
+    later('btw-live',45,'assistant_message','LIVE_ANSWER_OK: the **build** is running.',status='completed')
+
+BTW_COMPACTION='## Objective\nAnswer the side question.\n\n## Progress\n- read the logs\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.'
+
+def side(mid, status, created):
+    MISSIONS[mid]=dict(id=mid,title='Side question',status=status,project='orb-test',backend='opencode',tags=['btw-parent:btw-chat'],history=[],created_at=iso(created),updated_at=iso(created),last_activity_at=iso(time.time() if status=='running' else created+30))
+    QUEUE_EVENTS[mid]=[]
+
+def later(mid, delay, kind, content, status=None):
+    SCHEDULE.append(dict(at=time.time()+delay,mid=mid,kind=kind,content=content,status=status))
+
+def run_schedule():
+    for item in sorted(list(SCHEDULE), key=lambda i: i['at']):
+        if time.time() < item['at']: continue
+        SCHEDULE.remove(item); m=MISSIONS.get(item['mid'])
+        if not m: continue
+        qadd(item['mid'],item['kind'],item['content'])
+        if item['kind']=='assistant_message': m['history'].append({'role':'assistant','content':item['content']})
+        if item['status']: m['status']=item['status']
+        m['updated_at']=m['last_activity_at']=iso(time.time())
 
 def qadd(mid, kind, content, event_id=None, at=None):
     rows=QUEUE_EVENTS[mid]; n=len(rows)+1
@@ -113,11 +148,12 @@ class Handler(BaseHTTPRequestHandler):
         COUNTS[p] = COUNTS.get(p, 0) + 1
         if p=='/__counts': return self.send(COUNTS)
         if p=='/__received': return self.send(RECEIVED)
-        if p=='/api/health': return self.send({'status':'ok','auth_required':REQUIRE_AUTH})
+        if p=='/api/health':
+            time.sleep(HEALTH_DELAY); return self.send({'status':'ok','auth_required':REQUIRE_AUTH})
         if (REQUIRE_AUTH or EXPIRE_SESSION) and self.headers.get('Authorization') != 'Bearer '+VALID_TOKEN:
             REQUIRE_AUTH = True
             return self.send({'error':'invalid or expired token'},401)
-        deliver_queue()
+        deliver_queue(); run_schedule()
         if p=='/api/control/queue': return self.send([{k:v for k,v in q.items() if k!='deliver_at'} for q in QUEUE])
         if p.endswith('/events') and p.split('/')[4] in QUEUE_EVENTS:
             since=int(parse_qs(u.query).get('since_seq',['0'])[0] or 0)
@@ -143,8 +179,6 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith('/api/control/missions/'):
             mid=p.split('/')[4]; m=MISSIONS.get(mid)
             if not m: return self.send({'error':'Not found'},404)
-            if m.get('side_ready_at') and time.time()>=m['side_ready_at'] and m['status']=='running':
-                m['status']='completed'; m['history'].append({'role':'assistant','content':'SIDE_ANSWER_OK: the agent is fixing the build.'})
             if p.endswith('/cloud/artifact'):
                 name=parse_qs(u.query).get('path',[''])[0].split('/')[-1]
                 if name=='chart.png': data=Path(__file__).with_name('fixtures').joinpath('chart.png').read_bytes()
@@ -164,7 +198,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         with LOCK: self.mutate()
     def mutate(self):
-        global VALID_TOKEN, CORDONED
+        global VALID_TOKEN, CORDONED, HEALTH_DELAY
         p=unquote(urlparse(self.path).path); size=int(self.headers.get('Content-Length',0))
         if p == '/api/voice/transcribe':
             audio = self.rfile.read(size)
@@ -180,6 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
             return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})
+        if p=='/__health_delay': HEALTH_DELAY=float(body.get('seconds',0)); return self.send({})
         if p=='/api/control/inbox-state/preferences':
             INBOX_STATE['preferences'] = body; return self.send({})
         if p.startswith('/api/control/inbox-state/seen/'):
@@ -204,8 +239,17 @@ class Handler(BaseHTTPRequestHandler):
         if key in RECEIPTS: return self.send(RECEIPTS[key])
         if p.endswith('/btw/agent'):
             time.sleep(3); parent=p.split('/')[4]; mid=str(uuid.uuid4())
-            MISSIONS[mid]=dict(id=mid,title='Side question',status='running',project='orb-test',backend=body.get('backend','opencode'),tags=['btw-parent:'+parent],history=[{'role':'user','content':'Current request:\n'+body.get('side_question','')}],created_at=iso(time.time()),updated_at=iso(time.time()),side_ready_at=time.time()+6)
+            MISSIONS[mid]=dict(id=mid,title='Side question',status='running',project='orb-test',backend=body.get('backend','opencode'),tags=['btw-parent:'+parent],history=[{'role':'user','content':'Current request:\n'+body.get('side_question','')}],created_at=iso(time.time()),updated_at=iso(time.time()),last_activity_at=iso(time.time()))
+            QUEUE_EVENTS[mid]=[]; qadd(mid,'user_message','Current request:\n'+body.get('side_question',''))
+            later(mid,6,'assistant_message','SIDE_ANSWER_OK: the agent is fixing the build.',status='completed')
             RECEIPTS[key]=MISSIONS[mid]; return self.send(MISSIONS[mid])
+        if p=='/api/control/message' and any(t.startswith('btw-parent:') for t in MISSIONS.get(body.get('mission_id'),{}).get('tags',[])):
+            mid=body['mission_id']; m=MISSIONS[mid]; RECEIVED.append(body['content'])
+            m['status']='running'; m['updated_at']=m['last_activity_at']=iso(time.time())
+            m['history'].append({'role':'user','content':body['content']}); qadd(mid,'user_message',body['content'],key)
+            later(mid,2,'assistant_message_canonical','Looking into it…')
+            later(mid,16,'assistant_message','SEND_ANSWER_OK: a **side** reply.',status='completed')
+            RECEIPTS[key]={'id':key,'queued':False}; return self.send(RECEIPTS[key])
         if p=='/api/control/missions':
             mid=str(uuid.uuid4()); cloud=body.get('cloud'); m=dict(body,id=mid,status='awaiting_user',backend=('cloud_'+cloud['provider']) if cloud else body['backend'],history=[{'role':'user','content':body['prompt']},{'role':'assistant','content':'**ORB_TEST_OK**\n\nA response from the test agent.'}])
             if cloud: m['cloud_execution']={'mission_id':mid,'selection':cloud,'turns':[{'key':key,'prompt':body['prompt'],'result':'**ORB_TEST_OK**','phase':'response_complete','artifacts':[],'branches':[]}]}
