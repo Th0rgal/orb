@@ -6609,6 +6609,23 @@ fn remote_opencode_config_declares_a_context_limit() {
 }
 
 #[test]
+fn remote_opencode_config_uses_the_real_window_for_direct_gemini() {
+    for model in ["google/gemini-4-argon", "builtin/google/gemini-4-argon-eap"] {
+        let config = remote_opencode_config(model, "https://core.example");
+        let limit = &config["provider"]["builtin"]["models"][model]["limit"];
+        assert_eq!(limit["context"], 1_048_576, "{model}");
+    }
+    for model in [
+        "builtin/smart",
+        "smart",
+        "zai/glm-5.3",
+        "antigravity/gemini-4-argon",
+    ] {
+        assert_eq!(remote_opencode_context_limit(model), 200_000, "{model}");
+    }
+}
+
+#[test]
 fn remote_opencode_long_prompt_reaches_opencode_on_stdin_not_argv() {
     // Mission c13b82ea: a Claude Code -> OpenCode transfer of 165 messages failed with
     // "Argument list too long (os error 7)" because the history was the positional prompt.
