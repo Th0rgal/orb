@@ -18,7 +18,7 @@ import { ContextBadge } from "./ContextBadge";
 import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
 import { moveMissions, planMissionMoves } from "./missionMove";
-import { RunningWorkers, runningWorkerIds } from "./deleteRunning";
+import { RunningWorkers, deleteDescendants, descendantsSentence, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
 import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
 import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
@@ -221,6 +221,9 @@ export function LiveProjectsSection(p: {
   const runningBlocks = new Map<string, string[]>();
   /** The user confirmed "Stop and delete" for these roots. */
   const stopApproved = new Set<string>();
+  /** Roots whose delete the user confirmed with their descendants listed. */
+  const descendantsConfirmed = new Set<string>();
+  const deleteList = (ids: readonly string[]) => deleteDescendants(ids, allKnownMissions());
   const [stopPrompt, setStopPrompt] = createSignal<{ roots: string[]; workers: number } | null>(null);
   let activeDeleteWorkers = 0;
   let pendingRemoved = new Set<string>();
@@ -324,7 +327,10 @@ export function LiveProjectsSection(p: {
   const deleteMissionStopping = async (id: string, stop: boolean) => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}`, {method: "DELETE"});
+        // Core refuses to delete descendants unless asked: only a delete whose
+        // confirmation listed them opts in.
+        const cascade = descendantsConfirmed.has(id) ? "?include_descendants=true" : "";
+        return await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}${cascade}`, {method: "DELETE"});
       } catch (error) {
         const blocking = error instanceof ApiError && error.status === 409 ? runningWorkerIds(error.detail) : [];
         if (!blocking.length || attempt >= 3) throw error;
@@ -337,7 +343,7 @@ export function LiveProjectsSection(p: {
     const prompt = stopPrompt();
     if (!prompt) return;
     setStopPrompt(null);
-    for (const id of prompt.roots) stopApproved.add(id);
+    for (const id of prompt.roots) { stopApproved.add(id); if (deleteList([id]).length) descendantsConfirmed.add(id); }
     setDeleteTargets(prompt.roots);
     deleteSelected();
   };
@@ -450,6 +456,7 @@ export function LiveProjectsSection(p: {
     if (!targets.length) {setDeleteTargets([]); return;}
     setDeleteConfirmBusy(true);
     setActionError(null);
+    for (const id of targets) if (deleteList([id]).length) descendantsConfirmed.add(id);
     const allLoaded = allKnownMissions();
     for (const id of targets) {
       deletingDescendants.set(id, expandMissionDescendants([id], allLoaded));
@@ -1986,12 +1993,15 @@ export function LiveProjectsSection(p: {
       </Show>
       <Show when={stopPrompt()}>{prompt => (
         <ConfirmDialog title={`${prompt().workers} worker${prompt().workers === 1 ? " is" : "s are"} still running`} destructive action="Stop and delete"
-          description={`Stop ${prompt().workers === 1 ? "it" : "them"} and delete ${prompt().roots.length === 1 ? "the conversation" : `the ${prompt().roots.length} conversations`}? Stopping ends the running work.`}
+          description={`Stop ${prompt().workers === 1 ? "it" : "them"} and delete ${prompt().roots.length === 1 ? "the conversation" : `the ${prompt().roots.length} conversations`}? Stopping ends the running work. ${descendantsSentence(deleteList(prompt().roots))} Their history is deleted too.`}
           busy={false} error={null} onConfirm={confirmStopAndDelete} onClose={() => setStopPrompt(null)}/>
       )}</Show>
       <Show when={deleteTargets().length}>
-        <ConfirmDialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} destructive action="Delete"
-          description="This permanently deletes the selected conversations, their child agents and associated workspace files. A conversation with a running agent under it is kept until that agent stops."
+        <ConfirmDialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} destructive
+          action={deleteList(deleteTargets()).length ? `Delete ${deleteTargets().length + deleteList(deleteTargets()).length} sessions` : "Delete"}
+          description={deleteList(deleteTargets()).length
+            ? `${descendantsSentence(deleteList(deleteTargets()))} Their history and workspace files are permanently deleted with ${deleteTargets().length === 1 ? "it" : "them"}.`
+            : "This permanently deletes the selected conversations and their workspace files."}
           busy={deleteConfirmBusy()} error={actionError()} onConfirm={() => void deleteSelected()} onClose={() => {setActionError(null);setDeleteTargets([]);}}/>
       </Show>
       <Show when={pendingLargeImport()} keyed>{pending => (

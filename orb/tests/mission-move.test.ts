@@ -55,3 +55,13 @@ it('reads the running worker from Core’s 409 delete refusal',()=>{
  expect(runningWorkerIds(`Cannot delete a running mission or worker (${C}). Cancel it first.`)).toEqual([C]);
  expect(runningWorkerIds('Mission is locked')).toEqual([]);
 });
+
+import { deleteDescendants, descendantsSentence } from '../src/deleteRunning';
+it('lists every session a delete takes with it, flagging running ones',()=>{
+ const rows=[{id:'ev',title:'EV Bench',status:'completed'},{id:'b',title:'Benchmarks',status:'active',parent_mission_id:'ev'},{id:'btw',title:'EV Bench · btw',status:'completed',callback_parent_mission_id:'ev'},{id:'x',title:'Other',status:'active'}];
+ const list=deleteDescendants(['ev'],rows);
+ expect(list.map(d=>d.id)).toEqual(['b','btw']);
+ expect(descendantsSentence(list)).toBe('This also deletes 2 sessions: Benchmarks (running), EV Bench · btw.');
+ expect(descendantsSentence([])).toBe('');
+ expect(descendantsSentence(Array.from({length:8},(_,i)=>({id:`${i}`,title:`S${i}`,running:false})),3)).toBe('This also deletes 8 sessions: S0, S1, S2, and 5 more.');
+});

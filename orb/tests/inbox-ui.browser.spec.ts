@@ -384,7 +384,7 @@ test('suggested deletion uses shared confirmation, preserves drafts on cancel an
   await row.getByRole('button',{name:'Delete…',exact:true}).click();
   let dialog = page.getByRole('dialog',{name:'Delete 1 agent?'});
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('their child agents and associated workspace files');
+  await expect(dialog).toContainText('This permanently deletes the selected conversations and their workspace files');
   await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();
   expect(deletes).toBe(0);
   await page.keyboard.press('Escape');

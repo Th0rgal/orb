@@ -8,3 +8,28 @@ export function runningWorkerIds(detail: string): string[] {
   if (!/cannot delete a running/i.test(detail)) return [];
   return [...new Set(detail.match(UUID) ?? [])];
 }
+
+type Row = { id: string; title?: string | null; status: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null };
+export type DeleteDescendant = { id: string; title: string; running: boolean };
+const RUNNING = new Set(["active", "waiting_background"]);
+/** Sessions under `targets` (any depth) that deleting them also deletes. */
+export function deleteDescendants(targets: readonly string[], known: readonly Row[]): DeleteDescendant[] {
+  const included = new Set(targets), out: DeleteDescendant[] = [];
+  for (let added = true; added;) {
+    added = false;
+    for (const m of known) {
+      const parent = m.parent_mission_id || m.callback_parent_mission_id;
+      if (included.has(m.id) || !parent || !included.has(parent)) continue;
+      included.add(m.id); added = true;
+      out.push({ id: m.id, title: m.title?.trim() || m.id.slice(0, 8), running: RUNNING.has(m.status) });
+    }
+  }
+  return out;
+}
+/** "This also deletes 2 sessions: Benchmarks (running), EV Bench · btw." */
+export function descendantsSentence(list: readonly DeleteDescendant[], max = 6): string {
+  if (!list.length) return "";
+  const names = list.slice(0, max).map(d => d.running ? `${d.title} (running)` : d.title);
+  const more = list.length - names.length;
+  return `This also deletes ${list.length} session${list.length === 1 ? "" : "s"}: ${names.join(", ")}${more > 0 ? `, and ${more} more` : ""}.`;
+}
