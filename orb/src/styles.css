@@ -3807,3 +3807,29 @@ select.orb-select-native:disabled { cursor: default; }
 .debug-info-facts dd { margin: 0; color: var(--fg); overflow-wrap: anywhere; user-select: text; }
 .debug-info-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .debug-info-log { margin: 0; max-height: 240px; overflow: auto; padding: 8px; border-radius: 6px; background: var(--bg-inset); font: 11px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+
+/* ---------- smooth send: queue rows and handoff ---------- */
+/* Compact, Codex-like queue: a light one-line header, text · actions on hover.
+   Each row reserves its action area, so "sending" → "confirmed" never resizes it. */
+.followup-queue { padding:6px 6px 4px; }
+.followup-queue header { min-height:22px; padding:0 2px 0 8px; font-size:12px; }
+.followup-queue header .queue-count { color:var(--fg-3); }
+.queue-hint-hidden { visibility:hidden; }
+.followup-queue ol { margin-top:2px; }
+.queue-line { min-height:32px; }
+.queue-trailing { position:relative; flex:none; display:flex; align-items:center; justify-content:flex-end; min-width:82px; height:26px; }
+.queue-trailing .queue-sending { position:absolute; right:8px; top:50%; margin:-5px 0 0; opacity:0; transition:opacity .15s ease-out; }
+.queue-trailing .queue-sending.visible { opacity:1; }
+.queue-row.sending .queue-row-actions, .queue-row.leaving .queue-row-actions { opacity:0; pointer-events:none; }
+/* Sent: the row collapses while the transcript bubble arrives. */
+.queue-row.leaving { overflow:hidden; pointer-events:none; animation:queue-row-leave .15s ease-out both; }
+@keyframes queue-row-leave { from { opacity:1; max-height:34px; } to { opacity:0; max-height:0; } }
+/* A message handed to the agent but whose turn has not started yet. */
+.user.sending { animation:user-arrive .18s ease-out both, user-sending 1.6s ease-in-out .18s infinite; }
+@keyframes user-arrive { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+@keyframes user-sending { 0%, 100% { opacity:1; } 50% { opacity:.62; } }
+@media (prefers-reduced-motion:reduce) {
+  .queue-trailing .queue-sending { transition:none; }
+  .queue-row.leaving { animation:none; display:none; }
+  .user.sending { animation:none; opacity:.8; }
+}

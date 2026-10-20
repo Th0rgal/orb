@@ -882,7 +882,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/control/queue", get(control::get_queue))
         .route(
             "/api/control/queue/:id",
-            axum::routing::delete(control::remove_from_queue),
+            axum::routing::delete(control::remove_from_queue).patch(control::edit_queued_message),
         )
         .route(
             "/api/control/queue/:id/send-now",

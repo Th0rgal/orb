@@ -242,10 +242,20 @@ export function heldAfterHistory(history: StreamEvent[], held: StreamEvent[]): S
       if (op.type === 'snapshot' && typeof op.revision === 'number') revisions.set(bubble, Math.max(revisions.get(bubble) ?? 0, op.revision));
     }
   }
+  // Messages the history already shows as delivered. Everything streamed live
+  // before one of them belongs to an earlier turn, which the history now owns:
+  // replaying it after the snapshot would append that turn's text a second time
+  // below the newer message (the doubled "step N done" after a Send now).
+  const delivered = new Set<string>();
+  for (const event of history) {
+    const id = event.eventId ?? event.data.id;
+    if (event.type === 'user_message' && event.data.queued !== true && id != null) delivered.add(String(id));
+  }
   let finalizedThrough = -1;
   held.forEach((event,index) => {
     const key=identity(event);
     if(event.type === 'assistant_message' && event.data.canonical !== true && key && known.has(key)) finalizedThrough=index;
+    if(event.type === 'user_message' && event.data.queued !== true && delivered.has(String(event.data.id ?? event.eventId))) finalizedThrough=index;
   });
   return held.filter((event,index) => {
     if (event.type === 'user_message') return true;
