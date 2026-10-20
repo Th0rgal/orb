@@ -46,7 +46,8 @@ impl Hermes {
         let mut req = self
             .client
             .request(method, format!("{}{}", self.url, path))
-            .bearer_auth(&self.key);
+            .bearer_auth(&self.key)
+            .header(reqwest::header::ACCEPT, "application/json");
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -77,12 +78,62 @@ impl Hermes {
     async fn get(&self, path: &str) -> Result<Value, String> {
         self.call(reqwest::Method::GET, path, None, None).await
     }
+    /// Fetch one page of run events. When the run status is already terminal
+    /// with an output, a 404 (run retired from the live table, or a gateway
+    /// without durable replay), a 409 (run predates the event journal) or a non-JSON body (SSE served despite
+    /// `format=json`) is treated as an empty final page, so the turn can
+    /// complete from the status output instead of failing.
+    async fn events_page(&self, path: &str, status: &Value, cursor: u64) -> Result<Value, String> {
+        let response = self
+            .client
+            .get(format!("{}{}", self.url, path))
+            .bearer_auth(&self.key)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| "Hermes connection lost; execution will be reconciled")?;
+        let code = response.status();
+        let body = if code.is_success() {
+            response.bytes().await.ok()
+        } else {
+            None
+        };
+        events_page_from_response(code.as_u16(), body.as_deref(), status, cursor)
+    }
     async fn capabilities(&self) -> Result<(), String> {
         let c = self.get("/v1/capabilities").await?;
         if !c.is_object() {
             return Err("Invalid Hermes capabilities response".into());
         }
         Ok(())
+    }
+}
+fn run_is_terminal_with_output(status: &Value) -> bool {
+    matches!(
+        status["status"].as_str(),
+        Some("completed" | "failed" | "cancelled" | "interrupted")
+    ) && status["output"].is_string()
+}
+
+fn events_page_from_response(
+    code: u16,
+    body: Option<&[u8]>,
+    status: &Value,
+    cursor: u64,
+) -> Result<Value, String> {
+    let empty = || json!({"events": [], "cursor": cursor.to_string(), "has_more": false});
+    let parsed = body.and_then(|b| serde_json::from_slice::<Value>(b).ok());
+    match (code, parsed) {
+        (200..=299, Some(page)) if page.is_object() => Ok(page),
+        // 409 `run_replay_unsupported`: a run admitted before the gateway kept an event journal.
+        (200..=299, _) | (404 | 409, _) if run_is_terminal_with_output(status) => Ok(empty()),
+        (200..=299, _) => Err("Invalid Hermes response".into()),
+        (404, _) => {
+            Err("Hermes execution or capability is unavailable; no replacement was launched".into())
+        }
+        (401 | 403, _) => Err("Hermes authorization failed; reconnect the profile".into()),
+        (409, _) => Err("Hermes request conflicts with an existing operation".into()),
+        _ => Err("Hermes request failed; execution will be reconciled".into()),
     }
 }
 async fn probe(h: &Hermes) -> Result<(), String> {
@@ -421,10 +472,11 @@ async fn observe_with_client(
         .parse::<u64>()
         .map_err(|_| "Invalid event cursor")?;
     let events = h
-        .get(&run_path(
-            &run,
-            &format!("/events?format=json&after={cursor}"),
-        )?)
+        .events_page(
+            &run_path(&run, &format!("/events?format=json&after={cursor}"))?,
+            &status,
+            cursor,
+        )
         .await?;
     for event in events["events"].as_array().into_iter().flatten() {
         let event_id = event["id"].as_str().ok_or("Missing event identity")?;
