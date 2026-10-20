@@ -185,7 +185,8 @@
 .inbox-peek-transcript .user { margin: 12px 0 8px; padding: 10px 12px; background: var(--overlay-field); border-radius: 12px; content-visibility: visible; contain-intrinsic-size: none; }
 .inbox-peek-transcript .user:first-child { margin-top: 4px; }
 .inbox-peek-transcript .st-text { padding: 0 4px; }
-.inbox-peek-transcript :is(.st-work, .st-think, .st-tool) { margin: 3px 4px; }
+.inbox-peek-transcript :is(.st-work, .st-think, .st-think-fold, .st-tool) { margin: 3px 4px; }
+.inbox-peek-transcript .st-think-fold-body .st-think { margin: 0; }
 .inbox-peek-transcript .error-notice { margin: 6px 2px; }
 .inbox-peek-composer .composer { background: var(--overlay-field); border-color: var(--overlay-border); border-radius: 12px; box-shadow: none; }
 

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { Transcript, buildTranscript } from "../src/Transcript";
 import type { StreamEvent } from "../src/stream";
 import { resumePrompt } from "../src/messagePresentation";
@@ -45,20 +46,54 @@ describe("thinking fold", () => {
     expect(body?.querySelector("strong")?.textContent).toBe("MissionDock");
   });
 
-  it("folds consecutive earlier thoughts into a collapsible count row while keeping the latest thought visible", () => {
+  it("groups every consecutive thought, including the live one, into one fold with the header above", () => {
     const items = buildTranscript([
       ev("thinking", { content: "First thought", done: true }),
       ev("thinking", { content: "Second thought", done: true }),
       ev("thinking", { content: "Current thought in progress", done: false }),
     ]);
     const { container } = render(() => <Transcript items={items} />);
-    const fold = container.querySelector<HTMLButtonElement>(".st-think-fold .st-work-head");
-    expect(fold?.textContent).toBe("2 thoughts");
-    expect(container.querySelectorAll(".st-think-head")).toHaveLength(1);
-    expect(container.querySelector(".st-think-body")?.textContent).toBe("Current thought in progress");
+    const folds = container.querySelectorAll(".st-think-fold");
+    expect(folds).toHaveLength(1);
+    const fold = folds[0] as HTMLElement;
+    const head = fold.querySelector<HTMLButtonElement>(".st-think-fold-head")!;
+    expect(head.textContent).toBe("3 thoughts");
+    expect(fold.firstElementChild).toBe(head);
+    // The live thought opens the fold so its streaming text is visible, inside the group.
+    expect(head.getAttribute("aria-expanded")).toBe("true");
+    const heads = container.querySelectorAll(".st-think-head");
+    expect(heads).toHaveLength(3);
+    heads.forEach(h => expect(fold.querySelector(".st-think-fold-body")!.contains(h)).toBe(true));
+    expect(container.querySelector(".st-think-fold-body .st-think-body")?.textContent).toBe("Current thought in progress");
+    expect(container.querySelectorAll(".st-think:not(.st-think-fold-body .st-think)")).toHaveLength(0);
 
-    fold!.click();
-    expect(container.querySelectorAll(".st-think-head")).toHaveLength(3);
+    head.click();
+    expect(head.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelectorAll(".st-think-head")).toHaveLength(0);
+  });
+
+  it("loads finished thought groups collapsed", () => {
+    const items = buildTranscript([
+      ev("thinking", { content: "A", done: true }),
+      ev("thinking", { content: "B", done: true }),
+      ev("assistant_message", { id: "m", content: "Done." }),
+    ]);
+    const { container } = render(() => <Transcript items={items} />);
+    const head = container.querySelector<HTMLButtonElement>(".st-think-fold-head")!;
+    expect(head.textContent).toBe("2 thoughts");
+    expect(head.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelectorAll(".st-think-head")).toHaveLength(0);
+  });
+
+  it("keeps a live thought open when it finalizes, so the layout does not jump", () => {
+    const [items, setItems] = createSignal(buildTranscript([
+      ev("thinking", { content: "Streaming", done: false }),
+    ]));
+    const { container } = render(() => <Transcript items={items()} />);
+    expect(container.querySelector(".st-think-body")?.textContent).toBe("Streaming");
+    setItems(buildTranscript([ev("thinking", { content: "Streaming", done: true })]));
+    expect(container.querySelector(".st-think-head")?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".st-think-body")?.textContent).toBe("Streaming");
   });
 });
 
