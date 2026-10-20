@@ -34,6 +34,14 @@ struct OrbConversation: View {
     @State private var workModel = OrbWorkModel()
     @State private var changedFiles: [OrbTurnSummary.FileChange] = []
     @State private var queued: [OrbJSON] = []
+    /// Core's follow-up queue merged with optimistic sends/edits (OrbSendFlow.swift).
+    @State private var followUps = OrbFollowUpQueue()
+    /// Queued follow-up being edited in the composer (edit in place on send).
+    @State private var editingQueuedID: String?
+    /// Send now in flight: one continuous Sending… → Working… state, Stop kept.
+    @State private var handoff: OrbHandoff?
+    @State private var handoffTracker = OrbHandoffTracker()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var mode = "Message"
     @State private var refreshing = false
     @State private var lastRefresh = Date.distantPast
@@ -70,7 +78,8 @@ struct OrbConversation: View {
     static let workingPhases: Set<String> = ["queued", "submitting", "running", "cancel_requested"]
     static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode"]
     private var supportsMode: Bool { !isCloud && (selection.backend.isEmpty || Self.goalHarnesses.contains(selection.backend)) }
-    private var working: Bool { optimisticPrompt != nil || (isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : (MissionState(rawValue: mission["status"].text)?.isActive ?? false)) }
+    private var handoffActive: Bool { OrbHandoff.pending(status: mission["status"].text, handoff: handoff) }
+    private var working: Bool { optimisticPrompt != nil || handoffActive || (isCloud ? turns.contains { Self.workingPhases.contains($0["phase"].text) } : (MissionState(rawValue: mission["status"].text)?.isActive ?? false)) }
 
     private func rebuildWorkModel() {
         let next = OrbWorkModel.build(from: events, working: working)
@@ -161,6 +170,11 @@ struct OrbConversation: View {
         return rows
     }
 
+    /// Live text minus what stored history already holds (no doubled reply after a reload).
+    private var visibleLiveText: String {
+        OrbSendFlow.dedupeLiveText(liveText, stored: history.filter { $0.1 == "assistant" }.map(\.2))
+    }
+
     private func baseStepLabel() -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
         let provider = ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][execution["selection"]["provider"].text] ?? "the service"
@@ -172,6 +186,7 @@ struct OrbConversation: View {
             default: return !turn["result"].text.isEmpty ? "Writing…" : (turn["detail"].text.isEmpty ? "Thinking…" : turn["detail"].text)
             }
         }
+        if handoffActive { return "Sending…" }
         return !liveText.isEmpty ? "Writing…" : "Working…"
     }
 
@@ -605,8 +620,8 @@ struct OrbConversation: View {
         if !working && !isCloud {
             turnChangesCard
         }
-        if working && !liveText.isEmpty {
-            OrbRichText(source: liveText, onArtifact: { path in
+        if working && !visibleLiveText.isEmpty {
+            OrbRichText(source: visibleLiveText, onArtifact: { path in
                 Task { await openWorkspaceOrArtifact(path) }
             })
             .transition(.opacity)
@@ -1375,9 +1390,9 @@ struct OrbConversation: View {
     }
 
     private var queuedDrawer: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             Button {
-                withAnimation(.snappy(duration: 0.18)) { queueExpanded.toggle() }
+                withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) { queueExpanded.toggle() }
                 OrbHaptics.selection()
             } label: {
                 HStack(spacing: 6) {
@@ -1385,7 +1400,7 @@ struct OrbConversation: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(OrbStyle.textMuted)
                         .rotationEffect(.degrees(queueExpanded ? 90 : 0))
-                    Text("\(queued.count) Queued")
+                    Text("\(followUps.count) Queued")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(OrbStyle.textSecondary)
                     Spacer()
@@ -1395,23 +1410,18 @@ struct OrbConversation: View {
             .buttonStyle(.plain)
 
             if queueExpanded {
-                ForEach(queued.indices, id: \.self) { index in
-                    HStack(spacing: 8) {
-                        Text(queued[index]["content"].text)
-                            .font(.caption)
-                            .foregroundStyle(.primary.opacity(0.9))
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Button("Remove") {
-                            OrbHaptics.light()
-                            Task { await removeQueued(queued[index]["id"].text) }
-                        }
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(OrbStyle.textSecondary)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                    }
-                    .padding(.vertical, 3)
+                ForEach(followUps.rows) { row in
+                    queuedRow(row)
+                        .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .bottom)))
+                }
+            }
+            if editingQueuedID != nil {
+                HStack {
+                    Text("Editing queued message").font(.caption2).foregroundStyle(OrbStyle.textSecondary)
+                    Spacer()
+                    Button("Cancel") { editingQueuedID = nil; text = "" }
+                        .font(.caption2.weight(.semibold))
+                        .buttonStyle(.plain)
                 }
             }
         }
@@ -1420,6 +1430,60 @@ struct OrbConversation: View {
         .background(OrbStyle.surface.opacity(0.95), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(OrbStyle.border))
         .padding(.bottom, 6)
+        .animation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds), value: followUps.rows)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("orb.followUpQueue")
+    }
+
+    /// One compact line: text, then edit / send now / remove. The action area is
+    /// always reserved so a row does not change size from "sending" to "queued".
+    private func queuedRow(_ row: OrbQueuedRow) -> some View {
+        let editing = editingQueuedID == row.id
+        let enabled = !row.sending && editingQueuedID == nil
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 2) {
+                Text(row.content.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.caption)
+                    .foregroundStyle(editing ? OrbStyle.textMuted : .primary.opacity(0.9))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if editing {
+                    Text("Editing").font(.caption2).foregroundStyle(OrbStyle.textMuted).padding(.horizontal, 6)
+                } else {
+                    queueAction("pencil", label: "Edit queued message", enabled: enabled) {
+                        editingQueuedID = row.id
+                        text = row.content
+                        composerFocused = true
+                    }
+                    queueAction("arrow.up", label: "Send now", enabled: enabled) {
+                        OrbHaptics.light()
+                        Task { await sendQueuedNow(row.id) }
+                    }
+                    queueAction("trash", label: "Remove queued message", enabled: !row.sending) {
+                        OrbHaptics.light()
+                        Task { await removeQueued(row.id) }
+                    }
+                }
+            }
+            if let error = row.queueError {
+                Text("Delivery paused · \(error)").font(.caption2).foregroundStyle(OrbStyle.warning).lineLimit(1)
+            }
+        }
+        .padding(.vertical, 1)
+        .opacity(row.sending ? 0.75 : 1)
+    }
+
+    private func queueAction(_ symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(enabled ? OrbStyle.textSecondary : OrbStyle.textMuted.opacity(0.4))
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(label)
     }
 
     private var canSend: Bool {
@@ -1480,7 +1544,7 @@ struct OrbConversation: View {
             } else if modeQuery != nil {
                 modePicker
             }
-            if !queued.isEmpty { queuedDrawer }
+            if followUps.count > 0 || editingQueuedID != nil { queuedDrawer }
             if dictation.active {
                 OrbDictationCapsule(dictation: dictation)
             } else {
@@ -1712,6 +1776,16 @@ struct OrbConversation: View {
                 let queueResp = await queueTask
                 if queueResp != .null {
                     queued = queueResp.items.filter { $0["mission_id"].text == id }
+                    let next = followUps.withServer(OrbFollowUpQueue.parse(queueResp.items, missionID: id))
+                    if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+                }
+                if let current = handoff {
+                    let job = value["remote_job"]
+                    let ended = !job["finished_at"].text.isEmpty || !job["terminal_reason"].text.isEmpty
+                    if handoffTracker.observe(current, status: value["status"].text, jobID: job["job_id"].text.isEmpty ? nil : job["job_id"].text, jobEnded: ended) {
+                        handoff = nil
+                        handoffTracker.reset()
+                    }
                 }
             } else {
                 let accounts = (try? await OrbReadCache.cloudAccounts().items) ?? []
@@ -1748,7 +1822,16 @@ struct OrbConversation: View {
             text = ""
             return true
         }
+        if let editing = editingQueuedID, id != nil {
+            let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else { return false }
+            await editQueued(editing, content: content)
+            return true
+        }
         busy = true; defer { busy = false }
+        let clientID = UUID().uuidString
+        // A follow-up during a turn shows at once as a queued row, not as a bubble that jumps away.
+        let queueing = working && id != nil && !isCloud && attachments.isEmpty && OrbDisk.read(pendingKey, as: OrbPending.self) == nil
         let savedDraft = text
         let savedAttachments = attachments
         let savedMode = mode
@@ -1769,11 +1852,16 @@ struct OrbConversation: View {
                 var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if supportsMode && mode != "Message" { prompt = "/" + mode.lowercased() + " " + prompt }
                 // Optimistic UI: show the user bubble immediately and clear composer text while sending.
-                withAnimation(.snappy(duration: 0.18)) {
-                    optimisticPrompt = prompt
-                    text = ""
-                    followsLatest = true
-                    rebuildHistory()
+                withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
+                    if queueing {
+                        followUps = followUps.enqueue(clientID, prompt)
+                        text = ""
+                    } else {
+                        optimisticPrompt = prompt
+                        text = ""
+                        followsLatest = true
+                        rebuildHistory()
+                    }
                 }
                 for file in attachments {
                     let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(selection.node.isEmpty ? "core" : selection.node), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
@@ -1781,18 +1869,21 @@ struct OrbConversation: View {
                     uploaded.append(.object(["kind": .string("file"), "path": receipt["path"]]))
                     prompt += "\n[Uploaded: " + receipt["path"].text + "]"
                 }
-                optimisticPrompt = prompt
-                rebuildHistory()
+                if !queueing {
+                    optimisticPrompt = prompt
+                    rebuildHistory()
+                }
                 var body: [String: OrbJSON]
                 if let id {
-                    body = ["mission_id": .string(id), "content": .string(prompt), "client_message_id": .string(UUID().uuidString)]
+                    body = ["mission_id": .string(id), "content": .string(prompt), "client_message_id": .string(clientID)]
+                    if queueing { body["queue_followup"] = .bool(true) }
                     if !uploaded.isEmpty { body["attachments"] = .array(uploaded) }
                     if let identity = OrbContinuation.identity(for: mission) {
                         body["continue_identity"] = identity
                     }
                     if isCloud { body["cloud_model"] = .string(selection.model); body["cloud_model_params"] = selection.params }
                     if !isCloud && !selection.model.isEmpty && selection.model != mission["model_override"].text {
-                        guard !working || optimisticPrompt != nil else { throw OrbHTTPError(status: 409, detail: "Wait for this turn to finish before changing its model.") }
+                        guard !working || optimisticPrompt != nil || queueing else { throw OrbHTTPError(status: 409, detail: "Wait for this turn to finish before changing its model.") }
                         _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/settings", method: "PATCH", body: .object(["model_override": .string(selection.model)]))
                     }
                     if !isCloud && selection.backend == "codex" && selection.serviceTier != OrbCodexSpeed.of(mission) {
@@ -1833,6 +1924,15 @@ struct OrbConversation: View {
                 optimisticPrompt = nil
                 rebuildHistory()
             }
+            if queueing {
+                let queuedNow = result["queued"] == .bool(true)
+                let receiptID = result["id"].text
+                if receiptID.isEmpty || receiptID == clientID { followUps = followUps.posted(clientID, queued: queuedNow) }
+                else {
+                    followUps = followUps.postFailed(clientID)
+                    if queuedNow { followUps = followUps.enqueue(receiptID, savedDraft.trimmingCharacters(in: .whitespacesAndNewlines)).posted(receiptID, queued: true) }
+                }
+            }
             if let id {
                 OrbReadCache.invalidate("mission:\(id)")
             }
@@ -1849,6 +1949,7 @@ struct OrbConversation: View {
             return true
         } catch {
             optimisticPrompt = nil
+            if queueing { followUps = followUps.postFailed(clientID) }
             rebuildHistory()
             if text.isEmpty { text = savedDraft }
             attachments = savedAttachments
@@ -1897,10 +1998,100 @@ struct OrbConversation: View {
     }
     private func cancel() async {
         guard let id else { return }
+        handoff = nil
         do { _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/\(isCloud ? "cloud/cancel" : "cancel")", method: "POST"); await refresh(force: true) } catch { self.error = error.localizedDescription }
     }
     private func removeQueued(_ message: String) async {
-        do { _ = try await api.call("/api/control/queue/\(OrbCore.escape(message))", method: "DELETE"); await refresh(force: true) } catch { self.error = error.localizedDescription }
+        if editingQueuedID == message { editingQueuedID = nil; text = "" }
+        withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = followUps.hide(message) }
+        do { _ = try await api.call("/api/control/queue/\(OrbCore.escape(message))", method: "DELETE"); await refresh(force: true) }
+        catch let e as OrbHTTPError where e.status == 404 { await refresh(force: true) }
+        catch {
+            followUps = followUps.unhide(message)
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Edit in place via PATCH (same id and position); replace on 404/405 (older Core).
+    private func editQueued(_ queueID: String, content: String) async {
+        guard let id else { return }
+        editingQueuedID = nil
+        text = ""
+        guard followUps.row(queueID) != nil else {
+            error = "This message was already sent. Your edit was not applied."
+            return
+        }
+        followUps = followUps.edit(queueID, content)
+        var status: Int? = nil
+        do {
+            _ = try await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(content)]))
+            status = 200
+        } catch let e as OrbHTTPError { status = e.status } catch { status = nil }
+        switch OrbSendFlow.editOutcome(status: status) {
+        case .edited:
+            followUps = followUps.editConfirmed(queueID, content)
+        case .unsupported:
+            followUps = followUps.editReverted(queueID).hide(queueID)
+            _ = try? await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
+            let clientID = UUID().uuidString
+            followUps = followUps.enqueue(clientID, content)
+            do {
+                let result = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(content), "client_message_id": .string(clientID), "queue_followup": .bool(true)]))
+                followUps = followUps.posted(clientID, queued: result["queued"] == .bool(true))
+            } catch {
+                followUps = followUps.postFailed(clientID)
+                text = content
+                self.error = "Couldn’t save the edit. Your text is back in the composer."
+            }
+        case .alreadySent:
+            followUps = followUps.editReverted(queueID)
+            error = "This message was already sent, so the edit was not applied."
+        case .failed:
+            followUps = followUps.editReverted(queueID)
+            error = "Couldn’t save the edit."
+        }
+        await refresh(force: true)
+    }
+
+    /// Send now: the row leaves and the bubble appears together; Core promotes the
+    /// message (stop, then it next under the same id) or injects it live.
+    private func sendQueuedNow(_ queueID: String) async {
+        guard let id, editingQueuedID == nil, let row = followUps.row(queueID), !row.sending else { return }
+        let started = OrbHandoff(id: queueID, at: Date())
+        withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
+            followUps = followUps.hide(queueID)
+            optimisticPrompt = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            handoff = started
+            handoffTracker.reset()
+            followsLatest = true
+            rebuildHistory()
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(OrbHandoff.timeout))
+            if handoff == started { handoff = nil }
+        }
+        do {
+            let response = try await api.call("/api/control/queue/\(OrbCore.escape(queueID))/send-now?interrupt=true", method: "POST")
+            switch OrbSendFlow.sendNowOutcome(response) {
+            case .live: handoff = nil
+            case .promoted: break
+            case .fallback:
+                // Older Core without promote: stop the turn, then send this message.
+                _ = try? await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
+                _ = try? await api.call("/api/control/missions/\(OrbCore.escape(id))/cancel", method: "POST")
+                _ = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(row.content), "client_message_id": .string(UUID().uuidString)]))
+            }
+            OrbReadCache.invalidate("mission:\(id)")
+            await refresh(force: true)
+        } catch {
+            withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
+                followUps = followUps.unhide(queueID)
+                optimisticPrompt = nil
+                handoff = nil
+                rebuildHistory()
+            }
+            self.error = "Couldn’t send now. \(error.localizedDescription)"
+        }
     }
     private func safeURL(_ value: String) -> URL? { guard let url = URL(string: value), url.scheme == "https", url.user == nil, url.password == nil else { return nil }; return url }
 
