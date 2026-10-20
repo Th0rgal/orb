@@ -826,11 +826,25 @@ export function isBtwMission(mission: Pick<Mission, "tags">): boolean {
   return mission.tags?.some(tag => tag.startsWith("btw-parent:")) ?? false;
 }
 
+/** Last known copy of each parent fetched by id, so a transient failure never
+ * drops an existing parent and turns its workers into roots. */
+const ancestorCache = new Map<string, Mission>();
+async function fetchAncestor(id: string): Promise<Mission | null> {
+  try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`, {signal:AbortSignal.timeout(5000)}); ancestorCache.set(id, row); return row; }
+  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return ancestorCache.get(id) ?? null; }
+}
+/** Pages are ordered by recent activity: add parents that fell off the page. */
+async function includeAncestors(rows: Mission[], project?: string): Promise<Mission[]> {
+  const { withAncestors } = await import("./missionTree");
+  // A parent filed in another project is listed there, not here.
+  return withAncestors(rows, async id => { const row = await fetchAncestor(id); return row && (project === undefined || row.project === project) ? row : null; });
+}
+
 /** Missions tagged with this project (exact slug match on the backend). */
 export async function listProjectMissions(slug: string): Promise<Mission[]> {
   const origins=await import("./localOrigins"),observedAt=origins.observe();
   const local=(await origins.localOrigins()).filter(m=>m.project===slug && !isBtwMission(m));
-  try{const remote=await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=100&all=true`);await origins.rememberCoreState(local,remote,observedAt);const pending=local.filter(origins.localPending).map(row=>origins.withCoreEffort(row,remote.find(m=>m.id===row.id)));return [...pending,...remote.filter(m=>!isBtwMission(m) && !pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return local;throw error;}
+  try{const remote=await includeAncestors(await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=100&all=true`),slug);await origins.rememberCoreState(local,remote,observedAt);const pending=local.filter(origins.localPending).map(row=>origins.withCoreEffort(row,remote.find(m=>m.id===row.id)));return [...pending,...remote.filter(m=>!isBtwMission(m) && !pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return local;throw error;}
 }
 
 export async function listProjectFiles(slug: string, path: string): Promise<ProjectFileEntry[]> {
@@ -876,7 +890,7 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
 export async function listMissions(limit = 200): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = (await origins.localOrigins()).filter(m=>!isBtwMission(m));
-  try { const remote = await api<Mission[]>(`/api/control/missions?limit=${limit}`, {signal:AbortSignal.timeout(3000)}); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`,{signal:AbortSignal.timeout(3000)}))],observedAt); const pending=local.filter(origins.localPending).map(row=>origins.withCoreEffort(row,remote.find(m=>m.id===row.id))); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
+  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?limit=${limit}`, {signal:AbortSignal.timeout(3000)})); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`,{signal:AbortSignal.timeout(3000)}))],observedAt); const pending=local.filter(origins.localPending).map(row=>origins.withCoreEffort(row,remote.find(m=>m.id===row.id))); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
   catch(error){if(local.length)return local;throw error;}
 }
 

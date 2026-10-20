@@ -215,3 +215,40 @@ export function expandMissionDescendants<M extends Linked>(
   }
   return [...out];
 }
+
+/** Parents referenced by loaded rows that the rows do not contain. */
+export function missingParentIds<M extends Linked>(rows: readonly M[]): string[] {
+  const ids = new Set(rows.map(m => m.id));
+  const missing = new Set<string>();
+  for (const row of rows) { const parent = missionParent(row); if (parent && !ids.has(parent)) missing.add(parent); }
+  return [...missing];
+}
+
+/**
+ * A page of missions ordered by recent activity can hold many workers while
+ * their older parent falls off the page; the workers would then be listed as
+ * roots. Fetch every missing ancestor by id (a parent that no longer exists
+ * resolves to null) and list each one just before its first descendant, so
+ * the parent takes the place its newest worker had.
+ */
+export async function withAncestors<M extends Linked>(rows: readonly M[], fetchById: (id: string) => Promise<M | null>, maxDepth = 8): Promise<M[]> {
+  const known = new Map(rows.map(m => [m.id, m]));
+  const fetched = new Map<string, M>();
+  const tried = new Set<string>();
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const wanted = missingParentIds([...known.values()]).filter(id => !tried.has(id));
+    if (!wanted.length) break;
+    wanted.forEach(id => tried.add(id));
+    const results = await Promise.all(wanted.map(id => fetchById(id).catch(() => null)));
+    for (const row of results) if (row && !known.has(row.id)) { known.set(row.id, row); fetched.set(row.id, row); }
+  }
+  if (!fetched.size) return [...rows];
+  const out: M[] = [], placed = new Set<string>();
+  const place = (row: M, seen: Set<string>) => {
+    const parent = missionParent(row);
+    if (parent && fetched.has(parent) && !placed.has(parent) && !seen.has(parent)) { seen.add(parent); place(fetched.get(parent)!, seen); }
+    if (!placed.has(row.id)) { placed.add(row.id); out.push(row); }
+  };
+  for (const row of rows) place(row, new Set([row.id]));
+  return out;
+}
