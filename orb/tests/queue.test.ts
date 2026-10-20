@@ -73,3 +73,23 @@ it('preserves automatic origin through delivery and late receipts',()=>{
  const combined:StreamEvent={type:'user_message',data:{id:'combined',content:'Continue',source:'scheduler',messages:[['00000000-0000-4000-8000-000000000001','Continue']]}};
  expect(users([combined])[0]).not.toHaveProperty('source','scheduler');
 });
+
+describe("reload after a Send now interrupt",()=>{
+  const reload=(history:StreamEvent[],live:StreamEvent[])=>heldAfterHistory(history,live).reduce((items,event)=>applyStreamEvent(items,event),buildTranscript(history));
+  const texts=(items:ReturnType<typeof buildTranscript>)=>items.map(i=>i.kind==="user"?`user:${i.messageId}`:i.kind==="text"?`text:${i.text}`:i.kind);
+  // The interrupted turn's text was only streamed live; Send now delivered "b".
+  const live=[message("a",false,"go"),delta("step 1 done"),delta("step 1 done\nstep 2 done"),{...message("b",false,"now"),data:{id:"b",content:"now",queued:false,receipt:true}} as StreamEvent];
+  it("does not replay the interrupted turn's live text below the newer message",()=>{
+    // Core persisted the partial text as an assistant_message (stored history).
+    const history:StreamEvent[]=[{...message("a",false,"go"),sequence:1},{type:"assistant_message",eventId:"p",sequence:2,data:{id:"p",content:"step 1 done\nstep 2 done"}},{...message("b",false,"now"),sequence:3}];
+    expect(texts(reload(history,live))).toEqual(["user:a","text:step 1 done\nstep 2 done","user:b"]);
+  });
+  it("stays deterministic against an older Core that kept no partial text",()=>{
+    const history:StreamEvent[]=[{...message("a",false,"go"),sequence:1},{...message("b",false,"now"),sequence:3}];
+    expect(texts(reload(history,live))).toEqual(["user:a","user:b"]);
+  });
+  it("still folds in live text of the current turn",()=>{
+    const history:StreamEvent[]=[{...message("a",false,"go"),sequence:1},{...message("b",false,"now"),sequence:3}];
+    expect(texts(reload(history,[...live,delta("step 1 done")]))).toEqual(["user:a","user:b","text:step 1 done"]);
+  });
+});

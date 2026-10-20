@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 /**
  * One vocabulary for Core mission statuses. Every check that used to carry
  * its own list of status strings asks one of these predicates instead, so a
@@ -99,11 +100,50 @@ export function statusPresentation(status: string): { label: string; tone: Statu
 
 /* ── One answer to "is this mission working?" ─────────────────────────── */
 
-export type ActivityReason = "running" | "queued" | "starting" | "stopping" | "idle" | "failed" | "needs_you";
+/** A follow-up the user sent now (or promoted from the queue) that has not
+ * started its turn yet. `at` is when it was sent (ms). */
+export type Handoff = { id: string; at: number };
+
+/** After this long the real mission state shows again, whatever happened. */
+export const HANDOFF_TIMEOUT_MS = 30_000;
+
+/** Statuses a send-now handoff passes through: the stopped old turn and the
+ * not-yet-started new one. A failure is never masked. */
+const HANDOFF_STATUSES = set("interrupted", "cancelled", "paused", ...READY_STATUSES, "completed", "idle", "");
+
+const [handoffs, setHandoffs] = createSignal<Readonly<Record<string, Handoff>>>({});
+
+/** Start a handoff for `mission`: every surface (sidebar, Stop button, Working
+ * row, banner) keeps reading "working" until the new turn starts, the message
+ * is withdrawn, or {@link HANDOFF_TIMEOUT_MS} passes. */
+export function beginHandoff(mission: string, id: string, at = Date.now()): void {
+  setHandoffs(all => ({ ...all, [mission]: { id, at } }));
+  setTimeout(() => endHandoff(mission, id), HANDOFF_TIMEOUT_MS + 50);
+}
+
+/** End `mission`'s handoff (only the one for message `id`, when given). */
+export function endHandoff(mission: string, id?: string): void {
+  setHandoffs(all => {
+    const current = all[mission];
+    if (!current || (id && current.id !== id)) return all;
+    const next = { ...all };
+    delete next[mission];
+    return next;
+  });
+}
+
+export const missionHandoff = (mission: string | null | undefined): Handoff | null => (mission ? handoffs()[mission] ?? null : null);
+
+export function handoffPending(status: Status, handoff: Handoff | null | undefined, now = Date.now()): boolean {
+  if (!handoff || now - handoff.at >= HANDOFF_TIMEOUT_MS || now < handoff.at - 1000) return false;
+  return HANDOFF_STATUSES.has((status ?? "").toLowerCase());
+}
+
+export type ActivityReason = "running" | "queued" | "starting" | "stopping" | "handoff" | "idle" | "failed" | "needs_you";
 export type MissionActivity = { working: boolean; reason: ActivityReason; label?: string };
 
 type ActivityJob = { phase?: string | null; node_state?: string | null; node_id?: string | null; lease_state?: string | null; terminal_reason?: string | null; finished_at?: string | null; exit_code?: number | null } | null | undefined;
-type ActivityMission = { status?: string | null; remote_node_id?: string | null; remote_job?: ActivityJob; execution?: { state?: string | null } | null } | null | undefined;
+type ActivityMission = { id?: string; status?: string | null; remote_node_id?: string | null; remote_job?: ActivityJob; execution?: { state?: string | null } | null } | null | undefined;
 type ActivityItem = { kind: string; queued?: boolean };
 
 const TERMINAL_LEASES = new Set(["released", "expired", "lost", "terminal", "terminated", "finished", "failed", "cancelled", "canceled"]);
@@ -135,12 +175,16 @@ function errorAfterLastUser(items: readonly ActivityItem[]): boolean {
  * - An error after the last delivered message, with no live job, ends the turn.
  * - A remote job waiting for a node slot is working ("queued").
  */
-export function missionActivity(mission: ActivityMission, items: readonly ActivityItem[] = [], opts: { localRun?: boolean; needsYou?: boolean; nodeName?: (id: string) => string } = {}): MissionActivity {
+export function missionActivity(mission: ActivityMission, items: readonly ActivityItem[] = [], opts: { localRun?: boolean; needsYou?: boolean; nodeName?: (id: string) => string; handoff?: Handoff | null; now?: number } = {}): MissionActivity {
   if (opts.localRun) return { working: true, reason: "running" };
   if (!mission) return { working: false, reason: "idle" };
   const status = mission.status ?? "";
   const job = mission.remote_job;
   if (opts.needsYou && !isFailedStatus(status)) return { working: false, reason: "needs_you" };
+  // Send now = stop, then a new turn. Between the two the mission briefly reads
+  // `interrupted` (or idle) and its old job ends: that is the handoff, not a stop.
+  const handoff = opts.handoff !== undefined ? opts.handoff : missionHandoff(mission.id);
+  if (handoffPending(status, handoff, opts.now)) return { working: true, reason: "handoff", label: "Sending" };
   if (job && remoteJobEnded(job)) {
     const failed = !!job.terminal_reason || FAILED_JOB_STATES.has(job.node_state ?? "") || (job.exit_code != null && job.exit_code !== 0) || isFailedStatus(status);
     return { working: false, reason: failed ? "failed" : "idle" };

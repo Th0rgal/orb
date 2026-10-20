@@ -104,7 +104,7 @@ it('recovers a stored Antigravity answer on completion when live text was missed
  expect(view.container.querySelector('.agent-wait-status')).toBeNull();
 });
 
-it('replaces an edited remote queued message without leaving a duplicate Sending… row',async()=>{
+it.each([['edits in place on a current Core',false],['falls back to replace on an older Core',true]] as const)('%s, without leaving a duplicate Sending… row',async(_name,oldCore)=>{
  const {getMission,sendMissionMessage}=await import('../src/api');
  vi.mocked(getMission).mockResolvedValue({id:'edit-remote-queued',status:'active',history:[],created_at:'',updated_at:''});
  let rows=[{id:'orig-msg',mission_id:'edit-remote-queued',content:'Original queued text',source:'remote-queue'}];
@@ -115,6 +115,13 @@ it('replaces an edited remote queued message without leaving a duplicate Sending
  });
  vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
   const u=String(url);
+  if(options?.method==='PATCH'){
+   if(oldCore)return new Response('Method Not Allowed',{status:405});
+   const editedId=decodeURIComponent(u.split('/').pop()??'');
+   const {content}=JSON.parse(String(options.body));
+   rows=rows.map(r=>r.id===editedId?{...r,content}:r);
+   return Response.json({ok:true,id:editedId,content});
+  }
   if(options?.method==='DELETE'){
    const deletedId=decodeURIComponent(u.split('/').pop()??'');
    rows=rows.filter(r=>r.id!==deletedId);
@@ -136,6 +143,11 @@ it('replaces an edited remote queued message without leaving a duplicate Sending
   expect(screen.getAllByText('Edited queued text')).toHaveLength(1);
   expect(screen.queryByText('Sending…')).toBeNull();
  });
+ expect(screen.queryByText('Original queued text')).toBeNull();
+ // Same id and the count never changed: one row, never "2 Queued".
+ expect(screen.getByText('1 Queued')).toBeTruthy();
+ await waitFor(()=>expect(rows.map(r=>r.id)).toEqual(oldCore?[expect.not.stringMatching(/^orig-msg$/)]:['orig-msg']));
+ await waitFor(()=>expect(screen.getAllByText('Edited queued text')).toHaveLength(1));
  expect(screen.queryByText('Original queued text')).toBeNull();
 });
 
@@ -224,3 +236,42 @@ it('never leaks an in-flight Send now retry to another mission when the selected
 
 
 
+
+it('keeps one continuous Sending → Working state through a Send now stop',async()=>{
+ const {getMission}=await import('../src/api');
+ const {endHandoff}=await import('../src/missionStatus');
+ let current:Mission={id:'handoff',status:'active',history:[],created_at:'',updated_at:'1',remote_job:{job_id:'old',node_id:'nippur',phase:'running',node_state:'running'}};
+ vi.mocked(getMission).mockImplementation(async()=>current);
+ let rows=[{id:'promote-me',mission_id:'handoff',content:'Do this now',source:'remote-queue'}];
+ vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
+  const u=String(url);
+  if(u.includes('/send-now')&&options?.method==='POST'){rows=[];return Response.json({ok:true,delivered:false,promoted:true});}
+  if(u.includes('/queue?'))return Response.json(rows);
+  return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
+ }));
+ const view=render(()=><NativeMissionView id="handoff" initial={current}/>);
+ const {fireEvent}=await import('@solidjs/testing-library');
+ await screen.findByRole('button',{name:'Send now: Do this now'});
+ await fireEvent.click(screen.getByRole('button',{name:'Send now: Do this now'}));
+ // Same batch: the message is in the transcript, marked as sending.
+ const bubble=()=>[...view.container.querySelectorAll('.scroll .user')].find(node=>node.textContent?.includes('Do this now'));
+ expect(bubble()?.classList.contains('sending')).toBe(true);
+ const workingRow=()=>view.container.querySelector('.st-working')?.textContent??'';
+ await waitFor(()=>expect(workingRow()).toMatch(/^Sending on /));
+ // Core stops the old turn: interrupted, old job finished.
+ current={...current,status:'interrupted',updated_at:'2',remote_job:{job_id:'old',node_id:'nippur',phase:'finished',node_state:'cancelled'}};
+ state.event!({type:'mission_status_changed',data:{status:'interrupted'}});
+ await waitFor(()=>expect(view.container.querySelector('.send.stop')).not.toBeNull());
+ await new Promise(resolve=>setTimeout(resolve,50));
+ expect(screen.queryByText('Mission interrupted')).toBeNull();
+ expect(view.container.querySelector('.send.stop')).not.toBeNull();
+ expect(workingRow()).toMatch(/^Sending on /);
+ expect(bubble()?.classList.contains('sending')).toBe(true);
+ // The promoted message starts the new turn.
+ current={...current,status:'active',updated_at:'3',remote_job:{job_id:'new',node_id:'nippur',phase:'running',node_state:'running'}};
+ state.event!({type:'mission_status_changed',data:{status:'active'}});
+ await waitFor(()=>expect(workingRow()).toMatch(/^Working on /));
+ expect(bubble()?.classList.contains('sending')).toBe(false);
+ expect(screen.queryByText('Mission interrupted')).toBeNull();
+ endHandoff('handoff');
+});

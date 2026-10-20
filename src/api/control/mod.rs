@@ -6430,6 +6430,51 @@ pub async fn remove_from_queue(
     }
 }
 
+/// Body of `PATCH /api/control/queue/:id`.
+#[derive(Debug, Deserialize)]
+pub struct EditQueuedMessage {
+    pub content: String,
+}
+
+/// Edit a queued remote follow-up in place: same id, same FIFO position.
+/// `409` when the message was already delivered (or a node job is bound to
+/// it), `404` when no durable follow-up has this id, so older clients and
+/// in-memory host-queue rows keep using delete + resend.
+pub async fn edit_queued_message(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(message_id): Path<Uuid>,
+    Json(body): Json<EditQueuedMessage>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "A queued message cannot be empty; remove it instead".into(),
+        ));
+    }
+    // Delivery reads the content under dispatch admission: an edit either
+    // lands before the pump binds a job or is refused, never half applied.
+    let _guard = DISPATCH_ADMISSION.lock().await;
+    let _file = dispatch_admission::durable_lock(&state.config)
+        .await
+        .map_err(internal_error)?;
+    match remote_queue::edit(&state.projects, &user.id, message_id, content)
+        .map_err(internal_error)?
+    {
+        remote_queue::EditOutcome::Edited => Ok(Json(
+            serde_json::json!({ "ok": true, "id": message_id, "content": content }),
+        )),
+        remote_queue::EditOutcome::AlreadyDelivered => Err((
+            StatusCode::CONFLICT,
+            "This message was already sent; it can no longer be edited".into(),
+        )),
+        remote_queue::EditOutcome::NotFound => {
+            Err((StatusCode::NOT_FOUND, "message not in queue".into()))
+        }
+    }
+}
+
 /// Deliver a queued message immediately to a running turn when the harness
 /// supports live mid-turn user message injection, without cancelling the turn.
 /// Returns `{"ok": true, "delivered": true}` when injected live, or
@@ -6530,6 +6575,9 @@ pub async fn send_queued_now(
         if let Err(error) = rx.await.map_err(recv_failed)? {
             tracing::debug!(%mission_id, %error, "send-now interrupt found no running turn");
         }
+        // Between turns the promoted row is deliverable now; otherwise the
+        // job's poll loop wakes the pump again once the node confirms the stop.
+        remote_queue::wake();
         return Ok(Json(serde_json::json!({
             "ok": true,
             "delivered": false,
@@ -16611,6 +16659,24 @@ async fn poll_recovered_remote_build(
     }
 }
 
+/// Status cadence of a remote job being stopped (mission left Active). Its
+/// cancel request goes out on the first tick after the stop, and the terminal
+/// receipt is seen within one tick of the node confirming it, so a send-now
+/// follow-up starts right after the kill instead of ~7 s later (two 3 s
+/// status checks plus the 3 s queue pump tick).
+const REMOTE_STOPPING_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Delay between two node status checks of a remote job.
+fn remote_status_poll_delay(stopping: bool, failures: u32) -> std::time::Duration {
+    if stopping && failures == 0 {
+        REMOTE_STOPPING_POLL_INTERVAL
+    } else if stopping {
+        std::time::Duration::from_secs(3)
+    } else {
+        remote_poll_delay(failures)
+    }
+}
+
 fn remote_poll_delay(failures: u32) -> std::time::Duration {
     std::time::Duration::from_secs(if failures < 5 {
         3
@@ -16636,8 +16702,11 @@ async fn poll_remote_job(
     job_id: Uuid,
     started_at: chrono::DateTime<chrono::Utc>,
 ) {
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
     const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+    // However this loop ends (terminal receipt, rebalance, retirement), the
+    // mission's next queued follow-up may now be deliverable: wake the
+    // remote queue pump instead of waiting for its next 3 s tick.
+    let _wake_queue = remote_queue::WakeOnDrop;
     let outcome = |state: &str, exit_code: Option<i32>, error: Option<String>, terminal: bool| {
         crate::remote_node::DispatchOutcome {
             mission_id,
@@ -16665,17 +16734,14 @@ async fn poll_remote_job(
     let mut log_tick = tokio::time::interval(std::time::Duration::from_millis(500));
     log_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_status_check: Option<std::time::Instant> = None;
+    let mut last_cancel_request: Option<std::time::Instant> = None;
     loop {
         log_tick.tick().await;
         let inactive_status = match owner.mission_store.get_mission(mission_id).await {
             Ok(Some(current)) if current.status != MissionStatus::Active => Some(current.status),
             _ => None,
         };
-        let poll_delay = if inactive_status.is_some() {
-            POLL_INTERVAL
-        } else {
-            remote_poll_delay(failures)
-        };
+        let poll_delay = remote_status_poll_delay(inactive_status.is_some(), failures);
         if last_status_check.is_some_and(|at| at.elapsed() < poll_delay) {
             if failures == 0 && terminal_observation.is_none() {
                 if let Some(observer) = grok.as_mut() {
@@ -16691,7 +16757,12 @@ async fn poll_remote_job(
         // request cancellation but retain the durable handle and keep polling
         // until the node confirms a terminal state. A transient cancel outage
         // must not orphan a still-running remote job.
-        if let Some(status) = inactive_status {
+        if let Some(status) = inactive_status.filter(|_| {
+            // Status checks run every 500 ms while stopping; the cancel
+            // request itself is repeated at most every 3 s.
+            last_cancel_request.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(3))
+        }) {
+            last_cancel_request = Some(std::time::Instant::now());
             if let Err(err) = client
                 .cancel_job_with_reason(
                     &node,
@@ -16999,6 +17070,21 @@ async fn poll_remote_job(
                             // happened to its node job. Log once, then settle
                             // the observer's lease with the node's verdict.
                             if !preserved_terminal_noted {
+                                // Keep what the interrupted turn already said:
+                                // reloads must show it once, from storage.
+                                if let Some(partial) = grok
+                                    .as_ref()
+                                    .and_then(remote_grok::NativeGrokObserver::partial_turn_message)
+                                {
+                                    if let Err(error) =
+                                        owner.mission_store.log_event(mission_id, &partial).await
+                                    {
+                                        tracing::warn!(%mission_id, %job_id, %error,
+                                            "interrupted turn text persistence failed; retaining ownership and retrying");
+                                        continue;
+                                    }
+                                    owner.send(partial);
+                                }
                                 let note = AgentEvent::AssistantMessage {
                                 id: Uuid::new_v4(),
                                 content: format!(
@@ -43267,6 +43353,30 @@ Investigate <service/> failures.
                 None => serde_json::json!({}),
             },
         }
+    }
+
+    #[test]
+    fn stopping_remote_job_is_polled_fast_so_send_now_hands_off_quickly() {
+        // Before: the cancel request waited for the next 3 s status check, the
+        // terminal receipt for another, and the queue pump for its 3 s tick:
+        // up to ~9 s (observed ~7 s) between "interrupted" and the next turn.
+        let before = std::time::Duration::from_secs(3) * 3;
+        // After: cancel on the next 500 ms tick, terminal seen within one more
+        // tick of the node's confirmation, and the pump woken immediately.
+        let after = remote_status_poll_delay(true, 0) * 2;
+        assert_eq!(after, std::time::Duration::from_secs(1));
+        assert!(after * 7 < before);
+        // A running job keeps its 3 s cadence; an unreachable stopping node
+        // backs off instead of being hammered every 500 ms.
+        assert_eq!(
+            remote_status_poll_delay(false, 0),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            remote_status_poll_delay(true, 2),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(remote_status_poll_delay(false, 7), remote_poll_delay(7));
     }
 
     #[test]

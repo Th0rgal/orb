@@ -1,17 +1,24 @@
 import { pollWhileVisible } from "./poll";
 import { swallow } from "./log";
-import { For, Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
+import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { ErrorToast } from "./toast";
 import { messagePresentation } from "./messagePresentation";
-import { api, connectionVersion, listQueuedMessages, type QueuedMessage } from "./api";
+import { api, ApiError, connectionVersion, listQueuedMessages, type QueuedMessage } from "./api";
 import * as Ic from "./icons";
 
 export interface RemoteQueueHandle {
   sendNow: (id?: string) => Promise<void>;
   replaceEdited: (id: string, sendReplaced: () => Promise<boolean>, replayAfter?: (after: { content: string; attached?: boolean }[]) => Promise<void>) => Promise<boolean>;
+  /** Edit a queued message in place (same id, same position). Resolves
+   * "unsupported" when this Core (or this kind of row) cannot, so the caller
+   * falls back to `replaceEdited`. */
+  editInPlace: (id: string, content: string) => Promise<"edited" | "failed" | "unsupported">;
   editFirst: () => void;
   hasQueued: () => boolean;
 }
+
+/** How long a sent row takes to collapse out of the queue. */
+const LEAVE_MS = 160;
 
 export type PendingRemoteQueueItem = { id: string; content: string; attached?: boolean };
 
@@ -31,12 +38,26 @@ export function RemoteQueue(p: {
   onCancel: (id: string) => void;
   /** Withdraw a message shown optimistically as sent, when it was not delivered live. */
   onRetract?: (id: string) => void;
+  /** Core took a Send now: injected into the running turn (`live`), or
+   * promoted to start the next turn once the current one stops. */
+  onSendNowAccepted?: (id: string, live: boolean) => void;
+  /** A queued message's content changed in place (same id). */
+  onEdited?: (id: string, content: string) => void;
   ref?: (handle: RemoteQueueHandle) => void;
 }) {
   let revision = 0, destroyed = false;
   const deletedIds = new Set<string>();
   onCleanup(() => { destroyed = true; });
   const [rows, setRows] = createSignal<QueuedMessage[]>([]);
+  /** Optimistic in-place edits, by id, until Core confirms or refuses them. */
+  const [edits, setEdits] = createSignal<Readonly<Record<string, string>>>({});
+  /** Rows on their way to the transcript: kept for one short collapse so the
+   * message is never in neither place. Not counted, not actionable. */
+  const [leaving, setLeaving] = createSignal<(QueuedMessage & { attached?: boolean })[]>([]);
+  const leave = (row: QueuedMessage & { attached?: boolean }) => {
+    setLeaving(list => [...list.filter(r => r.id !== row.id), row]);
+    setTimeout(() => { if (!destroyed) setLeaving(list => list.filter(r => r.id !== row.id)); }, LEAVE_MS);
+  };
   const pendingList = () => {
     if (!p.pending) return [];
     return Array.isArray(p.pending) ? p.pending : [p.pending];
@@ -49,6 +70,10 @@ export function RemoteQueue(p: {
     for (const row of p.confirmed ?? []) if (!deletedIds.has(row.id) && !sent.has(row.id)) known.set(row.id, {...known.get(row.id), ...row});
     return [...known.values()];
   };
+  const edited = <T extends { id: string; content: string }>(row: T): T => {
+    const content = edits()[row.id];
+    return content == null ? row : { ...row, content };
+  };
   const displayRows = () => {
     const confirmedMap = new Map<string, QueuedMessage & { attached?: boolean }>();
     for (const row of visibleRows()) confirmedMap.set(row.id, row);
@@ -56,13 +81,13 @@ export function RemoteQueue(p: {
     const seen = new Set<string>();
     for (const row of visibleRows()) {
       seen.add(row.id);
-      out.push({ ...row, sending: false });
+      out.push({ ...edited(row), sending: false });
     }
     for (const item of pendingList()) {
       if (deletedIds.has(item.id) || seen.has(item.id) || delivered().has(item.id)) continue;
       seen.add(item.id);
       const confirmed = confirmedMap.get(item.id);
-      if (confirmed) out.push({ ...confirmed, sending: false });
+      if (confirmed) out.push({ ...edited(confirmed), sending: false });
       else out.push({ id: item.id, content: item.content, attached: item.attached, sending: true });
     }
     return out;
@@ -139,9 +164,14 @@ export function RemoteQueue(p: {
     // the later receipt dedupes); it returns to the queue only if Core refuses.
     const injected = { id: target.id, content: messagePresentation(target.content).text, attached: target.attached || messagePresentation(target.content).attached || undefined };
     const before = rows();
-    deletedIds.add(target.id);
-    setRows(previous => previous.filter(row => row.id !== target.id));
-    void p.onSendImmediate?.([], [injected]);
+    // One reactive batch: the row leaves the queue and the message enters the
+    // transcript together, so no frame shows it in neither place.
+    batch(() => {
+      deletedIds.add(target.id);
+      leave(target);
+      setRows(previous => previous.filter(row => row.id !== target.id));
+      void p.onSendImmediate?.([], [injected]);
+    });
     try {
       // A network error or timeout does not prove the message was not delivered:
       // it must never fall through to delete-and-resend. Only an explicit
@@ -151,6 +181,7 @@ export function RemoteQueue(p: {
       const live = await api<{ ok?: boolean; delivered?: boolean; promoted?: boolean }>(`/api/control/queue/${encodeURIComponent(target.id)}/send-now?interrupt=true`, { method: "POST" });
       if (live?.delivered || live?.promoted) {
         if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
+        p.onSendNowAccepted?.(target.id, !!live.delivered);
         revision++;
         p.onRows(rows().map(row => row.id));
         p.onCancel(target.id);
@@ -175,10 +206,13 @@ export function RemoteQueue(p: {
       if (version === connectionVersion() && mission === p.mission) {
         // Refused or unconfirmed: put the queue back as it was, same id, so nothing
         // looks sent that was not. The next queue read reconciles a late delivery.
-        p.onRetract?.(target.id);
-        deletedIds.delete(target.id);
-        setRows(before);
-        setError(e instanceof Error ? e.message : String(e));
+        batch(() => {
+          p.onRetract?.(target.id);
+          deletedIds.delete(target.id);
+          setLeaving(list => list.filter(r => r.id !== target.id));
+          setRows(before);
+          setError(e instanceof Error ? e.message : String(e));
+        });
       }
     } finally {
       setWorking(false);
@@ -218,9 +252,49 @@ export function RemoteQueue(p: {
       setWorking(false);
     }
   };
+  const editInPlace: RemoteQueueHandle["editInPlace"] = async (id, content) => {
+    const target = visibleRows().find(r => r.id === id);
+    if (!target) {
+      setError("This message was already sent. Your edit was not applied.");
+      return "failed";
+    }
+    // Attached context lives in the stored content: the resend path rebuilds it.
+    if (target.attached || messagePresentation(target.content).attached) return "unsupported";
+    const version = connectionVersion(), mission = p.mission;
+    const previous = edits()[id];
+    setError("");
+    setEdits(all => ({ ...all, [id]: content }));
+    const revert = () => setEdits(all => {
+      const next = { ...all };
+      if (previous == null) delete next[id]; else next[id] = previous;
+      return next;
+    });
+    try {
+      await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) });
+      if (destroyed || version !== connectionVersion() || mission !== p.mission) return "edited";
+      batch(() => {
+        revision++;
+        setRows(list => list.map(row => row.id === id ? { ...row, content } : row));
+        // The confirmed transcript copy (queued user item) follows the edit too.
+        p.onEdited?.(id, content);
+        setEdits(all => { const next = { ...all }; delete next[id]; return next; });
+      });
+      return "edited";
+    } catch (e) {
+      revert();
+      // Older Core (no PATCH route) or a row Core keeps outside its durable
+      // inbox: the caller replaces it the old way.
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return "unsupported";
+      if (!destroyed && version === connectionVersion() && mission === p.mission) {
+        setError(e instanceof ApiError && e.status === 409 ? "This message was already sent, so the edit was not applied." : `Couldn’t save the edit: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      return "failed";
+    }
+  };
   p.ref?.({
     sendNow,
     replaceEdited,
+    editInPlace,
     editFirst: () => {
       const first = visibleRows()[0];
       if (first && p.onEdit && !p.editing && !working()) {
@@ -229,35 +303,49 @@ export function RemoteQueue(p: {
     },
     hasQueued: () => visibleRows().length > 0,
   });
-  return <Show when={displayRows().length || error()}>
+  type Row = QueuedMessage & { attached?: boolean; sending?: boolean; leaving?: boolean };
+  // Leaving rows keep their slot until they have collapsed; they are not counted.
+  const renderedRows = (): Row[] => {
+    const out: Row[] = displayRows();
+    const shown = new Set(out.map(row => row.id));
+    for (const row of leaving()) if (!shown.has(row.id)) out.push({ ...row, leaving: true });
+    return out;
+  };
+  const rowsById = createMemo(() => new Map(renderedRows().map(row => [row.id, row])));
+  const rowIds = createMemo(() => renderedRows().map(row => row.id), [], { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) });
+  return <Show when={rowIds().length || error()}>
     <section class="followup-queue" classList={{collapsed:collapsed()}} aria-label="Queued messages" aria-live="polite">
-      {/* The header text and the row layout stay the same from send to delivery, so the dock
-          height changes once instead of once per phase ("Sending…" → "Queued"). */}
-      <Show when={true}>
+      {/* The header and every row keep one geometry from send to delivery: the
+          hint reserves its space and each row reserves its action area, so the
+          dock height changes only when a row is added or removed. */}
       <header>
         <span class="queue-count">{`${displayRows().length} Queued`}</span>
-        <Show when={visibleRows().length > 0 && !p.editing}><span class="queue-hint"><Ic.ReturnIcon size={13}/> to Send</span></Show>
+        <span class="queue-hint" classList={{"queue-hint-hidden": !(visibleRows().length > 0 && !p.editing)}} aria-hidden={!(visibleRows().length > 0 && !p.editing)}><Ic.ReturnIcon size={13}/> to Send</span>
         <div class="queue-options">
           <button type="button" class="queue-collapse" aria-label={collapsed()?"Show queued messages":"Hide queued messages"} aria-expanded={!collapsed()} onClick={()=>setCollapsed(!collapsed())}><Ic.ChevronDown size={14}/></button>
         </div>
       </header>
-      </Show>
-      <Show when={!collapsed()}><ol classList={{scrollable:displayRows().length>6}}><For each={displayRows()}>{row => {
-        const text = () => messagePresentation(row.content).text;
-        const attached = () => row.attached || messagePresentation(row.content).attached;
-        return <li class="queue-row" classList={{editing:p.editing===row.id,sending:!!row.sending,failed:!!row.queue_error}}>
+      <Show when={!collapsed()}><ol classList={{scrollable:rowIds().length>6}}><For each={rowIds()}>{id => {
+        // Keyed by id (a string), so the same <li> lives from "sending" to
+        // "confirmed" to "leaving": its spinner fades instead of the row being rebuilt.
+        let last: Row | undefined;
+        const r = () => (last = rowsById().get(id) ?? last)!;
+        const text = () => messagePresentation(edits()[r().id] ?? r().content).text;
+        const attached = () => r().attached || messagePresentation(r().content).attached;
+        const inert = () => !!r().sending || !!r().leaving;
+        return <li class="queue-row" classList={{editing:p.editing===r().id,sending:!!r().sending,leaving:!!r().leaving,failed:!!r().queue_error}} aria-hidden={r().leaving ? true : undefined}>
           <div class="queue-line">
             <div class="queue-text" title={text()}><span>{text()}</span><Show when={attached()}><small class="user-context">Attached context</small></Show></div>
-            <Show when={row.sending}><span class="queue-sending" role="status"><span class="sr-only">Sending…</span></span></Show>
-            <Show when={true}>
-              <Show when={p.editing===row.id} fallback={<span class="queue-row-actions" classList={{pending:!!row.sending}}>
-                <button type="button" class="queue-action-btn" aria-label={`Edit queued message: ${text()}`} disabled={!!row.sending||working()||!!p.editing||cancelling()===row.id} onClick={()=>p.onEdit?.({id:row.id,text:text(),remote:true})}><Ic.PencilIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Edit</span><kbd>→</kbd></span></button>
-                <button type="button" class="queue-action-btn" aria-label={`Send now: ${text()}`} disabled={!!row.sending||working()||!!p.editing||cancelling()===row.id} onClick={()=>void sendNow(row.id)}><Ic.ArrowUpIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Send now</span><kbd>↵</kbd></span></button>
-                <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${text()}`} disabled={!!row.sending||working()||cancelling()===row.id||p.editing===row.id} onClick={()=>void cancel(row.id)}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>
+            <span class="queue-trailing">
+              <span class="queue-sending" classList={{visible:!!r().sending}} role={r().sending ? "status" : undefined}><Show when={r().sending}><span class="sr-only">Sending…</span></Show></span>
+              <Show when={p.editing===r().id} fallback={<span class="queue-row-actions" classList={{pending:inert()}}>
+                <button type="button" class="queue-action-btn" aria-label={`Edit queued message: ${text()}`} disabled={inert()||working()||!!p.editing||cancelling()===r().id} onClick={()=>p.onEdit?.({id:r().id,text:text(),remote:true})}><Ic.PencilIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Edit</span><kbd>→</kbd></span></button>
+                <button type="button" class="queue-action-btn" aria-label={`Send now: ${text()}`} disabled={inert()||working()||!!p.editing||cancelling()===r().id} onClick={()=>void sendNow(r().id)}><Ic.ArrowUpIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Send now</span><kbd>↵</kbd></span></button>
+                <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${text()}`} disabled={inert()||working()||cancelling()===r().id||p.editing===r().id} onClick={()=>void cancel(r().id)}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>
               </span>}><span class="queue-editing">Editing</span></Show>
-            </Show>
+            </span>
           </div>
-          <Show when={row.queue_error}><small title={row.queue_error ?? undefined}>Delivery paused · {row.queue_error}</small></Show>
+          <Show when={r().queue_error}><small title={r().queue_error ?? undefined}>Delivery paused · {r().queue_error}</small></Show>
         </li>;
       }}</For></ol></Show>
       <ErrorToast error={error()} onDismiss={() => setError("")} />

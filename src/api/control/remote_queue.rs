@@ -280,11 +280,33 @@ async fn retire_missing_mission(
     Ok(true)
 }
 
+static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Run the queue pump now (a remote job just ended or a follow-up was
+/// promoted) instead of on its next periodic tick.
+pub(super) fn wake() {
+    WAKE.notify_one();
+}
+
+/// Wakes the pump when dropped: placed at the top of a remote job's poll
+/// loop so every exit path hands the mission to its next follow-up.
+pub(super) struct WakeOnDrop;
+
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        wake();
+    }
+}
+
 pub(super) fn start(state: std::sync::Weak<AppState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = WAKE.notified() => {}
+            }
             let Some(state) = state.upgrade() else { break };
             let entries = match waiting(&state.projects, None) {
                 Ok(rows) => rows,
@@ -406,6 +428,53 @@ pub(super) fn promote(store: &ProjectsStore, user: &str, id: Uuid) -> Result<Uui
     Uuid::parse_str(&mission).map_err(|e| e.to_string())
 }
 
+/// Outcome of editing a queued follow-up in place.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum EditOutcome {
+    /// The row kept its id and FIFO position; only its content changed.
+    Edited,
+    /// The message left the queue (accepted, cancelled) or a node job is
+    /// already bound to it: its content may have been delivered.
+    AlreadyDelivered,
+    /// No durable remote follow-up has this id.
+    NotFound,
+}
+
+/// Replace the content of a waiting follow-up, keeping its id and sequence.
+/// Refuses a row already bound to a node job: that delivery may have been
+/// accepted with the old text.
+pub(super) fn edit(
+    store: &ProjectsStore,
+    user: &str,
+    id: Uuid,
+    content: &str,
+) -> Result<EditOutcome, String> {
+    let conn = store.lock()?;
+    let changed = conn
+        .execute(
+            "UPDATE remote_message_queue SET payload=json_set(payload,'$.message.content',?3,'$.message.queue_error',NULL) WHERE user_id=?1 AND message_id=?2 AND state='waiting' AND json_extract(payload,'$.job_id') IS NULL",
+            params![user, id.to_string(), content],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed > 0 {
+        return Ok(EditOutcome::Edited);
+    }
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM remote_message_queue WHERE user_id=?1 AND message_id=?2",
+            params![user, id.to_string()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    Ok(if exists {
+        EditOutcome::AlreadyDelivered
+    } else {
+        EditOutcome::NotFound
+    })
+}
+
 pub(super) fn is_waiting(store: &ProjectsStore, user: &str, id: Uuid) -> Result<bool, String> {
     store
         .lock()?
@@ -422,6 +491,69 @@ pub(super) fn is_waiting(store: &ProjectsStore, user: &str, id: Uuid) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn edit_keeps_id_and_position_and_refuses_delivered_rows() {
+        let db = ProjectsStore::open_in_memory().unwrap();
+        let mission = Uuid::new_v4();
+        let ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        for (index, id) in ids.iter().enumerate() {
+            save(
+                &db,
+                &Entry {
+                    user_id: "u".into(),
+                    node_id: "nippur".into(),
+                    session_id: None,
+                    job_id: None,
+                    assignment: serde_json::json!({}),
+                    message: QueuedMessage {
+                        id: *id,
+                        content: format!("message {index}"),
+                        agent: None,
+                        mission_id: Some(mission),
+                        source: Some("remote-queue".into()),
+                        inflight: false,
+                        queue_error: None,
+                    },
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            edit(&db, "u", ids[1], "edited").unwrap(),
+            EditOutcome::Edited
+        );
+        let rows = waiting(&db, Some("u")).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.message.id).collect::<Vec<_>>(),
+            ids.to_vec(),
+            "same ids, same order"
+        );
+        assert_eq!(rows[1].message.content, "edited");
+        assert_eq!(rows[0].message.content, "message 0");
+        assert_eq!(
+            edit(&db, "u", Uuid::new_v4(), "x").unwrap(),
+            EditOutcome::NotFound
+        );
+        assert_eq!(
+            edit(&db, "other", ids[0], "x").unwrap(),
+            EditOutcome::NotFound
+        );
+        bind_job(&db, "u", ids[2], Some(Uuid::new_v4())).unwrap();
+        assert_eq!(
+            edit(&db, "u", ids[2], "late").unwrap(),
+            EditOutcome::AlreadyDelivered
+        );
+        assert!(finish(&db, "u", ids[0], "accepted").unwrap());
+        assert_eq!(
+            edit(&db, "u", ids[0], "late").unwrap(),
+            EditOutcome::AlreadyDelivered
+        );
+        assert_eq!(
+            waiting(&db, Some("u")).unwrap()[1].message.content,
+            "message 2"
+        );
+    }
+
     #[tokio::test]
     async fn stale_delivery_cannot_overtake_cancel_or_change_session() {
         let missions = crate::api::mission_store::InMemoryMissionStore::new();

@@ -822,7 +822,59 @@ fn take_allocated_claude_session(job_id: Uuid) -> bool {
         .remove(&job_id)
 }
 
+/// Marks an assistant message Core persisted from the streamed text of a turn
+/// that was stopped before its native final message (`completion_evidence`).
+pub(crate) const PARTIAL_TURN_CLASSIFICATION: &str = "partial_turn_interrupted";
+
+/// The durable copy of an interrupted turn's streamed text. Without it the
+/// text exists only as the mutable `text_delta_latest` row, which the next
+/// turn overwrites, so a reload lost (or, replayed from SSE, duplicated) it.
+pub(crate) fn partial_turn_message(
+    mission_id: Uuid,
+    job_id: Uuid,
+    text: &str,
+) -> Option<AgentEvent> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(AgentEvent::AssistantMessage {
+        // One id per job: a retried terminal pass updates the same row.
+        id: Uuid::new_v5(&job_id, b"partial-turn"),
+        content: text.to_string(),
+        success: true,
+        cost_cents: 0,
+        cost_source: crate::agents::CostSource::Unknown,
+        usage: None,
+        model: None,
+        model_normalized: None,
+        mission_id: Some(mission_id),
+        shared_files: None,
+        resumable: false,
+        completion_evidence: Some(crate::agents::CompletionEvidence {
+            terminal_reason: Some(crate::agents::TerminalReason::Cancelled),
+            completion_signal: crate::agents::CompletionSignal::Unknown,
+            completion_confidence: crate::agents::CompletionConfidence::Low,
+            native_terminal_seen: false,
+            pending_tools: None,
+            transport_failure_stage: None,
+            provider_error_source: None,
+            failure_class: None,
+            classification_source: PARTIAL_TURN_CLASSIFICATION.into(),
+        }),
+    })
+}
+
 impl NativeGrokObserver {
+    /// Streamed assistant text of this job when it was stopped mid-turn.
+    /// Antigravity keeps its own native bubbles, which are already durable.
+    pub(crate) fn partial_turn_message(&self) -> Option<AgentEvent> {
+        if self.stream.antigravity.is_some() {
+            return None;
+        }
+        partial_turn_message(self.mission_id, self.job_id, &self.stream.text)
+    }
+
     pub(crate) fn usage(&self) -> Option<crate::cost::TokenUsage> {
         self.stream
             .antigravity
@@ -3494,6 +3546,47 @@ mod tests {
         }
         assert_eq!(stream.text, "Hello 🦀Next phase");
         assert!(!stream.text.contains("goal_complete"));
+    }
+
+    #[test]
+    fn interrupted_turn_text_is_persisted_once_and_marked_partial() {
+        let (mission, job) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(partial_turn_message(mission, job, "  \n").is_none());
+        let first = partial_turn_message(mission, job, "step 1 done\nstep 2 done\n").unwrap();
+        let again = partial_turn_message(mission, job, "step 1 done\nstep 2 done").unwrap();
+        match (&first, &again) {
+            (
+                AgentEvent::AssistantMessage {
+                    id,
+                    content,
+                    success,
+                    completion_evidence,
+                    ..
+                },
+                AgentEvent::AssistantMessage { id: retry, .. },
+            ) => {
+                assert_eq!(id, retry, "a retried terminal pass reuses the row");
+                assert_eq!(content, "step 1 done\nstep 2 done");
+                assert!(*success);
+                let evidence = completion_evidence.as_ref().unwrap();
+                assert_eq!(evidence.classification_source, PARTIAL_TURN_CLASSIFICATION);
+                assert_eq!(
+                    evidence.terminal_reason,
+                    Some(crate::agents::TerminalReason::Cancelled)
+                );
+            }
+            _ => panic!("expected assistant messages"),
+        }
+        assert_ne!(
+            partial_turn_message(mission, Uuid::new_v4(), "x").map(|e| match e {
+                AgentEvent::AssistantMessage { id, .. } => id,
+                _ => Uuid::nil(),
+            }),
+            partial_turn_message(mission, job, "x").map(|e| match e {
+                AgentEvent::AssistantMessage { id, .. } => id,
+                _ => Uuid::nil(),
+            }),
+        );
     }
 
     #[test]

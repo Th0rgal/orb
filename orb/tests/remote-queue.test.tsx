@@ -1,8 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
+import { createSignal } from 'solid-js';
 import { RemoteQueue, type RemoteQueueHandle } from '../src/RemoteQueue';
 const backend = vi.hoisted(() => ({ list: vi.fn(), api: vi.fn() }));
-vi.mock('../src/api', () => ({ listQueuedMessages: backend.list, api: backend.api, connectionVersion: () => 1 }));
+vi.mock('../src/api', () => ({ listQueuedMessages: backend.list, api: backend.api, connectionVersion: () => 1, ApiError: class ApiError extends Error { constructor(public status: number, public detail: string) { super(`${status} ${detail}`); } } }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 it('shows durable remote messages in order and removes only the selected entry', async () => {
   backend.list.mockResolvedValue([{ id: 'one', content: 'First', source: 'remote-queue' },{ id: 'two', content: 'Second', source: 'remote-queue' },{ id: 'local', content: 'Local', source: 'api' }]);
@@ -135,7 +136,11 @@ it('injects the selected queued message live without deleting remaining queued m
   expect(cancel).toHaveBeenCalledWith('two');
   expect(cancel).not.toHaveBeenCalledWith('one');
   expect(screen.getByText('First')).toBeTruthy();
-  expect(screen.queryByText('Steer live now')).toBeNull();
+  // The sent row collapses out (not counted, hidden from assistive tech) …
+  expect(screen.getByText('1 Queued')).toBeTruthy();
+  expect(screen.getByText('Steer live now').closest('li')?.getAttribute('aria-hidden')).toBe('true');
+  // … then is gone.
+  await waitFor(() => expect(screen.queryByText('Steer live now')).toBeNull());
 });
 
 it('removes a queued message optimistically before the DELETE request resolves and stacks multiple pending items in order', async () => {
@@ -230,4 +235,53 @@ it('promoted by Core: keeps the same id, stops via Core, and never deletes or re
   expect(send).toHaveBeenCalledTimes(1);
   expect(send).toHaveBeenCalledWith([], [{id:'two',content:'Second',attached:undefined}]);
   expect(screen.getByText('First')).toBeTruthy();
+});
+
+it('edits a queued message in place and reverts with a toast when Core refuses', async () => {
+  backend.list.mockResolvedValue([
+    { id: 'one', content: 'First', source: 'remote-queue' },
+    { id: 'two', content: 'Second', source: 'remote-queue' },
+  ]);
+  let refuse!: (error: Error) => void;
+  backend.api.mockImplementation((_path: string, init?: RequestInit) => init?.method === 'PATCH' ? new Promise((_resolve, reject) => { refuse = reject; }) : Promise.resolve({ ok: true }));
+  let handle!: RemoteQueueHandle;
+  render(() => <RemoteQueue mission="remote" ref={h => handle = h} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('2 Queued');
+  const result = handle.editInPlace('one', 'First, edited');
+  // Optimistic: same place, same count, new text.
+  expect(screen.getByText('2 Queued')).toBeTruthy();
+  expect([...document.querySelectorAll('.queue-text span')].map(node => node.textContent)).toEqual(['First, edited', 'Second']);
+  expect(backend.api).toHaveBeenCalledWith('/api/control/queue/one', expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ content: 'First, edited' }) }));
+  const { ApiError } = await import('../src/api');
+  refuse(new ApiError(409, 'This message was already sent'));
+  expect(await result).toBe('failed');
+  expect([...document.querySelectorAll('.queue-text span')].map(node => node.textContent)).toEqual(['First', 'Second']);
+  expect((await screen.findByRole('alert')).textContent).toContain('already sent');
+});
+
+it('reports an older Core without the edit route so the caller replaces the message', async () => {
+  backend.list.mockResolvedValue([{ id: 'one', content: 'First', source: 'remote-queue' }]);
+  const { ApiError } = await import('../src/api');
+  backend.api.mockImplementation((_path: string, init?: RequestInit) => init?.method === 'PATCH' ? Promise.reject(new ApiError(405, 'Method Not Allowed')) : Promise.resolve({ ok: true }));
+  let handle!: RemoteQueueHandle;
+  render(() => <RemoteQueue mission="remote" ref={h => handle = h} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('1 Queued');
+  expect(await handle.editInPlace('one', 'Edited')).toBe('unsupported');
+  expect(screen.getByText('First')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('keeps one row element, and its action area, from sending to confirmed', async () => {
+  backend.list.mockResolvedValue([]);
+  const [pending, setPending] = createSignal<{ id: string; content: string }[]>([{ id: 'p1', content: 'Queued while busy' }]);
+  const [confirmed, setConfirmed] = createSignal<{ id: string; content: string }[]>([]);
+  render(() => <RemoteQueue mission="remote" pending={pending()} confirmed={confirmed()} onRows={() => {}} onCancel={() => {}}/>);
+  const row = (await screen.findByText('Queued while busy')).closest('li')!;
+  expect(row.classList.contains('sending')).toBe(true);
+  expect(row.querySelector('.queue-trailing .queue-row-actions')).not.toBeNull();
+  setConfirmed([{ id: 'p1', content: 'Queued while busy' }]); setPending([]);
+  const after = screen.getByText('Queued while busy').closest('li')!;
+  expect(after).toBe(row);
+  expect(after.classList.contains('sending')).toBe(false);
+  expect(after.querySelector('.queue-sending')?.classList.contains('visible')).toBe(false);
 });
