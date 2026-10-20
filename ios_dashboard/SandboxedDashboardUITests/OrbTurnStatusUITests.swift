@@ -83,4 +83,47 @@ final class OrbTurnStatusUITests: XCTestCase {
         await fulfillment(of: [queuedGone, workingGone], timeout: 10)
         capture(app, "queue-delivered")
     }
+
+    private nonisolated static func resetFixture() async throws {
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18766/__reset")!)
+        reset.httpMethod = "POST"
+        _ = try await URLSession.shared.data(for: reset)
+    }
+
+    /// A second send tapped while the first is in flight is queued at once, never dropped,
+    /// and the Working clock starts from the new turn, not the old one (~36 min ago).
+    @MainActor func testSendWhileSendingIsQueuedAndClockStartsFresh() async throws {
+        try await Self.resetFixture()
+        let app = open("idle-send")
+        let composer = app.textFields["composer"]
+        let send = app.buttons["composer.send"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.tap()
+        composer.typeText("fourth idle")
+        send.tap()
+        composer.typeText("fifth queued")
+        XCTAssertEqual(send.value as? String, "Sending", "the first send is still in flight")
+        send.tap()
+        XCTAssertTrue(app.staticTexts["1 Queued"].waitForExistence(timeout: 2), "the tap is accepted at once")
+        XCTAssertFalse((composer.value as? String ?? "").contains("fifth queued"), "the text leaves the composer")
+        let stale = app.staticTexts.matching(NSPredicate(format: "label CONTAINS ' min '")).firstMatch
+        XCTAssertFalse(stale.exists, "the clock never counts from the old turn")
+        capture(app, "send-while-sending")
+        XCTAssertTrue(app.descendants(matching: .any)["agent-working"].waitForExistence(timeout: 10))
+        XCTAssertFalse(stale.exists, "the clock never counts from the old turn")
+        XCTAssertTrue(app.staticTexts["QUEUED_REPLY_OK"].waitForExistence(timeout: 25), "the deferred message was delivered")
+        XCTAssertTrue(app.staticTexts["fifth queued"].exists)
+    }
+
+    /// Text typed right after the conversation opens is kept.
+    @MainActor func testEarlyComposerInputIsKept() async throws {
+        try await Self.resetFixture()
+        let app = open("agent-done")
+        let composer = app.textFields["composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.tap()
+        composer.typeText("early words")
+        sleep(2) // the open path (draft restore, first refresh) has run
+        XCTAssertEqual(composer.value as? String, "early words")
+    }
 }

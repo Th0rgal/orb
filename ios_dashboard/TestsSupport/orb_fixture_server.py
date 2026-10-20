@@ -41,10 +41,14 @@ def reset():
     MISSIONS['queue-run']=dict(id='queue-run',title='Queue while running',status='running',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='first message')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:05:00Z')
     QUEUE_EVENTS['queue-run']=[]
     qadd('queue-run','user_message','first message','first-id')
+    # Idle, its last turn started ~36 min ago; a send takes 2.5 s to be acknowledged.
+    MISSIONS['idle-send']=dict(id='idle-send',title='Idle send',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='old turn'),dict(role='assistant',content='old reply')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:06:00Z')
+    QUEUE_EVENTS['idle-send']=[]
+    qadd('idle-send','user_message','old turn','old-id',at=time.time()-2150); qadd('idle-send','assistant_message','old reply',at=time.time()-2140)
 
-def qadd(mid, kind, content, event_id=None):
+def qadd(mid, kind, content, event_id=None, at=None):
     rows=QUEUE_EVENTS[mid]; n=len(rows)+1
-    rows.append(dict(id=n,mission_id=mid,sequence=n,event_type=kind,timestamp=iso(time.time()),event_id=event_id or f'{mid}-{n}',tool_call_id=None,tool_name=None,content=content,metadata={}))
+    rows.append(dict(id=n,mission_id=mid,sequence=n,event_type=kind,timestamp=iso(at or time.time()),event_id=event_id or f'{mid}-{n}',tool_call_id=None,tool_name=None,content=content,metadata={}))
 
 def deliver_queue():
     """queue-run: the current turn ends; Core delivers the queued message, the agent answers, the mission completes."""
@@ -188,6 +192,10 @@ class Handler(BaseHTTPRequestHandler):
             mid=str(uuid.uuid4()); cloud=body.get('cloud'); m=dict(body,id=mid,status='awaiting_user',backend=('cloud_'+cloud['provider']) if cloud else body['backend'],history=[{'role':'user','content':body['prompt']},{'role':'assistant','content':'**ORB_TEST_OK**\n\nA response from the test agent.'}])
             if cloud: m['cloud_execution']={'mission_id':mid,'selection':cloud,'turns':[{'key':key,'prompt':body['prompt'],'result':'**ORB_TEST_OK**','phase':'response_complete','artifacts':[],'branches':[]}]}
             MISSIONS[mid]=m; RECEIPTS[key]=m; return self.send(m)
+        if p=='/api/control/message' and body['mission_id']=='idle-send' and MISSIONS['idle-send']['status']!='running' and not body.get('queue_followup'):
+            time.sleep(2.5); m=MISSIONS['idle-send']; m['status']='running'; m['history'].append({'role':'user','content':body['content']})
+            qadd('idle-send','user_message',body['content'],key)
+            RECEIPTS[key]={'id':key,'queued':False}; return self.send(RECEIPTS[key])
         if p=='/api/control/message' and body.get('queue_followup') and MISSIONS[body['mission_id']]['status']=='running':
             QUEUE.append(dict(id=key,mission_id=body['mission_id'],content=body['content'],source='remote-queue',deliver_at=time.time()+4))
             RECEIPTS[key]={'id':key,'queued':True}; return self.send(RECEIPTS[key])
