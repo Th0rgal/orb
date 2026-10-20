@@ -40,6 +40,10 @@ export class TranscriptReducer {
   /** Antigravity bubble ids, kept in transcript order as they are placed. */
   private native: string[] = [];
   private lastFinal: number | undefined;
+  /** Text of the turn-wide bubble when the last turn closed. */
+  private carried: string | undefined;
+  /** Prefix of a closed turn that Core's live text buffer still prepends. */
+  private glued = new Map<string, string>();
   private identity:string|undefined;
   private key(kind: string) { return this.identity ? `${kind}:${this.identity}:${++this.nextForEvent}` : `${kind}-${++this.next}`; }
   private nextForEvent=0;
@@ -71,7 +75,24 @@ export class TranscriptReducer {
     return index;
   }
 
+  /** Drop one item, keeping every index the reducer holds in step. */
+  removeAt(index: number) {
+    this.items.splice(index, 1);
+    for (const map of [this.users, this.tools, this.bubbles]) {
+      for (const [key, position] of map) {
+        if (position === index) map.delete(key);
+        else if (position > index) map.set(key, position - 1);
+      }
+    }
+    if (this.lastFinal != null) this.lastFinal = this.lastFinal === index ? undefined : this.lastFinal > index ? this.lastFinal - 1 : this.lastFinal;
+    if (this.lastUser > index) this.lastUser--;
+    else if (this.lastUser === index) this.lastUser = this.items.reduce((last, item, i) => item.kind === "user" && !item.queued ? i : last, -1);
+  }
   private close() {
+    const latest = this.bubbles.get("text_delta_latest");
+    const turn = latest == null ? undefined : this.items[latest];
+    if (turn?.kind === "text" && turn.text) this.carried = turn.text;
+    this.glued.clear();
     for (const index of this.bubbles.values()) {
       const item = this.items[index];
       if (item?.kind === "text" && item.live) this.put(index, { ...item, live: false });
@@ -83,6 +104,29 @@ export class TranscriptReducer {
     }
     this.bubbles.clear();
     this.native = [];
+  }
+  /** Core's durable copy of a cut turn's streamed text. It finalizes the
+   * bubble that turn already shows (live or from its stored snapshot), even
+   * when the Send now message that cut it is already placed below. */
+  private settlePartial(text: string) {
+    const want = text.trim();
+    if (!want) return;
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i];
+      if (item.kind === "user") { if (item.receipt || item.queued) continue; break; }
+      if (item.kind !== "text") continue;
+      const have = item.text.trim();
+      if (have === want || want.startsWith(have) || have.startsWith(want)) { this.put(i, { ...item, text, live: false }); return; }
+    }
+    // Not shown yet: it precedes the optimistic message that cut it.
+    let at = this.items.length;
+    while (at > 0) { const row = this.items[at - 1]; if (row.kind === "user" && (row.receipt || row.queued)) at--; else break; }
+    if (at < this.items.length) {
+      for (const map of [this.users, this.tools, this.bubbles]) for (const [key, i] of map) if (i >= at) map.set(key, i + 1);
+      if (this.lastFinal != null && this.lastFinal >= at) this.lastFinal++;
+      if (this.lastUser >= at) this.lastUser++;
+    }
+    this.items.splice(at, 0, { kind: "text", key: this.key("text"), text, live: false });
   }
   apply(ev: StreamEvent) {
     this.identity=ev.eventId??(ev.storedId!==undefined?`stored:${ev.storedId}`:ev.sequence!==undefined?`seq:${ev.sequence}`:undefined);this.nextForEvent=0;
@@ -151,10 +195,15 @@ export class TranscriptReducer {
       case "text_delta":
       case "text_op": {
         let index = this.bubbles.get(bubble);
+        // A bubble from before the latest delivered user message belongs to an
+        // earlier turn. Core reuses one text id per mission, so without this the
+        // next turn's text was appended to the previous turn's reply.
+        if (index != null && index < this.lastUser) { this.bubbles.delete(bubble); this.revisions.delete(bubble); index = undefined; }
         const previous = index == null ? undefined : this.items[index];
         let text = previous?.kind === "text" ? previous.text : "";
         let live = previous?.kind === "text" ? previous.live : true;
         let snapshot: string | undefined;
+        let replacedLength: number | undefined;
         if (ev.type === "text_delta") {
           const next = str(d.content);
           if (d.mode === "delta") {
@@ -192,10 +241,19 @@ export class TranscriptReducer {
               else splice(op.pos, 0, str(op.text));
             } else if (op.type === "replace") {
               const range = Array.isArray(op.range) ? op.range as number[] : [0, length()];
-              if (bubble === "text_delta_latest" && range[0] === 0) { snapshot = str(op.text); text = snapshot; chars = undefined; }
+              if (bubble === "text_delta_latest" && range[0] === 0) { snapshot = str(op.text); text = snapshot; chars = undefined; replacedLength = range[1]; }
               else splice(range[0], range[1] - range[0], str(op.text));
             } else if (op.type === "finalize") live = false;
           }
+        }
+        if (ev.type === "text_op" && bubble === "text_delta_latest" && snapshot != null) {
+          // A live buffer that outlived a cut turn replaces that whole turn's
+          // text with `old turn + new reply`. The new turn starts its own
+          // bubble; strip the closed turn's text, for every snapshot of it.
+          const carried = this.carried;
+          if (index == null && carried && replacedLength === Array.from(carried).length && snapshot.length > carried.length && snapshot.startsWith(carried)) this.glued.set(bubble, carried);
+          const prefix = this.glued.get(bubble);
+          if (prefix && snapshot.startsWith(prefix)) { snapshot = snapshot.slice(prefix.length); text = snapshot; }
         }
         if (index == null && bubble === "text_delta_latest" && this.lastFinal != null) {
           const finalized = this.items[this.lastFinal];
@@ -228,6 +286,7 @@ export class TranscriptReducer {
           else if(text){this.placeText(finalBubble,{kind:"text",key:this.key("text"),text,live:false});}
           return;
         }
+        if(d.partial===true&&d.success!==false){this.settlePartial(text);return;}
         const index=this.bubbles.get(finalBubble);
         const previous=index == null ? undefined : this.items[index];
         const native = this.native.map(id=>this.items[this.bubbles.get(id) ?? -1]).filter((i):i is Extract<StreamItem,{kind:'text'}>=>i?.kind==='text');
@@ -347,6 +406,35 @@ export function buildTranscript(events: StreamEvent[]): StreamItem[] {
   for(const event of events)reducer.apply(event);
   states.set(reducer.items,reducer);
   return reducer.items;
+}
+
+type UserItem = Extract<StreamItem, { kind: "user" }>;
+/** Remove user rows (a cancelled, retracted or elsewhere-delivered message)
+ * through the reducer. A plain `filter` produced an array without reducer
+ * state, and the next live event threw ("must originate from
+ * buildTranscript"): every later text of the turn was dropped until a full
+ * resync — after a Send now, the new turn's reply. */
+export function removeUsers(items: StreamItem[], match: (item: UserItem) => boolean): StreamItem[] {
+  if (!items.some(item => item.kind === "user" && match(item))) return items;
+  const reducer = states.get(items);
+  if (!reducer) return items.filter(item => item.kind !== "user" || !match(item));
+  reducer.items = items.slice();
+  for (let i = reducer.items.length - 1; i >= 0; i--) {
+    const item = reducer.items[i];
+    if (item.kind === "user" && match(item)) reducer.removeAt(i);
+  }
+  states.set(reducer.items, reducer);
+  return reducer.items;
+}
+
+/** Rewrite user rows in place (same positions), keeping reducer state. */
+export function mapUsers(items: StreamItem[], update: (item: UserItem) => UserItem): StreamItem[] {
+  let changed = false;
+  const next = items.map(item => { if (item.kind !== "user") return item; const updated = update(item); if (updated !== item) changed = true; return updated; });
+  if (!changed) return items;
+  const reducer = states.get(items);
+  if (reducer) { reducer.items = next; states.set(next, reducer); }
+  return next;
 }
 
 export function applyStreamEvent(items: StreamItem[], event: StreamEvent): StreamItem[] {

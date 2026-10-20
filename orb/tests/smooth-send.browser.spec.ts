@@ -108,3 +108,62 @@ test('reduced motion: the sent row leaves without animating',async({page})=>{
  const animation=await page.locator('.scroll .user',{hasText:'First queued message'}).evaluate(el=>getComputedStyle(el).animationName);
  expect(animation).toBe('none');
 });
+
+test('Send now over a streaming turn: no empty queue header, no duplicated or glued text',async({page})=>{
+ await page.goto('/tests/smooth-send.html?cut');
+ const queue=page.getByRole('region',{name:'Queued messages'});
+ await expect(queue).toContainText('1 Queued');
+ // The live turn streams over the stored snapshot, as on prod.
+ await page.evaluate(()=>{const w=window as any;w.push('text_op',{bubble_id:'text_delta_latest',ops:[{type:'insert',pos:0,text:'step 1 done'}]});w.push('text_op',{bubble_id:'text_delta_latest',ops:[{type:'replace',range:[0,11],text:w.STEPS}]});});
+ await expect(page.locator('.scroll')).toContainText('step 5 done');
+ await page.evaluate(()=>{
+  const frames:any[]=[];(window as any).cutFrames=frames;
+  const tick=()=>{
+   const scroll=document.querySelector('.scroll')?.textContent??'';
+   frames.push({
+    counts:[...document.querySelectorAll('.queue-count')].map(n=>n.textContent),
+    steps:scroll.split('step 5 done').length-1,
+    glued:scroll.includes('doneYou said'),
+   });
+   (window as any).cutRaf=requestAnimationFrame(tick);
+  };
+  tick();
+ });
+ await page.getByRole('button',{name:'Send now: retest queued'}).click();
+ await expect(page.locator('.scroll')).toContainText('You said',{timeout:10000});
+ await page.waitForTimeout(300);
+ const seen=await page.evaluate(()=>{cancelAnimationFrame((window as any).cutRaf);return (window as any).cutFrames as any[];});
+ expect(seen.length).toBeGreaterThan(10);
+ expect(seen.flatMap(f=>f.counts).filter(c=>/^0 /.test(c))).toEqual([]);
+ expect(Math.max(...seen.map(f=>f.steps))).toBe(1);
+ expect(seen.some(f=>f.glued)).toBe(false);
+ await expect(page.locator('.followup-queue')).toHaveCount(0);
+});
+
+test('a follow-up to an idle mission does not shift the transcript once shown',async({page})=>{
+ await page.goto('/tests/smooth-send.html?idle');
+ await expect(page.locator('.scroll')).toContainText('Paragraph 29',{timeout:20000});
+ const input=page.getByPlaceholder(/follow-up/i);
+ await input.fill('Idle follow-up');
+ await page.evaluate(()=>{
+  const frames:any[]=[];(window as any).idleFrames=frames;
+  const tick=()=>{
+   const bubble=[...document.querySelectorAll('.scroll .user')].find(el=>el.textContent?.includes('Idle follow-up'));
+   frames.push({t:performance.now(),top:bubble?Math.round(bubble.getBoundingClientRect().top):null,working:!!document.querySelector('.st-working')});
+   (window as any).idleRaf=requestAnimationFrame(tick);
+  };
+  tick();
+ });
+ await input.press('Enter');
+ await page.waitForTimeout(2500);
+ const seen=await page.evaluate(()=>{cancelAnimationFrame((window as any).idleRaf);return (window as any).idleFrames as any[];});
+ const shown=seen.filter(f=>f.top!=null);
+ expect(shown.length).toBeGreaterThan(10);
+ // Never nowhere once shown, and anchored: at most a pixel of drift.
+ expect(seen.slice(seen.findIndex(f=>f.top!=null)).every(f=>f.top!=null)).toBe(true);
+ // The frame the bubble mounts in may precede the pin-to-bottom scroll.
+ const tops=shown.filter(f=>f.t-shown[0].t>50).map(f=>f.top);
+ // The Working row stays from the send until the turn runs.
+ expect(shown.every(f=>f.working)).toBe(true);
+ expect(Math.max(...tops)-Math.min(...tops)).toBeLessThanOrEqual(1);
+});

@@ -313,19 +313,23 @@ export function RemoteQueue(p: {
   };
   const rowsById = createMemo(() => new Map(renderedRows().map(row => [row.id, row])));
   const rowIds = createMemo(() => renderedRows().map(row => row.id), [], { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) });
+  // Once the last counted row has moved to the transcript the panel itself
+  // closes, in that same batch: it keeps only the leaving rows for their
+  // collapse and never shows a "0 Queued" header.
+  const closing = createMemo(() => displayRows().length === 0 && !error());
   return <Show when={rowIds().length || error()}>
-    <section class="followup-queue" classList={{collapsed:collapsed()}} aria-label="Queued messages" aria-live="polite">
+    <section class="followup-queue" classList={{collapsed:collapsed(),closing:closing()}} aria-label="Queued messages" aria-live="polite" aria-hidden={closing() ? true : undefined}>
       {/* The header and every row keep one geometry from send to delivery: the
           hint reserves its space and each row reserves its action area, so the
           dock height changes only when a row is added or removed. */}
-      <header>
+      <Show when={!closing()}><header>
         <span class="queue-count">{`${displayRows().length} Queued`}</span>
         <span class="queue-hint" classList={{"queue-hint-hidden": !(visibleRows().length > 0 && !p.editing)}} aria-hidden={!(visibleRows().length > 0 && !p.editing)}><Ic.ReturnIcon size={13}/> to Send</span>
         <div class="queue-options">
           <button type="button" class="queue-collapse" aria-label={collapsed()?"Show queued messages":"Hide queued messages"} aria-expanded={!collapsed()} onClick={()=>setCollapsed(!collapsed())}><Ic.ChevronDown size={14}/></button>
         </div>
-      </header>
-      <Show when={!collapsed()}><ol classList={{scrollable:rowIds().length>6}}><For each={rowIds()}>{id => {
+      </header></Show>
+      <Show when={!collapsed() || closing()}><ol classList={{scrollable:rowIds().length>6}}><For each={rowIds()}>{id => {
         // Keyed by id (a string), so the same <li> lives from "sending" to
         // "confirmed" to "leaving": its spinner fades instead of the row being rebuilt.
         let last: Row | undefined;

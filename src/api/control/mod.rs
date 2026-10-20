@@ -16731,6 +16731,9 @@ async fn poll_remote_job(
     // The preserved-status terminal note is durable once; retries of the
     // ledger cleanup must not duplicate it.
     let mut preserved_terminal_noted = false;
+    // The interrupted turn's streamed text is persisted once, when the cut is
+    // first observed.
+    let mut partial_turn_persisted = false;
     // Stream only incremental logs between the existing status/lease checks.
     // A delayed network request must not cause a burst of catch-up polls.
     let mut log_tick = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -16743,9 +16746,34 @@ async fn poll_remote_job(
             Ok(Some(current)) if current.status != MissionStatus::Active => Some(current.status),
             _ => None,
         };
+        // Keep what a cut turn already said, as soon as the cut is seen.
+        // This used to happen only on the terminal receipt, and only while
+        // this job still owned the mission's run lease; a Send now interrupt
+        // finishes that lease at once (and the follow-up takes a new one), so
+        // remote Claude Code turns lost their text and a reload re-rendered
+        // the live copy. The streamed `AssistantMessage` also closes the
+        // SSE text buffer, so the next turn cannot be glued to it.
+        if inactive_status.is_some() && !partial_turn_persisted {
+            match grok
+                .as_ref()
+                .and_then(remote_grok::NativeGrokObserver::partial_turn_message)
+            {
+                Some(partial) => match owner.mission_store.log_event(mission_id, &partial).await {
+                    Ok(()) => {
+                        owner.send(partial);
+                        partial_turn_persisted = true;
+                    }
+                    Err(error) => tracing::warn!(%mission_id, %job_id, %error,
+                        "interrupted turn text persistence failed; retrying"),
+                },
+                None => partial_turn_persisted = true,
+            }
+        }
         let poll_delay = remote_status_poll_delay(inactive_status.is_some(), failures);
         if last_status_check.is_some_and(|at| at.elapsed() < poll_delay) {
-            if failures == 0 && terminal_observation.is_none() {
+            // A cut turn's text is final once persisted: streaming more of it
+            // would reopen a live bubble after its durable copy.
+            if failures == 0 && terminal_observation.is_none() && !partial_turn_persisted {
                 if let Some(observer) = grok.as_mut() {
                     observer.pump(&client, &node, &shared_token).await;
                 }
@@ -17080,21 +17108,6 @@ async fn poll_remote_job(
                             // happened to its node job. Log once, then settle
                             // the observer's lease with the node's verdict.
                             if !preserved_terminal_noted {
-                                // Keep what the interrupted turn already said:
-                                // reloads must show it once, from storage.
-                                if let Some(partial) = grok
-                                    .as_ref()
-                                    .and_then(remote_grok::NativeGrokObserver::partial_turn_message)
-                                {
-                                    if let Err(error) =
-                                        owner.mission_store.log_event(mission_id, &partial).await
-                                    {
-                                        tracing::warn!(%mission_id, %job_id, %error,
-                                            "interrupted turn text persistence failed; retaining ownership and retrying");
-                                        continue;
-                                    }
-                                    owner.send(partial);
-                                }
                                 let note = AgentEvent::AssistantMessage {
                                 id: Uuid::new_v4(),
                                 content: format!(
@@ -20726,6 +20739,30 @@ fn text_op_events_for_stream(
                 bubble_id: "text_delta_latest".to_string(),
                 ops,
             }]
+        }
+        // A delivered user message starts a new turn, and a mission leaving
+        // Active cuts the running one. Either way the next turn's text must
+        // start from an empty buffer: a carried buffer made the new reply's
+        // first snapshot `previous turn + new text` (the glued Send now reply).
+        AgentEvent::UserMessage {
+            queued: false,
+            mission_id: Some(mission_id),
+            ..
+        } => {
+            text_buffers.remove(&mission_id);
+            vec![ev]
+        }
+        AgentEvent::MissionStatusChanged {
+            mission_id, status, ..
+        } if status != MissionStatus::Active && text_buffers.remove(&mission_id).is_some() => {
+            vec![
+                AgentEvent::TextOp {
+                    mission_id,
+                    bubble_id: "text_delta_latest".to_string(),
+                    ops: vec![TextOp::Finalize],
+                },
+                ev,
+            ]
         }
         AgentEvent::AssistantMessage {
             mission_id: Some(mission_id),
@@ -36894,6 +36931,73 @@ mod tests {
             }
             other => panic!("expected text_op, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn text_op_stream_buffer_resets_across_a_cut_turn_so_send_now_reply_is_not_glued() {
+        // Live repro c24318b8: a remote Claude Code turn streamed "step 1..5
+        // done", Send now interrupted it (no final assistant message), and the
+        // next turn's first snapshot reached Orb as
+        // replace(0..len, "step 1 done…step 5 doneYou said …").
+        let mission_id = Uuid::new_v4();
+        let delta = |content: &str| AgentEvent::TextDelta {
+            content: content.to_string(),
+            mission_id: Some(mission_id),
+        };
+        let ops = |events: Vec<AgentEvent>| -> Vec<Vec<TextOp>> {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    AgentEvent::TextOp { ops, .. } => Some(ops),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Cut by a status change.
+        let mut buffers = HashMap::new();
+        let _ = text_op_events_for_stream(delta("step 1 done\nstep 5 done"), &mut buffers);
+        let cut = text_op_events_for_stream(
+            AgentEvent::MissionStatusChanged {
+                completion: None,
+                execution: None,
+                mission_id,
+                status: MissionStatus::Interrupted,
+                summary: None,
+            },
+            &mut buffers,
+        );
+        assert_eq!(ops(cut), vec![vec![TextOp::Finalize]]);
+        assert_eq!(
+            ops(text_op_events_for_stream(delta("You said"), &mut buffers)),
+            vec![vec![TextOp::Insert {
+                pos: 0,
+                text: "You said".into()
+            }]]
+        );
+        // A delivered user message alone also starts a fresh buffer; a queued
+        // one does not touch the running turn.
+        let mut buffers = HashMap::new();
+        let _ = text_op_events_for_stream(delta("step 1 done"), &mut buffers);
+        let user = |queued: bool| AgentEvent::UserMessage {
+            id: Uuid::new_v4(),
+            content: "retest queued".into(),
+            queued,
+            mission_id: Some(mission_id),
+            source: None,
+        };
+        let _ = text_op_events_for_stream(user(true), &mut buffers);
+        assert_eq!(
+            buffers.get(&mission_id).map(String::as_str),
+            Some("step 1 done")
+        );
+        let _ = text_op_events_for_stream(user(false), &mut buffers);
+        assert_eq!(
+            ops(text_op_events_for_stream(delta("You said"), &mut buffers)),
+            vec![vec![TextOp::Insert {
+                pos: 0,
+                text: "You said".into()
+            }]]
+        );
     }
 
     #[test]
