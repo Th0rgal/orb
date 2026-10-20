@@ -309,7 +309,7 @@ export interface CreateMissionBody {
   /**
    * Harness id (claudecode, codex, opencode, grok, antigravity). Goal mode has no
    * dedicated create field: a prompt of the form `/goal <objective>` is what
-   * makes the server persist `goal_mode` + `goal_objective` (control/mod.rs
+   * makes the server persist `goal_mode` + `goal_objective` (control/goal.rs
    * `parse_goal_objective`).
    */
   backend?: string;
@@ -1225,7 +1225,7 @@ export async function updateMissionSettings(
 /**
  * A project's autonomy grant (`GET|POST /api/projects/:slug/grant`).
  * `parallel_missions` is the *project* concurrency limit enforced by
- * `create_mission` in `src/api/control/mod.rs`: above 0, a launch is refused
+ * `create_mission` in `src/api/control/mission_create.rs`: above 0, a launch is refused
  * once that many of the project's own missions are unfinished. It is a
  * different limit from the backend-global `max_parallel_missions` setting.
  */
@@ -1303,7 +1303,7 @@ export async function updateGlobalSettings(patch: GlobalSettings): Promise<Globa
 
 /**
  * Mission statuses that occupy a project's `parallel_missions` slot, mirroring
- * `campaign_slot_held_by` in `src/api/control/mod.rs`. Terminal missions free
+ * `campaign_slot_held_by` in `src/api/control/mission_create.rs`. Terminal missions free
  * their slot, so this is what a cap of N is counted against.
  */
 export const CAP_SLOT_STATUSES = new Set([

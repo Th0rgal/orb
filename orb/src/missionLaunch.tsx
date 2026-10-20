@@ -169,7 +169,7 @@ const numberOr = (value: unknown, fallback: number) => (typeof value === "number
 
 /**
  * Classify a failed launch. `parallel_missions_cap` is raised by the *project's*
- * autonomy grant (`grant.parallel_missions` in `src/api/control/mod.rs`), which
+ * autonomy grant (`grant.parallel_missions` in `src/api/control/mission_create.rs`), which
  * counts that project's non-terminal missions — it is not the backend-global
  * `max_parallel_missions` setting, and raising the global one does not clear it.
  * The message says so, because the two are easy to confuse.

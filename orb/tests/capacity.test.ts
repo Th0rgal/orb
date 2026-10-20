@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { launchRefusal } from "../src/missionLaunch";
 import { ApiError, NO_PROJECT_LIMIT, holdsCapSlot, projectLimitOf, setProjectLimit, updateGlobalSettings, setConnection } from "../src/api";
 
-const CONTROL_RS = resolve(__dirname, "../../src/api/control/mod.rs");
+const CONTROL_RS = resolve(__dirname, "../../src/api/control/mission_create.rs");
 const capError = (active: number, cap: number) =>
   new ApiError(429, JSON.stringify({ error: "parallel_missions_cap", cap, active }));
 

@@ -35,5 +35,5 @@ this change does not claim transcript virtualization.
 fixture for mission `4bf947aa-7f72-44c2-8a8f-16816e37d663`. That stored log contains
 only one coalesced text snapshot; live cumulative operations across tool
 boundaries are tested separately against the producer's contract in
-`src/api/control/mod.rs::text_op_events_for_stream`. No global text-prefix
+`src/api/control/streaming.rs::text_op_events_for_stream`. No global text-prefix
 deduplication is used.
