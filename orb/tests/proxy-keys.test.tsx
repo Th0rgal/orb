@@ -26,6 +26,7 @@ beforeEach(() => {
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
     if (method !== "GET") writes.push({ path, method, body });
     if (path === "/api/model-routing/chains") return response([]);
+    if (path === "/api/ai/usage/summary") return response({ by_api_key: [{ key: "Cursor", label: "Cursor", requests: 250, input_tokens: 1_500_000, output_tokens: 20_000, cache_creation_tokens: 0, cache_read_tokens: 0, cost_cents: 340, unknown_cost_requests: 0, cost_status: "known" }] });
     if (path === "/api/proxy-keys/cleanup") return response({ keys: [...keys], cutoff: "2026-10-01", dry_run: true });
     if (method === "DELETE") {
       const id = decodeURIComponent(path.split("/").at(-1)!);
@@ -51,6 +52,13 @@ async function mount() {
 }
 
 describe("Proxy API keys", () => {
+  it("shows each key's router totals for the last 7 days", async () => {
+    await mount();
+    await waitFor(() => expect(screen.getAllByTestId("proxy-key-usage")[0].textContent).toBe("7d: 250 requests · 1.5M tokens · $3.40"));
+    expect(screen.getAllByTestId("proxy-key-usage")[1].textContent).toBe("No router usage in 7d");
+    expect((fetch as any).mock.calls.some(([url]: [string]) => url.endsWith("/api/ai/usage/summary?window=7d&source=router"))).toBe(true);
+  });
+
   it("loads on opening its Routing tab and forgets the created secret on leaving", async () => {
     render(() => <RoutingSettings onOpenClient={() => {}} />);
     await screen.findByText(/No chains configured/);

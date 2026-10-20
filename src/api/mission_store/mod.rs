@@ -814,6 +814,77 @@ pub struct HourlyUsageStats {
     pub cost_cents: u64,
 }
 
+/// Where a usage record came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSource {
+    /// A mission's harness (Claude Code, OpenCode, Codex, ...): assistant
+    /// message metadata in `mission_events`.
+    Harness,
+    /// The OpenAI-compatible `/v1` router (`proxy_usage`): external clients
+    /// with proxy keys, and harnesses that route through the builtin proxy.
+    Router,
+}
+
+impl UsageSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Harness => "harness",
+            Self::Router => "router",
+        }
+    }
+}
+
+/// One routed `/v1` request, as written by the proxy.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProxyUsageRecord {
+    /// Normalized model id (see `crate::cost::normalized_model`).
+    pub model: String,
+    /// Provider type the request was served by (e.g. "google").
+    pub provider: Option<String>,
+    /// Provider account that served the request.
+    pub account_id: Option<Uuid>,
+    /// Proxy API key that authenticated the request. `None` for the internal
+    /// proxy secret.
+    pub api_key_id: Option<Uuid>,
+    /// Key name at request time, kept so revoked keys stay identifiable.
+    pub api_key_name: Option<String>,
+    /// Mission the request belongs to (mission header or mission-scoped key).
+    pub mission_id: Option<Uuid>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// List-price estimate at write time. Re-derived on read for priced
+    /// models, so rows written before a price was added are corrected.
+    pub cost_cents: u64,
+}
+
+/// One usage row, harness or router, before aggregation. The usage summary
+/// filters and groups these; see `crate::api::usage_summary`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageRecord {
+    /// RFC3339 timestamp (UTC).
+    pub timestamp: String,
+    pub source: UsageSource,
+    pub model: String,
+    pub provider: Option<String>,
+    /// Mission backend (harness), when the record belongs to a mission.
+    pub backend: Option<String>,
+    pub mission_id: Option<String>,
+    pub mission_title: Option<String>,
+    pub api_key_id: Option<String>,
+    pub api_key_name: Option<String>,
+    pub account_id: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost_cents: u64,
+    /// False when the stored cost is not actual and the model has no price.
+    pub cost_known: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Automation Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2987,6 +3058,24 @@ pub trait MissionStore: Send + Sync {
         _cost_cents: u64,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Record one routed /v1 request with its attribution (key, provider,
+    /// account, mission) and cache tokens.
+    async fn record_proxy_usage_attributed(&self, record: &ProxyUsageRecord) -> Result<(), String> {
+        self.record_proxy_usage(
+            &record.model,
+            record.input_tokens,
+            record.output_tokens,
+            record.cost_cents,
+        )
+        .await
+    }
+
+    /// Every harness and router usage record on or after `since` (RFC3339),
+    /// oldest first. The usage summary aggregates these.
+    async fn get_usage_records(&self, _since: Option<&str>) -> Result<Vec<UsageRecord>, String> {
+        Ok(Vec::new())
     }
 
     /// Aggregate /v1 router usage per model. Merged with mission usage by the

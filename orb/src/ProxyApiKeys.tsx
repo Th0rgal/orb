@@ -5,9 +5,18 @@ import { ConfirmDialog } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { CopyIcon, PlusIcon } from "./icons";
 import * as Keys from "./proxyKeysApi";
+import { formatCost, formatTokens, getUsageSummary, totalTokens, type UsageGroup } from "./usageApi";
+
+/** Window of the per-key router totals. */
+const KEY_USAGE_WINDOW = "7d";
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const date = (value: string) => new Date(value).toLocaleString();
+
+function keyUsage(u: UsageGroup | undefined) {
+  if (!u?.requests) return `No router usage in ${KEY_USAGE_WINDOW}`;
+  return `${KEY_USAGE_WINDOW}: ${u.requests.toLocaleString()} ${u.requests === 1 ? "request" : "requests"} · ${formatTokens(totalTokens(u))} tokens · ${formatCost(u)}`;
+}
 
 export function ProxyApiKeys() {
   const [keys, setKeys] = createSignal<Keys.ProxyApiKeySummary[]>([]);
@@ -25,6 +34,7 @@ export function ProxyApiKeys() {
   const [previewReady, setPreviewReady] = createSignal(false);
   const [revokeTarget, setRevokeTarget] = createSignal<Keys.ProxyApiKeySummary[]>([]);
   const [copied, setCopied] = createSignal("");
+  const [usage, setUsage] = createSignal(new Map<string, UsageGroup>());
   const endpoint = createMemo(() => { connectionVersion(); return `${getApiUrl().replace(/\/+$/, "")}/v1`; });
   const validDays = () => Number.isInteger(days()) && days() >= 1 && days() <= 4294967295;
   let generation = 0;
@@ -38,8 +48,15 @@ export function ProxyApiKeys() {
     setLoading(true);
     setListError("");
     try {
-      const result = await Keys.listProxyApiKeys();
-      if (epoch === generation && request === listRequest) setKeys(result);
+      const [result, summary] = await Promise.all([
+        Keys.listProxyApiKeys(),
+        // Totals are informative; a usage failure must not hide the key list.
+        getUsageSummary(KEY_USAGE_WINDOW, { source: "router" }).catch(() => null),
+      ]);
+      if (epoch === generation && request === listRequest) {
+        setKeys(result);
+        setUsage(new Map((summary?.by_api_key ?? []).filter(g => g.key).map(g => [g.key!, g])));
+      }
     } catch (e) {
       if (epoch === generation && request === listRequest) setListError(message(e));
     } finally {
@@ -69,6 +86,7 @@ export function ProxyApiKeys() {
     closePanel();
     setRevokeTarget([]);
     setKeys([]);
+    setUsage(new Map<string, UsageGroup>());
     setListError("");
     setLoading(false);
     setBusy(false);
@@ -222,7 +240,7 @@ export function ProxyApiKeys() {
       <For each={keys()}>{key => <div class="proxy-key-row">
         <div class="proxy-key-info"><strong>{key.name}</strong><span title={`Created ${date(key.created_at)}`}>
           {key.last_used_at ? `Last used ${date(key.last_used_at)}` : `Never used · created ${date(key.created_at)}`}
-        </span></div>
+        </span><span class="proxy-key-usage" data-testid="proxy-key-usage">{keyUsage(usage().get(key.id))}</span></div>
         <code>{key.key_prefix}…</code>
         <button class="s-btn" disabled={busy()} aria-label={`Revoke ${key.name}`} onClick={() => { setError(""); setRevokeTarget([key]); }}>Revoke</button>
       </div>}</For>

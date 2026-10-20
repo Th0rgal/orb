@@ -7,6 +7,8 @@ mod machine_transfer;
 mod sqlite_client_link;
 #[path = "sqlite_local_origin.rs"]
 mod sqlite_local_origin;
+#[path = "sqlite_usage.rs"]
+mod usage;
 
 use super::{
     now_string, sanitize_filename, Automation, AutomationExecution, AwaitingKind, BoardOutboxItem,
@@ -1115,6 +1117,7 @@ impl SqliteMissionStore {
 
             // Run migrations for existing databases
             Self::run_migrations(&conn)?;
+            usage::migrate(&conn)?;
             // Cancel abandoned transfers after all mission tables exist.
             conn.execute_batch(include_str!("transfer_cleanup.sql"))
                 .map_err(|e| format!("Failed to install transfer cleanup: {e}"))?;
@@ -6990,6 +6993,20 @@ impl MissionStore for SqliteMissionStore {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    async fn record_proxy_usage_attributed(
+        &self,
+        record: &super::ProxyUsageRecord,
+    ) -> Result<(), String> {
+        usage::record(self, record).await
+    }
+
+    async fn get_usage_records(
+        &self,
+        since: Option<&str>,
+    ) -> Result<Vec<super::UsageRecord>, String> {
+        usage::records(self, since).await
     }
 
     async fn get_proxy_usage_by_model(

@@ -2026,288 +2026,49 @@ async fn get_stats(
     })
 }
 
-/// Optional query parameters for the AI usage summary endpoint.
+/// Query parameters for the AI usage summary endpoint.
 #[derive(Debug, Deserialize)]
 pub struct UsageSummaryQuery {
-    /// Time window: "24h", "7d", "30d", or "all". Default "all".
+    /// "all" (default) or N followed by h, d or w (e.g. "1h", "5h", "30d").
     window: Option<String>,
-}
-
-/// Per-model usage row in the API response.
-#[derive(Debug, Serialize)]
-pub struct ModelUsageResponse {
-    pub model: String,
-    /// Inferred provider type (e.g. "anthropic", "openai", "google", "xai") or
-    /// `null` when unknown.
-    pub provider: Option<String>,
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cost_cents: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UsageSummaryTotals {
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cost_cents: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UsageSummaryResponse {
-    pub window: String,
-    pub since: Option<String>,
-    pub totals: UsageSummaryTotals,
-    pub by_model: Vec<ModelUsageResponse>,
-    pub by_day: Vec<DailyUsageResponse>,
-    /// Only populated for windows where hourly granularity makes sense (24h, 7d).
-    pub by_hour: Vec<HourlyUsageResponse>,
-}
-
-/// One day's worth of aggregated usage — used to draw the sparkline.
-#[derive(Debug, Serialize)]
-pub struct DailyUsageResponse {
-    pub day: String,
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cost_cents: u64,
-}
-
-/// One hour's worth of aggregated usage — finer granularity for 24h/7d views.
-#[derive(Debug, Serialize)]
-pub struct HourlyUsageResponse {
-    /// `YYYY-MM-DDTHH` (UTC).
-    pub hour: String,
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cost_cents: u64,
-}
-
-/// Map a normalized model identifier to a provider type id.
-fn infer_provider_for_model(model: &str) -> Option<String> {
-    let m = model.to_lowercase();
-    if m.starts_with("muse-code/") {
-        Some("muse-code".to_string())
-    } else if m.contains("claude") {
-        Some("anthropic".to_string())
-    } else if m.contains("gpt")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
-        || m.contains("openai")
-    {
-        Some("openai".to_string())
-    } else if m.contains("gemini") {
-        Some("google".to_string())
-    } else if m.contains("grok") {
-        Some("xai".to_string())
-    } else if m.contains("glm") || m.contains("z-ai") || m.contains("zai") {
-        Some("zai".to_string())
-    } else if m.contains("minimax") || m.contains("abab") {
-        Some("minimax".to_string())
-    } else if m.contains("muse") {
-        Some("muse".to_string())
-    } else if m.contains("mistral") || m.contains("codestral") {
-        Some("mistral".to_string())
-    } else if m.contains("llama") && m.contains("groq") {
-        Some("groq".to_string())
-    } else if m.contains("command") || m.contains("cohere") {
-        Some("cohere".to_string())
-    } else if m.contains("qwen") || m.contains("deepseek") {
-        // Common open-router / together-ai models; default to open-router
-        Some("open-router".to_string())
-    } else {
-        None
-    }
+    #[serde(flatten)]
+    filter: super::usage_summary::UsageFilter,
 }
 
 /// GET /api/ai/usage/summary — aggregated AI token/cost usage.
 ///
 /// Query params:
-/// - `window`: "24h" | "7d" | "30d" | "all" (default "all").
+/// - `window`: "all" (default), or `Nh` / `Nd` / `Nw`. Invalid values are a
+///   400, never a silent all-time fall back.
+/// - `backend`, `provider`, `mission`, `source` ("harness" | "router"),
+///   `api_key`, `model`: optional comma-separated filters.
+///
+/// Rows carry a `source` so router and harness usage of one model stay
+/// separate; costs for unpriced models are counted in
+/// `unknown_cost_requests` instead of being reported as $0.
 async fn get_ai_usage_summary(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Query(params): Query<UsageSummaryQuery>,
-) -> Json<UsageSummaryResponse> {
-    let window = params.window.as_deref().unwrap_or("all");
-    let since: Option<String> = match window {
-        "24h" => Some((chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339()),
-        "7d" => Some((chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339()),
-        "30d" => Some((chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339()),
-        _ => None,
-    };
-
+) -> Result<Json<super::usage_summary::UsageSummaryResponse>, (StatusCode, String)> {
+    let window = super::usage_summary::parse_window(params.window.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let since = window.since(chrono::Utc::now());
     let control_state = state.control.get_or_spawn(&user).await;
-    let rows = control_state
+    let records = control_state
         .mission_store
-        .get_usage_by_model(since.as_deref())
+        .get_usage_records(since.as_deref())
         .await
-        .unwrap_or_default();
-    let daily = control_state
-        .mission_store
-        .get_usage_by_day(since.as_deref())
-        .await
-        .unwrap_or_default();
-    // Only fetch hourly buckets for short windows — at 30d / all the count
-    // explodes into the thousands and the line chart becomes unreadable.
-    let hourly = if matches!(window, "24h" | "7d") {
-        control_state
-            .mission_store
-            .get_usage_by_hour(since.as_deref())
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    // Merge in OpenAI-compatible /v1 router usage (external clients: assistant
-    // gateways, IDEs with proxy keys). It lives in a dedicated table because
-    // those requests have no mission to attach events to.
-    let mut rows = rows;
-    {
-        let proxy_rows = control_state
-            .mission_store
-            .get_proxy_usage_by_model(since.as_deref())
-            .await
-            .unwrap_or_default();
-        for p in proxy_rows {
-            if let Some(existing) = rows.iter_mut().find(|r| r.model == p.model) {
-                existing.requests = existing.requests.saturating_add(p.requests);
-                existing.input_tokens = existing.input_tokens.saturating_add(p.input_tokens);
-                existing.output_tokens = existing.output_tokens.saturating_add(p.output_tokens);
-                existing.cache_creation_tokens = existing
-                    .cache_creation_tokens
-                    .saturating_add(p.cache_creation_tokens);
-                existing.cache_read_tokens = existing
-                    .cache_read_tokens
-                    .saturating_add(p.cache_read_tokens);
-                existing.cost_cents = existing.cost_cents.saturating_add(p.cost_cents);
-            } else {
-                rows.push(p);
-            }
-        }
-    }
-    let mut daily = daily;
-    {
-        let proxy_daily = control_state
-            .mission_store
-            .get_proxy_usage_by_day(since.as_deref())
-            .await
-            .unwrap_or_default();
-        for p in proxy_daily {
-            if let Some(existing) = daily.iter_mut().find(|d| d.day == p.day) {
-                existing.requests = existing.requests.saturating_add(p.requests);
-                existing.input_tokens = existing.input_tokens.saturating_add(p.input_tokens);
-                existing.output_tokens = existing.output_tokens.saturating_add(p.output_tokens);
-                existing.cache_read_tokens = existing
-                    .cache_read_tokens
-                    .saturating_add(p.cache_read_tokens);
-                existing.cost_cents = existing.cost_cents.saturating_add(p.cost_cents);
-            } else {
-                daily.push(p);
-            }
-        }
-        daily.sort_by(|a, b| a.day.cmp(&b.day));
-    }
-    let mut hourly = hourly;
-    if matches!(window, "24h" | "7d") {
-        let proxy_hourly = control_state
-            .mission_store
-            .get_proxy_usage_by_hour(since.as_deref())
-            .await
-            .unwrap_or_default();
-        for p in proxy_hourly {
-            if let Some(existing) = hourly.iter_mut().find(|h| h.hour == p.hour) {
-                existing.requests = existing.requests.saturating_add(p.requests);
-                existing.input_tokens = existing.input_tokens.saturating_add(p.input_tokens);
-                existing.output_tokens = existing.output_tokens.saturating_add(p.output_tokens);
-                existing.cache_read_tokens = existing
-                    .cache_read_tokens
-                    .saturating_add(p.cache_read_tokens);
-                existing.cost_cents = existing.cost_cents.saturating_add(p.cost_cents);
-            } else {
-                hourly.push(p);
-            }
-        }
-        hourly.sort_by(|a, b| a.hour.cmp(&b.hour));
-    }
-
-    let mut totals = UsageSummaryTotals {
-        requests: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
-        cost_cents: 0,
-    };
-    let mut by_model: Vec<ModelUsageResponse> = Vec::with_capacity(rows.len());
-    for r in rows {
-        totals.requests = totals.requests.saturating_add(r.requests);
-        totals.input_tokens = totals.input_tokens.saturating_add(r.input_tokens);
-        totals.output_tokens = totals.output_tokens.saturating_add(r.output_tokens);
-        totals.cache_creation_tokens = totals
-            .cache_creation_tokens
-            .saturating_add(r.cache_creation_tokens);
-        totals.cache_read_tokens = totals.cache_read_tokens.saturating_add(r.cache_read_tokens);
-        totals.cost_cents = totals.cost_cents.saturating_add(r.cost_cents);
-        let provider = if r.model.is_empty() {
-            None
-        } else {
-            infer_provider_for_model(&r.model)
-        };
-        by_model.push(ModelUsageResponse {
-            model: r.model,
-            provider,
-            requests: r.requests,
-            input_tokens: r.input_tokens,
-            output_tokens: r.output_tokens,
-            cache_creation_tokens: r.cache_creation_tokens,
-            cache_read_tokens: r.cache_read_tokens,
-            cost_cents: r.cost_cents,
-        });
-    }
-
-    let by_day = daily
-        .into_iter()
-        .map(|d| DailyUsageResponse {
-            day: d.day,
-            requests: d.requests,
-            input_tokens: d.input_tokens,
-            output_tokens: d.output_tokens,
-            cache_read_tokens: d.cache_read_tokens,
-            cost_cents: d.cost_cents,
-        })
-        .collect();
-
-    let by_hour = hourly
-        .into_iter()
-        .map(|h| HourlyUsageResponse {
-            hour: h.hour,
-            requests: h.requests,
-            input_tokens: h.input_tokens,
-            output_tokens: h.output_tokens,
-            cache_read_tokens: h.cache_read_tokens,
-            cost_cents: h.cost_cents,
-        })
-        .collect();
-
-    Json(UsageSummaryResponse {
-        window: window.to_string(),
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Failed to read usage records");
+            (StatusCode::INTERNAL_SERVER_ERROR, e)
+        })?;
+    Ok(Json(super::usage_summary::summarize(
+        &records,
+        &window,
         since,
-        totals,
-        by_model,
-        by_day,
-        by_hour,
-    })
+        &params.filter,
+    )))
 }
 
 /// List all tasks.
@@ -3490,11 +3251,12 @@ mod tests {
     #[test]
     fn muse_subscription_usage_infers_separate_provider() {
         assert_eq!(
-            super::infer_provider_for_model("muse-code/muse-spark-1.3").as_deref(),
+            crate::api::usage_summary::infer_provider_for_model("muse-code/muse-spark-1.3")
+                .as_deref(),
             Some("muse-code")
         );
         assert_eq!(
-            super::infer_provider_for_model("muse-spark-1.3").as_deref(),
+            crate::api::usage_summary::infer_provider_for_model("muse-spark-1.3").as_deref(),
             Some("muse")
         );
     }
