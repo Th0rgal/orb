@@ -12,6 +12,11 @@ export function Select(props: JSX.SelectHTMLAttributes<HTMLSelectElement>) {
   const [label, setLabel] = createSignal("");
   const [active, setActive] = createSignal(0);
   const sync = () => {
+    // A value set before its <option>s exist falls back to the first option;
+    // re-apply the requested value whenever the options change.
+    const wanted = props.value;
+    if (wanted !== undefined && wanted !== null && select.value !== String(wanted)
+      && Array.from(select.options).some(o => o.value === String(wanted))) select.value = String(wanted);
     setOptions(Array.from(select.options).map(o => ({ value: o.value, label: o.label, disabled: o.disabled })));
     setLabel(select.selectedOptions[0]?.label ?? "");
   };
