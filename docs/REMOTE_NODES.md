@@ -251,11 +251,13 @@ node marks in-flight jobs `lost` and stops their leftover systemd scopes.
 Capacity changes therefore apply live instead. Edit
 `SANDBOXED_NODE_CAPACITY` and/or `SANDBOXED_NODE_SIDE_CAPACITY` in
 `/etc/sandboxed-node.env` (or `SANDBOXED_NODE_ENV_FILE`), then either wait up
-to 30 s (the node polls the file's mtime) or trigger it now with any of:
+to 30 s (the node polls the file's mtime) or trigger it now with any of the
+following. There is deliberately no pid file: the work directory is writable
+by jobs, so systemd's `$MAINPID` is the only signal target.
 
 ```bash
 sudo systemctl reload sandboxed-node        # needs ExecReload= above
-sudo sandboxed-node reload                  # SIGHUP via /var/lib/sandboxed-node/sandboxed-node.pid
+sudo sandboxed-node reload                  # = systemctl reload sandboxed-node.service
 sudo kill -HUP "$(systemctl show -p MainPID --value sandboxed-node)"
 ```
 

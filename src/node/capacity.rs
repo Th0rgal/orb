@@ -378,18 +378,6 @@ pub fn spawn_reload_watcher(capacity: NodeCapacity, path: PathBuf) {
     });
 }
 
-/// Pid file the running node writes (`SANDBOXED_NODE_PID_FILE`, default
-/// `<work_root>/../sandboxed-node.pid`, i.e. `/var/lib/sandboxed-node`).
-pub fn pid_file_path(work_root: &Path) -> PathBuf {
-    if let Some(path) = std::env::var_os("SANDBOXED_NODE_PID_FILE") {
-        return PathBuf::from(path);
-    }
-    work_root
-        .parent()
-        .unwrap_or(work_root)
-        .join("sandboxed-node.pid")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

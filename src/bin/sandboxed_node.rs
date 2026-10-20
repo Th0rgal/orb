@@ -135,10 +135,6 @@ async fn main() -> anyhow::Result<()> {
     // reload`) or an env-file mtime change. Running jobs are never touched.
     let env_file = sandboxed_sh::node::capacity::env_file_path();
     sandboxed_sh::node::capacity::spawn_reload_watcher(capacity, env_file.clone());
-    let pid_file = sandboxed_sh::node::capacity::pid_file_path(&work_root);
-    if let Err(error) = std::fs::write(&pid_file, format!("{}\n", std::process::id())) {
-        warn!(path = %pid_file.display(), %error, "cannot write pid file; `sandboxed-node reload` needs --pid");
-    }
     info!(env_file = %env_file.display(), "capacity reload: SIGHUP or env-file change");
 
     // Periodic disk GC for lean-build checkouts and lake cache slots
@@ -282,51 +278,47 @@ async fn install_antigravity_auth(
     })))
 }
 
-/// `sandboxed-node reload [--pid PID | --pid-file PATH]`: SIGHUP the running
-/// node so it re-reads its capacities. Without flags, the pid file under
-/// `SANDBOXED_NODE_WORK_DIR`'s parent (or `SANDBOXED_NODE_PID_FILE`).
+/// `sandboxed-node reload [--unit NAME]`: ask systemd to reload the node
+/// (`ExecReload=/bin/kill -HUP $MAINPID`). systemd owns the main pid, so no
+/// pid file exists that a job could plant or redirect.
 fn send_reload(args: Vec<String>) -> anyhow::Result<()> {
-    let mut pid: Option<i32> = None;
-    let mut pid_file: Option<PathBuf> = None;
-    let mut args = args.into_iter();
+    let argv = reload_command(&args)?;
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .map_err(|e| anyhow::anyhow!("run systemctl: {e}"))?;
+    anyhow::ensure!(status.success(), "systemctl reload failed: {status}");
+    println!("reloaded {} (running jobs are not restarted)", argv[2]);
+    Ok(())
+}
+
+/// The fixed systemctl argv for a reload. Only a plain unit name is
+/// accepted; there is no pid/pid-file input at all.
+fn reload_command(args: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut unit = "sandboxed-node.service".to_string();
+    let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--pid" => pid = args.next().and_then(|v| v.trim().parse().ok()),
-            "--pid-file" => pid_file = args.next().map(PathBuf::from),
-            other => anyhow::bail!(
-                "usage: sandboxed-node reload [--pid PID | --pid-file PATH] (unexpected '{other}')"
-            ),
+            "--unit" => {
+                unit = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--unit needs a name"))?
+                    .clone();
+            }
+            other => {
+                anyhow::bail!("usage: sandboxed-node reload [--unit NAME] (unexpected '{other}')")
+            }
         }
     }
-    let pid = match pid {
-        Some(pid) => pid,
-        None => {
-            let path = pid_file.unwrap_or_else(|| {
-                let work_root = std::env::var("SANDBOXED_NODE_WORK_DIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("/var/lib/sandboxed-node/work"));
-                sandboxed_sh::node::capacity::pid_file_path(&work_root)
-            });
-            std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?
-                .trim()
-                .parse()
-                .map_err(|_| anyhow::anyhow!("{} does not hold a pid", path.display()))?
-        }
-    };
-    anyhow::ensure!(pid > 1, "refusing to signal pid {pid}");
-    #[cfg(unix)]
-    {
-        if unsafe { libc::kill(pid, libc::SIGHUP) } != 0 {
-            anyhow::bail!("SIGHUP {pid}: {}", std::io::Error::last_os_error());
-        }
-        println!("sent SIGHUP to sandboxed-node (pid {pid}); running jobs are not restarted");
-        Ok(())
+    let valid = unit.starts_with("sandboxed-node")
+        && unit
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_@.".contains(c));
+    anyhow::ensure!(valid, "refusing unit name '{unit}'");
+    if !unit.ends_with(".service") {
+        unit.push_str(".service");
     }
-    #[cfg(not(unix))]
-    {
-        anyhow::bail!("reload is only supported on unix")
-    }
+    Ok(vec!["systemctl".into(), "reload".into(), unit])
 }
 
 fn check_auth(headers: &HeaderMap, state: &NodeState) -> Result<(), (StatusCode, String)> {
@@ -1128,6 +1120,38 @@ mod tests {
         let idle = heartbeat(State(state), headers).await.expect("heartbeat").0;
         assert_eq!(idle.capacity_total, 1);
         assert_eq!(idle.capacity_available, 1);
+    }
+
+    #[test]
+    fn reload_goes_through_systemd_and_takes_no_pid_input() {
+        let argv =
+            |a: &[&str]| reload_command(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            argv(&[]).unwrap(),
+            vec!["systemctl", "reload", "sandboxed-node.service"]
+        );
+        assert_eq!(
+            argv(&["--unit", "sandboxed-node@sepolia"]).unwrap()[2],
+            "sandboxed-node@sepolia.service"
+        );
+        // No way to aim the signal at an arbitrary process.
+        assert!(argv(&["--pid", "1"]).is_err());
+        assert!(argv(&["--pid-file", "/var/lib/sandboxed-node/work/x"]).is_err());
+        assert!(argv(&["--unit", "sshd"]).is_err());
+        assert!(argv(&["--unit", "sandboxed-node;rm"]).is_err());
+        assert!(argv(&["--unit", "sandboxed-node --no-block"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn node_writes_no_pid_file_into_job_writable_work_root() {
+        let work_root = tempfile::tempdir().expect("tempdir");
+        let _state = test_state(work_root.path().to_path_buf()).await;
+        let names: Vec<_> = std::fs::read_dir(work_root.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".pid")), "{names:?}");
     }
 
     #[test]
