@@ -112,6 +112,56 @@ fn workers() -> &'static Mutex<HashSet<PathBuf>> {
     static W: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     W.get_or_init(|| Mutex::new(HashSet::new()))
 }
+/// Journals whose `local_origin_launch` is still between its first write and
+/// recording the native generation. A worker started meanwhile (the mission
+/// list polls `local_origin_list`, which starts workers for pending records)
+/// must not read the missing generation as a vanished process.
+fn launching() -> &'static std::sync::Mutex<HashSet<PathBuf>> {
+    static L: OnceLock<std::sync::Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    L.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+fn is_launching(path: &Path) -> bool {
+    launching()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(path)
+}
+struct Launching(PathBuf);
+impl Launching {
+    fn begin(path: &Path) -> Self {
+        launching()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_owned());
+        Self(path.to_owned())
+    }
+}
+impl Drop for Launching {
+    fn drop(&mut self) {
+        launching()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+/// Status of the initial run as last observed, or `None` when nothing new can
+/// be inferred. Callers must not ask while the launch is still in flight.
+fn observed_status(poll: Option<&local_agents::PollState>, current: &str) -> Option<&'static str> {
+    match poll {
+        Some(p) if !p.done => Some("active"),
+        Some(p) if p.exit_code.is_some_and(|code| code != 0) || p.error.is_some() => {
+            if p.exit_code == Some(137) || p.exit_code == Some(143) || p.exit_code.is_none() {
+                Some("interrupted")
+            } else {
+                Some("failed")
+            }
+        }
+        Some(_) => Some("awaiting_user"),
+        // The process is unknown to this app (restart, crash): a real early stop.
+        None if current == "active" => Some("interrupted"),
+        None => None,
+    }
+}
 fn connections() -> &'static Mutex<std::collections::HashMap<PathBuf, Connection>> {
     static C: OnceLock<Mutex<std::collections::HashMap<PathBuf, Connection>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -166,12 +216,18 @@ async fn start_worker(path: PathBuf, c: Connection) {
             if record.acked == record.snapshot.sequence && record.snapshot.status != "active" {
                 break;
             }
+            // The launch owns the journal until it has recorded the native
+            // generation; observing earlier would mark a starting run interrupted.
+            if is_launching(&path) {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
             let id = record.snapshot.origin.id.to_string();
-            if let Some(p) = record
+            let poll = record
                 .native_generation
                 .as_deref()
-                .and_then(|generation| local_agents::poll_generation(&id, Some(generation)).ok())
-            {
+                .and_then(|generation| local_agents::poll_generation(&id, Some(generation)).ok());
+            if let Some(p) = &poll {
                 if p.session_id.is_some() && p.session_id != last_session {
                     if let Ok(bindings) = crate::local_bindings(None, None) {
                         let mut binding = bindings[&id].clone();
@@ -182,35 +238,23 @@ async fn start_worker(path: PathBuf, c: Connection) {
                     }
                     last_session = p.session_id.clone();
                 }
-                let status = if !p.done {
-                    "active"
-                } else if p.exit_code.is_some_and(|code| code != 0) || p.error.is_some() {
-                    if p.exit_code == Some(137) || p.exit_code == Some(143) || p.exit_code.is_none()
-                    {
-                        "interrupted"
-                    } else {
-                        "failed"
-                    }
-                } else {
-                    "awaiting_user"
+            }
+            if let Some(status) = observed_status(poll.as_ref(), &record.snapshot.status) {
+                let (text, error) = match poll {
+                    Some(p) => (p.text, p.error),
+                    None => (record.snapshot.text.clone(), record.snapshot.error.clone()),
                 };
-                if record.snapshot.text != p.text
+                if record.snapshot.text != text
                     || record.snapshot.status != status
-                    || record.snapshot.error != p.error
+                    || record.snapshot.error != error
                 {
                     record.snapshot.sequence += 1;
-                    record.snapshot.text = p.text;
+                    record.snapshot.text = text;
                     record.snapshot.status = status.into();
-                    record.snapshot.error = p.error;
+                    record.snapshot.error = error;
                     if write(&path, &record).is_err() {
                         break;
                     }
-                }
-            } else if record.snapshot.status == "active" {
-                record.snapshot.sequence += 1;
-                record.snapshot.status = "interrupted".into();
-                if write(&path, &record).is_err() {
-                    break;
                 }
             }
             if record.acked < record.snapshot.sequence || record.snapshot.status == "active" {
@@ -417,6 +461,8 @@ pub async fn local_origin_launch(
     guard
         .try_lock_exclusive()
         .map_err(|_| "This draft is already starting")?;
+    // Held (under the draft lock) until the native generation is recorded.
+    let launch_guard = Launching::begin(&path);
     if path.exists() {
         let record = read(&path)?;
         if record.snapshot.origin.prompt != draft.prompt
@@ -579,6 +625,7 @@ pub async fn local_origin_launch(
         }
         write(&path, &record)?;
     }
+    drop(launch_guard);
     let result = view(&record);
     start_worker(path, connection).await;
     Ok(result)
@@ -634,6 +681,65 @@ mod rejection_tests {
                 );
             }
         }
+    }
+
+    fn poll(done: bool, exit_code: Option<i32>, text: &str) -> local_agents::PollState {
+        local_agents::PollState {
+            activities: vec![],
+            text: text.into(),
+            done,
+            exit_code,
+            session_id: None,
+            error: None,
+            retryable: false,
+            resumed: false,
+            waiting_since: None,
+            stopping: false,
+        }
+    }
+
+    #[test]
+    fn clean_exit_with_answer_is_not_an_early_stop() {
+        assert_eq!(
+            observed_status(Some(&poll(true, Some(0), "answer")), "active"),
+            Some("awaiting_user")
+        );
+        assert_eq!(
+            observed_status(Some(&poll(false, None, "")), "active"),
+            Some("active")
+        );
+    }
+
+    #[test]
+    fn real_early_stops_stay_flagged() {
+        assert_eq!(
+            observed_status(Some(&poll(true, Some(143), "")), "active"),
+            Some("interrupted")
+        );
+        assert_eq!(
+            observed_status(Some(&poll(true, Some(2), "")), "active"),
+            Some("failed")
+        );
+        // Process unknown after the launch finished (app restart, crash).
+        assert_eq!(observed_status(None, "active"), Some("interrupted"));
+        assert_eq!(observed_status(None, "awaiting_user"), None);
+    }
+
+    /// Mission 5ce38ed7: the list's worker read the journal before the launch
+    /// recorded its native generation and published `interrupted` 1s into a
+    /// run that later exited 0 with its answer.
+    #[test]
+    fn worker_waits_while_launch_records_the_generation() {
+        let path = std::env::temp_dir().join(format!("orb-origin-{}.json", uuid::Uuid::new_v4()));
+        assert!(!is_launching(&path));
+        {
+            let _guard = Launching::begin(&path);
+            assert!(is_launching(&path));
+        }
+        assert!(
+            !is_launching(&path),
+            "a finished or failed launch releases the journal"
+        );
     }
 
     #[test]
