@@ -1,7 +1,7 @@
 import { For, Show, createSignal, onMount } from "solid-js";
 import { ErrorToast } from "./toast";
 import { getHermesSettings, updateHermesSettings, type HermesSettingsState } from "./cloudAgentApi";
-import { isConnected } from "./api";
+import { ApiError, isConnected } from "./api";
 import { Select } from "./Select";
 import { ProviderLogo } from "./ProviderLogo";
 import { MdView } from "./Markdown";
@@ -14,6 +14,9 @@ export function HermesSettings() {
   const [restarting, setRestarting] = createSignal(false);
   const [error, setError] = createSignal("");
   const [notice, setNotice] = createSignal("");
+  // Core answers 403 when Hermes is not configured for this account
+  // (HERMES_CLOUD_OWNER unset or another user). That is setup, not a failure.
+  const [unavailable, setUnavailable] = createSignal("");
 
   const [defaultModel, setDefaultModel] = createSignal("");
   const [reasoningEffort, setReasoningEffort] = createSignal("");
@@ -51,10 +54,12 @@ export function HermesSettings() {
     }
     setLoading(true);
     setError("");
+    setUnavailable("");
     try {
       applyState(await getHermesSettings());
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof ApiError && e.status === 403) setUnavailable(e.detail || "Hermes is not connected for this account");
+      else setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -125,6 +130,19 @@ export function HermesSettings() {
           }
         >
           <ErrorToast error={error()} onDismiss={() => setError("")} />
+          <Show when={unavailable()}>
+            <section class="s-sec">
+              <div class="s-card">
+                <div class="s-row">
+                  <div class="s-row-text">
+                    <div class="s-row-title">Coordinator not set up on this Core</div>
+                    <div class="s-row-desc">{unavailable()}. The Coordinator runs on a Hermes gateway that Core proxies for the user named in HERMES_CLOUD_OWNER. Missions and local agents work without it.</div>
+                  </div>
+                  <div class="s-row-ctrl"><button class="s-btn" onClick={() => void load()}>Check again</button></div>
+                </div>
+              </div>
+            </section>
+          </Show>
           <Show when={loading() && !state()}>
             <section class="s-sec">
               <div class="s-card">

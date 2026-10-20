@@ -4,9 +4,9 @@ import { ErrorToast } from "./toast";
 import { ExecutionSettings } from "./ExecutionSettings";
 import { Select } from "./Select";
 import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createSignal, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, on, onMount, type JSX } from "solid-js";
 import * as Ic from "./icons";
-import { clearConnection, getApiUrl, getJwt, isConnected, login, setApiUrl } from "./api";
+import { clearConnection, connectionVersion, getApiUrl, getJwt, isConnected, login, setApiUrl } from "./api";
 import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride, tauriInvoke } from "./localAgents";
 import { nativeInvoke } from "./native";
 import { DebugInfoPanel } from "./DebugInfo";
@@ -61,15 +61,24 @@ function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const refresh = async () => {
+    if (!isConnected()) return;
+    const version = connectionVersion();
     setBusy(true);
-    try { setAccounts(await cloudAccounts()); setError(""); }
-    catch (e) { setError(String(e)); }
+    try { const list = await cloudAccounts(); if (connectionVersion() === version) { setAccounts(list); setError(""); } }
+    catch (e) { if (connectionVersion() === version) setError(String(e)); }
     finally { setBusy(false); }
   };
-  onMount(() => { void refresh(); });
+  // Accounts belong to the connected Core: drop them on disconnect and reload
+  // after every (re)connect instead of keeping a pre-login failure on screen.
+  // connectionVersion bumps on every connect and disconnect.
+  createEffect(on(connectionVersion, () => {
+    setAccounts([]);
+    setError("");
+    void refresh();
+  }));
   return <Card title="Cloud accounts">
-    <Row title="Connected services" desc="Cloud agents use accounts connected to Core. Connecting an account does not start work.">
-      <button class="s-btn" disabled={busy()} onClick={() => void refresh()}>{busy() ? "Checking…" : "Refresh accounts"}</button>
+    <Row title="Connected services" desc={isConnected() ? "Cloud agents use accounts connected to Core. Connecting an account does not start work." : "Connect to the backend above to see cloud accounts."}>
+      <button class="s-btn" disabled={busy() || !isConnected()} onClick={() => void refresh()}>{busy() ? "Checking…" : "Refresh accounts"}</button>
     </Row>
     <ErrorToast error={error()} title="Couldn’t refresh cloud accounts" onDismiss={() => setError("")} />
     <For each={accounts()}>{a => <Row title={`${cloudNames[a.provider]} · ${a.label}`} desc={a.reason}>
