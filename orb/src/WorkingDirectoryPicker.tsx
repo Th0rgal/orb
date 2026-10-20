@@ -4,7 +4,7 @@ import { missionNode } from "./machines/nodes";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { api, type Mission } from "./api";
+import { api, ApiError, type Mission } from "./api";
 import {
   CheckIcon,
   ChevronRight,
@@ -98,6 +98,14 @@ function missionMatchesMachine(m: Mission, machine: string): boolean {
   return dest === machine;
 }
 
+// A reachable server that refuses the path is not a connection problem: say so,
+// so the user picks another folder instead of retrying forever.
+function listingErrorMessage(e: unknown, path: string): string {
+  if (e instanceof ApiError && e.status === 403) return `This machine doesn't allow browsing ${path}. Open a folder inside its workspace or type a path.`;
+  if (e instanceof ApiError && e.status >= 400 && e.status < 500) return `Could not load ${path}: ${e.detail || e.status}`;
+  return "Could not load folders. Check the connection and try again.";
+}
+
 export function WorkingDirectoryPicker(p: {
   machine: string;
   machineName?: string;
@@ -181,12 +189,12 @@ export function WorkingDirectoryPicker(p: {
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
       setEntries(dirs);
       setLiveAvailable(true);
-    } catch {
+    } catch (e) {
       if (seq !== requestSeq) return;
       setResolvedDir(queryPath.startsWith("/") ? queryPath : null);
       setEntries([]);
       setFileCount(0);
-      setLiveAvailable(false); setListingError("Could not load folders. Check the connection and try again.");
+      setLiveAvailable(false); setListingError(listingErrorMessage(e, queryPath));
     } finally {
       if (seq === requestSeq) setLoading(false);
     }

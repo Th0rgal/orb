@@ -87,3 +87,12 @@ it("browses remote folders, navigates breadcrumbs, toggles hidden folders, and c
   await waitFor(() => expect(change).toHaveBeenCalledWith("/srv/work/paloma/experiments"));
   expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("/api/fs/mkdir"), expect.objectContaining({ method: "POST" }));
 });
+
+it("explains a folder the machine refuses to list instead of blaming the connection", async () => {
+  vi.spyOn(window, "fetch").mockImplementation(async () => new Response("Path traversal attempt", { status: 403 }));
+  render(() => <WorkingDirectoryPicker machine="core" machineName="Core" value="/" onChange={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Choose working folder" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("doesn't allow browsing /");
+  expect(alert.textContent).not.toContain("Check the connection");
+});
