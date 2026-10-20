@@ -3850,3 +3850,8 @@ select.orb-select-native:disabled { cursor: default; }
   .queue-row.leaving { animation:none; display:none; }
   .user.sending { animation:none; opacity:.8; }
 }
+
+/* A moved conversation slides into its new folder (optimistic move, moves.ts). */
+@keyframes mission-arrive { from { opacity: .35; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.row.agent.mission-arriving { animation: mission-arrive 180ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .row.agent.mission-arriving { animation: none; } }

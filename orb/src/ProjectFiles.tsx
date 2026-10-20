@@ -17,7 +17,8 @@ import { ProviderLogo } from "./ProviderLogo";
 import { ContextBadge } from "./ContextBadge";
 import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
-import { moveMission } from "./missionMove";
+import { moveMissions, planMissionMoves } from "./missionMove";
+import { RunningWorkers, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
 import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
 import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
@@ -34,6 +35,7 @@ import {
   api,
   isConnected,
   ApiError,
+  cancelMission,
   connectionVersion,
   listProjectFiles,
   listProjectMissions,
@@ -212,6 +214,11 @@ export function LiveProjectsSection(p: {
   const queuedDeletes = new Set<string>();
   const deletingDescendants = new Map<string, string[]>();
   const deleteFailures: string[] = [];
+  /** Deletes held back only by running workers: root id -> running worker ids. */
+  const runningBlocks = new Map<string, string[]>();
+  /** The user confirmed "Stop and delete" for these roots. */
+  const stopApproved = new Set<string>();
+  const [stopPrompt, setStopPrompt] = createSignal<{ roots: string[]; workers: number } | null>(null);
   let activeDeleteWorkers = 0;
   let pendingRemoved = new Set<string>();
   let pendingUnmark = new Set<string>();
@@ -224,8 +231,7 @@ export function LiveProjectsSection(p: {
     createTreeSelection({ visibleNodes: () => [...tree(), ...(archivesOpen() ? archiveNodes() : [])] });
   const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, pasteMission, isMoving, hasCutClipboard } = createMissionMoves({
     allKnownMissions: () => allKnownMissions(),
-    removeRow: id => removeRow(id),
-    dropFromProjects: id => { for (const source of Object.keys(missions)) setMissions(source, list => list.filter(m => m.id !== id)); },
+    leaveProjects: (id, keep) => leaveProjects(id, keep),
     revealDestination: (slug, path) => { setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true); },
     loadMissions: slug => loadMissions(slug),
     setActionError: error => setActionError(error),
@@ -255,6 +261,11 @@ export function LiveProjectsSection(p: {
     });
   };
   const removeRow = (id: string) => removeRows([id]);
+  /** A moved mission leaves its old listings. Unlike `removeRows` it is not
+   * remembered as deleted, so the destination still lists it. */
+  const leaveProjects = (id: string, keep: string) => batch(() => {
+    for (const slug of Object.keys(missions)) if (slug !== keep && missions[slug]?.some(m => m.id === id)) setMissions(slug, rows => rows.filter(m => m.id !== id));
+  });
   const forgetDeleted = (ids: string[]) => {
     const removed = new Set(ids);
     if (!removed.size) return;
@@ -283,12 +294,18 @@ export function LiveProjectsSection(p: {
         });
       }
       if (final) {
+        for (const id of stopApproved) if (!runningBlocks.has(id)) stopApproved.delete(id);
+        if (runningBlocks.size) {
+          const roots = [...runningBlocks.keys()], workers = new Set([...runningBlocks.values()].flat()).size;
+          runningBlocks.clear();
+          setStopPrompt({ roots, workers });
+        }
         if (deleteFailures.length) {
           const failures = deleteFailures.splice(0, deleteFailures.length);
           setActionError(`Couldn’t delete ${failures.length} agent(s). ${failures.join("; ")}`);
         }
         setDeleteConfirmBusy(false);
-        if (!deleteFailures.length && !actionError()) setDeleteTargets([]);
+        if (!deleteFailures.length && !actionError() || stopPrompt()) setDeleteTargets([]);
         bumpProjects();
       }
     });
@@ -296,6 +313,30 @@ export function LiveProjectsSection(p: {
   const scheduleDeleteFlush = (version: number) => {
     if (deleteQueue.length <= 8) flushDeleteBatch(version, false);
     else if (!flushTimer) flushTimer = setTimeout(() => flushDeleteBatch(version, false), 32);
+  };
+  const stopWorkers = async (ids: readonly string[]) => {
+    await Promise.all(ids.map(wid => cancelMission(wid)));
+  };
+  /** DELETE `id`; with `stop`, a 409 naming a running worker cancels it and retries. */
+  const deleteMissionStopping = async (id: string, stop: boolean) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}`, {method: "DELETE"});
+      } catch (error) {
+        const blocking = error instanceof ApiError && error.status === 409 ? runningWorkerIds(error.detail) : [];
+        if (!blocking.length || attempt >= 3) throw error;
+        if (!stop) throw new RunningWorkers(blocking);
+        await stopWorkers(blocking);
+      }
+    }
+  };
+  const confirmStopAndDelete = () => {
+    const prompt = stopPrompt();
+    if (!prompt) return;
+    setStopPrompt(null);
+    for (const id of prompt.roots) stopApproved.add(id);
+    setDeleteTargets(prompt.roots);
+    deleteSelected();
   };
   const runDeleteWorker = async (version: number) => {
     activeDeleteWorkers++;
@@ -323,11 +364,10 @@ export function LiveProjectsSection(p: {
           // against the current server runner registry.
           const live = (status: string) => ["active", "waiting_background"].includes(status);
           if (live(mission.status)) throw new Error("Stop or finish this agent before deleting it.");
-          const runningChildren = subtree.filter(m => m.id !== id && live(m.status));
-          if (runningChildren.length) {
-            const names = runningChildren.slice(0, 3).map(m => `“${m.title || m.id.slice(0, 8)}”`).join(", ");
-            throw new Error(`${runningChildren.length} agent${runningChildren.length > 1 ? "s" : ""} under it ${runningChildren.length > 1 ? "are" : "is"} still running (${names}${runningChildren.length > 3 ? ", …" : ""}). Stop ${runningChildren.length > 1 ? "them" : "it"} first.`);
-          }
+          const runningChildren = subtree.filter(m => m.id !== id && live(m.status)).map(m => m.id);
+          if (runningChildren.length && !stopApproved.has(id)) throw new RunningWorkers(runningChildren);
+          if (runningChildren.length) await stopWorkers(runningChildren);
+          if (version !== connectionVersion()) break;
           const pausedIds = [
             ...(mission.status === "paused" ? [id] : []),
             ...subtree.filter(m => m.id !== id && m.status === "paused").map(m => m.id),
@@ -341,7 +381,7 @@ export function LiveProjectsSection(p: {
             if (version !== connectionVersion()) break;
           }
           if (version !== connectionVersion()) break;
-          const result = await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}`, {method: "DELETE"});
+          const result = await deleteMissionStopping(id, stopApproved.has(id));
           if (version !== connectionVersion()) break;
           const serverDeleted = new Set(result?.deleted_ids ?? []);
           for (const extraId of subtree.map(m => m.id)) {
@@ -376,6 +416,12 @@ export function LiveProjectsSection(p: {
               deletedInSession.add(rid);
               pendingRemoved.add(rid);
               pendingUnmark.add(rid);
+            }
+          } else if (error instanceof RunningWorkers) {
+            // Not a failure: ask once whether to stop them (see stopPrompt).
+            runningBlocks.set(id, error.ids);
+            for (const cid of covered) {
+              if (!queuedDeletes.has(cid)) pendingUnmark.add(cid);
             }
           } else {
             deleteFailures.push(`${id.slice(0, 8)}: ${String(error)}`);
@@ -846,17 +892,22 @@ export function LiveProjectsSection(p: {
       setFolderError("Use a folder name without slashes.");
       return;
     }
-    setMakingFolder(true);
+    // Optimistic: the folder shows at once and the dialog closes; a failure
+    // removes it again and reopens the dialog with the error.
+    const key = `${target.slug}:${target.path}`;
+    const path = target.path ? `${target.path}/${name}` : name;
+    const existed = (dirs[key] ?? []).some(e => e.name === name);
+    if (!existed) setDirs(key, rows => [...(rows ?? []), { name, kind: "dir" } as ProjectFileEntry].sort((a, b) => a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "dir" ? -1 : 1));
+    setExpanded(target.path ? key : target.slug, true);
+    setNewFolder(null);
     setFolderError(null);
     try {
-      await mkdirProjectFile(target.slug, target.path ? `${target.path}/${name}` : name);
-      loadDir(target.slug, target.path, true);
-      setExpanded(target.path ? `${target.slug}:${target.path}` : target.slug, true);
-      setNewFolder(null);
+      await mkdirProjectFile(target.slug, path);
+      void loadDir(target.slug, target.path, true);
     } catch (e) {
+      if (!existed) setDirs(key, rows => (rows ?? []).filter(r => !(r.name === name && r.kind === "dir")));
+      setFolderName(name); setNewFolder(target);
       setFolderError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMakingFolder(false);
     }
   };
   const beginFile = (slug: string, path: string) => {
@@ -1153,18 +1204,23 @@ export function LiveProjectsSection(p: {
             await performMoveCron(item.slug, item.id, targetSlug, parentMove ? parentMove.destPath : targetPath);
           } catch (err) { failures.push(`${item.name}: ${err instanceof Error ? err.message : String(err)}`); }
         }
+        // Missions (with the missions they launched) move together and in parallel.
+        const byFolder = new Map<string, string[]>();
         for (const item of missionItems) {
           if (version !== connectionVersion()) break;
           const m = allKnownMissions().find(x => x.id === item.id);
           const mFolder = m ? missionFolder(m) : "";
           const parentMove = m?.project && mFolder ? underMovedFolder(m.project, mFolder) : null;
           if (parentMove && parentMove.destSlug === m?.project) continue;
-          try {
-            await moveMission(item.id, targetSlug, parentMove ? parentMove.destPath : targetPath, m?.project ?? null);
-            if (m?.project && m.project !== targetSlug) removeRow(item.id);
-          } catch (err) { failures.push(`${item.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`); }
+          const dest = parentMove ? parentMove.destPath : targetPath;
+          byFolder.set(dest, [...(byFolder.get(dest) ?? []), item.id]);
         }
+        const plans = [...byFolder].map(([dest, ids]) => planMissionMoves(ids, targetSlug, dest, allKnownMissions()));
+        const missionFailures = (await Promise.all(plans.map(plan => moveMissions(plan, targetSlug)))).flat();
+        for (const f of missionFailures) failures.push(`${f.id.slice(0, 8)}: ${f.error instanceof Error ? f.error.message : String(f.error)}`);
         await loadMissions(targetSlug);
+        const failedIds = new Set(missionFailures.map(f => f.id));
+        for (const step of plans.flat()) if (!failedIds.has(step.id)) leaveProjects(step.id, targetSlug);
       }
       if (version !== connectionVersion()) return;
       setExpanded(targetPath ? `${targetSlug}:${targetPath}` : targetSlug, true);
@@ -1830,7 +1886,7 @@ export function LiveProjectsSection(p: {
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined]));
     return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
-      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission ? (!deleting() && (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id)) ? "active" : "" : (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id) ? "active" : ""}`} {...tip}
+      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission ? (!deleting() && (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id)) ? "active" : "" : (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id) ? "active" : ""}`} {...tip}
       onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } onMissionContext(e, d.mission); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
         setSelectionActive(true);
@@ -1911,6 +1967,11 @@ export function LiveProjectsSection(p: {
           <Show when={archivesMore()}><button class="row note" disabled={archivesLoading()} onClick={() => void loadArchives(true)}>Load older conversations</button></Show>
         </div>
       </Show>
+      <Show when={stopPrompt()}>{prompt => (
+        <ConfirmDialog title={`${prompt().workers} worker${prompt().workers === 1 ? " is" : "s are"} still running`} destructive action="Stop and delete"
+          description={`Stop ${prompt().workers === 1 ? "it" : "them"} and delete ${prompt().roots.length === 1 ? "the conversation" : `the ${prompt().roots.length} conversations`}? Stopping ends the running work.`}
+          busy={false} error={null} onConfirm={confirmStopAndDelete} onClose={() => setStopPrompt(null)}/>
+      )}</Show>
       <Show when={deleteTargets().length}>
         <ConfirmDialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} destructive action="Delete"
           description="This permanently deletes the selected conversations, their child agents and associated workspace files. A conversation with a running agent under it is kept until that agent stops."

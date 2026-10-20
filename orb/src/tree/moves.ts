@@ -1,7 +1,6 @@
 import { createSignal } from "solid-js";
 import { bumpProjects, connectionVersion, getApiUrl, type Mission } from "../api";
-import { cutMission, moveMission, readCutMission } from "../missionMove";
-import { missionMoveKey, previewMove, settleMove } from "../moves";
+import { cutMission, moveMissions, planMissionMoves, readCutMission } from "../missionMove";
 
 /**
  * Cut/paste of conversations between projects and folders in the sidebar.
@@ -10,9 +9,11 @@ import { missionMoveKey, previewMove, settleMove } from "../moves";
  */
 export function createMissionMoves(deps: {
   allKnownMissions: () => Mission[];
-  removeRow: (id: string) => void;
-  /** Drop `id` from every loaded project listing. */
-  dropFromProjects: (id: string) => void;
+  /**
+   * Drop `id` from the loaded listing of every project except `keep`. A moved
+   * mission is not deleted: this never hides it from later listings.
+   */
+  leaveProjects: (id: string, keep: string) => void;
   revealDestination: (slug: string, path: string) => void;
   loadMissions: (slug: string) => Promise<void>;
   setActionError: (error: string | null) => void;
@@ -36,24 +37,13 @@ export function createMissionMoves(deps: {
     if (pendingMoves().length) {
       moving = true;
       const ids = [...pendingMoves()], version = connectionVersion();
-      // The whole selection shows in its new place at once.
-      const from = new Map(ids.map(id => [id, deps.allKnownMissions().find(m => m.id === id)?.project ?? null]));
-      for (const id of ids) previewMove(missionMoveKey(id), { kind: "mission", fromProject: from.get(id) ?? null, toProject: slug, path });
-      void (async () => {
-        const failed: string[] = [];
-        for (const id of ids) {
-          if (version !== connectionVersion()) { settleMove(missionMoveKey(id)); continue; }
-          try {
-            await moveMission(id, slug, path, from.get(id) ?? null);
-            if (version !== connectionVersion()) break;
-            deps.removeRow(id);
-          } catch (error) { failed.push(id); deps.setActionError(`Couldn’t move ${id.slice(0, 8)}: ${String(error)}`); }
-        }
-        if (version !== connectionVersion()) return;
+      // No long grayed "cut" state: the rows are at their destination now
+      // (moves.ts overlay) and only failures come back.
+      setPendingMoves([]); setCutId(null); deps.setActionError(null);
+      deps.revealDestination(slug, path);
+      void run(ids, slug, path, version, failed => {
         setPendingMoves(failed); setCutId(failed[0] ?? null);
-        deps.revealDestination(slug, path);
-        await deps.loadMissions(slug); bumpProjects();
-      })().finally(() => { moving = false; });
+      }).finally(() => { moving = false; });
       return;
     }
     moving = true;
@@ -64,16 +54,27 @@ export function createMissionMoves(deps: {
       let missionId = clipboard === consumedCut ? null : readCutMission(clipboard, getApiUrl());
       if (!missionId && cutClipboard && clipboard !== cutClipboard) { clipboard = cutClipboard; missionId = readCutMission(clipboard, getApiUrl()); }
       if (!missionId || version !== connectionVersion()) return;
-      await moveMission(missionId, slug, path, deps.allKnownMissions().find(m => m.id === missionId)?.project ?? null);
-      if (version !== connectionVersion()) return;
       consumedCut = clipboard; cutClipboard = "";
       setCutId(null); deps.setActionError(null);
-      deps.dropFromProjects(missionId);
       deps.revealDestination(slug, path);
-      await deps.loadMissions(slug);
-      bumpProjects();
+      await run([missionId], slug, path, version, failed => { if (failed.length) { cutClipboard = clipboard; consumedCut = ""; setCutId(missionId); } });
     })().catch(e => deps.setActionError(`Couldn’t move conversation: ${String(e)}`)).finally(() => { moving = false; });
   };
+  /** Move `ids` (and the missions they launched) in parallel; `done` gets the failed selection ids. */
+  async function run(ids: string[], slug: string, path: string, version: number, done: (failed: string[]) => void) {
+    const plan = planMissionMoves(ids, slug, path, deps.allKnownMissions());
+    const failures = await moveMissions(plan, slug);
+    if (version !== connectionVersion()) return;
+    const failedIds = new Set(failures.map(f => f.id));
+    // Load the destination before leaving the source, so no row blinks out.
+    await deps.loadMissions(slug);
+    if (version !== connectionVersion()) return;
+    for (const step of plan) if (!failedIds.has(step.id)) deps.leaveProjects(step.id, slug);
+    done(ids.filter(id => failedIds.has(id)));
+    // Each failure already returned its row and showed an inline toast
+    // (moves.ts); the failed rows stay cut so the user can retry.
+    bumpProjects();
+  }
   return {
     cutId, setCutId, pendingMoves, setPendingMoves, beginMove, pasteMission,
     isMoving: () => moving, hasCutClipboard: () => !!cutClipboard,
