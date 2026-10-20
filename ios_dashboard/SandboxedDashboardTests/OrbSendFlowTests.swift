@@ -130,4 +130,25 @@ final class OrbSendFlowTests: XCTestCase {
         let listed = OrbFollowUpQueue().withServer([OrbQueuedRow(id: "s", content: "z")])
         XCTAssertEqual(listed.withServer([], fetchedAt: Date()).count, 0)
     }
+
+    func testTapWhileSendingIsQueuedNeverDropped() {
+        XCTAssertEqual(OrbSendFlow.tapAction(busy: false, content: "fourth idle", canQueue: true), .send)
+        XCTAssertEqual(OrbSendFlow.tapAction(busy: true, content: "fifth queued", canQueue: true), .deferToQueue)
+        XCTAssertEqual(OrbSendFlow.tapAction(busy: true, content: "x", canQueue: false), .ignore)
+        XCTAssertEqual(OrbSendFlow.tapAction(busy: false, content: "  ", canQueue: true), .ignore)
+        // The deferred row shows at once, then settles like any queued follow-up.
+        let q = OrbFollowUpQueue().enqueue("d1", "fifth queued")
+        XCTAssertEqual(q.rows.map(\.content), ["fifth queued"])
+        XCTAssertEqual(q.posted("d1", queued: true).count, 1)
+    }
+
+    func testWorkingClockStartsFromNewTurnNotStaleStart() {
+        let now = Date()
+        let stale = now.addingTimeInterval(-2150)
+        XCTAssertEqual(OrbSendFlow.turnStart(server: stale, localSend: now), now, "an old turn's start is never used for a new send")
+        let server = now.addingTimeInterval(-1)
+        XCTAssertEqual(OrbSendFlow.turnStart(server: server, localSend: now), server, "Core's start wins once it reports the new turn")
+        XCTAssertEqual(OrbSendFlow.turnStart(server: stale, localSend: nil), stale, "reopening keeps a long turn's clock")
+        XCTAssertEqual(OrbSendFlow.turnStart(server: nil, localSend: now), now)
+    }
 }

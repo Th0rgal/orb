@@ -145,7 +145,25 @@ struct OrbFollowUpQueue: Equatable {
 enum OrbEditOutcome: Equatable { case edited, unsupported, alreadySent, failed }
 enum OrbSendNowOutcome: Equatable { case live, promoted, fallback }
 
+enum OrbTapAction: Equatable { case send, deferToQueue, ignore }
+
 enum OrbSendFlow {
+    /// A tap on send never does nothing: while a send is in flight a follow-up is
+    /// accepted at once as an optimistic queued row and posted once that send settles.
+    static func tapAction(busy: Bool, content: String, canQueue: Bool) -> OrbTapAction {
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .ignore }
+        if !busy { return .send }
+        return canQueue ? .deferToQueue : .ignore
+    }
+
+    /// Start of the running turn: Core's latest user_message, unless this device just
+    /// started a newer turn Core has not reported yet (then the local send time).
+    /// A few seconds of clock skew still count as the same turn.
+    static func turnStart(server: Date?, localSend: Date?, skew: TimeInterval = 10) -> Date? {
+        guard let localSend else { return server }
+        guard let server else { return localSend }
+        return server < localSend.addingTimeInterval(-skew) ? localSend : server
+    }
     /// How long a sent row takes to collapse out of the queue (desktop LEAVE_MS).
     static let leaveSeconds = 0.16
 

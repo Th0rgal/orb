@@ -19,6 +19,10 @@ struct OrbConversation: View {
     @State private var dictation = OrbDictation()
     @State private var error = ""
     @State private var busy = false
+    /// Follow-ups tapped while a send was in flight, posted once it settles (never dropped).
+    @State private var deferredSends: [(id: String, content: String)] = []
+    /// When this device last started a turn (idle send), for the Working clock.
+    @State private var localTurnStart: Date?
     @State private var unavailable = false
     @State private var selection = OrbSelection()
     @State private var showSelection = false
@@ -205,7 +209,7 @@ struct OrbConversation: View {
     private func elapsedClock(at now: Date) -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
         let key = turn?["key"].text ?? "local:\(id ?? "")"
-        let serverStart = isCloud ? nil : OrbTurnSummary.turnStart(events)
+        let serverStart = isCloud ? nil : OrbSendFlow.turnStart(server: OrbTurnSummary.turnStart(events), localSend: localTurnStart)
         let started = serverStart.map { min($0, now) } ?? OrbWorkClock.start(key)
         return OrbTurnSummary.clock(Int(now.timeIntervalSince(started)))
     }
@@ -278,9 +282,9 @@ struct OrbConversation: View {
                 .navigationDestination(item: $forkedMission) { OrbConversation(missionID: $0, project: effectiveProjectSlug, folder: OrbRow(mission).folder) }
                 .task {
                     if let missionID { OrbOnScreen.opened(missionID) }
-                    OrbWebViewPool.shared.warmUp(count: 2)
                     id = missionID
-                    text = OrbDisk.read(draftKey, as: String.self) ?? ""
+                    // Never overwrite what the user already typed while the screen opened.
+                    if text.isEmpty { text = OrbDisk.read(draftKey, as: String.self) ?? "" }
                     attachments = OrbDisk.read(draftKey + ":files", as: [OrbAttachment].self) ?? []
                     if let pending = OrbDisk.read(pendingKey, as: OrbPending.self) {
                         if OrbSendsInFlight.keys.contains(pendingKey) {
@@ -328,6 +332,8 @@ struct OrbConversation: View {
                     }
                     await refresh()
                     scrollToBottomOnOpen(scroll: scroll)
+                    // Off the open path: building web views before the first frame delayed the composer.
+                    OrbWebViewPool.shared.warmUp(count: 2)
                     if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
                         contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
                     }
@@ -1490,7 +1496,7 @@ struct OrbConversation: View {
     }
 
     private var canSend: Bool {
-        !busy && !cloudBlocked && modeQuery == nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        (!busy || canDeferSend) && !cloudBlocked && modeQuery == nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var sendButton: some View {
@@ -1515,6 +1521,7 @@ struct OrbConversation: View {
         }
         .buttonStyle(.plain)
         .disabled(!canSend)
+        .accessibilityIdentifier("composer.send")
         .accessibilityLabel(busy ? "Sending message" : "Send message")
         .accessibilityValue(busy ? "Sending" : canSend ? "Ready" : "Unavailable")
     }
@@ -1858,7 +1865,56 @@ struct OrbConversation: View {
     }
 
     /// True once Core accepted the request, even if the refresh that follows fails.
+    private var canDeferSend: Bool {
+        id != nil && !isCloud && attachments.isEmpty && editingQueuedID == nil && Self.btwQuestion(text) == nil
+    }
+
     @discardableResult private func send() async -> Bool {
+        guard !cloudBlocked else { return false }
+        switch OrbSendFlow.tapAction(busy: busy, content: text, canQueue: canDeferSend) {
+        case .ignore: if busy { return false }
+        case .send: break
+        case .deferToQueue:
+            let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let clientID = UUID().uuidString
+            withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
+                followUps = followUps.enqueue(clientID, content, lastSequence: events.last?.sequence)
+                text = ""
+            }
+            deferredSends.append((clientID, content))
+            return true
+        }
+        let sent = await sendNow()
+        await drainDeferredSends()
+        return sent
+    }
+
+    /// Posts follow-ups accepted while a send was in flight, in order, as queued follow-ups.
+    private func drainDeferredSends() async {
+        guard let id, !busy else { return }
+        while !deferredSends.isEmpty {
+            let next = deferredSends.removeFirst()
+            busy = true
+            do {
+                let result = try await api.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(next.content), "client_message_id": .string(next.id), "queue_followup": .bool(true)]))
+                guard !result["id"].text.isEmpty, result["message_accepted"] != .bool(false) else { throw OrbHTTPError(status: 409, detail: "Core has not confirmed acceptance.") }
+                followUps = followUps.posted(next.id, queued: result["queued"] == .bool(true))
+                if result["queued"] != .bool(true) { localTurnStart = Date() }
+            } catch {
+                followUps = followUps.postFailed(next.id)
+                if text.isEmpty { text = next.content }
+                self.error = "Message kept. \(error.localizedDescription)"
+                busy = false
+                for rest in deferredSends { followUps = followUps.postFailed(rest.id); text += (text.isEmpty ? "" : "\n") + rest.content }
+                deferredSends.removeAll()
+                return
+            }
+            busy = false
+        }
+        await refresh(force: true)
+    }
+
+    @discardableResult private func sendNow() async -> Bool {
         guard !busy, !cloudBlocked else { return false }
         if let id, !isCloud, let question = Self.btwQuestion(text) {
             sideQuestion = OrbSideQuestionRequest(parent: id, question: question)
@@ -1901,6 +1957,7 @@ struct OrbConversation: View {
                         text = ""
                     } else {
                         optimisticPrompt = prompt
+                        localTurnStart = Date()
                         text = ""
                         followsLatest = true
                         rebuildHistory()
