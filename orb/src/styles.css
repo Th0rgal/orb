@@ -566,6 +566,16 @@ code {
   color: var(--fg-3); font-size: 13px; line-height: 20px;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.st-think-fold { margin: 4px 10px; }
+.st-think-fold-head {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--fg-3); font-size: 13px; line-height: 21px;
+}
+.st-think-fold-head:hover { color: var(--fg-2); }
+.st-think-fold-head .chev { opacity: .85; transition: transform .12s; }
+.st-think-fold-head .chev.open { transform: rotate(90deg); }
+.st-think-fold-body { margin: 2px 0 6px 5px; padding-left: 12px; border-left: 1px solid var(--stroke-soft); }
+.st-think-fold-body .st-think { margin: 0; }
 .st-work { margin: 4px 10px; }
 .st-work-head {
   display: flex; align-items: center; gap: 6px; height: 24px; width: 100%; text-align: left;

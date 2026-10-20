@@ -188,3 +188,38 @@ test("OpenCode / Cursor-styled tool components, diff badges, collapsible & dismi
   await page.locator(".tasks-dismiss").click();
   await expect(page.locator(".mission-tasks")).toHaveCount(0);
 });
+
+test("consecutive thoughts share one downward fold with aligned rows and no jump on finalize",async({page})=>{
+ await page.goto("/tests/transcript.html");
+ await page.waitForFunction(()=>!!(window as any).transcriptHarness);
+ await page.evaluate(()=> (window as any).transcriptHarness.reset([
+  {type:"user_message",data:{id:"u",content:"Go"}},
+  {type:"thinking",data:{content:"First thought",done:true}},
+  {type:"thinking",data:{content:"Second thought",done:true}},
+  {type:"thinking",data:{content:"Live thought",done:false}}
+ ]));
+ const fold=page.locator(".st-think-fold");
+ await expect(fold).toHaveCount(1);
+ const head=fold.locator(".st-think-fold-head");
+ await expect(head).toHaveText("3 thoughts");
+ await expect(head).toHaveAttribute("aria-expanded","true");
+ const rows=fold.locator(".st-think-fold-body .st-think-head");
+ await expect(rows).toHaveCount(3);
+ await expect(page.locator(".st-think-head")).toHaveCount(3);
+ const headBox=(await head.boundingBox())!, bodyBox=(await fold.locator(".st-think-fold-body").boundingBox())!;
+ expect(headBox.y+headBox.height).toBeLessThanOrEqual(bodyBox.y+1);
+ const xs=await rows.evaluateAll(els=>els.map(e=>Math.round(e.getBoundingClientRect().left)));
+ expect(new Set(xs).size).toBe(1);
+ const angle=(sel:string)=>page.locator(sel).first().evaluate(e=>getComputedStyle(e).transform);
+ const openHead=await angle(".st-think-fold-head .chev");
+ expect(openHead).toBe(await angle(".st-think-fold-body .st-think.open .st-think-head .chev"));
+ expect(openHead).toMatch(/^matrix\([^,]+, 1, -1,/);
+ const before=(await fold.boundingBox())!.height;
+ await page.evaluate(()=> (window as any).transcriptHarness.apply({type:"thinking",data:{content:"Live thought",done:true}}));
+ await expect(page.locator(".st-think-fold .shimmer")).toHaveCount(0);
+ expect((await fold.boundingBox())!.height).toBe(before);
+ await head.click();
+ await expect(head).toHaveAttribute("aria-expanded","false");
+ await expect(page.locator(".st-think-head")).toHaveCount(0);
+ await expect(page.locator(".st-think-fold-head .chev")).toHaveCSS("transform","none");
+});

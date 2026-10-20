@@ -420,20 +420,31 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
   );
 }
 
+/** Open state that sticks for the item's lifetime: the initial value is
+ * recorded once, so finalizing a live item (done flips) or remounting it into a
+ * fold never re-derives the default and the row does not jump. */
+function stickyDisclosure(key: string, initial: () => boolean) {
+  const state = useContext(DisclosureState);
+  if (state && !state.has(key)) state.set(key, initial());
+  const [open, setOpen] = createSignal(state?.get(key) ?? initial());
+  return [open, (value: boolean) => { state?.set(key, value); setOpen(value); }] as const;
+}
+
 export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) {
-  const [open, setOpen, isExplicit] = disclosure(`think:${p.item.key}`, !p.item.done);
-  const shown = () => isExplicit() ? open() : !p.item.done;
+  // A thought that is still streaming when it mounts opens so its text is
+  // visible, and stays open once it finalizes; finished thoughts load collapsed.
+  const [open, setOpen] = stickyDisclosure(`think:${p.item.key}`, () => !p.item.done);
   // An in-progress block with no text only repeats the live status next to the composer.
   return (
     <Show when={p.item.done || p.item.text.trim()}>
-    <div class={`st-think ${shown() ? "open" : ""}`}>
-      <button class="st-think-head" aria-expanded={shown()} onClick={() => setOpen(!shown())}>
+    <div class={`st-think ${open() ? "open" : ""}`}>
+      <button class="st-think-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
         <Show when={p.item.done} fallback={<span class="shimmer">Thinking</span>}>
           <span>Thinking</span>
         </Show>
-        <Ic.ChevronRight size={12} class={`chev ${shown() ? "open" : ""}`} />
+        <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
       </button>
-      <Show when={shown() && p.item.text}>
+      <Show when={open() && p.item.text}>
         <div class="st-think-body">{thinkInline(p.item.text)}</div>
       </Show>
     </div>
@@ -516,36 +527,39 @@ function WorkFold(p: { items: WorkItem[] }) {
   );
 }
 
-function ThinkFold(p: { items: Array<Extract<StreamItem, { kind: "think" }>> }) {
-  const [open, setOpen] = disclosure(`think-fold:${p.items[0]?.key}`, false);
-  const anchored = anchoredDisclosure();
-  let toggle!: HTMLButtonElement;
+type ThinkItem = Extract<StreamItem, { kind: "think" }>;
+
+/** Consecutive thoughts between two visible texts/tools: one fold whose header
+ * sits above its rows and opens downward. The live thought joins the group;
+ * the fold starts open when it mounts with a live thought so streaming text is
+ * visible, and keeps that state when the thought finalizes. */
+function ThinkFold(p: { items: ThinkItem[] }) {
+  const [open, setOpen] = stickyDisclosure(`think-fold:${p.items[0]?.key}`, () => p.items.some(t => !t.done));
+  const live = () => p.items.some(t => !t.done);
   const label = () => `${p.items.length} ${p.items.length === 1 ? "thought" : "thoughts"}`;
   return (
-    <div class={`st-work st-think-fold ${open() ? "open" : ""}`}>
+    <div class={`st-think-fold ${open() ? "open" : ""}`}>
+      <button class="st-think-fold-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
+        <span class={live() ? "shimmer" : undefined}>{label()}</span>
+        <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
+      </button>
       <Show when={open()}>
-        <div class="st-work-body">
+        <div class="st-think-fold-body">
           <For each={p.items}>{(t) => <ThinkBlock item={t} />}</For>
         </div>
       </Show>
-      <button class="st-work-head" ref={toggle} aria-expanded={open()} onClick={() => anchored(toggle, () => setOpen(!open()))}>
-        <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
-        <span class="st-work-label">{label()}</span>
-      </button>
     </div>
   );
 }
 
-export function ThoughtSequence(p: { items: Array<Extract<StreamItem, { kind: "think" }>> }) {
-  const folded = () => (p.items.length > 1 ? p.items.slice(0, -1) : []);
-  const latest = () => p.items[p.items.length - 1];
+export function ThoughtSequence(p: { items: ThinkItem[] }) {
+  // Hide the empty live placeholder the same way ThinkBlock does, so it does
+  // not bump the count; every remaining thought, live or not, shares one fold.
+  const shown = () => p.items.filter(t => t.done || t.text.trim());
   return (
-    <>
-      <Show when={folded().length}>
-        <ThinkFold items={folded()} />
-      </Show>
-      <Show when={latest()}>{(t) => <ThinkBlock item={t()} />}</Show>
-    </>
+    <Show when={shown().length > 1} fallback={<For each={shown()}>{(t) => <ThinkBlock item={t} />}</For>}>
+      <ThinkFold items={shown()} />
+    </Show>
   );
 }
 
@@ -651,7 +665,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
                 {wake => <BackgroundWakeRow wake={wake()} />}
               </Show>;
             case "think":
-              return <ThinkBlock item={item} />;
+              return <ThoughtSequence items={[item]} />;
             case "text":
               return (
                 <div class={`st-text ${item.live ? "live" : ""}`}>
