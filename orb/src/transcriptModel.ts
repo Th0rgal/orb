@@ -88,6 +88,23 @@ export class TranscriptReducer {
     if (this.lastUser > index) this.lastUser--;
     else if (this.lastUser === index) this.lastUser = this.items.reduce((last, item, i) => item.kind === "user" && !item.queued ? i : last, -1);
   }
+  /** Some harnesses (Antigravity) re-emit a turn's last reasoning after its
+   * final answer. Once the turn ends, thoughts trailing its last text move
+   * before that text, so they fold with the turn's work instead of dangling
+   * below the answer. Only thoughts follow that text, so no tool or user index moves. */
+  private hoistTrailingThoughts() {
+    let text = -1;
+    for (let i = this.items.length - 1; i > this.lastUser; i--) {
+      const kind = this.items[i].kind;
+      if (kind === "text") { text = i; break; }
+      if (kind !== "think") return;
+    }
+    if (text < 0 || text === this.items.length - 1) return;
+    const thoughts = this.items.splice(text + 1);
+    this.items.splice(text, 0, ...thoughts);
+    for (const [key, i] of this.bubbles) if (i === text) this.bubbles.set(key, i + thoughts.length);
+    if (this.lastFinal === text) this.lastFinal = text + thoughts.length;
+  }
   private close() {
     const latest = this.bubbles.get("text_delta_latest");
     const turn = latest == null ? undefined : this.items[latest];
@@ -294,15 +311,27 @@ export class TranscriptReducer {
         const isNativeReceipt = native.length > 0 && (trimmed === native.map(i=>i.text).join('').trim() || trimmed === native.at(-1)!.text.trim());
         this.close();
         if(d.success===false){this.items.push({kind:"error",key:this.key("error"),text:text||"Mission failed",terminal:true,cancelled:text.trim().toLowerCase()==="cancelled"});return;}
-        if(isNativeReceipt) return;
-        if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false});this.lastFinal=index;}
- else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false});}
+        if(!isNativeReceipt){
+          if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false});this.lastFinal=index;}
+          else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false});}
+        }
+        // Settle the turn's shape only after the final text is in place.
+        this.hoistTrailingThoughts();
         return;
       }
       case "thinking": {
-        const text=str(d.content),done=d.done===true;
-        if(last?.kind==="think"&&!last.done)this.put(this.items.length-1,{...last,text,done});
-        else if(text)this.items.push({kind:"think",key:this.key("think"),text,done});
+        const text=str(d.content),done=d.done===true,want=text.trim();
+        const liveLast=last?.kind==="think"&&!last.done;
+        // Empty or closing reasoning carries nothing to show.
+        if(!want){if(liveLast&&done)this.removeAt(this.items.length-1);return;}
+        // A replay of a thought this turn already shows (Antigravity repeats
+        // its last summary around tool calls and after the final answer).
+        const seen=(from:number,to:number)=>{for(let i=from;i<to;i++){const row=this.items[i];if(row.kind==="think"&&row.done&&row.text.trim()===want)return true;}return false;};
+        if(liveLast){
+          if(done&&seen(this.lastUser+1,this.items.length-1))this.removeAt(this.items.length-1);
+          else this.put(this.items.length-1,{...last,text,done});
+        }
+        else if(!seen(this.lastUser+1,this.items.length))this.items.push({kind:"think",key:this.key("think"),text,done});
         return;
       }
       case "tool_call":
@@ -322,6 +351,7 @@ export class TranscriptReducer {
         const status = str(d.status).toLowerCase();
         if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled"].includes(status)) {
           this.close();
+          this.hoistTrailingThoughts();
         }
         const summary = str(d.summary ?? d.content).trim();
         if (isFailedStatus(status) && summary) {

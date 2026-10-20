@@ -223,3 +223,23 @@ test("consecutive thoughts share one downward fold with aligned rows and no jump
  await expect(page.locator(".st-think-head")).toHaveCount(0);
  await expect(page.locator(".st-think-fold-head .chev")).toHaveCSS("transform","none");
 });
+
+test("a finished turn never ends with a dangling Thinking row",async({page})=>{
+ await page.goto("/tests/transcript.html");
+ await page.waitForFunction(()=>!!(window as any).transcriptHarness);
+ await page.evaluate(()=> (window as any).transcriptHarness.reset([
+  {type:"user_message",data:{id:"u",content:"Go"}},
+  {type:"tool_call",data:{tool_call_id:"a",name:"run",args:{}}},
+  {type:"tool_result",data:{tool_call_id:"a",result:"ok"}},
+  {type:"thinking",data:{content:"Meta-specs added.",done:true}},
+  {type:"assistant_message",data:{content:"Final report.",canonical:true,bubble_id:"antigravity:c:x:9",revision:1}},
+  {type:"thinking",data:{content:"Meta-specs added.",done:true}},
+  {type:"thinking",data:{content:"",done:true}},
+  {type:"assistant_message",data:{content:"Final report.",success:true}},
+  {type:"mission_status_changed",data:{status:"completed"}}
+ ]));
+ await expect(page.locator(".st-text")).toHaveText("Final report.");
+ await expect(page.locator(".shimmer")).toHaveCount(0);
+ const last=await page.locator(".st-text, .st-think, .st-think-fold, .st-work").evaluateAll(els=>els.at(-1)!.className);
+ expect(last).toContain("st-text");
+});
