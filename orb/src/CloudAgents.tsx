@@ -3,7 +3,8 @@ import { pollWhileVisible } from "./poll";
 import { ErrorToast } from "./toast";
 import { QuizAnswer } from "./QuizAnswer";
 import * as Ic from "./icons";
-import { For, Show, createSignal, createEffect, onMount, onCleanup } from 'solid-js';
+import { For, Show, createSignal, createEffect, on, onMount, onCleanup } from 'solid-js';
+import { createPinnedScroll } from './mission/pinnedScroll';
 import { api, getMission, openExternalUrl, type Mission } from './api';
 import { cloudAccounts, cloudAccountLabel, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider, type CloudTurn } from './cloudAgentApi';
 import './cloudAgents.css';
@@ -267,10 +268,17 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
   });
   onCleanup(() => { disposed = true; stopPoll?.(); stopFastPoll?.(); p.onMission?.(null); });
   const account = () => accounts().find(a => a.id === execution()?.selection.account && a.provider === execution()?.selection.provider);
+  // Optimistic send, like a mission follow-up: the message is in the transcript
+  // the moment it is sent, and leaves once the provider reports it as a turn.
+  const [outgoing, setOutgoing] = createSignal<{id: string; text: string; images: DraftImage[]; turns: number}[]>([]);
+  const [sendError, setSendError] = createSignal<string | null>(null);
+  const pin = createPinnedScroll({ key: () => p.id });
+  pin.observe();
   const send = async (text: string, images: DraftImage[] = []) => {
-    if (busy() || (!text.trim() && !images.length) || !execution() || !cloudCanSend(execution()!)) return false;
+    if ((!text.trim() && !images.length) || !execution() || !cloudCanSend(execution()!)) return false;
     const signature = JSON.stringify({ text, images: images.map(i => i.id), model: model(), params: modelParams() });
-    setBusy(true);
+    const row = { id: crypto.randomUUID(), text, images, turns: execution()!.turns.length + outgoing().length };
+    setOutgoing(rows => [...rows, row]); setSendError(null); pin.pin();
     try {
       if (attempt?.signature !== signature) {
         const sent = images.length ? imagePrompt(text, await stageRemoteImages(images, undefined, "core"), images) : text;
@@ -278,8 +286,10 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
       }
       await api('/api/control/message', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mission_id: p.id, content: attempt.text, client_message_id: attempt.key,...(attempt.model || attempt.params.length || execution()?.selection.provider==='hermes' ? {cloud_model:attempt.model,cloud_model_params:attempt.params}: {})})});
       attempt = undefined; await refresh(); return true;
-    } catch(e) { setError(String(e)); return false; } finally { setBusy(false); }
+    } catch(e) { setOutgoing(rows => rows.filter(r => r.id !== row.id)); setSendError(String(e)); return false; }
   };
+  // A sent row is replaced by the turn the provider opens for it.
+  createEffect(() => { const n = execution()?.turns.length ?? 0; setOutgoing(rows => { const kept = rows.filter(r => n <= r.turns); return kept.length === rows.length ? rows : kept; }); });
   const cancel = async () => { setBusy(true); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
   const approve = async (run_id:string, request_id:string|undefined, choice:string) => {
     setBusy(true);
@@ -287,29 +297,25 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     catch(e){setError(String(e));}finally{setBusy(false);}
   };
   const download = async (path: string) => { try { const result = await api<{url?:string; content_base64?:string; name?:string}>(`/api/control/missions/${p.id}/cloud/artifact?path=${encodeURIComponent(path)}`); if (result.content_base64) { const bytes = Uint8Array.from(atob(result.content_base64), c => c.charCodeAt(0)); const blob = URL.createObjectURL(new Blob([bytes], {type:'application/octet-stream'})); const link = document.createElement('a'); link.href = blob; link.download = result.name ?? 'artifact'; link.click(); setTimeout(() => URL.revokeObjectURL(blob), 10000); return; } const url = safeCloudUrl(result.url); if (!url) throw new Error('Invalid artifact URL'); await openExternalUrl(url); } catch(e) {setError(String(e));} };
-  const items = (): StreamItem[] => (execution()?.turns ?? []).flatMap(t => turnToStreamItems(t, working(t)));
-  // The provider exposes no timestamps; time the turn from when Orb first saw it working.
-  const [now, setNow] = createSignal(Date.now()); const seen = new Map<string, number>();
-  const stopClock = pollWhileVisible(() => { if (active()) setNow(Date.now()); }, 1000); onCleanup(stopClock);
+  const items = (): StreamItem[] => [...(execution()?.turns ?? []).flatMap(t => turnToStreamItems(t, working(t))),
+    ...outgoing().map((r): StreamItem => ({ kind: 'user', key: `outgoing:${r.id}`, text: r.text, images: r.images, messageId: r.id }))];
+  createEffect(on(items, () => queueMicrotask(pin.scrollIfPinned), { defer: true }));
+  createEffect(on(execution, e => { if (e) queueMicrotask(pin.landAtBottom); }));
   const progress = () => {
     const t = execution()?.turns.find(working); if (!t) return;
-    if (!seen.has(t.key)) seen.set(t.key, Date.now());
-    const seconds = Math.max(0, Math.floor((now() - seen.get(t.key)!) / 1000));
-    const label = t.phase === 'cancel_requested' ? 'Stopping…' : t.phase === 'queued' ? 'Queued…'
+    return t.phase === 'cancel_requested' ? 'Stopping…' : t.phase === 'queued' ? 'Queued…'
       : t.phase === 'waiting_user' ? 'Waiting for approval' : t.phase === 'submitting' ? (t.detail ?? `Opening ${cloudNames[execution()!.selection.provider]}…`)
-      : t.result ? 'Writing…' : (t.detail ?? 'Thinking…');
-    return `${label} · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+      : t.result ? 'Writing…' : (t.detail ?? 'Working…');
   };
-  return <><div class="scroll"><div class="col cloud-transcript">
+  return <><div class="scroll" ref={pin.ref} onScroll={pin.onScroll}><div class="col">
     <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
     <Show when={execution()} fallback={<p role="status">Loading cloud conversation…</p>}>{e => <>
-      <Transcript items={items()} pending={active()} renderText={(item, fallback) =>
+      <Transcript sizeKey={`m:${p.id}`} items={items()} pending={active() && !outgoing().length} sending={outgoing().at(-1)?.id} working={active() || outgoing().length > 0} workingLabel={progress() ?? 'Sending…'} renderText={(item, fallback) =>
         <Show when={e().selection.provider === 'chatgpt'} fallback={fallback}>
           <QuizAnswer text={item.text} fallback={fallback}
             disabled={busy() || !cloudCanSend(e()) || !account()?.capabilities.follow_up || item.key !== `${e().turns.at(-1)?.key}:answer`}
             onSubmit={text => send(text, [])}/>
         </Show>}/>
-      <Show when={progress()}>{text => <p class="cloud-working" role="status"><span class="cloud-working-dot" aria-hidden="true"/>{text()}</p>}</Show>
       <Show when={children().length}><div aria-label="Delegated missions"><For each={children()}>{child=><p><button class="na-drop-btn" onClick={()=>void getMission(child.id).then(m=>p.onOpenMission?.(m)).catch(e=>setError(String(e)))}>{child.title || child.id}</button> · {child.status}</p>}</For></div></Show>
       <For each={e().turns}>{turn => <>
         <Show when={turn.detail && !working(turn)}><p class="cloud-note">{turn.detail}</p></Show>
@@ -320,8 +326,9 @@ export function CloudConversation(p: { id: string; onMission?: (m: Mission | nul
     </>}</Show>
   </div></div><div class="dock" ref={floatingDock}><div class="col">
     <Show when={execution()}>{e => <>
-      <Show when={account()?.capabilities.follow_up}><Composer textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments) && e().selection.provider !== 'hermes'} directFileUpload={e().selection.provider === 'hermes'} picker={false} scope={`cloud:${p.id}`} placeholder="Continue this conversation…" busy={active()} disabled={busy() || !cloudCanSend(e())} onSend={send}
+      <Show when={account()?.capabilities.follow_up}><Composer allowConcurrentSend retainFailedMessage onPending={() => {}} onSendError={setSendError} textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments) && e().selection.provider !== 'hermes'} directFileUpload={e().selection.provider === 'hermes'} picker={false} scope={`cloud:${p.id}`} placeholder="Send follow-up" busy={active()} disabled={!cloudCanSend(e())} onSend={send}
         onStop={account()?.capabilities.cancel && e().turns.some(t => t.external_id && ['running','submitting','waiting_user'].includes(t.phase)) ? () => void cancel() : undefined}/></Show>
+      <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)} />
       <div class="cloud-conversation-meta"><ProviderLogo type={e().selection.provider}/><span title={account()?.label}>{cloudNames[e().selection.provider]}<Show when={!account() || cloudAccountLabel(account()!) !== cloudNames[e().selection.provider]}> · {account() ? cloudAccountLabel(account()!) : e().selection.account}</Show></span>
         {/* Like the agent composer: model and effort are chosen below the field, not inside it. */}
         <Show when={account()?.capabilities.models} fallback={<>

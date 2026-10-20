@@ -72,6 +72,7 @@ import {
 
 import { harnessChoices, refreshNodeAntigravityModels } from "../harnessPick";
 import { Composer, floatingDock } from "../composer/Composer";
+import { createPinnedScroll } from "./pinnedScroll";
 import { deliverInOrder } from "./sendQueue";
 import { missionActivity, beginHandoff, endHandoff, missionHandoff } from "../missionStatus";
 import { createHandoffTracker } from "./handoff";
@@ -295,8 +296,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const waiting = busy() || drafts.inFlightOtherThan(nextId);
     drafts.upsert({ ...draft, id: nextId, waiting });
     if (!waiting) {
-      nearBottom = true;
-      queueMicrotask(scrollIfPinned);
+      pin.pin();
     }
   };
   createEffect(()=>{
@@ -340,48 +340,22 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     return sendMsg(resumePrompt, [], []);
   };
   const [followAttach, setFollowAttach] = createSignal<AttachChip[]>([]);
+  // Near the top, or too short to scroll at all (a page of folded tool rows),
+  // keep fetching older pages: a scroll event alone never fires otherwise.
+  const older=()=>{
+    const el=scroller;
+    if(!el)return;
+    const short=el.scrollHeight<=el.clientHeight+800;
+    if((el.scrollTop<800||short)&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(older)).catch(e=>setError(String(e)));
+  };
+  const pin = createPinnedScroll({ key: () => p.id, onResize: () => older() });
+  const { landAtBottom, scrollIfPinned } = pin;
   let scroller: HTMLDivElement | undefined;
-  let nearBottom = true;
   createEffect(()=>{if(p.id)cacheRemember(`m:${p.id}`);});
-
-  // First paint of a mission lands at the bottom: hide the column for the few frames the
-  // virtual list needs to mount and measure the tail, instead of showing the top then jumping.
-  let landedFor = "";
-  const landAtBottom = () => {
-    if (!scroller || landedFor === p.id || !nearBottom) { landedFor = p.id; return; }
-    landedFor = p.id;
-    const el = scroller;
-    el.classList.add("landing");
-    const land = () => { if (nearBottom) el.scrollTo({ top: el.scrollHeight }); };
-    // Stop following the moment the reader (or a test) scrolls away during the landing frames.
-    land();
-    // rAF can be throttled (background window, headless WebKit): never leave the thread hidden.
-    let shown = false;
-    const show = () => { if (shown) return; shown = true; land(); el.classList.remove("landing"); };
-    const fallback = setTimeout(show, 80);
-    requestAnimationFrame(() => { land(); requestAnimationFrame(() => { clearTimeout(fallback); show(); }); });
-  };
-  const scrollIfPinned = () => {
-    if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) scroller?.scrollTo({ top: scroller.scrollHeight });
-  };
-  // Resize notifications run after streaming Markdown has changed layout.
+  pin.observe();
   onMount(() => {
     if (!scroller) return;
-    // Near the top, or too short to scroll at all (a page of folded tool rows),
-    // keep fetching older pages: a scroll event alone never fires otherwise.
-    const older=()=>{
-      const el=scroller!;
-      const short=el.scrollHeight<=el.clientHeight+800;
-      if((el.scrollTop<800||short)&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(older)).catch(e=>setError(String(e)));
-    };
     scroller.addEventListener('scroll',older,{passive:true});onCleanup(()=>scroller?.removeEventListener('scroll',older));
-    const observer = new ResizeObserver(() => { if (nearBottom) scrollIfPinned(); older(); });
-    const content = scroller.querySelector(".col");
-    // Border box: the dock height is bottom padding, which a content-box observer misses.
-    if (content) observer.observe(content, { box: "border-box" });
-    const dock = scroller.nextElementSibling;
-    if (dock) observer.observe(dock);
-    onCleanup(() => observer.disconnect());
   });
 
   // A stream status is newer than any mission read started before it: such a
@@ -517,7 +491,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     void refresh();
     // History must load even when the live connection has not opened yet.
     let initialReady = true;
-    void resync(true).then(() => { if (nearBottom) scrollIfPinned(); });
+    void resync(true).then(() => { scrollIfPinned(); });
     const stopStream = streamMission(
       p.id,
       (ev) => {
@@ -541,10 +515,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       () => {
         if (initialReady) {
           initialReady = false;
-          if (nearBottom) scrollIfPinned();
+          scrollIfPinned();
           return;
         }
-        void resync(true).then(() => { if (nearBottom) scrollIfPinned(); });
+        void resync(true).then(() => { scrollIfPinned(); });
       },
     );
     // Slow status poll — the stream is authoritative for content, but the
@@ -866,8 +840,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if(resend()?.state==='sending')return true;
     if(resend()?.state==='error'&&!resendKnown())return false;
     setResend({id:crypto.randomUUID(),text,waiting:busy(),state:"accepted"});
-    nearBottom=true;
-    queueMicrotask(scrollIfPinned);
+    pin.pin();
     void deliverResend();
     return true;
   };
@@ -932,8 +905,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     // several seconds, and the queue row has already disappeared.
     const projected = ordered.map(row => row.id as ReturnType<typeof crypto.randomUUID>);
     drafts.replaceAll(ordered.map(row => ({ id: row.id as ReturnType<typeof crypto.randomUUID>, text: messagePresentation(row.content).text, images: [], waiting: false })));
-    nearBottom = true;
-    queueMicrotask(scrollIfPinned);
+    pin.pin();
     try {
       if (wasBusy) {
         await cancelMission(targetMissionId).catch(swallow("mission.sendNow.cancel", { mission: targetMissionId }));
@@ -1006,11 +978,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       <div class="mission-tools"><Changes items={viewItems()} githubPr={mission()?.github_pr} /><Chapters items={viewItems()} scroller={() => scroller} /></div>
       <div
         class="scroll"
-        ref={scroller}
-        onScroll={() => {
-          if(scroller?.dataset.panelResizing)return;
-          nearBottom = !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
-        }}
+        ref={el => { scroller = el; pin.ref(el); }}
+        onScroll={pin.onScroll}
       >
         <div class="col" style={peekTranscriptHeight(p.id) && awaiting() ? { "min-height": `${peekTranscriptHeight(p.id)}px` } : undefined}>
           <Show
