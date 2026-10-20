@@ -3,12 +3,15 @@ import { onCleanup, onMount } from "solid-js";
 /** Scroll anchoring shared by every conversation view (missions, cloud agents):
  * follow the bottom while the reader is there, stop the moment they scroll up,
  * and keep following as streamed Markdown or the dock changes height. */
+/** scrollTo where available (jsdom has none). */
+const toBottom = (el: HTMLElement) => { if (typeof el.scrollTo === "function") el.scrollTo({ top: el.scrollHeight }); else el.scrollTop = el.scrollHeight; };
+
 export function createPinnedScroll(o: { key: () => string; onResize?: () => void }) {
   let scroller: HTMLDivElement | undefined;
   let nearBottom = true;
   let landedFor = "";
   const scrollIfPinned = () => {
-    if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) scroller?.scrollTo({ top: scroller.scrollHeight });
+    if (nearBottom && !scroller?.dataset.panelResizing && !scroller?.querySelector(".user.editing")) { if (scroller) toBottom(scroller); }
   };
   return {
     ref: (el: HTMLDivElement) => { scroller = el; },
@@ -30,7 +33,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
       const el = scroller;
       el.classList.add("landing");
       // Stop following the moment the reader (or a test) scrolls away during the landing frames.
-      const land = () => { if (nearBottom) el.scrollTo({ top: el.scrollHeight }); };
+      const land = () => { if (nearBottom) toBottom(el); };
       land();
       // rAF can be throttled (background window, headless WebKit): never leave the thread hidden.
       let shown = false;
