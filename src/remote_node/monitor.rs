@@ -1066,6 +1066,33 @@ mod tests {
     const GIB: u64 = 1 << 30;
 
     #[test]
+    fn reloaded_node_capacity_reaches_placement_on_next_heartbeat() {
+        let fleet = FleetMonitor::new();
+        let settings = RemoteNodeSettings {
+            enabled: true,
+            nodes: vec![node_config("babylon")],
+        };
+        // capacity 1 with 2 jobs in flight: busy (load >= 2x capacity).
+        let busy = cached_online("babylon", &[], 100, 32, 1, 1, 1);
+        fleet.record_heartbeat("babylon", busy.last_heartbeat.unwrap());
+        assert!(fleet.place_auto(&settings, &[]).is_err());
+        // The node hot-reloads to capacity 4; its next heartbeat replaces the
+        // cached one and placement admits it again, without a node restart.
+        let raised = cached_online("babylon", &[], 100, 32, 4, 1, 1);
+        fleet.record_heartbeat("babylon", raised.last_heartbeat.unwrap());
+        assert_eq!(fleet.place_auto(&settings, &[]).unwrap(), "babylon");
+        let view = fleet.statuses.read().unwrap();
+        assert_eq!(
+            view["babylon"]
+                .last_heartbeat
+                .as_ref()
+                .unwrap()
+                .capacity_total,
+            4
+        );
+    }
+
+    #[test]
     fn side_jobs_do_not_hide_free_ordinary_placement_capacity() {
         let mut status = cached_online("side-busy", &["lean"], 100, 32, 1, 1, 1);
         let hb = status.last_heartbeat.as_mut().unwrap();
