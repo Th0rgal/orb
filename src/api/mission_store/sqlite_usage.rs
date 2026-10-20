@@ -296,7 +296,8 @@ mod tests {
     fn migration_adds_attribution_columns_to_a_legacy_table() {
         let conn = Connection::open_in_memory().expect("db");
         conn.execute_batch(
-            "CREATE TABLE proxy_usage (id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+            "CREATE TABLE missions (id TEXT PRIMARY KEY, backend TEXT, title TEXT);
+             CREATE TABLE proxy_usage (id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
                 model TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0, cost_cents INTEGER NOT NULL DEFAULT 0);
              INSERT INTO proxy_usage (timestamp, model, input_tokens) VALUES ('2026-10-01T00:00:00+00:00', 'gpt-5.4', 10);",
