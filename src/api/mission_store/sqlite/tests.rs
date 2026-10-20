@@ -1,4 +1,3 @@
-
 use super::{assistant_message_metadata, AssistantMessageMetadataInput, SqliteMissionStore};
 use crate::agents::{
     CompletionConfidence, CompletionEvidence, CompletionSignal, CostSource, TerminalReason,

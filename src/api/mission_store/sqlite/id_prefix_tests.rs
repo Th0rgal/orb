@@ -1,4 +1,3 @@
-
 use super::SqliteMissionStore;
 use crate::api::mission_store::MissionStore;
 
