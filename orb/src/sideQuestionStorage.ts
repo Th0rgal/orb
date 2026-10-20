@@ -12,6 +12,8 @@ export type SavedSideQuestion = {
   /** Questions typed while the side agent was answering, oldest first. */
   queue?: QueuedSideQuestion[];
 };
+/** Turns kept per /btw tab. Core is the record; this only bounds the cache. */
+export const BTW_HISTORY_LIMIT = 200;
 export type QueuedSideQuestion = { id: string; question: string; attachments?: SideAttachment[] };
 export function sideQuestionKey(mission: string): string {
   let account = 'local';
@@ -34,7 +36,7 @@ export async function readSideQuestion(key: string): Promise<SavedSideQuestion |
     if (!value || !Array.isArray(value.history)) return;
     openHints.set(key, Boolean(value.open));
     return {
-      history: value.history.filter((v: SideExchange) => typeof v?.question === 'string' && typeof v?.answer === 'string').slice(-20),
+      history: value.history.filter((v: SideExchange) => typeof v?.question === 'string' && typeof v?.answer === 'string').slice(-BTW_HISTORY_LIMIT),
       draft: typeof value.draft === 'string' ? value.draft.slice(0, 2000) : '',
       model: typeof value.model === 'string' ? value.model : '',
       open: value.open === true,

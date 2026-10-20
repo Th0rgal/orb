@@ -13,7 +13,7 @@ import { Portal } from 'solid-js/web';
 import { useSidePanel } from './FilePanel';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion } from './api';
-import { readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, type QueuedSideQuestion } from './sideQuestionStorage';
+import { readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion } from './sideQuestionStorage';
 import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
@@ -21,6 +21,12 @@ import { remoteLog } from './remoteLog';
 import { sideContext, sideAttachments, type SideAttachment, type SideExchange } from './sideQuestionClient';
 import type { StreamItem } from './transcriptModel';
 import * as Ic from './icons';
+// A finished answer may already be in Core's history (a reconcile ran first).
+function appendTurn(rows:SideExchange[],turn:SideExchange):SideExchange[]{
+ const last=rows.at(-1);
+ if(last&&last.question.trim()===turn.question.trim()&&last.answer.trim()===turn.answer.trim())return rows;
+ return [...rows,turn].slice(-BTW_HISTORY_LIMIT);
+}
 export type SideQuestionsHandle={ask:(question:string,images?:DraftImage[],files?:UploadedFile[])=>Promise<boolean>;open:()=>void};
 // Local side history stays separate from mission events and the main draft.
 export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void;onOpenSession?:(id:string)=>void|Promise<void>}) {
@@ -32,6 +38,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [runStatus,setRunStatus]=createSignal('');
  const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[narration,setNarration]=createSignal<string[]>([]),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
  let abort:AbortController|undefined;
+ // Set while this panel itself is launching/answering a question.
+ let asking=false;
  let launchAbort:AbortController|undefined;
  let scroll:HTMLDivElement|undefined;
  // Sending explicitly returns to the latest turn, even after reading older replies.
@@ -63,6 +71,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   abort?.abort();setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
+  let resync:(()=>void)|undefined;
   const watchActive=(agent:NonNullable<ReturnType<typeof btwSession>>)=>{
    const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');
    void watchBtw(missionId,controller.signal,event=>{
@@ -70,7 +79,12 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
     if(event.type==='status')setRunStatus(event.text);
     if(event.type==='snapshot'){setAnswer(event.text);setNarration(event.narration??[]);}
-    if(event.type==='done'){const narrated=event.narration?.length?{narration:event.narration}:{};setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer,...narrated}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
+    if(event.type==='done'){
+     // A restored session can name an older question than the answer Core
+     // finished; never pair them, and let Core's history settle the turn.
+     const narrated=event.narration?.length?{narration:event.narration}:{};
+     setHistory(rows=>rows.some(row=>row.answer.trim()===event.answer.trim())?rows:appendTurn(rows,{id:turnId(),question:agent.question,answer:event.answer,...narrated}));
+     setBusy(false);setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());resync?.();queueMicrotask(sendNext);}
    }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(e instanceof Error?e.message:String(e));setBusy(false);}});
   };
   if(peekSideQuestionOpen(current)){setOpen(true);side?.show();}
@@ -117,17 +131,22 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    // a completed thread (another device, a restart) re-dispatches a job on
    // that same mission, and its answer must show without reopening the tab.
    let following='',stopFollow:(()=>void)|undefined,again:ReturnType<typeof setTimeout>|undefined;
-   onCleanup(()=>{stopFollow?.();clearTimeout(again);});
+   // The live stream can sit on a dead cursor (sleep, proxy, reconnect):
+   // re-read Core periodically so the newest turns always arrive.
+   const poll=setInterval(()=>{if(!stale&&document.visibilityState!=='hidden')sync(history());},15000);
+   onCleanup(()=>{stopFollow?.();clearTimeout(again);clearInterval(poll);});
    const follow=(id:string|undefined)=>{
     if(!id||id===following||stale)return;
     stopFollow?.();following=id;
     stopFollow=streamMission(id,event=>{
      if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
-     clearTimeout(again);again=setTimeout(()=>{if(!stale&&!busy())sync(history());},300);
-    },()=>{if(!stale&&!busy())sync(history());});
+     clearTimeout(again);again=setTimeout(()=>{if(!stale)sync(history());},300);
+    },()=>{if(!stale)sync(history());});
    };
-   const sync=(local:Parameters<typeof reconcile>[1])=>void reconcile(missionId,local).then(reconciled=>{
-    if(stale||key()!==current)return;
+   let generation=0;
+   // Only the newest read applies: an older, slower one never rolls back history.
+   const sync=(local:Parameters<typeof reconcile>[1])=>{const mine=++generation;void reconcile(missionId,local).then(reconciled=>{
+    if(stale||key()!==current||mine!==generation)return;
     follow(reconciled.latest);
     const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
     if(changed)setHistory(reconciled.history);
@@ -135,10 +154,17 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(pendingQ&&error()&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
      setError('');setQuestion('');setAnswer('');setNarration([]);
     }
+    // A restored pending turn ("Starting side agent…") that Core has since
+    // answered is finished: show Core's answer instead of a stale spinner.
+    if(pendingQ&&busy()&&!asking&&!reconciled.activeSession&&reconciled.history.at(-1)?.question.trim()===pendingQ){
+     abort?.abort();setBusy(false);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());
+     queueMicrotask(sendNext);
+    }
     if(reconciled.activeSession&&!busy()){
      watchActive(reconciled.activeSession);
     }
-   }).catch(swallow("sideQuestions.reconcile"));
+   }).catch(swallow("sideQuestions.reconcile"));};
+   resync=()=>{if(!stale)sync(history());};
    sync(cleanHistory);
   }
   });
@@ -179,6 +205,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setDraft('');
    revealSentQuestion();
   }
+  asking=true;
   void askBtwAgent(missionId,text,context,history(),controller.signal,event=>{
    if(current!==key()||controller.signal.aborted)return;
    if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
@@ -187,11 +214,11 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    if(event.type==='delta')setAnswer(value=>value+event.text);
    if(event.type==='done'){
     setAnswer(event.answer);setNarration(event.narration??[]);
-    const next=[...history(),{id:activeTurnId,question:text,answer:event.answer,...(event.narration?.length?{narration:event.narration}:{}),attachments}].slice(-20);
+    const next=appendTurn(history(),{id:activeTurnId,question:text,answer:event.answer,...(event.narration?.length?{narration:event.narration}:{}),attachments});
     setHistory(next);setBusy(false);setRunStatus('');
    }
   },attachments,launchController.signal).catch(e=>{if(current===key()&&!controller.signal.aborted)setError(e instanceof Error?e.message:String(e));})
-  .finally(()=>{if(current===key()&&abort===controller){setBusy(false);setRunStatus('');queueMicrotask(sendNext);}});
+  .finally(()=>{if(abort===controller)asking=false;if(current===key()&&abort===controller){setBusy(false);setRunStatus('');queueMicrotask(sendNext);}});
   return true;
  };
  const reveal=()=>{setOpen(true);side?.show();};

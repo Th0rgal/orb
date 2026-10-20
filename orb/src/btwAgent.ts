@@ -6,7 +6,7 @@ import {deliverAssistantText,flushClientLink} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
 import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
 import {btwConfig} from './btwSettings';
-import {sideQuestionKey} from './sideQuestionStorage';
+import {sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
@@ -163,7 +163,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  while(!signal.aborted){
   if(version!==connectionVersion())throw new Error('Connection changed.');
   const mission=await currentSide(parent,s,signal,version);attach();
-  const events=await getMissionEvents(s.id);
+  const events=await getMissionEvents(s.id,{enough:rows=>rows.some(e=>e.event_type==='user_message')||(rows.at(-1)?.sequence??0)<=(s.afterSequence??0)});
   if(signal.aborted||connectionVersion()!==version)return;
   receive({type:'status',text:btwQueueStatus(mission)});
   const reducer=new TranscriptReducer();let final:string|undefined;
@@ -341,7 +341,7 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  for(const m of sorted){
   if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
   let events:StoredEvent[]=[];
-  try{events=await getMissionEvents(m.id);}catch{continue;}
+  try{events=await getMissionEvents(m.id,{view:'transcript'});}catch{continue;}
   if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
   const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
   let curQuestion='',curAt='',curSeq=0;
@@ -355,6 +355,7 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
   for(const ev of ordered){
    if(ev.event_type==='user_message'){
     if(curQuestion)flush();
+    curAnswers=[];curFinal=undefined;
     curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
    }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
     const text=ev.content.trim();
@@ -389,9 +390,10 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  }
  if(!serverTurns.length)return {history:localHistory,activeSession:latestActive,latest:latest?.id};
  // Core is the record: its turns across every thread, in the order they were
- // asked. Local turns stay only when Core has no answer for that question yet.
+ // asked, newest last. A locally cached turn never outranks it: appending
+ // cache-only rows after Core's put an old answer below the newest one.
  serverTurns.sort((a,b)=>a.at.localeCompare(b.at));
- const onServer=new Set(serverTurns.map(t=>t.question.trim()));
- const merged:SideExchange[]=[...serverTurns.map(({at:_at,...turn})=>turn),...localHistory.filter(h=>!onServer.has(h.question.trim()))];
- return {history:merged.slice(-20),activeSession:latestActive,latest:latest?.id};
+ const local=new Map(localHistory.map(h=>[h.question.trim()+'\u0000'+h.answer.trim(),h]));
+ const merged:SideExchange[]=serverTurns.map(({at:_at,...turn})=>{const cached=local.get(turn.question.trim()+'\u0000'+turn.answer.trim());return cached?.attachments?{...turn,attachments:cached.attachments}:turn;});
+ return {history:merged.slice(-BTW_HISTORY_LIMIT),activeSession:latestActive,latest:latest?.id};
 }
