@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { isFailedStatus, isRunning, isSettingsIdle } from "../missionStatus";
+import { isFailedStatus, isLive, isRunning, isSettingsIdle, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -384,11 +384,16 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     onCleanup(() => observer.disconnect());
   });
 
-  const refresh = async () => {
+  // A stream status is newer than any mission read started before it: such a
+  // read (possibly shared with an earlier caller) would put the previous turn's
+  // failed status and ended job back for a moment, the red flash after a send.
+  let statusSeen = 0;
+  const refresh = async (fresh = false) => {
     if(!p.id)return;
+    const since = statusSeen;
     try {
-      const next=await getMission(p.id);
-      if(disposed)return;
+      const next=await getMission(p.id, { fresh });
+      if(disposed||since!==statusSeen)return;
       setMission(next);
       setError(null);
     } catch (e) {
@@ -519,10 +524,14 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         if (ev.type === "mission_status_changed" || ev.type === "status") {
           if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
             const status = ev.data.status;
+            statusSeen++;
+            // A new turn started: the previous turn's ended job is history,
+            // not a "Remote job stopped" failure, until the fresh read lands.
             setMission(old => ({ ...(old ?? {id:p.id,title:null,history:[],created_at:"",updated_at:""}), status,
+              ...(isLive(status) && old?.remote_job && remoteJobEnded(old.remote_job) ? { remote_job: null, terminal_reason: null } : {}),
               status_message: typeof ev.data.summary === "string" ? ev.data.summary : old?.status_message }));
           }
-          void refresh();
+          void refresh(true);
           return;
         }
         if (replaying) held.push(ev);
