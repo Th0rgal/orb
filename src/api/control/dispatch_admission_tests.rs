@@ -2393,7 +2393,8 @@ async fn native_goal_http_actor_blocked_parks_and_default_resume_recovers_same_g
             response.text().await.unwrap()
         );
         let recovered = wait_native_status(&h, m.id, MissionStatus::AwaitingUser).await;
-        assert!(recovered.goal_mode);
+        // The goal completed: it stays visible but no longer auto-resumes.
+        assert!(!recovered.goal_mode);
         assert_eq!(recovered.goal_objective.as_deref(), Some(objective));
         assert_eq!(recovered.project, m.project);
         let requests: Vec<Value> = std::fs::read_to_string(dir.join("requests.jsonl"))
