@@ -1,5 +1,8 @@
 import katex from "katex";
 import "katex/dist/katex.min.css";
+// Copying rendered math yields its TeX source instead of the MathML and HTML
+// layers glued together ("p\n=\n0.15p=0.15").
+import "katex/contrib/copy-tex";
 import {requestHighlight} from "./codeHighlightClient";
 import { CodeBlock } from "./CodeBlock";
 import { FileReference, FileReferenceText } from "./fileReferenceContext";

@@ -3853,3 +3853,7 @@ select.orb-select-native:disabled { cursor: default; }
 @keyframes mission-arrive { from { opacity: .35; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 .row.agent.mission-arriving { animation: mission-arrive 180ms ease-out; }
 @media (prefers-reduced-motion: reduce) { .row.agent.mission-arriving { animation: none; } }
+/* /btw progress narration: folded above the answer, like the work fold. */
+.btw-narration { margin: 4px 0 8px; color: var(--fg-3); font-size: 12px; }
+.btw-narration summary { cursor: pointer; width: fit-content; }
+.btw-narration > .md { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--stroke); color: var(--fg-2); }

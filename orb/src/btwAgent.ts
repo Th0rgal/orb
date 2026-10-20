@@ -55,6 +55,26 @@ export function isSyntheticRemoteAssistantNote(text: string): boolean {
   /^Native Codex goal stopped with status /.test(text)
  );
 }
+// OpenCode auto-compaction writes a summary turn and a synthetic "Continue…"
+// prompt. Older Core builds recorded both inside the side agent's answer.
+const COMPACTION_SUMMARY=/(?:^|\n)## Objective\n[\s\S]*?\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed\.[^\S\n]*(?:\n|$)/g;
+export function stripCompactionSummary(text:string):string{
+ return text.replace(COMPACTION_SUMMARY,'\n\n').replace(/\n{3,}/g,'\n\n').trim();
+}
+export type SideAnswer={answer:string;narration:string[]};
+/** The side turn's answer is its final message; earlier text is progress
+ * narration, shown folded rather than glued in front of the answer. */
+export function sideAnswer(texts:string[],final?:string):SideAnswer{
+ const meaningful=(t:string)=>!!t.replace(/[.\s…]/g,'');
+ const clean:string[]=[];
+ for(const raw of texts){const t=stripCompactionSummary(raw);if(meaningful(t)&&clean.at(-1)!==t)clean.push(t);}
+ const recorded=final!==undefined?stripCompactionSummary(final):'';
+ if(meaningful(recorded)){
+  const at=clean.lastIndexOf(recorded);
+  return {answer:recorded,narration:(at>=0?clean.slice(0,at):clean).filter(t=>t!==recorded)};
+ }
+ return {answer:clean.at(-1)??'',narration:clean.slice(0,-1)};
+}
 const ACTIVE=[...WORKING_STATUSES,'paused'];
 const RESUMABLE=['awaiting_user','completed','interrupted'];
 // Event sequences belong to one mission. Resolve the entire replacement chain
@@ -116,23 +136,24 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   receive({type:'done',answer:state.text});return;
  }
  let previous:string|undefined;
- let streamedText='';
+ let streamed:SideAnswer={answer:'',narration:[]};
  let wake:(()=>void)|undefined;
- const publish=(text:string)=>{if(!signal.aborted&&connectionVersion()===version&&text!==previous){previous=text;receive({type:'snapshot',text} as SideEvent);}};
- const streamText=()=>live.items.filter(i=>i.kind==='text').map(i=>i.kind==='text'?i.text:'').join('\n\n');
+ const size=(a:SideAnswer)=>a.answer.length+a.narration.reduce((n,t)=>n+t.length,0);
+ const publish=(a:SideAnswer)=>{const key=JSON.stringify(a);if(!signal.aborted&&connectionVersion()===version&&key!==previous){previous=key;receive({type:'snapshot',text:a.answer,narration:a.narration});}};
+ const textsOf=(items:StreamItem[])=>items.flatMap(i=>i.kind==='text'?[i.text]:[]);
  // Unfinished thoughts are never stored: only the live stream carries them.
  let live=new TranscriptReducer(),streamId:string|undefined,stopStream:(()=>void)|undefined;
  const attach=()=>{
   if(streamId===s.id)return;
-  stopStream?.();live=new TranscriptReducer();streamedText='';
-  if(streamId!==undefined)publish('');
+  stopStream?.();live=new TranscriptReducer();streamed={answer:'',narration:[]};
+  if(streamId!==undefined)publish(streamed);
   const id=s.id;streamId=id;
   setLiveThoughts(all=>({...all,[id]:[]}));
   stopStream=streamMission(id,event=>{
    if(id!==s.id||signal.aborted||connectionVersion()!==version)return;
    live.apply(event);
-   streamedText=streamText();
-   if(streamedText)publish(streamedText);
+   streamed=sideAnswer(textsOf(live.items));
+   if(streamed.answer)publish(streamed);
    if(event.type==='mission_status_changed'||event.type==='status')wake?.();
    setLiveThoughts(all=>({...all,[id]:thoughtsOf(live.items).map(item=>({...item}))}));
   },()=>{});
@@ -145,19 +166,20 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   const events=await getMissionEvents(s.id);
   if(signal.aborted||connectionVersion()!==version)return;
   receive({type:'status',text:btwQueueStatus(mission)});
-  let text='';const reducer=new TranscriptReducer();
+  const reducer=new TranscriptReducer();let final:string|undefined;
   for(const event of btwTurnEvents(events,s)){
    if(event.event_type==='assistant_message'&&isSyntheticRemoteAssistantNote(event.content))continue;
+   if(event.event_type==='assistant_message')final=event.content;
    const e=storedToStream(event);if(e)reducer.apply(e);}
   setAgentItems(all=>({...all,[s.id]:reducer.items}));
   const toolItems=reducer.items.filter((i):i is Extract<StreamItem,{kind:'tool'}>=>i.kind==='tool');
   setRemoteActivities(all=>({...all,[s.id]:toolItems.map(i=>({id:i.callId,label:i.name,done:i.done,failed:false,detail:JSON.stringify({args:i.args,result:i.result})}))}));
-  const recorded=reducer.items.filter(i=>i.kind==='text'&&!!i.text.replace(/[.\s…]/g,'')).map(i=>i.kind==='text'?i.text:'').join('\n\n');
   const active=ACTIVE.includes(mission.status);
-  text=recorded||text;
+  let result=sideAnswer(textsOf(reducer.items),final);
   // A terminal persisted response is authoritative, even if shorter than a streamed draft.
-  if((active||!text)&&streamedText.length>text.length)text=streamedText;
-  publish(text);
+  if((active||!result.answer)&&size(streamed)>size(result))result=streamed;
+  const text=result.answer;
+  publish(result);
   if(!active){
    s.active=false;
    if(['failed','interrupted','cancelled'].includes(mission.status)){
@@ -174,7 +196,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
    }
    if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
    delete s.brokenSession;save(parent,s);
-   receive({type:'done',answer:text});return;
+   receive({type:'done',answer:text,...(result.narration.length?{narration:result.narration}:{})});return;
   }
   await new Promise<void>(resolve=>{
    const timer=setTimeout(done,5000);
@@ -323,12 +345,12 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
   if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
   const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
   let curQuestion='',curAt='',curSeq=0;
-  let curAnswers:string[]=[];
+  let curAnswers:string[]=[];let curFinal:string|undefined;
   const flush=()=>{
-   const q=curQuestion.trim(),a=curAnswers.join('\n\n').trim();
+   const q=curQuestion.trim(),{answer:a,narration}=sideAnswer(curAnswers,curFinal);
    // Stable per question event, so a re-read never renumbers a turn.
-   if(q&&a&&!isSyntheticRemoteAssistantNote(a))serverTurns.push({id:`btw:${m.id}:${curSeq}`,question:q,answer:a,at:curAt});
-   curQuestion='';curAnswers=[];
+   if(q&&a&&!isSyntheticRemoteAssistantNote(a))serverTurns.push({id:`btw:${m.id}:${curSeq}`,question:q,answer:a,...(narration.length?{narration}:{}),at:curAt});
+   curQuestion='';curAnswers=[];curFinal=undefined;
   };
   for(const ev of ordered){
    if(ev.event_type==='user_message'){
@@ -336,6 +358,7 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
     curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
    }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
     const text=ev.content.trim();
+    if(ev.event_type==='assistant_message')curFinal=text;
     if(curAnswers.at(-1)!==text)curAnswers.push(text);
    }
   }

@@ -67,7 +67,7 @@ it('reconnects to a replacement and rejects late events from the old stream',asy
   callbacks.get('old-stream')!({type:'text_delta',data:{content:'Late old answer'}});
   expect(receive.mock.calls).toHaveLength(boundary);
   callbacks.get('new-stream')!({type:'text_delta',data:{content:'New draft'}});
-  expect(receive).toHaveBeenLastCalledWith({type:'snapshot',text:'New draft'});
+  expect(receive).toHaveBeenLastCalledWith({type:'snapshot',text:'New draft',narration:[]});
   finished=true;
   callbacks.get('new-stream')!({type:'mission_status_changed',data:{status:'awaiting_user'}});
   await watching;
@@ -649,4 +649,56 @@ it('hides side agents in both navigation lists without hiding their transcript e
  expect(isBtwMission({tags:['btw-parent:parent']})).toBe(true);
  expect(isBtwMission({})).toBe(false);
  } finally {clearConnection();vi.unstubAllGlobals();}
+});
+
+// Real shapes: d9f08eac seq 181 (opencode, compaction summary recorded before
+// the answer) and c83baa5b (Antigravity: canonical narration bubbles, then the
+// final assistant_message repeating the last bubble).
+const COMPACTED='## Objective\n- Act as the `/btw` side-agent for main mission `3fe5c5a3`.\n\n## Next Move\n1. Check `git status`.\n\n## Relevant Files\n- `evm.fast-dev`: Main repository.\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.\n\nC\'est fait : l\'agent principal a été arrêté proprement.\n\nhttps://github.com/Th0rgal/evm.fast-dev/pull/1';
+it('strips a recorded opencode compaction summary from the side answer',async()=>{
+ const {sideAnswer,stripCompactionSummary}=await import('../src/btwAgent');
+ expect(stripCompactionSummary(COMPACTED)).toBe("C'est fait : l'agent principal a été arrêté proprement.\n\nhttps://github.com/Th0rgal/evm.fast-dev/pull/1");
+ expect(sideAnswer([COMPACTED],COMPACTED).answer.startsWith("C'est fait")).toBe(true);
+ expect(stripCompactionSummary('## Objective\nA real heading the model wrote.')).toBe('## Objective\nA real heading the model wrote.');
+});
+
+it('shows the final message as the answer and folds earlier narration',async()=>{
+ const {sideAnswer}=await import('../src/btwAgent');
+ const narration=["J'ai créé `BoundedCertificate.lean` et lancé sa vérification. J'attends la fin de la tâche.","J'ai retiré l'import et relancé la vérification."];
+ const final='La mission **W1+W3** est terminée (`DONE`).';
+ expect(sideAnswer([...narration,final+'\n'],final)).toEqual({answer:final,narration});
+ // Without a final message (still streaming), the latest text is the answer.
+ expect(sideAnswer(narration)).toEqual({answer:narration[1],narration:[narration[0]]});
+});
+
+it('watchBtw separates Antigravity narration bubbles from the final answer',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ const {watchBtw}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('ag-parent'),JSON.stringify({id:'ag-side',question:'Q',harness:'antigravity',model:'gemini',local:false,active:true,baseline:0}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'awaiting_user',history:[],tags:[],title:null,created_at:'',updated_at:''}));
+ vi.mocked(getMissionEvents).mockResolvedValue([
+  {event_type:'user_message',content:'Q',sequence:1,id:1,timestamp:''},
+  {event_type:'assistant_message_canonical',content:"J'attends la fin de la tâche.\n",sequence:118,id:2,timestamp:'',metadata:{bubble_id:'antigravity:c:j:85',canonical_from:'text_op',revision:1}},
+  {event_type:'assistant_message_canonical',content:'La mission est terminée.\n',sequence:140,id:3,timestamp:'',metadata:{bubble_id:'antigravity:c:j:107',canonical_from:'text_op',revision:26}},
+  {event_type:'assistant_message',content:'La mission est terminée.',sequence:141,id:4,timestamp:'',metadata:{success:true}},
+ ] as any);
+ const events:any[]=[];
+ await watchBtw('ag-parent',new AbortController().signal,e=>events.push(e));
+ const done=events.at(-1);
+ expect(done.type).toBe('done');
+ expect(done.answer).toBe('La mission est terminée.');
+ expect(done.answer).not.toContain("J'attends");
+});
+
+it('reconciled history keeps only the final message as the answer',async()=>{
+ const {reconcileBtwServerHistory}=await import('../src/btwAgent');
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(api).mockImplementation(async(path:string)=>path.startsWith('/api/control/missions?tag=')?[{id:'oc',status:'completed',created_at:'2026-10-20T17:53:54Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:p-oc'],history:[],title:null,updated_at:''}] as any:[] as any);
+ vi.mocked(getMissionEvents).mockImplementation(async()=>[
+  {id:1,sequence:132,event_type:'user_message',content:'Header\n\nCurrent request:\ndis lui de s’arrêter',timestamp:''},
+  {id:2,sequence:181,event_type:'assistant_message',content:COMPACTED,timestamp:''},
+ ] as any);
+ const result=await reconcileBtwServerHistory('p-oc',[]);
+ expect(result.history[0].answer.startsWith("C'est fait")).toBe(true);
+ expect(result.history[0].answer).not.toContain('Continue if you have next steps');
 });

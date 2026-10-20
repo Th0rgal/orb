@@ -286,6 +286,14 @@ pub(crate) struct GrokStream {
     pub(crate) json_events: u64,
     progress: bool,
     pub(crate) diagnostics: VecDeque<String>,
+    /// OpenCode: byte offset in `text` where the turn's latest answer segment
+    /// starts. Text parts before the last tool call are progress narration.
+    opencode_answer_start: usize,
+    /// OpenCode: the next text part starts a new answer segment.
+    opencode_segment_closed: bool,
+    /// OpenCode: message id of the latest text part and the offset in `text`
+    /// where that message's text began (separator included).
+    opencode_last_message: Option<(Option<String>, usize)>,
 }
 
 impl GrokStream {
@@ -334,6 +342,62 @@ impl GrokStream {
                 _ => {}
             }
         }
+    }
+
+    /// The turn's answer: the text after its last tool call. OpenCode reports
+    /// every text part of a turn, so earlier parts are progress narration.
+    pub(crate) fn final_text(&self) -> &str {
+        let answer = self
+            .text
+            .get(self.opencode_answer_start..)
+            .unwrap_or_default();
+        if answer.trim().is_empty() {
+            &self.text
+        } else {
+            answer
+        }
+    }
+
+    /// One finished OpenCode text part (`run --format json` emits each once,
+    /// when it ends). Auto-compaction writes its summary as an assistant text
+    /// part and then a synthetic `compaction_continue` user part; neither is
+    /// something the model said to the operator.
+    fn feed_opencode_text(&mut self, part: &serde_json::Value, updates: &mut Vec<StreamUpdate>) {
+        let Some(text) = part["text"].as_str() else {
+            return;
+        };
+        if part["synthetic"].as_bool() == Some(true) {
+            if part["metadata"]["compaction_continue"].as_bool() == Some(true) {
+                if let Some((_, start)) = self.opencode_last_message.take() {
+                    self.text.truncate(start);
+                    self.opencode_answer_start = self.opencode_answer_start.min(start);
+                    updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
+                }
+                self.opencode_segment_closed = true;
+            }
+            return;
+        }
+        if text.trim().is_empty() {
+            return;
+        }
+        let message = part["messageID"].as_str().map(str::to_string);
+        let start = self.text.len();
+        if !self.text.is_empty() {
+            self.text.push_str("\n\n");
+        }
+        if self.opencode_segment_closed || start == 0 {
+            self.opencode_answer_start = self.text.len();
+            self.opencode_segment_closed = false;
+        }
+        if self
+            .opencode_last_message
+            .as_ref()
+            .is_none_or(|(id, _)| message.is_none() || *id != message)
+        {
+            self.opencode_last_message = Some((message, start));
+        }
+        self.text.push_str(text);
+        updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
     }
 
     fn requires_error_cancellation(&self) -> bool {
@@ -564,15 +628,7 @@ impl GrokStream {
             }
             let part = &value["part"];
             match value["type"].as_str() {
-                Some("text") => {
-                    if let Some(text) = part["text"].as_str() {
-                        if !self.text.is_empty() {
-                            self.text.push_str("\n\n");
-                        }
-                        self.text.push_str(text);
-                        updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
-                    }
-                }
+                Some("text") => self.feed_opencode_text(part, updates),
                 Some("reasoning") => {
                     if let Some(text) = part["text"].as_str().filter(|t| !t.is_empty()) {
                         self.thinking = text.to_string();
@@ -580,6 +636,7 @@ impl GrokStream {
                     }
                 }
                 Some("tool_use") => {
+                    self.opencode_segment_closed = true;
                     let update = serde_json::json!({
                         "toolCallId": part["callID"], "name": part["tool"],
                         "rawInput": part["state"]["input"], "status": if part["state"]["status"] == "error" { serde_json::json!("failed") } else { part["state"]["status"].clone() },
@@ -1624,7 +1681,7 @@ impl NativeGrokObserver {
             .antigravity
             .as_ref()
             .map(|s| s.summary())
-            .unwrap_or_else(|| self.stream.text.clone())
+            .unwrap_or_else(|| self.stream.final_text().to_string())
             .trim()
             .to_string();
         if legacy_claude && success {
@@ -3129,6 +3186,79 @@ mod tests {
         assert!(verdict.cli_error.unwrap().contains("startup_watchdog"));
     }
 
+    /// Shape of the /btw side turns that showed narration, a compaction
+    /// summary and the answer glued into one message (missions 412e22b7 and
+    /// d9f08eac on prod, opencode builtin/smart on a remote node).
+    #[test]
+    fn opencode_answer_excludes_narration_and_compaction_summary() {
+        let mut stream = GrokStream::default();
+        let fixture = include_str!("../../../tests/fixtures/opencode_btw_compaction.jsonl");
+        for line in fixture.lines() {
+            stream.feed(&format!("{line}\n"));
+        }
+        assert!(stream.ended);
+        assert_eq!(
+            stream.final_text(),
+            "Voici l'analyse sur pièces : la campagne utilise bien `research-governor rank`.\n\nVeux-tu que je corrige l'instrumentation ?"
+        );
+        assert!(!stream.text.contains("## Objective"));
+        assert!(!stream.text.contains("Continue if you have next steps"));
+        // Narration stays in the live stream, separated by paragraph breaks.
+        assert!(stream.text.starts_with(
+            "Je vais lire le skill `research-boss` et inspecter les fichiers du workspace.\n\nInspectons"
+        ));
+        assert!(stream.text.contains("principale.\n\nRegardons maintenant"));
+    }
+
+    #[test]
+    fn opencode_answer_without_tools_is_the_whole_reply() {
+        let mut stream = GrokStream::default();
+        stream.feed(concat!(
+            "{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{\"messageID\":\"m\",\"text\":\"One\"}}\n",
+            "{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{\"messageID\":\"m\",\"text\":\"Two\"}}\n",
+            "{\"type\":\"tool_use\",\"sessionID\":\"s\",\"part\":{\"callID\":\"c\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\"}}}\n",
+        ));
+        // A turn that ends on a tool keeps everything it said.
+        assert_eq!(stream.final_text(), "One\n\nTwo");
+    }
+
+    #[tokio::test]
+    async fn opencode_verdict_records_only_the_final_answer() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "btw-final")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(Some("btw"), None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "sepolia", mission.id, job)
+            .await
+            .unwrap();
+        let fixture = include_str!("../../../tests/fixtures/opencode_btw_compaction.jsonl");
+        for line in fixture.lines() {
+            observer.stream.feed(&format!("{line}\n"));
+        }
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id":job,"mission_id":mission.id,"state":"succeeded","exit_code":0,
+            "created_at":"2026-10-20T17:53:54Z"
+        }))
+        .unwrap();
+        let verdict = observer.verdict(&status, "sepolia").await;
+        assert!(verdict.success);
+        assert!(verdict.content.starts_with("Voici l'analyse sur pièces"));
+        assert!(!verdict.content.contains("Je vais lire"));
+        assert!(!verdict.content.contains("## Objective"));
+    }
+
     #[tokio::test]
     async fn missing_cli_before_native_protocol_is_a_setup_failure() {
         use crate::api::mission_store::{MissionStore, SqliteMissionStore};
@@ -3199,6 +3329,7 @@ mod tests {
         assert_eq!(stream.session_id.as_deref(), Some("ses_test"));
         assert_eq!(stream.thinking, "Planning");
         assert_eq!(stream.text, "Checking files\n\nDone");
+        assert_eq!(stream.final_text(), "Done");
         assert!(stream.progress);
         assert!(stream.ended);
         assert_eq!(stream.stop_reason.as_deref(), Some("end_turn"));
