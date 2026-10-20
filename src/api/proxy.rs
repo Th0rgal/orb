@@ -1422,20 +1422,27 @@ async fn usage_attribution(
     state: &super::routes::AppState,
     headers: &HeaderMap,
 ) -> UsageAttribution {
-    let key = match headers
+    let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-    {
-        Some(token) => state.proxy_api_keys.find_by_token(token).await,
-        None => None,
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let internal = token.is_some_and(|t| {
+        !state.proxy_secret.is_empty() && super::auth::constant_time_eq(t, &state.proxy_secret)
+    });
+    let key = match token {
+        Some(token) if !internal => state.proxy_api_keys.find_by_token(token).await,
+        _ => None,
     };
-    attribution_from(headers, key.as_ref())
+    attribution_from(headers, key.as_ref(), internal)
 }
 
+/// The mission header is caller-controlled, so it is trusted only from the
+/// internal proxy secret (Core's own harnesses). A mission-scoped launch key
+/// always attributes to its own mission; other keys never take the header.
 fn attribution_from(
     headers: &HeaderMap,
     key: Option<&super::proxy_keys::KeySummary>,
+    internal_secret: bool,
 ) -> UsageAttribution {
     let header_mission = headers
         .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
@@ -1447,7 +1454,11 @@ fn attribution_from(
     UsageAttribution {
         api_key_id: key.map(|k| k.id),
         api_key_name: key.map(|k| k.name.clone()),
-        mission_id: header_mission.or(key_mission),
+        mission_id: match (key_mission, internal_secret) {
+            (Some(mission), _) => Some(mission),
+            (None, true) => header_mission,
+            (None, false) => None,
+        },
     }
 }
 
@@ -1727,7 +1738,14 @@ async fn native_protocol_proxy(
     } else {
         None
     };
-    let attribution = attribution_from(&headers, execution_key.as_ref());
+    let internal_secret = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| {
+            !state.proxy_secret.is_empty() && super::auth::constant_time_eq(t, &state.proxy_secret)
+        });
+    let attribution = attribution_from(&headers, execution_key.as_ref(), internal_secret);
     let mission_key_id = execution_key
         .as_ref()
         .and_then(|key| key.name.strip_prefix("remote-launch:"))
@@ -8137,8 +8155,13 @@ mod tests {
     }
 
     #[test]
-    fn attribution_uses_key_and_mission_header_without_the_token() {
-        let mission = uuid::Uuid::new_v4();
+    fn attribution_trusts_the_mission_header_only_from_the_internal_secret() {
+        let claimed = uuid::Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::api::proxy_liveness::MISSION_ID_HEADER,
+            HeaderValue::from_str(&claimed.to_string()).unwrap(),
+        );
         let key = crate::api::proxy_keys::KeySummary {
             id: uuid::Uuid::new_v4(),
             name: "Cursor".into(),
@@ -8146,25 +8169,36 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_used_at: None,
         };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            crate::api::proxy_liveness::MISSION_ID_HEADER,
-            HeaderValue::from_str(&mission.to_string()).unwrap(),
-        );
-        let a = attribution_from(&headers, Some(&key));
+
+        // Internal proxy secret: Core's own harness, header honoured.
+        let a = attribution_from(&headers, None, true);
+        assert_eq!(a.mission_id, Some(claimed));
+        assert_eq!(a.api_key_id, None);
+
+        // Ordinary proxy key: header ignored, key still attributed.
+        let a = attribution_from(&headers, Some(&key), false);
+        assert_eq!(a.mission_id, None);
         assert_eq!(a.api_key_id, Some(key.id));
         assert_eq!(a.api_key_name.as_deref(), Some("Cursor"));
-        assert_eq!(a.mission_id, Some(mission));
 
+        // Mission-scoped launch key: always its own mission, header ignored.
         let launched = uuid::Uuid::new_v4();
         let launch_key = crate::api::proxy_keys::KeySummary {
             name: format!("remote-launch:{launched}"),
             ..key
         };
-        let a = attribution_from(&HeaderMap::new(), Some(&launch_key));
-        assert_eq!(a.mission_id, Some(launched));
         assert_eq!(
-            attribution_from(&HeaderMap::new(), None),
+            attribution_from(&headers, Some(&launch_key), false).mission_id,
+            Some(launched)
+        );
+        assert_eq!(
+            attribution_from(&HeaderMap::new(), Some(&launch_key), false).mission_id,
+            Some(launched)
+        );
+
+        // Unauthenticated-by-key callers (e.g. JWT chain tests): header ignored.
+        assert_eq!(
+            attribution_from(&headers, None, false),
             UsageAttribution::default()
         );
     }
