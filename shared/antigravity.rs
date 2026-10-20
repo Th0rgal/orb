@@ -116,9 +116,35 @@ pub fn is_transient_error(message: &str) -> bool {
         "i/o timeout",
         "tls handshake timeout",
         "unexpected eof",
+        "malformed function call",
+        "api error (attempt ",
+        "response may be truncated",
+        IDLE_WAIT_INTERRUPTED_MARKER,
     ]
     .iter()
     .any(|s| lower.contains(s))
+}
+
+/// Lower-case marker of [`idle_wait_interrupted_message`]; recovery matches on it.
+pub const IDLE_WAIT_INTERRUPTED_MARKER: &str =
+    "interrupted while its root agent was idle waiting for background task(s)";
+
+/// The terminal error of a turn that `agy` cut while its root agent waited for
+/// subagents/background tasks. This is a normal end of turn, never a provider failure.
+pub fn idle_wait_interrupted_message(tasks: u32) -> String {
+    format!(
+        "Antigravity was {IDLE_WAIT_INTERRUPTED_MARKER} ({tasks} still running); resume this conversation to check them"
+    )
+}
+
+/// Parse `diagnostics: root agent idle; waiting up to 30m0s for 1 background task(s)`.
+fn parse_idle_wait_diagnostic(line: &str) -> Option<u32> {
+    let rest = line.split_once("root agent idle; waiting up to ")?.1;
+    let count = rest.split_once(" for ")?.1;
+    let (count, tail) = count.trim_start().split_once(' ')?;
+    tail.starts_with("background task")
+        .then(|| count.parse().ok())
+        .flatten()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -418,6 +444,9 @@ pub struct Stream {
     /// headless `agy -p` the CLI exits instead of waking itself, so the host
     /// must turn it into a durable wake-up.
     pub native_schedule: Option<NativeSchedule>,
+    /// Background tasks the root agent announced it was idle-waiting for
+    /// (`diagnostics: root agent idle; waiting up to … for N background task(s)`).
+    pub idle_wait_tasks: Option<u32>,
 }
 
 /// Antigravity's built-in `schedule` tool (`DurationSeconds`, `Prompt`).
@@ -869,6 +898,31 @@ impl Stream {
         if let Some(marker) = ErrorMarker::parse(line) {
             self.error_marker = Some(marker);
         }
+        if let Some(tasks) = parse_idle_wait_diagnostic(line) {
+            self.idle_wait_tasks = Some(tasks);
+        } else if self.idle_wait_tasks.is_some()
+            && self.error.is_none()
+            && !self.success
+            && line.trim().eq_ignore_ascii_case("error: interrupted")
+        {
+            self.error = Some("interrupted".into());
+        }
+    }
+
+    /// The turn ended on the CLI's generic interruption while the root agent
+    /// was idle-waiting for its background tasks or subagents.
+    pub fn idle_wait_interrupted(&self) -> Option<u32> {
+        let tasks = self.idle_wait_tasks?;
+        if self.identity_error || self.success {
+            return None;
+        }
+        let error = self.error.as_deref()?.trim().to_ascii_lowercase();
+        let error = error.strip_prefix("error:").unwrap_or(&error).trim();
+        matches!(
+            error,
+            "interrupted" | "antigravity result: cancelled" | "antigravity result: interrupted"
+        )
+        .then_some(tasks)
     }
 
     pub fn unfinished_background_tasks(&self) -> Vec<&str> {
@@ -1139,6 +1193,9 @@ impl Stream {
         if self.success {
             return !self.unfinished_background_tasks().is_empty();
         }
+        if self.idle_wait_interrupted().is_some() {
+            return true;
+        }
         self.error.as_deref().is_some_and(is_transient_error)
             || self
                 .error_marker
@@ -1164,6 +1221,9 @@ impl Stream {
                 .as_ref()
                 .and_then(|marker| marker.short_error.as_deref())
         };
+        if let Some(tasks) = self.idle_wait_interrupted() {
+            return Err(idle_wait_interrupted_message(tasks));
+        }
         if let Some(error) = &self.error {
             if error.starts_with("Antigravity result:") {
                 if let Some(short) = marker_error {
@@ -2253,6 +2313,63 @@ mod tests {
         assert!(stream.success);
         assert!(stream.error.is_none());
         assert!(stream.finish().is_ok());
+    }
+
+    #[test]
+    fn root_agent_idle_wait_interruption_is_a_retryable_end_of_turn() {
+        assert_eq!(
+            parse_idle_wait_diagnostic(
+                "diagnostics: root agent idle; waiting up to 30m0s for 1 background task(s)"
+            ),
+            Some(1)
+        );
+        assert_eq!(parse_idle_wait_diagnostic("root agent idle"), None);
+        // Interruption reported only on stderr (incident 3fe5c5a3 / job 10cfe462).
+        let mut stream = Stream::default();
+        stream.feed(&json!({"event":"init","conversation_id":"s"}));
+        stream.observe_stderr(
+            "diagnostics: root agent idle; waiting up to 30m0s for 2 background task(s)",
+        );
+        stream.observe_stderr("error: interrupted");
+        assert!(stream.is_retryable());
+        let err = stream.finish().unwrap_err();
+        assert!(err.contains(IDLE_WAIT_INTERRUPTED_MARKER), "{err}");
+        assert!(err.contains("2 still running"));
+        assert!(is_transient_error(&err));
+        // Interruption reported as the native result.
+        let mut stream = Stream::default();
+        stream.feed(&json!({"event":"init","conversation_id":"s"}));
+        stream.observe_stderr(
+            "diagnostics: root agent idle; waiting up to 30m0s for 1 background task(s)",
+        );
+        stream.feed(&json!({"event":"result","result":{"conversation_id":"s","status":"ERROR","error":"interrupted"}}));
+        assert!(stream.is_retryable());
+        assert!(stream
+            .finish()
+            .unwrap_err()
+            .contains(IDLE_WAIT_INTERRUPTED_MARKER));
+        // Without the idle diagnostic, a bare interruption stays unclassified,
+        // and operator/auth failures are never rewritten.
+        let mut stream = Stream::default();
+        stream.feed(&json!({"event":"init","conversation_id":"s"}));
+        stream.observe_stderr("error: interrupted");
+        assert!(stream.error.is_none());
+        stream.observe_stderr(
+            "diagnostics: root agent idle; waiting up to 30m0s for 1 background task(s)",
+        );
+        stream.feed(&json!({"event":"result","result":{"conversation_id":"s","status":"ERROR","error":"UNAUTHENTICATED: sign in again"}}));
+        assert!(!stream.is_retryable());
+        assert!(!stream
+            .finish()
+            .unwrap_err()
+            .contains(IDLE_WAIT_INTERRUPTED_MARKER));
+        for transient in [
+            "Malformed function call: missing name",
+            "API error (attempt 2): INTERNAL",
+            "model output stopped (response may be truncated)",
+        ] {
+            assert!(is_transient_error(transient), "{transient}");
+        }
     }
 
     #[test]

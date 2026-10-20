@@ -568,6 +568,63 @@ pub(crate) fn provider_has_available_account(
     })
 }
 
+/// Recovery label of an Antigravity turn cut while its root agent idle-waited
+/// for background tasks or subagents.
+pub(crate) const IDLE_WAIT_INTERRUPTED: &str = "Antigravity background-task wait interrupted";
+
+/// Consecutive automatic idle-wait resumes without sustained new output
+/// before the mission waits for the operator instead of looping.
+pub(crate) const MAX_IDLE_WAIT_RESUMES: u32 = 3;
+
+/// Status reason of a mission parked after [`MAX_IDLE_WAIT_RESUMES`].
+pub(crate) const IDLE_WAIT_EXHAUSTED_REASON: &str = "antigravity_idle_wait_exhausted";
+
+/// Whether a failed job is an idle-wait interruption whose automatic resume
+/// budget is spent, so the mission must wait for the operator.
+pub(crate) async fn idle_wait_resumes_exhausted(
+    working_dir: &std::path::Path,
+    mission_id: Uuid,
+    failure: &str,
+) -> bool {
+    antigravity_resumable_interruption(failure) == Some(IDLE_WAIT_INTERRUPTED)
+        && remote_wait(working_dir, mission_id)
+            .await
+            .is_some_and(|wait| wait.resume_at.is_none() && idle_wait_budget_spent(&wait))
+}
+
+fn idle_wait_budget_spent(wait: &RemoteWait) -> bool {
+    wait.limit == IDLE_WAIT_INTERRUPTED && wait.replays >= MAX_IDLE_WAIT_RESUMES
+}
+
+/// What the operator reads when idle-wait resumes are exhausted.
+pub(crate) fn annotate_idle_wait_exhausted(output: &str) -> String {
+    format!(
+        "{}\n\nAntigravity was interrupted {MAX_IDLE_WAIT_RESUMES} times in a row while its root \
+         agent waited for background tasks or subagents, without new progress. Automatic \
+         resumes stopped; the mission is waiting. Check the background tasks, then send a \
+         message to continue.",
+        output.trim_end()
+    )
+}
+
+/// The resume content of a remote replay; `None` lets a goal resume natively.
+pub(crate) fn remote_replay_content(mission: &Mission, limit: &str) -> Option<String> {
+    if limit == IDLE_WAIT_INTERRUPTED {
+        let prompt = remote_resume_prompt(limit);
+        return Some(
+            match mission
+                .goal_objective
+                .as_deref()
+                .filter(|_| mission.goal_mode)
+            {
+                Some(objective) => format!("/goal {objective}\n\n{prompt}"),
+                None => prompt,
+            },
+        );
+    }
+    (!mission.goal_mode).then(|| remote_resume_prompt(limit))
+}
+
 /// Classify a resumable Antigravity remote interruption or transient upstream
 /// error on a mission that already has a persisted native conversation ID.
 pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'static str> {
@@ -592,6 +649,8 @@ pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'stat
         Some("Antigravity response truncated")
     } else if failure.contains("Antigravity ended without a SUCCESS result") {
         Some("Antigravity interrupted turn")
+    } else if lower.contains(crate::antigravity::IDLE_WAIT_INTERRUPTED_MARKER) {
+        Some(IDLE_WAIT_INTERRUPTED)
     } else if failure.contains("Antigravity ended its headless turn while background task(s)") {
         Some("Antigravity background task handoff")
     } else if crate::antigravity::is_transient_error(failure) {
@@ -715,6 +774,12 @@ pub(crate) async fn plan_remote(
         }
         if mission.backend == "antigravity" && has_session && replays < MAX_REMOTE_REPLAYS {
             if let Some(interruption) = antigravity_resumable_interruption(failure) {
+                if interruption == IDLE_WAIT_INTERRUPTED
+                    && !sustained_progress
+                    && previous.as_ref().is_some_and(idle_wait_budget_spent)
+                {
+                    return None;
+                }
                 let delay = recovery_delay_secs(replays, mission_id);
                 return Some(UsageLimitWait {
                     limit: interruption.to_string(),
@@ -769,7 +834,7 @@ pub(crate) async fn plan_remote(
         if planned.is_none() && !success && !sustained_progress {
             if let Some(mut exhausted) = previous
                 .clone()
-                .filter(|wait| wait.replays >= MAX_REMOTE_REPLAYS)
+                .filter(|wait| wait.replays >= MAX_REMOTE_REPLAYS || idle_wait_budget_spent(wait))
             {
                 // Keep the exhausted budget while finalization is retried; deleting
                 // it here would let a repeated observation start again at attempt one.
@@ -840,6 +905,15 @@ pub(crate) fn remote_resume_prompt(limit: &str) -> String {
         return format!(
             "{RECOVERY_PROMPT_MARKER} The wake-up you scheduled with your native schedule tool is \
              due. Continue with the check-in you scheduled."
+        );
+    }
+    if limit == IDLE_WAIT_INTERRUPTED {
+        return format!(
+            "{RECOVERY_PROMPT_MARKER} Your previous turn was cut while you were waiting for \
+             background tasks or subagents to finish. Check those background tasks and \
+             subagents now, report their status (finished, failed, or still running), and \
+             continue your work from there. Do not restart finished work or duplicate tasks \
+             that are still running."
         );
     }
     if limit == "Antigravity response truncated" {
@@ -1546,6 +1620,89 @@ mod tests {
         assert_eq!(
             after_replay_failure(&wait, false, &still_running, now, None),
             ReplayFailure::GiveUp
+        );
+    }
+
+    #[tokio::test]
+    async fn antigravity_idle_wait_interruption_resumes_at_most_three_times() {
+        let (dir, store) = sqlite_store().await;
+        let mut mission = active_mission(&store, "antigravity").await;
+        store
+            .update_mission_session_id(
+                mission.id,
+                "ef77ed0f-551d-4624-aad9-2a54bba215b6",
+                "antigravity",
+                None,
+            )
+            .await
+            .unwrap();
+        let failure = crate::antigravity::idle_wait_interrupted_message(1);
+        for attempt in 0..MAX_IDLE_WAIT_RESUMES {
+            let wait = plan_remote(
+                dir.path(),
+                &store,
+                mission.id,
+                false,
+                &failure,
+                Uuid::new_v4(),
+                false,
+            )
+            .await
+            .unwrap_or_else(|| panic!("resume {attempt} planned"));
+            assert_eq!(wait.limit, IDLE_WAIT_INTERRUPTED);
+            assert!(!idle_wait_resumes_exhausted(dir.path(), mission.id, &failure).await);
+            // The scheduler replays the job.
+            update_remote_wait(dir.path(), mission.id, |previous| {
+                previous.map(|previous| RemoteWait {
+                    resume_at: None,
+                    replays: previous.replays + 1,
+                    ..previous
+                })
+            })
+            .await;
+        }
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            &failure,
+            Uuid::new_v4(),
+            false
+        )
+        .await
+        .is_none());
+        assert!(idle_wait_resumes_exhausted(dir.path(), mission.id, &failure).await);
+        assert!(annotate_idle_wait_exhausted("out").contains("the mission is waiting"));
+        // Sustained new output resets the budget.
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            &failure,
+            Uuid::new_v4(),
+            true
+        )
+        .await
+        .is_some());
+
+        let prompt = remote_resume_prompt(IDLE_WAIT_INTERRUPTED);
+        assert!(prompt.contains("waiting for background tasks or subagents"));
+        assert!(prompt.contains("report their status"));
+        assert_eq!(
+            remote_replay_content(&mission, IDLE_WAIT_INTERRUPTED).as_deref(),
+            Some(prompt.as_str())
+        );
+        mission.goal_mode = true;
+        mission.goal_objective = Some("ship EVM-FAST".into());
+        assert_eq!(
+            remote_replay_content(&mission, IDLE_WAIT_INTERRUPTED),
+            Some(format!("/goal ship EVM-FAST\n\n{prompt}"))
+        );
+        assert_eq!(
+            remote_replay_content(&mission, "Antigravity interrupted turn"),
+            None
         );
     }
 

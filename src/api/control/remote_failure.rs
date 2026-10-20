@@ -145,6 +145,7 @@ pub(crate) fn classify(raw: &str) -> Failure {
                 "http 524",
                 "code 503",
                 "code 529",
+                crate::antigravity::IDLE_WAIT_INTERRUPTED_MARKER,
             ]
             .iter()
             .any(|s| lower.contains(s))
@@ -213,6 +214,10 @@ mod tests {
                 FailureKind::Cancelled,
             ),
             ("interrupted", FailureKind::Unknown),
+            (
+                &crate::antigravity::idle_wait_interrupted_message(1),
+                FailureKind::Transport,
+            ),
         ] {
             assert_eq!(classify(text).kind, expected, "{text}");
         }

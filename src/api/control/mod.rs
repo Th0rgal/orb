@@ -14829,6 +14829,9 @@ async fn finalize_remote_mission(
         MissionStatus::Interrupted
     } else if status_reason == "native_goal_stopped" {
         MissionStatus::Blocked
+    } else if status_reason == usage_limit_wait::IDLE_WAIT_EXHAUSTED_REASON {
+        // Not a failure: the agent was waiting on its own background work.
+        MissionStatus::AwaitingUser
     } else if success {
         MissionStatus::Completed
     } else {
@@ -16086,8 +16089,7 @@ async fn replay_remote_mission_after_usage_limit(
         }
         Ok(Some(placement)) => {
             // A goal resumes natively (`/goal resume`).
-            let content =
-                (!mission.goal_mode).then(|| usage_limit_wait::remote_resume_prompt(&wait.limit));
+            let content = usage_limit_wait::remote_replay_content(&mission, &wait.limit);
             remote_grok::continue_on_node(
                 state,
                 &control,
@@ -16922,6 +16924,14 @@ async fn poll_remote_job(
                             );
                             content = usage_limit_wait::annotate_remote_output(&content, &wait);
                             status_reason = usage_limit_wait::USAGE_LIMIT_WAIT_REASON;
+                        } else if !success
+                            && usage_limit_wait::idle_wait_resumes_exhausted(
+                                ledger_dir, mission_id, failure,
+                            )
+                            .await
+                        {
+                            content = usage_limit_wait::annotate_idle_wait_exhausted(&content);
+                            status_reason = usage_limit_wait::IDLE_WAIT_EXHAUSTED_REASON;
                         }
                     }
                     // A terminal node receipt proves admission, even if its ACK
