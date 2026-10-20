@@ -21,6 +21,7 @@ async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean}=
     }
     if(req.method()==='POST' && path.endsWith('/cancel')) { cancels.push(id); missions=missions.map(m=>m.id===id?{...m,status:'interrupted'}:m); return route.fulfill({json:{ok:true}}); }
     if(req.method()==='DELETE') {
+      if(missions.some(m=>m.parent_mission_id===id) && url.searchParams.get('include_descendants')!=='true') return route.fulfill({status:409,body:'Mission has 1 descendant session'});
       const running=missions.find(m=>m.parent_mission_id===id&&m.status==='active');
       if(running) return route.fulfill({status:409,body:`Cannot delete a running mission or worker (${running.id}). Cancel it first.`});
       const gone=[id,...missions.filter(m=>m.parent_mission_id===id).map(m=>m.id)];
@@ -90,11 +91,28 @@ test('deleting a mission with a running worker offers Stop and delete', async ({
   const {tree,cancels,missions}=await setup(page,{deleteRunning:true});
   await tree.getByRole('button',{name:'Pareto',exact:true}).click({button:'right'});
   await page.getByRole('menuitem',{name:/^Delete/}).click();
-  await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
+  // The confirmation names the session that goes with it, flagged as running.
+  await expect(page.getByRole('dialog')).toContainText('This also deletes 1 session: Deep Audit (running).');
+  await page.getByRole('dialog').getByRole('button',{name:'Delete 2 sessions',exact:true}).click();
   const dialog=page.getByRole('dialog');
+  await expect(dialog).toContainText('This also deletes 1 session: Deep Audit');
   await expect(dialog).toContainText('1 worker is still running');
   await dialog.getByRole('button',{name:'Stop and delete',exact:true}).click();
   await expect.poll(()=>cancels).toEqual([C]);
   await expect.poll(()=>missions().map(m=>m.title)).toEqual(['Fredrik']);
   await expect(tree.getByRole('button',{name:'Pareto',exact:true})).toHaveCount(0);
+});
+
+test('deleting a mission without children uses the plain wording and no cascade opt-in', async ({page}) => {
+  const urls:string[]=[];
+  page.on('request',r=>{ if(r.method()==='DELETE') urls.push(new URL(r.url()).search); });
+  const {tree,missions}=await setup(page);
+  await tree.getByRole('button',{name:'Fredrik',exact:true}).click({button:'right'});
+  await page.getByRole('menuitem',{name:/^Delete/}).click();
+  const dialog=page.getByRole('dialog');
+  await expect(dialog).toContainText('Delete 1 agent?');
+  await expect(dialog).not.toContainText('also deletes');
+  await dialog.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect.poll(()=>missions().map(m=>m.title).sort()).toEqual(['Deep Audit','Pareto']);
+  expect(urls).toEqual(['']);
 });

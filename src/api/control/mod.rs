@@ -20269,15 +20269,83 @@ pub async fn resume_mission(
     outcome.map(Json)
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteMissionQuery {
+    /// Required to delete a mission that has descendants: the delete removes
+    /// them too, with their history. Without it such a delete is refused, so a
+    /// caller cannot wipe launched sessions by accident.
+    #[serde(default)]
+    pub include_descendants: Option<bool>,
+}
+
+/// Refuse (409) a delete that would also remove `descendants` unless the
+/// caller opted in with `include_descendants=true`.
+fn require_descendant_opt_in(
+    mission_id: Uuid,
+    include_descendants: Option<bool>,
+    descendants: &[Mission],
+) -> Result<(), (StatusCode, String)> {
+    if descendants.is_empty() || include_descendants == Some(true) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        descendants_refusal(mission_id, descendants),
+    ))
+}
+
+/// The 409 body for a delete that would also remove descendants.
+fn descendants_refusal(mission_id: Uuid, descendants: &[Mission]) -> String {
+    let titles: Vec<String> = descendants
+        .iter()
+        .take(10)
+        .map(|m| {
+            let title = m.title.clone().unwrap_or_else(|| m.id.to_string());
+            if matches!(
+                m.status,
+                MissionStatus::Active | MissionStatus::WaitingBackground
+            ) {
+                format!("{title} (running)")
+            } else {
+                title
+            }
+        })
+        .collect();
+    let more = descendants.len().saturating_sub(titles.len());
+    format!(
+        "Mission {mission_id} has {} descendant session{}: {}{}. Deleting it would delete them too; pass include_descendants=true to confirm.",
+        descendants.len(),
+        if descendants.len() == 1 { "" } else { "s" },
+        titles.join(", "),
+        if more > 0 { format!(", and {more} more") } else { String::new() },
+    )
+}
+
 /// Delete a mission by ID.
-/// Only allows deleting missions that are not currently running.
+/// Only allows deleting missions that are not currently running. A mission
+/// with descendants is deleted (with them) only with `include_descendants=true`.
 pub async fn delete_mission(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(mission_id): Path<Uuid>,
+    Query(query): Query<DeleteMissionQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let child_ids = collect_child_mission_ids(&control.mission_store, mission_id).await?;
+    if !child_ids.is_empty() && query.include_descendants != Some(true) {
+        let mut descendants = Vec::with_capacity(child_ids.len());
+        for id in &child_ids {
+            if let Some(m) = control
+                .mission_store
+                .get_mission(*id)
+                .await
+                .map_err(internal_error)?
+            {
+                descendants.push(m);
+            }
+        }
+        require_descendant_opt_in(mission_id, query.include_descendants, &descendants)?;
+    }
     let mut ids_to_delete = HashSet::with_capacity(child_ids.len() + 1);
     ids_to_delete.insert(mission_id);
     ids_to_delete.extend(child_ids);
@@ -37307,6 +37375,53 @@ mod tests {
         assert!(store.get_mission(boss.id).await.unwrap().is_none());
         assert!(store.get_mission(worker.id).await.unwrap().is_none());
         assert!(store.get_mission(nested_worker.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_to_cascade_without_include_descendants() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let parent = store
+            .create_mission(Some("EV Bench"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let child = store
+            .create_mission_with_parent(
+                Some("Benchmarks"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                Some(parent.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(child.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        let ids = collect_child_mission_ids(&store, parent.id).await.unwrap();
+        let mut descendants = Vec::new();
+        for id in ids {
+            descendants.push(store.get_mission(id).await.unwrap().unwrap());
+        }
+        for opt in [None, Some(false)] {
+            let (status, body) =
+                require_descendant_opt_in(parent.id, opt, &descendants).unwrap_err();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(
+                body.contains("1 descendant session: Benchmarks (running)"),
+                "{body}"
+            );
+            assert!(body.contains("include_descendants=true"), "{body}");
+        }
+        assert!(require_descendant_opt_in(parent.id, Some(true), &descendants).is_ok());
+        assert!(require_descendant_opt_in(parent.id, None, &[]).is_ok());
+        // Nothing was deleted by the refusal.
+        assert!(store.get_mission(child.id).await.unwrap().is_some());
     }
 
     #[tokio::test]
