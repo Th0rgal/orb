@@ -383,6 +383,25 @@ pub(super) fn positional_prompt(prompt: &str) -> String {
 /// Conservative window for proxy-routed models: every chain member offers at least this.
 pub(super) const REMOTE_OPENCODE_CONTEXT_LIMIT: u64 = 200_000;
 pub(super) const REMOTE_OPENCODE_OUTPUT_LIMIT: u64 = 32_000;
+/// Gemini 4 models served directly (no chain) expose a 1,048,576-token input window.
+pub(super) const REMOTE_OPENCODE_GEMINI_CONTEXT_LIMIT: u64 = 1_048_576;
+
+/// Context window declared to OpenCode for `model`. Chains (`builtin/smart`, ...) keep the
+/// conservative floor of their smallest member; a direct Gemini 4 model gets its real
+/// window. With the floor, OpenCode compacted every few turns and re-read the files it had
+/// just lost (mission 4ad4bc01: 4 compactions in 20 minutes, 66 reads, almost no edits).
+pub(super) fn remote_opencode_context_limit(model: &str) -> u64 {
+    let id = model.strip_prefix("builtin/").unwrap_or(model);
+    let direct = id
+        .strip_prefix("google/")
+        .or_else(|| id.strip_prefix("gemini/"))
+        .unwrap_or("");
+    if direct.starts_with("gemini-4-") {
+        REMOTE_OPENCODE_GEMINI_CONTEXT_LIMIT
+    } else {
+        REMOTE_OPENCODE_CONTEXT_LIMIT
+    }
+}
 
 pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_json::Value {
     serde_json::json!({
@@ -400,7 +419,7 @@ pub(crate) fn remote_opencode_config(model: &str, api_base_url: &str) -> serde_j
                 // A declared window lets OpenCode compact before the prompt outgrows the
                 // smallest member of a chain (mission 64619ac7 overflowed the Spark's 262k
                 // window with 32k output reserved and no limit known, then hung).
-                "models": { model: { "name": model, "limit": { "context": REMOTE_OPENCODE_CONTEXT_LIMIT, "output": REMOTE_OPENCODE_OUTPUT_LIMIT } } },
+                "models": { model: { "name": model, "limit": { "context": remote_opencode_context_limit(model), "output": REMOTE_OPENCODE_OUTPUT_LIMIT } } },
                 "options": {
                     "baseURL": format!("{}/v1", api_base_url.trim_end_matches('/')),
                     "apiKey": format!("{{env:{REMOTE_PROXY_KEY_ENV}}}")
