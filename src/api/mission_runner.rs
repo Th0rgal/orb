@@ -121,25 +121,7 @@ pub(crate) fn resolve_mission_working_directory(
     workspace_type: WorkspaceType,
     requested: &str,
 ) -> Result<PathBuf, String> {
-    let requested = requested.trim();
-    if requested.is_empty() {
-        return Err("working_directory is empty".to_string());
-    }
-
-    let requested_path = Path::new(requested);
-    let resolved = if workspace_type == WorkspaceType::Container {
-        if requested_path.is_absolute() && requested_path.starts_with(workspace_root) {
-            requested_path.to_path_buf()
-        } else if requested_path.is_absolute() {
-            workspace_root.join(requested_path.strip_prefix("/").unwrap_or(requested_path))
-        } else {
-            workspace_root.join(requested_path)
-        }
-    } else if requested_path.is_absolute() {
-        requested_path.to_path_buf()
-    } else {
-        workspace_root.join(requested_path)
-    };
+    let resolved = requested_mission_path(workspace_root, workspace_type, requested)?;
 
     if !resolved.is_dir() {
         return Err(format!(
@@ -167,6 +149,78 @@ pub(crate) fn resolve_mission_working_directory(
         return canonicalize_existing_prefix(&resolved);
     }
     Ok(resolved)
+}
+
+/// Map a requested working directory to its host-side path without touching
+/// the filesystem. Container guest paths land below the container rootfs.
+fn requested_mission_path(
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    requested: &str,
+) -> Result<PathBuf, String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err("working_directory is empty".to_string());
+    }
+
+    let requested_path = Path::new(requested);
+    Ok(if workspace_type == WorkspaceType::Container {
+        if requested_path.is_absolute() && requested_path.starts_with(workspace_root) {
+            requested_path.to_path_buf()
+        } else if requested_path.is_absolute() {
+            workspace_root.join(requested_path.strip_prefix("/").unwrap_or(requested_path))
+        } else {
+            workspace_root.join(requested_path)
+        }
+    } else if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        workspace_root.join(requested_path)
+    })
+}
+
+/// Create a missing working directory for a mission being created, so a
+/// typed folder does not have to exist beforehand. Creation is limited to
+/// where Core already writes: below the workspace root, or (host workspaces)
+/// below `allowed_roots`, the same roots `/api/fs/mkdir` enforces. Turns never
+/// call this: a checkout that disappears later is an error, not a new folder.
+pub(crate) fn ensure_mission_working_directory(
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    requested: &str,
+    allowed_roots: &[PathBuf],
+) -> Result<(), String> {
+    let path = requested_mission_path(workspace_root, workspace_type, requested)?;
+    if path.exists() {
+        return Ok(());
+    }
+    let canonical = canonicalize_existing_prefix(&path)?;
+    let mut roots = vec![workspace_root.to_path_buf()];
+    if workspace_type == WorkspaceType::Host {
+        roots.extend(allowed_roots.iter().cloned());
+    }
+    roots.sort();
+    roots.dedup();
+    let allowed = roots.iter().any(|root| {
+        canonicalize_existing_prefix(root).is_ok_and(|root| canonical.starts_with(root))
+    });
+    if !allowed {
+        let roots = roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "working_directory {} does not exist, and Core only creates folders under: {roots}",
+            path.display()
+        ));
+    }
+    std::fs::create_dir_all(&canonical).map_err(|error| {
+        format!(
+            "failed to create working_directory {}: {error}",
+            canonical.display()
+        )
+    })
 }
 
 /// Canonicalize a path that may not exist yet (a worktree prepared later):
@@ -10201,9 +10255,10 @@ mod tests {
         codex_key_fingerprint, codex_missing_goal_final_response_message,
         codex_tool_stall_should_retry_with_default_model, codex_turn_requires_tool_activity,
         curl_dependency_error, custom_opencode_provider_definition,
-        ensure_opencode_provider_for_model, extract_codex_reset_window, extract_model_from_message,
-        extract_opencode_session_id, extract_part_text, extract_str, extract_think_content,
-        is_capacity_limited_error, is_codex_chatgpt_account_model_blocked, is_codex_node_wrapper,
+        ensure_mission_working_directory, ensure_opencode_provider_for_model,
+        extract_codex_reset_window, extract_model_from_message, extract_opencode_session_id,
+        extract_part_text, extract_str, extract_think_content, is_capacity_limited_error,
+        is_codex_chatgpt_account_model_blocked, is_codex_node_wrapper,
         is_codex_transport_error_message, is_opencode_session_id, is_provider_payload_error,
         is_rate_limited_error, is_session_corruption_error, is_success_path_auth_error,
         is_success_path_provider_payload_error, is_success_path_rate_limited_error,
@@ -10624,6 +10679,96 @@ mod tests {
             root.path(),
             WorkspaceType::Container,
             "/escape",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn missing_host_working_directory_under_allowed_root_is_created() {
+        let workspace = tempfile::tempdir().unwrap();
+        let allowed = tempfile::tempdir().unwrap();
+        let wanted = allowed.path().join("new-project/src");
+        let requested = wanted.to_string_lossy().into_owned();
+
+        assert!(resolve_mission_working_directory(
+            workspace.path(),
+            WorkspaceType::Host,
+            &requested
+        )
+        .is_err());
+        ensure_mission_working_directory(
+            workspace.path(),
+            WorkspaceType::Host,
+            &requested,
+            &[allowed.path().to_path_buf()],
+        )
+        .unwrap();
+
+        assert!(wanted.is_dir());
+        assert_eq!(
+            resolve_mission_working_directory(workspace.path(), WorkspaceType::Host, &requested)
+                .unwrap(),
+            wanted.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_host_working_directory_outside_allowed_roots_is_refused() {
+        let workspace = tempfile::tempdir().unwrap();
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let wanted = outside.path().join("new-project");
+
+        let error = ensure_mission_working_directory(
+            workspace.path(),
+            WorkspaceType::Host,
+            &wanted.to_string_lossy(),
+            &[allowed.path().to_path_buf()],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("only creates folders under"), "{error}");
+        assert!(!wanted.exists());
+    }
+
+    #[test]
+    fn missing_container_working_directory_is_created_below_rootfs_only() {
+        let root = tempfile::tempdir().unwrap();
+        ensure_mission_working_directory(
+            root.path(),
+            WorkspaceType::Container,
+            "/workspace/new-project",
+            &[],
+        )
+        .unwrap();
+        assert!(root.path().join("workspace/new-project").is_dir());
+
+        let outside = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+            assert!(ensure_mission_working_directory(
+                root.path(),
+                WorkspaceType::Container,
+                "/escape/new-project",
+                &[],
+            )
+            .is_err());
+            assert!(!outside.path().join("new-project").exists());
+        }
+    }
+
+    #[test]
+    fn missing_working_directory_rejects_parent_traversal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let allowed = tempfile::tempdir().unwrap();
+        let requested = format!("{}/missing/../../escaped", allowed.path().display());
+
+        assert!(ensure_mission_working_directory(
+            workspace.path(),
+            WorkspaceType::Host,
+            &requested,
+            &[allowed.path().to_path_buf()],
         )
         .is_err());
     }
