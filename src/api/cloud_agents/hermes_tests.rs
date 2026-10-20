@@ -583,3 +583,118 @@ async fn capabilities_accepts_upstream_hermes_without_fork_flags() {
     assert!(h.capabilities().await.is_ok());
     server.abort();
 }
+
+#[test]
+fn events_page_tolerates_missing_or_sse_events_only_for_terminal_runs_with_output() {
+    let done = json!({"status":"completed","output":"final"});
+    let running = json!({"status":"running"});
+    let page = events_page_from_response(404, None, &done, 7).unwrap();
+    assert_eq!(page["events"], json!([]));
+    assert_eq!(page["cursor"], "7");
+    assert_eq!(page["has_more"], false);
+    let sse = b"event: message.delta\ndata: {}\n\n";
+    assert!(events_page_from_response(200, Some(sse), &done, 0).is_ok());
+    assert!(events_page_from_response(409, None, &done, 0).is_ok());
+    assert!(events_page_from_response(404, None, &running, 0).is_err());
+    assert!(events_page_from_response(409, None, &running, 0).is_err());
+    assert!(events_page_from_response(200, Some(sse), &running, 0).is_err());
+    assert!(events_page_from_response(404, None, &json!({"status":"completed"}), 0).is_err());
+    assert!(events_page_from_response(500, None, &done, 0).is_err());
+    let ok = events_page_from_response(200, Some(br#"{"events":[],"cursor":"3"}"#), &running, 0)
+        .unwrap();
+    assert_eq!(ok["cursor"], "3");
+}
+
+async fn observe_retired_run(events_route: axum::routing::MethodRouter) -> (Execution, Value) {
+    let accept = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = accept.clone();
+    let app = Router::new()
+        .route(
+            "/v1/runs/run_done",
+            get(move |headers: axum::http::HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(
+                        headers
+                            .get("accept")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .into(),
+                    );
+                    Json(json!({"status":"completed","output":"All done","session_id":"s1"}))
+                }
+            }),
+        )
+        .route("/v1/runs/run_done/events", events_route)
+        .route(
+            "/api/sessions/s1/messages",
+            get(|| async { Json(json!({"messages":[]})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let h = Hermes {
+        client: reqwest::Client::new(),
+        url,
+        key: "fixture".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn MissionStore> = Arc::new(
+        SqliteMissionStore::new(dir.path().into(), "hermes-test")
+            .await
+            .unwrap(),
+    );
+    let mut turn = Turn::new("first".into(), "hello".into());
+    turn.external_id = Some("run_done".into());
+    turn.phase = Phase::Running;
+    let e = Execution {
+        mission_id: Uuid::new_v4(),
+        parent_mission_id: None,
+        request_key: "key".into(),
+        request_signature: "sig".into(),
+        revision: 0,
+        selection: Selection {
+            provider: Provider::Hermes,
+            account: "paloma".into(),
+            repository: None,
+            git_ref: None,
+            model: None,
+            model_params: vec![],
+        },
+        external_id: Some("s1".into()),
+        external_url: None,
+        turns: vec![turn],
+    };
+    let mut e = store
+        .save_cloud_execution(e, None, None, None, vec![])
+        .await
+        .unwrap();
+    observe_with_client(&store, &mut e, 0, &h).await.unwrap();
+    server.abort();
+    let accept = accept.lock().unwrap().clone();
+    (e, json!(accept))
+}
+
+#[tokio::test]
+async fn retired_run_events_404_completes_turn_from_status_output() {
+    let (e, accept) = observe_retired_run(get(|| async {
+        (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
+    }))
+    .await;
+    assert_eq!(e.turns[0].phase, Phase::ResponseComplete);
+    assert_eq!(e.turns[0].result.as_deref(), Some("All done"));
+    assert_eq!(accept, json!(["application/json"]));
+}
+
+#[tokio::test]
+async fn sse_events_body_completes_turn_from_status_output() {
+    let (e, _) = observe_retired_run(get(|| async {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "event: run.completed\ndata: {}\n\n",
+        )
+    }))
+    .await;
+    assert_eq!(e.turns[0].phase, Phase::ResponseComplete);
+    assert_eq!(e.turns[0].result.as_deref(), Some("All done"));
+}
