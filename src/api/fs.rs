@@ -361,7 +361,7 @@ async fn find_in_mission_subdirs(
     matches.pop()
 }
 
-fn path_allowed_roots(state: &AppState) -> Vec<PathBuf> {
+pub(crate) fn path_allowed_roots(state: &AppState) -> Vec<PathBuf> {
     let mut roots = vec![state.config.working_dir.clone(), api_context_root(state)];
 
     if let Some(runtime) = load_runtime_workspace() {

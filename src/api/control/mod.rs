@@ -12177,6 +12177,13 @@ pub(super) async fn create_mission_inner(
                     tags.push(super::mission_runner::HOST_STATE_TAG.to_string());
                 }
             }
+            super::mission_runner::ensure_mission_working_directory(
+                &workspace.path,
+                workspace.workspace_type,
+                directory,
+                &super::fs::path_allowed_roots(&state),
+            )
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
             req.working_directory = Some(
                 super::mission_runner::resolve_mission_working_directory(
                     &workspace.path,
