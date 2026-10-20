@@ -2663,6 +2663,28 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_idle_wait_interruption_does_not_cancel_the_job() {
+        let mut stream = GrokStream {
+            antigravity: Some(Default::default()),
+            ..Default::default()
+        };
+        stream.feed("{\"event\":\"init\",\"conversation_id\":\"same\"}\n");
+        stream.feed(
+            "diagnostics: root agent idle; waiting up to 30m0s for 1 background task(s)\nerror: interrupted\n",
+        );
+        let error = stream
+            .error
+            .clone()
+            .expect("idle-wait interruption recorded");
+        assert!(error.contains(crate::antigravity::IDLE_WAIT_INTERRUPTED_MARKER));
+        assert!(!stream.requires_error_cancellation());
+        assert_eq!(
+            super::super::usage_limit_wait::antigravity_resumable_interruption(&error),
+            Some(super::super::usage_limit_wait::IDLE_WAIT_INTERRUPTED)
+        );
+    }
+
+    #[test]
     fn antigravity_remote_thoughts_require_matching_native_identity() {
         let mut stream = GrokStream {
             antigravity: Some(Default::default()),
