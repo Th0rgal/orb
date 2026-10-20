@@ -424,6 +424,12 @@ export default function App() {
     return MACHINES.find((m) => m.id === newMachine())?.name ?? nodeLabel(newMachine());
   };
 
+  // Harnesses without models are hidden, so connecting or removing a provider
+  // account can add or drop a whole harness, not just models.
+  const onProvidersChanged = () => { if (isConnected()) void refreshHarnessChoices(); };
+  window.addEventListener("orb:providers-refresh", onProvidersChanged);
+  onCleanup(() => window.removeEventListener("orb:providers-refresh", onProvidersChanged));
+
   // Keyed on the connection only: the body reads selected()/newMachine()/
   // fleetNodes(), and tracking those made every fleet poll re-run the
   // effect, which re-polled the fleet — an endless fetch loop.

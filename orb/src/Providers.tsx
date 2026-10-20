@@ -168,7 +168,7 @@ export function Providers() {
           <button class="s-btn" onClick={() => void reloadRemote()}>Try again</button>
         </ErrorNotice>}</Show>
       </div>}>
-        <LiveProviders list={live() ?? []} onRefresh={() => void reloadRemote()} loading={loading()} loadError={loadError()} />
+        <LiveProviders list={live() ?? []} onRefresh={() => { void reloadRemote(); window.dispatchEvent(new Event("orb:providers-refresh")); }} loading={loading()} loadError={loadError()} />
       </Show>
     </Show>
   );
@@ -269,7 +269,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
     <div class="page">
       <div class="page-head">
         <h2>Providers</h2>
-        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(swallow("providers.usage")); p.onRefresh(); window.dispatchEvent(new Event("orb:providers-refresh")); }}>
+        <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(swallow("providers.usage")); p.onRefresh(); }}>
           Refresh
         </button>
       </div>

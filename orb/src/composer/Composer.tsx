@@ -32,7 +32,7 @@ import {
   getApiUrl,
 } from "../api";
 
-import { harnessChoices, setHarnessPick, effectivePick, refreshNodeAntigravityModels } from "../harnessPick";
+import { harnessChoices, setHarnessPick, effectivePick, refreshHarnessChoices, refreshNodeAntigravityModels } from "../harnessPick";
 
 const MODELS = ["Orb Lorem 4.6 High Fast", "Ipsum 5 Max", "Dolor 4.5 Sonnet", "Auto"];
 
@@ -659,6 +659,7 @@ export function Composer(p: {
               setWhich(opening ? "harness" : null);
               // Discover newly installed CLIs without recreating the composer.
               if (opening && p.harnessIds) void refreshLocalAgents(false);
+              if (opening && isConnected()) void refreshHarnessChoices();
               if (opening && p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
             }}>
               {choice()?.backend.name ?? "Harness"} <Ic.ChevronDown size={12} />
