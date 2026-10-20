@@ -20,16 +20,23 @@ Before = `origin/master` e3f54e6c. After = this branch.
 | 1b | Enter, idle mission after a failed/interrupted turn (`no-red-flash`) | — | — | — | — | 0 | 0 | **"Remote job stopped" then "Mission failed" → none** |
 | 2 | Enter while running (queues) | 21 → 17 | 0 → 0 | 34 → 0 | 0 → 0 | 0 | 0 | none |
 | 3 | Send now from the queue | 4 → 7 | **1 (38 px down, 19 px back) → 0** | 0 → 0 | 0 → 0 | 0 | 0 | none |
-| 4 | Queued message auto-delivered at turn end | 9 → 14 | **1 → 0** | 0 → 0 | 0.0073 → 0.0073 | 0 | 0 | none |
+| 4 | Queued message auto-delivered at turn end | 9 → 4 | **1 (Working row drops 41 px, then the message lifts it 60 px) → 0** | 0 → 0 | 0.0073 → 0.0136 (see below) | 0 | 0 | none |
 | 5 | Edit a queued message, then send it | 6 → 3 | **1 → 0** | 0 → 0 | 0 → 0 | 0 | 0 | none |
 | 6 | First prompt of a new mission | 97 → 105 | 0 → 0 | 0 → 0 | 0.0039 → 0.0039 | 0 | 0 | none |
 | 7 | `/goal` | 7 → 6 | 0 → 0 | 0 → 0 | 0 → 0 | 0 | 0 | none |
 | 1c | Enter on a remote mission that needs a replacement session (prod c7592dff → 0db534df, `sidebar-replacement`) | — | — | — | — | — | **sidebar rows titled "Verity": 2 → 1** | none |
 | 8 | `/btw` side question | 19 → 14 | 0 → 0 | 0 → 0 | 0 → 0 | n/a | n/a | none |
+| 8b | `/btw` answer arriving on a completed thread (prod 9304baf4, `btw-threads`) | **never, until the tab is reopened → live** | — | — | — | — | — | none |
 
-Time-to-visible differences of a few ms are run-to-run noise (one frame).
-The remaining CLS on paths 4 and 6 (under 0.01) comes from the Working row
-and the launch banner, not from the message.
+Samples are read after each painted frame (rAF, then the next task), so
+they show what was on screen, after ResizeObserver pinning for that frame.
+Time-to-visible differences of a few tens of ms are run-to-run noise on a
+loaded machine.
+
+Path 4 keeps a CLS of about 0.014: with no user input, the dock shrinking by
+the delivered row counts as a layout shift (paths 3 and 5 have the same
+shrink but follow a click). It is one move, not a bounce; its test allows
+0.02. Path 6's 0.0039 is the launch banner.
 
 ## Causes fixed
 
@@ -56,6 +63,20 @@ and the launch banner, not from the message.
    send now announces `orb:mission-archived` for the original in the same
    batch, the sidebar drops it from every project list at once, and list reads
    in this session keep it out unless it is restored.
+
+4. **Gap between a turn and its queued follow-up (4).** When a turn ended
+   with messages queued, the Working row unmounted until Core delivered the
+   next message ~150 ms later: the transcript dropped and came back up. The
+   row now stays for up to 3 s after a turn ends while messages are queued.
+5. **Stale /btw tab (8b).** The tab read Core's threads once, when opened,
+   ordered threads by creation (the live thread 05364b53 was created before
+   older-looking ones were last used), merged server turns after local ones,
+   and a session saved as running could pin it to an old thread. It now binds
+   to the thread with the latest activity, drops a saved running session
+   Core reports finished, takes Core's turns as the record in the order they
+   were asked (local turns only while Core has no answer yet), and follows the
+   newest thread's stream while open, so a question re-dispatched on a
+   completed thread shows its answer live.
 
 ## Not consolidated
 

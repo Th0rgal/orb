@@ -303,7 +303,7 @@ export function extractBtwUserQuestion(content:string):string{
  return raw.replace(/(?:\nAttachment: [^\n]+)+\s*$/,'').trim();
 }
 
-export async function reconcileBtwServerHistory(parent:string,localHistory:SideExchange[],signal?:AbortSignal):Promise<{history:SideExchange[];activeSession?:BtwSession}>{
+export async function reconcileBtwServerHistory(parent:string,localHistory:SideExchange[],signal?:AbortSignal):Promise<{history:SideExchange[];activeSession?:BtwSession;latest?:string}>{
  const version=connectionVersion();
  let rows:Mission[]=[];
  try{
@@ -314,7 +314,7 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  const valid=rows.filter(m=>m&&typeof m.id==='string'&&Array.isArray(m.tags)&&m.tags.includes(`btw-parent:${parent}`)&&!m.tags.includes('superseded'));
  if(!valid.length)return {history:localHistory};
  const sorted=[...valid].sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
- const serverTurns:SideExchange[]=[];
+ const serverTurns:(SideExchange&{at:string})[]=[];
  let latestActive:BtwSession|undefined;
  for(const m of sorted){
   if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
@@ -322,17 +322,18 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
   try{events=await getMissionEvents(m.id);}catch{continue;}
   if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
   const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
-  let curQuestion='';
+  let curQuestion='',curAt='',curSeq=0;
   let curAnswers:string[]=[];
   const flush=()=>{
    const q=curQuestion.trim(),a=curAnswers.join('\n\n').trim();
-   if(q&&a&&!isSyntheticRemoteAssistantNote(a))serverTurns.push({id:`btw:${m.id}:${serverTurns.length}`,question:q,answer:a});
+   // Stable per question event, so a re-read never renumbers a turn.
+   if(q&&a&&!isSyntheticRemoteAssistantNote(a))serverTurns.push({id:`btw:${m.id}:${curSeq}`,question:q,answer:a,at:curAt});
    curQuestion='';curAnswers=[];
   };
   for(const ev of ordered){
    if(ev.event_type==='user_message'){
     if(curQuestion)flush();
-    curQuestion=extractBtwUserQuestion(ev.content);
+    curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
    }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
     const text=ev.content.trim();
     if(curAnswers.at(-1)!==text)curAnswers.push(text);
@@ -346,9 +347,15 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
    flush();
   }
  }
- const latest=sorted.at(-1);
- const existing=btwSession(parent);
- if(latestActive&&(!existing||!existing.active)){
+ // The newest thread is the one with the latest activity: each /btw question
+ // re-dispatches a job on the same mission, so an old thread can be the live one.
+ const activity=(m:Mission)=>(m as Mission&{last_activity_at?:string}).last_activity_at||m.updated_at||m.created_at||'';
+ const latest=[...sorted].sort((a,b)=>activity(a).localeCompare(activity(b))).at(-1);
+ let existing=btwSession(parent);
+ // A session saved as running whose thread Core reports finished (or that is
+ // no longer listed) is stale: it must not pin the tab to an old thread.
+ if(existing?.active&&!valid.some(m=>m.id===existing!.id&&ACTIVE.includes(m.status)))existing={...existing,active:false};
+ if(latestActive&&(!existing||!existing.active||existing.id!==latestActive.id)){
   save(parent,latestActive);
  }else if(latest&&RESUMABLE.includes(latest.status)&&!existing?.active){
   const local=latest.tags?.includes('placement:client')??false;
@@ -357,11 +364,11 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
    save(parent,{id:latest.id,question:lastTurn.question,harness:latest.backend||existing?.harness||'opencode',model:latest.model_override||existing?.model||'builtin/smart',local,active:false,baseline:0,placement:existing?.placement,contextVersion:existing?.contextVersion,conversationCursor:existing?.conversationCursor});
   }
  }
- if(!serverTurns.length)return {history:localHistory,activeSession:latestActive};
- const merged=[...localHistory];
- for(const turn of serverTurns){
-  const exists=merged.some(h=>h.question.trim()===turn.question.trim()&&h.answer.trim()===turn.answer.trim());
-  if(!exists)merged.push(turn);
- }
- return {history:merged.slice(-20),activeSession:latestActive};
+ if(!serverTurns.length)return {history:localHistory,activeSession:latestActive,latest:latest?.id};
+ // Core is the record: its turns across every thread, in the order they were
+ // asked. Local turns stay only when Core has no answer for that question yet.
+ serverTurns.sort((a,b)=>a.at.localeCompare(b.at));
+ const onServer=new Set(serverTurns.map(t=>t.question.trim()));
+ const merged:SideExchange[]=[...serverTurns.map(({at:_at,...turn})=>turn),...localHistory.filter(h=>!onServer.has(h.question.trim()))];
+ return {history:merged.slice(-20),activeSession:latestActive,latest:latest?.id};
 }

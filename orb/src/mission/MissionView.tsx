@@ -648,8 +648,21 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
     return false;
   };
+  // A turn ended with messages still queued: Core delivers the next one in a
+  // moment. Keep the Working row across that gap, or the transcript drops by
+  // the row and jumps back up when the delivered message lands.
+  const [queueHandover, setQueueHandover] = createSignal(0);
+  createEffect(on(busy, (now, before) => {
+    if (now) { setQueueHandover(0); return; }
+    if (!before || clientPlaced() || isFailedStatus(mission()?.status)) return;
+    if (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued)) return;
+    const until = Date.now() + 3000;
+    setQueueHandover(until);
+    setTimeout(() => { if (queueHandover() === until) setQueueHandover(0); }, 3050);
+  }, { defer: true }));
   const working = () => {
     if(sendError())return false;
+    if(queueHandover())return true;
     if(!p.id)return !p.launchError;
     if(sendingImmediate()&&!handoff())return false;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;

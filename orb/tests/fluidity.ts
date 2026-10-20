@@ -6,7 +6,7 @@ export type Fluidity={frames:number;toVisibleMs:number|null;reversals:number;max
 export async function startSampling(page:Page,text:string){
  await page.evaluate(text=>{
   const w=window as any;const frames:any[]=[];w.fl_={frames,shifts:[] as number[],t0:0};
-  try{new PerformanceObserver(list=>{for(const e of list.getEntries() as any[])if(!e.hadRecentInput&&w.fl_.t0&&e.startTime>=w.fl_.t0)w.fl_.shifts.push(e.value);}).observe({type:'layout-shift',buffered:false});}catch{}
+  try{new PerformanceObserver(list=>{for(const e of list.getEntries() as any[])if(!e.hadRecentInput&&w.fl_.t0&&e.startTime>=w.fl_.t0){w.fl_.shifts.push(e.value);if(w.flDebug)console.log('SHIFT',e.value.toFixed(4),Math.round(e.startTime-w.fl_.t0),(e.sources??[]).map((x:any)=>(x.node?.className??x.node?.nodeName??'?')+':'+Math.round(x.previousRect.y)+'>'+Math.round(x.currentRect.y)+' h'+Math.round(x.previousRect.height)+'>'+Math.round(x.currentRect.height)).join(' | '));}}).observe({type:'layout-shift',buffered:false});}catch{}
   const visible=(el:Element)=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0;};
   const has=(sel:string)=>[...document.querySelectorAll(sel)].filter(el=>visible(el)&&el.textContent?.includes(text));
   // What the eye follows: an existing transcript paragraph's screen position.
@@ -21,9 +21,9 @@ export async function startSampling(page:Page,text:string){
     side:has('.btw-thread').length,
     errors:[...document.querySelectorAll('[role=alert], .error-notice, .error, .toast.error')].filter(visible).map(el=>(el.textContent??'').trim().slice(0,100))});
   };
-  const tick=()=>{sample();w.flRaf=requestAnimationFrame(tick);};
-  // rAF only: it runs once per painted frame (~16 ms) and sees what was
-  // painted. A timer would also catch mid-frame states no one ever sees.
+  // Read after the frame is painted (rAF, then the next task): this is what
+  // the user saw, after ResizeObserver scroll pinning ran for that frame.
+  const tick=()=>{setTimeout(sample,0);w.flRaf=requestAnimationFrame(tick);};
   tick();
  },text);
 }
