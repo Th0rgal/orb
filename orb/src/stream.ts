@@ -69,7 +69,24 @@ export async function getMissionEventPage(id:string, cursor:{since?:number;befor
  if(!['true','false'].includes(more!)||((more==='true'||events.length>0)&&(nextCursor===undefined||pageMax===undefined)))throw Error('Incomplete event page cursor.');
  return {events,reset:cursor.since!==undefined&&max!==undefined&&cursor.since>max,nextCursor,pageMax,hasMore:more==='true'};
 }
-export async function getMissionEvents(id:string):Promise<StoredEvent[]>{return (await getMissionEventPage(id)).events;}
+/** The mission's stored events, oldest first, newest last. The endpoint pages
+ * 200 rows from the tail, so a single page silently drops older turns of a
+ * long thread (a /btw thread easily exceeds it with tool rows). This walks
+ * back with the exclusive `before` cursor until the history is complete, or
+ * until `enough` says the rows read so far suffice (e.g. the latest turn). */
+export async function getMissionEvents(id:string,options:{view?:'transcript'|'trace'|'history'|'all';enough?:(newestFirst:StoredEvent[])=>boolean}={}):Promise<StoredEvent[]>{
+ const bySequence=new Map<number,StoredEvent>();
+ let before:number|undefined;
+ for(let pages=0;pages<500;pages++){
+  const page=await getMissionEventPage(id,{...(options.view?{view:options.view}:{}),...(before!==undefined?{before}:{})});
+  for(const event of page.events)bySequence.set(event.sequence,event);
+  if(!page.hasMore||page.nextCursor===undefined||!page.events.length)break;
+  if(before!==undefined&&page.nextCursor>=before)throw Error('Event cursor did not advance.');
+  before=page.nextCursor;
+  if(options.enough?.([...bySequence.values()].sort((a,b)=>b.sequence-a.sequence)))break;
+ }
+ return [...bySequence.values()].sort((a,b)=>a.sequence-b.sequence);
+}
 
 /** Map a stored (replayed) event row onto the live-stream event shape. */
 export function storedToStream(ev: StoredEvent): StreamEvent | null {

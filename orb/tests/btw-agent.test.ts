@@ -35,7 +35,7 @@ it('follows multiple recovered side missions with a fresh sequence boundary',asy
  await watchBtw('recovered-parent',new AbortController().signal,event=>events.push(event));
  expect(btwSession('recovered-parent')).toMatchObject({id:'new-side',baseline:0,active:false});
  expect(btwSession('recovered-parent')?.afterSequence).toBeUndefined();
- expect(getMissionEvents).toHaveBeenCalledWith('new-side');
+ expect(getMissionEvents).toHaveBeenCalledWith('new-side',expect.objectContaining({enough:expect.any(Function)}));
  expect(streamMission).toHaveBeenCalledWith('new-side',expect.any(Function),expect.any(Function));
  expect(events.at(-1)).toEqual({type:'done',answer:'Recovered answer'});
 });
