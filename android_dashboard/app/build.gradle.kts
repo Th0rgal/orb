@@ -47,11 +47,12 @@ android {
             }
         }
         debug {
-            // Device UI checks use isolated data and leave the installed account untouched.
-            if (providers.gradleProperty("orbPreview").isPresent) {
-                applicationIdSuffix = ".preview"
-                manifestPlaceholders["orbAppLabel"] = "Orb Preview"
-            }
+            // Debug builds always install side by side with the release app
+            // (sh.sandboxed.dashboard) so a dev APK never overwrites the
+            // user's real install or its data.
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-dev"
+            manifestPlaceholders["orbAppLabel"] = "Orb (dev)"
             isMinifyEnabled = false
         }
     }
