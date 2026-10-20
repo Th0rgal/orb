@@ -38,12 +38,36 @@ if(idle){
  core.rows=[];
  core.events=[...core.events,...Array.from({length:30},(_,i)=>({id:2+i,event_id:`a${i}`,sequence:2+i,event_type:'assistant_message',timestamp:'',content:`Paragraph ${i} of a long answer that wraps over a couple of lines in the transcript column.`,metadata:{success:true}}))];
 }
+// `?long`: a transcript taller than the view, so the bottom pin is exercised.
+if(new URLSearchParams(location.search).has('long')&&!idle)core.events=[core.events[0],...[2,3,4].map(seq=>({id:seq,event_id:`l${seq}`,sequence:seq,event_type:'assistant_message',timestamp:'',content:Array.from({length:10},(_,i)=>`Earlier paragraph ${(seq-2)*10+i} of a long answer that wraps over a couple of lines in the transcript column.`).join('\n\n'),metadata:{success:true}})),...core.events.slice(1)];
 const status=(next:string,job:any,at:string)=>{core.mission={...core.mission,status:next,updated_at:at,remote_job:job};push('mission_status_changed',{status:next});};
-Object.assign(window,{core,push,status});
+// The running turn ends and Core delivers the queue head on its own.
+const deliverNext=()=>{
+ const row=core.rows[0];if(!row)return;
+ status('awaiting_user',{job_id:'old',node_id:'nippur',phase:'finished',node_state:'completed',exit_code:0},'7');
+ setTimeout(()=>{
+  core.rows=core.rows.slice(1);
+  core.events=[...core.events,{id:60,event_id:row.id,sequence:60,event_type:'user_message',timestamp:'',content:row.content,metadata:{queued:false}}];
+  push('user_message',{id:row.id,content:row.content,queued:false});
+  status('active',{job_id:'next',node_id:'nippur',phase:'running',node_state:'running'},'8');
+ },150);
+};
+Object.assign(window,{core,push,status,deliverNext});
 window.fetch=async(input,init)=>{
  const url=new URL(String(input),location.origin),path=url.pathname,method=init?.method??'GET';
  if(path==='/api/control/stream')return new Response(new ReadableStream({start(c){stream=c;}}),{headers:{'Content-Type':'text/event-stream'}});
- if(path===`/api/control/missions/${id}/events`)return (()=>{const max=String(Math.max(0,...core.events.map(e=>e.sequence)));return Response.json(core.events,{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':max,'X-Next-Cursor':max,'X-Page-Max-Sequence':max}});})();
+ if(path===`/api/control/missions/${id}/events`)return (()=>{
+  // Core pages after since_seq; an empty page carries no cursor.
+  const since=Number(url.searchParams.get('since_seq')??-1),page=core.events.filter(e=>e.sequence>since);
+  const max=String(Math.max(0,...core.events.map(e=>e.sequence)));
+  return Response.json(page,{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':max,...(page.length?{'X-Next-Cursor':max,'X-Page-Max-Sequence':max}:{})}});
+ })();
+ // /btw: Core starts a side agent mission that answers ~400 ms later.
+ if(path===`/api/control/missions/${id}/btw/agent`&&method==='POST'){(core as any).sideAt=Date.now();return Response.json({id:'side',title:'Side',backend:'opencode',status:'active',history:[],created_at:'',updated_at:'1',project:'default',tags:[`btw-parent:${id}`]});}
+ const sideDone=()=>(core as any).sideAt&&Date.now()-(core as any).sideAt>400;
+ if(path==='/api/control/missions/side')return Response.json({id:'side',title:'Side',backend:'opencode',status:sideDone()?'awaiting_user':'active',history:[],created_at:'',updated_at:sideDone()?'2':'1',project:'default',tags:[`btw-parent:${id}`]});
+ if(path==='/api/control/missions/side/events'){const ev=sideDone()?[{id:1,event_id:'s1',sequence:1,event_type:'user_message',timestamp:'',content:'Side check',metadata:{queued:false}},{id:2,event_id:'s2',sequence:2,event_type:'assistant_message',timestamp:'',content:'Side answer',metadata:{success:true}}]:[];const since=Number(url.searchParams.get('since_seq')??-1),page=ev.filter(e=>e.sequence>since);return Response.json(page,{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':String(ev.length),...(page.length?{'X-Next-Cursor':String(ev.length),'X-Page-Max-Sequence':String(ev.length)}:{})}});}
+ if(path.endsWith('/events'))return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0','X-Next-Cursor':'0','X-Page-Max-Sequence':'0'}});
  if(path===`/api/control/missions/${id}`)return Response.json(core.mission);
  if(path==='/api/control/queue')return Response.json(core.rows);
  const send=path.match(/^\/api\/control\/queue\/([^/]+)\/send-now$/);
@@ -81,6 +105,7 @@ window.fetch=async(input,init)=>{
  if(edit&&method==='DELETE'){core.rows=core.rows.filter(r=>r.id!==edit[1]);return Response.json({ok:true});}
  if(path==='/api/control/message'&&method==='POST'){
   const body=JSON.parse(String(init!.body));const mid=body.client_message_id??body.id??crypto.randomUUID();
+  if(body.mission_id==='side')return Response.json({id:mid,queued:false,message_accepted:true});
   await new Promise(r=>setTimeout(r,300));
   // `?conflict`: an older Core refusing the follow-up while an automatic
   // resume runs on the node, then accepting it.
@@ -95,6 +120,10 @@ window.fetch=async(input,init)=>{
   }
   core.rows=[...core.rows,{id:mid,mission_id:id,content:body.content,source:'remote-queue'}];
   return Response.json({id:mid,queued:true,message_accepted:true});
+ }
+ if(path===`/api/control/missions/${id}/btw`&&method==='POST'){
+  const frames=[{type:'start',model:'ask'},{type:'delta',text:'Side answer'},{type:'done',answer:'Side answer'}];
+  return new Response(new ReadableStream({async start(c){for(const f of frames){await new Promise(r=>setTimeout(r,150));c.enqueue(enc.encode(`data: ${JSON.stringify(f)}\n\n`));}c.close();}}),{headers:{'Content-Type':'text/event-stream'}});
  }
  if(path==='/api/projects')return Response.json({projects:[{slug:'default',title:'Default'}]});
  if(path==='/api/remote-nodes')return Response.json({enabled:true,nodes:[{id:'nippur',name:'Nippur'}]});

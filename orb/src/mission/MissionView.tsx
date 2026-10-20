@@ -25,7 +25,7 @@ import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } fro
 import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
-import { Show, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
+import { Show, batch, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "../icons";
 import { ForkMission } from "../ForkMission";
 import { streamMission, heldAfterHistory, type StreamEvent } from "../stream";
@@ -772,7 +772,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         rememberLaunch(replacement.id, { prompt: sent, nodeId, destination: nodeLabel(nodeId), replacement: true });
         drafts.remove(attemptId);
         if (chips === followAttach()) setFollowAttach([]);
-        p.onFork?.(replacement);
+        // Core archived this mission as superseded by the replacement: it
+        // leaves every list in the same batch the replacement joins them, so
+        // the sidebar never shows the conversation twice.
+        batch(() => {
+          window.dispatchEvent(new CustomEvent("orb:mission-archived", { detail: { id: targetMissionId } }));
+          p.onFork?.(replacement);
+        });
         return true;
       }
       const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: sent, queued: result.queued, receipt: true, attached: chips.length > 0 } };

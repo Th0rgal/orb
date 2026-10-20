@@ -136,11 +136,9 @@ it('injects the selected queued message live without deleting remaining queued m
   expect(cancel).toHaveBeenCalledWith('two');
   expect(cancel).not.toHaveBeenCalledWith('one');
   expect(screen.getByText('First')).toBeTruthy();
-  // The sent row collapses out (not counted, hidden from assistive tech) …
+  // The sent row leaves in the same batch its bubble lands: no collapse step.
   expect(screen.getByText('1 Queued')).toBeTruthy();
-  expect(screen.getByText('Steer live now').closest('li')?.getAttribute('aria-hidden')).toBe('true');
-  // … then is gone.
-  await waitFor(() => expect(screen.queryByText('Steer live now')).toBeNull());
+  expect(screen.queryByText('Steer live now')).toBeNull();
 });
 
 it('removes a queued message optimistically before the DELETE request resolves and stacks multiple pending items in order', async () => {
