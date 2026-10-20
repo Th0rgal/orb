@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { Providers } from "../src/Providers";
 import { clearConnection, setConnection } from "../src/api";
 
@@ -57,6 +57,10 @@ it("removes an API key provider from its actions menu", async () => {
     return new Response(JSON.stringify(data));
   });
   vi.stubGlobal("fetch", fetch);
+  // Harness pickers reload their model lists on this event.
+  const changed = vi.fn();
+  window.addEventListener("orb:providers-refresh", changed);
+  onTestFinished(() => window.removeEventListener("orb:providers-refresh", changed));
   render(() => <Providers />);
   fireEvent.click(await screen.findByRole("button", { name: "Actions for Meta Muse API", exact: true }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Remove provider…", exact: true }));
@@ -64,6 +68,7 @@ it("removes an API key provider from its actions menu", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Remove provider and credentials" }));
   await waitFor(() => expect(deleted).toBe(true));
   await waitFor(() => expect(screen.queryByText("Meta Muse API")).toBeNull());
+  expect(changed).toHaveBeenCalledTimes(1);
 });
 
 it("feeds a Claude authorization code to CLIProxyAPI while preserving the reconnect UUID", async () => {
