@@ -88,7 +88,7 @@ test('reopening Orb retains the provider identity, result and follow-up target',
  await expect(page.getByText('Two.',{exact:true})).toBeVisible({timeout:10000});
  await expect(page.locator('.mission-lead .provider-logo > span')).toHaveCSS('width','15px');
  await expect(page.locator('.mission-lead .provider-logo > span')).toHaveCSS('mask-image', /cursor.svg/);
- await page.getByPlaceholder('Continue this conversation…').fill('Explain the same result');
+ await page.getByPlaceholder('Send follow-up').fill('Explain the same result');
  await page.getByRole('button',{name:'Send',exact:true}).click();
  await expect.poll(()=>followups.length).toBe(1);
  expect(followups[0].mission_id).toBe(id);
@@ -225,7 +225,7 @@ test('Hermes approvals, turn-only stop and reload retain the same conversation',
  await expect(page.getByRole('button',{name:'Harmless delegated check'})).toBeVisible();
  await page.getByLabel('Model',{exact:true}).click();
  await page.getByRole('option',{name:'Profile default'}).click();
- await page.getByPlaceholder('Continue this conversation…').fill('Recall the marker');
+ await page.getByPlaceholder('Send follow-up').fill('Recall the marker');
  await page.getByRole('button',{name:'Send',exact:true}).click();
  await expect.poll(()=>actions.length).toBe(3);
  expect(actions[2].body.mission_id).toBe(id);
@@ -289,7 +289,7 @@ test('Hermes cloud agent supports custom router model selection and image attach
  await expect(page.getByText('Red pixel seen.',{exact:true})).toBeVisible();
  await expect(page.locator('.message-image img')).toBeVisible();
  await page.getByLabel('Choose images').setInputFiles({name:'followup.png',mimeType:'image/png',buffer:png});
- await page.getByPlaceholder('Continue this conversation…').fill('Compare with second image [Image #1]');
+ await page.getByPlaceholder('Send follow-up').fill('Compare with second image [Image #1]');
  await page.getByRole('button',{name:'Send',exact:true}).click();
  await expect.poll(()=>followups.length).toBe(1);
  expect(followups[0].cloud_model).toBe('builtin/private');
@@ -468,7 +468,7 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
  await page.getByRole('option',{name:'Claude Opus 4.6 (Anthropic) · anthropic/claude-opus-4-6'}).click();
  await page.getByLabel('Effort',{exact:true}).click();
  await page.getByRole('option',{name:'Max',exact:true}).click();
- await page.getByPlaceholder('Continue this conversation…').fill('Deep dive with Opus Max');
+ await page.getByPlaceholder('Send follow-up').fill('Deep dive with Opus Max');
  await page.getByRole('button',{name:'Send',exact:true}).click();
  await expect.poll(()=>followups.length).toBe(1);
  expect(followups[0].mission_id).toBe(id);

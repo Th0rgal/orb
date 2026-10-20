@@ -12,13 +12,16 @@ const execution = (t: object) => ({mission_id: 'm', revision: 1, selection: {pro
 it('shows that a ChatGPT turn is starting, then thinking, with elapsed time', async () => {
   fakes.execution.mockResolvedValue(execution(turn('submitting')));
   render(() => <CloudConversation id="m" />);
-  expect((await screen.findByText(/Opening ChatGPT… · 0:0\d/)).getAttribute('role')).toBe('status');
+  // The mission Working row: the step in a status, the elapsed time beside it.
+  const status = await screen.findByText('Opening ChatGPT…');
+  expect(status.getAttribute('role')).toBe('status');
+  expect(status.closest('.st-working')?.querySelector('.st-working-time')).toBeTruthy();
 });
 
 it('says Writing once a partial answer streams, and stops when the answer is complete', async () => {
   fakes.execution.mockResolvedValue(execution(turn('running', {result: 'Question 1…'})));
   const view = render(() => <CloudConversation id="m" />);
-  await screen.findByText(/Writing… · /);
+  await screen.findByText('Writing…');
   expect(screen.getByText('Question 1…')).toBeTruthy();
   view.unmount();
   fakes.execution.mockResolvedValue(execution(turn('response_complete', {result: 'Question 1 ?'})));
