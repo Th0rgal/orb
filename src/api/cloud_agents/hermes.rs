@@ -36,6 +36,12 @@ impl Hermes {
             key: system::hermes_api_server_key_for_config(config).await?,
         })
     }
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, format!("{}{}", self.url, path))
+            .bearer_auth(&self.key)
+            .header(reqwest::header::ACCEPT, "application/json")
+    }
     async fn call(
         &self,
         method: reqwest::Method,
@@ -43,11 +49,7 @@ impl Hermes {
         body: Option<Value>,
         key: Option<&str>,
     ) -> Result<Value, String> {
-        let mut req = self
-            .client
-            .request(method, format!("{}{}", self.url, path))
-            .bearer_auth(&self.key)
-            .header(reqwest::header::ACCEPT, "application/json");
+        let mut req = self.request(method, path);
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -59,16 +61,7 @@ impl Hermes {
             .await
             .map_err(|_| "Hermes connection lost; execution will be reconciled")?;
         if !response.status().is_success() {
-            return Err(match response.status().as_u16() {
-                400 | 422 => {
-                    "Hermes rejected this turn; check the selected model and profile configuration"
-                }
-                401 | 403 => "Hermes authorization failed; reconnect the profile",
-                404 => "Hermes execution or capability is unavailable; no replacement was launched",
-                409 => "Hermes request conflicts with an existing operation",
-                _ => "Hermes request failed; execution will be reconciled",
-            }
-            .into());
+            return Err(status_error(response.status().as_u16()));
         }
         response
             .json()
@@ -85,10 +78,7 @@ impl Hermes {
     /// complete from the status output instead of failing.
     async fn events_page(&self, path: &str, status: &Value, cursor: u64) -> Result<Value, String> {
         let response = self
-            .client
-            .get(format!("{}{}", self.url, path))
-            .bearer_auth(&self.key)
-            .header(reqwest::header::ACCEPT, "application/json")
+            .request(reqwest::Method::GET, path)
             .send()
             .await
             .map_err(|_| "Hermes connection lost; execution will be reconciled")?;
@@ -128,13 +118,20 @@ fn events_page_from_response(
         // 409 `run_replay_unsupported`: a run admitted before the gateway kept an event journal.
         (200..=299, _) | (404 | 409, _) if run_is_terminal_with_output(status) => Ok(empty()),
         (200..=299, _) => Err("Invalid Hermes response".into()),
-        (404, _) => {
-            Err("Hermes execution or capability is unavailable; no replacement was launched".into())
-        }
-        (401 | 403, _) => Err("Hermes authorization failed; reconnect the profile".into()),
-        (409, _) => Err("Hermes request conflicts with an existing operation".into()),
-        _ => Err("Hermes request failed; execution will be reconciled".into()),
+        _ => Err(status_error(code)),
     }
+}
+fn status_error(code: u16) -> String {
+    match code {
+        400 | 422 => {
+            "Hermes rejected this turn; check the selected model and profile configuration"
+        }
+        401 | 403 => "Hermes authorization failed; reconnect the profile",
+        404 => "Hermes execution or capability is unavailable; no replacement was launched",
+        409 => "Hermes request conflicts with an existing operation",
+        _ => "Hermes request failed; execution will be reconciled",
+    }
+    .into()
 }
 async fn probe(h: &Hermes) -> Result<(), String> {
     tokio::time::timeout(Duration::from_millis(750), h.capabilities())
