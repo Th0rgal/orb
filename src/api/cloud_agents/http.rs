@@ -28,6 +28,9 @@ pub async fn accounts(
 ) -> Json<Vec<Account>> {
     let connected =
         account_allowed(&user.id) && cursor::Cursor::from_account("cursor-default").is_ok();
+    let grok_allowed = std::env::var("GROK_BOT_OWNER").as_deref() == Ok(user.id.as_str())
+        && std::env::var("GROK_BOT_VALIDATED").as_deref() == Ok("1");
+    let grok_connected = grok::Grok::from_account("grok-default").is_ok();
     let mut accounts = vec![
         Account {
             id: "chatgpt-pool".into(),
@@ -44,11 +47,13 @@ pub async fn accounts(
             id: "grok-default".into(),
             provider: Provider::GrokBot,
             label: "Grok Bot".into(),
-            available: std::env::var("GROK_BOT_OWNER").as_deref() == Ok(user.id.as_str())
-                && std::env::var("GROK_BOT_VALIDATED").as_deref() == Ok("1")
-                && grok::Grok::from_account("grok-default").is_ok(),
+            available: grok_allowed && grok_connected,
             experimental: true,
-            reason: Some("Experimental connector. Bots on this account share one computer".into()),
+            reason: Some(if grok_allowed && !grok_connected {
+                "Grok Bot credential is missing or expired: re-export the desktop session".into()
+            } else {
+                "Experimental connector. Bots on this account share one computer".into()
+            }),
             capabilities: Capabilities {
                 follow_up: true,
                 cancel: true,
