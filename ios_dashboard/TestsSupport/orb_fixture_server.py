@@ -14,13 +14,15 @@ RECEIPTS = {}
 PROVIDERS = {}
 CORDONED = False
 INBOX_STATE = {}
+QUEUE = []
+QUEUE_EVENTS = {}
 PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
 PROMPT = "Please test the new interface"
 def reset():
     global CORDONED
     CORDONED = False
-    MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
+    QUEUE.clear(); QUEUE_EVENTS.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
     PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
@@ -35,7 +37,23 @@ def reset():
     # task list in harness vocabulary, edits, a running command and a linked PR.
     for mid, title, status in [('agent-work', 'Fix the iOS build', 'active'), ('agent-done', 'Ship the iOS fix', 'completed')]:
         MISSIONS[mid]=dict(id=mid,title=title,status=status,project='orb-test',backend='claudecode',tags=[],model_override='test-model',github_pr='Th0rgal/orb#1132',history=[dict(role='user',content='Set up CI for the app'),dict(role='assistant',content='CI is set up.'),dict(role='user',content='Now fix the build')]+([dict(role='assistant',content='The build is fixed and the PR is open.')] if status=='completed' else []),created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:01:00Z')
-reset()
+    # A running turn: a follow-up sent now is queued, then Core delivers it.
+    MISSIONS['queue-run']=dict(id='queue-run',title='Queue while running',status='running',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='first message')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:05:00Z')
+    QUEUE_EVENTS['queue-run']=[]
+    qadd('queue-run','user_message','first message','first-id')
+
+def qadd(mid, kind, content, event_id=None):
+    rows=QUEUE_EVENTS[mid]; n=len(rows)+1
+    rows.append(dict(id=n,mission_id=mid,sequence=n,event_type=kind,timestamp=iso(time.time()),event_id=event_id or f'{mid}-{n}',tool_call_id=None,tool_name=None,content=content,metadata={}))
+
+def deliver_queue():
+    """queue-run: the current turn ends; Core delivers the queued message, the agent answers, the mission completes."""
+    for item in list(QUEUE):
+        if time.time() < item['deliver_at']: continue
+        QUEUE.remove(item); m=MISSIONS[item['mission_id']]
+        m['history'] += [{'role':'assistant','content':'first reply'},{'role':'user','content':item['content']},{'role':'assistant','content':'QUEUED_REPLY_OK'}]
+        qadd(m['id'],'assistant_message','first reply'); qadd(m['id'],'user_message',item['content'],item['id']); qadd(m['id'],'assistant_message','QUEUED_REPLY_OK')
+        m['status']='completed'
 
 def iso(t): return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))
 def agent_events(mid):
@@ -62,6 +80,8 @@ def agent_events(mid):
         add('tool_result','BUILD SUCCEEDED','Bash','b1'); add('assistant_message','The build is fixed and the PR is open.')
     return rows
 
+reset()
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def send(self, value, status=200):
@@ -75,6 +95,11 @@ class Handler(BaseHTTPRequestHandler):
         if (REQUIRE_AUTH or EXPIRE_SESSION) and self.headers.get('Authorization') != 'Bearer '+VALID_TOKEN:
             REQUIRE_AUTH = True
             return self.send({'error':'invalid or expired token'},401)
+        deliver_queue()
+        if p=='/api/control/queue': return self.send([{k:v for k,v in q.items() if k!='deliver_at'} for q in QUEUE])
+        if p.endswith('/events') and p.split('/')[4] in QUEUE_EVENTS:
+            since=int(parse_qs(u.query).get('since_seq',['0'])[0] or 0)
+            return self.send([e for e in QUEUE_EVENTS[p.split('/')[4]] if e['sequence']>since])
         if p=='/api/control/inbox-state': return self.send(INBOX_STATE)
         if p=='/api/ai/providers': return self.send(list(PROVIDERS.values()))
         if p=='/api/ai/providers/usage': return self.send({'entries': {'fixture-provider': {'provider_type':'openai', 'codex_primary_used_percent':25}}})
@@ -163,6 +188,9 @@ class Handler(BaseHTTPRequestHandler):
             mid=str(uuid.uuid4()); cloud=body.get('cloud'); m=dict(body,id=mid,status='awaiting_user',backend=('cloud_'+cloud['provider']) if cloud else body['backend'],history=[{'role':'user','content':body['prompt']},{'role':'assistant','content':'**ORB_TEST_OK**\n\nA response from the test agent.'}])
             if cloud: m['cloud_execution']={'mission_id':mid,'selection':cloud,'turns':[{'key':key,'prompt':body['prompt'],'result':'**ORB_TEST_OK**','phase':'response_complete','artifacts':[],'branches':[]}]}
             MISSIONS[mid]=m; RECEIPTS[key]=m; return self.send(m)
+        if p=='/api/control/message' and body.get('queue_followup') and MISSIONS[body['mission_id']]['status']=='running':
+            QUEUE.append(dict(id=key,mission_id=body['mission_id'],content=body['content'],source='remote-queue',deliver_at=time.time()+4))
+            RECEIPTS[key]={'id':key,'queued':True}; return self.send(RECEIPTS[key])
         if p=='/api/control/message':
             m=MISSIONS[body['mission_id']]; m['history'] += [{'role':'user','content':body['content']},{'role':'assistant','content':'FOLLOWUP_OK'}]
             if 'cloud_execution' in m: m['cloud_execution']['turns'].append({'key':key,'prompt':body['content'],'result':'FOLLOWUP_OK','phase':'response_complete','artifacts':[],'branches':[]})

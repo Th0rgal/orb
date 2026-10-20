@@ -10,6 +10,15 @@ struct OrbQueuedRow: Equatable, Identifiable {
     /// Optimistic: posted, Core has not listed it yet. Not actionable.
     var sending = false
     var queueError: String? = nil
+    /// When Core accepted this optimistic row into its queue (`queued: true`).
+    var postedAt: Date? = nil
+}
+
+/// A `user_message` Core delivered into the transcript.
+struct OrbDeliveredMessage: Equatable {
+    var id: String?
+    var content: String
+    var sequence: Int64
 }
 
 /// Core's durable follow-up inbox merged with optimistic sends, in-place edits and removals.
@@ -21,6 +30,9 @@ struct OrbFollowUpQueue: Equatable {
     var hidden: Set<String> = []
     /// Ids already shown as delivered in the transcript.
     var delivered: Set<String> = []
+    /// Last event sequence known when a row first appeared locally; a content-only
+    /// match must come from a later `user_message` (an older identical message does not count).
+    var seenAfter: [String: Int64] = [:]
 
     var rows: [OrbQueuedRow] {
         var seen = Set<String>()
@@ -37,24 +49,62 @@ struct OrbFollowUpQueue: Equatable {
 
     func row(_ id: String) -> OrbQueuedRow? { rows.first { $0.id == id } }
 
-    func withServer(_ rows: [OrbQueuedRow]) -> OrbFollowUpQueue {
+    /// Core's queue as read by a request started at `fetchedAt`. An accepted
+    /// optimistic row Core no longer lists after it was posted was delivered (or
+    /// removed) and leaves the drawer; a row still being posted stays.
+    func withServer(_ rows: [OrbQueuedRow], fetchedAt: Date = .distantPast, lastSequence: Int64? = nil) -> OrbFollowUpQueue {
         var next = self
         let listed = Set(rows.map(\.id))
         next.server = rows.map { var r = $0; r.sending = false; return r }
-        next.pending = pending.filter { !listed.contains($0.id) }
+        next.pending = pending.filter { row in
+            if listed.contains(row.id) { return false }
+            if let posted = row.postedAt, !row.sending, posted < fetchedAt { return false }
+            return true
+        }
         next.hidden = hidden.filter { listed.contains($0) }
+        for row in rows where next.seenAfter[row.id] == nil { next.seenAfter[row.id] = lastSequence ?? 0 }
+        let live = Set(next.server.map(\.id) + next.pending.map(\.id))
+        next.seenAfter = next.seenAfter.filter { live.contains($0.key) }
         return next
     }
 
-    func enqueue(_ id: String, _ content: String) -> OrbFollowUpQueue {
+    /// A queued row becomes the transcript bubble once Core delivers it: matched by
+    /// client_message_id (the event id), else by content in a later user_message.
+    func reconciled(with messages: [OrbDeliveredMessage]) -> OrbFollowUpQueue {
+        guard !messages.isEmpty else { return self }
+        var next = self
+        let ids = Set(messages.compactMap(\.id))
+        var used = Set<Int64>()
+        for row in rows {
+            if ids.contains(row.id) {
+                next.delivered.insert(row.id)
+                if let m = messages.first(where: { $0.id == row.id }) { used.insert(m.sequence) }
+            }
+        }
+        let known = Set(server.map(\.id) + pending.map(\.id))
+        let content = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for row in rows where !next.delivered.contains(row.id) {
+            let after = seenAfter[row.id] ?? Int64.max
+            if let m = messages.first(where: { m in
+                !used.contains(m.sequence) && m.sequence > after && !(m.id.map(known.contains) ?? false) && content(m.content) == content(row.content)
+            }) {
+                used.insert(m.sequence)
+                next.delivered.insert(row.id)
+            }
+        }
+        return next
+    }
+
+    func enqueue(_ id: String, _ content: String, lastSequence: Int64? = nil) -> OrbFollowUpQueue {
         var next = self
         next.pending = pending.filter { $0.id != id } + [OrbQueuedRow(id: id, content: content, sending: true)]
+        next.seenAfter[id] = lastSequence ?? 0
         return next
     }
 
-    func posted(_ id: String, queued: Bool) -> OrbFollowUpQueue {
+    func posted(_ id: String, queued: Bool, at date: Date = Date()) -> OrbFollowUpQueue {
         var next = self
-        if queued { next.pending = pending.map { var r = $0; if r.id == id { r.sending = false }; return r } }
+        if queued { next.pending = pending.map { var r = $0; if r.id == id { r.sending = false; r.postedAt = date }; return r } }
         else { next.pending = pending.filter { $0.id != id } }
         return next
     }

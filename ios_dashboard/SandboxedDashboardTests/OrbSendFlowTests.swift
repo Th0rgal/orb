@@ -95,4 +95,39 @@ final class OrbSendFlowTests: XCTestCase {
         XCTAssertEqual(OrbSendFlow.dedupeLiveText("step 1 done\nstep 3", stored: ["step 1 done"]), "step 3")
         XCTAssertEqual(OrbSendFlow.dedupeLiveText("new text", stored: ["older reply"]), "new text")
     }
+
+    // Queue while running -> Core delivers -> the row becomes the transcript bubble.
+    func testDeliveredByClientMessageIdLeavesQueue() {
+        var q = OrbFollowUpQueue().enqueue("c1", "third message while running", lastSequence: 10).posted("c1", queued: true)
+        q = q.withServer([OrbQueuedRow(id: "c1", content: "third message while running")], fetchedAt: Date(), lastSequence: 10)
+        XCTAssertEqual(ids(q), ["c1"])
+        // Stale queue read still lists it, but the user_message event arrived.
+        q = q.reconciled(with: [OrbDeliveredMessage(id: "c1", content: "edited elsewhere", sequence: 12)])
+        XCTAssertEqual(q.count, 0)
+        q = q.withServer([OrbQueuedRow(id: "c1", content: "third message while running")])
+        XCTAssertEqual(q.count, 0)
+    }
+
+    func testDeliveredByContentFallbackOnlyForLaterEvents() {
+        let q = OrbFollowUpQueue().enqueue("c1", "ok", lastSequence: 20).posted("c1", queued: true)
+        XCTAssertEqual(q.reconciled(with: [OrbDeliveredMessage(id: nil, content: "ok", sequence: 5)]).count, 1, "an older identical message is not this delivery")
+        XCTAssertEqual(q.reconciled(with: [OrbDeliveredMessage(id: "server-id", content: " ok ", sequence: 21)]).count, 0)
+        // One event delivers one row.
+        let two = q.enqueue("c2", "ok", lastSequence: 20).posted("c2", queued: true)
+        XCTAssertEqual(ids(two.reconciled(with: [OrbDeliveredMessage(id: nil, content: "ok", sequence: 21)])), ["c2"])
+    }
+
+    func testQueueReadWithoutAcceptedRowRemovesIt() {
+        let posted = Date()
+        let q = OrbFollowUpQueue().enqueue("c1", "x").posted("c1", queued: true, at: posted)
+        // A read that started before Core accepted it may not list it yet.
+        XCTAssertEqual(q.withServer([], fetchedAt: posted.addingTimeInterval(-1)).count, 1)
+        // A later read that no longer lists it: delivered or removed.
+        XCTAssertEqual(q.withServer([], fetchedAt: posted.addingTimeInterval(1)).count, 0)
+        // A row still being posted stays.
+        XCTAssertEqual(OrbFollowUpQueue().enqueue("c2", "y").withServer([], fetchedAt: Date().addingTimeInterval(5)).count, 1)
+        // A server row that disappears is gone.
+        let listed = OrbFollowUpQueue().withServer([OrbQueuedRow(id: "s", content: "z")])
+        XCTAssertEqual(listed.withServer([], fetchedAt: Date()).count, 0)
+    }
 }
