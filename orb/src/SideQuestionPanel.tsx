@@ -30,7 +30,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [turnId,setTurnId]=createSignal(crypto.randomUUID());
  const [preparing,setPreparing]=createSignal(false);
  const [runStatus,setRunStatus]=createSignal('');
- const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
+ const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[narration,setNarration]=createSignal<string[]>([]),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
  let abort:AbortController|undefined;
  let launchAbort:AbortController|undefined;
  let scroll:HTMLDivElement|undefined;
@@ -69,8 +69,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(stale||controller.signal.aborted)return;
     if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
     if(event.type==='status')setRunStatus(event.text);
-    if(event.type==='snapshot')setAnswer(event.text);
-    if(event.type==='done'){setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
+    if(event.type==='snapshot'){setAnswer(event.text);setNarration(event.narration??[]);}
+    if(event.type==='done'){const narrated=event.narration?.length?{narration:event.narration}:{};setHistory(rows=>[...rows,{id:turnId(),question:agent.question,answer:event.answer,...narrated}].slice(-20));setBusy(false);queueMicrotask(sendNext);}
    }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(e instanceof Error?e.message:String(e));setBusy(false);}});
   };
   if(peekSideQuestionOpen(current)){setOpen(true);side?.show();}
@@ -95,8 +95,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   const lastAnswer=lastSaved?.answer;
   const emptyReply=lastAnswer!==undefined&&(lastAnswer==='The side agent finished without a text response.'||!lastAnswer.replace(/[.\s…]/g,''));
   const syntheticReply=lastAnswer!==undefined&&isSyntheticRemoteAssistantNote(lastAnswer)&&!saved?.pending;
-  if(emptyReply){setHistory(rows=>rows.slice(0,-1));setQuestion(lastSaved!.question);setAnswer('');}
-  if(syntheticReply){setQuestion(lastSaved!.question);setAnswer('');if(!agent?.active)setError('Side question was interrupted before the agent answered. Retry to request a complete answer.');}
+  if(emptyReply){setHistory(rows=>rows.slice(0,-1));setQuestion(lastSaved!.question);setAnswer('');setNarration([]);}
+  if(syntheticReply){setQuestion(lastSaved!.question);setAnswer('');setNarration([]);if(!agent?.active)setError('Side question was interrupted before the agent answered. Retry to request a complete answer.');}
   if(launching){
    setBusy(true);setRunStatus('Starting side agent…');
    void launching.then(()=>{
@@ -133,7 +133,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(changed)setHistory(reconciled.history);
     const pendingQ=question().trim();
     if(pendingQ&&error()&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
-     setError('');setQuestion('');setAnswer('');
+     setError('');setQuestion('');setAnswer('');setNarration([]);
     }
     if(reconciled.activeSession&&!busy()){
      watchActive(reconciled.activeSession);
@@ -176,18 +176,18 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   if(current===key()){
    setPendingAttachments(attachments);
-   setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setError('');setDraft('');
+   setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setDraft('');
    revealSentQuestion();
   }
   void askBtwAgent(missionId,text,context,history(),controller.signal,event=>{
    if(current!==key()||controller.signal.aborted)return;
    if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
     if(event.type==='status')setRunStatus(event.text);
-   if(event.type==='snapshot')setAnswer(event.text);
+   if(event.type==='snapshot'){setAnswer(event.text);setNarration(event.narration??[]);}
    if(event.type==='delta')setAnswer(value=>value+event.text);
    if(event.type==='done'){
-    setAnswer(event.answer);
-    const next=[...history(),{id:activeTurnId,question:text,answer:event.answer,attachments}].slice(-20);
+    setAnswer(event.answer);setNarration(event.narration??[]);
+    const next=[...history(),{id:activeTurnId,question:text,answer:event.answer,...(event.narration?.length?{narration:event.narration}:{}),attachments}].slice(-20);
     setHistory(next);setBusy(false);setRunStatus('');
    }
   },attachments,launchController.signal).catch(e=>{if(current===key()&&!controller.signal.aborted)setError(e instanceof Error?e.message:String(e));})
@@ -205,18 +205,18 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  onCleanup(()=>window.removeEventListener('keydown',escape));
  const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setBusy(false);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
  const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
- const dismiss=()=>{setError('');setQuestion('');setAnswer('');setPendingAttachments([]);queueMicrotask(sendNext);};
+ const dismiss=()=>{setError('');setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
  // Reconcile the same turn through preparation, streaming and persistence.
  const [turns,setTurns]=createStore<Array<SideExchange & {id:string;pending?:boolean;error?:string}>>([]);
  createEffect(()=>{
   const rows=history().map((row,index)=>({...row,id:row.id??`saved:${loadedKey()}:${index}`}));
-  if((preparing()||busy()||error())&&!rows.some(row=>row.id===turnId()))rows.push({id:turnId(),question:question(),answer:answer(),attachments:pendingAttachments(),pending:preparing()||busy(),error:error()} as typeof rows[number]);
+  if((preparing()||busy()||error())&&!rows.some(row=>row.id===turnId()))rows.push({id:turnId(),question:question(),answer:answer(),narration:narration(),attachments:pendingAttachments(),pending:preparing()||busy(),error:error()} as typeof rows[number]);
   setTurns(reconcile(rows,{key:'id'}));
  });
  const prepareSend=(draft:{text:string}|null)=>{
   if(!draft){setPreparing(false);return;}
   if(busy())return;
-  setTurnId(crypto.randomUUID());setQuestion(draft.text);setAnswer('');setError('');setPreparing(true);
+  setTurnId(crypto.randomUUID());setQuestion(draft.text);setAnswer('');setNarration([]);setError('');setPreparing(true);
   setOpen(true);side?.show();revealSentQuestion();
  };
  let inline!:HTMLDivElement;
@@ -234,6 +234,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      return <article data-side-turn={exchange.id}>
      <UserTurn text={exchange.question} pending={exchange.pending&&!exchange.answer} onSend={text=>ask(text,[],[],exchange.attachments??[])}/>
      <Show when={exchange.pending}><ThoughtSequence items={btwThoughts(p.mission)}/></Show>
+     <Show when={exchange.narration?.length}><details class="btw-narration"><summary>{exchange.narration!.length===1?'1 progress update':`${exchange.narration!.length} progress updates`}</summary><For each={exchange.narration}>{note=><MdView compact text={note}/>}</For></details></Show>
      <Show when={content().text}><MdView compact text={content().text}/></Show>
      <Show when={content().details}><details class="legacy-log"><summary>Original execution log</summary><pre>{content().details}</pre></details></Show>
      <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>

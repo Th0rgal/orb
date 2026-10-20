@@ -168,3 +168,32 @@ test('side question toggles with Meta+Shift+J and shares expand and restore shor
  await expect(page.locator('main')).toBeVisible();
  await expect(page.locator('.btw-sidebar')).toBeVisible();
 });
+
+test('side answer shows the final message and folds progress narration',async({page})=>{
+ const mission=(id:string)=>({id,status:id==='browser-fixture'?'active':'awaiting_user',title:'Fixture',history:[],tags:[],created_at:'',updated_at:''});
+ const events:any[]=[];
+ await page.route('**/api/**',async route=>{
+  const path=new URL(route.request().url()).pathname;
+  if(path.endsWith('/btw/agent')){
+   events.push(
+    {id:1,sequence:1,event_type:'assistant_message_canonical',content:"Je vais lire le skill `research-boss`.",timestamp:'',metadata:{bubble_id:'antigravity:c:j:1',canonical_from:'text_op',revision:1}},
+    {id:2,sequence:2,event_type:'assistant_message_canonical',content:'Inspectons les événements.',timestamp:'',metadata:{bubble_id:'antigravity:c:j:2',canonical_from:'text_op',revision:1}},
+    {id:3,sequence:3,event_type:'assistant_message',content:"Voici l'analyse sur pièces : tout est câblé.",timestamp:''});
+   return route.fulfill({json:mission('side-child')});
+  }
+  if(path.endsWith('/events'))return route.fulfill(eventPage(route,events));
+  if(path.includes('/missions/'))return route.fulfill({json:mission(path.split('/').at(-1)!)});
+  return route.fulfill({json:[]});
+ });
+ await page.goto('/tests/side-questions.html');
+ await page.getByPlaceholder('Send follow-up').fill('/btw analyse la campagne');
+ await page.getByTitle('Ask side question',{exact:true}).click();
+ const turn=page.locator('.btw-thread article').last();
+ await expect(turn.getByText("Voici l'analyse sur pièces",{exact:false})).toBeVisible();
+ const fold=turn.locator('details.btw-narration');
+ await expect(fold.locator('summary')).toHaveText('2 progress updates');
+ await expect(fold.getByText('Inspectons les événements.')).toBeHidden();
+ await expect(turn.locator('.md').last()).not.toContainText('Inspectons');
+ await fold.locator('summary').click();
+ await expect(fold.getByText('Inspectons les événements.')).toBeVisible();
+});
