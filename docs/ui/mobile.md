@@ -35,11 +35,11 @@ app's account and drafts:
 ```sh
 cd android_dashboard
 adb reverse tcp:18766 tcp:18766
-ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew -PorbPreview \
+ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew \
   :app:connectedDebugAndroidTest --max-workers=1
 ```
 
-`OrbPolishTest` uses UI Automator and requires the `.preview` application ID.
+`OrbPolishTest` uses UI Automator and the `.preview` application ID that every debug build carries.
 It exercises Inbox, preview, an unsent reply, the conversation composer and the
 model picker. Screenshots are saved in the preview app's external files directory.
 Unlock the device before running these visual checks. Do not uninstall or clear the normal app for visual testing.

@@ -22,8 +22,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,6 +33,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.animation.animateContentSize
+import androidx.compose.ui.platform.testTag
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -337,11 +338,17 @@ object OrbTimelineBuilder {
             )
         }
 
-        if (streamingText.trim().isNotEmpty()) {
+        // Live text the stored history already holds is not shown twice (reloads, SSE replays).
+        val liveText = OrbSendFlow.dedupeLiveText(
+            streamingText,
+            deduplicatedMessages.filter { (it.str("role", "sender", "author") ?: "assistant").lowercase() in setOf("assistant", "agent") }
+                .map { it.str("content", "text", "message") ?: "" }
+        )
+        if (liveText.trim().isNotEmpty()) {
             turns.add(
                 OrbTurn.Assistant(
                     id = "streaming-assistant",
-                    text = streamingText,
+                    text = liveText,
                     timestamp = null,
                     isStreaming = true
                 )
@@ -493,8 +500,15 @@ fun OrbConversationPage(
     var inputText by remember { mutableStateOf("") }
     var composeMode by remember { mutableStateOf(OrbComposeMode.Message) }
     var showModePicker by remember { mutableStateOf(false) }
-    val queuedMessages = remember { mutableStateListOf<String>() }
-    var showQueuedDrawer by remember { mutableStateOf(false) }
+    // Core's durable follow-up queue merged with optimistic sends/edits (OrbSendFlow.kt).
+    var followUps by remember(missionId) { mutableStateOf(OrbFollowUpQueue()) }
+    var showQueuedDrawer by remember { mutableStateOf(true) }
+    /** Queued follow-up being edited in the composer (edit in place on send). */
+    var editingQueuedId by remember(missionId) { mutableStateOf<String?>(null) }
+    /** Send now in flight: one continuous Sending… → Working… state, Stop kept. */
+    var handoff by remember(missionId) { mutableStateOf<OrbHandoff?>(null) }
+    val handoffTracker = remember(missionId) { OrbHandoffTracker() }
+    val reducedMotion = orbReducedMotion()
     val pendingAttachments = remember { mutableStateListOf<OrbPendingAttachment>() }
 
     var isSending by remember { mutableStateOf(false) }
@@ -542,8 +556,24 @@ fun OrbConversationPage(
         else allMissions.firstOrNull { it.id == missionId } ?: currentMission
     }
 
-    val isLive = remember(liveRow, isSending) {
-        isSending || (liveRow != null && OrbMissionTree.isLive(liveRow))
+    val handoffActive = OrbHandoff.pending(liveRow?.str("status", "state"), handoff, System.currentTimeMillis())
+    val isLive = remember(liveRow, isSending, handoffActive) {
+        isSending || handoffActive || (liveRow != null && OrbMissionTree.isLive(liveRow))
+    }
+
+    // End the handoff once the new turn runs (or a failure shows), and after the 30 s fallback.
+    LaunchedEffect(liveRow, handoff) {
+        val h = handoff ?: run { handoffTracker.reset(); return@LaunchedEffect }
+        val job = liveRow?.dict("remote_job")
+        val jobEnded = job != null && (OrbJSON.str(job, "finished_at") != null || OrbJSON.str(job, "terminal_reason") != null)
+        if (handoffTracker.observe(h, liveRow?.str("status", "state"), job?.let { OrbJSON.str(it, "job_id") }, jobEnded)) {
+            handoff = null
+        }
+    }
+    LaunchedEffect(handoff) {
+        val h = handoff ?: return@LaunchedEffect
+        delay(OrbHandoff.TIMEOUT_MS + 50)
+        if (handoff == h) handoff = null
     }
 
     val chainIds = remember(missionId, allMissions) {
@@ -697,6 +727,21 @@ fun OrbConversationPage(
         }
     }
 
+    suspend fun refreshFollowUps(id: String) {
+        val rows = orbTry(OrbLog.Category.Network, "/api/control/queue") {
+            OrbJSON.dictList(core.request("/api/control/queue?mission_id=${core.encodeComponent(id)}"))
+        }.getOrNull() ?: return
+        if (id == missionId) followUps = followUps.withServer(OrbFollowUpQueue.parse(rows, id))
+    }
+
+    LaunchedEffect(missionId) {
+        val id = missionId ?: return@LaunchedEffect
+        while (isActive) {
+            refreshFollowUps(id)
+            delay(if (isLive || followUps.count > 0) 3000L else 10000L)
+        }
+    }
+
     var latestTurns by remember { mutableStateOf<List<OrbTurn>>(emptyList()) }
 
     // Client-side slash commands (/btw, /fork, /clone, /pause), mirroring Orb.
@@ -762,6 +807,96 @@ fun OrbConversationPage(
         }
     }
 
+    /** Optimistic follow-up while a turn runs: the row shows now, Core queues it durably. */
+    fun queueFollowUp(id: String, content: String) {
+        val clientId = UUID.randomUUID().toString()
+        followUps = followUps.enqueue(clientId, content)
+        scope.launch {
+            try {
+                val receipt = OrbJSON.dict(
+                    core.request(
+                        "/api/control/message",
+                        method = "POST",
+                        body = mapOf("content" to content, "mission_id" to id, "queue_followup" to true, "client_message_id" to clientId)
+                    )
+                )
+                if (receipt?.get("message_accepted") == false) throw OrbError("Message was not accepted.")
+                val queued = receipt?.get("queued") == true
+                val receiptId = OrbJSON.str(receipt, "id") ?: clientId
+                followUps = if (receiptId == clientId) followUps.posted(clientId, queued)
+                else followUps.postFailed(clientId).let { if (queued) it.enqueue(receiptId, content).posted(receiptId, true) else it }
+                if (!queued) loadHistory(id)
+                refreshFollowUps(id)
+            } catch (e: Throwable) {
+                followUps = followUps.postFailed(clientId)
+                inputText = inputText.ifEmpty { content }
+                errorMessage = e.message ?: "Couldn't queue the message. Your text is back in the composer."
+            }
+        }
+    }
+
+    /** Edit in place (PATCH, same id and position); falls back to replace on 404/405. */
+    fun editQueued(queueId: String, content: String) {
+        val id = missionId ?: return
+        editingQueuedId = null
+        inputText = ""
+        val before = followUps.row(queueId)
+        if (before == null) {
+            errorMessage = "This message was already sent. Your edit was not applied."
+            return
+        }
+        followUps = followUps.edit(queueId, content)
+        scope.launch {
+            val status = try {
+                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "PATCH", body = mapOf("content" to content))
+                200
+            } catch (e: OrbError) {
+                e.status ?: -1
+            } catch (e: Throwable) {
+                -1
+            }
+            when (OrbSendFlow.editOutcome(status.takeIf { it >= 0 })) {
+                OrbEditOutcome.Edited -> followUps = followUps.editConfirmed(queueId, content)
+                OrbEditOutcome.Unsupported -> {
+                    // Older Core: replace (remove, then queue the new text at the end).
+                    followUps = followUps.editReverted(queueId).hide(queueId)
+                    orbTry(OrbLog.Category.Network, "/api/control/queue") {
+                        core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "DELETE")
+                    }
+                    queueFollowUp(id, content)
+                }
+                OrbEditOutcome.AlreadySent -> {
+                    followUps = followUps.editReverted(queueId)
+                    errorMessage = "This message was already sent, so the edit was not applied."
+                }
+                OrbEditOutcome.Failed -> {
+                    followUps = followUps.editReverted(queueId)
+                    errorMessage = "Couldn't save the edit."
+                }
+            }
+        }
+    }
+
+    fun removeQueued(queueId: String) {
+        val id = missionId ?: return
+        if (editingQueuedId == queueId) { editingQueuedId = null; inputText = "" }
+        followUps = followUps.hide(queueId)
+        scope.launch {
+            try {
+                core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "DELETE")
+                refreshFollowUps(id)
+            } catch (e: OrbError) {
+                if (e.status != 404) {
+                    followUps = followUps.unhide(queueId)
+                    errorMessage = e.message
+                }
+            } catch (e: Throwable) {
+                followUps = followUps.unhide(queueId)
+                errorMessage = e.message
+            }
+        }
+    }
+
     fun sendTurn(rawInput: String? = null) {
         val baseText = (rawInput ?: inputText).trim()
         if (baseText.isEmpty() && pendingAttachments.isEmpty()) return
@@ -771,8 +906,13 @@ fun OrbConversationPage(
                 return
             }
         }
-        if (isLive && rawInput == null && missionId != null) {
-            queuedMessages.add(baseText)
+        val editingId = editingQueuedId
+        if (editingId != null && rawInput == null && missionId != null) {
+            editQueued(editingId, baseText)
+            return
+        }
+        if (isLive && rawInput == null && missionId != null && pendingAttachments.isEmpty()) {
+            queueFollowUp(missionId, composeMode.wrapPrompt(baseText))
             inputText = ""
             return
         }
@@ -852,17 +992,13 @@ fun OrbConversationPage(
         }
     }
 
-    // Drain queued messages when agent finishes turn
-    LaunchedEffect(isLive, queuedMessages.size) {
-        if (!isLive && queuedMessages.isNotEmpty() && !isSending) {
-            val next = queuedMessages.removeAt(0)
-            sendTurn(next)
-        }
-    }
+    // Follow-ups now live in Core's durable queue: Core delivers them in order
+    // when the turn ends, so nothing is drained from the phone.
 
     fun stopMission() {
         val id = missionId ?: return
         isStopping = true
+        handoff = null
         scope.launch {
             try {
                 orbTry(OrbLog.Category.Network, "/api/control/missions") {
@@ -875,6 +1011,54 @@ fun OrbConversationPage(
                 errorMessage = e.message
             } finally {
                 isStopping = false
+            }
+        }
+    }
+
+    /**
+     * Send now: the row leaves the queue and the message enters the thread in the
+     * same frame; Core promotes it (stop, then this message next under the same
+     * id) or injects it live. A refusal puts everything back.
+     */
+    fun sendQueuedNow(queueId: String) {
+        val id = missionId ?: return
+        if (editingQueuedId != null) return
+        val row = followUps.row(queueId) ?: return
+        if (row.sending) return
+        val localId = "local-sendnow-$queueId"
+        followUps = followUps.hide(queueId)
+        messages = messages + OrbRow(
+            localId,
+            mapOf("role" to "user", "content" to row.content.trim(), "created_at" to java.time.Instant.now().toString())
+        )
+        handoff = OrbHandoff(queueId, System.currentTimeMillis())
+        scope.launch {
+            try {
+                val resp = OrbJSON.dict(
+                    core.request("/api/control/queue/${core.encodeComponent(queueId)}/send-now?interrupt=true", method = "POST")
+                )
+                when (OrbSendFlow.sendNowOutcome(resp)) {
+                    OrbSendFlow.SendNow.Live -> handoff = null
+                    OrbSendFlow.SendNow.Promoted -> Unit // handoff ends when the new turn runs
+                    OrbSendFlow.SendNow.Fallback -> {
+                        // Older Core without promote: stop the turn, then send this message.
+                        messages = messages.filterNot { it.id == localId }
+                        orbTry(OrbLog.Category.Network, "/api/control/queue") {
+                            core.request("/api/control/queue/${core.encodeComponent(queueId)}", method = "DELETE")
+                        }
+                        orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                            core.request("/api/control/missions/$id/cancel", method = "POST")
+                        }
+                        sendTurn(row.content)
+                    }
+                }
+                core.refreshMissionsQuietly()
+                refreshFollowUps(id)
+            } catch (e: Throwable) {
+                messages = messages.filterNot { it.id == localId }
+                followUps = followUps.unhide(queueId)
+                handoff = null
+                errorMessage = e.message ?: "Couldn't send now."
             }
         }
     }
@@ -1140,8 +1324,6 @@ fun OrbConversationPage(
         modifier = modifier
             .fillMaxSize()
             .background(OrbStyle.background)
-            .navigationBarsPadding()
-            .imePadding()
     ) {
         // Top Header Bar
         Row(
@@ -1359,6 +1541,13 @@ fun OrbConversationPage(
             }
 
             items(turns, key = { it.id }) { turn ->
+                Box(
+                    modifier = if (reducedMotion) Modifier else Modifier.animateItem(
+                        fadeInSpec = androidx.compose.animation.core.tween(220),
+                        placementSpec = androidx.compose.animation.core.spring(stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow),
+                        fadeOutSpec = androidx.compose.animation.core.tween(OrbSendFlow.LEAVE_MS)
+                    )
+                ) {
                 when (turn) {
                     is OrbTurn.User -> {
                         OrbUserBubble(
@@ -1378,14 +1567,19 @@ fun OrbConversationPage(
                         )
                     }
                     is OrbTurn.WorkFold -> {
-                        OrbWorkFoldView(
-                            fold = turn,
-                            onPreviewFile = { previewFilePath = it }
-                        )
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalOrbWorkingLabel provides (if (handoffActive) "Sending…" else null)
+                        ) {
+                            OrbWorkFoldView(
+                                fold = turn,
+                                onPreviewFile = { previewFilePath = it }
+                            )
+                        }
                     }
                     is OrbTurn.Wake -> {
                         OrbBackgroundWakeRow(turn = turn)
                     }
+                }
                 }
             }
 
@@ -1806,80 +2000,34 @@ fun OrbConversationPage(
                 )
             }
 
-            // Queued messages drawer
-            if (queuedMessages.isNotEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+            // Queued follow-ups: compact rows (edit / send now / remove), Codex-style.
+            OrbFollowUpQueueView(
+                rows = followUps.rows,
+                expanded = showQueuedDrawer,
+                onToggle = { showQueuedDrawer = !showQueuedDrawer },
+                editingId = editingQueuedId,
+                reducedMotion = reducedMotion,
+                onEdit = { row ->
+                    editingQueuedId = row.id
+                    inputText = row.content
+                },
+                onSendNow = { row -> sendQueuedNow(row.id) },
+                onRemove = { row -> removeQueued(row.id) }
+            )
+            if (editingQueuedId != null) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .orbPressClickable { showQueuedDrawer = !showQueuedDrawer },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Schedule,
-                            contentDescription = null,
-                            tint = OrbStyle.textSecondary,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Text(
-                            text = "${queuedMessages.size} Queued",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Icon(
-                            imageVector = if (showQueuedDrawer) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = OrbStyle.textMuted,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                    if (showQueuedDrawer) {
-                        queuedMessages.forEachIndexed { idx, qm ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(OrbStyle.card)
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = qm,
-                                    color = OrbStyle.textSecondary,
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .orbPressClickable { queuedMessages.removeAt(idx) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Remove",
-                                        tint = OrbStyle.textMuted,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    Text("Editing queued message", color = OrbStyle.textSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    Text(
+                        "Cancel",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.orbPressClickable { editingQueuedId = null; inputText = "" }
+                    )
                 }
             }
 
@@ -2439,6 +2587,7 @@ fun OrbWorkFoldView(
 ) {
     var expanded by remember { mutableStateOf(false) }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val workingOverride = LocalOrbWorkingLabel.current
 
     LaunchedEffect(fold.isLive) {
         while (fold.isLive && isActive) {
@@ -2447,9 +2596,9 @@ fun OrbWorkFoldView(
         }
     }
 
-    val summary = remember(fold.steps, fold.isLive) {
+    val summary = remember(fold.steps, fold.isLive, workingOverride) {
         if (fold.isLive) {
-            fold.steps.lastOrNull()?.title ?: "Working…"
+            workingOverride ?: fold.steps.lastOrNull()?.title ?: "Working…"
         } else {
             val reads = fold.steps.count { it.kind == OrbWorkStep.Kind.Read }
             val edits = fold.steps.count { it.kind == OrbWorkStep.Kind.Edit }
@@ -3064,5 +3213,162 @@ private fun OrbTurnChangesCard(
                 }
             }
         }
+    }
+}
+
+/** Overrides the live work row's label (e.g. "Sending…" during a Send now handoff). */
+val LocalOrbWorkingLabel = androidx.compose.runtime.compositionLocalOf<String?> { null }
+
+/** True when the user turned animations off (Settings > Accessibility > Remove animations). */
+@Composable
+fun orbReducedMotion(): Boolean {
+    val context = LocalContext.current
+    return remember(context) {
+        android.provider.Settings.Global.getFloat(
+            context.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f
+        ) == 0f
+    }
+}
+
+/** Compact follow-up queue above the composer: one line per message, actions on the right. */
+@Composable
+fun OrbFollowUpQueueView(
+    rows: List<OrbQueuedRow>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    editingId: String?,
+    reducedMotion: Boolean,
+    onEdit: (OrbQueuedRow) -> Unit,
+    onSendNow: (OrbQueuedRow) -> Unit,
+    onRemove: (OrbQueuedRow) -> Unit
+) {
+    // Rows that just left keep their slot for one short collapse (desktop LEAVE_MS).
+    val shown = remember { mutableStateListOf<OrbQueuedRow>() }
+    val visible = remember { androidx.compose.runtime.mutableStateMapOf<String, Boolean>() }
+    LaunchedEffect(rows) {
+        val ids = rows.map { it.id }.toSet()
+        for (row in rows) {
+            val i = shown.indexOfFirst { it.id == row.id }
+            if (i >= 0) shown[i] = row else shown.add(row)
+            visible[row.id] = true
+        }
+        for (row in shown.toList()) if (row.id !in ids) visible[row.id] = false
+        // Keep Core's order for the rows still queued.
+        val order = rows.withIndex().associate { it.value.id to it.index }
+        val sorted = shown.sortedBy { order[it.id] ?: Int.MAX_VALUE }
+        shown.clear(); shown.addAll(sorted)
+        delay(if (reducedMotion) 0L else OrbSendFlow.LEAVE_MS.toLong() + 40)
+        shown.removeAll { visible[it.id] == false }
+        visible.keys.retainAll(shown.map { it.id }.toSet())
+    }
+    if (shown.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(OrbStyle.surface)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .then(if (reducedMotion) Modifier else Modifier.animateContentSize(animationSpec = androidx.compose.animation.core.tween<androidx.compose.ui.unit.IntSize>(OrbSendFlow.LEAVE_MS)))
+            .then(Modifier.testTag("orb-followup-queue"))
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().orbPressClickable(onClick = onToggle).padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${rows.size} Queued",
+                color = OrbStyle.textSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(
+                imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = if (expanded) "Hide queued messages" else "Show queued messages",
+                tint = OrbStyle.textMuted,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+        if (expanded) {
+            for (row in shown) {
+                androidx.compose.runtime.key(row.id) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = visible[row.id] != false,
+                        enter = if (reducedMotion) androidx.compose.animation.EnterTransition.None
+                        else androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
+                            androidx.compose.animation.expandVertically(androidx.compose.animation.core.tween(180)),
+                        exit = if (reducedMotion) androidx.compose.animation.ExitTransition.None
+                        else androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(OrbSendFlow.LEAVE_MS)) +
+                            androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.tween(OrbSendFlow.LEAVE_MS))
+                    ) {
+                        OrbFollowUpRow(
+                            row = row,
+                            editing = editingId == row.id,
+                            actionsEnabled = !row.sending && editingId == null,
+                            onEdit = { onEdit(row) },
+                            onSendNow = { onSendNow(row) },
+                            onRemove = { onRemove(row) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OrbFollowUpRow(
+    row: OrbQueuedRow,
+    editing: Boolean,
+    actionsEnabled: Boolean,
+    onEdit: () -> Unit,
+    onSendNow: () -> Unit,
+    onRemove: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().heightIn(min = 32.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = row.content.trim(),
+                color = if (editing) OrbStyle.textMuted else Color.White,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            // One geometry from "sending" to "confirmed": the action area is always reserved.
+            if (editing) {
+                Text("Editing", color = OrbStyle.textMuted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 8.dp))
+            } else {
+                OrbQueueAction(Icons.Default.Edit, "Edit queued message", actionsEnabled, onEdit)
+                OrbQueueAction(Icons.Default.ArrowUpward, "Send now", actionsEnabled, onSendNow)
+                OrbQueueAction(Icons.Default.DeleteOutline, "Remove queued message", !row.sending && !editing, onRemove)
+            }
+        }
+        row.queueError?.let {
+            Text("Delivery paused · $it", color = OrbStyle.warning, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun OrbQueueAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .orbPressClickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (enabled) OrbStyle.textSecondary else OrbStyle.textMuted.copy(alpha = 0.4f),
+            modifier = Modifier.size(15.dp)
+        )
     }
 }

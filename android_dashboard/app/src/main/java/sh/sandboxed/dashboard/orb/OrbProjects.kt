@@ -14,11 +14,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -110,7 +110,8 @@ sealed class OrbNavScreen {
 @Composable
 fun OrbAppRoot(
     core: OrbCore,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    debugShowSetup: Boolean = false
 ) {
     val context = LocalContext.current
     remember(context) {
@@ -233,22 +234,19 @@ fun OrbAppRoot(
         pop()
     }
 
-    if (baseURL.trim().isEmpty() && !hasLoaded) {
-        OrbSetupView(
-            core = core,
-            title = "Connect to Orb",
-            onConnected = {}
-        )
+    if ((baseURL.trim().isEmpty() && !hasLoaded) || debugShowSetup) {
+        OrbSafeDrawingRoot(modifier = modifier) {
+            OrbSetupView(
+                core = core,
+                title = "Connect to Orb",
+                onConnected = {}
+            )
+        }
         return
     }
 
     val currentScreen = backStack.value.lastOrNull() ?: OrbNavScreen.Home
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(OrbStyle.background)
-            .statusBarsPadding()
-    ) {
+    OrbSafeDrawingRoot(modifier = modifier) {
         when (currentScreen) {
             is OrbNavScreen.Home -> {
                 OrbHomeScreen(
@@ -256,6 +254,10 @@ fun OrbAppRoot(
                     selectedTab = topTab,
                     onSelectTab = { topTab = it },
                     onOpenSettings = { showSettingsSheet = true },
+                    onChangeServer = {
+                        settingsInitialRoute = OrbSettingsRoute.Backend
+                        showSettingsSheet = true
+                    },
                     onSelectProject = { proj -> push(OrbNavScreen.Project(proj)) },
                     onSelectMission = { mission, proj ->
                         push(OrbNavScreen.Conversation(proj, mission))
@@ -315,7 +317,6 @@ fun OrbAppRoot(
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
                     .padding(bottom = 88.dp)
                     .clip(CircleShape)
                     .background(OrbStyle.warning)
@@ -371,13 +372,15 @@ fun OrbHomeScreen(
     onSelectTab: (OrbTopTab) -> Unit,
     onOpenSettings: () -> Unit,
     onSelectProject: (OrbRow) -> Unit,
-    onSelectMission: (mission: OrbRow, project: OrbRow) -> Unit
+    onSelectMission: (mission: OrbRow, project: OrbRow) -> Unit,
+    onChangeServer: () -> Unit = onOpenSettings
 ) {
     val scope = rememberCoroutineScope()
     val projects by core.projects.collectAsState()
     val missions by core.missions.collectAsState()
     val isLoading by core.isLoading.collectAsState()
     val lastError by core.lastError.collectAsState()
+    val connectionIssue by core.connectionIssue.collectAsState()
     val lastErrorLog by core.lastErrorLog.collectAsState()
 
     var searchQuery by remember { mutableStateOf("") }
@@ -419,8 +422,6 @@ fun OrbHomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(OrbStyle.background)
-            .navigationBarsPadding()
-            .imePadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Top bar matching iOS OrbHome toolbar exactly:
@@ -561,7 +562,18 @@ fun OrbHomeScreen(
                         if (OrbMoveClipboard.mission != null) {
                             item(key = "move_banner") { OrbMoveBanner(modifier = Modifier.padding(vertical = 6.dp)) }
                         }
-                        lastError?.let { err ->
+                        val issue = connectionIssue
+                        if (issue != null) {
+                            item(key = "home_connection_issue") {
+                                OrbConnectionIssueCard(
+                                    issue = issue,
+                                    log = lastErrorLog,
+                                    onChangeServer = onChangeServer,
+                                    onUseDefault = { scope.launch { core.useDefaultServer() } },
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        } else lastError?.let { err ->
                             item(key = "home_error") {
                                 OrbNotice(
                                     title = err,
@@ -1434,8 +1446,6 @@ fun OrbProjectPage(
         modifier = Modifier
             .fillMaxSize()
             .background(OrbStyle.background)
-            .navigationBarsPadding()
-            .imePadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Top bar matching iOS OrbProjectPage inline navigation bar:
@@ -2575,5 +2585,89 @@ fun OrbMoveBanner(modifier: Modifier = Modifier) {
             "Cancel", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier.orbPressClickable { OrbMoveClipboard.clear() }
         )
+    }
+}
+
+/**
+ * The single place that keeps Orb content clear of the status bar, navigation
+ * bar, display cutout (camera hole) and keyboard. Every top-level screen of
+ * [OrbAppRoot] — including the first-run setup — is drawn inside it, so a new
+ * screen is covered automatically and must not add its own status/navigation/
+ * IME padding. The background still paints edge to edge behind the bars
+ * (MainActivity keeps enableEdgeToEdge). Sheets and dialogs live in their own
+ * windows and use Material's inset defaults.
+ */
+@Composable
+fun OrbSafeDrawingRoot(
+    modifier: Modifier = Modifier,
+    insets: androidx.compose.foundation.layout.WindowInsets =
+        androidx.compose.foundation.layout.WindowInsets.safeDrawing,
+    content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+            .windowInsetsPadding(insets)
+            .testTag("orb-safe-root"),
+        content = content
+    )
+}
+
+/** Connection failure card: plain-language message, the failing URL, and two ways out. */
+@Composable
+fun OrbConnectionIssueCard(
+    issue: OrbConnectionIssue,
+    log: String?,
+    onChangeServer: () -> Unit,
+    onUseDefault: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(OrbStyle.surface)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+            .padding(14.dp)
+            .testTag("orb-connection-issue"),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(issue.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            issue.serverURL,
+            color = OrbStyle.textSecondary,
+            fontSize = 13.sp,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+        )
+        Text(issue.message, color = OrbStyle.textSecondary, fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val primaryIsDefault = issue.recommendDefault
+            if (issue.offerUseDefault) {
+                OrbIssueButton("Use default", primary = primaryIsDefault, onClick = onUseDefault)
+            }
+            OrbIssueButton("Change server", primary = !primaryIsDefault, onClick = onChangeServer)
+        }
+        if (!log.isNullOrEmpty() || issue.technicalDetail.isNotEmpty()) {
+            OrbNotice(
+                title = "Details",
+                log = log ?: issue.technicalDetail
+            )
+        }
+    }
+}
+
+@Composable
+private fun OrbIssueButton(label: String, primary: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(if (primary) Color.White else OrbStyle.card)
+            .orbPressClickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = if (primary) Color.Black else Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }

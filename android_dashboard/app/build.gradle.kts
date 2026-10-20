@@ -47,11 +47,12 @@ android {
             }
         }
         debug {
-            // Device UI checks use isolated data and leave the installed account untouched.
-            if (providers.gradleProperty("orbPreview").isPresent) {
-                applicationIdSuffix = ".preview"
-                manifestPlaceholders["orbAppLabel"] = "Orb Preview"
-            }
+            // Debug builds always install side by side with the release app
+            // (sh.sandboxed.dashboard) so a dev APK never overwrites the
+            // user's real install or its data.
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-dev"
+            manifestPlaceholders["orbAppLabel"] = "Orb (dev)"
             isMinifyEnabled = false
         }
     }
@@ -69,6 +70,8 @@ android {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
     testOptions {
+        // Robolectric-backed Compose tests (OrbSafeDrawingRootTest) need resources.
+        unitTests.isIncludeAndroidResources = true
         unitTests.all {
             // Tests read the cross-platform tables in shared/orb-spec straight from the repo.
             it.systemProperty("orb.spec.dir", rootProject.file("../shared/orb-spec").absolutePath)
@@ -116,6 +119,9 @@ dependencies {
     debugImplementation(libs.compose.ui.test.manifest)
 
     testImplementation(libs.junit)
+    testImplementation(composeBom)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.uiautomator)
