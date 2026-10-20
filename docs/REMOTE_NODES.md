@@ -188,6 +188,8 @@ EnvironmentFile=/etc/sandboxed-node.env
 Environment=XDG_RUNTIME_DIR=/run/user/999
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/999/bus
 ExecStart=/usr/local/bin/sandboxed-node
+# Capacity hot reload (see "Changing capacity without a restart").
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 User=sandboxed-node
@@ -241,6 +243,46 @@ only as an explicit emergency migration override.
 `SANDBOXED_NODE_TOKEN_PREVIOUS` (rotation only), `SANDBOXED_NODE_LABELS`,
 `SANDBOXED_NODE_MAX_JOB_SECS`, and `SANDBOXED_NODE_MAX_QUEUED` (jobs waiting
 behind capacity; defaults to four times `SANDBOXED_NODE_CAPACITY`).
+
+### Changing capacity without a restart
+
+`systemctl restart sandboxed-node` retires every running job: on startup the
+node marks in-flight jobs `lost` and stops their leftover systemd scopes.
+Capacity changes therefore apply live instead. Edit
+`SANDBOXED_NODE_CAPACITY` and/or `SANDBOXED_NODE_SIDE_CAPACITY` in
+`/etc/sandboxed-node.env` (or `SANDBOXED_NODE_ENV_FILE`), then either wait up
+to 30 s (the node polls the file's mtime) or trigger it now with any of:
+
+```bash
+sudo systemctl reload sandboxed-node        # needs ExecReload= above
+sudo sandboxed-node reload                  # SIGHUP via /var/lib/sandboxed-node/sandboxed-node.pid
+sudo kill -HUP "$(systemctl show -p MainPID --value sandboxed-node)"
+```
+
+- Grow: new permits are available immediately.
+- Shrink: running jobs keep their slots and are never interrupted; no new job
+  (or `/execute`) is admitted until the running count drops under the new
+  cap. Freed slots are retired as jobs finish.
+- The next `/heartbeat` reports the new `capacity_total`; Core replaces its
+  cached heartbeat on every poll, so placement uses it within one heartbeat.
+- A key missing from the file keeps the running value; an invalid value is
+  logged and ignored (the running capacity is kept). The default
+  `SANDBOXED_NODE_MAX_QUEUED` (4x capacity) and the per-job memory budget
+  follow the live capacity.
+
+Only the two capacities reload. Any other env change (token, labels, bind,
+...) still needs a restart, so wait for the node to be idle.
+
+Why a restart still kills running jobs: jobs already run in their own
+`systemd-run --scope` units under the runner's user manager, so `KillMode=` on
+this unit is not what retires them. The job's supervisor is the node process
+itself: it owns the child (`waitpid` exit code), the job deadline, cancel
+tokens, OOM attribution, Lean artifact collection and the slot-provider lease,
+and the durable job row is only a status receipt (the payload is not
+persisted). A new process cannot recover the exit code of a process it did not
+spawn, so "adopting" a survivor would report a guessed result to Core. The
+startup path therefore keeps reconciling survivors as `lost` and reaping their
+scopes; changing `KillMode` alone would not make a restart safe.
 
 Node env vars for lean-build jobs:
 

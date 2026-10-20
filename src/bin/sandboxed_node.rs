@@ -17,7 +17,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
@@ -30,10 +29,10 @@ struct NodeState {
     previous_token: Option<String>,
     labels: Vec<String>,
     work_root: PathBuf,
-    capacity_total: u32,
-    /// Shared permits for ordinary jobs and synchronous `/execute` calls.
-    /// The async runner owns one additional bounded side-question permit.
-    admission: Arc<Semaphore>,
+    /// Shared permits for ordinary jobs and synchronous `/execute` calls,
+    /// resized live by the env-file reload (`runner.capacity()` holds both
+    /// this pool and the side-question pool).
+    admission: Arc<sandboxed_sh::node::Admission>,
     active_leases: AtomicU32,
     jobs: JobStore,
     runner: Arc<JobRunner>,
@@ -45,6 +44,9 @@ struct NodeState {
 async fn main() -> anyhow::Result<()> {
     if sandboxed_sh::node::maybe_exec_cleared_scope_payload()? {
         return Ok(());
+    }
+    if std::env::args().nth(1).as_deref() == Some("reload") {
+        return send_reload(std::env::args().skip(2).collect());
     }
 
     tracing_subscriber::registry()
@@ -88,15 +90,10 @@ async fn main() -> anyhow::Result<()> {
     let work_root = std::env::var("SANDBOXED_NODE_WORK_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/var/lib/sandboxed-node/work"));
-    let capacity_total = match std::env::var("SANDBOXED_NODE_CAPACITY") {
-        Ok(raw) => raw
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|capacity| *capacity > 0)
-            .ok_or_else(|| anyhow::anyhow!("SANDBOXED_NODE_CAPACITY must be a positive integer"))?,
-        Err(_) => 1,
-    };
+    let capacity_total = sandboxed_sh::node::capacity::parse_capacity(
+        std::env::var("SANDBOXED_NODE_CAPACITY").ok().as_deref(),
+    )?
+    .unwrap_or(1);
     let max_job_secs = std::env::var("SANDBOXED_NODE_MAX_JOB_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -111,7 +108,11 @@ async fn main() -> anyhow::Result<()> {
         warn!("marked {recovered} in-flight job(s) from a previous run as lost");
     }
     sandboxed_sh::node::runner::reap_previous_scopes_on_start().await?;
-    let admission = Arc::new(Semaphore::new(capacity_total as usize));
+    let capacity = sandboxed_sh::node::NodeCapacity::for_process(
+        capacity_total,
+        sandboxed_sh::node::capacity::current_side_capacity(),
+    );
+    let admission = Arc::clone(&capacity.main);
     // Managed auth: profiles raw jobs may request by name. The path is the
     // node's own configuration; payloads never carry it. Advertised in the
     // heartbeat only while the credential file is actually readable.
@@ -126,11 +127,19 @@ async fn main() -> anyhow::Result<()> {
     let runner = JobRunner::spawn_with_options(
         jobs.clone(),
         work_root.clone(),
-        capacity_total,
         max_job_secs,
-        Arc::clone(&admission),
+        capacity.clone(),
         managed_auth.clone(),
     );
+    // Hot capacity reload: SIGHUP (`sandboxed-node reload`, `systemctl
+    // reload`) or an env-file mtime change. Running jobs are never touched.
+    let env_file = sandboxed_sh::node::capacity::env_file_path();
+    sandboxed_sh::node::capacity::spawn_reload_watcher(capacity, env_file.clone());
+    let pid_file = sandboxed_sh::node::capacity::pid_file_path(&work_root);
+    if let Err(error) = std::fs::write(&pid_file, format!("{}\n", std::process::id())) {
+        warn!(path = %pid_file.display(), %error, "cannot write pid file; `sandboxed-node reload` needs --pid");
+    }
+    info!(env_file = %env_file.display(), "capacity reload: SIGHUP or env-file change");
 
     // Periodic disk GC for lean-build checkouts and lake cache slots
     // (SANDBOXED_NODE_MIN_FREE_GB, default 10).
@@ -143,7 +152,6 @@ async fn main() -> anyhow::Result<()> {
         previous_token,
         labels,
         work_root,
-        capacity_total,
         admission,
         active_leases: AtomicU32::new(0),
         jobs,
@@ -274,6 +282,53 @@ async fn install_antigravity_auth(
     })))
 }
 
+/// `sandboxed-node reload [--pid PID | --pid-file PATH]`: SIGHUP the running
+/// node so it re-reads its capacities. Without flags, the pid file under
+/// `SANDBOXED_NODE_WORK_DIR`'s parent (or `SANDBOXED_NODE_PID_FILE`).
+fn send_reload(args: Vec<String>) -> anyhow::Result<()> {
+    let mut pid: Option<i32> = None;
+    let mut pid_file: Option<PathBuf> = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--pid" => pid = args.next().and_then(|v| v.trim().parse().ok()),
+            "--pid-file" => pid_file = args.next().map(PathBuf::from),
+            other => anyhow::bail!(
+                "usage: sandboxed-node reload [--pid PID | --pid-file PATH] (unexpected '{other}')"
+            ),
+        }
+    }
+    let pid = match pid {
+        Some(pid) => pid,
+        None => {
+            let path = pid_file.unwrap_or_else(|| {
+                let work_root = std::env::var("SANDBOXED_NODE_WORK_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("/var/lib/sandboxed-node/work"));
+                sandboxed_sh::node::capacity::pid_file_path(&work_root)
+            });
+            std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{} does not hold a pid", path.display()))?
+        }
+    };
+    anyhow::ensure!(pid > 1, "refusing to signal pid {pid}");
+    #[cfg(unix)]
+    {
+        if unsafe { libc::kill(pid, libc::SIGHUP) } != 0 {
+            anyhow::bail!("SIGHUP {pid}: {}", std::io::Error::last_os_error());
+        }
+        println!("sent SIGHUP to sandboxed-node (pid {pid}); running jobs are not restarted");
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("reload is only supported on unix")
+    }
+}
+
 fn check_auth(headers: &HeaderMap, state: &NodeState) -> Result<(), (StatusCode, String)> {
     match bearer_token(headers) {
         Some(token)
@@ -347,7 +402,8 @@ async fn heartbeat(
         resource_history: sandboxed_sh::node::resource_history::snapshot(),
         node_id: state.node_id.clone(),
         online: true,
-        capacity_total: state.capacity_total,
+        // Live target: a reload shows up in the very next heartbeat.
+        capacity_total: state.runner.capacity().capacity(),
         // This is only a monitoring snapshot; the shared semaphore above is
         // the atomic enforcement point.
         capacity_available: state.admission.available_permits() as u32,
@@ -427,7 +483,7 @@ async fn execute(
     // Do not turn an overloaded node into an unbounded set of concurrent
     // child processes. `try_acquire_owned` is atomic and shares permits with
     // async jobs, so both APIs fail closed at the same capacity boundary.
-    let _permit = state.admission.clone().try_acquire_owned().map_err(|_| {
+    let _permit = state.admission.try_acquire_owned().map_err(|_| {
         (
             StatusCode::TOO_MANY_REQUESTS,
             "node capacity exhausted".to_string(),
@@ -734,13 +790,14 @@ mod tests {
 
     async fn test_state_with_capacity(work_root: PathBuf, capacity_total: u32) -> Arc<NodeState> {
         let jobs = JobStore::open(&work_root).await.expect("job store");
-        let admission = Arc::new(Semaphore::new(capacity_total as usize));
-        let runner = JobRunner::spawn_with_admission(
+        let capacity = sandboxed_sh::node::NodeCapacity::new(capacity_total, 2);
+        let admission = Arc::clone(&capacity.main);
+        let runner = JobRunner::spawn_with_options(
             jobs.clone(),
             work_root.clone(),
-            capacity_total,
             DEFAULT_MAX_JOB_SECS,
-            Arc::clone(&admission),
+            capacity,
+            sandboxed_sh::node::ManagedAuth::default(),
         );
         Arc::new(NodeState {
             node_id: "test-node".to_string(),
@@ -748,7 +805,6 @@ mod tests {
             previous_token: Some("node-secret-old".to_string()),
             labels: vec!["test".to_string()],
             work_root,
-            capacity_total,
             admission,
             active_leases: AtomicU32::new(0),
             jobs,
@@ -1029,6 +1085,49 @@ mod tests {
         let idle = heartbeat(State(state), headers).await.expect("heartbeat").0;
         assert_eq!(idle.active_leases, 0);
         assert_eq!(idle.capacity_available, 2);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_reports_reloaded_capacity_with_jobs_in_flight() {
+        let work_root = tempfile::tempdir().expect("tempdir");
+        let state = test_state_with_capacity(work_root.path().to_path_buf(), 2).await;
+        let headers = auth_headers(&state.shared_token);
+        let running = [
+            state.admission.try_acquire_owned().expect("slot 1"),
+            state.admission.try_acquire_owned().expect("slot 2"),
+        ];
+        let env = work_root.path().join("sandboxed-node.env");
+
+        // Grow 2 -> 5 while both slots are busy.
+        std::fs::write(
+            &env,
+            "SANDBOXED_NODE_CAPACITY=5\nSANDBOXED_NODE_SIDE_CAPACITY=3\n",
+        )
+        .unwrap();
+        assert!(state.runner.capacity().reload_from(&env).unwrap());
+        let grown = heartbeat(State(state.clone()), headers.clone())
+            .await
+            .expect("heartbeat")
+            .0;
+        assert_eq!(grown.capacity_total, 5);
+        assert_eq!(grown.capacity_available, 3);
+        assert_eq!(state.runner.capacity().side_capacity(), 3);
+
+        // Shrink 5 -> 1: running jobs keep their slots, nothing is admitted.
+        std::fs::write(&env, "SANDBOXED_NODE_CAPACITY=1\n").unwrap();
+        assert!(state.runner.capacity().reload_from(&env).unwrap());
+        let shrunk = heartbeat(State(state.clone()), headers.clone())
+            .await
+            .expect("heartbeat")
+            .0;
+        assert_eq!(shrunk.capacity_total, 1);
+        assert_eq!(shrunk.capacity_available, 0);
+        assert!(state.admission.try_acquire_owned().is_err());
+
+        drop(running);
+        let idle = heartbeat(State(state), headers).await.expect("heartbeat").0;
+        assert_eq!(idle.capacity_total, 1);
+        assert_eq!(idle.capacity_available, 1);
     }
 
     #[test]

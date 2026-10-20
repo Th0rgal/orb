@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -320,10 +320,13 @@ fn persisted_payload_json(payload: &JobPayload) -> anyhow::Result<String> {
 pub struct JobRunner {
     store: JobStore,
     work_root: PathBuf,
-    capacity: u32,
+    /// Live-resizable main and side-question admission pools.
+    capacity: super::capacity::NodeCapacity,
     max_job_secs: u64,
     tx: mpsc::UnboundedSender<QueuedJob>,
-    max_queued: u32,
+    /// Explicit `SANDBOXED_NODE_MAX_QUEUED`; otherwise four times the live
+    /// capacity.
+    max_queued_override: Option<u32>,
     cancels: Mutex<HashMap<Uuid, CancellationToken>>,
     side_jobs: Mutex<HashSet<Uuid>>,
     /// Queued or running ordinary jobs per workspace mission. A companion
@@ -356,7 +359,7 @@ impl JobRunner {
             work_root,
             capacity,
             max_job_secs,
-            Arc::new(Semaphore::new(capacity.max(1) as usize)),
+            super::capacity::Admission::new(capacity.max(1) as usize),
         )
     }
 
@@ -365,16 +368,18 @@ impl JobRunner {
     pub fn spawn_with_admission(
         store: JobStore,
         work_root: PathBuf,
-        capacity: u32,
+        _capacity: u32,
         max_job_secs: u64,
-        admission: Arc<Semaphore>,
+        admission: Arc<super::capacity::Admission>,
     ) -> Arc<Self> {
         Self::spawn_with_options(
             store,
             work_root,
-            capacity,
             max_job_secs,
-            admission,
+            super::capacity::NodeCapacity::from_pools(
+                admission,
+                super::capacity::Admission::new(side_question_capacity()),
+            ),
             super::managed_auth::ManagedAuth::from_env(),
         )
     }
@@ -384,24 +389,24 @@ impl JobRunner {
     pub fn spawn_with_options(
         store: JobStore,
         work_root: PathBuf,
-        capacity: u32,
         max_job_secs: u64,
-        admission: Arc<Semaphore>,
+        capacity: super::capacity::NodeCapacity,
         managed_auth: super::managed_auth::ManagedAuth,
     ) -> Arc<Self> {
-        let max_queued = std::env::var("SANDBOXED_NODE_MAX_QUEUED")
+        let max_queued_override = std::env::var("SANDBOXED_NODE_MAX_QUEUED")
             .ok()
-            .and_then(|raw| raw.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or_else(|| (capacity.max(1) as usize).saturating_mul(4));
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .filter(|value| *value > 0);
+        let admission = Arc::clone(&capacity.main);
+        let side_admission = Arc::clone(&capacity.side);
         let (tx, mut rx) = mpsc::unbounded_channel::<QueuedJob>();
         let runner = Arc::new(Self {
             store,
             work_root,
-            capacity: capacity.max(1),
+            capacity,
             max_job_secs: max_job_secs.max(1),
             tx,
-            max_queued: u32::try_from(max_queued).unwrap_or(u32::MAX),
+            max_queued_override,
             cancels: Mutex::new(HashMap::new()),
             side_jobs: Mutex::new(HashSet::new()),
             background: Mutex::new(HashMap::new()),
@@ -423,10 +428,9 @@ impl JobRunner {
         // share a small bounded pool (SANDBOXED_NODE_SIDE_CAPACITY, default
         // 2), never an unbounded bypass of node admission. One slow /btw on
         // one mission must not block every other mission's side question.
-        let side_admission = Arc::new(Semaphore::new(side_question_capacity()));
         // A mission that launched long background jobs must still be able to
         // answer its operator. One extra permit, shared by all workspaces.
-        let companion_admission = Arc::new(Semaphore::new(1));
+        let companion_admission = super::capacity::Admission::new(1);
         let dispatcher = Arc::clone(&runner);
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
@@ -492,6 +496,16 @@ impl JobRunner {
             .contains_key(&workspace)
     }
 
+    /// Live admission pools (resized by the env-file reload).
+    pub fn capacity(&self) -> &super::capacity::NodeCapacity {
+        &self.capacity
+    }
+
+    fn max_queued(&self) -> u32 {
+        self.max_queued_override
+            .unwrap_or_else(|| self.capacity.capacity().saturating_mul(4))
+    }
+
     pub fn queued_count(&self) -> u32 {
         self.queued.load(Ordering::Acquire)
     }
@@ -523,15 +537,16 @@ impl JobRunner {
         // rows are status receipts (in-flight jobs become `lost` on restart),
         // so never retain commit-pack source bytes in jobs.db.
         let payload_json = persisted_payload_json(&payload)?;
+        let max_queued = self.max_queued();
         // The dispatcher drains the mpsc channel into semaphore waiters so a
         // cancelled queued job releases its channel slot immediately. Keep an
         // explicit atomic bound across both locations.
         self.queued
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                (queued < self.max_queued).then_some(queued + 1)
+                (queued < max_queued).then_some(queued + 1)
             })
             .map_err(|_| NodeQueueFull {
-                max_queued: self.max_queued as usize,
+                max_queued: max_queued as usize,
             })?;
         let log_path = self.log_path(job_id);
         if let Err(error) = self
@@ -1010,7 +1025,7 @@ impl JobRunner {
                     &self.work_root,
                     &log_path,
                     &job.payload,
-                    self.capacity,
+                    self.capacity.capacity(),
                     self.max_job_secs,
                     token,
                 )
@@ -1435,11 +1450,8 @@ fn job_memory_limit() -> std::io::Result<u64> {
         })
         .ok_or_else(|| std::io::Error::other("MemTotal unavailable"))?
         * 1024;
-    let capacity = std::env::var("SANDBOXED_NODE_CAPACITY")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(1);
+    // Live value: follows a capacity reload, not just the startup env.
+    let capacity = u64::from(super::capacity::current_capacity());
     // Every concurrent permit can hold a job: main slots plus the side lane.
     Ok(default_job_memory_limit(
         total,
@@ -1450,18 +1462,11 @@ fn job_memory_limit() -> std::io::Result<u64> {
 /// Concurrent side questions per node: light read-mostly jobs (they inspect
 /// a parent mission), so a few may run beside the main slots.
 fn side_question_capacity() -> usize {
-    parse_side_capacity(
-        std::env::var("SANDBOXED_NODE_SIDE_CAPACITY")
-            .ok()
-            .as_deref(),
-    )
+    super::capacity::current_side_capacity()
 }
 
-fn parse_side_capacity(raw: Option<&str>) -> usize {
-    raw.and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| (1..=16).contains(n))
-        .unwrap_or(2)
-}
+#[cfg(test)]
+use super::capacity::parse_side_capacity;
 
 #[test]
 fn side_question_capacity_defaults_to_two_and_is_bounded() {
@@ -2128,9 +2133,8 @@ mod tests {
         let runner = JobRunner::spawn_with_options(
             store.clone(),
             dir.path().into(),
-            1,
             30,
-            Arc::new(Semaphore::new(1)),
+            crate::node::capacity::NodeCapacity::new(1, 2),
             super::super::managed_auth::ManagedAuth::with_grok_home(&auth_home),
         );
         let job_id = Uuid::new_v4();
@@ -2769,7 +2773,7 @@ mod tests {
             dir.path().into(),
             1,
             30,
-            Arc::new(Semaphore::new(1)),
+            crate::node::capacity::Admission::new(1),
         );
         let raw = |command: &str, companion_of| JobPayload::RawCommand {
             command: command.into(),
@@ -2830,8 +2834,8 @@ mod tests {
         std::env::set_var("SANDBOXED_NODE_SIDE_CAPACITY", "1");
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::open(dir.path()).await.unwrap();
-        let admission = Arc::new(Semaphore::new(1));
-        let main_permit = admission.clone().acquire_owned().await.unwrap();
+        let admission = crate::node::capacity::Admission::new(1);
+        let main_permit = admission.acquire_owned().await.unwrap();
         let runner =
             JobRunner::spawn_with_admission(store.clone(), dir.path().into(), 1, 30, admission);
         let normal = Uuid::new_v4();
