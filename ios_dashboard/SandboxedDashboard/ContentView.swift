@@ -49,6 +49,8 @@ struct ContentView: View {
         .task {
             await checkAuth()
         }
+        // Registered on the root, which exists from launch; OrbHome consumes it when ready.
+        .onOpenURL { OrbDeepLinks.shared.receive($0) }
         .sheet(isPresented: $showSetupSheet) {
             SetupSheet(onComplete: {
                 showSetupSheet = false

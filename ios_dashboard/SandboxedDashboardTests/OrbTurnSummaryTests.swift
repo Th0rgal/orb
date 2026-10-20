@@ -98,9 +98,78 @@ final class OrbTurnSummaryTests: XCTestCase {
         XCTAssertTrue(OrbOnScreen.presentation(missionID: "m1").contains(.list))
     }
 
-    @MainActor func testSideAnswersRenderInlineMarkdown() {
-        let rendered = OrbSideQuestionSheet.markdown("cible **40/45** et `b223122a`\n- next")
-        XCTAssertEqual(String(rendered.characters), "cible 40/45 et b223122a\n- next")
+    // MARK: /btw threads (desktop btwAgent.ts after #1190 and #1197)
+
+    private func event(_ seq: Int64, _ type: String, _ content: String, at: String = "2026-10-20T10:00:00Z") -> StoredEvent {
+        StoredEvent(id: seq, missionId: "m", sequence: seq, eventType: type, timestamp: at, eventId: nil, toolCallId: nil, toolName: nil, content: content, metadata: [:])
+    }
+
+    private static let compaction = "## Objective\nFinish the side question.\n\n## Progress\n- read files\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+
+    func testBtwCompactionBlocksAreStripped() {
+        XCTAssertEqual(OrbBtwThreads.stripCompaction(Self.compaction + "\n\nThe **answer**."), "The **answer**.")
+        XCTAssertEqual(OrbBtwThreads.stripCompaction("Before.\n" + Self.compaction + "  \nAfter."), "Before.\n\nAfter.")
+        XCTAssertEqual(OrbBtwThreads.stripCompaction(Self.compaction), "")
+        // Text that merely mentions an objective is kept.
+        XCTAssertEqual(OrbBtwThreads.stripCompaction("## Objective\nShip it."), "## Objective\nShip it.")
+    }
+
+    func testBtwAnswerIsTheFinalMessageAndNarrationIsFolded() {
+        let a = OrbBtwThreads.sideAnswer(["Looking at the logs…", "Checking tests.", "**Done**: 3 passed."], final: "**Done**: 3 passed.")
+        XCTAssertEqual(a.answer, "**Done**: 3 passed.")
+        XCTAssertEqual(a.narration, ["Looking at the logs…", "Checking tests."])
+        // A compaction-only message is not narration, and dots are not meaningful.
+        let b = OrbBtwThreads.sideAnswer([Self.compaction, "…", "Answer"], final: nil)
+        XCTAssertEqual(b.answer, "Answer")
+        XCTAssertEqual(b.narration, [])
+        // The stored final wins even when a stale canonical copy came after it.
+        let c = OrbBtwThreads.sideAnswer(["step", "final", "step 2"], final: Self.compaction + "\nfinal")
+        XCTAssertEqual(c.answer, "final")
+        XCTAssertEqual(c.narration, ["step"])
+    }
+
+    func testBtwThreadParsingKeepsAnsweredTurnsAndTheLiveQuestion() {
+        let events = [
+            event(1, "user_message", "<main_conversation_update>ctx</main_conversation_update>\n\nCurrent request:\nWhat broke?\nAttachment: /tmp/a.png", at: "2026-10-20T10:00:00Z"),
+            event(2, "assistant_message_canonical", "Reading the build log."),
+            event(3, "tool_call", "{}"),
+            event(4, "assistant_message", Self.compaction + "\n\nThe **linker** failed."),
+            event(5, "user_message", "Unanswered question", at: "2026-10-20T10:05:00Z"),
+            event(6, "user_message", "And now?", at: "2026-10-20T10:06:00Z"),
+            event(7, "assistant_message", "Remote node 'ashur' job 0123abcd-0123-0123-0123-0123456789ab finished without assistant text "),
+            event(8, "assistant_message_canonical", "Still checking"),
+        ]
+        let done = OrbBtwThreads.parse(missionID: "m", events: events, active: false)
+        XCTAssertEqual(done.turns.map(\.question), ["What broke?", "And now?"])
+        XCTAssertEqual(done.turns[0].answer, "The **linker** failed.")
+        XCTAssertEqual(done.turns[0].narration, ["Reading the build log."])
+        XCTAssertEqual(done.turns[0].id, "btw:m:1")
+        XCTAssertNil(done.open)
+        let live = OrbBtwThreads.parse(missionID: "m", events: events, active: true)
+        XCTAssertEqual(live.turns.map(\.question), ["What broke?"])
+        XCTAssertEqual(live.open?.question, "And now?")
+        XCTAssertEqual(live.open?.answer, "Still checking")
+        XCTAssertEqual(live.open?.events.map(\.sequence), [7, 8])
+    }
+
+    func testBtwBindsToTheThreadWithLatestActivityAndOrdersTurnsByTime() {
+        func thread(_ id: String, created: String, activity: String, tags: [String] = ["btw-parent:p"]) -> OrbJSON {
+            .object(["id": .string(id), "created_at": .string(created), "updated_at": .string(created), "last_activity_at": .string(activity), "tags": .array(tags.map { .string($0) })])
+        }
+        let rows = [
+            thread("new", created: "2026-10-20T09:00:00Z", activity: "2026-10-20T09:10:00Z"),
+            thread("old", created: "2026-10-20T08:00:00Z", activity: "2026-10-20T11:00:00Z"),
+            thread("gone", created: "2026-10-20T07:00:00Z", activity: "2026-10-20T12:00:00Z", tags: ["btw-parent:p", "superseded"]),
+            thread("other", created: "2026-10-20T07:00:00Z", activity: "2026-10-20T12:00:00Z", tags: ["btw-parent:q"]),
+        ]
+        let threads = OrbBtwThreads.threads(rows, parent: "p")
+        XCTAssertEqual(threads.map { $0["id"].text }, ["old", "new"])
+        XCTAssertEqual(OrbBtwThreads.latest(threads)?["id"].text, "old", "a re-dispatched old thread is the live one")
+        let merged = OrbBtwThreads.merge([
+            [.init(id: "a1", question: "q1", answer: "x", at: "2026-10-20T08:00:00Z"), .init(id: "a3", question: "q3", answer: "x", at: "2026-10-20T11:00:00Z")],
+            [.init(id: "b2", question: "q2", answer: "x", at: "2026-10-20T09:00:00Z")],
+        ])
+        XCTAssertEqual(merged.map(\.id), ["a1", "b2", "a3"])
     }
 
     func testNotificationSubtitleDoesNotRepeatTheProject() {

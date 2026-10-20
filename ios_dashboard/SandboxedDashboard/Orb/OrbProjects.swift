@@ -311,6 +311,19 @@ struct OrbArchiveProjectGroup: Identifiable, Equatable {
     }
 }
 
+/// `orb://` links, buffered: a cold-start link arrives before the home screen
+/// exists (while the app is still connecting), and was dropped.
+@Observable @MainActor
+final class OrbDeepLinks {
+    static let shared = OrbDeepLinks()
+    private(set) var pending: URL?
+    func receive(_ url: URL) { pending = url }
+    func take() -> URL? {
+        defer { pending = nil }
+        return pending
+    }
+}
+
 struct OrbHome: View {
     @State private var projects: [OrbRow] = []
     @State private var loading = true
@@ -346,6 +359,8 @@ struct OrbHome: View {
     @State private var deleteConfirmBusy = false
     @State private var secretRequests = OrbSecretRequestMonitor.shared
     @State private var secretSheet = false
+    @State private var deepLinks = OrbDeepLinks.shared
+    @State private var homeReady = false
     @Environment(\.scenePhase) private var scenePhase
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
@@ -412,6 +427,8 @@ struct OrbHome: View {
                     homeTab = "inbox"
                 }
                 await load()
+                homeReady = true
+                consumeDeepLink()
             }
             .onChange(of: OrbNotificationCenter.shared.pendingFocus) { _, newValue in
                 if newValue != nil {
@@ -452,25 +469,30 @@ struct OrbHome: View {
             }
             .navigationDestination(item: $linkedMission) { OrbConversation(missionID: $0, project: linkedProject, folder: linkedFolder) }
             .navigationDestination(item: $linkedProjectObj) { OrbProjectPage(project: $0) }
-            .onOpenURL { url in
-                if let focus = OrbInboxFocusRequest.parse(url: url) {
-                    homeTab = "inbox"
-                    if !focus.missionID.isEmpty {
-                        OrbNotificationCenter.shared.focusInbox(
-                            missionID: focus.missionID,
-                            expandPeek: focus.expandPeek,
-                            openReply: focus.openReply
-                        )
-                    }
-                } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission" {
-                    linkedProject = ""
-                    linkedFolder = ""
-                    linkedMission = url.lastPathComponent
-                } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "inbox" {
-                    homeTab = "inbox"
-                }
-            }
+            // Links arrive through the buffer (ContentView registers it), so one
+            // opened during launch is handled once this view and its data are ready.
+            .onChange(of: deepLinks.pending) { _, _ in if homeReady { consumeDeepLink() } }
         }.tint(.primary).toggleStyle(OrbSwitchStyle()).preferredColorScheme(.dark)
+    }
+
+    private func consumeDeepLink() {
+        guard let url = deepLinks.take() else { return }
+        if let focus = OrbInboxFocusRequest.parse(url: url) {
+            homeTab = "inbox"
+            if !focus.missionID.isEmpty {
+                OrbNotificationCenter.shared.focusInbox(
+                    missionID: focus.missionID,
+                    expandPeek: focus.expandPeek,
+                    openReply: focus.openReply
+                )
+            }
+        } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission", !url.lastPathComponent.isEmpty, url.lastPathComponent != "/" {
+            linkedProject = ""
+            linkedFolder = ""
+            linkedMission = url.lastPathComponent
+        } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "inbox" {
+            homeTab = "inbox"
+        }
     }
 
     private var homeModePicker: some View {

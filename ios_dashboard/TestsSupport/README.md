@@ -32,7 +32,10 @@ node ios_dashboard/TestsSupport/test_rich_renderer.cjs
 `OrbTurnStatusUITests` uses the default fixture (18766): `agent-work` is a coding turn
 in progress (task list in harness vocabulary, edits, a running command, turn started
 95 s before each request), `agent-done` is the finished turn with `github_pr`, and
-`POST …/btw/agent` takes 3 s, then the side answer arrives 6 s later.
+`POST …/btw/agent` takes 3 s, then the side answer arrives 6 s later. `btw-chat` has two
+/btw threads: `btw-done` (narration, an opencode compaction block, a Markdown answer) and
+`btw-live`, which answers 45 s after each `/__reset`; a question sent to a side thread
+streams a progress update, then its answer 16 s later.
 
 The loopback fixture has no provider credentials. UI tests use a DEBUG-only
 local cache reset; it is refused for non-loopback API endpoints. They create
