@@ -210,6 +210,9 @@ export function LiveProjectsSection(p: {
   const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);
   const [batchBusy, setBatchBusy] = createSignal(false);
   const deletedInSession = new Set<string>();
+  /** Archived elsewhere (superseded by a replacement, or transferred): hidden at
+   * once, and kept out of any list read that started before Core archived it. */
+  const archivedInSession = new Set<string>();
   const deleteQueue: string[] = [];
   const queuedDeletes = new Set<string>();
   const deletingDescendants = new Map<string, string[]>();
@@ -741,6 +744,19 @@ export function LiveProjectsSection(p: {
       void loadDir(detail.slug, "");
     };
     window.addEventListener("orb:project-created", onProjectCreated);
+    const onArchived = (event: Event) => {
+      const { id } = (event as CustomEvent<{ id: string }>).detail;
+      archivedInSession.add(id);
+      leaveProjects(id, "");
+    };
+    const onArchiveFailed = (event: Event) => {
+      const { id } = (event as CustomEvent<{ id: string }>).detail;
+      archivedInSession.delete(id);
+      for (const project of projects()) if (expanded[project.slug]) void loadMissions(project.slug);
+    };
+    window.addEventListener("orb:mission-archived", onArchived);
+    window.addEventListener("orb:mission-archive-failed", onArchiveFailed);
+    onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); });
     const onCronChanged = (event: Event) => {
       const detail = (event as CustomEvent<{ slug: string; id?: string; deleted?: boolean; targetSlug?: string; folder?: string }>).detail;
       if (!detail?.slug) return;
@@ -794,7 +810,7 @@ export function LiveProjectsSection(p: {
       .then((list) => {
         if (!currentConnection(version)) return;
         if (revision !== missionRevision) return;
-        const visibleList = list.filter(m => !deletedInSession.has(m.id));
+        const visibleList = list.filter(m => !deletedInSession.has(m.id) && !archivedInSession.has(m.id));
         const merged = mergeById((missions[slug] ?? []).filter(m => !deletedInSession.has(m.id)), visibleList.map(m => archiving.has(m.id) ? {...m, status: archiving.get(m.id)!} : m));
         if (merged !== missions[slug]) setMissions(slug, merged);
         p.onProjectMissions?.(slug, merged);
@@ -1473,6 +1489,7 @@ export function LiveProjectsSection(p: {
       await Promise.all(targets.map(t => restore ? reopenMission(t.id) : archiveMission(t.id)));
       if (!currentConnection(version)) return;
       if (restore) {
+        for (const t of targets) archivedInSession.delete(t.id);
         const slug = mission.project || Object.keys(missions).find(slug => missions[slug]?.some(m => m.id === id));
         if (slug) {
           setMissions(slug, rows => [

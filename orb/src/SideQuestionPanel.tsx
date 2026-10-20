@@ -3,6 +3,7 @@ import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
 import * as btwMod from "./btwAgent";
 import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote} from "./btwAgent";
+import {streamMission} from "./stream";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
 import { Composer } from "./composer/Composer";
@@ -111,8 +112,23 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let reconcileServer:typeof btwMod.reconcileBtwServerHistory|undefined;
   try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
   if(typeof reconcileServer==='function'){
-   void reconcileServer(missionId,cleanHistory).then(reconciled=>{
+   const reconcile=reconcileServer;
+   // The newest thread stays live while the tab is open: a question asked on
+   // a completed thread (another device, a restart) re-dispatches a job on
+   // that same mission, and its answer must show without reopening the tab.
+   let following='',stopFollow:(()=>void)|undefined,again:ReturnType<typeof setTimeout>|undefined;
+   onCleanup(()=>{stopFollow?.();clearTimeout(again);});
+   const follow=(id:string|undefined)=>{
+    if(!id||id===following||stale)return;
+    stopFollow?.();following=id;
+    stopFollow=streamMission(id,event=>{
+     if(!['user_message','assistant_message','assistant_message_canonical','mission_status_changed'].includes(event.type))return;
+     clearTimeout(again);again=setTimeout(()=>{if(!stale&&!busy())sync(history());},300);
+    },()=>{if(!stale&&!busy())sync(history());});
+   };
+   const sync=(local:Parameters<typeof reconcile>[1])=>void reconcile(missionId,local).then(reconciled=>{
     if(stale||key()!==current)return;
+    follow(reconciled.latest);
     const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
     if(changed)setHistory(reconciled.history);
     const pendingQ=question().trim();
@@ -123,6 +139,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      watchActive(reconciled.activeSession);
     }
    }).catch(swallow("sideQuestions.reconcile"));
+   sync(cleanHistory);
   }
   });
  }));

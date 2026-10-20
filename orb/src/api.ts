@@ -893,13 +893,14 @@ export async function listCompletedMissions(limit = 100): Promise<Mission[]> {
 
 /** `coreOnly` skips the local-origin fallback: callers that need Core's
  * placement must not see a journal row that predates a machine transfer. */
-export async function getMission(id: string, options: { coreOnly?: boolean } = {}): Promise<Mission> {
+export async function getMission(id: string, options: { coreOnly?: boolean; fresh?: boolean } = {}): Promise<Mission> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = options.coreOnly ? undefined : (await origins.localOrigins(id)).find(row=>row.id===id);
   try{
     const path = `/api/control/missions/${id}`;
     const read = async () => {
-      const value = await api<Mission>(path, local ? { signal: AbortSignal.timeout(3000) } : undefined);
+      // `fresh`: never join a read that started before the caller's newer event.
+      const value = await api<Mission>(path, local ? { signal: AbortSignal.timeout(3000) } : options.fresh ? {} : undefined);
       if (!value || typeof value !== "object" || value.id !== id) throw new InvalidApiResponseError(`GET ${path}`);
       return value;
     };

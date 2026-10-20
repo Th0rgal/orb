@@ -29,6 +29,7 @@ window.fetch=async(input,init)=>{
   setTimeout(()=>{eventController?.enqueue(new TextEncoder().encode(`event: user_message\ndata: ${JSON.stringify({id:'canonical',content:body.prompt})}\n\n`));},1000);
   return Response.json(mission);
  }
+ if(path==='/api/control/cyber-capabilities')return Response.json({version:2,route_supported:true});
  if(path==='/api/control/stream')return new Response(new ReadableStream({start(c){eventController=c;}}),{headers:{'Content-Type':'text/event-stream'}});
  if(path.endsWith('/events'))return Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}});
  if(path.endsWith('/conflicts'))return Response.json({});

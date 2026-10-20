@@ -510,8 +510,12 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
   background: var(--bg-elev); border: 1px solid var(--stroke);
   border-radius: var(--radius-lg); padding: 8px 40px 8px 10px; margin: 22px 0 14px;
   white-space: pre-wrap; overflow-wrap: anywhere;
-  content-visibility: auto; contain-intrinsic-size: auto 40px;
+  content-visibility: auto; contain-intrinsic-size: auto 21px;
 }
+/* A bubble that just landed is laid out for real in its first frame: with the
+   placeholder size it painted 19 px too tall, then shrank, and the pinned
+   transcript bounced up and back down. */
+.user.pending, .user.sending { content-visibility: visible; }
 .user:first-child { margin-top: 0; }
 .restore { position: absolute; right: 8px; bottom: 7px; }
 .agent-turn { padding: 0 10px; content-visibility: auto; contain-intrinsic-size: auto 400px; }
@@ -2591,11 +2595,9 @@ select.orb-select-native:disabled { cursor: default; }
 .queue-row small[role="alert"] { color:var(--red); }
 .queue-row > .queue-send-now { margin:0 0 6px 4px; font-size:13px; }
 .followup-queue > p[role="alert"] { margin:6px 8px 2px; color:var(--red); font-size:12px; }
-.followup-queue.closing { overflow:hidden; pointer-events:none; animation:queue-card-close 160ms ease-out both; }
-@keyframes queue-card-close { from { opacity:1; max-height:120px; } to { opacity:0; max-height:0; margin-bottom:0; padding-top:0; padding-bottom:0; border-width:0; } }
 @keyframes queue-card-reveal { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 @keyframes queue-row-reveal { from { opacity:0; transform:translateY(2px); } to { opacity:1; transform:translateY(0); } }
-@media (prefers-reduced-motion:reduce) { .followup-queue, .queue-row { animation:none; } .followup-queue.closing { display:none; } }
+@media (prefers-reduced-motion:reduce) { .followup-queue, .queue-row { animation:none; } }
 @media (max-width:600px) { .queue-hint, .queue-tooltip { display:none; } .queue-row-actions { opacity:1; } }
 
 .file-panel.maximized { inset:0 0 0 var(--sb-w); width:auto; z-index:40; }
@@ -3837,17 +3839,13 @@ select.orb-select-native:disabled { cursor: default; }
 .queue-trailing { position:relative; flex:none; display:flex; align-items:center; justify-content:flex-end; min-width:82px; height:26px; }
 .queue-trailing .queue-sending { position:absolute; right:8px; top:50%; margin:-5px 0 0; opacity:0; transition:opacity .15s ease-out; }
 .queue-trailing .queue-sending.visible { opacity:1; }
-.queue-row.sending .queue-row-actions, .queue-row.leaving .queue-row-actions { opacity:0; pointer-events:none; }
-/* Sent: the row collapses while the transcript bubble arrives. */
-.queue-row.leaving { overflow:hidden; pointer-events:none; animation:queue-row-leave .15s ease-out both; }
-@keyframes queue-row-leave { from { opacity:1; max-height:34px; } to { opacity:0; max-height:0; } }
+.queue-row.sending .queue-row-actions { opacity:0; pointer-events:none; }
 /* A message handed to the agent but whose turn has not started yet. */
 .user.sending { animation:user-arrive .18s ease-out both, user-sending 1.6s ease-in-out .18s infinite; }
 @keyframes user-arrive { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 @keyframes user-sending { 0%, 100% { opacity:1; } 50% { opacity:.62; } }
 @media (prefers-reduced-motion:reduce) {
   .queue-trailing .queue-sending { transition:none; }
-  .queue-row.leaving { animation:none; display:none; }
   .user.sending { animation:none; opacity:.8; }
 }
 

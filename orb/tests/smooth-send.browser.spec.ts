@@ -38,7 +38,9 @@ test('Send now is one continuous Sending → Working state, with the message nev
  // Atomic: from the click on, every frame shows the message in the queue or the transcript.
  const from=seen.findIndex(f=>!f.queued);
  expect(seen.slice(from).every(f=>f.transcript)).toBe(true);
- expect(seen.some(f=>f.leaving&&f.transcript)).toBe(true);
+ // One transition: the row leaves in the frame the bubble lands, never both, never neither.
+ expect(seen.some(f=>f.leaving)).toBe(false);
+ expect(seen.slice(from).every(f=>!f.queued)).toBe(true);
  // Continuous: Stop stays, no interruption notice, "Sending…" then "Working…".
  expect(seen.every(f=>f.stop)).toBe(true);
  expect(seen.some(f=>f.failure)).toBe(false);
@@ -104,7 +106,6 @@ test('reduced motion: the sent row leaves without animating',async({page})=>{
  await page.goto('/tests/smooth-send.html');
  await expect(page.getByRole('region',{name:'Queued messages'})).toContainText('2 Queued');
  await page.getByRole('button',{name:'Send now: First queued message'}).click();
- await expect(page.locator('.queue-row.leaving')).toBeHidden();
  const animation=await page.locator('.scroll .user',{hasText:'First queued message'}).evaluate(el=>getComputedStyle(el).animationName);
  expect(animation).toBe('none');
 });

@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { isFailedStatus, isRunning, isSettingsIdle } from "../missionStatus";
+import { isFailedStatus, isLive, isRunning, isSettingsIdle, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -25,7 +25,7 @@ import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } fro
 import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
-import { Show, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
+import { Show, batch, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "../icons";
 import { ForkMission } from "../ForkMission";
 import { streamMission, heldAfterHistory, type StreamEvent } from "../stream";
@@ -384,11 +384,16 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     onCleanup(() => observer.disconnect());
   });
 
-  const refresh = async () => {
+  // A stream status is newer than any mission read started before it: such a
+  // read (possibly shared with an earlier caller) would put the previous turn's
+  // failed status and ended job back for a moment, the red flash after a send.
+  let statusSeen = 0;
+  const refresh = async (fresh = false) => {
     if(!p.id)return;
+    const since = statusSeen;
     try {
-      const next=await getMission(p.id);
-      if(disposed)return;
+      const next=await getMission(p.id, { fresh });
+      if(disposed||since!==statusSeen)return;
       setMission(next);
       setError(null);
     } catch (e) {
@@ -519,10 +524,14 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         if (ev.type === "mission_status_changed" || ev.type === "status") {
           if (ev.type === "mission_status_changed" && typeof ev.data.status === "string") {
             const status = ev.data.status;
+            statusSeen++;
+            // A new turn started: the previous turn's ended job is history,
+            // not a "Remote job stopped" failure, until the fresh read lands.
             setMission(old => ({ ...(old ?? {id:p.id,title:null,history:[],created_at:"",updated_at:""}), status,
+              ...(isLive(status) && old?.remote_job && remoteJobEnded(old.remote_job) ? { remote_job: null, terminal_reason: null } : {}),
               status_message: typeof ev.data.summary === "string" ? ev.data.summary : old?.status_message }));
           }
-          void refresh();
+          void refresh(true);
           return;
         }
         if (replaying) held.push(ev);
@@ -639,8 +648,21 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
     return false;
   };
+  // A turn ended with messages still queued: Core delivers the next one in a
+  // moment. Keep the Working row across that gap, or the transcript drops by
+  // the row and jumps back up when the delivered message lands.
+  const [queueHandover, setQueueHandover] = createSignal(0);
+  createEffect(on(busy, (now, before) => {
+    if (now) { setQueueHandover(0); return; }
+    if (!before || clientPlaced() || isFailedStatus(mission()?.status)) return;
+    if (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued)) return;
+    const until = Date.now() + 3000;
+    setQueueHandover(until);
+    setTimeout(() => { if (queueHandover() === until) setQueueHandover(0); }, 3050);
+  }, { defer: true }));
   const working = () => {
     if(sendError())return false;
+    if(queueHandover())return true;
     if(!p.id)return !p.launchError;
     if(sendingImmediate()&&!handoff())return false;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
@@ -763,7 +785,13 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         rememberLaunch(replacement.id, { prompt: sent, nodeId, destination: nodeLabel(nodeId), replacement: true });
         drafts.remove(attemptId);
         if (chips === followAttach()) setFollowAttach([]);
-        p.onFork?.(replacement);
+        // Core archived this mission as superseded by the replacement: it
+        // leaves every list in the same batch the replacement joins them, so
+        // the sidebar never shows the conversation twice.
+        batch(() => {
+          window.dispatchEvent(new CustomEvent("orb:mission-archived", { detail: { id: targetMissionId } }));
+          p.onFork?.(replacement);
+        });
         return true;
       }
       const event: StreamEvent = { type: "user_message", eventId: result.id, data: { id: result.id, content: sent, queued: result.queued, receipt: true, attached: chips.length > 0 } };

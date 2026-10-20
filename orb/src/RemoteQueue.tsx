@@ -18,7 +18,6 @@ export interface RemoteQueueHandle {
 }
 
 /** How long a sent row takes to collapse out of the queue. */
-const LEAVE_MS = 160;
 
 export type PendingRemoteQueueItem = { id: string; content: string; attached?: boolean };
 
@@ -51,13 +50,6 @@ export function RemoteQueue(p: {
   const [rows, setRows] = createSignal<QueuedMessage[]>([]);
   /** Optimistic in-place edits, by id, until Core confirms or refuses them. */
   const [edits, setEdits] = createSignal<Readonly<Record<string, string>>>({});
-  /** Rows on their way to the transcript: kept for one short collapse so the
-   * message is never in neither place. Not counted, not actionable. */
-  const [leaving, setLeaving] = createSignal<(QueuedMessage & { attached?: boolean })[]>([]);
-  const leave = (row: QueuedMessage & { attached?: boolean }) => {
-    setLeaving(list => [...list.filter(r => r.id !== row.id), row]);
-    setTimeout(() => { if (!destroyed) setLeaving(list => list.filter(r => r.id !== row.id)); }, LEAVE_MS);
-  };
   const pendingList = () => {
     if (!p.pending) return [];
     return Array.isArray(p.pending) ? p.pending : [p.pending];
@@ -168,7 +160,6 @@ export function RemoteQueue(p: {
     // transcript together, so no frame shows it in neither place.
     batch(() => {
       deletedIds.add(target.id);
-      leave(target);
       setRows(previous => previous.filter(row => row.id !== target.id));
       void p.onSendImmediate?.([], [injected]);
     });
@@ -209,7 +200,6 @@ export function RemoteQueue(p: {
         batch(() => {
           p.onRetract?.(target.id);
           deletedIds.delete(target.id);
-          setLeaving(list => list.filter(r => r.id !== target.id));
           setRows(before);
           setError(e instanceof Error ? e.message : String(e));
         });
@@ -303,41 +293,33 @@ export function RemoteQueue(p: {
     },
     hasQueued: () => visibleRows().length > 0,
   });
-  type Row = QueuedMessage & { attached?: boolean; sending?: boolean; leaving?: boolean };
-  // Leaving rows keep their slot until they have collapsed; they are not counted.
-  const renderedRows = (): Row[] => {
-    const out: Row[] = displayRows();
-    const shown = new Set(out.map(row => row.id));
-    for (const row of leaving()) if (!shown.has(row.id)) out.push({ ...row, leaving: true });
-    return out;
-  };
-  const rowsById = createMemo(() => new Map(renderedRows().map(row => [row.id, row])));
-  const rowIds = createMemo(() => renderedRows().map(row => row.id), [], { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) });
-  // Once the last counted row has moved to the transcript the panel itself
-  // closes, in that same batch: it keeps only the leaving rows for their
-  // collapse and never shows a "0 Queued" header.
-  const closing = createMemo(() => displayRows().length === 0 && !error());
+  type Row = QueuedMessage & { attached?: boolean; sending?: boolean };
+  // A row moving to the transcript leaves in the same frame its bubble lands:
+  // the dock shrinks by the row exactly when the transcript grows by the
+  // bubble, so a pinned transcript moves once and never bounces back.
+  const rowsById = createMemo(() => new Map(displayRows().map(row => [row.id, row as Row])));
+  const rowIds = createMemo(() => displayRows().map(row => row.id), [], { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) });
   return <Show when={rowIds().length || error()}>
-    <section class="followup-queue" classList={{collapsed:collapsed(),closing:closing()}} aria-label="Queued messages" aria-live="polite" aria-hidden={closing() ? true : undefined}>
+    <section class="followup-queue" classList={{collapsed:collapsed()}} aria-label="Queued messages" aria-live="polite">
       {/* The header and every row keep one geometry from send to delivery: the
           hint reserves its space and each row reserves its action area, so the
           dock height changes only when a row is added or removed. */}
-      <Show when={!closing()}><header>
+      <Show when={rowIds().length}><header>
         <span class="queue-count">{`${displayRows().length} Queued`}</span>
         <span class="queue-hint" classList={{"queue-hint-hidden": !(visibleRows().length > 0 && !p.editing)}} aria-hidden={!(visibleRows().length > 0 && !p.editing)}><Ic.ReturnIcon size={13}/> to Send</span>
         <div class="queue-options">
           <button type="button" class="queue-collapse" aria-label={collapsed()?"Show queued messages":"Hide queued messages"} aria-expanded={!collapsed()} onClick={()=>setCollapsed(!collapsed())}><Ic.ChevronDown size={14}/></button>
         </div>
       </header></Show>
-      <Show when={!collapsed() || closing()}><ol classList={{scrollable:rowIds().length>6}}><For each={rowIds()}>{id => {
+      <Show when={!collapsed()}><ol classList={{scrollable:rowIds().length>6}}><For each={rowIds()}>{id => {
         // Keyed by id (a string), so the same <li> lives from "sending" to
-        // "confirmed" to "leaving": its spinner fades instead of the row being rebuilt.
+        // "confirmed": its spinner fades instead of the row being rebuilt.
         let last: Row | undefined;
         const r = () => (last = rowsById().get(id) ?? last)!;
         const text = () => messagePresentation(edits()[r().id] ?? r().content).text;
         const attached = () => r().attached || messagePresentation(r().content).attached;
-        const inert = () => !!r().sending || !!r().leaving;
-        return <li class="queue-row" classList={{editing:p.editing===r().id,sending:!!r().sending,leaving:!!r().leaving,failed:!!r().queue_error}} aria-hidden={r().leaving ? true : undefined}>
+        const inert = () => !!r().sending;
+        return <li class="queue-row" classList={{editing:p.editing===r().id,sending:!!r().sending,failed:!!r().queue_error}}>
           <div class="queue-line">
             <div class="queue-text" title={text()}><span>{text()}</span><Show when={attached()}><small class="user-context">Attached context</small></Show></div>
             <span class="queue-trailing">
