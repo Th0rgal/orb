@@ -38,7 +38,7 @@ import { cacheRemember } from "../pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, normalizeEffort, supportedEfforts } from "../effort";
 import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, putTranscript, putTranscriptHeight, putTranscriptItems } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "../Skeleton";
-import { visibleTranscript } from "../transcriptModel";
+import { visibleTranscript, removeUsers, mapUsers } from "../transcriptModel";
 import { pollWhileVisible } from "../poll";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "../missionContext";
 import {
@@ -406,7 +406,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     const removed=new Set(remoteQueuedIds().filter(id=>!ids.includes(id)));
     setRemoteQueuedIds(ids);
     if(!removed.size)return;
-    setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||!item.messageId||!removed.has(item.messageId)));
+    setItems(previous=>removeUsers(previous,item=>!!item.queued&&!!item.messageId&&removed.has(item.messageId)));
     liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||!removed.has(String(event.data?.id)));
     void resync(true);
   };
@@ -625,12 +625,26 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
    * a tool call counts, not just text — and never runs for a state the user
    * has to act on, which keeps its own banner.
    */
+  // A delivered follow-up whose turn has not started yet. Between the send
+  // receipt and Core's user_message/status, neither the draft nor `busy()`
+  // held the Working row: it unmounted for ~0.7 s and the transcript shifted
+  // under the new bubble, then shifted back when the turn started.
+  const awaitingTurn = () => {
+    const list = items();
+    for (let i = list.length - 1; i >= 0; i--) {
+      const item = list[i];
+      if (item.kind !== "user") return false;
+      if (item.queued) continue;
+      return item.receipt === true;
+    }
+    return false;
+  };
   const working = () => {
     if(sendError())return false;
     if(!p.id)return !p.launchError;
     if(sendingImmediate()&&!handoff())return false;
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
-    return busy() || optimisticList().some(item => !item.waiting && !item.failed) || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
+    return busy() || optimisticList().some(item => !item.waiting && !item.failed) || awaitingTurn() || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
   };
   // A remote job queued for capacity has not started: say so instead of "Working".
   const phaseLabel = () => handoff() ? "Sending" : sendingImmediate() ? "Stopping the current turn…" : mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : mission()?.backend === "claudecode" && !activity() ? "Waiting for Claude Code" : "Working";
@@ -991,7 +1005,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             }
           >
 
-            <Show when={mission() && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
+            {/* A sent follow-up supersedes the previous run's banner: it must go
+                with the send, not when the turn starts ~1 s later (a second
+                shift of the transcript under the new message). */}
+            <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
             <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} sending={handoff()?.id} working={working()} workingLabel={`${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
@@ -1028,17 +1045,17 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             delivered={items().flatMap(item => item.kind === "user" && !item.queued && item.messageId ? [item.messageId] : [])}
             onRetract={id=>{
               endHandoff(p.id,id);
-              setItems(previous=>previous.filter(item=>item.kind!=="user"||item.queued||item.messageId!==id));
+              setItems(previous=>removeUsers(previous,item=>!item.queued&&item.messageId===id));
               liveEvents=liveEvents.filter(event=>event.type!=="user_message"||event.data?.queued||event.data?.id!==id);
               held=held.filter(event=>event.type!=="user_message"||event.data?.queued||event.data?.id!==id);
             }}
             onSendNowAccepted={(id,live)=>{ if(live)endHandoff(p.id,id); }}
             onEdited={(id,content)=>{
-              setItems(previous=>previous.map(item=>item.kind==="user"&&item.queued&&item.messageId===id?{...item,text:content}:item));
+              setItems(previous=>mapUsers(previous,item=>item.queued&&item.messageId===id?{...item,text:content}:item));
               liveEvents=liveEvents.map(event=>event.type==="user_message"&&event.data?.queued&&event.data?.id===id?{...event,data:{...event.data,content}}:event);
             }}
             onRows={reconcileRemoteQueue} onCancel={id=>{
-            setItems(previous=>previous.filter(item=>item.kind!=="user"||!item.queued||item.messageId!==id));
+            setItems(previous=>removeUsers(previous,item=>!!item.queued&&item.messageId===id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>
           <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => drafts.remove(id)} onEdit={row=>void queuedEdit.start(row)}/>

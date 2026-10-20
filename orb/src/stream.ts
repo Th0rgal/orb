@@ -24,6 +24,13 @@ export function isGeneratedRemoteJobStatus(ev: Pick<StoredEvent, "content" | "me
   return REMOTE_JOB_RUNNING.test(ev.content) || DISPATCHED_JOB.test(ev.content);
 }
 
+/** Core marks the persisted text of a turn that was cut (Send now, Stop). */
+export const PARTIAL_TURN = "partial_turn_interrupted";
+export function isPartialTurn(data: Record<string, unknown> | undefined): boolean {
+  const evidence = data?.completion_evidence as { classification_source?: unknown } | undefined;
+  return data?.partial === true || evidence?.classification_source === PARTIAL_TURN;
+}
+
 export interface StreamEvent {
   eventId?: string;
   sequence?: number;
@@ -80,7 +87,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       if (isGeneratedRemoteJobStatus(ev)) return null;
       // Canonical rows are the finalized text_op bubble; treat both as the
       // turn's final message (the reducer dedupes identical text).
-      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id, revision: ev.metadata?.revision }), type: "assistant_message" };
+      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id, revision: ev.metadata?.revision, ...(isPartialTurn(ev.metadata) ? { partial: true } : {}) }), type: "assistant_message" };
     case "text_op": {
       let ops: unknown = [];
       try {
@@ -192,6 +199,7 @@ export function streamMission(
           }
           try {
             const parsed = JSON.parse(data);
+            if (eventType === "assistant_message" && isPartialTurn(parsed)) parsed.partial = true;
             deliver({ type: eventType, data: parsed, eventId: parsed.event_id ?? parsed.id, sequence: parsed.sequence });
           } catch {
             /* malformed frame — skip */
@@ -251,6 +259,19 @@ export function heldAfterHistory(history: StreamEvent[], held: StreamEvent[]): S
     const id = event.eventId ?? event.data.id;
     if (event.type === 'user_message' && event.data.queued !== true && id != null) delivered.add(String(id));
   }
+  // The stored text_delta row is the current turn's text. When history
+  // already holds it, held live text of that same turn (everything before
+  // the first message history has not delivered yet) is a second copy: the
+  // replay after a Send now interrupt rendered "step 1…5 done" twice.
+  const latestText = (event: StreamEvent) => event.type === 'text_delta' || (event.type === 'text_op' && String(event.data.bubble_id ?? 'text_delta_latest') === 'text_delta_latest');
+  let lastHistoryUser = -1;
+  history.forEach((event, index) => { if (event.type === 'user_message' && event.data.queued !== true) lastHistoryUser = index; });
+  const turnText = history.slice(lastHistoryUser + 1).filter(latestText);
+  const historyHasTurnText = turnText.length > 0;
+  // A sequenced revision newer than the stored row is newer text, not a copy.
+  const storedThrough = Math.max(-1, ...turnText.map(event => event.sequence ?? -1));
+  let newTurn = held.findIndex(event => event.type === 'user_message' && event.data.queued !== true && !delivered.has(String(event.data.id ?? event.eventId)));
+  if (newTurn < 0) newTurn = held.length;
   let finalizedThrough = -1;
   held.forEach((event,index) => {
     const key=identity(event);
@@ -262,6 +283,7 @@ export function heldAfterHistory(history: StreamEvent[], held: StreamEvent[]): S
     const key=identity(event);
     if(key && known.has(key)) return false;
     const bubble=String(event.data.bubble_id ?? 'text_delta_latest');
+    if(historyHasTurnText && index < newTurn && latestText(event) && (event.sequence == null || event.sequence <= storedThrough)) return false;
     if(index <= finalizedThrough && (event.type==='thinking'||event.type==='text_delta'||(event.type==='text_op'&&bubble==='text_delta_latest'))) return false;
     if(event.type==='text_op'&&Array.isArray(event.data.ops)&&event.data.ops.some(op=>op.type==='snapshot')) {
       const revision=Math.max(...event.data.ops.filter(op=>op.type==='snapshot').map(op=>Number(op.revision)));

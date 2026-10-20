@@ -285,3 +285,19 @@ it('keeps one row element, and its action area, from sending to confirmed', asyn
   expect(after.classList.contains('sending')).toBe(false);
   expect(after.querySelector('.queue-sending')?.classList.contains('visible')).toBe(false);
 });
+
+it('never shows a zero-count header while the last row leaves for the transcript', async () => {
+  backend.list.mockResolvedValue([{id:'only',content:'retest queued',source:'remote-queue'}]);
+  backend.api.mockImplementation(async (url: string) => url.includes('/send-now') ? {ok:true,delivered:false,promoted:true} : {ok:true});
+  const send = vi.fn().mockResolvedValue(undefined);
+  render(() => <RemoteQueue mission="remote" onSendImmediate={send} onRows={()=>{}} onCancel={()=>{}}/>);
+  await screen.findByText('1 Queued');
+  const counts: string[] = [];
+  const sample = () => document.querySelectorAll('.queue-count').forEach(node => counts.push(node.textContent ?? ''));
+  const observer = new MutationObserver(sample);
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+  await fireEvent.click(screen.getByRole('button',{name:'Send now: retest queued'}));
+  await waitFor(() => expect(document.querySelector('.followup-queue')).toBeNull());
+  observer.disconnect();
+  expect(counts.filter(text => /^0\b/.test(text))).toEqual([]);
+});

@@ -485,6 +485,11 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
    composer keystroke relayout the whole conversation. */
 .scroll { contain: layout paint; }
 .scroll .col > * { content-visibility: auto; contain-intrinsic-size: auto 160px; }
+/* Always on screen, and changed by every send: as skippable content the
+   Working row mounted as a 160px placeholder for a frame, and the turn list
+   painted a stale layout for a frame when the turn started — the whole
+   transcript jumped by several lines under the new message. */
+.scroll .col > .st-working, .scroll .col > [data-virtual-transcript] { content-visibility: visible; contain-intrinsic-size: none; }
 .scroll .col { padding: 16px 0 24px; user-select: text; -webkit-user-select: text; cursor: auto; font-size: 13px; line-height: 21px; }
 
 .sk-transcript { margin-top: 8px; }
@@ -2576,9 +2581,11 @@ select.orb-select-native:disabled { cursor: default; }
 .queue-row small[role="alert"] { color:var(--red); }
 .queue-row > .queue-send-now { margin:0 0 6px 4px; font-size:13px; }
 .followup-queue > p[role="alert"] { margin:6px 8px 2px; color:var(--red); font-size:12px; }
+.followup-queue.closing { overflow:hidden; pointer-events:none; animation:queue-card-close 160ms ease-out both; }
+@keyframes queue-card-close { from { opacity:1; max-height:120px; } to { opacity:0; max-height:0; margin-bottom:0; padding-top:0; padding-bottom:0; border-width:0; } }
 @keyframes queue-card-reveal { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 @keyframes queue-row-reveal { from { opacity:0; transform:translateY(2px); } to { opacity:1; transform:translateY(0); } }
-@media (prefers-reduced-motion:reduce) { .followup-queue, .queue-row { animation:none; } }
+@media (prefers-reduced-motion:reduce) { .followup-queue, .queue-row { animation:none; } .followup-queue.closing { display:none; } }
 @media (max-width:600px) { .queue-hint, .queue-tooltip { display:none; } .queue-row-actions { opacity:1; } }
 
 .file-panel.maximized { inset:0 0 0 var(--sb-w); width:auto; z-index:40; }
