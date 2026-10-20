@@ -86,6 +86,7 @@ import {
   type RemoteLaunchCapability,
   type RemoteNodesResponse,
 } from "./api";
+const UsageSettings = lazy(() => import("./UsageSettings").then(module => ({ default: module.UsageSettings })));
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
 const SkillsSettings = lazy(() => import("./SkillsSettings").then(module => ({ default: module.SkillsSettings })));
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
@@ -101,7 +102,7 @@ import { Composer } from "./composer/Composer";
 import { MissionView, NativeMissionView } from "./mission/MissionView";
 
 
-const PAGES = new Set(["inbox", "cloud-agent", "settings", "inbox-settings", "btw-settings", "hermes-settings", "skills-settings", "bitwarden-settings", "routing", "machines", "providers", "execution"]);
+const PAGES = new Set(["inbox", "cloud-agent", "settings", "inbox-settings", "btw-settings", "hermes-settings", "skills-settings", "bitwarden-settings", "usage-settings", "routing", "machines", "providers", "execution"]);
 
 export default function App() {
   const [secretRequests, setSecretRequests] = createSignal(0);
@@ -471,14 +472,14 @@ export default function App() {
       context: previewContext()?.id === id ? previewContext()?.pct : null };
   });
 
-  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "inbox-settings" || selected() === "btw-settings" || selected() === "hermes-settings" || selected() === "skills-settings" || selected() === "bitwarden-settings";
+  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "inbox-settings" || selected() === "btw-settings" || selected() === "hermes-settings" || selected() === "skills-settings" || selected() === "bitwarden-settings" || selected() === "usage-settings";
   const openSettings = () => {
     open("settings");
   };
   const leaveSettings = () => {
     const h = history();
     for (let i = hIdx() - 1; i >= 0; i--) {
-      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "inbox-settings" && h[i] !== "btw-settings" && h[i] !== "hermes-settings" && h[i] !== "skills-settings" && h[i] !== "bitwarden-settings") {
+      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "inbox-settings" && h[i] !== "btw-settings" && h[i] !== "hermes-settings" && h[i] !== "skills-settings" && h[i] !== "bitwarden-settings" && h[i] !== "usage-settings") {
         if (selected() === "routing" && !confirmLeaveRouting(() => { if (open(h[i], false)) setHIdx(i); })) return;
         if (open(h[i], false)) setHIdx(i);
         return;
@@ -918,6 +919,7 @@ export default function App() {
             <button class={`row ${selected() === "settings" ? "active" : ""}`} onClick={() => open("settings")}><span class="row-ico"><Ic.GearIcon /></span><span class="row-label">General</span></button>
             <div class="settings-nav-group-gap" />
             <button class={`row ${selected() === "routing" ? "active" : ""}`} onClick={() => open("routing")}><span class="row-ico"><Ic.CubeIcon /></span><span class="row-label">Models &amp; Routing</span></button>
+            <button class={`row ${selected() === "usage-settings" ? "active" : ""}`} onClick={() => open("usage-settings")}><span class="row-ico"><Ic.UsageIcon /></span><span class="row-label">Usage</span></button>
             <button class={`row ${selected() === "hermes-settings" ? "active" : ""}`} onClick={() => open("hermes-settings")}><span class="row-ico"><Ic.TargetIcon /></span><span class="row-label">Coordinator</span></button>
             <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Side Questions</span></button>
             <div class="settings-nav-group-gap" />
@@ -971,6 +973,7 @@ export default function App() {
             <Match when={selected() === "hermes-settings"}><span>Settings · Coordinator</span></Match>
             <Match when={selected() === "btw-settings"}><span>Settings · Side Questions</span></Match>
             <Match when={selected() === "routing"}><span>Settings · Models &amp; Routing</span></Match>
+            <Match when={selected() === "usage-settings"}><span>Settings · Usage</span></Match>
             <Match when={selected() === "machines"}>
               <span>Machines</span>
             </Match>
@@ -1233,6 +1236,7 @@ export default function App() {
           </Match>
           <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
           <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>
+          <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
           <Match when={selected() === "inbox-settings"}><InboxSettings /></Match>
           <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
           <Match when={selected() === "btw-settings"}><BtwSettings/></Match>

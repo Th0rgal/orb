@@ -58,12 +58,20 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
     },
     PricingEntry {
         canonical: "claude-sonnet-4-6",
-        aliases: &["claude-sonnet-4-6", "claude-4-6-sonnet"],
+        aliases: &[
+            "claude-sonnet-4-6",
+            "claude-sonnet-4.6",
+            "claude-4-6-sonnet",
+        ],
         pricing: pricing(3_000, 15_000, Some(3_750), Some(300)),
     },
     PricingEntry {
         canonical: "claude-sonnet-4-5",
-        aliases: &["claude-sonnet-4-5", "claude-4-5-sonnet"],
+        aliases: &[
+            "claude-sonnet-4-5",
+            "claude-sonnet-4.5",
+            "claude-4-5-sonnet",
+        ],
         pricing: pricing(3_000, 15_000, Some(3_750), Some(300)),
     },
     PricingEntry {
@@ -256,6 +264,16 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         aliases: &["o4-mini"],
         pricing: pricing(1_100, 4_400, None, Some(550)),
     },
+    // Gemini 4 Argon (Google API / Antigravity catalog, EAP). Google has not
+    // published a list price yet: it carries the Gemini 3.1 Pro rates
+    // ($2/$12 per Mtok, $0.20 cached) so router traffic is not costed as 0.
+    // Effort variants (-low/-medium/-high) and -eap share the family alias;
+    // `agy-demo` is the name the Antigravity CLI reports for the same model.
+    PricingEntry {
+        canonical: "gemini-4-argon",
+        aliases: &["gemini-4-argon", "gemini-4.0-argon", "agy-demo"],
+        pricing: pricing(2_000, 12_000, None, Some(200)),
+    },
     PricingEntry {
         canonical: "gemini-3.1-pro",
         aliases: &["gemini-3.1-pro", "gemini-3-1-pro"],
@@ -295,6 +313,30 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         canonical: "gemini-1.5-flash",
         aliases: &["gemini-1.5-flash", "gemini-1-5-flash"],
         pricing: pricing(75, 300, None, None),
+    },
+    // grok-4.7 and its build-fast variant have no published list price yet:
+    // they carry the grok-4.5 and grok-4-fast rates respectively.
+    PricingEntry {
+        canonical: "grok-4.7-build-fast",
+        aliases: &["grok-4.7-build-fast", "grok-4-7-build-fast"],
+        pricing: pricing(1_250, 2_500, None, Some(200)),
+    },
+    PricingEntry {
+        canonical: "grok-4.7",
+        aliases: &["grok-4.7", "grok-4-7", "grok-4.7-latest"],
+        pricing: pricing(2_000, 6_000, None, Some(500)),
+    },
+    // grok-4.20 (dated reasoning/non-reasoning/multi-agent ids) and grok-4.3
+    // carry the grok-4 rates until xAI lists them separately.
+    PricingEntry {
+        canonical: "grok-4.20",
+        aliases: &["grok-4.20-multi-agent", "grok-4.20"],
+        pricing: pricing(1_250, 2_500, None, Some(200)),
+    },
+    PricingEntry {
+        canonical: "grok-4.3",
+        aliases: &["grok-4.3", "grok-4-3"],
+        pricing: pricing(1_250, 2_500, None, Some(200)),
     },
     PricingEntry {
         // grok-4.6 list price not yet published separately; mirrors grok-4.5
@@ -473,6 +515,27 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         aliases: &["minimax-m2"],
         pricing: pricing(300, 1_200, Some(375), Some(30)),
     },
+    // Z.AI's vision flash model is free on the pay-as-you-go list.
+    PricingEntry {
+        canonical: "glm-4.6v-flash",
+        aliases: &["glm-4.6v-flash", "glm-4-6v-flash"],
+        pricing: pricing(0, 0, None, None),
+    },
+    // Cerebras gpt-oss-120b list price ($0.35/$0.75 per Mtok).
+    PricingEntry {
+        canonical: "gpt-oss-120b",
+        aliases: &["gpt-oss-120b"],
+        pricing: pricing(350, 750, None, None),
+    },
+    // Kimi (Moonshot) coding models. Kimi publishes no per-token rate for the
+    // coding plan ids; they carry the Kimi K2 API rates ($0.60/$2.50 per
+    // Mtok, $0.15 cached) so routed traffic gets an estimate. `k3` sits last
+    // so the short alias cannot shadow a longer, more specific entry.
+    PricingEntry {
+        canonical: "kimi-for-coding",
+        aliases: &["kimi-for-coding", "kimi-k2", "kimi-k3", "k3"],
+        pricing: pricing(600, 2_500, None, Some(150)),
+    },
 ];
 
 /// Token usage from an API call.
@@ -555,7 +618,9 @@ pub fn normalized_model(model: &str) -> String {
 /// - $15/1M output = 15_000 nanodollars per token
 pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
     let normalized = normalize_model(model);
-    if normalized.starts_with("muse-code/") {
+    // Subscription routes and OpenRouter's `:free` variants carry no
+    // per-token charge: price them at zero (a known cost), not unknown.
+    if normalized.starts_with("muse-code/") || normalized.ends_with(":free") {
         return Some(pricing(0, 0, None, None));
     }
     PRICING_ENTRIES
@@ -564,10 +629,37 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
         .map(|entry| entry.pricing)
 }
 
+/// Whether `model` has a list price (including known-free routes). Usage for
+/// a model without one must be reported as "cost unknown", never as $0.
+pub fn has_pricing(model: &str) -> bool {
+    pricing_for_model(model).is_some()
+}
+
+/// Warn about an unpriced model once per process and model. The usage
+/// summary re-prices every stored row on read, so a per-call warning would
+/// log thousands of identical lines per page view.
+fn warn_unknown_model_once(model: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = normalize_model(model).to_string();
+    let first = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.len() < 1_024 && seen.insert(key))
+        .unwrap_or(false);
+    if first {
+        tracing::warn!(
+            model = %model,
+            "No list price for model; its usage is reported as cost unknown"
+        );
+    }
+}
+
 /// Calculate cost in cents from token usage and model.
 ///
 /// Returns 0 if:
-/// - Model is unknown (logs a warning once per unknown model)
+/// - Model is unknown (warns once per model; see [`has_pricing`])
 /// - No token usage provided
 pub fn cost_cents_from_usage(model: &str, usage: &TokenUsage) -> u64 {
     if !usage.has_usage() {
@@ -575,8 +667,7 @@ pub fn cost_cents_from_usage(model: &str, usage: &TokenUsage) -> u64 {
     }
 
     let Some(pricing) = pricing_for_model(model) else {
-        // Log warning for unknown models (in production, consider rate-limiting this)
-        tracing::warn!(model = %model, "Unknown model for cost calculation, using 0 cost");
+        warn_unknown_model_once(model);
         return 0;
     };
 
@@ -848,6 +939,56 @@ mod tests {
         let minimax = pricing_for_model("minimax/MiniMax-M3").expect("minimax pricing");
         assert_eq!(minimax.input_nano_per_token, 600);
         assert_eq!(minimax.output_nano_per_token, 2_400);
+    }
+
+    #[test]
+    fn gemini_4_argon_variants_share_one_price() {
+        for model in [
+            "gemini-4-argon",
+            "gemini-4-argon-medium",
+            "gemini-4-argon-high",
+            "gemini-4-argon-eap",
+            "google/gemini-4-argon-eap",
+            "agy-demo",
+            "agy-demo-high",
+        ] {
+            assert_eq!(normalized_model(model), "gemini-4-argon", "{model}");
+            let p = pricing_for_model(model).expect(model);
+            assert_eq!(p.input_nano_per_token, 2_000);
+            assert_eq!(p.output_nano_per_token, 12_000);
+        }
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            ..Default::default()
+        };
+        // $2 input + $1.20 output.
+        assert_eq!(cost_cents_from_usage("gemini-4-argon-eap", &usage), 320);
+    }
+
+    #[test]
+    fn every_catalog_snapshot_model_has_a_price() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/snapshots");
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("catalog snapshots") {
+            let path = entry.expect("entry").path();
+            let text = std::fs::read_to_string(&path).expect("snapshot");
+            let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+            for model in value["models"].as_array().into_iter().flatten() {
+                let id = model["id"].as_str().unwrap_or_default();
+                if !id.is_empty() && !has_pricing(id) {
+                    missing.push(format!("{}: {id}", path.display()));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "unpriced routed models: {missing:#?}");
+    }
+
+    #[test]
+    fn free_and_subscription_routes_are_priced_at_zero_not_unknown() {
+        assert!(has_pricing("meta-llama/llama-3.3-70b-instruct:free"));
+        assert!(has_pricing("muse-code/muse-spark-1.3"));
+        assert!(!has_pricing("completely-unknown-model"));
     }
 
     #[test]

@@ -261,6 +261,7 @@ export const ComputeNodeIcon = (p: P) => (
 
 export const BranchIcon = (p: P) => <I {...p}><circle cx="4" cy="3" r="1.5" /><circle cx="12" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><path d="M4 4.5v7M12 4.5v1c0 3-8 1-8 4" /></I>;
 
+export const UsageIcon = (p: P) => (<I {...p}><path d="M2.5 13.5h11"/><path d="M4.5 11V8M8 11V4M11.5 11V6.5"/></I>);
 export const PlanIcon = (p: P) => (<I {...p}><circle cx="3" cy="4" r="1"/><circle cx="3" cy="8" r="1"/><circle cx="3" cy="12" r="1"/><path d="M7 4h6M7 8h6M7 12h4"/></I>);
 
 export const CutIcon = (p: P) => <I {...p}>

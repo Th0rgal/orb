@@ -1405,31 +1405,208 @@ fn proxy_usage_model(entry: &crate::provider_health::ResolvedEntry) -> String {
     }
 }
 
-/// Persist one routed /v1 request's token usage into the single-tenant user's
-/// mission store so the providers usage page counts router traffic alongside
-/// mission usage. Cost is a list-price estimate from the upstream model id.
-async fn record_proxy_usage(
-    state: &Arc<super::routes::AppState>,
-    model_id: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-) {
-    let model = crate::cost::normalized_model(model_id);
+/// Who a routed request is billed to in the usage ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UsageAttribution {
+    /// Proxy API key that authenticated the request (`None` for the internal
+    /// proxy secret and JWT-authenticated chain tests).
+    pub api_key_id: Option<uuid::Uuid>,
+    pub api_key_name: Option<String>,
+    /// Mission from the liveness header, or a mission-scoped launch key.
+    pub mission_id: Option<uuid::Uuid>,
+}
+
+/// Resolve attribution from the request headers. The bearer token is only
+/// hashed and compared; it is never stored or logged.
+async fn usage_attribution(
+    state: &super::routes::AppState,
+    headers: &HeaderMap,
+) -> UsageAttribution {
+    let key = match headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(token) => state.proxy_api_keys.find_by_token(token).await,
+        None => None,
+    };
+    attribution_from(headers, key.as_ref())
+}
+
+fn attribution_from(
+    headers: &HeaderMap,
+    key: Option<&super::proxy_keys::KeySummary>,
+) -> UsageAttribution {
+    let header_mission = headers
+        .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| uuid::Uuid::parse_str(v.trim()).ok());
+    let key_mission = key
+        .and_then(|k| k.name.strip_prefix("remote-launch:"))
+        .and_then(|id| uuid::Uuid::parse_str(id).ok());
+    UsageAttribution {
+        api_key_id: key.map(|k| k.id),
+        api_key_name: key.map(|k| k.name.clone()),
+        mission_id: header_mission.or(key_mission),
+    }
+}
+
+/// Token counts of one routed request. `input` excludes cached input so the
+/// ledger uses one convention (Anthropic's) for every provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProxyTokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_creation: u64,
+    pub cache_read: u64,
+}
+
+impl ProxyTokens {
+    fn any(&self) -> bool {
+        self.input > 0 || self.output > 0 || self.cache_creation > 0 || self.cache_read > 0
+    }
+}
+
+/// Accumulates usage across SSE events or one JSON body. Values are maxed,
+/// not summed: providers repeat cumulative counts across events.
+#[derive(Debug, Clone, Copy, Default)]
+struct UsageAccumulator {
+    input: u64,
+    output: u64,
+    cache_creation: u64,
+    cache_read: u64,
+    /// OpenAI/Google style cached tokens, which are part of `input`.
+    cached_in_input: u64,
+}
+
+impl UsageAccumulator {
+    /// Observe one `usage` object. Returns whether it carried input/output.
+    fn observe(&mut self, usage: &serde_json::Value) -> bool {
+        let get = |paths: &[&str]| {
+            paths
+                .iter()
+                .find_map(|p| usage.pointer(p).and_then(serde_json::Value::as_u64))
+        };
+        let input = get(&["/prompt_tokens", "/input_tokens", "/promptTokenCount"]);
+        let output = get(&["/completion_tokens", "/output_tokens"]);
+        if let Some(v) = input {
+            self.input = self.input.max(v);
+        }
+        if let Some(v) = output {
+            self.output = self.output.max(v);
+        }
+        if let Some(v) = get(&["/cache_read_input_tokens"]) {
+            self.cache_read = self.cache_read.max(v);
+        }
+        if let Some(v) = get(&["/cache_creation_input_tokens"]) {
+            self.cache_creation = self.cache_creation.max(v);
+        }
+        if let Some(v) = get(&[
+            "/prompt_tokens_details/cached_tokens",
+            "/input_tokens_details/cached_tokens",
+            "/cachedContentTokenCount",
+        ]) {
+            self.cached_in_input = self.cached_in_input.max(v);
+        }
+        input.is_some() || output.is_some()
+    }
+
+    fn tokens(&self) -> ProxyTokens {
+        ProxyTokens {
+            input: self.input.saturating_sub(self.cached_in_input),
+            output: self.output,
+            cache_creation: self.cache_creation,
+            cache_read: self.cache_read.max(self.cached_in_input),
+        }
+    }
+}
+
+/// Cache counts from a raw (untranslated) provider response body, applied to
+/// input/output counts a translator already extracted.
+fn tokens_with_body_cache(input: u64, output: u64, body: &[u8]) -> ProxyTokens {
+    let mut acc = UsageAccumulator::default();
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        for usage in [
+            value.get("usage"),
+            value.get("usageMetadata"),
+            value.pointer("/response/usageMetadata"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            acc.observe(usage);
+        }
+    }
+    acc.input = input;
+    acc.output = output;
+    acc.tokens()
+}
+
+/// Ledger fields that come from the resolved route.
+#[derive(Debug, Clone)]
+struct ProxyUsageTarget {
+    model: String,
+    provider: Option<String>,
+    account_id: Option<uuid::Uuid>,
+    attribution: UsageAttribution,
+}
+
+fn proxy_usage_target(
+    entry: &crate::provider_health::ResolvedEntry,
+    attribution: &UsageAttribution,
+) -> ProxyUsageTarget {
+    ProxyUsageTarget {
+        model: proxy_usage_model(entry),
+        provider: Some(entry.provider_id.clone()),
+        account_id: Some(entry.account_id),
+        attribution: attribution.clone(),
+    }
+}
+
+fn proxy_usage_record(
+    target: &ProxyUsageTarget,
+    tokens: ProxyTokens,
+) -> crate::api::mission_store::ProxyUsageRecord {
+    let model = crate::cost::normalized_model(&target.model);
     let usage = crate::cost::TokenUsage {
-        input_tokens,
-        output_tokens,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
+        input_tokens: tokens.input,
+        output_tokens: tokens.output,
+        cache_creation_input_tokens: Some(tokens.cache_creation),
+        cache_read_input_tokens: Some(tokens.cache_read),
     };
     let cost_cents = crate::cost::cost_cents_from_usage(&model, &usage);
+    crate::api::mission_store::ProxyUsageRecord {
+        model,
+        provider: target.provider.clone(),
+        account_id: target.account_id,
+        api_key_id: target.attribution.api_key_id,
+        api_key_name: target.attribution.api_key_name.clone(),
+        mission_id: target.attribution.mission_id,
+        input_tokens: tokens.input,
+        output_tokens: tokens.output,
+        cache_creation_tokens: tokens.cache_creation,
+        cache_read_tokens: tokens.cache_read,
+        cost_cents,
+    }
+}
+
+/// Persist one routed /v1 request's token usage into the single-tenant user's
+/// mission store, attributed to its key, provider account and mission. Cost
+/// is a list-price estimate from the upstream model id.
+async fn record_proxy_usage(
+    state: &Arc<super::routes::AppState>,
+    target: &ProxyUsageTarget,
+    tokens: ProxyTokens,
+) {
+    let record = proxy_usage_record(target, tokens);
     let user = super::auth::implicit_single_tenant_user(&state.config);
     let control_state = state.control.get_or_spawn(&user).await;
     if let Err(error) = control_state
         .mission_store
-        .record_proxy_usage(&model, input_tokens, output_tokens, cost_cents)
+        .record_proxy_usage_attributed(&record)
         .await
     {
-        tracing::warn!(%error, model = %model, "Failed to record proxy usage");
+        tracing::warn!(%error, model = %record.model, "Failed to record proxy usage");
     }
 }
 
@@ -1439,11 +1616,11 @@ async fn record_proxy_usage(
 /// scope.
 fn proxy_usage_sink(
     state: Arc<super::routes::AppState>,
-    model_id: String,
-) -> Box<dyn FnOnce(u64, u64) + Send> {
-    Box::new(move |input_tokens, output_tokens| {
+    target: ProxyUsageTarget,
+) -> Box<dyn FnOnce(ProxyTokens) + Send> {
+    Box::new(move |tokens| {
         tokio::spawn(async move {
-            record_proxy_usage(&state, &model_id, input_tokens, output_tokens).await;
+            record_proxy_usage(&state, &target, tokens).await;
         });
     })
 }
@@ -1452,20 +1629,11 @@ fn proxy_usage_sink(
 // Native protocol handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn native_response_usage(body: &[u8]) -> Option<(u64, u64)> {
+fn native_response_usage(body: &[u8]) -> Option<ProxyTokens> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let usage = value.get("usage")?;
-    let input = usage
-        .get("input_tokens")
-        .or_else(|| usage.get("prompt_tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let output = usage
-        .get("output_tokens")
-        .or_else(|| usage.get("completion_tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    (input > 0 || output > 0).then_some((input, output))
+    let mut acc = UsageAccumulator::default();
+    acc.observe(value.get("usage")?);
+    (acc.input > 0 || acc.output > 0).then(|| acc.tokens())
 }
 
 fn body_has_previous_response_id(body: &[u8]) -> bool {
@@ -1559,6 +1727,7 @@ async fn native_protocol_proxy(
     } else {
         None
     };
+    let attribution = attribution_from(&headers, execution_key.as_ref());
     let mission_key_id = execution_key
         .as_ref()
         .and_then(|key| key.name.strip_prefix("remote-launch:"))
@@ -2147,7 +2316,10 @@ async fn native_protocol_proxy(
                 entry.account_id,
                 None,
                 entry.subscription_key.clone(),
-                Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
+                Some(proxy_usage_sink(
+                    state.clone(),
+                    proxy_usage_target(entry, &attribution),
+                )),
                 liveness_mission_id,
             );
             let mut response = (status, Body::from_stream(tracked_stream)).into_response();
@@ -2174,18 +2346,12 @@ async fn native_protocol_proxy(
         };
         if status.is_success() {
             state.health_tracker.record_entry_success(entry).await;
-            if let Some((input_tokens, output_tokens)) = native_response_usage(&response_body) {
+            if let Some(tokens) = native_response_usage(&response_body) {
                 state
                     .health_tracker
-                    .record_token_usage(entry.account_id, input_tokens, output_tokens)
+                    .record_token_usage(entry.account_id, tokens.input, tokens.output)
                     .await;
-                record_proxy_usage(
-                    &state,
-                    &proxy_usage_model(entry),
-                    input_tokens,
-                    output_tokens,
-                )
-                .await;
+                record_proxy_usage(&state, &proxy_usage_target(entry, &attribution), tokens).await;
             }
         }
         let mut response = (status, Body::from(response_body)).into_response();
@@ -2299,6 +2465,7 @@ pub(crate) async fn chat_completions_inner(
     if let Some(id) = liveness_mission_id {
         crate::api::proxy_liveness::note_activity(id);
     }
+    let attribution = usage_attribution(&state, &headers).await;
 
     let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
 
@@ -2311,13 +2478,18 @@ pub(crate) async fn chat_completions_inner(
         let handled =
             super::grok_tool_bridge::handle_chat_completion(&state.config.working_dir, &body).await;
         if let Some(usage) = handled.usage {
-            record_proxy_usage(
-                &state,
-                &usage.model,
-                usage.input_tokens,
-                usage.output_tokens,
-            )
-            .await;
+            let target = ProxyUsageTarget {
+                provider: crate::api::usage_summary::infer_provider_for_model(&usage.model),
+                model: usage.model,
+                account_id: None,
+                attribution: attribution.clone(),
+            };
+            let tokens = ProxyTokens {
+                input: usage.input_tokens,
+                output: usage.output_tokens,
+                ..Default::default()
+            };
+            record_proxy_usage(&state, &target, tokens).await;
         }
         return handled.response;
     }
@@ -2980,7 +3152,10 @@ pub(crate) async fn chat_completions_inner(
                     account_id,
                     None,
                     entry.subscription_key.clone(),
-                    Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
+                    Some(proxy_usage_sink(
+                        state.clone(),
+                        proxy_usage_target(entry, &attribution),
+                    )),
                     liveness_mission_id,
                 );
 
@@ -3162,7 +3337,12 @@ pub(crate) async fn chat_completions_inner(
                     .health_tracker
                     .record_token_usage(entry.account_id, input, output)
                     .await;
-                record_proxy_usage(&state, &proxy_usage_model(entry), input, output).await;
+                record_proxy_usage(
+                    &state,
+                    &proxy_usage_target(entry, &attribution),
+                    tokens_with_body_cache(input, output, &resp_body),
+                )
+                .await;
             }
             let success_provider = entry.provider_id.clone();
             for evt in &mut pending_fallback_events {
@@ -3228,7 +3408,10 @@ pub(crate) async fn chat_completions_inner(
                             account_id,
                             None,
                             entry.subscription_key.clone(),
-                            Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
+                            Some(proxy_usage_sink(
+                                state.clone(),
+                                proxy_usage_target(entry, &attribution),
+                            )),
                             liveness_mission_id,
                         );
 
@@ -3463,7 +3646,12 @@ pub(crate) async fn chat_completions_inner(
                     .health_tracker
                     .record_token_usage(entry.account_id, input, output)
                     .await;
-                record_proxy_usage(&state, &proxy_usage_model(entry), input, output).await;
+                record_proxy_usage(
+                    &state,
+                    &proxy_usage_target(entry, &attribution),
+                    tokens_with_body_cache(input, output, &resp_body),
+                )
+                .await;
             }
             let success_provider = entry.provider_id.clone();
             for evt in &mut pending_fallback_events {
@@ -3769,7 +3957,10 @@ pub(crate) async fn chat_completions_inner(
                         account_id,
                         rate_limit_snapshot,
                         entry.subscription_key.clone(),
-                        Some(proxy_usage_sink(state.clone(), proxy_usage_model(entry))),
+                        Some(proxy_usage_sink(
+                            state.clone(),
+                            proxy_usage_target(entry, &attribution),
+                        )),
                         liveness_mission_id,
                     );
 
@@ -3899,11 +4090,12 @@ pub(crate) async fn chat_completions_inner(
                                     .health_tracker
                                     .record_token_usage(entry.account_id, input, output)
                                     .await;
+                                let mut acc = UsageAccumulator::default();
+                                acc.observe(usage);
                                 record_proxy_usage(
                                     &state,
-                                    &proxy_usage_model(entry),
-                                    input,
-                                    output,
+                                    &proxy_usage_target(entry, &attribution),
+                                    acc.tokens(),
                                 )
                                 .await;
                             }
@@ -5455,8 +5647,12 @@ fn take_sse_event(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(event)
 }
 
-fn usage_from_sse_event(event: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
-    let text = std::str::from_utf8(event).ok()?;
+/// Observe the first usage object carrying input/output counts in one SSE
+/// event.
+fn observe_sse_event(event: &[u8], acc: &mut UsageAccumulator) {
+    let Ok(text) = std::str::from_utf8(event) else {
+        return;
+    };
     for line in text.lines() {
         let Some(data) = line.trim_end_matches('\r').strip_prefix("data: ") else {
             continue;
@@ -5473,38 +5669,17 @@ fn usage_from_sse_event(event: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
         .into_iter()
         .flatten()
         {
-            let input = usage
-                .get("prompt_tokens")
-                .or_else(|| usage.get("input_tokens"))
-                .and_then(serde_json::Value::as_u64);
-            let output = usage
-                .get("completion_tokens")
-                .or_else(|| usage.get("output_tokens"))
-                .and_then(serde_json::Value::as_u64);
-            if input.is_some() || output.is_some() {
-                return Some((input, output));
+            if acc.observe(usage) {
+                return;
             }
         }
     }
-    None
 }
 
-fn update_sse_usage(
-    buffer: &mut Vec<u8>,
-    chunk: &[u8],
-    input_tokens: &mut u64,
-    output_tokens: &mut u64,
-) {
+fn update_sse_usage(buffer: &mut Vec<u8>, chunk: &[u8], acc: &mut UsageAccumulator) {
     buffer.extend_from_slice(chunk);
     while let Some(event) = take_sse_event(buffer) {
-        if let Some((input, output)) = usage_from_sse_event(&event) {
-            if let Some(value) = input {
-                *input_tokens = (*input_tokens).max(value);
-            }
-            if let Some(value) = output {
-                *output_tokens = (*output_tokens).max(value);
-            }
-        }
+        observe_sse_event(&event, acc);
     }
 }
 
@@ -5514,7 +5689,7 @@ fn track_stream_health(
     account_id: uuid::Uuid,
     rate_limit_snapshot: Option<crate::provider_health::RateLimitSnapshot>,
     subscription_key: Option<crate::provider_health::SubscriptionKey>,
-    usage_sink: Option<Box<dyn FnOnce(u64, u64) + Send>>,
+    usage_sink: Option<Box<dyn FnOnce(ProxyTokens) + Send>>,
     liveness_mission_id: Option<uuid::Uuid>,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     async_stream::stream! {
@@ -5522,8 +5697,7 @@ fn track_stream_health(
         let mut errored = false;
         let mut received_any = false;
         let mut idle_timeout = false;
-        let mut input_tokens: u64 = 0;
-        let mut output_tokens: u64 = 0;
+        let mut usage = UsageAccumulator::default();
         let mut sse_buffer = Vec::new();
         loop {
             match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
@@ -5553,12 +5727,7 @@ fn track_stream_health(
                                 crate::api::proxy_liveness::note_activity(id);
                             }
                             // Decode complete SSE events without altering the relayed bytes.
-                            update_sse_usage(
-                                &mut sse_buffer,
-                                chunk,
-                                &mut input_tokens,
-                                &mut output_tokens,
-                            );
+                            update_sse_usage(&mut sse_buffer, chunk, &mut usage);
                         }
                         Err(_) => errored = true,
                     }
@@ -5567,15 +5736,9 @@ fn track_stream_health(
             }
         }
         if !sse_buffer.is_empty() {
-            if let Some((input, output)) = usage_from_sse_event(&sse_buffer) {
-                if let Some(value) = input {
-                    input_tokens = input_tokens.max(value);
-                }
-                if let Some(value) = output {
-                    output_tokens = output_tokens.max(value);
-                }
-            }
+            observe_sse_event(&sse_buffer, &mut usage);
         }
+        let tokens = usage.tokens();
         if errored || !received_any {
             let reason = if idle_timeout {
                 CooldownReason::Timeout
@@ -5594,10 +5757,13 @@ fn track_stream_health(
             health_tracker
                 .record_success_with_subscription(account_id, subscription_key.as_ref())
                 .await;
-            if input_tokens > 0 || output_tokens > 0 {
-                health_tracker.record_token_usage(account_id, input_tokens, output_tokens).await;
+            if tokens.any() {
+                // Health tracking keeps its historical meaning: all input.
+                health_tracker
+                    .record_token_usage(account_id, usage.input, tokens.output)
+                    .await;
                 if let Some(sink) = usage_sink {
-                    sink(input_tokens, output_tokens);
+                    sink(tokens);
                 }
             }
             if let Some(snapshot) = rate_limit_snapshot {
@@ -7902,48 +8068,157 @@ mod tests {
     #[test]
     fn fragmented_native_sse_usage_is_buffered_and_protocol_aware() {
         let mut buffer = Vec::new();
-        let mut input = 0;
-        let mut output = 0;
+        let mut acc = UsageAccumulator::default();
         update_sse_usage(
             &mut buffer,
             b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tok",
-            &mut input,
-            &mut output,
+            &mut acc,
         );
-        assert_eq!((input, output), (0, 0));
+        assert_eq!((acc.input, acc.output), (0, 0));
         update_sse_usage(
             &mut buffer,
             b"ens\":12,\"output_tokens\":4}}}\n\n",
-            &mut input,
-            &mut output,
+            &mut acc,
         );
-        assert_eq!((input, output), (12, 4));
+        assert_eq!((acc.input, acc.output), (12, 4));
 
         update_sse_usage(
             &mut buffer,
-            b"event: message_start\r\ndata: {\"message\":{\"usage\":{\"input_tokens\":20}}}\r\n\r\n",
-            &mut input,
-            &mut output,
+            b"event: message_start\r\ndata: {\"message\":{\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":7}}}\r\n\r\n",
+            &mut acc,
         );
         update_sse_usage(
             &mut buffer,
             b"event: message_delta\ndata: {\"usage\":{\"output_tokens\":9}}\n\n",
-            &mut input,
-            &mut output,
+            &mut acc,
         );
-        assert_eq!((input, output), (20, 9));
+        assert_eq!((acc.input, acc.output), (20, 9));
+        assert_eq!(
+            acc.tokens(),
+            ProxyTokens {
+                input: 20,
+                output: 9,
+                cache_creation: 7,
+                cache_read: 300
+            }
+        );
         assert!(buffer.is_empty());
     }
 
     #[test]
+    fn openai_cached_tokens_are_split_out_of_input() {
+        let mut buffer = Vec::new();
+        let mut acc = UsageAccumulator::default();
+        update_sse_usage(
+            &mut buffer,
+            b"data: {\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":800}}}\n\n",
+            &mut acc,
+        );
+        assert_eq!(
+            acc.tokens(),
+            ProxyTokens {
+                input: 200,
+                output: 50,
+                cache_creation: 0,
+                cache_read: 800
+            }
+        );
+        // Google raw bodies report cached content inside promptTokenCount.
+        let google = br#"{"usageMetadata":{"promptTokenCount":500,"cachedContentTokenCount":400}}"#;
+        assert_eq!(
+            tokens_with_body_cache(500, 20, google),
+            ProxyTokens {
+                input: 100,
+                output: 20,
+                cache_creation: 0,
+                cache_read: 400
+            }
+        );
+    }
+
+    #[test]
+    fn attribution_uses_key_and_mission_header_without_the_token() {
+        let mission = uuid::Uuid::new_v4();
+        let key = crate::api::proxy_keys::KeySummary {
+            id: uuid::Uuid::new_v4(),
+            name: "Cursor".into(),
+            key_prefix: "sk-proxy".into(),
+            created_at: chrono::Utc::now(),
+            last_used_at: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::api::proxy_liveness::MISSION_ID_HEADER,
+            HeaderValue::from_str(&mission.to_string()).unwrap(),
+        );
+        let a = attribution_from(&headers, Some(&key));
+        assert_eq!(a.api_key_id, Some(key.id));
+        assert_eq!(a.api_key_name.as_deref(), Some("Cursor"));
+        assert_eq!(a.mission_id, Some(mission));
+
+        let launched = uuid::Uuid::new_v4();
+        let launch_key = crate::api::proxy_keys::KeySummary {
+            name: format!("remote-launch:{launched}"),
+            ..key
+        };
+        let a = attribution_from(&HeaderMap::new(), Some(&launch_key));
+        assert_eq!(a.mission_id, Some(launched));
+        assert_eq!(
+            attribution_from(&HeaderMap::new(), None),
+            UsageAttribution::default()
+        );
+    }
+
+    #[test]
+    fn proxy_usage_record_carries_route_and_prices_argon() {
+        let entry = crate::provider_health::ResolvedEntry {
+            provider_id: "google".into(),
+            model_id: "gemini-4-argon-eap".into(),
+            account_id: uuid::Uuid::new_v4(),
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            subscription_key: None,
+        };
+        let key = uuid::Uuid::new_v4();
+        let target = proxy_usage_target(
+            &entry,
+            &UsageAttribution {
+                api_key_id: Some(key),
+                api_key_name: Some("bot".into()),
+                mission_id: None,
+            },
+        );
+        let record = proxy_usage_record(
+            &target,
+            ProxyTokens {
+                input: 1_000_000,
+                output: 0,
+                cache_creation: 0,
+                cache_read: 0,
+            },
+        );
+        assert_eq!(record.model, "gemini-4-argon");
+        assert_eq!(record.provider.as_deref(), Some("google"));
+        assert_eq!(record.account_id, Some(entry.account_id));
+        assert_eq!(record.api_key_id, Some(key));
+        assert_eq!(record.cost_cents, 200);
+    }
+
+    #[test]
     fn native_usage_accepts_responses_and_chat_field_names() {
+        let tokens = |input, output| ProxyTokens {
+            input,
+            output,
+            ..Default::default()
+        };
         assert_eq!(
             native_response_usage(br#"{"usage":{"input_tokens":12,"output_tokens":3}}"#),
-            Some((12, 3))
+            Some(tokens(12, 3))
         );
         assert_eq!(
             native_response_usage(br#"{"usage":{"prompt_tokens":7,"completion_tokens":2}}"#),
-            Some((7, 2))
+            Some(tokens(7, 2))
         );
         assert_eq!(native_response_usage(br#"{"usage":{}}"#), None);
     }
