@@ -10,6 +10,23 @@ pub struct Grok {
     client: reqwest::Client,
     token: String,
 }
+/// True when the token is a JWT whose `exp` claim is at or before `now` (seconds).
+/// Opaque tokens are left to the provider to judge.
+fn token_expired(token: &str, now: i64) -> bool {
+    let mut parts = token.split('.');
+    let (Some(_), Some(payload), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|c| c["exp"].as_i64())
+        .is_some_and(|exp| exp <= now)
+}
+
 impl Grok {
     pub fn from_account(account: &str) -> Result<Self, String> {
         if account != "grok-default" {
@@ -23,6 +40,11 @@ impl Grok {
             .filter(|v| !v.is_empty())
             .ok_or("reconnect_required")?
             .to_owned();
+        // The exported desktop session cannot be refreshed here: an expired
+        // token would only surface later as a 401 on every queued Bot.
+        if token_expired(&token, chrono::Utc::now().timestamp()) {
+            return Err("reconnect_required".into());
+        }
         Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -546,5 +568,19 @@ mod tests {
             json!({"kind":"send-message","requestId":"r","message":{"type":"future"}}),
         ];
         assert!(response_for(&rows, "a").is_err());
+    }
+
+    #[test]
+    fn expired_jwt_requires_reconnect() {
+        let b64 = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        let jwt = |exp: i64| format!("{}.{}.sig", b64("{}"), b64(&format!("{{\"exp\":{exp}}}")));
+        assert!(token_expired(&jwt(100), 100));
+        assert!(token_expired(&jwt(99), 100));
+        assert!(!token_expired(&jwt(101), 100));
+        assert!(!token_expired("opaque-token", 100));
+        assert!(!token_expired(
+            &format!("{}.{}.sig", b64("{}"), b64("{}")),
+            100
+        ));
     }
 }
