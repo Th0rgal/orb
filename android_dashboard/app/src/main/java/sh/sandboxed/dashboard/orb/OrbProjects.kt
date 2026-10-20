@@ -254,6 +254,10 @@ fun OrbAppRoot(
                     selectedTab = topTab,
                     onSelectTab = { topTab = it },
                     onOpenSettings = { showSettingsSheet = true },
+                    onChangeServer = {
+                        settingsInitialRoute = OrbSettingsRoute.Backend
+                        showSettingsSheet = true
+                    },
                     onSelectProject = { proj -> push(OrbNavScreen.Project(proj)) },
                     onSelectMission = { mission, proj ->
                         push(OrbNavScreen.Conversation(proj, mission))
@@ -368,13 +372,15 @@ fun OrbHomeScreen(
     onSelectTab: (OrbTopTab) -> Unit,
     onOpenSettings: () -> Unit,
     onSelectProject: (OrbRow) -> Unit,
-    onSelectMission: (mission: OrbRow, project: OrbRow) -> Unit
+    onSelectMission: (mission: OrbRow, project: OrbRow) -> Unit,
+    onChangeServer: () -> Unit = onOpenSettings
 ) {
     val scope = rememberCoroutineScope()
     val projects by core.projects.collectAsState()
     val missions by core.missions.collectAsState()
     val isLoading by core.isLoading.collectAsState()
     val lastError by core.lastError.collectAsState()
+    val connectionIssue by core.connectionIssue.collectAsState()
     val lastErrorLog by core.lastErrorLog.collectAsState()
 
     var searchQuery by remember { mutableStateOf("") }
@@ -556,7 +562,18 @@ fun OrbHomeScreen(
                         if (OrbMoveClipboard.mission != null) {
                             item(key = "move_banner") { OrbMoveBanner(modifier = Modifier.padding(vertical = 6.dp)) }
                         }
-                        lastError?.let { err ->
+                        val issue = connectionIssue
+                        if (issue != null) {
+                            item(key = "home_connection_issue") {
+                                OrbConnectionIssueCard(
+                                    issue = issue,
+                                    log = lastErrorLog,
+                                    onChangeServer = onChangeServer,
+                                    onUseDefault = { scope.launch { core.useDefaultServer() } },
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        } else lastError?.let { err ->
                             item(key = "home_error") {
                                 OrbNotice(
                                     title = err,
@@ -2595,4 +2612,62 @@ fun OrbSafeDrawingRoot(
             .testTag("orb-safe-root"),
         content = content
     )
+}
+
+/** Connection failure card: plain-language message, the failing URL, and two ways out. */
+@Composable
+fun OrbConnectionIssueCard(
+    issue: OrbConnectionIssue,
+    log: String?,
+    onChangeServer: () -> Unit,
+    onUseDefault: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(OrbStyle.surface)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+            .padding(14.dp)
+            .testTag("orb-connection-issue"),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(issue.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            issue.serverURL,
+            color = OrbStyle.textSecondary,
+            fontSize = 13.sp,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+        )
+        Text(issue.message, color = OrbStyle.textSecondary, fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val primaryIsDefault = issue.recommendDefault
+            if (issue.offerUseDefault) {
+                OrbIssueButton("Use default", primary = primaryIsDefault, onClick = onUseDefault)
+            }
+            OrbIssueButton("Change server", primary = !primaryIsDefault, onClick = onChangeServer)
+        }
+        if (!log.isNullOrEmpty() || issue.technicalDetail.isNotEmpty()) {
+            OrbNotice(
+                title = "Details",
+                log = log ?: issue.technicalDetail
+            )
+        }
+    }
+}
+
+@Composable
+private fun OrbIssueButton(label: String, primary: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(if (primary) Color.White else OrbStyle.card)
+            .orbPressClickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = if (primary) Color.Black else Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    }
 }

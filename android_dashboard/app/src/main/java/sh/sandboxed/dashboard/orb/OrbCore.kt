@@ -771,6 +771,10 @@ class OrbCore private constructor(context: Context) {
     private val _lastErrorLog = MutableStateFlow<String?>(null)
     val lastErrorLog: StateFlow<String?> = _lastErrorLog.asStateFlow()
 
+    /** Set when the server cannot be reached at all; the home screen shows an actionable card. */
+    private val _connectionIssue = MutableStateFlow<OrbConnectionIssue?>(null)
+    val connectionIssue: StateFlow<OrbConnectionIssue?> = _connectionIssue.asStateFlow()
+
     /** Last successful [refreshAll], epoch ms (shown on Debug info). */
     private val _lastRefreshAtMs = MutableStateFlow<Long?>(null)
     val lastRefreshAtMs: StateFlow<Long?> = _lastRefreshAtMs.asStateFlow()
@@ -920,6 +924,7 @@ class OrbCore private constructor(context: Context) {
         _hasLoadedSuccessfully.value = false
         _lastError.value = null
         _lastErrorLog.value = null
+        _connectionIssue.value = null
     }
 
     /** [fresh] = rows just fetched from Core: they replace whatever a project screen cached,
@@ -967,6 +972,33 @@ class OrbCore private constructor(context: Context) {
         if (p.isNotEmpty() || m.isNotEmpty() || h.isNotEmpty()) {
             _hasLoadedSuccessfully.value = true
         }
+    }
+
+    /** "host:port" of the HTTP proxy the system routes [base] through, or null for direct. */
+    private fun systemProxyFor(base: String): String? = try {
+        java.net.ProxySelector.getDefault()?.select(java.net.URI(base))
+            ?.firstOrNull { it.type() != java.net.Proxy.Type.DIRECT }
+            ?.address()?.let { it as? java.net.InetSocketAddress }
+            ?.let { "${it.hostString}:${it.port}" }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** GET /api/health on the default server without credentials; true when it answers. */
+    private fun probeDefaultServer(): Boolean = try {
+        val req = okhttp3.Request.Builder().url("${OrbConnection.DEFAULT_BASE_URL}/api/health").get().build()
+        httpClient.newCall(req).execute().use { it.code in 200..499 }
+    } catch (t: Throwable) {
+        OrbLog.w(OrbLog.Category.Network, "default server probe failed", t)
+        false
+    }
+
+    /** Switch to [OrbConnection.DEFAULT_BASE_URL], reusing a token saved for it, then refresh. */
+    suspend fun useDefaultServer() {
+        val base = OrbConnection.DEFAULT_BASE_URL
+        val saved = OrbKeychain.read(KEYCHAIN_SERVICE, base) ?: prefs.getString("$TOKEN_FALLBACK_KEY.$base", null)
+        configureSession(base, saved, null)
+        refreshAll()
     }
 
     private fun persistSession() {
@@ -1088,11 +1120,23 @@ class OrbCore private constructor(context: Context) {
                 _hasLoadedSuccessfully.value = true
                 _lastError.value = null
                 _lastErrorLog.value = null
+                _connectionIssue.value = null
             } else {
                 val err = pResult.exceptionOrNull() ?: mResult.exceptionOrNull()
                 if (err != null) {
                     _lastError.value = err.message ?: "Request failed"
                     recordErrorLog("baseURL=${_baseURL.value}\nerror=${err.message}", "refresh failed: ${err.message}")
+                    val failedBase = _baseURL.value
+                    val proxy = systemProxyFor(failedBase)
+                    _connectionIssue.value = OrbConnection.issue(failedBase, err.message, defaultReachable = null, proxy = proxy)
+                    if (OrbConnection.shouldProbeDefault(failedBase, err.message)) {
+                        launch(Dispatchers.IO) {
+                            val reachable = probeDefaultServer()
+                            if (_baseURL.value == failedBase && _connectionIssue.value != null) {
+                                _connectionIssue.value = OrbConnection.issue(failedBase, err.message, reachable, proxy)
+                            }
+                        }
+                    }
                 }
             }
         }
