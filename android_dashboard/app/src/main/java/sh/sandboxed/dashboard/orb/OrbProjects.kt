@@ -14,11 +14,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -110,7 +110,8 @@ sealed class OrbNavScreen {
 @Composable
 fun OrbAppRoot(
     core: OrbCore,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    debugShowSetup: Boolean = false
 ) {
     val context = LocalContext.current
     remember(context) {
@@ -233,22 +234,19 @@ fun OrbAppRoot(
         pop()
     }
 
-    if (baseURL.trim().isEmpty() && !hasLoaded) {
-        OrbSetupView(
-            core = core,
-            title = "Connect to Orb",
-            onConnected = {}
-        )
+    if ((baseURL.trim().isEmpty() && !hasLoaded) || debugShowSetup) {
+        OrbSafeDrawingRoot(modifier = modifier) {
+            OrbSetupView(
+                core = core,
+                title = "Connect to Orb",
+                onConnected = {}
+            )
+        }
         return
     }
 
     val currentScreen = backStack.value.lastOrNull() ?: OrbNavScreen.Home
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(OrbStyle.background)
-            .statusBarsPadding()
-    ) {
+    OrbSafeDrawingRoot(modifier = modifier) {
         when (currentScreen) {
             is OrbNavScreen.Home -> {
                 OrbHomeScreen(
@@ -315,7 +313,6 @@ fun OrbAppRoot(
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
                     .padding(bottom = 88.dp)
                     .clip(CircleShape)
                     .background(OrbStyle.warning)
@@ -419,8 +416,6 @@ fun OrbHomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(OrbStyle.background)
-            .navigationBarsPadding()
-            .imePadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Top bar matching iOS OrbHome toolbar exactly:
@@ -1434,8 +1429,6 @@ fun OrbProjectPage(
         modifier = Modifier
             .fillMaxSize()
             .background(OrbStyle.background)
-            .navigationBarsPadding()
-            .imePadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Top bar matching iOS OrbProjectPage inline navigation bar:
@@ -2576,4 +2569,30 @@ fun OrbMoveBanner(modifier: Modifier = Modifier) {
             modifier = Modifier.orbPressClickable { OrbMoveClipboard.clear() }
         )
     }
+}
+
+/**
+ * The single place that keeps Orb content clear of the status bar, navigation
+ * bar, display cutout (camera hole) and keyboard. Every top-level screen of
+ * [OrbAppRoot] — including the first-run setup — is drawn inside it, so a new
+ * screen is covered automatically and must not add its own status/navigation/
+ * IME padding. The background still paints edge to edge behind the bars
+ * (MainActivity keeps enableEdgeToEdge). Sheets and dialogs live in their own
+ * windows and use Material's inset defaults.
+ */
+@Composable
+fun OrbSafeDrawingRoot(
+    modifier: Modifier = Modifier,
+    insets: androidx.compose.foundation.layout.WindowInsets =
+        androidx.compose.foundation.layout.WindowInsets.safeDrawing,
+    content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+            .windowInsetsPadding(insets)
+            .testTag("orb-safe-root"),
+        content = content
+    )
 }

@@ -27,9 +27,12 @@ class MainActivity : FragmentActivity() {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
         handleIncomingIntent(intent, orbCore)
+        // Debug-only: render the first-run screen over an existing session so
+        // device inset checks can screenshot it without clearing app data.
+        val debugShowSetup = BuildConfig.DEBUG && intent?.getBooleanExtra("orb_debug_show_setup", false) == true
         setContent {
             OrbMaterialTheme {
-                OrbAppRoot(core = orbCore)
+                OrbAppRoot(core = orbCore, debugShowSetup = debugShowSetup)
             }
         }
     }
