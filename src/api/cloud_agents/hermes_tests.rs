@@ -600,6 +600,11 @@ fn events_page_tolerates_missing_or_sse_events_only_for_terminal_runs_with_outpu
     assert!(events_page_from_response(200, Some(sse), &running, 0).is_err());
     assert!(events_page_from_response(404, None, &json!({"status":"completed"}), 0).is_err());
     assert!(events_page_from_response(500, None, &done, 0).is_err());
+    // Other failures read the same as any Hermes call.
+    assert_eq!(
+        events_page_from_response(400, None, &running, 0).unwrap_err(),
+        status_error(400)
+    );
     let ok = events_page_from_response(200, Some(br#"{"events":[],"cursor":"3"}"#), &running, 0)
         .unwrap();
     assert_eq!(ok["cursor"], "3");
