@@ -1980,9 +1980,7 @@ export function LiveProjectsSection(p: {
           busy={false} error={null} onConfirm={confirmStopAndDelete} onClose={() => setStopPrompt(null)}/>
       )}</Show>
       <Show when={deleteTargets().length}>
-        <ConfirmDialog title={deleteList(deleteTargets()).length
-            ? `Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"} and the sessions under ${deleteTargets().length === 1 ? "it" : "them"}?`
-            : `Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} destructive
+        <ConfirmDialog title={`Delete ${deleteTargets().length} agent${deleteTargets().length === 1 ? "" : "s"}?`} destructive
           action={deleteList(deleteTargets()).length ? `Delete ${deleteTargets().length + deleteList(deleteTargets()).length} sessions` : "Delete"}
           description={deleteList(deleteTargets()).length
             ? `${descendantsSentence(deleteList(deleteTargets()))} Their history and workspace files are permanently deleted with ${deleteTargets().length === 1 ? "it" : "them"}.`

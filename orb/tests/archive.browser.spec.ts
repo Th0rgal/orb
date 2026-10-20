@@ -314,7 +314,9 @@ test('archiving or deleting a parent agent cascades to its spawned subagents and
  await expect(parentDeleteRow).toBeVisible();
  await parentDeleteRow.click({button:'right'});
  await page.getByRole('menuitem',{name:'Delete agent…',exact:true}).click();
- await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
+ // The confirmation names the subagent deleted with it.
+ await expect(page.getByRole('dialog')).toContainText('This also deletes 1 session: Delete worker 1');
+ await page.getByRole('dialog').getByRole('button',{name:'Delete 2 sessions',exact:true}).click();
  await expect(page.getByRole('dialog')).toHaveCount(0);
  await expect(parentDeleteRow).toHaveCount(0);
  await expect(projects.getByRole('button',{name:'Delete worker 1',exact:true})).toHaveCount(0);
