@@ -171,11 +171,20 @@ pub(super) async fn enqueue(
     }
     // Keep existing continuation admission: a queued message must never turn
     // into a replacement mission or silently switch writer identity.
-    let unsupported = mission.project.github_pr.is_some()
-        || mission.project.tags.iter().any(|tag| tag == "pr-writer")
+    //
+    // While a node job runs, a writer on its own explicit track (tagged
+    // `pr-writer` or not) still queues: the follow-up waits for that job, and
+    // its delivery goes through `continue_on_node`, which re-admits the
+    // mission's own track lease or withdraws the row. Refusing it here sent
+    // Orb a "turn is still running" error for an ordinary follow-up whenever
+    // an automatic resume or goal continuation was running (verity-core
+    // antigravity mission 52221aaa on babylon). A PR binding still needs
+    // create admission, so it is refused either way.
+    let writer_identity = mission.project.tags.iter().any(|tag| tag == "pr-writer")
         || mission.project.track.as_ref().is_some_and(|track| {
             track != &crate::api::track_leases::generated_track_key(&mid.to_string())
         });
+    let unsupported = mission.project.github_pr.is_some() || (writer_identity && !placement.live);
     if unsupported {
         let prefix = if placement.live {
             remote_grok::REMOTE_JOB_STILL_RUNNING

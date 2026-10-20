@@ -167,3 +167,30 @@ test('a follow-up to an idle mission does not shift the transcript once shown',a
  expect(shown.every(f=>f.working)).toBe(true);
  expect(Math.max(...tops)-Math.min(...tops)).toBeLessThanOrEqual(1);
 });
+
+test('a follow-up refused with "turn still running" is queued, never an error',async({page})=>{
+ await page.goto('/tests/smooth-send.html?conflict');
+ const queue=page.getByRole('region',{name:'Queued messages'});
+ await expect(queue).toContainText('2 Queued',{timeout:20000});
+ const input=page.getByPlaceholder('Send follow-up');
+ await input.fill('Follow-up during auto resume');
+ await page.evaluate(()=>{
+  const frames:any[]=[];(window as any).conflictFrames=frames;
+  const tick=()=>{
+   const text='Follow-up during auto resume';
+   const inQueue=[...document.querySelectorAll('.followup-queue .queue-row')].some(el=>el.textContent?.includes(text));
+   const inTranscript=[...document.querySelectorAll('.scroll .user')].some(el=>el.textContent?.includes(text));
+   frames.push({shown:inQueue||inTranscript,error:/turn is still running|REMOTE_JOB_STILL_RUNNING/i.test(document.body.textContent??'')});
+   (window as any).conflictRaf=requestAnimationFrame(tick);
+  };
+  tick();
+ });
+ await input.press('Enter');
+ await expect(queue).toContainText('3 Queued',{timeout:15000});
+ const seen=await page.evaluate(()=>{cancelAnimationFrame((window as any).conflictRaf);return (window as any).conflictFrames as any[];});
+ const from=seen.findIndex(f=>f.shown);
+ expect(from).toBeGreaterThanOrEqual(0);
+ expect(seen.slice(from).every(f=>f.shown)).toBe(true);
+ expect(seen.some(f=>f.error)).toBe(false);
+ await expect(page.locator('.queue-text',{hasText:'Follow-up during auto resume'})).toHaveCount(1);
+});

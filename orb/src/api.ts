@@ -1020,6 +1020,31 @@ export function fitReplacementHistory(mission: Mission, text: string): HistoryEn
 }
 
 
+/** Delay before re-posting a follow-up that Core refused because a turn runs. */
+export const TURN_RUNNING_RETRY_MS = [1000, 2000, 3000, 5000];
+const TURN_RUNNING_GIVE_UP_MS = 30 * 60_000;
+export const isTurnStillRunning = (error: unknown) =>
+  error instanceof ApiError && error.status === 409 && error.detail.includes("REMOTE_JOB_STILL_RUNNING");
+
+/**
+ * Older Cores refuse a follow-up with REMOTE_JOB_STILL_RUNNING while an
+ * automatic resume or goal continuation runs on the node (a writer on its own
+ * track). A send must never fail for that: keep re-posting the same message
+ * id (idempotent) until Core queues or delivers it. The caller's optimistic
+ * row stays in the queue meanwhile.
+ */
+export async function postWhileTurnRuns<T>(post: () => Promise<T>, cancelled: () => boolean, sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))): Promise<T> {
+  const started = Date.now();
+  for (let attempt = 0; ; attempt++) {
+    try { return await post(); }
+    catch (error) {
+      if (!isTurnStillRunning(error) || Date.now() - started > TURN_RUNNING_GIVE_UP_MS) throw error;
+      await sleep(TURN_RUNNING_RETRY_MS[Math.min(attempt, TURN_RUNNING_RETRY_MS.length - 1)]);
+      if (cancelled()) throw new Error("Connection changed. Your draft is kept.");
+    }
+  }
+}
+
 export async function sendMissionMessage(
   id: string,
   text: string,
@@ -1056,12 +1081,13 @@ export async function sendMissionMessage(
     ? { project: mission.project ?? null, track: mission.track, github_pr: mission.github_pr ?? null }
     : undefined;
   let receipt: MessageReceipt;
-  try {
-  receipt = await api<MessageReceipt>("/api/control/message", {
+  const post = () => api<MessageReceipt>("/api/control/message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content: text, mission_id: id, queue_followup: true, client_message_id: clientMessageId, ...(continue_identity ? { continue_identity } : {}), ...(attachments?.length ? { attachments } : {}) }),
   });
+  try {
+    receipt = await postWhileTurnRuns(post, () => connectionVersion() !== version);
   } catch (error) {
     if (!(error instanceof ApiError) || error.status !== 409 || !error.detail.startsWith("REMOTE_RESUME_REQUIRES_REPLACEMENT:")) throw error;
     // Side conversations must keep their archive, parent and sidebar identity.
