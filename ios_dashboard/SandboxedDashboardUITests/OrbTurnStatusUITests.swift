@@ -111,8 +111,24 @@ final class OrbTurnStatusUITests: XCTestCase {
         capture(app, "send-while-sending")
         XCTAssertTrue(app.descendants(matching: .any)["agent-working"].waitForExistence(timeout: 10))
         XCTAssertFalse(stale.exists, "the clock never counts from the old turn")
+        // Core must actually receive the second message, while the first turn still runs.
+        var received: [String] = []
+        for _ in 0..<20 where !received.contains("fifth queued") {
+            received = try await Self.received()
+            if !received.contains("fifth queued") { try await Task.sleep(for: .milliseconds(250)) }
+        }
+        XCTAssertEqual(received, ["fourth idle", "fifth queued"], "the fixture server received both messages, in order")
         XCTAssertTrue(app.staticTexts["QUEUED_REPLY_OK"].waitForExistence(timeout: 25), "the deferred message was delivered")
         XCTAssertTrue(app.staticTexts["fifth queued"].exists)
+        let gone = NSPredicate(format: "exists == false")
+        let queuedGone = expectation(for: gone, evaluatedWith: app.staticTexts["1 Queued"])
+        let workingGone = expectation(for: gone, evaluatedWith: app.descendants(matching: .any)["agent-working"])
+        await fulfillment(of: [queuedGone, workingGone], timeout: 10)
+    }
+
+    private nonisolated static func received() async throws -> [String] {
+        let (data, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:18766/__received")!)
+        return try JSONDecoder().decode([String].self, from: data)
     }
 
     /// Text typed right after the conversation opens is kept.

@@ -156,6 +156,11 @@ enum OrbSendFlow {
         return canQueue ? .deferToQueue : .ignore
     }
 
+    /// Deferred follow-ups go out once the in-flight POST returned, whatever happens after.
+    static func canDrain(awaitingAck: Bool, draining: Bool, pending: Int) -> Bool {
+        pending > 0 && !awaitingAck && !draining
+    }
+
     /// Start of the running turn: Core's latest user_message, unless this device just
     /// started a newer turn Core has not reported yet (then the local send time).
     /// A few seconds of clock skew still count as the same turn.
