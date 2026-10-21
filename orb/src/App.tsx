@@ -148,6 +148,8 @@ export default function App() {
   const [launchViewKey,setLaunchViewKey]=createSignal<string>(crypto.randomUUID());
   let retryLaunch:(()=>void)|undefined;
   const launchedViewKeys=new Map<string,string>();
+  // Title a cloud launch from its prompt while Core creates the mission.
+  const [cloudLaunchTitle,setCloudLaunchTitle]=createSignal<string|null>(null);
   const prepareLaunch=(draft:{text:string;images:DraftImage[];retry?:()=>void}|null)=>{
     if(!draft){setLaunchPreview(null);return;}
     retryLaunch=draft.retry;setCreateError(null);
@@ -987,6 +989,7 @@ export default function App() {
               <span>Providers</span>
             </Match>
             <Match when={selected() === "inbox"}><span>Inbox</span></Match>
+            <Match when={selected() === "cloud-agent" && cloudLaunchTitle()}>{(title) => <span>{title().replace(/\s+/g, " ").slice(0, 80)}</span>}</Match>
             <Match when={selected() === "cloud-agent"}><span>Cloud agent</span></Match>
             <Match when={currentProjectSettings()}>
               {(slug) => <span>{liveProjects().find((x) => x.slug === slug())?.title ?? slug()} · Settings</span>}
@@ -1240,7 +1243,8 @@ export default function App() {
             <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
               projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}
               onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
-              onCreated={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
+              onPending={seed => setCloudLaunchTitle(seed?.prompt.trim() || null)}
+              onCreated={m => { setCloudLaunchTitle(null); setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
           </Match>
           <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
           <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>

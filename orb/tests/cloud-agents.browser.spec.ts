@@ -29,7 +29,9 @@ test('cloud menu is available at project and folder level without launching on a
  await page.getByRole('option',{name:'Grok Bot'}).click();
  await expect(dialog.getByLabel('Experimental connector')).toBeVisible();
  await expect(dialog.getByText('Protocol compatibility not validated')).toBeVisible();
+ await dialog.getByLabel('Prompt',{exact:true}).fill('Draft for an unavailable service');
  await expect(dialog.getByRole('button',{name:'Create cloud agent'})).toBeDisabled();
+ await dialog.getByLabel('Prompt',{exact:true}).fill('');
  await page.getByRole('button',{name:/New Agent/}).click();
  await expect(dialog).toHaveCount(0);
  // Expand via the visible project tree row when it is initially collapsed.

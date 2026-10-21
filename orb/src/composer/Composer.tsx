@@ -85,19 +85,26 @@ export function Composer(p: {
   onEditFirstQueued?: () => void;
   /** Allow typing and stacking follow-up messages while an earlier send is in flight. */
   allowConcurrentSend?: boolean;
+  /** Accessible name of the draft field (defaults to the placeholder). */
+  inputLabel?: string;
+  /** Title and accessible name of the send button. */
+  sendLabel?: string;
+  /** With textOnly: keep "+" in place, disabled, explaining why attachments are unavailable. */
+  attachDisabledReason?: string;
 }) {
   const [text, setText] = createSignal("");
   const [uploading, setUploading] = createSignal(false);
   const [uploadError, setUploadError] = createSignal<string | null>(null);
   const [pendingLargeUploads, setPendingLargeUploads] = createSignal<Array<{ source: UploadSource; size: number; destination: string }>>([]);
   let uploaded: UploadedFile[] = [];
+  const [uploadTick, bumpUploads] = createSignal(0);
   let disposed = false;
   onCleanup(() => { disposed = true; });
   let fileInput!: HTMLInputElement;
   const uploadTarget = () => p.uploadTarget ?? "core";
   const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : p.projectSlug ? `context:${p.projectSlug}` : uploadTarget();
   const insertUploadedFile = (file: UploadedFile) => {
-    uploaded.push(file);
+    uploaded.push(file); bumpUploads(n => n + 1);
     const current = ta ? (ta.selectionStart ?? text().length) : text().length;
     const token = uploadToken(file.path) + " ";
     const next = insertAtCaret(text(), current, ta ? (ta.selectionEnd ?? current) : current, token);
@@ -125,6 +132,7 @@ export function Composer(p: {
     return backgroundUploads().filter((item) => item.scope === scopeKey && (item.state === "uploading" || item.state === "paused" || item.state === "failed"));
   });
   const attachSources = async (sources: UploadSource[]) => {
+    if (p.textOnly && p.attachDisabledReason && sources.length) { setUploadError(p.attachDisabledReason); return; }
     if (p.textOnly || p.imagesOnly) return;
     const scope = p.scope;
     const destination = attachmentTarget();
@@ -159,7 +167,8 @@ export function Composer(p: {
     else await attachSources(sources);
   });
   const attachMixed = async (sources: UploadSource[]) => {
-    if (p.textOnly) return;
+    // Never drop files silently: say why this destination can't take them.
+    if (p.textOnly) { if (p.attachDisabledReason && sources.length) setUploadError(p.attachDisabledReason); return; }
     try {
     const scope=p.scope;
     sources=await Promise.all(sources.map(async source=>{
@@ -191,6 +200,15 @@ export function Composer(p: {
     catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
   };
   const [images, setImages] = createSignal<DraftImage[]>([]);
+  // Direct uploads (cloud agents) show each file as a removable chip; the
+  // draft's token stays the source of truth, as for mentions.
+  const fileChips = createMemo(() => { uploadTick(); return [...uploaded]; });
+  const removeUploadedFile = (file: UploadedFile) => {
+    const token = uploadToken(file.path);
+    uploaded = uploaded.filter(item => item !== file); bumpUploads(n => n + 1);
+    const value = text().replaceAll(`${token} `, "").replaceAll(token, "");
+    write(value); if (ta) { ta.value = value; resize(); }
+  };
   const [viewing, setViewing] = createSignal<number | null>(null);
   const [sendingCount, setSendingCount] = createSignal(0);
   const sending = () => sendingCount() > 0;
@@ -199,7 +217,7 @@ export function Composer(p: {
   const [mode, setMode] = createSignal<ComposerMode | null>(null);
   const [draftReady, setDraftReady] = createSignal(false);
   createEffect(on(() => p.scope, (scope, previous) => {
-    if (previous !== undefined && previous !== scope) { setText(""); setImages([]); setMode(null); uploaded = []; }
+    if (previous !== undefined && previous !== scope) { setText(""); setImages([]); setMode(null); uploaded = []; bumpUploads(n => n + 1); }
     setDraftReady(false);
     if (!scope) { setDraftReady(true); return; }
     let current=true;
@@ -213,7 +231,7 @@ export function Composer(p: {
     });
     void readComposerDraft(scope).then(draft => {
       if (current && draft && !text() && !images().length) {
-        uploaded = (draft.uploads ?? []).map(file => ({...file, connection: file.endpoint === getApiUrl() ? connectionVersion() : -1}));
+        uploaded = (draft.uploads ?? []).map(file => ({...file, connection: file.endpoint === getApiUrl() ? connectionVersion() : -1})); bumpUploads(n => n + 1);
         setText(draft.text);setImages(draft.images);
         if(draft.mode) setMode(draft.mode);
         queueMicrotask(() => { if (ta?.isConnected) { ta.value=draft.text; resize(); } });
@@ -259,7 +277,10 @@ export function Composer(p: {
   const [imageError, setImageError] = createSignal<string | null>(null);
   const [readingImages, setReadingImages] = createSignal(false);
   const pasteImages = async (event: ClipboardEvent) => {
-    if (p.textOnly) return;
+    if (p.textOnly) {
+      if (p.attachDisabledReason && Array.from(event.clipboardData?.files ?? []).length) { event.preventDefault(); setImageError(p.attachDisabledReason); }
+      return;
+    }
     const clipboard = event.clipboardData;
     if (!clipboard) return;
     const files = Array.from(clipboard.files).filter(file => file.type.startsWith("image/"));
@@ -468,7 +489,9 @@ export function Composer(p: {
     setCaret(next.caret);
   };
   const send = async () => {
-    const original = text();
+    // A direct upload stays attached even if its token was edited out of the draft.
+    const missingTokens = p.directFileUpload ? uploaded.map(file => uploadToken(file.path)).filter(token => !text().includes(token)) : [];
+    const original = missingTokens.length ? `${text().trimEnd()}${text().trim() ? "\n\n" : ""}${missingTokens.join(" ")}` : text();
     let payload = draftOf(original);
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sendingLocked() || uploading() || readingImages()) return;
@@ -486,7 +509,7 @@ export function Composer(p: {
     const project = p.projectSlug;
     const destination = attachmentTarget();
     setPendingSend({text:original,images:sentImages});
-    if(!sideMode)p.onPending?.({text:payload,images:sentImages,retry:()=>{uploaded=originalUploads;setText(original);setImages(sentImages);setMode(originalMode);void send();}});
+    if(!sideMode)p.onPending?.({text:payload,images:sentImages,retry:()=>{uploaded=originalUploads;bumpUploads(n => n + 1);setText(original);setImages(sentImages);setMode(originalMode);void send();}});
     setSendingCount(c => c + 1);
     setText(""); setImages([]); ta.value=""; resize();
     let accepted = false;
@@ -495,7 +518,7 @@ export function Composer(p: {
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
       const resolved = (p.textOnly || p.imagesOnly) ? {text: original, files: []} : await prepareUploads(original, originalUploads, destination);
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
-      uploaded = resolved.files;
+      uploaded = resolved.files; bumpUploads(n => n + 1);
       payload = draftOf(resolved.text);
       p.onAttachments?.(mentionedChips(resolved.text,[...atItems(), ...resolved.files.filter(file => file.destination.startsWith("context:")).map(file => ({id:`upload:${file.path}`,kind:"context" as const,label:file.source.name,path:file.path,project:file.destination.slice("context:".length),section:"Files" as const}))]));
       accepted = sideMode
@@ -503,7 +526,7 @@ export function Composer(p: {
         : await (p.sideQuestion ? p.onSend(payload || "Please look at the attached images.", sentImages, resolved.files) : p.onSend(payload || "Please look at the attached images.", sentImages)) !== false;
       if (accepted) {
         if (sideMode) p.onAttachments?.([]);
-        if (uploaded === resolved.files) uploaded = [];
+        if (uploaded === resolved.files) { uploaded = []; bumpUploads(n => n + 1); }
         setUploadError(null);
         if (draftTimer !== undefined) {
           clearTimeout(draftTimer);
@@ -518,7 +541,7 @@ export function Composer(p: {
     finally {
       setSendingCount(c => Math.max(0, c - 1));
       if (!accepted && !p.retainFailedMessage && draftScope === p.scope && !text() && !images().length) {
-        uploaded = originalUploads;
+        uploaded = originalUploads; bumpUploads(n => n + 1);
         setMode(originalMode);setText(original);setImages(sentImages);
         ta.value=original;resize();
       }
@@ -732,7 +755,7 @@ export function Composer(p: {
   const sendBtn = (
     <div class="send-slot">
       <Show when={(text().trim() || images().length) && !slash() && !voiceActive()}>
-        <button class="send" disabled={p.disabled || uploading() || sendingLocked() || readingImages()} onClick={send} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : "Send"}>
+        <button class="send" disabled={p.disabled || uploading() || sendingLocked() || readingImages()} onClick={send} aria-label={p.sendLabel} title={mode()==="btw" ? "Ask side question" : p.busy ? "Queue for next turn" : p.sendLabel ?? "Send"}>
           <Ic.ArrowUpIcon size={14} />
         </button>
       </Show>
@@ -783,7 +806,7 @@ export function Composer(p: {
       onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))e.currentTarget.classList.remove("drop-active");}}
       onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sendingLocked()||uploading()||readingImages())return;void attachMixed(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})));}}
       onClick={() => !voiceActive() && ta.focus()}>
-      <Show when={!p.textOnly}>{plus}</Show>
+      <Show when={!p.textOnly} fallback={<Show when={p.attachDisabledReason}>{reason => <div class="plus-wrap" title={reason()}><button class="plus" type="button" disabled aria-label="Attach file or image" aria-description={reason()} title={reason()}><Ic.PlusIcon size={14} /></button></div>}</Show>}>{plus}</Show>
       {slashMenu}
       {atMenu}
       <Show when={uploading()}><div class="composer-upload-status" role="status">Attaching file…</div></Show>
@@ -838,9 +861,11 @@ export function Composer(p: {
       </span>}</Show>
       <div class="composer-field">
         <Show when={images().length}><div class="composer-images"><For each={images()}>{image => <div class="composer-image"><img src={image.dataUrl} alt={image.reference ? `Image #${image.reference}` : "Attached image"} title="Open preview" onClick={e => { e.stopPropagation(); setViewing(images().indexOf(image)); }} /><Show when={image.reference}><span class="composer-image-reference">#{image.reference}</span></Show><button class="icon-btn" aria-label="Remove image" title="Remove image" onClick={e => { e.stopPropagation(); setImages(current => current.filter(item => item.id !== image.id)); if (image.reference) { const value = text().replaceAll(`[Image #${image.reference}]`, ""); setText(value); ta.value = value; resize(); } }}><Ic.CloseIcon size={12}/></button></div>}</For></div></Show><Show when={viewing() !== null && images().length}><Lightbox items={draftLightbox(images())} index={viewing()!} onClose={() => setViewing(null)} /></Show>
+        <Show when={p.directFileUpload && fileChips().length}><div class="attach-pills" aria-label="Attached files"><For each={fileChips()}>{file => <button type="button" class="pill on" title={`Remove ${file.source.name}`} aria-label={`Remove ${file.source.name}`} onClick={e => { e.stopPropagation(); removeUploadedFile(file); }}><Ic.FileIcon size={12}/> {file.source.name} <Ic.CloseIcon size={12}/></button>}</For></div></Show>
         <ErrorToast error={imageError()} title="Couldn’t add the image" onDismiss={() => setImageError(null)} />
         <textarea readOnly={sendingLocked()}
           ref={ta}
+          aria-label={p.inputLabel}
           onPaste={event => void pasteImages(event)}
           rows={1}
           // Keep the placeholder clear of the native caret without shifting typed text.

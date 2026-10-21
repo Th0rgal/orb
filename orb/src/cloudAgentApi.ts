@@ -77,3 +77,27 @@ export function safeCloudUrl(value?: string): string | undefined { try { const u
 export function launchCloud(body: {title: string; prompt: string; project: string; tags: string[]; idempotency_key: string; cloud: CloudSelection}): Promise<Mission> { return createMission(body); }
 
 export function cloudAccountLabel(a: CloudAccount): string { const match = /^chatgpt-profile(?:-(\d+))?$/.exec(a.id); return match ? `Profile ${match[1] ?? 1}` : a.label.replace(/^(ChatGPT|Cursor Cloud|Grok Bot) · /, ""); }
+
+export const CLOUD_PROVIDER_KEY = 'orb.cloud.provider';
+const isProvider = (value: unknown): value is CloudProvider => typeof value === 'string' && value in cloudNames;
+/** The provider the new-task composer opens on: the user's last explicit
+ * choice when it still has an account, else Hermes when available, else the
+ * first available provider, else the first provider with any account. */
+export function defaultCloudProvider(accounts: CloudAccount[], persisted?: string | null): CloudProvider {
+  const order = Object.keys(cloudNames) as CloudProvider[];
+  if (isProvider(persisted) && accounts.some(a => a.provider === persisted)) return persisted;
+  if (accounts.some(a => a.provider === 'hermes' && a.available)) return 'hermes';
+  return order.find(p => accounts.some(a => a.provider === p && a.available))
+    ?? order.find(p => accounts.some(a => a.provider === p))
+    ?? 'hermes';
+}
+export function readCloudProvider(): string | null { try { return localStorage.getItem(CLOUD_PROVIDER_KEY); } catch { return null; } }
+export function writeCloudProvider(value: CloudProvider) { try { localStorage.setItem(CLOUD_PROVIDER_KEY, value); } catch { /* kept in memory */ } }
+/** Why "+" is unavailable for this account, or undefined when it accepts attachments. */
+export function cloudAttachmentBlock(provider: CloudProvider, account?: CloudAccount): string | undefined {
+  if (account?.capabilities.attachments) return undefined;
+  return `${cloudNames[provider]} doesn’t accept attachments yet. Paste the content into the prompt, or switch to Hermes.`;
+}
+/** Prompt shown as the first bubble between submit and the first server state. */
+export interface CloudLaunchSeed { prompt: string; images: import('./imageAttachments').DraftImage[]; provider: CloudProvider; account?: string }
+export const cloudLaunchSeeds = new Map<string, CloudLaunchSeed>();
