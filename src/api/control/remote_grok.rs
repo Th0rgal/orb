@@ -1050,6 +1050,17 @@ impl NativeGrokObserver {
         partial_turn_message(self.mission_id, self.job_id, &self.stream.text)
     }
 
+    async fn has_pending_wakeup(&self) -> bool {
+        self.owner
+            .mission_store
+            .get_mission_automations(self.mission_id)
+            .await
+            .is_ok_and(|rows| {
+                rows.iter()
+                    .any(|a| a.active && a.variables.contains_key("__wakeup_source"))
+            })
+    }
+
     pub(crate) fn usage(&self) -> Option<crate::cost::TokenUsage> {
         self.stream
             .antigravity
@@ -1897,10 +1908,19 @@ impl NativeGrokObserver {
             .filter(|_| self.mission.backend != "codex" && self.goal_turn())
         {
             let status = if success {
-                self.stream
-                    .native_goal_status
-                    .clone()
-                    .unwrap_or_else(|| "complete".to_string())
+                match self.stream.native_goal_status.clone() {
+                    Some(status) => status,
+                    // OpenCode has no native goal state: its run ending only
+                    // means the model stopped for now. With a wake-up still
+                    // armed the goal is waiting, not complete (4ad4bc01 at
+                    // 04:46Z reported complete while waiting for 06:00).
+                    None if self.mission.backend == "opencode"
+                        && self.has_pending_wakeup().await =>
+                    {
+                        "paused".to_string()
+                    }
+                    None => "complete".to_string(),
+                }
             } else {
                 "paused".to_string()
             };
@@ -3452,6 +3472,77 @@ mod tests {
             .iter()
             .any(|u| matches!(u, StreamUpdate::NativeText(v)
             if v["bubble_id"] == "opencode:s:prt_b4000")));
+    }
+
+    #[tokio::test]
+    async fn opencode_goal_with_pending_wakeup_is_paused_not_complete() {
+        use crate::api::mission_store::{
+            self as ms, Automation, AutomationDriver, FreshSession, MissionStore, RetryConfig,
+            SqliteMissionStore, StopPolicy, TriggerType,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "goal-wake")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(Some("goal"), None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        store
+            .update_mission_goal(mission.id, true, Some("optimise until 06:00"))
+            .await
+            .unwrap();
+        store
+            .create_automation(Automation {
+                id: Uuid::new_v4(),
+                mission_id: mission.id,
+                command_source: ms::CommandSource::Inline {
+                    content: "deliver the summary".into(),
+                },
+                trigger: TriggerType::Interval { seconds: 3600 },
+                variables: std::collections::HashMap::from([(
+                    "__wakeup_source".into(),
+                    "automation-manager".into(),
+                )]),
+                active: true,
+                stop_policy: StopPolicy::AfterFirstFire,
+                fresh_session: FreshSession::Keep,
+                created_at: ms::now_string(),
+                last_triggered_at: None,
+                retry_config: RetryConfig::default(),
+                consecutive_failures: 0,
+                driver: AutomationDriver::Scheduler,
+            })
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: Some(tx),
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job)
+            .await
+            .unwrap();
+        observer.stream.feed(concat!(
+            "{\"type\":\"text\",\"sessionID\":\"s\",\"part\":{\"id\":\"p1\",\"messageID\":\"m\",\"text\":\"Waiting for 06:00.\"}}\n",
+            "{\"type\":\"step_finish\",\"sessionID\":\"s\",\"part\":{\"reason\":\"stop\"}}\n",
+        ));
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id":job,"mission_id":mission.id,"state":"succeeded","exit_code":0,
+            "created_at":"2026-10-21T04:46:00Z"
+        }))
+        .unwrap();
+        observer.verdict(&status, "old-agent").await;
+        let mut goal = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::GoalStatus { status, .. } = event {
+                goal = Some(status);
+            }
+        }
+        assert_eq!(goal.as_deref(), Some("paused"));
     }
 
     #[tokio::test]
