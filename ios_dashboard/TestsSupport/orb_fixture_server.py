@@ -30,6 +30,13 @@ def reset():
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
     MISSIONS['long-chat']=dict(id='long-chat',title='Long conversation',status='awaiting_user',project='orb-test',backend='codex',tags=[],model_override='test-model',history=[dict(role='user',content=f'Message {i:03d} — conversation history') for i in range(1,81)])
+    # Long, rich transcript for scroll/keyboard tests: wide code, wide tables, long URLs.
+    long_rich=[]
+    for i in range(1,31):
+        long_rich.append(dict(role='user',content=f'Question {i:02d}: explain step {i}'))
+        long_rich.append(dict(role='assistant',content=f'## Step {i}\n\nAnswer {i:02d} with a very long URL https://example.com/{"a"*120} and inline `code_{i}`.\n\n```swift\nlet veryLongLineNumber{i} = "{"x"*160}"\n```\n\n| Column A | Column B | Column C | Column D | Column E | Column F |\n| --- | --- | --- | --- | --- | --- |\n| a{i} | b{i} | c{i} | d{i} | e{i} | f{i} |'))
+    long_rich.append(dict(role='assistant',content='LONG_RICH_LAST answer at the bottom.'))
+    MISSIONS['long-rich']=dict(id='long-rich',title='Long rich conversation',status='awaiting_user',project='orb-test',backend='opencode',tags=[],model_override='test-model',history=long_rich)
     rich=Path(__file__).with_name('fixtures').joinpath('chatgpt-rich.md').read_text()
     MISSIONS['rich-chatgpt']=dict(id='rich-chatgpt',title='ChatGPT rich response',status='awaiting_user',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test','model':'test-cloud-model'},'turns':[{'key':'rich-turn','prompt':'Montre le calcul, un tableau et les fichiers.','phase':'response_complete','result':rich,'artifacts':[{'path':'/mnt/data/chart.png'},{'path':'/mnt/data/result.csv'}]}]})
     MISSIONS['rich-growth']=dict(id='rich-growth',title='Growing rich response',status='active',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'growth-turn','prompt':'Write a long response.','phase':'running','result':'Starting the response…','artifacts':[]}]})

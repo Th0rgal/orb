@@ -37,6 +37,14 @@ in progress (task list in harness vocabulary, edits, a running command, turn sta
 `btw-live`, which answers 45 s after each `/__reset`; a question sent to a side thread
 streams a progress update, then its answer 16 s later.
 
+`OrbTranscriptUITests` (default fixture) covers the shared transcript container on
+`long-rich` (30 rich turns: wide code, wide tables, long URLs): opens at the bottom, no
+horizontal offset, jump-to-latest pill, fast-scroll thumb, early composer input, header
+menu on first tap and the /btw sheet. Offsets come from the DEBUG-only
+`conversation.scrollProbe` / `btw.scrollProbe` accessibility values. The opt-in
+`OrbTranscriptLiveCapture` reads and scrolls one dedicated test mission on the signed-in
+app (`TEST_RUNNER_ORB_UX_LIVE_MISSION=<uuid>`); it never sends.
+
 The loopback fixture has no provider credentials. UI tests use a DEBUG-only
 local cache reset; it is refused for non-loopback API endpoints. They create
 classic agents and each cloud type, send follow-ups, navigate expanded folders,
