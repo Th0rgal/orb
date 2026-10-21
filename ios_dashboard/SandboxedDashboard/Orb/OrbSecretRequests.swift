@@ -95,7 +95,7 @@ struct OrbSecretRequestBanner: View {
                         .font(.footnote.weight(.semibold))
                     Spacer()
                     Text("\(count)")
-                        .font(.system(size: 11, weight: .bold)).monospacedDigit()
+                        .font(.system(.caption, weight: .bold)).monospacedDigit()
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(OrbStyle.warning.opacity(0.25), in: Capsule())
                     Image(systemName: "chevron.right").font(.caption).foregroundStyle(OrbStyle.textSecondary)
@@ -162,7 +162,7 @@ struct OrbSecretRequestsSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text(Self.kindBadge(r))
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(.caption2, weight: .bold))
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background((r["kind"].text == "read" ? OrbStyle.success : OrbStyle.warning).opacity(0.22), in: RoundedRectangle(cornerRadius: 4))
                 Text(monitor.describe(r)).font(.subheadline.weight(.medium))

@@ -328,7 +328,7 @@ extension OrbConversation {
                 if let details = parsedRemote.details, expandedLogIDs.contains(item.0) {
                     ScrollView {
                         Text(details.prefix(8000))
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(OrbStyle.textSecondary)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -365,7 +365,7 @@ extension OrbConversation {
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                     Text(wake.command)
-                        .font(.system(size: 11.5, design: .monospaced))
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(OrbStyle.textMuted)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -383,12 +383,12 @@ extension OrbConversation {
             if isExpanded {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Task \(wake.task) · \(wake.command)")
-                        .font(.system(size: 10.5, design: .monospaced))
+                        .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(OrbStyle.textMuted)
                     if !wake.output.isEmpty {
                         ScrollView {
                             Text(wake.output.prefix(4000))
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(OrbStyle.textSecondary)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
