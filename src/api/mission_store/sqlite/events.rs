@@ -121,7 +121,7 @@ pub(in crate::api::mission_store) fn log_event_sync(
         return (|| -> Result<(), String> {
             // A finalized native step is immutable. A log reset may replay
             // it; do not create duplicate canonical rows or reopen the step.
-            if bubble_id.starts_with("antigravity:") && conn.query_row(
+            if (bubble_id.starts_with("antigravity:") || bubble_id.starts_with("opencode:")) && conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND event_type='assistant_message_canonical' AND event_id=?2)",
                     params![&mid, &bubble_id], |row| row.get::<_, bool>(0)
                 ).unwrap_or(false) { return Ok(()); }

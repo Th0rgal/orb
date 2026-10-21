@@ -6653,18 +6653,22 @@ fn remote_opencode_long_prompt_reaches_opencode_on_stdin_not_argv() {
         .iter()
         .all(|(key, value)| key.len() + value.len() < 128 * 1024));
 
-    // Short prompts stay positional.
+    // Short prompts use stdin too: `opencode run` wraps any positional
+    // argument containing a space in literal quotes (mission 4ad4bc01 got
+    // `"/goal …"`), while it appends non-TTY stdin verbatim.
     let short = RemoteHarnessPlan::OpenCode {
         model: Some("xai/grok-4.6".into()),
-        prompt: "hi".into(),
+        prompt: "/goal say \"hi\" twice".into(),
         resume_session_id: None,
     };
     let execution = remote_execution_for_plan(&short, "https://core.example", "test");
-    assert!(
-        execution.command.ends_with(" 'hi'"),
-        "{}",
-        execution.command
-    );
+    assert!(execution.command.ends_with(" <&3"), "{}", execution.command);
+    assert!(!execution.command.contains("say"), "{}", execution.command);
+    let env = execution.env.unwrap();
+    let staged: String = (0..)
+        .map_while(|i| env.get(&format!("{STDIN_PROMPT_ENV}{i}")).cloned())
+        .collect();
+    assert_eq!(staged, "/goal say \"hi\" twice");
 }
 
 #[test]
@@ -6769,9 +6773,8 @@ fn remote_execution_routes_selected_model_through_core_proxy_env() {
     };
     let exec = remote_execution_for_plan(&plan, "https://core.example/", "sk-proxy-abc");
     assert!(
-        exec.command.contains(
-            "opencode run --format json --thinking --model 'builtin/xai/grok-4.6' 'build'"
-        ),
+        exec.command
+            .contains("opencode run --format json --thinking --model 'builtin/xai/grok-4.6' <&3"),
         "{}",
         exec.command
     );
@@ -6794,18 +6797,18 @@ fn remote_execution_routes_selected_model_through_core_proxy_env() {
     );
     assert!(!env[REMOTE_OPENCODE_CONFIG_ENV].contains("sk-proxy-abc"));
     // Map key and --model agree even when the client sent `builtin/`,
-    // and a leading-dash prompt stays positional.
+    // and a leading-dash prompt reaches stdin, never yargs.
     let plan =
         plan_remote_harness(None, "opencode", Some("builtin/xai/grok-4.6"), Some("-x")).unwrap();
     let exec = remote_execution_for_plan(&plan, "https://core.example", "k");
     assert!(
-        exec.command
-            .contains("--model 'builtin/xai/grok-4.6' ' -x'"),
+        exec.command.ends_with("--model 'builtin/xai/grok-4.6' <&3"),
         "{}",
         exec.command
     );
-    let config: serde_json::Value =
-        serde_json::from_str(&exec.env.unwrap()[REMOTE_OPENCODE_CONFIG_ENV]).unwrap();
+    let env = exec.env.unwrap();
+    assert_eq!(env[&format!("{STDIN_PROMPT_ENV}0")], "-x");
+    let config: serde_json::Value = serde_json::from_str(&env[REMOTE_OPENCODE_CONFIG_ENV]).unwrap();
     assert!(config["provider"]["builtin"]["models"]["xai/grok-4.6"].is_object());
     let plan = RemoteHarnessPlan::ClaudeCode {
         resume_session_id: None,

@@ -326,6 +326,11 @@ pub(super) fn stdin_prompt(prompt: &str) -> Option<StdinPrompt> {
     if shell_single_quote(&positional_prompt(prompt)).len() <= INLINE_PROMPT_LIMIT {
         return None;
     }
+    Some(staged_prompt(prompt))
+}
+
+/// Stage `prompt` on fd 3 whatever its size.
+pub(super) fn staged_prompt(prompt: &str) -> StdinPrompt {
     let prompt = prompt.replace('\0', "");
     let prompt = if prompt.len() > STDIN_PROMPT_LIMIT {
         // Keep the objective at the head and the latest turns at the tail.
@@ -362,7 +367,7 @@ pub(super) fn stdin_prompt(prompt: &str) -> Option<StdinPrompt> {
         parts.join(" "),
         names.join(" "),
     );
-    Some(StdinPrompt { prelude, env })
+    StdinPrompt { prelude, env }
 }
 
 pub(super) fn positional_prompt(prompt: &str) -> String {
@@ -697,19 +702,14 @@ pub(crate) fn remote_execution_for_plan(
                 remote_opencode_config(model, api_base_url).to_string(),
             );
             let effective_prompt = plan_body.unwrap_or(prompt.as_str());
-            // A transferred conversation can exceed ARG_MAX (E2BIG). `opencode run` appends
-            // non-TTY stdin to the message, so long prompts go through the same staged fd 3
-            // as the other harnesses instead of argv.
-            match stdin_prompt(effective_prompt) {
-                None => {
-                    command.push(' ');
-                    command.push_str(&shell_single_quote(&positional_prompt(effective_prompt)));
-                }
-                Some(staged) => {
-                    command = format!("{}{command} <&3", staged.prelude);
-                    env.extend(staged.env);
-                }
-            }
+            // `opencode run` rewrites every positional argument containing a
+            // space as `"…"` with inner quotes escaped, so each remote prompt
+            // reached the model wrapped in literal quotes (`"/goal …"` in
+            // mission 4ad4bc01). Non-TTY stdin is appended verbatim, and it
+            // also avoids ARG_MAX (E2BIG) for transferred conversations.
+            let staged = staged_prompt(effective_prompt);
+            command = format!("{}{command} <&3", staged.prelude);
+            env.extend(staged.env);
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,

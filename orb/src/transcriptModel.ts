@@ -66,7 +66,7 @@ export class TranscriptReducer {
     }
     this.items.splice(index,0,item);
     this.bubbles.set(bubble,index);
-    if(bubble.startsWith('antigravity:')){
+    if(bubble.startsWith('antigravity:')||bubble.startsWith('opencode:')){
       // Insert by position so receipts compare bubbles in transcript order.
       let at=this.native.length;
       while(at>0&&(this.bubbles.get(this.native[at-1])??-1)>index)at--;
@@ -337,14 +337,20 @@ export class TranscriptReducer {
       case "tool_call":
       case "tool_result": {
         const callId=str(d.tool_call_id), index=this.tools.get(callId);
-        if(index!=null){
+        // A finished call whose id comes back is a new call: OpenCode history
+        // from before Core made its ids unique reused `call_0` per response.
+        // A re-emitted call (Antigravity repeats some) carries the same arguments;
+        // late arguments for a row its result created have none to compare.
+        const prior=index==null?undefined:this.items[index];
+        const reused=ev.type==="tool_call"&&prior?.kind==="tool"&&prior.done&&prior.args!=null&&JSON.stringify(prior.args)!==JSON.stringify(d.args??null);
+        if(index!=null&&!reused){
           const old=this.items[index];
           if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,result:d.result,done:true,unresolved:false});
           else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:str(d.name)||old.name,args:d.args??old.args});
           return;
         }
         this.tools.set(callId,this.items.length);
-        this.items.push({kind:"tool",key:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),done:ev.type==="tool_result"});return;
+        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),done:ev.type==="tool_result"});return;
       }
       case "error": this.close(); this.items.push({kind:"error",key:this.key("error"),text:str(d.message)});return;
       case "mission_status_changed": {
