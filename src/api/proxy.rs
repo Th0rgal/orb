@@ -2324,9 +2324,9 @@ async fn native_protocol_proxy(
                 .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| uuid::Uuid::parse_str(value.trim()).ok());
-            let upstream_stream = upstream
-                .bytes_stream()
-                .map(|item| item.map_err(|error| std::io::Error::other(error.to_string())));
+            let upstream_stream = upstream.bytes_stream().map(|item| {
+                item.map_err(|error| std::io::Error::other(error.without_url().to_string()))
+            });
             let upstream_stream =
                 super::control::cyber::observe(upstream_stream, cyber_receipt.clone());
             let tracked_stream = track_stream_health(
@@ -5896,7 +5896,7 @@ fn normalize_sse_stream(
                     }
                     Some(Err(e)) => {
                         return Some((
-                            Err(std::io::Error::other(e.to_string())),
+                            Err(std::io::Error::other(e.without_url().to_string())),
                             (stream, buf, stripper, envelope, flushed),
                         ));
                     }
@@ -7052,7 +7052,7 @@ fn transform_anthropic_sse_to_openai(
                     Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
                     Some(Err(e)) => {
                         return Some((
-                            Err(std::io::Error::other(e.to_string())),
+                            Err(std::io::Error::other(e.without_url().to_string())),
                             (
                                 stream,
                                 buf,
@@ -7949,7 +7949,7 @@ where
             Some(Err(e)) => {
                 return Err((
                     CooldownReason::ServerError,
-                    format!("stream read error: {}", e),
+                    format!("stream read error: {}", redact_urls(&e.to_string())),
                 ));
             }
             None => {
@@ -8102,7 +8102,7 @@ where
             Some(Err(e)) => {
                 return Err((
                     CooldownReason::ServerError,
-                    format!("stream read error: {}", e),
+                    format!("stream read error: {}", redact_urls(&e.to_string())),
                 ));
             }
             None => {
@@ -8115,6 +8115,38 @@ where
         }
     }
     Ok((peek_buf, stream))
+}
+
+/// Strip query strings and userinfo from any URL in `text` before it is
+/// logged: upstream errors may embed request URLs carrying API keys
+/// (`?key=` for Gemini) or credentials.
+fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("http") {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>' | ','))
+            .unwrap_or(tail.len());
+        let url = &tail[..end];
+        if url.starts_with("http://") || url.starts_with("https://") {
+            let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
+            let after = &url[scheme_end..];
+            let host_and_path = after.rsplit_once('@').map(|(_, h)| h).unwrap_or(after);
+            let without_query = host_and_path.split(['?', '#']).next().unwrap_or("");
+            out.push_str(&url[..scheme_end]);
+            out.push_str(without_query);
+            if without_query.len() != host_and_path.len() {
+                out.push_str("?<redacted>");
+            }
+        } else {
+            out.push_str(url);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// OpenAI-style SSE for a completion that produced no content because the
@@ -8157,13 +8189,20 @@ fn sse_error_terminated(
             match item {
                 Ok(chunk) => yield Ok(chunk),
                 Err(error) => {
-                    let code = if error.kind() == std::io::ErrorKind::TimedOut {
-                        "upstream_stalled"
-                    } else {
-                        "upstream_stream_error"
+                    // Fixed client-facing text: the underlying error can carry
+                    // the upstream URL (keys in query strings, internal
+                    // hosts). The detail goes to the log only, redacted.
+                    let (code, message) = match error.kind() {
+                        std::io::ErrorKind::TimedOut => ("upstream_stalled", "upstream stream stalled"),
+                        _ => ("upstream_stream_error", "upstream stream error"),
                     };
+                    tracing::warn!(
+                        error = %redact_urls(&error.to_string()),
+                        code,
+                        "Upstream stream failed after headers; ending SSE with an error event"
+                    );
                     let event = serde_json::json!({
-                        "error": { "message": format!("Upstream stream failed: {error}"), "type": "server_error", "code": code }
+                        "error": { "message": message, "type": "server_error", "code": code }
                     });
                     yield Ok(bytes::Bytes::from(format!("\n\ndata: {event}\n\ndata: [DONE]\n\n")));
                     break;
@@ -8712,7 +8751,7 @@ fn transform_google_sse_to_openai(
                     Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
                     Some(Err(e)) => {
                         return Some((
-                            Err(std::io::Error::other(e.to_string())),
+                            Err(std::io::Error::other(e.without_url().to_string())),
                             (
                                 stream,
                                 buf,
@@ -11039,6 +11078,32 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn sse_error_event_never_leaks_urls_or_keys() {
+        let leaky = "error sending request for url (https://generativelanguage.googleapis.com/v1beta/models/x:streamGenerateContent?alt=sse&key=AIzaSECRETKEY123) via http://user:pw@10.0.0.7:8317/v1";
+        for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::Other] {
+            let failing = futures::stream::iter(vec![
+                Ok(bytes::Bytes::from(HELLO)),
+                Err(std::io::Error::new(kind, leaky)),
+            ]);
+            let text: String = sse_error_terminated(failing)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+                .collect();
+            for secret in ["AIzaSECRETKEY123", "googleapis", "10.0.0.7", "pw@", "http"] {
+                assert!(!text.contains(secret), "{secret} leaked: {text}");
+            }
+        }
+        let redacted = redact_urls(leaky);
+        assert!(!redacted.contains("AIzaSECRETKEY123"));
+        assert!(!redacted.contains("pw@"));
+        assert!(redacted.contains(
+            "generativelanguage.googleapis.com/v1beta/models/x:streamGenerateContent?<redacted>"
+        ));
     }
 
     #[test]

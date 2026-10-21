@@ -216,6 +216,28 @@ fn transient_cooldown_max() -> std::time::Duration {
     )
 }
 
+/// Most transient-failure timestamps kept per account.
+const MAX_TRANSIENT_SAMPLES: usize = 64;
+
+/// `base × multiplier^over`, capped at [`transient_cooldown_max`]. Computed in
+/// f64 with a clamped exponent and built with `try_from_secs_f64`, so a long
+/// failure streak (or odd config) can neither overflow nor panic.
+pub fn transient_cooldown(
+    base: std::time::Duration,
+    multiplier: f64,
+    over: usize,
+) -> std::time::Duration {
+    let cap = transient_cooldown_max();
+    let exponent = over.min(32) as i32;
+    let secs = base.as_secs_f64() * multiplier.max(1.0).powi(exponent);
+    if !secs.is_finite() {
+        return cap;
+    }
+    std::time::Duration::try_from_secs_f64(secs.min(cap.as_secs_f64()))
+        .map(|d| d.min(cap))
+        .unwrap_or(cap)
+}
+
 impl CooldownReason {
     /// Upstream hiccups (5xx, network errors, timeouts, empty streams) as
     /// opposed to signals about the account (429, quota, credit, auth).
@@ -701,6 +723,10 @@ impl ProviderHealthTracker {
         if reason.is_transient() && retry_after.is_none() {
             let now = std::time::Instant::now();
             health.transient_failures.push_back(now);
+            // Bounded: only the streak length within the window matters.
+            while health.transient_failures.len() > MAX_TRANSIENT_SAMPLES {
+                health.transient_failures.pop_front();
+            }
             while health
                 .transient_failures
                 .front()
@@ -720,12 +746,11 @@ impl ProviderHealthTracker {
                 );
                 return std::time::Duration::ZERO;
             }
-            let over = (streak - threshold) as u32;
-            let cooldown = self
-                .backoff_config
-                .base_delay
-                .mul_f64(self.backoff_config.multiplier.powi(over as i32))
-                .min(transient_cooldown_max());
+            let cooldown = transient_cooldown(
+                self.backoff_config.base_delay,
+                self.backoff_config.multiplier,
+                streak - threshold,
+            );
             health.cooldown_until = Some(now + cooldown);
             tracing::warn!(
                 account_id = %account_id,
@@ -2669,6 +2694,40 @@ mod tests {
             .record_entry_failure(&entries[0], CooldownReason::PaymentRequired, None)
             .await;
         assert_eq!(again.as_secs(), 600, "the streak restarts after a success");
+    }
+
+    #[test]
+    fn transient_cooldown_never_overflows_on_huge_streaks() {
+        let base = std::time::Duration::from_secs(5);
+        let cap = std::time::Duration::from_secs(60);
+        assert_eq!(transient_cooldown(base, 2.0, 0), base);
+        assert_eq!(
+            transient_cooldown(base, 2.0, 1),
+            std::time::Duration::from_secs(10)
+        );
+        for over in [5, 64, 10_000, usize::MAX] {
+            assert_eq!(transient_cooldown(base, 2.0, over), cap, "{over}");
+        }
+        assert_eq!(transient_cooldown(base, f64::INFINITY, 3), cap);
+        assert_eq!(transient_cooldown(base, f64::NAN, 3), base.min(cap));
+        assert_eq!(transient_cooldown(std::time::Duration::MAX, 2.0, 1), cap);
+    }
+
+    #[tokio::test]
+    async fn long_transient_streak_is_bounded_and_does_not_panic() {
+        let tracker = ProviderHealthTracker::new();
+        let account = Uuid::new_v4();
+        let mut last = std::time::Duration::ZERO;
+        for _ in 0..2_000 {
+            last = tracker
+                .record_failure(account, CooldownReason::ServerError, None)
+                .await;
+        }
+        assert!(last <= std::time::Duration::from_secs(60));
+        let len = tracker.accounts.read().await[&account]
+            .transient_failures
+            .len();
+        assert!(len <= MAX_TRANSIENT_SAMPLES);
     }
 
     #[tokio::test]
