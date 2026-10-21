@@ -28,7 +28,11 @@ TOOLS=/opt/sandboxed-tools
 NODE_USER=orbnode
 NODE_HOME=/var/lib/orb-node
 NODE_WORK=$NODE_HOME/work
+# Shared Lean toolchain: root-owned, read-only for everyone (never on a writable path).
+SHARED_ELAN=/opt/orb/elan
 # sandboxed-node's Lean runner uses <work>/caches/elan as ELAN_HOME (src/node/lean.rs).
+# It is orbnode-writable and appears ONLY in orb-node.service / orbnode's own env; its
+# toolchain entry is a symlink into the read-only $SHARED_ELAN, so no download is needed.
 ELAN_HOME_DIR=$NODE_WORK/caches/elan
 # Boat's platform layer re-provisions some /usr/local/bin names (claude, ...) at every
 # boot, so the image's pinned tools live in /opt/orb/bin, first on every PATH we control.
@@ -83,11 +87,13 @@ as_node() { sudo -u "$NODE_USER" -H env HOME="$NODE_HOME" ELAN_HOME="$ELAN_HOME_
   PATH="$ELAN_HOME_DIR/bin:$ORB_BIN:/usr/local/bin:/usr/bin:/bin" "$@"; }
 
 [ "$(uname -m)" = x86_64 ] || die "x86_64 only"
-for f in sandboxed-node fleet-tools-x86_64.tar.gz certified-search.tar.gz build-info.json; do
+for f in sandboxed-node sandboxed-mcp fleet-tools-x86_64.tar.gz certified-search.tar.gz build-info.json; do
   [ -s "$ORB_STAGE/$f" ] || die "missing staged input $ORB_STAGE/$f"
 done
 NODE_BIN_SHA256=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["node_sha256"])' "$ORB_STAGE/build-info.json")
 verify "$ORB_STAGE/sandboxed-node" "$NODE_BIN_SHA256"
+MCP_BIN_SHA256=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["mcp_sha256"])' "$ORB_STAGE/build-info.json")
+verify "$ORB_STAGE/sandboxed-mcp" "$MCP_BIN_SHA256"
 verify "$ORB_STAGE/certified-search.tar.gz" "$CERTIFIED_SEARCH_SHA256"
 DL=$(mktemp -d)   # owned by user; root only reads verified files from it
 trap 'rm -rf "$DL"' EXIT
@@ -103,14 +109,17 @@ if [ ${#need[@]} -gt 0 ]; then
   sudo apt-get install -y -qq --no-install-recommends "${need[@]}"
 fi
 
+log "system PATH dirs root-owned (boat's base image ships /usr/local/* owned by user)"
+PATH_DIRS="/usr/local/bin /usr/local/sbin /usr/local/games /usr/local/cargo/bin"
+for d in $PATH_DIRS; do [ -d "$d" ] && sudo chown root:root "$d" && sudo chmod go-w "$d"; done
+
 log "service account $NODE_USER"
 if ! id "$NODE_USER" >/dev/null 2>&1; then
   sudo useradd --system --home-dir "$NODE_HOME" --create-home --shell /bin/bash "$NODE_USER"
 fi
 for g in sudo adm admin wheel docker lxd; do sudo gpasswd -d "$NODE_USER" "$g" >/dev/null 2>&1 || true; done
 sudo rm -f "/etc/sudoers.d/$NODE_USER"
-# Traversable (not listable) so other users can run the shared elan toolchain.
-sudo install -d -m 0711 -o "$NODE_USER" -g "$NODE_USER" "$NODE_HOME" "$NODE_WORK" "$NODE_WORK/caches"
+sudo install -d -m 0750 -o "$NODE_USER" -g "$NODE_USER" "$NODE_HOME" "$NODE_WORK" "$NODE_WORK/caches"
 sudo loginctl enable-linger "$NODE_USER"
 # Core writes enroll.env here; PID1 (root) reads it for EnvironmentFile=, orbnode must not.
 install -d -m 0700 /home/user/.orb
@@ -200,31 +209,46 @@ exec /opt/orb/bin/research-governor "$@"
 EOF
 sudo chmod 755 $ORB_BIN/certified-search
 
-log "elan $ELAN_VERSION + Lean $LEAN_VERSION for $NODE_USER (ELAN_HOME=$ELAN_HOME_DIR)"
-if ! as_node test -x "$ELAN_HOME_DIR/bin/elan"; then
-  fetch "$ELAN_URL" "$ELAN_SHA256" "$DL/elan.tgz"
-  mkdir -p "$DL/elan" && tar -xzf "$DL/elan.tgz" -C "$DL/elan"
-  sudo install -m 0755 -o "$NODE_USER" -g "$NODE_USER" "$DL/elan/elan-init" "$NODE_HOME/elan-init"
-  as_node "$NODE_HOME/elan-init" -y --no-modify-path --default-toolchain none
-  sudo rm -f "$NODE_HOME/elan-init"
+log "elan $ELAN_VERSION + Lean $LEAN_VERSION, shared read-only at $SHARED_ELAN (root)"
+fetch "$ELAN_URL" "$ELAN_SHA256" "$DL/elan.tgz"
+mkdir -p "$DL/elan" && tar -xzf "$DL/elan.tgz" -C "$DL/elan"
+chmod 0755 "$DL" "$DL/elan" && chmod 0755 "$DL/elan/elan-init"
+if [ ! -x "$SHARED_ELAN/bin/elan" ]; then
+  sudo env ELAN_HOME="$SHARED_ELAN" HOME=/root "$DL/elan/elan-init" -y --no-modify-path --default-toolchain none
 fi
-TC_DIR=$ELAN_HOME_DIR/toolchains/leanprover--lean4---v$LEAN_VERSION
-if ! as_node test -x "$TC_DIR/bin/lean"; then
+TC_NAME=leanprover--lean4---v$LEAN_VERSION
+TC_DIR=$SHARED_ELAN/toolchains/$TC_NAME
+if [ ! -x "$TC_DIR/bin/lean" ]; then
   fetch "$LEAN_URL" "$LEAN_SHA256" "$DL/lean.tar.zst"
-  sudo chmod 0644 "$DL/lean.tar.zst"; sudo chmod 0755 "$DL"
-  as_node mkdir -p "$TC_DIR.tmp"
-  as_node tar --zstd -xf "$DL/lean.tar.zst" -C "$TC_DIR.tmp" --strip-components=1
-  as_node mv "$TC_DIR.tmp" "$TC_DIR"
+  sudo rm -rf "$TC_DIR.tmp" && sudo mkdir -p "$TC_DIR.tmp"
+  sudo tar --zstd -xf "$DL/lean.tar.zst" -C "$TC_DIR.tmp" --strip-components=1 --no-same-owner
+  sudo mv "$TC_DIR.tmp" "$TC_DIR"
 fi
+sudo env ELAN_HOME="$SHARED_ELAN" HOME=/root "$SHARED_ELAN/bin/elan" default "$LEAN_TOOLCHAIN"
+sudo chown -R root:root "$SHARED_ELAN"
+sudo chmod -R u+rwX,go+rX,go-w "$SHARED_ELAN"
+# Wrappers on the global PATH pin ELAN_HOME to the read-only tree (no env export needed).
+for b in "$SHARED_ELAN"/bin/*; do
+  n=$(basename "$b")
+  printf '#!/bin/sh\nELAN_HOME=%s exec %s "$@"\n' "$SHARED_ELAN" "$b" | sudo tee "$ORB_BIN/$n" >/dev/null
+  sudo chmod 755 "$ORB_BIN/$n"
+done
+"$ORB_BIN/lean" --version | grep -qF "version $LEAN_VERSION" || die "shared lean toolchain not active"
+
+log "orbnode job ELAN_HOME $ELAN_HOME_DIR (toolchain symlinked read-only)"
+if ! as_node test -x "$ELAN_HOME_DIR/bin/elan"; then
+  as_node "$DL/elan/elan-init" -y --no-modify-path --default-toolchain none
+fi
+as_node mkdir -p "$ELAN_HOME_DIR/toolchains"
+as_node ln -sfn "$TC_DIR" "$ELAN_HOME_DIR/toolchains/$TC_NAME"
 as_node elan default "$LEAN_TOOLCHAIN"
-as_node lean --version | grep -qF "version $LEAN_VERSION" || die "lean toolchain not active"
-sudo chmod -R a+rX "$ELAN_HOME_DIR"
-sudo tee /etc/profile.d/orb-elan.sh >/dev/null <<EOF
-# Shared elan/Lean toolchain owned by $NODE_USER (read-only for other users).
-export ELAN_HOME=$ELAN_HOME_DIR
-case ":\$PATH:" in *":$ORB_BIN:"*) ;; *) export PATH="$ELAN_HOME_DIR/bin:$ORB_BIN:\$PATH";; esac
+as_node lean --version | grep -qF "version $LEAN_VERSION" || die "orbnode lean toolchain not active"
+sudo rm -f /etc/profile.d/orb-elan.sh
+sudo tee /etc/profile.d/orb-path.sh >/dev/null <<EOF
+# Pinned image tools (root-owned, not group/other-writable).
+case ":\$PATH:" in *":$ORB_BIN:"*) ;; *) export PATH="$ORB_BIN:\$PATH";; esac
 EOF
-sudo chmod 644 /etc/profile.d/orb-elan.sh
+sudo chmod 644 /etc/profile.d/orb-path.sh
 
 log "auto-update off (global)"
 sudo tee /etc/profile.d/orb-no-autoupdate.sh >/dev/null <<'EOF'
@@ -235,8 +259,12 @@ for kv in DISABLE_AUTOUPDATER=1 NO_UPDATE_NOTIFIER=1; do
   grep -qx "$kv" /etc/environment 2>/dev/null || echo "$kv" | sudo tee -a /etc/environment >/dev/null
 done
 
-log "sandboxed-node"
+log "sandboxed-node + sandboxed-mcp"
 sudo install -m 0755 -o root -g root "$ORB_STAGE/sandboxed-node" $ORB_BIN/sandboxed-node
+sudo install -m 0755 -o root -g root "$ORB_STAGE/sandboxed-mcp" $ORB_BIN/sandboxed-mcp
+# Core hard-codes /usr/local/bin/sandboxed-mcp for remote harness jobs; boat rewrites
+# /usr/local/bin at boot, so orb-boot.service and orb-node's ExecStartPre recreate the link.
+sudo ln -sfn $ORB_BIN/sandboxed-mcp /usr/local/bin/sandboxed-mcp
 
 log "orb-node.service (installed, not enabled)"
 UID_N=$(id -u $NODE_USER)
@@ -254,7 +282,7 @@ EnvironmentFile=/home/user/.orb/enroll.env
 WorkingDirectory=$NODE_HOME
 Environment=SANDBOXED_NODE_WORK_DIR=$NODE_WORK
 Environment=SANDBOXED_NODE_BIND=127.0.0.1:3088
-Environment=PATH=$ELAN_HOME_DIR/bin:$ORB_BIN:/usr/local/bin:$NODE_DIR/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=$ELAN_HOME_DIR/bin:$ORB_BIN:$NODE_DIR/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HOME=$NODE_HOME
 Environment=ELAN_HOME=$ELAN_HOME_DIR
 Environment=XDG_RUNTIME_DIR=/run/user/$UID_N
@@ -262,6 +290,7 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_N/bus
 Environment=DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1
 NoNewPrivileges=true
 # Boat resets /var/lib/systemd/linger on boot: re-enable linger and wait for the user bus.
+ExecStartPre=+/bin/ln -sfn $ORB_BIN/sandboxed-mcp /usr/local/bin/sandboxed-mcp
 ExecStartPre=+/bin/sh -c 'loginctl enable-linger $NODE_USER; for i in \$\$(seq 100); do [ -S /run/user/$UID_N/bus ] && exit 0; sleep 0.2; done; echo user bus missing >&2; exit 1'
 ExecStart=$ORB_BIN/sandboxed-node
 Restart=on-failure
@@ -270,19 +299,24 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-sudo tee /etc/systemd/system/orb-linger.service >/dev/null <<EOF
+sudo systemctl disable orb-linger.service >/dev/null 2>&1 || true
+sudo rm -f /etc/systemd/system/orb-linger.service
+sudo tee /etc/systemd/system/orb-boot.service >/dev/null <<EOF
 [Unit]
-Description=Enable lingering for $NODE_USER (boat resets /var/lib/systemd/linger at boot)
-After=systemd-logind.service
+Description=Orb image boot fixups (boat resets linger and parts of /usr/local/bin at boot)
+After=systemd-logind.service local-fs.target
+Before=orb-node.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/loginctl enable-linger $NODE_USER
+ExecStart=/bin/sh -c 'for d in $PATH_DIRS; do [ -d "\$\$d" ] && chown root:root "\$\$d" && chmod go-w "\$\$d"; done; true'
+ExecStart=/bin/ln -sfn $ORB_BIN/sandboxed-mcp /usr/local/bin/sandboxed-mcp
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
-sudo systemctl enable orb-linger.service >/dev/null 2>&1
+sudo systemctl enable orb-boot.service >/dev/null 2>&1
 sudo systemctl disable orb-node.service >/dev/null 2>&1 || true
 
 log "convenience links in /usr/local/bin (boat may override platform names at boot)"
@@ -303,6 +337,7 @@ m = {
   "recipe_sha": info.get("recipe_sha"),
   "node_version": info.get("node_version"),
   "node_sha256": info.get("node_sha256"),
+  "mcp_sha256": info.get("mcp_sha256"),
   "node_user": "$NODE_USER",
   "harnesses": {
     "claude": "$(ver as_node $ORB_BIN/claude --version)",
@@ -311,7 +346,7 @@ m = {
     "gemini": "$(ver as_node $ORB_BIN/gemini --version)",
     "agy": "$(ver as_node $ORB_BIN/agy --version)",
   },
-  "lean": {"default_toolchain": "$LEAN_TOOLCHAIN", "elan_home": "$ELAN_HOME_DIR",
+  "lean": {"default_toolchain": "$LEAN_TOOLCHAIN", "elan_home": "$SHARED_ELAN", "node_job_elan_home": "$ELAN_HOME_DIR",
            "lean": "$(as_node lean --version | head -1)", "lake": "$(as_node lake --version | head -1)",
            "elan": "$(ver as_node elan --version)"},
   "nodejs": "$NODEJS_VERSION",

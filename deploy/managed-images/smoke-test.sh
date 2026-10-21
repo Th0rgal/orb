@@ -32,7 +32,7 @@ sudo rm -f /home/user/.orb/enroll.env.smoke
 check "unit runs as $NU" grep -qx "User=$NU" /etc/systemd/system/orb-node.service
 check "unit work dir" grep -qx "Environment=SANDBOXED_NODE_WORK_DIR=$NH/work" /etc/systemd/system/orb-node.service
 check "orb-node.service not enabled" sh -c "! systemctl is-enabled orb-node.service 2>/dev/null | grep -qx enabled"
-check "orb-linger.service enabled" sh -c "systemctl is-enabled orb-linger.service | grep -qx enabled"
+check "orb-boot.service enabled" sh -c "systemctl is-enabled orb-boot.service | grep -qx enabled"
 for _ in $(seq 1 30); do [ -S /run/user/$NUID/bus ] && break; sleep 0.5; done
 check "linger enabled for $NU (after boot)" sh -c "loginctl show-user $NU -p Linger | grep -q yes"
 check "user bus /run/user/$NUID/bus" test -S /run/user/$NUID/bus
@@ -53,6 +53,13 @@ check "lean default v4.35.0" as_node sh -c "lean --version | grep -F 'version 4.
 check "turbo-lean --version" as_node turbo-lean --version
 check "lean-native --version" as_node lean-native --version
 check "certified-search --help" as_node certified-search --help
+check "sandboxed-mcp link after boot" sh -c "[ \"\$(readlink /usr/local/bin/sandboxed-mcp)\" = /opt/orb/bin/sandboxed-mcp ] && [ \"\$(stat -L -c %U /usr/local/bin/sandboxed-mcp)\" = root ]"
+mcp_out=$(as_node timeout 3 /usr/local/bin/sandboxed-mcp </dev/null 2>&1); mcp_rc=$?
+if grep -q 'No such file' <<<"$mcp_out" || [ $mcp_rc -eq 126 ] || [ $mcp_rc -eq 127 ]; then fail "sandboxed-mcp as $NU (rc $mcp_rc): $(echo "$mcp_out" | head -2 | tr '\n' ' ' | cut -c1-200)"
+else pass "sandboxed-mcp runs as $NU (rc $mcp_rc)"; fi
+check "shared elan root-owned, read-only" sh -c "[ -z \"\$(sudo find /opt/orb -not -user root -o -perm /022 -not -type l | head -1)\" ]"
+check "lake --version as user (shared toolchain)" sh -c "PATH=/opt/orb/bin:/usr/bin:/bin lake --version"
+check "no global ELAN_HOME" sh -c "! grep -rqs ELAN_HOME /etc/environment /etc/profile /etc/profile.d /etc/bash.bashrc"
 check "research-governor-core present" test -x /opt/orb/bin/research-governor-core
 
 proj=$(as_node mktemp -d -p $NH)
@@ -90,6 +97,23 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:3088/heartbe
 [ "$code" = 401 ] && pass "heartbeat without token -> 401" || fail "heartbeat without token -> $code"
 sudo pkill -u $NU -f '^/opt/orb/bin/sandboxed-node' 2>/dev/null; sleep 0.5
 sudo rm -rf "$wd" /tmp/smoke-node.log
+
+# --- PATH hygiene: root's and user's login PATH dirs must be root-owned (user's may also be
+# owned by user itself) and not group/other-writable.
+path_ok() { # label owner-allowed path
+  local bad="" d
+  IFS=: read -ra ds <<<"$3"
+  for d in "${ds[@]}"; do
+    [ -n "$d" ] && sudo test -e "$d" || continue
+    o=$(sudo stat -L -c %U "$d"); m=$(sudo stat -L -c %a "$d")
+    if ! grep -qwx -- "$o" <<<"$(tr ' ' '\n' <<<"$2")" || [ $(( 8#$m & 8#022 )) -ne 0 ]; then bad="$bad $d($o,$m)"; fi
+  done
+  [ -z "$bad" ] && pass "PATH hygiene $1" || fail "PATH hygiene $1:$bad"
+}
+path_ok "root login" root "$(sudo -i sh -c 'echo $PATH')"
+path_ok "/etc/environment" root "$(sudo sh -c '. /etc/environment 2>/dev/null; echo ${PATH:-}')"
+path_ok "user login" "root user" "$(sudo -iu user sh -c 'echo $PATH')"
+path_ok "orb-node.service (non-orbnode dirs)" root "$(grep -oP '^Environment=PATH=\K.*' /etc/systemd/system/orb-node.service | tr ':' '\n' | grep -v '^/var/lib/orb-node' | paste -sd:)"
 
 # --- secrets scan
 # Boat writes ~/.config/ascii/boat/config.json at every boot; on a noEnv sandbox it holds
