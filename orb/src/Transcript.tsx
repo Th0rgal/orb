@@ -21,7 +21,7 @@ import * as Ic from "./icons";
 import { markdownText, MdView } from "./Markdown";
 import { createStore, reconcile } from "solid-js/store";
 import { goalDraft, planObjective } from "./goal";
-import { isTaskTool, latestTaskList, parseTaskList } from "./taskList";
+import { isTaskTool, latestTaskList, parseTaskList, taskCardView } from "./taskList";
 
 import { messagePresentation, isAutomaticRecovery, isResumePrompt } from "./messagePresentation";
 import { computeDiffStats, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
@@ -563,12 +563,13 @@ export function ThoughtSequence(p: { items: ThinkItem[] }) {
   );
 }
 
-function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
+function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean }) {
   const [collapsed, setCollapsed] = createSignal(false);
   const [dismissed, setDismissed] = createSignal(dismissedChecklists.has(p.key));
   createEffect(() => {
     setDismissed(dismissedChecklists.has(p.key));
   });
+  const view = () => taskCardView(p.tasks, p.ended === true);
   const completedCount = () => p.tasks.filter(task => task.status === "completed").length;
   const allDone = () => p.tasks.length > 0 && p.tasks.every(task => task.status === "completed" || task.status === "cancelled");
   const activeTask = () =>
@@ -582,12 +583,12 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
   };
   return (
     <Show when={!dismissed()}>
-      <section class={`mission-tasks ${collapsed() ? "collapsed" : ""} ${allDone() ? "is-done" : ""}`} id="mission-tasks" aria-label="Tasks" tabIndex={-1}>
+      <section class={`mission-tasks ${collapsed() ? "collapsed" : ""} ${allDone() ? "is-done" : ""} ${p.ended && !allDone() ? "is-ended" : ""}`} id="mission-tasks" aria-label="Tasks" tabIndex={-1}>
         <div class="tasks-heading">
           <button type="button" class="tasks-heading-toggle" aria-expanded={!collapsed()} onClick={() => setCollapsed(v => !v)}>
             <Ic.ChevronDown size={13} class={`tasks-chev ${collapsed() ? "collapsed" : ""}`} />
             <strong>Tasks</strong>
-            <span class="tasks-count">{completedCount()}/{p.tasks.length} completed</span>
+            <span class="tasks-count">{view().label}</span>
             <Show when={collapsed() && activeTask()}>
               <span class="tasks-preview">{activeTask()!.text}</span>
             </Show>
@@ -606,7 +607,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[] }) {
         </div>
         <Show when={!collapsed()}>
           <progress aria-label="Task progress" max={p.tasks.length} value={completedCount()} />
-          <ol><For each={p.tasks}>{task => <li data-status={task.status}>
+          <ol><For each={view().tasks}>{task => <li data-status={task.status}>
             <span class={`task-state ${task.status === "in_progress" ? "shimmer" : ""}`} aria-label={task.status.replaceAll("_", " ")}>{task.status === "completed" ? "✓" : task.status === "cancelled" ? "−" : task.status === "in_progress" ? "◉" : "○"}</span><span class="task-text">{task.text}</span>
           </li>}</For></ol>
         </Show>
@@ -683,7 +684,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
       </For>}</VirtualTurns></DisclosureState.Provider>
       <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} /></Show>
       <Show when={checklist()?.tasks.length}>
-        <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} />
+        <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} />
       </Show>
     </>
   );

@@ -103,3 +103,18 @@ export function latestTaskList(items: StreamItem[]): Checklist | null {
   }
   return null;
 }
+
+/** How the Tasks card shows a plan. Once the turn is no longer running an
+ * unfinished plan is a record of where the agent stopped, not live progress:
+ * no item is "in progress" any more (4ad4bc01 kept a spinning step 4/5 after
+ * its turn ended on a wake-up). */
+export function taskCardView(tasks: TaskItem[], ended: boolean): { tasks: TaskItem[]; label: string } {
+  const done = tasks.filter(t => t.status === "completed").length;
+  const finished = tasks.every(t => t.status === "completed" || t.status === "cancelled");
+  if (!ended || finished) return { tasks, label: `${done}/${tasks.length} completed` };
+  const stop = tasks.findIndex(t => t.status === "in_progress" || t.status === "pending");
+  return {
+    tasks: tasks.map(t => t.status === "in_progress" ? { ...t, status: "pending" as const } : t),
+    label: `Stopped at step ${stop + 1}/${tasks.length}`,
+  };
+}

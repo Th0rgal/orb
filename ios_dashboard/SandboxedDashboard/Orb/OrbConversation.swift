@@ -613,7 +613,7 @@ struct OrbConversation: View {
             turnSummaryRow(turn: turns[index])
         }
         if !workModel.todos.isEmpty {
-            OrbMissionTasksCard(todos: workModel.todos)
+            OrbMissionTasksCard(todos: workModel.todos, ended: !working)
         }
         if working {
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -2683,7 +2683,23 @@ private struct OrbToolRow: View {
 
 private struct OrbMissionTasksCard: View {
     let todos: [OrbWorkModel.TodoItem]
+    /// The turn is no longer running: an unfinished plan shows where it
+    /// stopped, with no step in progress (desktop `taskCardView`).
+    var ended = false
     @State private var expanded = false
+
+    private var stopped: Bool {
+        ended && !todos.allSatisfy { $0.status == "completed" || $0.status == "cancelled" }
+    }
+    private func shownStatus(_ status: String) -> String {
+        stopped && status == "in_progress" ? "pending" : status
+    }
+    private var countLabel: String {
+        guard stopped, let index = todos.firstIndex(where: { $0.status == "in_progress" || $0.status == "pending" }) else {
+            return "\(completedCount)/\(todos.count) tasks"
+        }
+        return "Stopped at step \(index + 1)/\(todos.count)"
+    }
 
     private var completedCount: Int {
         todos.filter { $0.status == "completed" }.count
@@ -2710,7 +2726,7 @@ private struct OrbMissionTasksCard: View {
                     Image(systemName: completedCount == todos.count ? "checkmark.circle.fill" : "checklist")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(completedCount == todos.count ? OrbStyle.success : OrbStyle.textSecondary)
-                    Text("\(completedCount)/\(todos.count) tasks")
+                    Text(countLabel)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(OrbStyle.textSecondary)
                         .monospacedDigit()
@@ -2736,9 +2752,9 @@ private struct OrbMissionTasksCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(todos) { item in
                         HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: Self.icon(item.status))
+                            Image(systemName: Self.icon(shownStatus(item.status)))
                                 .font(.system(size: 11))
-                                .foregroundStyle(item.status == "completed" ? OrbStyle.success : (item.status == "in_progress" ? .white : OrbStyle.textMuted))
+                                .foregroundStyle(item.status == "completed" ? OrbStyle.success : (shownStatus(item.status) == "in_progress" ? .white : OrbStyle.textMuted))
                                 .padding(.top, 2)
                             Text(item.content)
                                 .font(.caption)
