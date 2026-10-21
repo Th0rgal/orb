@@ -3,6 +3,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageSettings } from "../src/UsageSettings";
 import { setConnection } from "../src/api";
 import { chartBuckets, formatCost, usageQuery, windowHours, type UsageSummary, type UsageTotals } from "../src/usageApi";
+import { errorSummary, formatMs, formatRate, isRedFlag, type ProxyHealth, type ReliabilityStats } from "../src/proxyHealthApi";
+
+const stats = (over: Partial<ReliabilityStats> = {}): ReliabilityStats => ({
+  requests: 0, ok: 0, success_rate: null, ttft_p50_ms: null, ttft_p95_ms: null, latency_p50_ms: null, latency_p95_ms: null, retried: 0, fell_back: 0, errors: {}, ...over,
+});
+
+export function proxyHealth(window = "24h"): ProxyHealth {
+  return {
+    window, since: "2026-10-19T12:00:00+00:00",
+    totals: stats({ requests: 400, ok: 380, success_rate: 0.95, ttft_p50_ms: 1200, ttft_p95_ms: 8400, retried: 12, fell_back: 30 }),
+    groups: [
+      { provider: "minimax", model: "MiniMax-M3", account_id: "15d3c9ef-573e-447d-bebe-cfcd8097343d", flags: ["low_success_rate", "out_of_credit"], ...stats({ requests: 483, ok: 0, success_rate: 0, errors: { "client_error:402": 483 } }) },
+      { provider: "google", model: "gemini-4-argon-eap", account_id: null, flags: [], ...stats({ requests: 330, ok: 320, success_rate: 320 / 330, ttft_p50_ms: 900, ttft_p95_ms: 4000, errors: { empty_before_first_chunk: 10 } }) },
+    ],
+    chains: [{ chain_id: "builtin/smart", ...stats({ requests: 400, ok: 380, success_rate: 0.95 }) }],
+  };
+}
 
 const totals = (over: Partial<UsageTotals> = {}): UsageTotals => ({
   requests: 0, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, cost_cents: 0, unknown_cost_requests: 0, ...over,
@@ -66,6 +83,7 @@ describe("Usage page", () => {
       const url = new URL(input);
       requests.push(url.pathname + url.search);
       if (url.pathname === "/api/ai/usage/summary") return new Response(JSON.stringify(summary(url.searchParams.get("window") ?? "all")));
+      if (url.pathname === "/api/ai/proxy/health") return new Response(JSON.stringify(proxyHealth(url.searchParams.get("window") ?? "24h")));
       throw Error(url.pathname);
     }));
   });
@@ -78,7 +96,7 @@ describe("Usage page", () => {
     expect(screen.getByText("96%")).toBeTruthy();
     expect(screen.getByText("Unknown")).toBeTruthy();
     expect(screen.getByText("Router · google")).toBeTruthy();
-    expect(requests[0]).toBe("/api/ai/usage/summary?window=24h");
+    expect(requests.find(r => r.startsWith("/api/ai/usage/"))).toBe("/api/ai/usage/summary?window=24h");
 
     const groupBy = screen.getByLabelText("Group by") as HTMLSelectElement;
     groupBy.value = "api_key";
@@ -91,5 +109,52 @@ describe("Usage page", () => {
     window.value = "5h";
     fireEvent.change(window);
     await waitFor(() => expect(requests).toContain("/api/ai/usage/summary?window=5h&api_key=key-argon"));
+  });
+
+  it("shows router reliability with red flags and switches the window", async () => {
+    render(() => <UsageSettings />);
+    const section = await screen.findByRole("region", { name: "Reliability" });
+    await waitFor(() => expect(section.textContent).toContain("95.0%"));
+    expect(section.textContent).toContain("1.2 s");
+    expect(section.textContent).toContain("8.4 s");
+    expect(section.textContent).toContain("12 · 30");
+    const problems = screen.getByRole("list", { name: "Reliability problems" });
+    expect(problems.textContent).toContain("minimax · MiniMax-M3");
+    expect(problems.textContent).toContain("Out of credit");
+    expect(problems.textContent).toContain("402 out of credit ×483");
+    expect(problems.textContent).not.toContain("gemini");
+    const rows = screen.getByRole("table", { name: "Reliability by provider" });
+    expect(rows.querySelector(".usage-red")?.textContent).toContain("0%");
+    expect(rows.textContent).toContain("97.0%");
+    expect(requests).toContain("/api/ai/proxy/health?window=24h");
+    fireEvent.click(screen.getByRole("radio", { name: "1h" }));
+    await waitFor(() => expect(requests).toContain("/api/ai/proxy/health?window=1h"));
+  });
+
+  it("keeps usage visible when an older core has no reliability endpoint", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === "/api/ai/usage/summary") return new Response(JSON.stringify(summary()));
+      return new Response("not found", { status: 404 });
+    }));
+    render(() => <UsageSettings />);
+    await screen.findByText("gemini-4-argon");
+    await waitFor(() => expect(screen.getByRole("region", { name: "Reliability" }).textContent).toContain("unavailable"));
+  });
+});
+
+describe("reliability helpers", () => {
+  it("formats rates, latencies and the error breakdown", () => {
+    expect(formatRate(null)).toBe("—");
+    expect(formatRate(1)).toBe("100%");
+    expect(formatRate(0.8467)).toBe("84.7%");
+    expect(formatMs(450)).toBe("450 ms");
+    expect(formatMs(45_000)).toBe("45 s");
+    expect(errorSummary({ timeout: 2, "client_error:402": 483, "server_error:503": 1 })).toBe("402 out of credit ×483 · timeout ×2 · server 503 ×1");
+  });
+  it("flags low success only with enough traffic", () => {
+    expect(isRedFlag(stats({ requests: 3, success_rate: 0 }))).toBe(false);
+    expect(isRedFlag(stats({ requests: 20, success_rate: 0.85 }))).toBe(true);
+    expect(isRedFlag({ ...stats({ requests: 1, success_rate: 1 }), flags: ["out_of_credit"] })).toBe(true);
   });
 });

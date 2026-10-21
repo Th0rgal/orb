@@ -1,4 +1,5 @@
 import type { AIProvider, ProviderUsage } from "./api";
+import type { AccountHealthSnapshot } from "./routingApi";
 
 export function codexWindowLabel(minutes: number | undefined, fallback: string) {
   if (minutes == null) return fallback;
@@ -56,9 +57,14 @@ export function usageWindows(u: ProviderUsage) {
   return windows;
 }
 
-export function effectiveProviderStatus(a: AIProvider, usage?: ProviderUsage) {
+export function effectiveProviderStatus(a: AIProvider, usage?: ProviderUsage, health?: AccountHealthSnapshot) {
   // Checked first: the backend skips a disabled account whatever its quota.
   if (a.enabled === false) return "disabled";
+  // The router's circuit breaker saw the account fail as a whole (402 / no
+  // credit, 401 / 403): it is skipped until its next probe, whatever the
+  // saved credential says.
+  if (health?.account_state === "out_of_credit") return "out_of_credit";
+  if (health?.account_state === "auth_failed") return "auth_failed";
   if (a.status.type === "needs_reauth" || usage?.status === "needs_reauth") return "needs_reauth";
   if (usage?.error) return "error";
   if (usage && usageWindows(usage).some(window => window.used >= 1)) return "quota_exhausted";

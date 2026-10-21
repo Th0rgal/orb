@@ -33,6 +33,7 @@ import {
   type ProviderUsage,
 } from "./api";
 import { nativeInvoke } from "./clientRuns";
+import { listHealth, type AccountHealthSnapshot } from "./routingApi";
 
 type AuthKind = "oauth" | "api";
 
@@ -109,6 +110,8 @@ const KINDS: Kind[] = [
 
 export function Providers() {
   const [remote, setRemote] = createSignal<AIProvider[] | null>(null);
+  // Router circuit-breaker state per account ("Out of credit", "Auth failed").
+  const [health, setHealth] = createSignal<Record<string, AccountHealthSnapshot>>({});
 
   const [loading, setLoading] = createSignal(false);
   const [loadError, setLoadError] = createSignal<string | null>(null);
@@ -130,6 +133,9 @@ export function Providers() {
     try {
       const providers = await listProviders(controller.signal);
       if (active()) setRemote(providers);
+      listHealth()
+        .then(list => { if (active() && Array.isArray(list)) setHealth(Object.fromEntries(list.map(h => [h.account_id, h]))); })
+        .catch(() => {});
     } catch (error) {
       if (active()) setLoadError(controller.signal.aborted
         ? "Loading providers timed out. Check your connection and try again."
@@ -168,7 +174,7 @@ export function Providers() {
           <button class="s-btn" onClick={() => void reloadRemote()}>Try again</button>
         </ErrorNotice>}</Show>
       </div>}>
-        <LiveProviders list={live() ?? []} onRefresh={() => { void reloadRemote(); window.dispatchEvent(new Event("orb:providers-refresh")); }} loading={loading()} loadError={loadError()} />
+        <LiveProviders list={live() ?? []} health={health()} onRefresh={() => { void reloadRemote(); window.dispatchEvent(new Event("orb:providers-refresh")); }} loading={loading()} loadError={loadError()} />
       </Show>
     </Show>
   );
@@ -185,7 +191,7 @@ const SUBSCRIPTION_META: Record<string, { vendor: string; desc: string }> = {
   "muse-code": { vendor: "Meta", desc: "Muse Code subscription · No paid API fallback" },
 };
 
-function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?: boolean; loadError?: string | null }) {
+function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountHealthSnapshot>; onRefresh: () => void; loading?: boolean; loadError?: string | null }) {
   const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>({});
   const [keyEditor, setKeyEditor] = createSignal<AIProvider | "new" | null>(null);
   const [reauth, setReauth] = createSignal<AIProvider | null>(null);
@@ -284,7 +290,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No OAuth providers configured.</div></div>
@@ -297,7 +303,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
           <h3>Model connections</h3>
           <p class="s-row-desc p-section-description">Model access through connected credentials, separate from subscription accounts.</p>
           <div class="s-card">
-            <For each={modelConnections()}>{a => <LiveRow a={a} usage={usage()[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
+            <For each={modelConnections()}>{a => <LiveRow a={a} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
           </div>
         </section>
       </Show>
@@ -308,7 +314,7 @@ function LiveProviders(p: { list: AIProvider[]; onRefresh: () => void; loading?:
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API key providers configured.</div></div>
@@ -887,14 +893,14 @@ function MistralUsageConnect(p: { a: AIProvider; usage?: ProviderUsage; onUsage?
   </div>;
 }
 
-function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
+function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
-  const status = () => effectiveProviderStatus(a, p.usage);
-  const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted"].includes(status()) ? "needs_reauth" : "not_configured";
-  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  const status = () => effectiveProviderStatus(a, p.usage, p.health);
+  const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted", "out_of_credit", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
+  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
-  const expandable = () => a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  const expandable = () => status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
   const [open, setOpen] = createSignal(a.provider_type === "antigravity");
   const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
   const needsAuth = () => ["needs_reauth", "needs_auth"].includes(status());
@@ -946,6 +952,11 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; onUsage?: (usage: Pr
           </Show>
           <Show when={hasProviderUsageDetails(p.usage)}>
             <UsageDetail usage={p.usage!} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
+          </Show>
+          <Show when={status() === "out_of_credit" || status() === "auth_failed"}>
+            <p class="s-row-desc inline-error">{status() === "out_of_credit"
+              ? "The router got 402 / out of credit from this account and skips it."
+              : "The router got 401 / 403 from this account and skips it."}{p.health?.next_probe_at ? ` Next probe ${new Date(p.health.next_probe_at).toLocaleTimeString()}.` : ""}</p>
           </Show>
           <Show when={!p.usage?.error && (a.status.reason || a.status.message)}><p class="s-row-desc inline-error">{(a.status.reason || a.status.message)?.replace(/\s*—\s*/g, ". ")}</p></Show>
           <Show when={p.onEditKey}><div class="p-acc-actions"><button class="s-btn" onClick={p.onEditKey}>Edit API key</button></div></Show>

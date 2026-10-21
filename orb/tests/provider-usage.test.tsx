@@ -87,3 +87,14 @@ it("identifies the Mistral monthly allowance without fabricating an API percenta
   expect(usageWindows({provider_type:'mistral'})).toEqual([]);
   expect(effectiveProviderStatus(mistral, {provider_type:'mistral'})).toBe('connected');
 });
+it("shows router circuit-breaker state instead of Connected", async () => {
+  expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "out_of_credit" } as never)).toBe("out_of_credit");
+  expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "auth_failed" } as never)).toBe("auth_failed");
+  expect(effectiveProviderStatus(account("ben"), usage(10), { account_state: "available" } as never)).toBe("connected");
+  setConnection("http://core.test", "test-token");
+  const health = [{ account_id: "ben", account_state: "out_of_credit", next_probe_at: "2026-10-20T12:00:00Z" }];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/providers") ? [account("ben")] : url.endsWith("/model-routing/health") ? health : url.includes("/ben/usage") ? usage(10) : {}))));
+  const { container } = render(() => <Providers />);
+  await waitFor(() => expect(container.textContent).toContain("Out of credit"));
+  expect(container.textContent).not.toContain("Connected");
+});

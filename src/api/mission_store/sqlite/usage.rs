@@ -1,14 +1,44 @@
 //! Cost and usage aggregate, including proxy usage.
 
 use super::*;
-use crate::api::mission_store::{ProxyUsageRecord, UsageRecord};
+use crate::api::mission_store::{ProxyOutcomeRecord, ProxyUsageRecord, UsageRecord};
 
 #[path = "../sqlite_usage.rs"]
 mod usage_records;
 
 pub(super) fn migrate(conn: &Connection) -> Result<(), String> {
-    usage_records::migrate(conn)
+    usage_records::migrate(conn)?;
+    migrate_proxy_outcomes(conn)
 }
+
+/// Per-request router outcomes (reliability monitoring). A table of its own
+/// rather than more `proxy_usage` columns: `proxy_usage` only gets a row when
+/// tokens were reported, while failed requests are exactly what this tracks.
+fn migrate_proxy_outcomes(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS proxy_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            provider TEXT,
+            account_id TEXT,
+            model TEXT,
+            status TEXT NOT NULL,
+            http_status INTEGER,
+            retries INTEGER NOT NULL DEFAULT 0,
+            ttft_ms INTEGER,
+            total_ms INTEGER NOT NULL DEFAULT 0,
+            fallback_depth INTEGER NOT NULL DEFAULT 0,
+            stream INTEGER NOT NULL DEFAULT 0,
+            superseded INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_proxy_outcomes_timestamp ON proxy_outcomes(timestamp);",
+    )
+    .map_err(|e| format!("Failed to create proxy_outcomes: {e}"))
+}
+
+/// Outcome rows older than this are pruned on write.
+const PROXY_OUTCOME_RETENTION_DAYS: i64 = 30;
 
 pub(super) fn usage_cost_with_read_side_estimate(
     model: &str,
@@ -576,6 +606,86 @@ impl SqliteMissionStore {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub(super) async fn record_proxy_outcome(
+        &self,
+        record: &ProxyOutcomeRecord,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO proxy_outcomes (timestamp, chain_id, provider, account_id, model,
+                status, http_status, retries, ttft_ms, total_ms, fallback_depth, stream, superseded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                record.timestamp,
+                record.chain_id,
+                record.provider,
+                record.account_id.map(|id| id.to_string()),
+                record.model,
+                record.status,
+                record.http_status.map(i64::from),
+                i64::from(record.retries),
+                record.ttft_ms.map(|v| v as i64),
+                record.total_ms as i64,
+                i64::from(record.fallback_depth),
+                record.stream as i64,
+                record.superseded as i64,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        // Cheap bounded retention: prune roughly once per 512 inserts.
+        if conn.last_insert_rowid() % 512 == 0 {
+            let cutoff = (chrono::Utc::now()
+                - chrono::Duration::days(PROXY_OUTCOME_RETENTION_DAYS))
+            .to_rfc3339();
+            conn.execute(
+                "DELETE FROM proxy_outcomes WHERE timestamp < ?1",
+                rusqlite::params![cutoff],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn get_proxy_outcomes(
+        &self,
+        since: Option<&str>,
+    ) -> Result<Vec<ProxyOutcomeRecord>, String> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, chain_id, provider, account_id, model, status, http_status,
+                        retries, ttft_ms, total_ms, fallback_depth, stream, superseded
+                 FROM proxy_outcomes
+                 WHERE ?1 IS NULL OR timestamp >= ?1
+                 ORDER BY timestamp ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![since], |row| {
+                let account: Option<String> = row.get(3)?;
+                Ok(ProxyOutcomeRecord {
+                    timestamp: row.get(0)?,
+                    chain_id: row.get(1)?,
+                    provider: row.get(2)?,
+                    account_id: account.and_then(|a| Uuid::parse_str(&a).ok()),
+                    model: row.get(4)?,
+                    status: row.get(5)?,
+                    http_status: row
+                        .get::<_, Option<i64>>(6)?
+                        .and_then(|v| u16::try_from(v).ok()),
+                    retries: row.get::<_, i64>(7)?.max(0) as u32,
+                    ttft_ms: row.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
+                    total_ms: row.get::<_, i64>(9)?.max(0) as u64,
+                    fallback_depth: row.get::<_, i64>(10)?.max(0) as u32,
+                    stream: row.get::<_, i64>(11)? != 0,
+                    superseded: row.get::<_, i64>(12)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     pub(super) async fn record_proxy_usage_attributed(
