@@ -184,6 +184,66 @@ pub struct AccountHealth {
     pub total_output_tokens: u64,
     /// Latest rate-limit quota snapshot from provider headers.
     pub rate_limit_snapshot: Option<RateLimitSnapshot>,
+    /// Recent transient failures (5xx, network, empty stream), newest last,
+    /// pruned to [`TRANSIENT_WINDOW`]. A cooldown needs
+    /// [`transient_failure_threshold`] of them.
+    pub transient_failures: std::collections::VecDeque<std::time::Instant>,
+}
+
+/// Window in which transient failures are counted toward a cooldown.
+pub const TRANSIENT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Consecutive transient failures within [`TRANSIENT_WINDOW`] before an
+/// account is cooled down (`PROVIDER_TRANSIENT_FAILURE_THRESHOLD`, default
+/// 3). One blip must never take a single-entry chain offline.
+pub fn transient_failure_threshold() -> usize {
+    std::env::var("PROVIDER_TRANSIENT_FAILURE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(3)
+}
+
+/// Cap on a transient-failure cooldown (`PROVIDER_TRANSIENT_COOLDOWN_MAX_SECS`,
+/// default 60 s). Transient failures never get the degraded multiplier.
+fn transient_cooldown_max() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("PROVIDER_TRANSIENT_COOLDOWN_MAX_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(60),
+    )
+}
+
+/// Most transient-failure timestamps kept per account.
+const MAX_TRANSIENT_SAMPLES: usize = 64;
+
+/// `base × multiplier^over`, capped at [`transient_cooldown_max`]. Computed in
+/// f64 with a clamped exponent and built with `try_from_secs_f64`, so a long
+/// failure streak (or odd config) can neither overflow nor panic.
+pub fn transient_cooldown(
+    base: std::time::Duration,
+    multiplier: f64,
+    over: usize,
+) -> std::time::Duration {
+    let cap = transient_cooldown_max();
+    let exponent = over.min(32) as i32;
+    let secs = base.as_secs_f64() * multiplier.max(1.0).powi(exponent);
+    if !secs.is_finite() {
+        return cap;
+    }
+    std::time::Duration::try_from_secs_f64(secs.min(cap.as_secs_f64()))
+        .map(|d| d.min(cap))
+        .unwrap_or(cap)
+}
+
+impl CooldownReason {
+    /// Upstream hiccups (5xx, network errors, timeouts, empty streams) as
+    /// opposed to signals about the account (429, quota, credit, auth).
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::ServerError | Self::Timeout)
+    }
 }
 
 impl AccountHealth {
@@ -441,6 +501,19 @@ impl ProviderHealthTracker {
             .unwrap_or(true) // Unknown accounts are healthy by default
     }
 
+    /// Shortest remaining cooldown among `account_ids` (the honest
+    /// `Retry-After` when every candidate is cooling down).
+    pub async fn min_remaining_cooldown(
+        &self,
+        account_ids: &[Uuid],
+    ) -> Option<std::time::Duration> {
+        let accounts = self.accounts.read().await;
+        account_ids
+            .iter()
+            .filter_map(|id| accounts.get(id).and_then(|h| h.remaining_cooldown()))
+            .min()
+    }
+
     /// Return true when at least one currently configured candidate account is
     /// in an active cooldown.
     pub async fn any_account_has_active_cooldown(&self, account_ids: &[Uuid]) -> bool {
@@ -579,6 +652,7 @@ impl ProviderHealthTracker {
         health.total_requests += 1;
         health.total_successes += 1;
         health.consecutive_failures = 0;
+        health.transient_failures.clear();
         health.cooldown_until = None;
         drop(accounts);
         // A served request proves the allowance is back, whatever reset time
@@ -638,6 +712,56 @@ impl ProviderHealthTracker {
         }
 
         health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+        health.last_failure_reason = Some(reason);
+        health.last_failure_at = Some(chrono::Utc::now());
+
+        // Transient failures only cool the account down after several in a
+        // short window, for at most a minute, and never spill over to the
+        // shared subscription: a single 5xx or dropped stream used to park
+        // the only account of a single-entry chain and answer every
+        // following request with "all providers in cooldown".
+        if reason.is_transient() && retry_after.is_none() {
+            let now = std::time::Instant::now();
+            health.transient_failures.push_back(now);
+            // Bounded: only the streak length within the window matters.
+            while health.transient_failures.len() > MAX_TRANSIENT_SAMPLES {
+                health.transient_failures.pop_front();
+            }
+            while health
+                .transient_failures
+                .front()
+                .is_some_and(|at| now.duration_since(*at) > TRANSIENT_WINDOW)
+            {
+                health.transient_failures.pop_front();
+            }
+            let streak = health.transient_failures.len();
+            let threshold = transient_failure_threshold();
+            if streak < threshold {
+                tracing::info!(
+                    account_id = %account_id,
+                    reason = %reason,
+                    streak,
+                    threshold,
+                    "Transient upstream failure recorded; no cooldown yet"
+                );
+                return std::time::Duration::ZERO;
+            }
+            let cooldown = transient_cooldown(
+                self.backoff_config.base_delay,
+                self.backoff_config.multiplier,
+                streak - threshold,
+            );
+            health.cooldown_until = Some(now + cooldown);
+            tracing::warn!(
+                account_id = %account_id,
+                reason = %reason,
+                streak,
+                cooldown_secs = cooldown.as_secs_f64(),
+                "Repeated transient upstream failures; short account cooldown"
+            );
+            return cooldown;
+        }
+
         let is_auth_error = matches!(reason, CooldownReason::AuthError);
         let account_streak = if reason.is_account_error() {
             health.consecutive_failures
@@ -2572,6 +2696,94 @@ mod tests {
         assert_eq!(again.as_secs(), 600, "the streak restarts after a success");
     }
 
+    #[test]
+    fn transient_cooldown_never_overflows_on_huge_streaks() {
+        let base = std::time::Duration::from_secs(5);
+        let cap = std::time::Duration::from_secs(60);
+        assert_eq!(transient_cooldown(base, 2.0, 0), base);
+        assert_eq!(
+            transient_cooldown(base, 2.0, 1),
+            std::time::Duration::from_secs(10)
+        );
+        for over in [5, 64, 10_000, usize::MAX] {
+            assert_eq!(transient_cooldown(base, 2.0, over), cap, "{over}");
+        }
+        assert_eq!(transient_cooldown(base, f64::INFINITY, 3), cap);
+        assert_eq!(transient_cooldown(base, f64::NAN, 3), base.min(cap));
+        assert_eq!(transient_cooldown(std::time::Duration::MAX, 2.0, 1), cap);
+    }
+
+    #[tokio::test]
+    async fn long_transient_streak_is_bounded_and_does_not_panic() {
+        let tracker = ProviderHealthTracker::new();
+        let account = Uuid::new_v4();
+        let mut last = std::time::Duration::ZERO;
+        for _ in 0..2_000 {
+            last = tracker
+                .record_failure(account, CooldownReason::ServerError, None)
+                .await;
+        }
+        assert!(last <= std::time::Duration::from_secs(60));
+        let len = tracker.accounts.read().await[&account]
+            .transient_failures
+            .len();
+        assert!(len <= MAX_TRANSIENT_SAMPLES);
+    }
+
+    #[tokio::test]
+    async fn one_transient_blip_never_cools_a_single_entry_chain_down() {
+        let mut leanstral = AIProvider::new(ProviderType::Mistral, "Mistral".to_string());
+        leanstral.api_key = Some("test-key".to_string());
+        leanstral.status = ProviderStatus::Connected;
+        let account_id = leanstral.id;
+        let store = store_with(vec![leanstral]).await;
+        let chains = store_with_chain(
+            "mistral/labs-leanstral-1-5-1",
+            vec![ChainEntry {
+                provider_id: "mistral".to_string(),
+                model_id: "labs-leanstral-1-5-1".to_string(),
+            }],
+        )
+        .await;
+        let tracker = ProviderHealthTracker::new();
+        let chain = "mistral/labs-leanstral-1-5-1";
+        let entry = chains
+            .resolve_chain(chain, &store, &[], &tracker)
+            .await
+            .remove(0);
+        for reason in [CooldownReason::ServerError, CooldownReason::Timeout] {
+            let cooldown = tracker.record_entry_failure(&entry, reason, None).await;
+            assert!(
+                cooldown.is_zero(),
+                "{reason}: no cooldown below the threshold"
+            );
+            assert_eq!(
+                chains
+                    .resolve_chain(chain, &store, &[], &tracker)
+                    .await
+                    .len(),
+                1,
+                "the route stays open after one blip"
+            );
+        }
+        // The third transient failure inside the window: short cooldown,
+        // scoped to the account.
+        let cooldown = tracker
+            .record_entry_failure(&entry, CooldownReason::ServerError, None)
+            .await;
+        assert!(!cooldown.is_zero() && cooldown.as_secs() <= 60);
+        assert!(!tracker.is_healthy(account_id).await);
+        let remaining = tracker.min_remaining_cooldown(&[account_id]).await.unwrap();
+        assert!(remaining <= cooldown);
+        // A success resets the streak.
+        tracker.clear_cooldown(account_id).await;
+        tracker.record_entry_success(&entry).await;
+        assert!(tracker
+            .record_entry_failure(&entry, CooldownReason::ServerError, None)
+            .await
+            .is_zero());
+    }
+
     #[tokio::test]
     async fn auth_errors_use_the_account_breaker_and_report_auth_failed() {
         let tracker = ProviderHealthTracker::new();
@@ -2586,10 +2798,13 @@ mod tests {
         );
         // Transient failures keep the short backoff and a generic state.
         let other = Uuid::new_v4();
-        let short = tracker
-            .record_failure(other, CooldownReason::ServerError, None)
-            .await;
-        assert!(short.as_secs() < 60);
+        let mut short = std::time::Duration::ZERO;
+        for _ in 0..transient_failure_threshold() {
+            short = tracker
+                .record_failure(other, CooldownReason::ServerError, None)
+                .await;
+        }
+        assert!(short.as_secs() <= 60);
         assert_eq!(tracker.get_health(other).await.account_state, "cooldown");
     }
 
