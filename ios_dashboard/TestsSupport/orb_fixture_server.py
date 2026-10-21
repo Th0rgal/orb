@@ -55,6 +55,13 @@ def reset():
     MISSIONS['idle-send']=dict(id='idle-send',title='Idle send',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='old turn'),dict(role='assistant',content='old reply')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:06:00Z')
     QUEUE_EVENTS['idle-send']=[]
     qadd('idle-send','user_message','old turn','old-id',at=time.time()-2150); qadd('idle-send','assistant_message','old reply',at=time.time()-2140)
+    # A permission request already answered, then one still waiting: exactly one card shows.
+    MISSIONS['ask-question']=dict(id='ask-question',title='Needs approval',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='Run the tests')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:02:00Z')
+    QUEUE_EVENTS['ask-question']=[]
+    qadd('ask-question','user_message','Run the tests','ask-u1',at=time.time()-120)
+    qadd('ask-question','tool_call','{"method":"permission","params":{"input":{"description":"OLD_REQUEST lint","command":"swift lint"}}}',at=time.time()-110,tool_call_id='q-old',tool_name='ui_native_request')
+    qadd('ask-question','tool_result','{"action":"accept"}',at=time.time()-100,tool_call_id='q-old',tool_name='ui_native_request')
+    qadd('ask-question','tool_call','{"method":"permission","params":{"input":{"description":"OPEN_REQUEST run the suite","command":"swift test"}}}',at=time.time()-90,tool_call_id='q-open',tool_name='ui_native_request')
     # /btw: a conversation with two side threads, one answered (narration, an
     # opencode compaction block, Markdown answer) and one live that answers ~8 s
     # after a reset. Side questions sent to a thread stream, then complete.
@@ -89,9 +96,9 @@ def run_schedule():
         if item['status']: m['status']=item['status']
         m['updated_at']=m['last_activity_at']=iso(time.time())
 
-def qadd(mid, kind, content, event_id=None, at=None):
+def qadd(mid, kind, content, event_id=None, at=None, tool_call_id=None, tool_name=None):
     rows=QUEUE_EVENTS[mid]; n=len(rows)+1
-    rows.append(dict(id=n,mission_id=mid,sequence=n,event_type=kind,timestamp=iso(at or time.time()),event_id=event_id or f'{mid}-{n}',tool_call_id=None,tool_name=None,content=content,metadata={}))
+    rows.append(dict(id=n,mission_id=mid,sequence=n,event_type=kind,timestamp=iso(at or time.time()),event_id=event_id or f'{mid}-{n}',tool_call_id=tool_call_id,tool_name=tool_name,content=content,metadata={}))
 
 def deliver_queue():
     """queue-run: the current turn ends; Core delivers the queued message, the agent answers, the mission completes."""

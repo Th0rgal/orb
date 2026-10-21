@@ -115,9 +115,5 @@ final class OrbFleetActivityController {
         return flat.count <= limit ? flat : String(flat.prefix(limit - 1)) + "…"
     }
 
-    private static func date(_ raw: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
-    }
+    private static func date(_ raw: String) -> Date? { OrbDateCache.parse(raw) }
 }

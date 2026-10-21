@@ -100,6 +100,11 @@ final class OrbCore {
             cachedBaseURL = resolved
             cachedTokenEndpoint = nil
             cachedJwtToken = nil
+            #if DEBUG
+            // UI tests point the app at loopback fixtures with `-api_base_url`; never let a
+            // test that edits the server URL overwrite the operator's saved endpoint.
+            if ProcessInfo.processInfo.arguments.contains("-api_base_url") { return }
+            #endif
             UserDefaults.standard.set(trimmed, forKey: "api_base_url")
         }
     }
