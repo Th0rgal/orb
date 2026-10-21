@@ -16,9 +16,10 @@ export function Popover(p: {
   // If no explicit anchor is available, use the focused trigger captured before
   // the Portal mounts. Callers with pointer-only triggers must pass their anchor.
   const trigger = overlayTrigger();
-  const anchor = p.anchor ?? (p.point ? undefined : trigger);
-  const position = useOverlayPosition(() => root, {anchor: () => anchor, point: () => p.point, placement: p.placement, width: () => p.width});
-  onMount(() => onCleanup(mountOverlay(layer, {close: p.onClose, escape: p.onEscape, busy: () => !!p.busy, trap: p.trap, restoreFocus: p.restoreFocus, initialFocus: p.initialFocus, returnFocus: p.returnFocus ?? p.anchor ?? trigger, contains: node => !!anchor?.contains(node)})));
+  // Reactive: a submenu re-anchors when its parent row changes or is re-rendered.
+  const anchor = () => p.anchor ?? (p.point ? undefined : trigger);
+  const position = useOverlayPosition(() => root, {anchor, point: () => p.point, placement: p.placement, width: () => p.width});
+  onMount(() => onCleanup(mountOverlay(layer, {close: p.onClose, escape: p.onEscape, busy: () => !!p.busy, trap: p.trap, restoreFocus: p.restoreFocus, initialFocus: p.initialFocus, returnFocus: p.returnFocus ?? p.anchor ?? trigger, contains: node => !!anchor()?.contains(node)})));
   return <OverlayContext.Provider value={layer}><Portal><div ref={el => {root = el; p.ref?.(el);}} id={p.id} role={p.role ?? "dialog"} aria-label={p.label} aria-busy={p.busy || undefined} inert={overlayHasModalAbove(layer)} tabIndex={-1}
     class={`overlay-popover ${p.class ?? ""}`} style={{...position(), "z-index": overlayZIndex(layer)}} onPointerDown={e => e.stopPropagation()} onPointerMove={p.onPointerMove} onKeyDown={p.onKeyDown} onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>{p.children}</div></Portal></OverlayContext.Provider>;
 }
