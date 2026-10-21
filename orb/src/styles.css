@@ -516,6 +516,10 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
    placeholder size it painted 19 px too tall, then shrank, and the pinned
    transcript bounced up and back down. */
 .user.pending, .user.sending { content-visibility: visible; }
+/* The virtual list already mounts only the turns near the viewport, so a
+   bubble inside it skipping its own paint only delays it: a fast scroll up
+   showed empty bubbles for a frame until the browser caught up. */
+[data-virtual-transcript] .user { content-visibility: visible; }
 .user:first-child { margin-top: 0; }
 .restore { position: absolute; right: 8px; bottom: 7px; }
 .agent-turn { padding: 0 10px; content-visibility: auto; contain-intrinsic-size: auto 400px; }

@@ -645,9 +645,14 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   const [turnStore,setTurns]=createStore<Array<{key:string;items:Grouped[]}>>([]);
   createEffect(()=>setTurns(reconcile(turns(),{key:'key'})));
   const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='work'?item.items.map(t=>t.kind==='think'?t.text:`${t.name} ${resultText(t.args)} ${resultText(t.result)}`).join('\n'):item.kind==='tool'?`${item.name} ${resultText(item.result)}`:item.kind==='text'?markdownText(item.text):item.text).join('\n');
+  // Rough height of a turn before it is first measured, from its text: rows
+  // paged in above the reader start close to their real size, so the scroll
+  // correction when they are measured is small instead of hundreds of px.
+  const wrapped=(text:string,width:number)=>text.split('\n').reduce((n,line)=>n+Math.max(1,Math.ceil(line.length/width)),0);
+  const estimateTurn=(turn:{items:Grouped[]})=>turn.items.reduce((h,item)=>h+(item.kind==='user'?54+21*wrapped(item.text,92):item.kind==='text'?12+23*wrapped(item.text,100):item.kind==='error'?64:34),0);
   return (
     <>
-      <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
+      <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
             case "work":
