@@ -3867,3 +3867,30 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-narration { margin: 4px 0 8px; color: var(--fg-3); font-size: 12px; }
 .btw-narration summary { cursor: pointer; width: fit-content; }
 .btw-narration > .md { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--stroke); color: var(--fg-2); }
+
+/* Managed (boat.dev) machines */
+.managed-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 8px; }
+.managed-head .s-section-title { margin: 0; }
+.managed-budget { margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+.managed-list .m-row { padding: 10px 14px; border-radius: 0; }
+.managed-list .m-name { display: flex; align-items: center; gap: 0; }
+.managed-list .m-meta { gap: 0; flex-wrap: wrap; }
+.managed-owner { margin-left: 8px; }
+.managed-urgent { color: var(--amber); }
+.managed-recent-toggle { margin-top: 8px; color: var(--fg-3); }
+.managed-recent-toggle .chev { margin-right: 2px; }
+.managed-recent-toggle .chev.open { transform: rotate(90deg); }
+.managed-recent { margin-top: 4px; opacity: .8; }
+.managed-form { display: flex; flex-direction: column; gap: 14px; }
+.managed-sizes { display: flex; flex-direction: column; gap: 4px; }
+.managed-size {
+  display: grid; grid-template-columns: minmax(70px, auto) 1fr auto; align-items: center; gap: 12px;
+  padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--overlay-border);
+  background: var(--overlay-field); color: var(--fg-2); text-align: left; font: 13px var(--sans);
+}
+.managed-size:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.managed-size.on { border-color: var(--focus-border); color: var(--fg); }
+.managed-size-name { font-weight: 500; }
+.managed-size-spec, .managed-size-rate { font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.managed-estimate { display: flex; justify-content: space-between; font-size: 13px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.managed-estimate strong { color: var(--fg); font-weight: 600; }

@@ -40,6 +40,7 @@ import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
 import { MACHINES, Machines } from "./Machines";
+import { isManagedNode } from "./managedMachineModel";
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { mdSource, toggleMdSource } from "./Markdown";
@@ -1157,7 +1158,7 @@ export default function App() {
                                   <Ic.ComputeNodeIcon />
                                 </span>
                                 <span class="menu-col">
-                                  <span class="menu-title">{isAdministrationNode(n) ? "DGX Spark · Admin" : n.id}</span>
+                                  <span class="menu-title">{isAdministrationNode(n) ? "DGX Spark · Admin" : n.id}<Show when={isManagedNode(n)}><span class="m-tag">Managed</span></Show></span>
                                 </span>
                                 <MachineLoadBadge machine={n.id} />
                                 <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && (!n.cordoned || isAdministrationNode(n)) ? "online" : ""}`} />{isAdministrationNode(n) && n.status === "online" ? "Manual" : n.cordoned ? "Cordoned" : n.status}</span>

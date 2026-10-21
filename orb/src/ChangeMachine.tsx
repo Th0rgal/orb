@@ -1,3 +1,4 @@
+import { isManagedNode } from "./managedMachineModel";
 import { swallow } from "./log";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
@@ -36,7 +37,8 @@ export function loadMachineDestinations(missionId: string, force = false): Promi
     const [view, computer] = await Promise.all([inspectTransfer(missionId), local()]);
     if (view.version !== 1) throw new Error("Update the connected backend to enable machine transfer.");
     const rows = preferSparkAdministration([computer, ...view.destinations], row => row.machine.kind === "node" ? row.machine.id : undefined)
-      .map(row => row.machine.kind === "node" && row.machine.id === "dgx-spark-admin" ? { ...row, label: nodeLabel(row.machine.id) } : row);
+      .map(row => row.machine.kind === "node" && row.machine.id === "dgx-spark-admin" ? { ...row, label: nodeLabel(row.machine.id) }
+        : row.machine.kind === "node" && isManagedNode({ id: row.machine.id }) && !/managed/i.test(row.label) ? { ...row, label: `${row.label} · Managed` } : row);
     if (version === connectionVersion()) cacheMachineDestinations(rows);
     return { view, rows, client: computer.machine.kind === "client" ? computer.machine.id : undefined };
   })();
