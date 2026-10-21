@@ -684,7 +684,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
       </For>}</VirtualTurns></DisclosureState.Provider>
       <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} /></Show>
       <Show when={checklist()?.tasks.length}>
-        <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={!p.working} />
+        <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} />
       </Show>
     </>
   );
