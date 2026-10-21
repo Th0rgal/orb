@@ -27,7 +27,7 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbConversation.swift",
+            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbTranscriptModel.swift",
             "pattern": "for (offset, element) in mission[\"history\"].items.enumerated() {"
           }
         ]
@@ -58,7 +58,7 @@
         "status": "supported",
         "evidence": [
           {
-            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbConversation.swift",
+            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbWorkFold.swift",
             "pattern": "case \"thinking\":"
           }
         ]

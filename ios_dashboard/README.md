@@ -13,7 +13,7 @@ Native SwiftUI iOS client for **Orb**, located in `SandboxedDashboard/Orb`.
 ## Features
 
 - **Projects & Synced Colors** (`OrbProjects.swift`, `OrbProjectAppearance.swift`) — Browse projects with synchronized colors, mission trees, and finished groups.
-- **Live Conversations & Rich Transcripts** (`OrbConversation.swift`, `OrbRichText.swift`, `OrbMath.swift`, `OrbQuiz.swift`) — Follow real-time SSE streams, expand `Worked — …` tool and thinking folds, answer interactive agent questions (`OrbQuestions.swift`), view KaTeX math and quizzes, and send or queue follow-ups.
+- **Live Conversations & Rich Transcripts** (`OrbConversation*.swift`, `OrbTranscriptModel.swift`, `OrbTranscriptScroll.swift`, `OrbWorkFold.swift`, `OrbRichText.swift`, `OrbMath.swift`, `OrbQuiz.swift`) — Follow real-time SSE streams, expand `Worked — …` tool and thinking folds, answer interactive agent questions (`OrbQuestions.swift`), view KaTeX math and quizzes, and send or queue follow-ups.
 - **Shared Project Context & Files** (`OrbDocuments.swift`, `OrbAttachments.swift`, `OrbMessageImages.swift`) — Read and edit synchronized Markdown `@context` files, preview images, and upload attachments.
 - **Unified Settings** (`OrbSettings.swift`, `OrbMachinesSettings.swift`, `OrbProvidersSettings.swift`) — Configure your **Backend** connection, manage **Providers** (including CLIProxyAPI OAuth logins and quota inspection), and view **Machines** (registered remote nodes plus the shared `/api/settings/ssh-hosts` address book).
 
