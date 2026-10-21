@@ -1636,8 +1636,12 @@ struct OrbInboxView: View {
                             projectFilterChips
                         }
 
-                        if !error.isEmpty {
-                            OrbNotice(message: error)
+                        if !error.isEmpty && !missions.isEmpty {
+                            // Cached items stay visible; the failed refresh can be retried.
+                            HStack(alignment: .top, spacing: 8) {
+                                OrbNotice(message: error)
+                                retryButton
+                            }
                         }
 
                         if showWorking && !computed.working.isEmpty {
@@ -1646,6 +1650,16 @@ struct OrbInboxView: View {
 
                         if loading && missions.isEmpty {
                             inboxSkeletons
+                        } else if !error.isEmpty && missions.isEmpty {
+                            // Nothing loaded: not "Inbox zero", an error with a retry.
+                            ContentUnavailableView {
+                                Label("Inbox unavailable", systemImage: "wifi.exclamationmark")
+                                    .accessibilityIdentifier("inbox.error")
+                            } description: {
+                                Text(error)
+                            } actions: {
+                                retryButton
+                            }
                         } else if filteredNeedsYou.isEmpty && filteredReady.isEmpty {
                             emptyInboxState
                         } else {
@@ -2351,58 +2365,24 @@ struct OrbInboxView: View {
                 }
             }
 
-            if isReplying && dictation.active {
-                OrbDictationCapsule(dictation: dictation)
-                    .id("inbox.replyBox.\(item.id)")
-            } else if isReplying {
-                HStack(spacing: 8) {
-                    TextField(
-                        item.interaction != nil ? "Reply to \(item.headline)…" : "Send follow-up…",
-                        text: $replyDraft
-                    )
-                    .font(.footnote)
-                    .focused($replyFocused)
-                    .submitLabel(.send)
-                    .onSubmit {
-                        Task { await submitInlineReply(item) }
-                    }
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .frame(minHeight: 44)
-                    .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: OrbStyle.controlRadius, style: .continuous)
-                            .stroke(OrbStyle.borderStrong, lineWidth: 1)
-                    )
-
-                    OrbDictationButton(dictation: dictation, text: $replyDraft, onStart: { replyFocused = false }, onComplete: { replyFocused = true }).disabled(isBusy)
-                    Button {
-                        OrbHaptics.light()
-                        Task { await submitInlineReply(item) }
-                    } label: {
-                        Text(isBusy ? "…" : "Send")
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .foregroundStyle(
-                                replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                    ? OrbStyle.textMuted
-                                    : OrbStyle.background
-                            )
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .frame(minHeight: 44)
-                            .contentShape(Rectangle())
-                            .background(
-                                replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                    ? Color.white.opacity(0.08)
-                                    : Color.white,
-                                in: RoundedRectangle(cornerRadius: OrbStyle.controlRadius)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("inbox.send.\(item.id)")
-                    .disabled(isBusy || replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if isReplying {
+                // The same composer as the conversation and /btw (field, dictation, send).
+                OrbComposerBox(
+                    placeholder: item.interaction != nil ? "Reply to \(item.headline)…" : "Send follow-up…",
+                    text: $replyDraft,
+                    focused: $replyFocused,
+                    dictation: dictation,
+                    busy: isBusy,
+                    canSend: !isBusy && !replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    fieldIdentifier: "inbox.reply.field.\(item.id)",
+                    sendIdentifier: "inbox.send.\(item.id)",
+                    sendLabel: "Send reply",
+                    containerIdentifier: "inbox.replyBox.container.\(item.id)",
+                    onSend: { Task { await submitInlineReply(item) } }
+                ) {
+                    EmptyView()
+                } leading: {
+                    EmptyView()
                 }
                 .id("inbox.replyBox.\(item.id)")
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -2599,6 +2579,22 @@ struct OrbInboxView: View {
                 .stroke(OrbStyle.border, lineWidth: 1)
         )
         .accessibilityIdentifier("inbox.empty")
+    }
+
+    private var retryButton: some View {
+        Button {
+            OrbHaptics.selection()
+            Task { await load(force: true) }
+        } label: {
+            Label("Retry", systemImage: "arrow.clockwise")
+                .font(.footnote.weight(.semibold))
+                .frame(minHeight: 44)
+                .padding(.horizontal, 12)
+                .background(OrbStyle.elevated, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(loading)
+        .accessibilityIdentifier("inbox.retry")
     }
 
     private var inboxSkeletons: some View {
