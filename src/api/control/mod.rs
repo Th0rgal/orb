@@ -19,6 +19,7 @@ pub(crate) mod dispatch_admission;
 pub(crate) mod dispatch_admission_tests;
 pub(crate) mod execution_ownership;
 pub mod fork;
+pub(crate) mod host_goal;
 pub(crate) mod machine_transfer;
 mod rebalance;
 mod remote_failure;
