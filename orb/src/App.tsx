@@ -1017,6 +1017,8 @@ export default function App() {
             </Match>
           </Switch>
         </div>
+        {/* A mission view portals its Changes/Chapters pills here, beside the title-bar icons. */}
+        <div class="tb-tools" id="tb-tools" />
         <FilePanelButton />
       </header>
 

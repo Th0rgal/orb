@@ -26,6 +26,7 @@ import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
 import { Show, batch, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
+import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
 import { ForkMission } from "../ForkMission";
 import { streamMission, heldAfterHistory, type StreamEvent } from "../stream";
@@ -975,7 +976,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
 
   return (
     <>
-      <div class="mission-tools"><Changes items={viewItems()} githubPr={mission()?.github_pr} /><Chapters items={viewItems()} scroller={() => scroller} /></div>
+      {/* Centred in the title-bar row, just left of its icons (Codex / ChatGPT desktop). */}
+      <Show when={document.getElementById("tb-tools")}>{slot => <Portal mount={slot()}>
+        <div class="mission-tools"><Changes items={viewItems()} githubPr={mission()?.github_pr} /><Chapters items={viewItems()} scroller={() => scroller} /></div>
+      </Portal>}</Show>
       <div
         class="scroll"
         ref={el => { scroller = el; pin.ref(el); }}
