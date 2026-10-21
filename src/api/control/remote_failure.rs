@@ -13,6 +13,9 @@ pub(crate) enum FailureKind {
     Configuration,
     Quota,
     Cancelled,
+    /// The startup watchdog stopped a job that stayed silent on every
+    /// liveness signal. Nobody asked for the stop, so it is retried once.
+    StartupStall,
     Unknown,
 }
 
@@ -43,14 +46,11 @@ fn retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) -> Optio
 
 pub(crate) fn classify(raw: &str) -> Failure {
     let lower = raw.to_ascii_lowercase();
-    let kind = if [
-        "cancelled by",
-        "canceled by",
-        "operator stop",
-        "startup watchdog",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
+    let kind = if lower.contains("startup watchdog") || lower.contains("startup_watchdog") {
+        FailureKind::StartupStall
+    } else if ["cancelled by", "canceled by", "operator stop"]
+        .iter()
+        .any(|s| lower.contains(s))
     {
         FailureKind::Cancelled
     } else if [
@@ -160,6 +160,7 @@ pub(crate) fn classify(raw: &str) -> Failure {
         FailureKind::Configuration => "The node's CLI, model, or workspace configuration needs attention before resuming.",
         FailureKind::Quota => "The provider usage limit was reached.",
         FailureKind::Cancelled => "The run was stopped. Automatic recovery will not override that stop.",
+        FailureKind::StartupStall => "The run stayed silent past the startup watchdog and was interrupted; it is resumed automatically once.",
         FailureKind::Unknown => "The run ended without a confirmed recoverable cause.",
     }.into();
     failure
@@ -211,6 +212,14 @@ mod tests {
             ),
             (
                 "cancelled by startup watchdog after HTTP 503",
+                FailureKind::StartupStall,
+            ),
+            (
+                "Cancelled by startup_watchdog: No native activity",
+                FailureKind::StartupStall,
+            ),
+            (
+                "Cancelled by operator: stop requested",
                 FailureKind::Cancelled,
             ),
             ("interrupted", FailureKind::Unknown),

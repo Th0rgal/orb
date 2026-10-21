@@ -374,6 +374,15 @@ pub(crate) struct RemoteWait {
 /// A native resume died before producing output: replace the conversation
 /// with a fresh run on the same node that carries the mission history.
 pub(crate) const FRESH_SESSION_FALLBACK: &str = "Native resume failure";
+/// The startup watchdog interrupted a silent remote job: resumed once.
+pub(crate) const STARTUP_STALL_WAIT: &str = "Startup watchdog interruption";
+/// Automatic resumes after a startup-watchdog stop without new progress.
+const MAX_STARTUP_STALL_RESUMES: u32 = 1;
+
+fn startup_stall_budget_spent(wait: &RemoteWait) -> bool {
+    wait.limit == STARTUP_STALL_WAIT && wait.replays >= MAX_STARTUP_STALL_RESUMES
+}
+
 /// Antigravity ended its turn on its native `schedule` tool.
 pub(crate) const NATIVE_SCHEDULE_WAIT: &str = "Antigravity native schedule";
 
@@ -676,6 +685,7 @@ pub(crate) fn sustained_recovery_progress(
 
 fn is_transient_wait(limit: &str) -> bool {
     limit == "Inference connection interrupted"
+        || limit == STARTUP_STALL_WAIT
         || (limit.starts_with("Antigravity ") && !limit.ends_with("limit"))
 }
 
@@ -745,6 +755,18 @@ pub(crate) async fn plan_remote(
                 | super::remote_failure::FailureKind::Cancelled
         ) {
             return None;
+        }
+        if classified.kind == super::remote_failure::FailureKind::StartupStall {
+            // A silent job is not an operator stop: resume once so a
+            // wake-up driven mission keeps its loop, then wait for a human.
+            if previous.as_ref().is_some_and(startup_stall_budget_spent) {
+                return None;
+            }
+            return Some(UsageLimitWait {
+                limit: STARTUP_STALL_WAIT.to_string(),
+                resume_at: now + Duration::seconds(IMMEDIATE_REPLAY_SECS),
+                announced: false,
+            });
         }
         let has_session = mission
             .session_id
@@ -832,10 +854,11 @@ pub(crate) async fn plan_remote(
     });
     update_remote_wait(working_dir, mission_id, |previous| {
         if planned.is_none() && !success && !sustained_progress {
-            if let Some(mut exhausted) = previous
-                .clone()
-                .filter(|wait| wait.replays >= MAX_REMOTE_REPLAYS || idle_wait_budget_spent(wait))
-            {
+            if let Some(mut exhausted) = previous.clone().filter(|wait| {
+                wait.replays >= MAX_REMOTE_REPLAYS
+                    || idle_wait_budget_spent(wait)
+                    || startup_stall_budget_spent(wait)
+            }) {
                 // Keep the exhausted budget while finalization is retried; deleting
                 // it here would let a repeated observation start again at attempt one.
                 exhausted.resume_at = None;
@@ -1621,6 +1644,70 @@ mod tests {
             after_replay_failure(&wait, false, &still_running, now, None),
             ReplayFailure::GiveUp
         );
+    }
+
+    /// 4ad4bc01: a startup-watchdog stop of a wake-up driven OpenCode mission
+    /// used to fail it (`remote_job_cancelled`). It now waits and resumes
+    /// once; a second stall in a row waits for the operator.
+    #[tokio::test]
+    async fn startup_watchdog_cancel_resumes_once() {
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "opencode").await;
+        store
+            .update_mission_session_id(mission.id, "ses_resumed", "opencode", None)
+            .await
+            .unwrap();
+        let failure = "Cancelled by startup watchdog: no native protocol activity, node output, or model traffic within 900 seconds of running.";
+        assert_eq!(
+            super::super::remote_failure::classify(failure).kind,
+            super::super::remote_failure::FailureKind::StartupStall
+        );
+        let wait = plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            failure,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .expect("first stall resumes");
+        assert_eq!(wait.limit, STARTUP_STALL_WAIT);
+        assert!(remote_resume_prompt(&wait.limit).contains(RECOVERY_PROMPT_MARKER));
+        update_remote_wait(dir.path(), mission.id, |previous| {
+            previous.map(|previous| RemoteWait {
+                resume_at: None,
+                replays: previous.replays + 1,
+                ..previous
+            })
+        })
+        .await;
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            failure,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .is_none());
+        // An operator stop is still final.
+        let (dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "opencode").await;
+        assert!(plan_remote(
+            dir.path(),
+            &store,
+            mission.id,
+            false,
+            "Cancelled by operator: stop",
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+        .is_none());
     }
 
     #[tokio::test]

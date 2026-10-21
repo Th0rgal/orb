@@ -1437,6 +1437,12 @@ async fn usage_attribution(
     attribution_from(headers, key.as_ref(), internal)
 }
 
+/// Mission whose job the proxy reports alive to the remote startup watchdog:
+/// authenticated attribution only, never the raw caller-controlled header.
+fn liveness_mission(attribution: &UsageAttribution) -> Option<uuid::Uuid> {
+    attribution.mission_id
+}
+
 /// The mission header is caller-controlled, so it is trusted only from the
 /// internal proxy secret (Core's own harnesses). A mission-scoped launch key
 /// always attributes to its own mission; other keys never take the header.
@@ -1747,6 +1753,9 @@ async fn native_protocol_proxy(
             !state.proxy_secret.is_empty() && super::auth::constant_time_eq(t, &state.proxy_secret)
         });
     let attribution = attribution_from(&headers, execution_key.as_ref(), internal_secret);
+    let _in_flight = attribution
+        .mission_id
+        .map(crate::api::proxy_liveness::begin_request);
     let mission_key_id = execution_key
         .as_ref()
         .and_then(|key| key.name.strip_prefix("remote-launch:"))
@@ -2320,10 +2329,7 @@ async fn native_protocol_proxy(
         }
         let response_headers = upstream.headers().clone();
         if is_stream && status.is_success() {
-            let liveness_mission_id = headers
-                .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| uuid::Uuid::parse_str(value.trim()).ok());
+            let liveness_mission_id = liveness_mission(&attribution);
             let upstream_stream = upstream.bytes_stream().map(|item| {
                 item.map_err(|error| std::io::Error::other(error.without_url().to_string()))
             });
@@ -2478,14 +2484,14 @@ pub(crate) async fn chat_completions_inner(
     // Mission attribution for runner watchdogs: the per-workspace builtin
     // provider sends this header so the proxy can report "this mission's LLM
     // call is still streaming" while the harness CLI emits nothing.
-    let liveness_mission_id = headers
-        .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| uuid::Uuid::parse_str(v.trim()).ok());
-    if let Some(id) = liveness_mission_id {
-        crate::api::proxy_liveness::note_activity(id);
-    }
+    // Remote jobs authenticate with their `remote-launch:<mission>` key and
+    // send no header: attribute them through the key as well, so the remote
+    // startup watchdog sees a silent CLI that is still talking to a model.
     let attribution = usage_attribution(&state, &headers).await;
+    // Only authenticated attribution: a raw header from an ordinary key
+    // must not keep another mission's job alive past the watchdog.
+    let liveness_mission_id = liveness_mission(&attribution);
+    let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
 
     let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
 
@@ -6170,6 +6176,7 @@ fn track_stream_health(
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     let idle = reliability::stream_idle_timeout();
     async_stream::stream! {
+        let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
         let mut stream = std::pin::pin!(inner);
         let mut errored = false;
         let mut received_any = false;
@@ -9215,6 +9222,40 @@ mod tests {
         assert_eq!(
             attribution_from(&headers, None, false),
             UsageAttribution::default()
+        );
+    }
+
+    #[test]
+    fn ordinary_key_cannot_keep_another_mission_alive() {
+        let victim = uuid::Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::api::proxy_liveness::MISSION_ID_HEADER,
+            HeaderValue::from_str(&victim.to_string()).unwrap(),
+        );
+        let key = crate::api::proxy_keys::KeySummary {
+            id: uuid::Uuid::new_v4(),
+            name: "Cursor".into(),
+            key_prefix: "sk-proxy".into(),
+            created_at: chrono::Utc::now(),
+            last_used_at: None,
+        };
+        let attribution = attribution_from(&headers, Some(&key), false);
+        let liveness = liveness_mission(&attribution);
+        assert_eq!(liveness, None);
+        let _guard = liveness.map(crate::api::proxy_liveness::begin_request);
+        assert!(!crate::api::proxy_liveness::is_active(
+            victim,
+            std::time::Duration::from_secs(3600)
+        ));
+        // A launch key still keeps its own mission alive.
+        let launch_key = crate::api::proxy_keys::KeySummary {
+            name: format!("remote-launch:{victim}"),
+            ..key
+        };
+        assert_eq!(
+            liveness_mission(&attribution_from(&headers, Some(&launch_key), false)),
+            Some(victim)
         );
     }
 
