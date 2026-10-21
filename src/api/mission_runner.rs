@@ -724,6 +724,23 @@ pub(crate) async fn register_claude_builtin_wakeup(
     prompt: String,
     reason: String,
 ) -> Result<serde_json::Value, String> {
+    let variables = std::collections::HashMap::from([
+        ("__wakeup_reason".to_string(), reason),
+        ("__wakeup_source".to_string(), "claude-builtin".to_string()),
+        ("__wakeup_request_id".to_string(), request_id),
+    ]);
+    register_core_wakeup(mission_id, delay_seconds, prompt, variables).await
+}
+
+/// Register a one-shot durable wake-up through the automation API, which
+/// enforces Stop fencing and one-pending-wake-up supersession. `variables`
+/// must carry `__wakeup_source`.
+pub(crate) async fn register_core_wakeup(
+    mission_id: Uuid,
+    delay_seconds: u64,
+    prompt: String,
+    variables: std::collections::HashMap<String, String>,
+) -> Result<serde_json::Value, String> {
     let api_base = localhost_api_base_url_from_env().ok_or("Wake-up unavailable: PORT is unset")?;
     let delay = delay_seconds.clamp(
         CLAUDE_BUILTIN_WAKEUP_MIN_SECONDS,
@@ -733,7 +750,7 @@ pub(crate) async fn register_claude_builtin_wakeup(
         "command_source": { "type": "inline", "content": prompt },
         "trigger": { "type": "interval", "seconds": delay },
         "stop_policy": { "type": "after_first_fire" }, "fresh_session": "keep",
-        "variables": {"__wakeup_reason":reason,"__wakeup_source":"claude-builtin","__wakeup_request_id":request_id},
+        "variables": variables,
         "start_immediately": false,
     });
     let client = reqwest::Client::builder()

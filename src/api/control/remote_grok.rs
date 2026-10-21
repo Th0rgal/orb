@@ -1053,15 +1053,78 @@ impl NativeGrokObserver {
         partial_turn_message(self.mission_id, self.job_id, &self.stream.text)
     }
 
-    async fn has_pending_wakeup(&self) -> bool {
-        self.owner
-            .mission_store
+    /// Host goal driver for a successful goal turn of a harness without a
+    /// native goal loop (see `host_goal`). Returns the `goal_status` to
+    /// report, or `None` when the user's Stop disarmed the goal.
+    async fn drive_host_goal(&self, objective: &str, content: &mut String) -> Option<String> {
+        use super::host_goal::{self, Outcome};
+        let store = &self.owner.mission_store;
+        // Re-read: a Stop during the turn disarmed goal mode after attach.
+        let armed = store
+            .get_mission(self.mission_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.goal_mode);
+        let rows = store
             .get_mission_automations(self.mission_id)
             .await
-            .is_ok_and(|rows| {
-                rows.iter()
-                    .any(|a| a.active && a.variables.contains_key("__wakeup_source"))
-            })
+            .unwrap_or_default();
+        let (continuation_pending, wakeup_armed) = host_goal::pending(&rows);
+        let (prior_no_progress, prior_continuations) = host_goal::prior_counters(&rows, objective);
+        let mut outcome = host_goal::decide(&host_goal::Input {
+            text: self.stream.final_text(),
+            armed,
+            continuation_pending,
+            wakeup_armed,
+            made_progress: self.stream.opencode_last_tool_part.is_some(),
+            prior_no_progress,
+            prior_continuations,
+            max_no_progress: host_goal::max_no_progress(),
+            max_continuations: host_goal::max_continuations(),
+        });
+        match &outcome {
+            Outcome::Continue {
+                no_progress,
+                continuations,
+            } => {
+                let variables = host_goal::variables(
+                    objective,
+                    "Host goal loop: continue after the previous turn",
+                    format!("host-goal:{}", self.job_id),
+                    *no_progress,
+                    *continuations,
+                );
+                if let Err(error) = crate::api::mission_runner::register_core_wakeup(
+                    self.mission_id,
+                    host_goal::continuation_delay_secs(),
+                    host_goal::continuation_prompt(objective),
+                    variables,
+                )
+                .await
+                {
+                    tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, %error,
+                        "Host goal continuation could not be queued; goal paused");
+                    content.push_str(&format!(
+                        "\n\nGoal paused: the automatic continuation could not be queued ({error})."
+                    ));
+                    outcome = Outcome::Paused;
+                } else {
+                    tracing::info!(mission_id = %self.mission_id, job_id = %self.job_id,
+                        continuations, no_progress, "Host goal continuation queued");
+                }
+            }
+            Outcome::Stalled { turns } => {
+                tracing::warn!(mission_id = %self.mission_id, turns, "Host goal paused: no progress");
+                content.push_str("\n\n");
+                content.push_str(&host_goal::stalled_notice(*turns));
+            }
+            Outcome::BudgetLimited => {
+                content.push_str("\n\nGoal stopped: the automatic continuation budget is spent.");
+            }
+            _ => {}
+        }
+        outcome.status()
     }
 
     pub(crate) fn usage(&self) -> Option<crate::cost::TokenUsage> {
@@ -1938,27 +2001,26 @@ impl NativeGrokObserver {
         {
             let status = if success {
                 match self.stream.native_goal_status.clone() {
-                    Some(status) => status,
+                    Some(status) => Some(status),
                     // OpenCode has no native goal state: its run ending only
-                    // means the model stopped for now. With a wake-up still
-                    // armed the goal is waiting, not complete (4ad4bc01 at
-                    // 04:46Z reported complete while waiting for 06:00).
-                    None if self.mission.backend == "opencode"
-                        && self.has_pending_wakeup().await =>
-                    {
-                        "paused".to_string()
+                    // means the model stopped for now. Core drives the loop
+                    // (4ad4bc01 was marked complete at 13:38Z and stopped).
+                    None if super::host_goal::host_drives_goal(&self.mission.backend) => {
+                        self.drive_host_goal(&objective, &mut content).await
                     }
-                    None => "complete".to_string(),
+                    None => Some("complete".to_string()),
                 }
             } else {
-                "paused".to_string()
+                Some("paused".to_string())
             };
-            let event = AgentEvent::GoalStatus {
-                status,
-                objective,
-                mission_id: Some(self.mission_id),
-            };
-            self.owner.publish_native(event).await;
+            if let Some(status) = status {
+                let event = AgentEvent::GoalStatus {
+                    status,
+                    objective,
+                    mission_id: Some(self.mission_id),
+                };
+                self.owner.publish_native(event).await;
+            }
         }
 
         if success && scheduled_end {
@@ -3631,6 +3693,82 @@ mod tests {
             .iter()
             .any(|u| matches!(u, StreamUpdate::NativeText(v)
             if v["bubble_id"] == "opencode:s:prt_b4000")));
+    }
+
+    async fn opencode_goal_turn_status(text: &str, stop_first: bool) -> Option<String> {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "host-goal")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(Some("goal"), None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        store
+            .update_mission_goal(mission.id, true, Some("never stop, report every 30 min"))
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        let owner = RemoteMissionOwner {
+            mission_store: store.clone(),
+            events_tx: Some(tx.clone()),
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "old-agent", mission.id, job)
+            .await
+            .unwrap();
+        if stop_first {
+            super::super::goal::disarm_goal_on_user_stop(&store, &tx, mission.id)
+                .await
+                .unwrap();
+            while rx.try_recv().is_ok() {}
+        }
+        let line = serde_json::json!({"type":"text","sessionID":"s","part":{"id":"p1","messageID":"m","text":text}});
+        observer.stream.feed(&format!(
+            "{line}\n{{\"type\":\"step_finish\",\"sessionID\":\"s\",\"part\":{{\"reason\":\"stop\"}}}}\n"
+        ));
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id":job,"mission_id":mission.id,"state":"succeeded","exit_code":0,
+            "created_at":"2026-10-21T13:38:24Z"
+        }))
+        .unwrap();
+        observer.verdict(&status, "old-agent").await;
+        let mut goal = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::GoalStatus { status, .. } = event {
+                goal = Some(status);
+            }
+        }
+        goal
+    }
+
+    #[tokio::test]
+    async fn opencode_goal_marker_completes_and_plain_end_never_does() {
+        assert_eq!(
+            opencode_goal_turn_status("All done.\n<!-- GOAL_COMPLETE -->", false)
+                .await
+                .as_deref(),
+            Some("complete")
+        );
+        // No API server in tests, so queuing the continuation fails and the
+        // goal pauses; it is never reported complete.
+        assert_ne!(
+            opencode_goal_turn_status("Progress report at 13:38.", false)
+                .await
+                .as_deref(),
+            Some("complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_goal_after_user_stop_reports_nothing() {
+        assert_eq!(
+            opencode_goal_turn_status("Progress report.", true).await,
+            None
+        );
     }
 
     #[tokio::test]
