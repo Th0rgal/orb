@@ -31,7 +31,7 @@ fn node_auth<'a>(
         .remote_nodes
         .node(&placement.node_id)
         .ok_or_else(|| err(StatusCode::CONFLICT, "Recorded job node unavailable"))?;
-    let secret = std::env::var(&node.token_env)
+    let secret = crate::remote_node::node_token(&node.token_env)
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {

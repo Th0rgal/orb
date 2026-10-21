@@ -2233,7 +2233,7 @@ pub(crate) async fn finalize_orphaned_node_job(
     let Some(node) = state.config.remote_nodes.node(&placement.node_id) else {
         return false;
     };
-    let Ok(token) = std::env::var(&node.token_env) else {
+    let Ok(token) = crate::remote_node::node_token(&node.token_env) else {
         return false;
     };
     match RemoteNodeClient::default()
@@ -2454,7 +2454,7 @@ async fn continue_inner(
                 StatusCode::CONFLICT,
                 "Queued message node is no longer configured".into(),
             ))?;
-            let token = std::env::var(&node.token_env).map_err(internal)?;
+            let token = crate::remote_node::node_token(&node.token_env).map_err(internal)?;
             Some((
                 job,
                 RemoteNodeClient::default().get_job(node, &token, job).await,
@@ -2771,7 +2771,7 @@ async fn continue_inner(
             .as_deref()
             .is_some_and(|s| s.starts_with("ses_"))
     {
-        let token = std::env::var(&_node.token_env).map_err(internal)?;
+        let token = crate::remote_node::node_token(&_node.token_env).map_err(internal)?;
         let client = RemoteNodeClient::default();
         let mut stream = GrokStream::default();
         let mut offset = 0;

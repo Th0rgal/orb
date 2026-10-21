@@ -56,6 +56,7 @@ pub mod github_connection;
 pub mod harness_attribution;
 pub mod hermes_tools;
 pub mod library;
+pub mod managed;
 pub mod mcp;
 pub mod model_policy;
 pub mod model_selection;

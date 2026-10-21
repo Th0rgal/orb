@@ -1097,6 +1097,10 @@ pub(super) async fn remote_library_skills(
     mission: &Mission,
     node: &crate::remote_node::RemoteNodeConfig,
 ) -> Option<(String, String)> {
+    // Managed machines are untrusted: no Library material beyond the prompt.
+    if crate::managed::is_managed_node(&node.id) {
+        return None;
+    }
     let library = state.library.read().await.clone()?;
     let (workspace_skills, default_host) = match state.workspaces.get(mission.workspace_id).await {
         Some(ws) => (
@@ -1152,7 +1156,7 @@ pub(super) async fn remote_library_skills(
         if archive.len() > crate::uploads::MAX_BYTES {
             return Err(format!("archive is {} bytes", archive.len()));
         }
-        let token = std::env::var(&node.token_env)
+        let token = crate::remote_node::node_token(&node.token_env)
             .ok()
             .filter(|t| !t.trim().is_empty())
             .ok_or("node token unavailable")?;

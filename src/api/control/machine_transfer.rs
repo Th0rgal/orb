@@ -263,9 +263,9 @@ async fn node_request(
     let node = state
         .config
         .remote_nodes
-        .node(node_id)
+        .static_node(node_id)
         .ok_or_else(|| conflict("Machine is no longer configured"))?;
-    let token = std::env::var(&node.token_env)
+    let token = crate::remote_node::node_token(&node.token_env)
         .map_err(|_| conflict("Machine authentication unavailable"))?;
     let url = format!("{}{}", node.base_url, path);
     let req = if let Some(body) = body {
@@ -667,9 +667,9 @@ fn node_endpoint(state: &AppState, id: &str) -> Result<(String, String), Error> 
     let node = state
         .config
         .remote_nodes
-        .node(id)
+        .static_node(id)
         .ok_or_else(|| conflict("Machine is no longer configured"))?;
-    let token = std::env::var(&node.token_env)
+    let token = crate::remote_node::node_token(&node.token_env)
         .map_err(|_| conflict("Machine authentication unavailable"))?;
     Ok((node.base_url.clone(), token))
 }

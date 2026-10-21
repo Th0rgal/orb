@@ -33,7 +33,7 @@ fn remote_node_auth(
         StatusCode::BAD_REQUEST,
         "Unknown destination machine".into(),
     ))?;
-    let token = std::env::var(&node.token_env).map_err(|_| {
+    let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Machine connection is unavailable".into(),

@@ -64,6 +64,9 @@ pub async fn remote(
     if !super::projects_overview::is_plain_key(project) {
         return Err("Invalid context project".into());
     }
+    if crate::managed::is_managed_node(&node.id) {
+        return Err("Project context is not delivered to managed machines".into());
+    }
     let root = super::mission_payload::project_files_root(&state.config.working_dir, project);
     let metadata = state
         .config
@@ -90,7 +93,8 @@ pub async fn remote(
     let endpoint = super::mission_runner::public_api_base_url_from_env()
         .ok_or("Remote context requires SANDBOXED_PUBLIC_URL")?;
     let token = super::context_auth::issue(&state.config, project, &node.id)?;
-    let node_token = std::env::var(&node.token_env).map_err(|_| "Node credentials unavailable")?;
+    let node_token = crate::remote_node::node_token(&node.token_env)
+        .map_err(|_| "Node credentials unavailable")?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())

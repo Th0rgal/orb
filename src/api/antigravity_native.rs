@@ -60,12 +60,17 @@ pub(crate) async fn sync_node(
     let Some(credential) = routing_credential() else {
         return Ok(NodeSync::NoLogin);
     };
+    if crate::managed::is_managed_node(node_id) {
+        return Err(format!(
+            "Node '{node_id}' is a managed machine; account sign-ins are never pushed to it"
+        ));
+    }
     let node = state
         .config
         .remote_nodes
-        .node(node_id)
+        .static_node(node_id)
         .ok_or_else(|| format!("Unknown node '{node_id}'"))?;
-    let token = std::env::var(&node.token_env)
+    let token = crate::remote_node::node_token(&node.token_env)
         .map_err(|_| format!("Node '{node_id}' credential unavailable"))?;
     crate::remote_node::RemoteNodeClient::default()
         .push_antigravity_credential(node, &token, &credential)

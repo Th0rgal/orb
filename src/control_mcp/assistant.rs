@@ -252,6 +252,32 @@ struct DownloadSharedFileParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SpawnManagedParams {
+    #[serde(default)]
+    size: Option<String>,
+    #[serde(default)]
+    cpu: Option<u32>,
+    #[serde(default)]
+    ram_gb: Option<u32>,
+    #[serde(default)]
+    ttl_minutes: Option<u64>,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    /// Set by the gateway to the calling mission; never trusted from agents.
+    #[serde(default)]
+    owner_mission_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManagedIdParams {
+    machine_id: String,
+    #[serde(default)]
+    ttl_minutes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct StartMissionParams {
     #[serde(default)]
     parent_mission_id: Option<Uuid>,
@@ -263,6 +289,8 @@ struct StartMissionParams {
     workspace_id: Option<String>,
     #[serde(default)]
     remote_node_id: Option<String>,
+    #[serde(default)]
+    managed_ttl_minutes: Option<u64>,
     #[serde(default)]
     backend: Option<String>,
     #[serde(default)]
@@ -1432,6 +1460,44 @@ impl AssistantMcp {
     pub(super) fn tools() -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
+                name: "spawn_managed_machine".to_string(),
+                description: "Rent a fresh, disposable cloud VM (boat.dev, EU) and enroll it as a compute node, so you can run a subagent or heavy job on dedicated CPU/RAM instead of sharing the fleet. Use this whenever a task needs more compute than you have (parallel builds, big test suites, memory-hungry Lean/Rust/ML work, isolation from the shared nodes) or get_compute_fleet shows no free capacity. You choose the size: small = 2 vCPU / 4 GB RAM / 12 GB disk ($0.018/h, default), default = 4 vCPU / 8 GB / 50 GB ($0.036/h), large = 8 vCPU / 16 GB / 125 GB ($0.072/h), xlarge = 16 vCPU / 32 GB / 251 GB ($0.20/h); or pass cpu and/or ram_gb and the smallest fitting size is picked. The VM comes with claude, codex, opencode, gemini, agy, elan/Lean v4.35.0, turbo-lean, lean-native and certified-search, but NO credentials and no private checkouts (it is an untrusted, managed trust class: never send secrets or private-host work there). Result (via get_action) has `node_id`: start a subagent there with start_mission(remote_node_id=node_id, backend=..., prompt=...). Shortcut: start_mission(remote_node_id=\"auto-managed:<size>\") spawns and places in one call. Every machine has a TTL (default 120 min, max 720) and is destroyed after 30 idle minutes; daily budget and concurrency caps are hard refusals (errors budget_exceeded / quota_exceeded). Call destroy_managed_machine as soon as you are done.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "size": {"type": "string", "enum": ["small", "default", "large", "xlarge"], "description": "small=2 vCPU/4 GB, default=4 vCPU/8 GB, large=8 vCPU/16 GB, xlarge=16 vCPU/32 GB. Omit to use cpu/ram_gb or the default (small)."},
+                        "cpu": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Minimum vCPUs needed (alternative to size)."},
+                        "ram_gb": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Minimum RAM in GB needed (alternative to size)."},
+                        "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Hard lifetime; the VM is destroyed when it expires. Default 120."},
+                        "image": {"type": "string", "description": "Image (named snapshot). Default orb-node-base."},
+                        "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "list_managed_machines".to_string(),
+                description: "List rented managed VMs (boat.dev): id, node_id, size, CPU/RAM, state, TTL (expires_at), cost so far, plus today's budget (spent, cap, running count, max concurrent) and the size/price table. Check this before spawning to reuse a machine you already own.".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
+                name: "destroy_managed_machine".to_string(),
+                description: "Destroy a managed VM you no longer need (stops billing immediately and closes its cost ledger). Idempotent. Pass the machine id (mm…) or its node id (managed-mm…).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["machine_id"],
+                    "properties": {"machine_id": {"type": "string"}}
+                }),
+            },
+            ToolDefinition {
+                name: "extend_managed_machine".to_string(),
+                description: "Extend a managed VM's TTL by ttl_minutes beyond its current expiry (total lifetime capped at 720 minutes after creation).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["machine_id", "ttl_minutes"],
+                    "properties": {"machine_id": {"type": "string"}, "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720}}
+                }),
+            },
+            ToolDefinition {
                 name: "list_active_missions".to_string(),
                 description: "List active, pending, blocked, or awaiting-user missions in sandboxed.sh. Includes goal_mode separately from mission_mode and a goal_objective preview of at most 1,000 characters plus a truncation ellipsis.".to_string(),
                 input_schema: json!({
@@ -2388,7 +2454,7 @@ impl AssistantMcp {
         }))
     }
 
-    async fn start_mission(&self, params: StartMissionParams) -> Result<Value, String> {
+    async fn start_mission(&self, mut params: StartMissionParams) -> Result<Value, String> {
         // A scoped controller must launch work under its own project — an
         // untagged mission would escape both the roster and this scope.
         if self.project_scope.is_some() {
@@ -2439,6 +2505,31 @@ impl AssistantMcp {
             }
             None => None,
         };
+        let mut managed_machine = Value::Null;
+        if let Some(size) = params
+            .remote_node_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| r.to_ascii_lowercase().starts_with("auto-managed"))
+            .map(|r| r.split_once(':').map(|(_, s)| s.trim().to_string()))
+        {
+            let spawned = self
+                .spawn_managed_machine(
+                    SpawnManagedParams {
+                        size: size.filter(|s| !s.is_empty()),
+                        cpu: None,
+                        ram_gb: None,
+                        ttl_minutes: params.managed_ttl_minutes,
+                        image: None,
+                        reason: Some(format!("start_mission: {}", params.title)),
+                        owner_mission_id: None,
+                    },
+                    params.parent_mission_id.map(|id| id.to_string()),
+                )
+                .await?;
+            params.remote_node_id = spawned["node_id"].as_str().map(str::to_string);
+            managed_machine = spawned["machine"].clone();
+        }
         let mut body = json!({
             "title": params.title,
             "parent_mission_id": params.parent_mission_id,
@@ -2480,19 +2571,46 @@ impl AssistantMcp {
         if let Some(cloud) = params.cloud {
             body["cloud"] = cloud;
         }
-        let response = self.api_post("/api/control/missions", body).await?;
-        if !response.status().is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(format!("Failed to create mission: {text}"));
+        let created = self.api_post("/api/control/missions", body).await;
+        let created = match created {
+            Ok(response) if response.status().is_success() => response
+                .json::<Value>()
+                .await
+                .map_err(|error| format!("Failed to parse created mission: {error}")),
+            Ok(response) => Err(format!(
+                "Failed to create mission: {}",
+                response.text().await.unwrap_or_default()
+            )),
+            Err(error) => Err(error),
+        };
+        let mission = match created {
+            Ok(mission) if mission["id"].as_str().is_some() => mission,
+            other => {
+                // Do not leave a rented VM behind for a mission that never started.
+                if let Some(id) = managed_machine["id"].as_str() {
+                    let _ = self
+                        .managed_request(
+                            reqwest::Method::DELETE,
+                            format!("/api/managed-machines/{id}"),
+                            None,
+                        )
+                        .await;
+                }
+                return Err(match other {
+                    Err(e) => e,
+                    Ok(_) => "Created mission response did not include an id".to_string(),
+                });
+            }
+        };
+        if managed_machine.is_null() {
+            Ok(json!({ "mission": mission }))
+        } else {
+            Ok(json!({
+                "mission": mission,
+                "managed_machine": managed_machine,
+                "note": "The subagent runs on a rented managed VM. Destroy it with destroy_managed_machine once the subagent's result is in (it is also destroyed after 30 idle minutes or at its TTL)."
+            }))
         }
-        let mission: Value = response
-            .json()
-            .await
-            .map_err(|error| format!("Failed to parse created mission: {error}"))?;
-        if mission["id"].as_str().is_none() {
-            return Err("Created mission response did not include an id".to_string());
-        }
-        Ok(json!({ "mission": mission }))
     }
 
     /// Run a bash command through `POST /api/workspaces/:id/exec`, which
@@ -2870,6 +2988,71 @@ impl AssistantMcp {
             "success": true,
             "acknowledged": id.to_string(),
             "already_acknowledged": false,
+        }))
+    }
+
+    async fn managed_request(
+        &self,
+        method: reqwest::Method,
+        path: String,
+        body: Option<Value>,
+    ) -> Result<Value, String> {
+        let mut req = self
+            .client
+            .request(method, format!("{}{}", self.api_url, path))
+            // Spawning waits for the VM to enroll (typically 20-90 s).
+            .timeout(std::time::Duration::from_secs(420));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        if let Some((name, value)) = self.auth_header() {
+            req = req.header(name, value);
+        }
+        let response = req
+            .send()
+            .await
+            .map_err(|error| format!("HTTP request failed: {error}"))?;
+        let status = response.status();
+        let value: Value = response.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(format!(
+                "{} ({status}): {}",
+                value["error"].as_str().unwrap_or("managed_machine_error"),
+                value["message"].as_str().unwrap_or("request failed")
+            ));
+        }
+        Ok(value)
+    }
+
+    async fn spawn_managed_machine(
+        &self,
+        params: SpawnManagedParams,
+        owner_mission_id: Option<String>,
+    ) -> Result<Value, String> {
+        let machine = self
+            .managed_request(
+                reqwest::Method::POST,
+                "/api/managed-machines".into(),
+                Some(json!({
+                    "size": params.size,
+                    "cpu": params.cpu,
+                    "ram_gb": params.ram_gb,
+                    "ttl_minutes": params.ttl_minutes,
+                    "image": params.image,
+                    "reason": params.reason,
+                    "owner_mission_id": owner_mission_id,
+                    "wait": true,
+                })),
+            )
+            .await?;
+        Ok(json!({
+            "machine": machine,
+            "node_id": machine["node_id"],
+            "next": format!(
+                "start_mission(remote_node_id=\"{}\", backend=..., prompt=...) runs a subagent on it; destroy_managed_machine(machine_id=\"{}\") when done",
+                machine["node_id"].as_str().unwrap_or_default(),
+                machine["id"].as_str().unwrap_or_default()
+            ),
         }))
     }
 
@@ -3826,6 +4009,39 @@ impl AssistantMcp {
                 self.adopt_mission(params).await
             }
             "get_compute_fleet" => self.get_compute_fleet().await,
+            "spawn_managed_machine" => {
+                let params: SpawnManagedParams = parse_params(arguments)?;
+                let owner = params.owner_mission_id.clone();
+                self.spawn_managed_machine(params, owner).await
+            }
+            "list_managed_machines" => {
+                self.managed_request(reqwest::Method::GET, "/api/managed-machines".into(), None)
+                    .await
+            }
+            "destroy_managed_machine" => {
+                let params: ManagedIdParams = parse_params(arguments)?;
+                self.managed_request(
+                    reqwest::Method::DELETE,
+                    format!(
+                        "/api/managed-machines/{}",
+                        urlencoding::encode(&params.machine_id)
+                    ),
+                    None,
+                )
+                .await
+            }
+            "extend_managed_machine" => {
+                let params: ManagedIdParams = parse_params(arguments)?;
+                self.managed_request(
+                    reqwest::Method::POST,
+                    format!(
+                        "/api/managed-machines/{}/extend",
+                        urlencoding::encode(&params.machine_id)
+                    ),
+                    Some(json!({"ttl_minutes": params.ttl_minutes.unwrap_or(60)})),
+                )
+                .await
+            }
             "list_projects" => self.list_projects().await,
             "get_project" => {
                 let params: ProjectSlugParams = parse_params(arguments)?;

@@ -163,8 +163,21 @@ impl RemoteNodeSettings {
         }
     }
 
-    pub fn node(&self, id: &str) -> Option<&RemoteNodeConfig> {
+    /// Static (operator-enrolled) nodes only. Use this for every path that
+    /// hands a node credentials or private material beyond the per-job
+    /// projected harness auth: managed nodes are an untrusted class.
+    pub fn static_node(&self, id: &str) -> Option<&RemoteNodeConfig> {
         self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// Static nodes first, then live managed (dial-out) nodes. Managed nodes
+    /// are deliberately absent from `nodes`, so automatic placement, which
+    /// iterates `nodes`, never selects them.
+    pub fn node(&self, id: &str) -> Option<&RemoteNodeConfig> {
+        self.nodes
+            .iter()
+            .find(|node| node.id == id)
+            .or_else(|| crate::managed::node_config(id))
     }
 }
 
@@ -175,6 +188,16 @@ fn parse_bool_env(key: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+/// Resolve a node bearer token by its `token_env` name: managed nodes keep
+/// theirs in memory (never in the process environment, so harness children
+/// cannot inherit it); static nodes read the environment.
+pub fn node_token(token_env: &str) -> Result<String, std::env::VarError> {
+    if let Some(token) = crate::managed::node_token(token_env) {
+        return Ok(token);
+    }
+    std::env::var(token_env)
 }
 
 pub fn default_token_env(node_id: &str) -> String {

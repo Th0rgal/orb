@@ -447,6 +447,28 @@ async fn authorize(
             }
         }
     }
+    // Managed machines belong to the mission tree that rented them.
+    match tool.definition.name.as_str() {
+        "spawn_managed_machine" => {
+            args["owner_mission_id"] = json!(own.to_string());
+        }
+        "destroy_managed_machine" | "extend_managed_machine" => {
+            let id = args
+                .get("machine_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            managed_owner_check(&store, own, &id).await?;
+        }
+        "start_mission" => {
+            if let Some(r) = args.get("remote_node_id").and_then(Value::as_str) {
+                if crate::managed::is_managed_node(r) {
+                    managed_owner_check(&store, own, r).await?;
+                }
+            }
+        }
+        _ => {}
+    }
     // A native child may leave its parent's machine: `remote_node_id` set to
     // "auto" (fleet scheduler) or to another registered node. It then starts
     // in that node's default workspace, never in the parent's.
@@ -454,6 +476,7 @@ async fn authorize(
         && args.get("cloud").is_none_or(Value::is_null)
         && match args.get("remote_node_id").and_then(Value::as_str) {
             Some(r) if r.eq_ignore_ascii_case("auto") => true,
+            Some(r) if r.to_ascii_lowercase().starts_with("auto-managed") => true,
             Some(r) => {
                 if state.config.remote_nodes.node(r).is_none() {
                     return Err(ToolError::denied("Unknown remote node"));
@@ -524,6 +547,63 @@ async fn authorize(
         args["parent_mission_id"] = json!(own);
     }
     Ok(())
+}
+
+/// Mission ids from `id` up through its parents (bounded).
+async fn mission_lineage(
+    store: &std::sync::Arc<dyn crate::api::mission_store::MissionStore>,
+    id: Uuid,
+) -> Vec<Uuid> {
+    let mut chain = vec![id];
+    let mut cur = id;
+    for _ in 0..32 {
+        match store.get_mission(cur).await {
+            Ok(Some(m)) => match m.parent_mission_id {
+                Some(parent) if !chain.contains(&parent) => {
+                    chain.push(parent);
+                    cur = parent;
+                }
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    chain
+}
+
+/// Owner, ancestor or descendant of the owning mission may act on a machine.
+pub(crate) fn lineage_related(caller_chain: &[Uuid], owner_chain: &[Uuid]) -> bool {
+    let (Some(caller), Some(owner)) = (caller_chain.first(), owner_chain.first()) else {
+        return false;
+    };
+    caller_chain.contains(owner) || owner_chain.contains(caller)
+}
+
+async fn managed_owner_check(
+    store: &std::sync::Arc<dyn crate::api::mission_store::MissionStore>,
+    own: Uuid,
+    machine: &str,
+) -> Result<(), ToolError> {
+    let manager = crate::managed::global()
+        .ok_or_else(|| ToolError::denied("Managed machines unavailable"))?;
+    let machine = manager
+        .get(machine)
+        .await
+        .ok_or_else(|| ToolError::denied("Unknown managed machine"))?;
+    let owner = machine
+        .owner_mission_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| ToolError::denied("Managed machine belongs to another owner"))?;
+    let caller_chain = mission_lineage(store, own).await;
+    let owner_chain = mission_lineage(store, owner).await;
+    if lineage_related(&caller_chain, &owner_chain) {
+        Ok(())
+    } else {
+        Err(ToolError::denied(
+            "Managed machine belongs to another mission tree",
+        ))
+    }
 }
 
 async fn authorize_job(
@@ -1010,6 +1090,35 @@ pub async fn revoke(
             )
         })?;
     Ok(Json(json!({"revoked":true})))
+}
+
+#[cfg(test)]
+mod managed_owner_tests {
+    use super::lineage_related;
+    use uuid::Uuid;
+
+    #[test]
+    fn only_owner_lineage_may_act_on_a_machine() {
+        let (root, child, grandchild, other) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        // chains are self-first, then ancestors
+        let root_c = vec![root];
+        let child_c = vec![child, root];
+        let gc_c = vec![grandchild, child, root];
+        let other_c = vec![other];
+        let sibling = Uuid::new_v4();
+        let sibling_c = vec![sibling, root];
+        assert!(lineage_related(&child_c, &child_c)); // owner itself
+        assert!(lineage_related(&root_c, &child_c)); // ancestor of owner
+        assert!(lineage_related(&gc_c, &child_c)); // descendant of owner
+        assert!(!lineage_related(&other_c, &child_c)); // unrelated
+        assert!(!lineage_related(&sibling_c, &child_c)); // sibling is not lineage
+        assert!(!lineage_related(&[], &child_c));
+    }
 }
 
 #[cfg(test)]

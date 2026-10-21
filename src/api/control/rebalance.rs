@@ -186,7 +186,7 @@ async fn try_rebalance(
         .ok_or("old node is no longer configured")?
         .clone();
     let client = crate::remote_node::RemoteNodeClient::default();
-    let old_token = std::env::var(&old.token_env).map_err(|e| e.to_string())?;
+    let old_token = crate::remote_node::node_token(&old.token_env).map_err(|e| e.to_string())?;
     let status = client
         .get_job(&old, &old_token, handle.job_id)
         .await

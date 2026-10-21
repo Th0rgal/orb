@@ -2126,7 +2126,7 @@ pub async fn node_antigravity_models(
         .remote_nodes
         .node(&node_id)
         .ok_or((StatusCode::NOT_FOUND, "Unknown node".into()))?;
-    let token = std::env::var(&node.token_env).map_err(|_| {
+    let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Node credential unavailable".into(),
