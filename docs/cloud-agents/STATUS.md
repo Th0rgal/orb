@@ -27,6 +27,14 @@ conversation identity; all Bots on the account share one computer. No admin
 methods, attachment uploads, arbitrary model overrides or file deletion are used.
 See GROK_PROTOCOL.md for real compatibility evidence.
 
+## Attachments
+
+Only Hermes advertises attachments. Orb uploads each file to Core (`/api/uploads`)
+and sends its `@path` mention in the prompt; Hermes reads it from Core storage
+(verified live 2026-10-21 with a text attachment). ChatGPT, Grok Bot and Cursor Cloud
+advertise none: the new-task composer keeps "+" in place, disabled, with the reason,
+and refuses dropped or pasted files out loud.
+
 ## Verification / remaining gates
 
 Required live canary: create a bounded test conversation, close Orb, restart Core,

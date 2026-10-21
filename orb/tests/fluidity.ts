@@ -58,3 +58,25 @@ export async function stopSampling(page:Page,{side=false}:{side?:boolean}={}):Pr
   errors:[...new Set(after.flatMap(f=>f.errors).filter(e=>!before.has(e)))],
  };
 }
+
+/** Per-frame position of the user bubble holding `text`, and any bare loading line. */
+export async function startBubbleSampling(page:Page,text:string,bare:RegExp){
+ await page.evaluate(({text,bare})=>{
+  const w=window as any;const re=new RegExp(bare.source,bare.flags);const frames:any[]=[];w.flb_={frames,t0:performance.now()};
+  const sample=()=>{
+   const bubble=[...document.querySelectorAll('.main .user')].find(el=>el.textContent?.includes(text)&&el.getBoundingClientRect().height>0);
+   const r=bubble?.getBoundingClientRect();
+   const main=document.querySelector('.main') as HTMLElement|null;
+   frames.push({t:performance.now(),top:r?Math.round(r.top):null,left:r?Math.round(r.left):null,bare:re.test(main?.innerText??'')});
+  };
+  const tick=()=>{setTimeout(sample,0);w.flbRaf=requestAnimationFrame(tick);};tick();
+ },{text,bare:{source:bare.source,flags:bare.flags}});
+}
+export async function stopBubbleSampling(page:Page){
+ const frames=await page.evaluate(()=>{const w=window as any;cancelAnimationFrame(w.flbRaf);return w.flb_.frames;}) as {t:number;top:number|null;left:number|null;bare:boolean}[];
+ const placed=frames.filter(f=>f.top!=null);
+ const tops=placed.map(f=>f.top!),lefts=placed.map(f=>f.left!);
+ return {frames:frames.length,bare:frames.filter(f=>f.bare).length,shown:placed.length,
+  maxShift:placed.length?Math.max(Math.max(...tops)-Math.min(...tops),Math.max(...lefts)-Math.min(...lefts)):0,
+  gaps:frames.slice(frames.findIndex(f=>f.top!=null)).filter(f=>f.top==null).length};
+}
