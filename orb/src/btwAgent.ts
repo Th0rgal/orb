@@ -166,10 +166,11 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   const events=await getMissionEvents(s.id,{enough:rows=>rows.some(e=>e.event_type==='user_message')||(rows.at(-1)?.sequence??0)<=(s.afterSequence??0)});
   if(signal.aborted||connectionVersion()!==version)return;
   receive({type:'status',text:btwQueueStatus(mission)});
-  const reducer=new TranscriptReducer();let final:string|undefined;
+  const reducer=new TranscriptReducer();let final:string|undefined;let delta:string|undefined;
   for(const event of btwTurnEvents(events,s)){
    if(event.event_type==='assistant_message'&&isSyntheticRemoteAssistantNote(event.content))continue;
-   if(event.event_type==='assistant_message')final=event.content;
+   if(event.event_type==='text_delta')delta=event.content;
+   if(event.event_type==='assistant_message')final=repairedFinal(event.content,delta);
    const e=storedToStream(event);if(e)reducer.apply(e);}
   setAgentItems(all=>({...all,[s.id]:reducer.items}));
   const toolItems=reducer.items.filter((i):i is Extract<StreamItem,{kind:'tool'}>=>i.kind==='tool');
@@ -341,11 +342,12 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  for(const m of sorted){
   if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
   let events:StoredEvent[]=[];
-  try{events=await getMissionEvents(m.id,{view:'transcript'});}catch{continue;}
+  // History, not transcript: the streamed text repairs a truncated final (repairedFinal).
+  try{events=await getMissionEvents(m.id,{view:'history'});}catch{continue;}
   if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
   const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
   let curQuestion='',curAt='',curSeq=0;
-  let curAnswers:string[]=[];let curFinal:string|undefined;
+  let curAnswers:string[]=[];let curFinal:string|undefined;let curDelta:string|undefined;
   const flush=()=>{
    const q=curQuestion.trim(),{answer:a,narration}=sideAnswer(curAnswers,curFinal);
    // Stable per question event, so a re-read never renumbers a turn.
@@ -355,10 +357,12 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
   for(const ev of ordered){
    if(ev.event_type==='user_message'){
     if(curQuestion)flush();
-    curAnswers=[];curFinal=undefined;
+    curAnswers=[];curFinal=undefined;curDelta=undefined;
     curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
+   }else if(ev.event_type==='text_delta'){
+    curDelta=ev.content;
    }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
-    const text=ev.content.trim();
+    const text=ev.event_type==='assistant_message'?repairedFinal(ev.content,curDelta).trim():ev.content.trim();
     if(ev.event_type==='assistant_message')curFinal=text;
     if(curAnswers.at(-1)!==text)curAnswers.push(text);
    }
@@ -396,4 +400,14 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  const local=new Map(localHistory.map(h=>[h.question.trim()+'\u0000'+h.answer.trim(),h]));
  const merged:SideExchange[]=serverTurns.map(({at:_at,...turn})=>{const cached=local.get(turn.question.trim()+'\u0000'+turn.answer.trim());return cached?.attachments?{...turn,attachments:cached.attachments}:turn;});
  return {history:merged.slice(-BTW_HISTORY_LIMIT),activeSession:latestActive,latest:latest?.id};
+}
+
+/** Core before the fix of 2026-10-21 kept only an OpenCode closing line written
+ * after a compaction ("Everything has been explained…", /btw 412e22b7 seq 422)
+ * as the final message, while the turn's streamed text still held the answer.
+ * When that streamed text ends with the final message and is much longer, it
+ * is the reply; sideAnswer still separates its narration. */
+export function repairedFinal(final:string,delta:string|undefined):string{
+ const want=final.trim(),have=delta?.trim()??'';
+ return want&&have.length>=want.length*3&&have.length-want.length>=200&&have.endsWith(want)?have:final;
 }
