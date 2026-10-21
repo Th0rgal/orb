@@ -1790,6 +1790,7 @@ pub(super) async fn poll_remote_job(
                                 | "native_goal_stopped"
                                 | "remote_transport_error"
                                 | "remote_quota"
+                                | "remote_startup_stalled"
                         )
                     {
                         let sustained_progress = usage_limit_wait::sustained_recovery_progress(

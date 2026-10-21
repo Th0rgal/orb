@@ -1747,6 +1747,9 @@ async fn native_protocol_proxy(
             !state.proxy_secret.is_empty() && super::auth::constant_time_eq(t, &state.proxy_secret)
         });
     let attribution = attribution_from(&headers, execution_key.as_ref(), internal_secret);
+    let _in_flight = attribution
+        .mission_id
+        .map(crate::api::proxy_liveness::begin_request);
     let mission_key_id = execution_key
         .as_ref()
         .and_then(|key| key.name.strip_prefix("remote-launch:"))
@@ -2323,7 +2326,8 @@ async fn native_protocol_proxy(
             let liveness_mission_id = headers
                 .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| uuid::Uuid::parse_str(value.trim()).ok());
+                .and_then(|value| uuid::Uuid::parse_str(value.trim()).ok())
+                .or(attribution.mission_id);
             let upstream_stream = upstream.bytes_stream().map(|item| {
                 item.map_err(|error| std::io::Error::other(error.without_url().to_string()))
             });
@@ -2478,14 +2482,16 @@ pub(crate) async fn chat_completions_inner(
     // Mission attribution for runner watchdogs: the per-workspace builtin
     // provider sends this header so the proxy can report "this mission's LLM
     // call is still streaming" while the harness CLI emits nothing.
+    // Remote jobs authenticate with their `remote-launch:<mission>` key and
+    // send no header: attribute them through the key as well, so the remote
+    // startup watchdog sees a silent CLI that is still talking to a model.
+    let attribution = usage_attribution(&state, &headers).await;
     let liveness_mission_id = headers
         .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| uuid::Uuid::parse_str(v.trim()).ok());
-    if let Some(id) = liveness_mission_id {
-        crate::api::proxy_liveness::note_activity(id);
-    }
-    let attribution = usage_attribution(&state, &headers).await;
+        .and_then(|v| uuid::Uuid::parse_str(v.trim()).ok())
+        .or(attribution.mission_id);
+    let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
 
     let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
 
@@ -6170,6 +6176,7 @@ fn track_stream_health(
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     let idle = reliability::stream_idle_timeout();
     async_stream::stream! {
+        let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
         let mut stream = std::pin::pin!(inner);
         let mut errored = false;
         let mut received_any = false;

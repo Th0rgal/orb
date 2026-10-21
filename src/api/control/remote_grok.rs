@@ -957,6 +957,9 @@ pub(crate) struct NativeGrokObserver {
     session_persisted: Option<String>,
     auth_cancel_requested: bool,
     running_since: Option<std::time::Instant>,
+    /// Node log length when `running_since` was last reset: raw output the
+    /// parser does not recognise (stderr, compaction notices) still proves life.
+    startup_log_len: u64,
     startup_failure: Option<String>,
     /// The latest `pump` itself read the log to its current end.
     pumped_to_end: bool,
@@ -1128,6 +1131,7 @@ impl NativeGrokObserver {
             thinking_snapshot: String::new(),
             auth_cancel_requested: false,
             running_since: None,
+            startup_log_len: 0,
             startup_failure: None,
             pumped_to_end: false,
             replay_until: owner
@@ -1184,6 +1188,12 @@ impl NativeGrokObserver {
     }
 
     /// Bound silent login/startup hangs without limiting a running native goal.
+    ///
+    /// A silent log is not proof of a hang: `opencode run --format json`
+    /// prints nothing until its first part completes, and a resumed session of
+    /// several hundred thousand tokens can spend minutes (compaction included)
+    /// before that. The job counts as alive while the proxy is serving a model
+    /// request for this mission, or while the node log grows at all.
     pub(crate) async fn check_startup(
         &mut self,
         status: &NodeJobStatus,
@@ -1194,23 +1204,41 @@ impl NativeGrokObserver {
         if status.state != "running" || self.stream.progress || self.stream.native_activity {
             return;
         }
-        let since = self
-            .running_since
-            .get_or_insert_with(std::time::Instant::now);
-        if since.elapsed() >= std::time::Duration::from_secs(300) {
-            self.startup_failure = Some("Cancelled by startup watchdog: no native protocol activity within 300 seconds of running. Check the node's CLI, working directory, and connectivity before resuming.".into());
-            if !self.auth_cancel_requested {
-                self.auth_cancel_requested = client
-                    .cancel_job_with_reason(
-                        node,
-                        token,
-                        self.job_id,
-                        "startup_watchdog",
-                        "No native protocol activity within 300 seconds",
-                    )
-                    .await
-                    .is_ok();
-            }
+        let proxy_active = crate::api::proxy_liveness::is_active(
+            self.mission_id,
+            std::time::Duration::from_secs(startup_proxy_recent_secs()),
+        );
+        let resumed = self.session_persisted.is_some();
+        if !startup_watchdog_should_cancel(
+            &mut self.running_since,
+            &mut self.startup_log_len,
+            self.log_len,
+            proxy_active,
+            std::time::Duration::from_secs(startup_watchdog_secs(resumed)),
+        ) {
+            return;
+        }
+        let secs = startup_watchdog_secs(resumed);
+        tracing::warn!(
+            mission_id = %self.mission_id,
+            job_id = %self.job_id,
+            node = %node.id,
+            secs,
+            resumed,
+            "remote job silent with no proxy activity; startup watchdog cancels it"
+        );
+        self.startup_failure = Some(format!("Cancelled by startup watchdog: no native protocol activity, node output, or model traffic within {secs} seconds of running. The turn was interrupted and is resumed automatically once."));
+        if !self.auth_cancel_requested {
+            self.auth_cancel_requested = client
+                .cancel_job_with_reason(
+                    node,
+                    token,
+                    self.job_id,
+                    "startup_watchdog",
+                    &format!("No native protocol activity, node output, or model traffic within {secs} seconds"),
+                )
+                .await
+                .is_ok();
         }
     }
 
@@ -1836,6 +1864,7 @@ impl NativeGrokObserver {
                 super::remote_failure::FailureKind::Configuration => "remote_configuration",
                 super::remote_failure::FailureKind::Quota => "remote_quota",
                 super::remote_failure::FailureKind::Cancelled => "remote_job_cancelled",
+                super::remote_failure::FailureKind::StartupStall => "remote_startup_stalled",
                 super::remote_failure::FailureKind::Unknown => "remote_node_job",
             }
         } else {
@@ -1948,6 +1977,66 @@ impl NativeGrokObserver {
             cli_error: self.stream.error.clone(),
         }
     }
+}
+
+/// Startup watchdog for a fresh turn (`SANDBOXED_REMOTE_STARTUP_WATCHDOG_SECS`).
+const STARTUP_WATCHDOG_SECS: u64 = 300;
+/// Startup watchdog for a resumed session, whose first event can wait for a
+/// large context to be compacted and re-read
+/// (`SANDBOXED_REMOTE_STARTUP_WATCHDOG_RESUMED_SECS`).
+const STARTUP_WATCHDOG_RESUMED_SECS: u64 = 900;
+/// Proxy traffic this recent counts as the job talking to a model
+/// (`SANDBOXED_REMOTE_STARTUP_PROXY_RECENT_SECS`).
+const STARTUP_PROXY_RECENT_SECS: u64 = 180;
+
+fn env_secs(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+pub(crate) fn startup_watchdog_secs(resumed: bool) -> u64 {
+    if resumed {
+        env_secs(
+            "SANDBOXED_REMOTE_STARTUP_WATCHDOG_RESUMED_SECS",
+            STARTUP_WATCHDOG_RESUMED_SECS,
+        )
+    } else {
+        env_secs(
+            "SANDBOXED_REMOTE_STARTUP_WATCHDOG_SECS",
+            STARTUP_WATCHDOG_SECS,
+        )
+    }
+}
+
+fn startup_proxy_recent_secs() -> u64 {
+    env_secs(
+        "SANDBOXED_REMOTE_STARTUP_PROXY_RECENT_SECS",
+        STARTUP_PROXY_RECENT_SECS,
+    )
+}
+
+/// Decide one startup-watchdog tick. Any liveness signal restarts the
+/// silence clock; only a job silent on every signal for `threshold` is
+/// cancelled. A job the proxy shows talking to a model is never cancelled.
+pub(crate) fn startup_watchdog_should_cancel(
+    running_since: &mut Option<std::time::Instant>,
+    seen_log_len: &mut u64,
+    log_len: u64,
+    proxy_active: bool,
+    threshold: std::time::Duration,
+) -> bool {
+    if proxy_active || log_len > *seen_log_len {
+        *seen_log_len = log_len.max(*seen_log_len);
+        *running_since = Some(std::time::Instant::now());
+        return false;
+    }
+    running_since
+        .get_or_insert_with(std::time::Instant::now)
+        .elapsed()
+        >= threshold
 }
 
 /// Marker shared with recovery: a resume that died before any event.
@@ -2831,6 +2920,76 @@ fn vibe_continuation_plan(
 
 #[cfg(test)]
 mod tests {
+
+    /// 4ad4bc01 (opencode, resumed 325k-token session): the node log stayed
+    /// empty for 300 s while the proxy streamed Gemini for the mission's
+    /// `remote-launch:` key. Such a job must survive the watchdog.
+    #[test]
+    fn startup_watchdog_spares_silent_job_with_proxy_activity() {
+        let mission = Uuid::new_v4();
+        crate::api::proxy_liveness::note_activity(mission);
+        let active = crate::api::proxy_liveness::is_active(
+            mission,
+            std::time::Duration::from_secs(startup_proxy_recent_secs()),
+        );
+        assert!(active);
+        let mut since = Some(std::time::Instant::now() - std::time::Duration::from_secs(3600));
+        let mut seen = 0;
+        assert!(!startup_watchdog_should_cancel(
+            &mut since,
+            &mut seen,
+            0,
+            active,
+            std::time::Duration::ZERO,
+        ));
+        // A request still in flight (no first byte yet) counts too.
+        let other = Uuid::new_v4();
+        let _guard = crate::api::proxy_liveness::begin_request(other);
+        assert!(crate::api::proxy_liveness::is_active(
+            other,
+            std::time::Duration::ZERO
+        ));
+        // Raw node output the parser does not recognise also proves life.
+        let mut since = Some(std::time::Instant::now() - std::time::Duration::from_secs(3600));
+        assert!(!startup_watchdog_should_cancel(
+            &mut since,
+            &mut seen,
+            42,
+            false,
+            std::time::Duration::from_secs(300),
+        ));
+        assert_eq!(seen, 42);
+    }
+
+    #[test]
+    fn startup_watchdog_still_cancels_a_dead_job() {
+        let mission = Uuid::new_v4();
+        let active = crate::api::proxy_liveness::is_active(
+            mission,
+            std::time::Duration::from_secs(startup_proxy_recent_secs()),
+        );
+        assert!(!active);
+        let mut since = None;
+        let mut seen = 0;
+        // First tick starts the clock; nothing elapsed yet.
+        assert!(!startup_watchdog_should_cancel(
+            &mut since,
+            &mut seen,
+            0,
+            active,
+            std::time::Duration::from_secs(300),
+        ));
+        since = Some(std::time::Instant::now() - std::time::Duration::from_secs(301));
+        assert!(startup_watchdog_should_cancel(
+            &mut since,
+            &mut seen,
+            0,
+            active,
+            std::time::Duration::from_secs(300),
+        ));
+        assert!(startup_watchdog_secs(true) > startup_watchdog_secs(false));
+    }
+
     #[test]
     fn terminal_run_lease_orphans_its_node_job_after_grace() {
         use crate::api::mission_store::{MissionExecutionState, MissionRun};
@@ -3315,7 +3474,7 @@ mod tests {
         })).unwrap();
         let verdict = observer.verdict(&status, "node").await;
         assert!(!verdict.success);
-        assert_eq!(verdict.status_reason, "remote_job_cancelled");
+        assert_eq!(verdict.status_reason, "remote_startup_stalled");
         assert!(verdict.cli_error.unwrap().contains("startup_watchdog"));
     }
 
