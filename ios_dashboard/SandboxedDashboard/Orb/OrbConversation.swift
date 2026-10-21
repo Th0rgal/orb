@@ -9,10 +9,7 @@ struct OrbConversation: View {
     @State private var id: String?
     @State private var loading = true
     @State private var visibleCount = 20
-    @State private var followsLatest = true
-    @State private var userScrolling = false
-    @State private var atBottom = true
-    @State private var openedAtLatest = false
+    @State private var scroller = OrbTranscriptScroller()
     @State private var mission: OrbJSON = .null
     @State private var execution: OrbJSON = .null
     @State private var text = ""
@@ -107,7 +104,7 @@ struct OrbConversation: View {
             events: events,
             optimisticPrompt: optimisticPrompt
         )
-        if !followsLatest && next.count > history.count && history.count >= visibleCount {
+        if !scroller.pinned && next.count > history.count && history.count >= visibleCount {
             visibleCount += (next.count - history.count)
         }
         if history.count != next.count || zip(history, next).contains(where: { $0.0 != $1.0 || $0.1 != $1.1 || $0.2 != $1.2 }) {
@@ -415,32 +412,12 @@ struct OrbConversation: View {
 
     private func scrollToBottomOnOpen(scroll: ScrollViewProxy) {
         guard !history.isEmpty else { return }
-        followsLatest = true
-        openedAtLatest = true
-        scroll.scrollTo("conversation-bottom", anchor: .bottom)
-        Task { @MainActor in
-            await Task.yield()
-            if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
-            try? await Task.sleep(for: .milliseconds(90))
-            if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
-            try? await Task.sleep(for: .milliseconds(220))
-            if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
-        }
+        scroller.scrollToBottom()
     }
 
     @ViewBuilder
     private func conversationContainer(scroll: ScrollViewProxy) -> some View {
-        ZStack(alignment: .bottomTrailing) {
-            conversationScrollView(scroll: scroll)
-            if !atBottom && !history.isEmpty {
-                scrollToLatestButton(scroll: scroll)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func conversationScrollView(scroll: ScrollViewProxy) -> some View {
-        ScrollView {
+        OrbTranscriptScrollView(identifier: "conversation", scroller: scroller, working: working) {
             VStack(alignment: .leading, spacing: 14) {
                 if unavailable {
                     ContentUnavailableView("Available on your Mac", systemImage: "laptopcomputer", description: Text("This conversation runs locally in Orb and cannot be controlled from iOS."))
@@ -453,47 +430,16 @@ struct OrbConversation: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .defaultScrollAnchor(.bottom)
-        .onScrollPhaseChange { _, phase in
-            userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
-            if userScrolling { followsLatest = atBottom }
-        }
-        .onScrollGeometryChange(for: Bool.self) { geometry in
-            let maxScrollableY = max(0, geometry.contentSize.height - geometry.visibleRect.height)
-            return maxScrollableY <= 24 || geometry.visibleRect.maxY >= geometry.contentSize.height - 40
-        } action: { _, value in
-            atBottom = value
-            if value {
-                followsLatest = true
-            } else if userScrolling {
-                followsLatest = false
-            }
-        }
-        .onScrollGeometryChange(for: CGSize.self) { geometry in
-            CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
-        } action: { _, _ in
-            if followsLatest {
-                Task { @MainActor in
-                    await Task.yield()
-                    if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
-                }
-            }
-        }
         .onChange(of: working) { _, now in
             if !now { OrbWorkClock.stop("local:\(id ?? "")") }
             rebuildWorkModel()
         }
         .onChange(of: history.last?.0) { _, _ in
-            if !openedAtLatest || followsLatest {
-                scroll.scrollTo("conversation-bottom", anchor: .bottom)
-                openedAtLatest = true
-                Task { @MainActor in
-                    await Task.yield()
-                    if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
-                    try? await Task.sleep(for: .milliseconds(120))
-                    if followsLatest { scroll.scrollTo("conversation-bottom", anchor: .bottom) }
-                }
-            }
+            if scroller.pinned { scroller.scrollToBottom() }
+        }
+        .onChange(of: composerFocused) { _, focused in
+            // The keyboard covers the transcript: keep the latest message visible, like Messages.
+            if focused && scroller.metrics.distanceFromBottom <= OrbTranscriptScroller.pillThreshold { scroller.scrollToBottom(animated: true) }
         }
     }
 
@@ -591,7 +537,7 @@ struct OrbConversation: View {
         if history.count > visibleCount {
             Button("Load earlier messages") {
                 let anchor = history.suffix(visibleCount).first?.0
-                followsLatest = false
+                scroller.pinned = false
                 visibleCount += 20
                 Task { @MainActor in
                     await Task.yield()
@@ -947,70 +893,36 @@ struct OrbConversation: View {
         }
     }
 
-    private func scrollToLatestButton(scroll: ScrollViewProxy) -> some View {
-        Button {
-            OrbHaptics.selection()
-            followsLatest = true
-            withAnimation(.snappy(duration: 0.22)) {
-                scroll.scrollTo("conversation-bottom", anchor: .bottom)
-            }
-        } label: {
-            HStack(spacing: 6) {
-                if working { OrbRunningDots(size: 10) }
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8)
-            .background(OrbStyle.elevated.opacity(0.95), in: Capsule())
-            .overlay(Capsule().stroke(OrbStyle.borderStrong))
-            .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-        }
-        .buttonStyle(.plain)
-        .padding(.trailing, 16)
-        .padding(.bottom, 10)
-        .transition(.scale(scale: 0.9).combined(with: .opacity))
-        .accessibilityLabel("Scroll to latest message")
-    }
 
     private var conversationToolbarMenu: some View {
         let currentStatus = mission["status"].text
-        return Menu {
-            if id != nil && !unavailable {
-                Section {
-                    Text(selection.label)
-                    if !status.isEmpty { Text(status.capitalized) }
-                }
-                Button("Rename") { title = mission["title"].text; rename = true }
-                Button("Move") { destinationProject = mission["project"].text; destinationFolder = OrbRow(mission).folder; moving = true }
-                if MissionState(rawValue: currentStatus)?.canReopen == true {
-                    Button(currentStatus == "acknowledged" ? "Restore" : "Reopen") {
-                        Task { await mutate(["status": .string("paused")]) }
-                    }
-                    .disabled(working)
-                }
-                if currentStatus != "acknowledged" {
-                    Button("Archive") { Task { await mutate(["status": .string("acknowledged")]) } }.disabled(working)
-                }
-                if working && (!isCloud || selection.canCancel) {
-                    Button("Stop", role: .destructive) { Task { await cancel() } }
-                }
-                if let url = safeURL(execution["external_url"].text) {
-                    Link("Open in service", destination: url)
-                }
-                if !isCloud {
-                    Divider()
-                    Button { sideQuestion = OrbSideQuestionRequest(parent: id ?? "", question: "") } label: { Label("Side question (/btw)", systemImage: "bubble.left.and.text.bubble.right") }
-                    Button { forking = true } label: { Label("Fork conversation", systemImage: "arrow.triangle.branch") }
-                    Button { cloning = true } label: { Label("Clone", systemImage: "plus.square.on.square") }
-                }
+        let state = MissionState(rawValue: currentStatus)
+        return OrbConversationMenu(
+            hasMission: id != nil && !unavailable,
+            agentLabel: selection.label,
+            status: status.capitalized,
+            canReopen: state?.canReopen == true,
+            reopenTitle: currentStatus == "acknowledged" ? "Restore" : "Reopen",
+            canArchive: currentStatus != "acknowledged",
+            working: working,
+            canStop: working && (!isCloud || selection.canCancel),
+            externalURL: safeURL(execution["external_url"].text),
+            local: !isCloud,
+            hasProject: !effectiveProjectSlug.isEmpty
+        ) { action in
+            switch action {
+            case .rename: title = mission["title"].text; rename = true
+            case .move: destinationProject = mission["project"].text; destinationFolder = OrbRow(mission).folder; moving = true
+            case .reopen: Task { await mutate(["status": .string("paused")]) }
+            case .archive: Task { await mutate(["status": .string("acknowledged")]) }
+            case .stop: Task { await cancel() }
+            case .sideQuestion: sideQuestion = OrbSideQuestionRequest(parent: id ?? "", question: "")
+            case .fork: forking = true
+            case .clone: cloning = true
+            case .context: showContext = true
             }
-            if !effectiveProjectSlug.isEmpty { Button("Project context") { showContext = true } }
-        } label: {
-            Image(systemName: "ellipsis")
         }
-        .accessibilityLabel("Conversation actions")
+        .equatable()
     }
 
     @ViewBuilder private var cloneActions: some View {
@@ -1859,7 +1771,7 @@ struct OrbConversation: View {
                         optimisticPrompt = prompt
                         localTurnStart = Date()
                         text = ""
-                        followsLatest = true
+                        scroller.scrollToBottom()
                         rebuildHistory()
                     }
                 }
@@ -1947,8 +1859,7 @@ struct OrbConversation: View {
             attachments = []
             OrbDisk.remove(draftKey + ":files")
             error = ""
-            followsLatest = true
-            openedAtLatest = false
+            scroller.scrollToBottom()
             await refresh(force: true)
             return true
         } catch {
@@ -2067,7 +1978,7 @@ struct OrbConversation: View {
             optimisticPrompt = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
             handoff = started
             handoffTracker.reset()
-            followsLatest = true
+            scroller.scrollToBottom()
             rebuildHistory()
         }
         Task {
@@ -3267,7 +3178,7 @@ struct OrbComposerBox<Top: View, Leading: View>: View {
                         .foregroundStyle(canSend ? OrbStyle.background : Color.white.opacity(0.25))
                 }
             }
-            .frame(width: 38, height: 40)
+            .frame(width: 44, height: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -3291,10 +3202,76 @@ struct OrbComposerBox<Top: View, Leading: View>: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.white.opacity(0.9))
             }
-            .frame(width: 34, height: 40)
+            .frame(width: 44, height: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(stopLabel)
+        .accessibilityIdentifier("composer.stop")
+    }
+}
+
+/// The conversation's "…" menu. Driven by plain values and `Equatable`, so the 1 s
+/// Working clock and 3 s polling do not rebuild it while a finger is on it (a rebuilt
+/// toolbar menu could swallow the first tap).
+struct OrbConversationMenu: View, Equatable {
+    enum Action { case rename, move, reopen, archive, stop, sideQuestion, fork, clone, context }
+
+    let hasMission: Bool
+    let agentLabel: String
+    let status: String
+    let canReopen: Bool
+    let reopenTitle: String
+    let canArchive: Bool
+    let working: Bool
+    let canStop: Bool
+    let externalURL: URL?
+    let local: Bool
+    let hasProject: Bool
+    let perform: (Action) -> Void
+
+    nonisolated static func == (l: Self, r: Self) -> Bool {
+        l.hasMission == r.hasMission && l.agentLabel == r.agentLabel && l.status == r.status &&
+        l.canReopen == r.canReopen && l.reopenTitle == r.reopenTitle && l.canArchive == r.canArchive &&
+        l.working == r.working && l.canStop == r.canStop && l.externalURL == r.externalURL &&
+        l.local == r.local && l.hasProject == r.hasProject
+    }
+
+    var body: some View {
+        Menu {
+            if hasMission {
+                Section {
+                    Text(agentLabel)
+                    if !status.isEmpty { Text(status) }
+                }
+                Button { perform(.rename) } label: { Label("Rename", systemImage: "pencil") }
+                Button { perform(.move) } label: { Label("Move", systemImage: "folder") }
+                if canReopen {
+                    Button { perform(.reopen) } label: { Label(reopenTitle, systemImage: "arrow.uturn.backward") }.disabled(working)
+                }
+                if canArchive {
+                    Button { perform(.archive) } label: { Label("Archive", systemImage: "archivebox") }.disabled(working)
+                }
+                if canStop {
+                    Button(role: .destructive) { perform(.stop) } label: { Label("Stop", systemImage: "stop.circle") }
+                }
+                if let externalURL {
+                    Link(destination: externalURL) { Label("Open in service", systemImage: "arrow.up.right.square") }
+                }
+                if local {
+                    Divider()
+                    Button { perform(.sideQuestion) } label: { Label("Side question (/btw)", systemImage: "bubble.left.and.text.bubble.right") }
+                    Button { perform(.fork) } label: { Label("Fork conversation", systemImage: "arrow.triangle.branch") }
+                    Button { perform(.clone) } label: { Label("Clone", systemImage: "plus.square.on.square") }
+                }
+            }
+            if hasProject { Button { perform(.context) } label: { Label("Project context", systemImage: "doc.text") } }
+        } label: {
+            Image(systemName: "ellipsis")
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Conversation actions")
+        .accessibilityIdentifier("conversation.menu")
     }
 }
