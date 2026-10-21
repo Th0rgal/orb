@@ -19,7 +19,7 @@
 //! `SANDBOXED_MANAGED_MAX_TTL_MINUTES` (720), `SANDBOXED_MANAGED_DEFAULT_SIZE`
 //! (small), `SANDBOXED_MANAGED_MAX_SIZE` (xlarge), `SANDBOXED_MANAGED_IMAGE`
 //! (orb-node-base), `SANDBOXED_MANAGED_CORE_URL` (defaults to
-//! `SANDBOXED_PUBLIC_URL`), `SANDBOXED_MANAGED_IDLE_MINUTES` (30),
+//! `SANDBOXED_PUBLIC_URL`), `SANDBOXED_MANAGED_IDLE_MINUTES` (15),
 //! `SANDBOXED_MANAGED_RECONCILE_SECS` (300).
 
 pub mod boat;
@@ -225,7 +225,7 @@ impl ManagedSettings {
                 .or_else(|| std::env::var("SANDBOXED_PUBLIC_URL").ok())
                 .map(|u| u.trim().trim_end_matches('/').to_string())
                 .filter(|u| !u.is_empty()),
-            idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(30),
+            idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(15),
             reconcile_secs: env_parse("SANDBOXED_MANAGED_RECONCILE_SECS").unwrap_or(300),
         }
     }
