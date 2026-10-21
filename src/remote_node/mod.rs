@@ -163,6 +163,13 @@ impl RemoteNodeSettings {
         }
     }
 
+    /// Static (operator-enrolled) nodes only. Use this for every path that
+    /// hands a node credentials or private material beyond the per-job
+    /// projected harness auth: managed nodes are an untrusted class.
+    pub fn static_node(&self, id: &str) -> Option<&RemoteNodeConfig> {
+        self.nodes.iter().find(|node| node.id == id)
+    }
+
     /// Static nodes first, then live managed (dial-out) nodes. Managed nodes
     /// are deliberately absent from `nodes`, so automatic placement, which
     /// iterates `nodes`, never selects them.

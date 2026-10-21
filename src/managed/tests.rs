@@ -12,6 +12,7 @@ fn settings() -> ManagedSettings {
         default_size: "small".into(),
         max_size: "xlarge".into(),
         image: "orb-node-base".into(),
+        allowed_images: vec!["orb-node-base".into()],
         core_url: Some("https://core.example".into()),
         idle_minutes: 30,
         reconcile_secs: 300,
@@ -389,4 +390,86 @@ async fn boat_e2e_provider_round_trip() {
         boat::is_stopped_state(&still) || still.is_empty(),
         "state {still}"
     );
+}
+
+#[test]
+fn only_allowlisted_images_are_accepted() {
+    let s = settings();
+    assert_eq!(
+        ManagedManager::resolve_image(&s, None).unwrap(),
+        "orb-node-base"
+    );
+    assert_eq!(
+        ManagedManager::resolve_image(&s, Some(" ")).unwrap(),
+        "orb-node-base"
+    );
+    assert_eq!(
+        ManagedManager::resolve_image(&s, Some("orb-node-base")).unwrap(),
+        "orb-node-base"
+    );
+    assert_eq!(
+        ManagedManager::resolve_image(&s, Some("someone-elses-snapshot"))
+            .unwrap_err()
+            .error,
+        "image_unknown"
+    );
+}
+
+#[tokio::test]
+async fn spawn_rejects_unlisted_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let e = m
+        .spawn(SpawnRequest {
+            image: Some("research-xlarge-16gb".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "image_unknown");
+    assert_eq!(fake.created.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn managed_nodes_are_excluded_from_static_lookup() {
+    let machine = ManagedMachine {
+        id: "mmtrust01".into(),
+        provider: "fake".into(),
+        provider_id: None,
+        node_id: "managed-mmtrust01".into(),
+        image: "orb-node-base".into(),
+        size: "small".into(),
+        cpu: 2,
+        ram_gb: 4,
+        disk_gb: 12,
+        usd_per_hour: 0.018,
+        state: MachineState::Online,
+        created_at: Utc::now(),
+        expires_at: Utc::now(),
+        online_at: None,
+        destroyed_at: None,
+        destroy_reason: None,
+        cost_usd: 0.0,
+        cost_is_metered: false,
+        owner_mission_id: None,
+        reason: None,
+        error: None,
+        ledger_closed: false,
+        last_busy_at: None,
+    };
+    register_node(&machine, 3999, "tok");
+    let settings = crate::remote_node::RemoteNodeSettings {
+        enabled: true,
+        nodes: vec![],
+    };
+    // Job placement may resolve it by explicit id ...
+    assert!(settings.node("managed-mmtrust01").is_some());
+    // ... but credential-bearing paths use static_node and never see it.
+    assert!(settings.static_node("managed-mmtrust01").is_none());
+    assert!(is_managed_node("managed-mmtrust01"));
+    // Token lives in memory, never in the process environment.
+    assert!(std::env::var(token_env_for("mmtrust01")).is_err());
+    unregister_node(&machine);
+    assert!(settings.node("managed-mmtrust01").is_none());
 }

@@ -265,6 +265,9 @@ struct SpawnManagedParams {
     image: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    /// Set by the gateway to the calling mission; never trusted from agents.
+    #[serde(default)]
+    owner_mission_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2519,6 +2522,7 @@ impl AssistantMcp {
                         ttl_minutes: params.managed_ttl_minutes,
                         image: None,
                         reason: Some(format!("start_mission: {}", params.title)),
+                        owner_mission_id: None,
                     },
                     params.parent_mission_id.map(|id| id.to_string()),
                 )
@@ -4007,7 +4011,8 @@ impl AssistantMcp {
             "get_compute_fleet" => self.get_compute_fleet().await,
             "spawn_managed_machine" => {
                 let params: SpawnManagedParams = parse_params(arguments)?;
-                self.spawn_managed_machine(params, None).await
+                let owner = params.owner_mission_id.clone();
+                self.spawn_managed_machine(params, owner).await
             }
             "list_managed_machines" => {
                 self.managed_request(reqwest::Method::GET, "/api/managed-machines".into(), None)

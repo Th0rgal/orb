@@ -164,6 +164,9 @@ pub struct ManagedSettings {
     pub default_size: String,
     pub max_size: String,
     pub image: String,
+    /// Images (named snapshots) callers may request
+    /// (`SANDBOXED_MANAGED_IMAGES`, comma list; default just `image`).
+    pub allowed_images: Vec<String>,
     #[serde(skip)]
     pub core_url: Option<String>,
     pub idle_minutes: u64,
@@ -191,6 +194,19 @@ impl ManagedSettings {
             .map_or("xlarge", |s| s.size)
             .to_string();
         let max_ttl = env_parse("SANDBOXED_MANAGED_MAX_TTL_MINUTES").unwrap_or(720u64);
+        let image = std::env::var("SANDBOXED_MANAGED_IMAGE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "orb-node-base".into());
+        let mut allowed_images: Vec<String> = std::env::var("SANDBOXED_MANAGED_IMAGES")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !allowed_images.contains(&image) {
+            allowed_images.push(image.clone());
+        }
         Self {
             enabled,
             provider: "boat".into(),
@@ -202,10 +218,8 @@ impl ManagedSettings {
             max_ttl_minutes: max_ttl,
             default_size,
             max_size,
-            image: std::env::var("SANDBOXED_MANAGED_IMAGE")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "orb-node-base".into()),
+            image,
+            allowed_images,
             core_url: std::env::var("SANDBOXED_MANAGED_CORE_URL")
                 .ok()
                 .or_else(|| std::env::var("SANDBOXED_PUBLIC_URL").ok())
@@ -650,6 +664,27 @@ impl ManagedManager {
         }
     }
 
+    /// Only operator-allowlisted images may be started.
+    pub fn resolve_image(
+        settings: &ManagedSettings,
+        requested: Option<&str>,
+    ) -> Result<String, ManagedError> {
+        match requested.map(str::trim).filter(|i| !i.is_empty()) {
+            None => Ok(settings.image.clone()),
+            Some(image) if settings.allowed_images.iter().any(|a| a == image) => {
+                Ok(image.to_string())
+            }
+            Some(image) => Err(ManagedError::new(
+                "image_unknown",
+                400,
+                format!(
+                    "Image '{image}' is not allowed; allowed: {}",
+                    settings.allowed_images.join(", ")
+                ),
+            )),
+        }
+    }
+
     /// Validate a request against size / TTL policy. Pure, so it is unit-tested.
     pub fn plan(
         settings: &ManagedSettings,
@@ -728,11 +763,7 @@ impl ManagedManager {
             )
         })?;
         let (spec, ttl_minutes) = Self::plan(&self.settings, &req)?;
-        let image = req
-            .image
-            .clone()
-            .filter(|i| !i.trim().is_empty())
-            .unwrap_or_else(|| self.settings.image.clone());
+        let image = Self::resolve_image(&self.settings, req.image.as_deref())?;
 
         let machine = {
             let _guard = self.admission.lock().await;

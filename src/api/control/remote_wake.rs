@@ -1097,6 +1097,10 @@ pub(super) async fn remote_library_skills(
     mission: &Mission,
     node: &crate::remote_node::RemoteNodeConfig,
 ) -> Option<(String, String)> {
+    // Managed machines are untrusted: no Library material beyond the prompt.
+    if crate::managed::is_managed_node(&node.id) {
+        return None;
+    }
     let library = state.library.read().await.clone()?;
     let (workspace_skills, default_host) = match state.workspaces.get(mission.workspace_id).await {
         Some(ws) => (

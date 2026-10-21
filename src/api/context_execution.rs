@@ -64,6 +64,9 @@ pub async fn remote(
     if !super::projects_overview::is_plain_key(project) {
         return Err("Invalid context project".into());
     }
+    if crate::managed::is_managed_node(&node.id) {
+        return Err("Project context is not delivered to managed machines".into());
+    }
     let root = super::mission_payload::project_files_root(&state.config.working_dir, project);
     let metadata = state
         .config
