@@ -851,6 +851,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/nodes/:name/cordon", post(cordon_remote_node))
         .route("/api/nodes/:name/uncordon", post(uncordon_remote_node))
         .route("/api/ai/usage/summary", get(get_ai_usage_summary))
+        .route("/api/ai/proxy/health", get(get_ai_proxy_health))
         .route("/api/task", post(create_task))
         .route("/api/task/:id", get(get_task))
         .route("/api/task/:id/stop", post(stop_task))
@@ -2068,6 +2069,39 @@ async fn get_ai_usage_summary(
         &window,
         since,
         &params.filter,
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProxyHealthQuery {
+    /// N followed by h, d or w (default "24h"), or "all".
+    window: Option<String>,
+}
+
+/// GET /api/ai/proxy/health — router reliability per provider/model/account:
+/// success rate, p50/p95 time to first token, error breakdown, red flags.
+async fn get_ai_proxy_health(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<ProxyHealthQuery>,
+) -> Result<Json<super::proxy_reliability::ProxyHealthResponse>, (StatusCode, String)> {
+    let window =
+        super::usage_summary::parse_window(Some(params.window.as_deref().unwrap_or("24h")))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let since = window.since(chrono::Utc::now());
+    let control_state = state.control.get_or_spawn(&user).await;
+    let records = control_state
+        .mission_store
+        .get_proxy_outcomes(since.as_deref())
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Failed to read proxy outcomes");
+            (StatusCode::INTERNAL_SERVER_ERROR, e)
+        })?;
+    Ok(Json(super::proxy_reliability::summarize(
+        &records,
+        &window.label,
+        since,
     )))
 }
 

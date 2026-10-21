@@ -41,7 +41,59 @@ pub enum CooldownReason {
     /// request, 404 unknown model). Tracked so repeated failures trigger
     /// cooldown/backoff instead of silently consuming retries.
     ClientError,
+    /// HTTP 402 or an "insufficient credit/balance" body: the account is out
+    /// of prepaid credit. An account error, not a model error: every request
+    /// routed there fails until someone tops it up, so it gets the account
+    /// circuit breaker (see [`account_error_cooldown`]).
+    PaymentRequired,
 }
+
+impl CooldownReason {
+    /// Errors that say the *account* is unusable (no credit, bad or revoked
+    /// credentials) rather than that one request failed. They trip the
+    /// account circuit breaker: a long exponential cooldown whose expiry
+    /// lets exactly the next request through as a probe.
+    pub fn is_account_error(self) -> bool {
+        matches!(self, Self::PaymentRequired | Self::AuthError)
+    }
+}
+
+/// Base of the account circuit breaker (402 / out of credit / 401 / 403).
+/// Defaults to 10 minutes; override with `PROVIDER_ACCOUNT_ERROR_BASE_SECS`.
+fn account_error_base_secs() -> u64 {
+    std::env::var("PROVIDER_ACCOUNT_ERROR_BASE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(600)
+}
+
+/// Cap of the account circuit breaker. Defaults to 6 hours; override with
+/// `PROVIDER_ACCOUNT_ERROR_MAX_SECS`.
+fn account_error_max_secs() -> u64 {
+    std::env::var("PROVIDER_ACCOUNT_ERROR_MAX_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(6 * 3600)
+}
+
+/// Cooldown after the `consecutive`-th (1-based) account error in a row:
+/// 10 min, 20 min, 40 min, … capped at 6 h. The account becomes routable
+/// again when it expires, so the next request is the periodic probe: a
+/// success closes the breaker (resets the streak), another account error
+/// re-opens it for twice as long.
+pub fn account_error_cooldown(consecutive: u32) -> std::time::Duration {
+    let base = account_error_base_secs();
+    let max = account_error_max_secs().max(base);
+    let exp = consecutive.saturating_sub(1).min(20);
+    let secs = base.saturating_mul(1u64 << exp).min(max);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Label stored with a persisted out-of-credit cooldown, so a restart still
+/// reports "out of credit" rather than a generic usage limit.
+pub const OUT_OF_CREDIT_LIMIT: &str = "out of credit";
 
 impl std::fmt::Display for CooldownReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -53,6 +105,7 @@ impl std::fmt::Display for CooldownReason {
             Self::ServerError => write!(f, "server_error"),
             Self::AuthError => write!(f, "auth_error"),
             Self::ClientError => write!(f, "client_error"),
+            Self::PaymentRequired => write!(f, "payment_required"),
         }
     }
 }
@@ -286,6 +339,29 @@ pub struct AccountHealthSnapshot {
     pub is_degraded: bool,
     /// Latest rate-limit quota snapshot from provider headers.
     pub rate_limit_snapshot: Option<RateLimitSnapshot>,
+    /// What Settings should say about this account: `available`,
+    /// `out_of_credit`, `auth_failed`, `quota_exhausted`, `rate_limited` or
+    /// `cooldown`. See [`account_state`].
+    pub account_state: &'static str,
+    /// When the account circuit breaker lets the next probe request through
+    /// (only set while an account error keeps the account parked).
+    pub next_probe_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Classify an account for display. Only an active cooldown changes the
+/// state: once it expires the account is `available` again (and the next
+/// request probes it).
+pub fn account_state(in_cooldown: bool, reason: Option<CooldownReason>) -> &'static str {
+    if !in_cooldown {
+        return "available";
+    }
+    match reason {
+        Some(CooldownReason::PaymentRequired) => "out_of_credit",
+        Some(CooldownReason::AuthError) => "auth_failed",
+        Some(CooldownReason::QuotaExhausted) => "quota_exhausted",
+        Some(CooldownReason::RateLimit) | Some(CooldownReason::Overloaded) => "rate_limited",
+        _ => "cooldown",
+    }
 }
 
 impl Default for ProviderHealthTracker {
@@ -563,6 +639,11 @@ impl ProviderHealthTracker {
 
         health.consecutive_failures = health.consecutive_failures.saturating_add(1);
         let is_auth_error = matches!(reason, CooldownReason::AuthError);
+        let account_streak = if reason.is_account_error() {
+            health.consecutive_failures
+        } else {
+            0
+        };
         health.last_failure_reason = Some(reason);
         health.last_failure_at = Some(chrono::Utc::now());
 
@@ -579,8 +660,11 @@ impl ProviderHealthTracker {
                 let base = std::time::Duration::from_secs(quota_cooldown_secs());
                 retry_after.map(|r| r.max(base)).unwrap_or(base)
             }
-            CooldownReason::AuthError => {
-                retry_after.unwrap_or(std::time::Duration::from_secs(3600))
+            // Account errors (402 / out of credit / 401 / 403): exponential
+            // circuit breaker, 10 min doubling to 6 h. Expiry is the probe.
+            CooldownReason::AuthError | CooldownReason::PaymentRequired => {
+                let breaker = account_error_cooldown(account_streak.max(1));
+                retry_after.map(|r| r.max(breaker)).unwrap_or(breaker)
             }
             _ => retry_after.unwrap_or_else(|| {
                 self.backoff_config
@@ -593,7 +677,16 @@ impl ProviderHealthTracker {
 
         let is_degraded =
             health.consecutive_failures >= self.backoff_config.circuit_breaker_threshold;
-        if is_degraded {
+        if reason.is_account_error() {
+            tracing::warn!(
+                account_id = %account_id,
+                provider = %provider_id,
+                reason = %reason,
+                consecutive_failures = health.consecutive_failures,
+                cooldown_secs = cooldown.as_secs_f64(),
+                "Account circuit breaker open — skipping account until the probe window"
+            );
+        } else if is_degraded {
             tracing::warn!(
                 account_id = %account_id,
                 consecutive_failures = health.consecutive_failures,
@@ -635,7 +728,15 @@ impl ProviderHealthTracker {
         // An exhausted allowance does not come back with a restart: keep the
         // cooldown on disk. No reset time was announced on this path, so it
         // is the fixed quota window (or the upstream retry delay).
-        if matches!(reason, CooldownReason::QuotaExhausted) {
+        if matches!(
+            reason,
+            CooldownReason::QuotaExhausted | CooldownReason::PaymentRequired
+        ) {
+            let label = if matches!(reason, CooldownReason::PaymentRequired) {
+                OUT_OF_CREDIT_LIMIT
+            } else {
+                "usage limit"
+            };
             let now = chrono::Utc::now();
             let reset = crate::account_limits::LimitReset {
                 at: now
@@ -646,7 +747,7 @@ impl ProviderHealthTracker {
             self.park_until_limit_reset(
                 account_id,
                 subscription,
-                crate::account_limits::LimitCooldown::new(&provider_id, "usage limit", reset),
+                crate::account_limits::LimitCooldown::new(&provider_id, label, reset),
             );
         }
 
@@ -803,6 +904,15 @@ impl ProviderHealthTracker {
     ) -> AccountHealthSnapshot {
         // The longer of the in-memory cooldown and the usage-limit one.
         let remaining = health.remaining_cooldown().max(limit_remaining);
+        let state = account_state(remaining.is_some(), health.last_failure_reason);
+        let next_probe_at = remaining
+            .filter(|_| {
+                health
+                    .last_failure_reason
+                    .is_some_and(CooldownReason::is_account_error)
+            })
+            .and_then(|d| chrono::Duration::from_std(d).ok())
+            .map(|d| chrono::Utc::now() + d);
         AccountHealthSnapshot {
             account_id,
             provider_id: health.provider_id.clone(),
@@ -824,6 +934,8 @@ impl ProviderHealthTracker {
             total_output_tokens: health.total_output_tokens,
             is_degraded: health.consecutive_failures >= backoff_config.circuit_breaker_threshold,
             rate_limit_snapshot: health.rate_limit_snapshot.clone(),
+            account_state: state,
+            next_probe_at,
         }
     }
 
@@ -842,29 +954,38 @@ impl ProviderHealthTracker {
             }
             // Parked by a cooldown loaded from disk or recorded by a harness
             // rotation path: this tracker has no counters for it.
-            None => AccountHealthSnapshot {
-                account_id,
-                provider_id: limit
-                    .as_ref()
-                    .map(|cooldown| cooldown.provider.clone())
-                    .filter(|provider| !provider.is_empty()),
-                is_healthy: limit_remaining.is_none(),
-                cooldown_remaining_secs: limit_remaining.map(|d| d.as_secs_f64()),
-                consecutive_failures: 0,
-                last_failure_reason: limit
-                    .as_ref()
-                    .map(|_| CooldownReason::QuotaExhausted.to_string()),
-                last_failure_at: limit.as_ref().map(|cooldown| cooldown.recorded_at),
-                total_requests: 0,
-                total_successes: 0,
-                total_rate_limits: 0,
-                total_errors: 0,
-                avg_latency_ms: None,
-                total_input_tokens: 0,
-                total_output_tokens: 0,
-                is_degraded: false,
-                rate_limit_snapshot: None,
-            },
+            None => {
+                let parked_reason = limit.as_ref().map(|cooldown| {
+                    if cooldown.limit == OUT_OF_CREDIT_LIMIT {
+                        CooldownReason::PaymentRequired
+                    } else {
+                        CooldownReason::QuotaExhausted
+                    }
+                });
+                AccountHealthSnapshot {
+                    account_id,
+                    provider_id: limit
+                        .as_ref()
+                        .map(|cooldown| cooldown.provider.clone())
+                        .filter(|provider| !provider.is_empty()),
+                    is_healthy: limit_remaining.is_none(),
+                    cooldown_remaining_secs: limit_remaining.map(|d| d.as_secs_f64()),
+                    consecutive_failures: 0,
+                    last_failure_reason: parked_reason.map(|r| r.to_string()),
+                    last_failure_at: limit.as_ref().map(|cooldown| cooldown.recorded_at),
+                    total_requests: 0,
+                    total_successes: 0,
+                    total_rate_limits: 0,
+                    total_errors: 0,
+                    avg_latency_ms: None,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    is_degraded: false,
+                    rate_limit_snapshot: None,
+                    account_state: account_state(limit_remaining.is_some(), parked_reason),
+                    next_probe_at: None,
+                }
+            }
         }
     }
 
@@ -2379,6 +2500,97 @@ mod tests {
         tracker.remove_account(account_id).await;
 
         assert!(!tracker.any_account_has_active_cooldown(&[account_id]).await);
+    }
+
+    #[test]
+    fn account_error_cooldown_doubles_from_ten_minutes_to_six_hours() {
+        let mins = |n| account_error_cooldown(n).as_secs() / 60;
+        assert_eq!(mins(1), 10);
+        assert_eq!(mins(2), 20);
+        assert_eq!(mins(3), 40);
+        assert_eq!(mins(6), 320);
+        assert_eq!(mins(7), 360, "capped at 6 h");
+        assert_eq!(mins(40), 360);
+    }
+
+    #[tokio::test]
+    async fn payment_required_opens_the_account_circuit_breaker_and_skips_the_chain_entry() {
+        let mut minimax = AIProvider::new(ProviderType::Minimax, "MiniMax".to_string());
+        minimax.api_key = Some("test-key".to_string());
+        minimax.status = ProviderStatus::Connected;
+        let account_id = minimax.id;
+        let store = store_with(vec![minimax]).await;
+        let chains = store_with_chain(
+            "smart",
+            vec![ChainEntry {
+                provider_id: "minimax".to_string(),
+                model_id: "MiniMax-M3".to_string(),
+            }],
+        )
+        .await;
+        let tracker = ProviderHealthTracker::new();
+        let entries = chains.resolve_chain("smart", &store, &[], &tracker).await;
+        assert_eq!(entries.len(), 1);
+
+        let first = tracker
+            .record_entry_failure(&entries[0], CooldownReason::PaymentRequired, None)
+            .await;
+        assert_eq!(first.as_secs(), 600, "first 402 parks the account 10 min");
+        assert!(!tracker.is_healthy(account_id).await);
+        assert!(
+            chains
+                .resolve_chain("smart", &store, &[], &tracker)
+                .await
+                .is_empty(),
+            "an out-of-credit account is skipped instead of paying a failing hop"
+        );
+        let health = tracker.get_health(account_id).await;
+        assert_eq!(health.account_state, "out_of_credit");
+        assert_eq!(
+            health.last_failure_reason.as_deref(),
+            Some("payment_required")
+        );
+        assert!(health.next_probe_at.is_some());
+
+        // The probe after expiry fails again: twice as long.
+        let second = tracker
+            .record_entry_failure(&entries[0], CooldownReason::PaymentRequired, None)
+            .await;
+        assert_eq!(second.as_secs(), 1200);
+
+        // A successful probe closes the breaker.
+        tracker.clear_cooldown(account_id).await;
+        tracker.record_entry_success(&entries[0]).await;
+        assert!(tracker.is_healthy(account_id).await);
+        assert_eq!(
+            tracker.get_health(account_id).await.account_state,
+            "available"
+        );
+        let again = tracker
+            .record_entry_failure(&entries[0], CooldownReason::PaymentRequired, None)
+            .await;
+        assert_eq!(again.as_secs(), 600, "the streak restarts after a success");
+    }
+
+    #[tokio::test]
+    async fn auth_errors_use_the_account_breaker_and_report_auth_failed() {
+        let tracker = ProviderHealthTracker::new();
+        let account_id = Uuid::new_v4();
+        let cooldown = tracker
+            .record_failure(account_id, CooldownReason::AuthError, None)
+            .await;
+        assert_eq!(cooldown.as_secs(), 600);
+        assert_eq!(
+            tracker.get_health(account_id).await.account_state,
+            "auth_failed"
+        );
+        // Transient failures keep the short backoff and a generic state.
+        let other = Uuid::new_v4();
+        let short = tracker
+            .record_failure(other, CooldownReason::ServerError, None)
+            .await;
+        assert!(short.as_secs() < 60);
+        assert_eq!(tracker.get_health(other).await.account_state, "cooldown");
     }
 
     async fn store_with(providers: Vec<AIProvider>) -> AIProviderStore {

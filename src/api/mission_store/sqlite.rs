@@ -1228,6 +1228,15 @@ impl MissionStore for SqliteMissionStore {
     ) -> Result<Vec<HourlyUsageStats>, String> {
         SqliteMissionStore::get_proxy_usage_by_hour(self, since).await
     }
+    async fn record_proxy_outcome(&self, record: &super::ProxyOutcomeRecord) -> Result<(), String> {
+        SqliteMissionStore::record_proxy_outcome(self, record).await
+    }
+    async fn get_proxy_outcomes(
+        &self,
+        since: Option<&str>,
+    ) -> Result<Vec<super::ProxyOutcomeRecord>, String> {
+        SqliteMissionStore::get_proxy_outcomes(self, since).await
+    }
     async fn create_automation(&self, automation: Automation) -> Result<Automation, String> {
         SqliteMissionStore::create_automation(self, automation).await
     }

@@ -5076,3 +5076,49 @@ async fn registered_tool_execution_is_scoped_to_its_run() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn proxy_outcomes_round_trip_and_filter_by_since() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+        .await
+        .expect("sqlite store");
+    let account = Uuid::new_v4();
+    let old = crate::api::mission_store::ProxyOutcomeRecord {
+        timestamp: "2026-10-01T00:00:00+00:00".into(),
+        chain_id: "builtin/smart".into(),
+        provider: Some("minimax".into()),
+        account_id: Some(account),
+        model: Some("MiniMax-M3".into()),
+        status: "client_error".into(),
+        http_status: Some(402),
+        superseded: true,
+        ..Default::default()
+    };
+    let recent = crate::api::mission_store::ProxyOutcomeRecord {
+        timestamp: "2026-10-20T00:00:00+00:00".into(),
+        chain_id: "builtin/smart".into(),
+        provider: Some("zai".into()),
+        status: "ok".into(),
+        http_status: Some(200),
+        retries: 1,
+        ttft_ms: Some(850),
+        total_ms: 4_200,
+        fallback_depth: 1,
+        stream: true,
+        ..Default::default()
+    };
+    store.record_proxy_outcome(&old).await.expect("record old");
+    store
+        .record_proxy_outcome(&recent)
+        .await
+        .expect("record recent");
+
+    let all = store.get_proxy_outcomes(None).await.expect("all");
+    assert_eq!(all, vec![old.clone(), recent.clone()]);
+    let since = store
+        .get_proxy_outcomes(Some("2026-10-19T00:00:00+00:00"))
+        .await
+        .expect("since");
+    assert_eq!(since, vec![recent]);
+}

@@ -860,6 +860,40 @@ pub struct ProxyUsageRecord {
     pub cost_cents: u64,
 }
 
+/// Outcome of one routed `/v1` request (success or failure), written by the
+/// proxy for reliability monitoring (`/api/ai/proxy/health`). Each client
+/// request writes one final row (`superseded = false`) plus one row per
+/// upstream attempt that failed before the chain moved on. `retries` counts
+/// same-entry retries and `fallback_depth` how many chain entries were tried
+/// before this one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProxyOutcomeRecord {
+    /// RFC3339 timestamp (UTC) of the request start.
+    pub timestamp: String,
+    /// Chain id the request resolved to (e.g. `builtin/smart`, or the direct
+    /// `provider/model` id).
+    pub chain_id: String,
+    /// Provider of the entry that answered, or of the last entry tried.
+    pub provider: Option<String>,
+    pub account_id: Option<Uuid>,
+    pub model: Option<String>,
+    /// `ok`, `client_error`, `server_error`, `timeout`,
+    /// `empty_before_first_chunk` or `stalled`.
+    pub status: String,
+    /// Upstream HTTP status of the deciding attempt, when there was one.
+    pub http_status: Option<u16>,
+    pub retries: u32,
+    /// Time to first content chunk (streams only).
+    pub ttft_ms: Option<u64>,
+    pub total_ms: u64,
+    pub fallback_depth: u32,
+    pub stream: bool,
+    /// A failed upstream attempt after which the chain moved on to another
+    /// entry. Counted in per-provider/model/account reliability, but not in
+    /// request totals (the request's own row has `superseded = false`).
+    pub superseded: bool,
+}
+
 /// One usage row, harness or router, before aggregation. The usage summary
 /// filters and groups these; see `crate::api::usage_summary`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3100,6 +3134,19 @@ pub trait MissionStore: Send + Sync {
         &self,
         _since: Option<&str>,
     ) -> Result<Vec<HourlyUsageStats>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Record the outcome of one routed /v1 request (reliability metrics).
+    async fn record_proxy_outcome(&self, _record: &ProxyOutcomeRecord) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Router request outcomes on or after `since` (RFC3339), oldest first.
+    async fn get_proxy_outcomes(
+        &self,
+        _since: Option<&str>,
+    ) -> Result<Vec<ProxyOutcomeRecord>, String> {
         Ok(Vec::new())
     }
 

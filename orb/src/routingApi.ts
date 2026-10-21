@@ -60,6 +60,10 @@ export interface AccountHealthSnapshot {
   total_output_tokens: number;
   is_degraded: boolean;
   rate_limit_snapshot: RateLimitSnapshot | null;
+  /** available, out_of_credit, auth_failed, quota_exhausted, rate_limited or cooldown (older cores omit it). */
+  account_state?: "available" | "out_of_credit" | "auth_failed" | "quota_exhausted" | "rate_limited" | "cooldown";
+  /** When the circuit breaker lets the next probe request through. */
+  next_probe_at?: string | null;
 }
 
 export interface FallbackEvent {
