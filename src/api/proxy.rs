@@ -8235,8 +8235,19 @@ fn proxy_outcome_sink(
     })
 }
 
-/// 402, or a 4xx whose body says the account has no credit or quota left,
-/// is an account error rather than "wrong model". `None` for other 4xx.
+/// Account errors among 4xx answers, for the account circuit breaker.
+///
+/// Only an HTTP 402 or a documented structured error code counts. Error
+/// bodies often echo the request (and so the caller's prompt), so free-text
+/// matching would let any caller park a shared account for hours by putting
+/// "billing" in a prompt that triggers a 400. Recognised codes:
+/// * OpenAI-style `error.code` / `error.type`: `insufficient_quota`,
+///   `billing_hard_limit_reached` (credit), plus `insufficient_quota`-class
+///   quota codes below;
+/// * Anthropic `error.type` == `billing_error`;
+/// * MiniMax `base_resp.status_code` 1008 (insufficient balance).
+///
+/// `None` for every other 4xx (treated as a per-request error, no cooldown).
 fn classify_account_client_error(status: StatusCode, body: &[u8]) -> Option<CooldownReason> {
     if status == StatusCode::PAYMENT_REQUIRED {
         return Some(CooldownReason::PaymentRequired);
@@ -8244,24 +8255,28 @@ fn classify_account_client_error(status: StatusCode, body: &[u8]) -> Option<Cool
     if !status.is_client_error() {
         return None;
     }
-    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
-    if [
-        "insufficient balance",
-        "insufficient_balance",
-        "insufficient credit",
-        "insufficient_credit",
-        "out of credits",
-        "credit balance is too low",
-        "payment required",
-        "billing",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if value
+        .pointer("/base_resp/status_code")
+        .and_then(|v| v.as_i64())
+        == Some(1008)
     {
         return Some(CooldownReason::PaymentRequired);
     }
-    if body_is_quota_exhausted(body) {
-        return Some(CooldownReason::QuotaExhausted);
+    let error = value.get("error")?;
+    let codes = ["code", "type"]
+        .iter()
+        .filter_map(|key| error.get(*key).and_then(|v| v.as_str()))
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let has = |names: &[&str]| codes.iter().any(|c| names.contains(&c.as_str()));
+    if has(&[
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "billing_error",
+        "billing_not_active",
+    ]) {
+        return Some(CooldownReason::PaymentRequired);
     }
     None
 }
@@ -10827,25 +10842,46 @@ mod tests {
             classify_account_client_error(StatusCode::PAYMENT_REQUIRED, b"{}"),
             Some(CooldownReason::PaymentRequired)
         ));
-        assert!(matches!(
-            classify_account_client_error(
-                StatusCode::BAD_REQUEST,
-                br#"{"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}}"#
-            ),
-            Some(CooldownReason::PaymentRequired)
-        ));
-        assert!(matches!(
-            classify_account_client_error(
-                StatusCode::FORBIDDEN,
-                br#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}"#
-            ),
-            Some(CooldownReason::QuotaExhausted)
-        ));
+        for body in [
+            &br#"{"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}}"#[..],
+            br#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}"#,
+            br#"{"error":{"type":"billing_hard_limit_reached"}}"#,
+            br#"{"type":"error","error":{"type":"billing_error","message":"Your credit balance is too low"}}"#,
+        ] {
+            assert!(
+                matches!(
+                    classify_account_client_error(StatusCode::BAD_REQUEST, body),
+                    Some(CooldownReason::PaymentRequired)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
         assert!(classify_account_client_error(
             StatusCode::NOT_FOUND,
             br#"{"error":{"message":"model not found"}}"#
         )
         .is_none());
+    }
+
+    #[test]
+    fn echoed_prompt_text_never_trips_the_account_breaker() {
+        // A caller controls the prompt, and error bodies echo it: free text
+        // must not take a shared account offline.
+        for body in [
+            &br#"{"error":{"type":"invalid_request_error","message":"bad input: 'billing payment required insufficient balance out of credits'"}}"#[..],
+            br#"{"error":{"message":"insufficient_quota usage limit exceeded your current quota"}}"#,
+            br#"{"base_resp":{"status_code":1004,"status_msg":"billing"}}"#,
+            b"payment required: insufficient balance (billing)",
+        ] {
+            for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
+                assert!(
+                    classify_account_client_error(status, body).is_none(),
+                    "{status} {}",
+                    String::from_utf8_lossy(body)
+                );
+            }
+        }
     }
 
     #[test]
