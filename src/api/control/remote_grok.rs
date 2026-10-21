@@ -300,6 +300,8 @@ pub(crate) struct GrokStream {
     /// OpenCode: byte offset in `text` up to which narration is already
     /// durable as its own bubble.
     opencode_flushed: usize,
+    /// OpenCode: tokens summed over the job's `step_finish` parts.
+    pub(crate) opencode_usage: Option<crate::cost::TokenUsage>,
 }
 
 impl GrokStream {
@@ -707,6 +709,17 @@ impl GrokStream {
                     });
                 }
                 Some("step_finish") => {
+                    let tokens = &part["tokens"];
+                    if tokens.is_object() {
+                        let usage = self.opencode_usage.get_or_insert_with(Default::default);
+                        usage.input_tokens += tokens["input"].as_u64().unwrap_or(0);
+                        usage.output_tokens += tokens["output"].as_u64().unwrap_or(0)
+                            + tokens["reasoning"].as_u64().unwrap_or(0);
+                        *usage.cache_read_input_tokens.get_or_insert(0) +=
+                            tokens["cache"]["read"].as_u64().unwrap_or(0);
+                        *usage.cache_creation_input_tokens.get_or_insert(0) +=
+                            tokens["cache"]["write"].as_u64().unwrap_or(0);
+                    }
                     if let Some(reason) = part["reason"].as_str() {
                         if matches!(reason, "stop" | "end_turn" | "EndTurn") {
                             self.ended = true;
@@ -1011,6 +1024,8 @@ impl NativeGrokObserver {
                 cache_read_input_tokens: Some(stream.cache_read_tokens),
                 cache_creation_input_tokens: None,
             })
+            // OpenCode reports tokens per step; its turns had no usage at all.
+            .or_else(|| self.stream.opencode_usage.clone())
     }
 
     /// Whether this job runs a goal turn. Antigravity says so itself: `agy`
@@ -3341,6 +3356,19 @@ mod tests {
             .iter()
             .any(|u| matches!(u, StreamUpdate::TextSnapshot(_))));
         assert!(stream.opencode_unflushed_text().trim().is_empty());
+    }
+
+    #[test]
+    fn opencode_usage_sums_step_tokens() {
+        let mut stream = GrokStream::default();
+        stream.feed(concat!(
+            "{\"type\":\"step_finish\",\"sessionID\":\"s\",\"part\":{\"reason\":\"tool-calls\",\"tokens\":{\"input\":100,\"output\":10,\"reasoning\":5,\"cache\":{\"read\":40,\"write\":0}}}}\n",
+            "{\"type\":\"step_finish\",\"sessionID\":\"s\",\"part\":{\"reason\":\"stop\",\"tokens\":{\"input\":200,\"output\":20,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}\n",
+        ));
+        let usage = stream.opencode_usage.unwrap();
+        assert_eq!(usage.input_tokens, 300);
+        assert_eq!(usage.output_tokens, 35);
+        assert_eq!(usage.cache_read_input_tokens, Some(40));
     }
 
     #[tokio::test]
