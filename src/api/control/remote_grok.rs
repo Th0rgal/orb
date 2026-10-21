@@ -294,6 +294,12 @@ pub(crate) struct GrokStream {
     /// OpenCode: message id of the latest text part and the offset in `text`
     /// where that message's text began (separator included).
     opencode_last_message: Option<(Option<String>, usize)>,
+    /// OpenCode: part id of the first text part of the open segment, the
+    /// identity of its durable bubble once a tool call closes it.
+    opencode_segment_part: Option<String>,
+    /// OpenCode: byte offset in `text` up to which narration is already
+    /// durable as its own bubble.
+    opencode_flushed: usize,
 }
 
 impl GrokStream {
@@ -362,7 +368,7 @@ impl GrokStream {
     /// when it ends). Auto-compaction writes its summary as an assistant text
     /// part and then a synthetic `compaction_continue` user part; neither is
     /// something the model said to the operator.
-    fn feed_opencode_text(&mut self, part: &serde_json::Value, updates: &mut Vec<StreamUpdate>) {
+    fn feed_opencode_text(&mut self, part: &serde_json::Value) {
         let Some(text) = part["text"].as_str() else {
             return;
         };
@@ -371,7 +377,7 @@ impl GrokStream {
                 if let Some((_, start)) = self.opencode_last_message.take() {
                     self.text.truncate(start);
                     self.opencode_answer_start = self.opencode_answer_start.min(start);
-                    updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
+                    self.opencode_flushed = self.opencode_flushed.min(start);
                 }
                 self.opencode_segment_closed = true;
             }
@@ -388,6 +394,7 @@ impl GrokStream {
         if self.opencode_segment_closed || start == 0 {
             self.opencode_answer_start = self.text.len();
             self.opencode_segment_closed = false;
+            self.opencode_segment_part = part["id"].as_str().map(str::to_string);
         }
         if self
             .opencode_last_message
@@ -397,7 +404,42 @@ impl GrokStream {
             self.opencode_last_message = Some((message, start));
         }
         self.text.push_str(text);
-        updates.push(StreamUpdate::TextSnapshot(self.text.clone()));
+        // Each part arrives complete. Narration becomes its own durable bubble
+        // when a tool call closes its segment, and the answer is the turn's
+        // final message; a turn-wide live snapshot would show both twice.
+    }
+
+    /// Text of the open segment, once a tool call proves it is narration:
+    /// a finalized bubble placed before that tool, so a long turn keeps what
+    /// the agent said between its tool calls (mission 4ad4bc01 showed 1,771
+    /// tool calls and none of its 605 narration parts).
+    fn flush_opencode_narration(&mut self, updates: &mut Vec<StreamUpdate>) {
+        if self.opencode_segment_closed {
+            return;
+        }
+        let start = self.opencode_answer_start.max(self.opencode_flushed);
+        let Some(segment) = self.text.get(start..).map(str::trim) else {
+            return;
+        };
+        if !segment.is_empty() {
+            let bubble = format!(
+                "opencode:{}:{}",
+                self.session_id.as_deref().unwrap_or("unknown"),
+                self.opencode_segment_part
+                    .clone()
+                    .unwrap_or_else(|| start.to_string())
+            );
+            updates.push(StreamUpdate::NativeText(serde_json::json!({
+                "bubble_id": bubble,
+                "ops": [{"type":"snapshot","text":segment,"revision":1},{"type":"finalize"}],
+            })));
+        }
+        self.opencode_flushed = self.text.len();
+    }
+
+    /// OpenCode text not yet durable as a narration bubble.
+    pub(crate) fn opencode_unflushed_text(&self) -> &str {
+        self.text.get(self.opencode_flushed..).unwrap_or_default()
     }
 
     fn requires_error_cancellation(&self) -> bool {
@@ -628,7 +670,7 @@ impl GrokStream {
             }
             let part = &value["part"];
             match value["type"].as_str() {
-                Some("text") => self.feed_opencode_text(part, updates),
+                Some("text") => self.feed_opencode_text(part),
                 Some("reasoning") => {
                     if let Some(text) = part["text"].as_str().filter(|t| !t.is_empty()) {
                         self.thinking = text.to_string();
@@ -636,9 +678,21 @@ impl GrokStream {
                     }
                 }
                 Some("tool_use") => {
+                    self.flush_opencode_narration(updates);
                     self.opencode_segment_closed = true;
+                    // OpenCode's callID is the provider's per-response index for
+                    // Gemini and other OpenAI-compatible models (`call_0` 1,371
+                    // times in mission 4ad4bc01), and clients pair tool rows by
+                    // id. The part id is unique per call.
+                    let call_id = match (part["id"].as_str(), part["callID"].as_str()) {
+                        (Some(part_id), Some(call)) => {
+                            serde_json::json!(format!("{part_id}:{call}"))
+                        }
+                        (Some(part_id), None) => serde_json::json!(part_id),
+                        _ => part["callID"].clone(),
+                    };
                     let update = serde_json::json!({
-                        "toolCallId": part["callID"], "name": part["tool"],
+                        "toolCallId": call_id, "name": part["tool"],
                         "rawInput": part["state"]["input"], "status": if part["state"]["status"] == "error" { serde_json::json!("failed") } else { part["state"]["status"].clone() },
                         "error": part["state"]["error"],
                         "output": part["state"]["output"],
@@ -935,6 +989,14 @@ impl NativeGrokObserver {
     pub(crate) fn partial_turn_message(&self) -> Option<AgentEvent> {
         if self.stream.antigravity.is_some() {
             return None;
+        }
+        if self.mission.backend == "opencode" {
+            // Narration already has its own bubbles; only the open tail is lost.
+            return partial_turn_message(
+                self.mission_id,
+                self.job_id,
+                self.stream.opencode_unflushed_text(),
+            );
         }
         partial_turn_message(self.mission_id, self.job_id, &self.stream.text)
     }
@@ -3220,6 +3282,65 @@ mod tests {
         ));
         // A turn that ends on a tool keeps everything it said.
         assert_eq!(stream.final_text(), "One\n\nTwo");
+    }
+
+    /// Mission 4ad4bc01: Gemini through the proxy numbers tool calls per
+    /// response, so OpenCode reported `call_0` for most of 1,771 calls and the
+    /// transcript collapsed them into five rows; its narration never reached
+    /// history at all.
+    #[test]
+    fn opencode_tool_ids_are_unique_and_narration_becomes_durable_bubbles() {
+        let mut stream = GrokStream::default();
+        let mut updates = Vec::new();
+        let fixture = include_str!("../../../tests/fixtures/opencode_btw_compaction.jsonl");
+        for line in fixture.lines() {
+            updates.extend(stream.feed(&format!("{line}\n")));
+        }
+        updates.extend(stream.feed(concat!(
+            "{\"type\":\"tool_use\",\"sessionID\":\"ses_btw\",\"part\":{\"id\":\"prt_x1\",\"callID\":\"call_0\",\"tool\":\"read\",\"state\":{\"status\":\"completed\"}}}\n",
+            "{\"type\":\"tool_use\",\"sessionID\":\"ses_btw\",\"part\":{\"id\":\"prt_x2\",\"callID\":\"call_0\",\"tool\":\"read\",\"state\":{\"status\":\"completed\"}}}\n",
+        )));
+        let ids: Vec<String> = updates
+            .iter()
+            .filter_map(|u| match u {
+                StreamUpdate::Tool {
+                    update,
+                    completed: false,
+                } => Some(update["toolCallId"].as_str().unwrap().to_string()),
+                _ => None,
+            })
+            .collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+        assert!(ids.contains(&"prt_x1:call_0".to_string()));
+        let bubbles: Vec<(String, String)> = updates
+            .iter()
+            .filter_map(|u| match u {
+                StreamUpdate::NativeText(v) => Some((
+                    v["bubble_id"].as_str().unwrap().to_string(),
+                    v["ops"][0]["text"].as_str().unwrap().to_string(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bubbles[0].0, "opencode:ses_btw:prt_02");
+        assert!(bubbles[0].1.starts_with("Je vais lire"));
+        assert!(bubbles[1].1.starts_with("Inspectons"));
+        assert!(bubbles
+            .iter()
+            .all(|(_, text)| !text.contains("## Objective")));
+        // The answer before the trailing tools is narration too, exactly once.
+        assert_eq!(
+            bubbles
+                .iter()
+                .filter(|(_, t)| t.starts_with("Voici l'analyse"))
+                .count(),
+            1
+        );
+        assert!(!updates
+            .iter()
+            .any(|u| matches!(u, StreamUpdate::TextSnapshot(_))));
+        assert!(stream.opencode_unflushed_text().trim().is_empty());
     }
 
     #[tokio::test]
