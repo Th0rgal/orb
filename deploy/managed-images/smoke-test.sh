@@ -1,91 +1,114 @@
 #!/usr/bin/env bash
 # Smoke test for the orb-node-base image. Run INSIDE a sandbox started from the
-# snapshot, as user `user` (passwordless sudo available). Exit 0 only if every
-# check passes. Prints one PASS/FAIL line per check and a final summary.
+# snapshot, as user `user` (passwordless sudo). Node-facing checks run as the
+# unprivileged service account `orbnode`. Exit 0 only if every check passes.
 set -uo pipefail
-export PATH="$HOME/.elan/bin:/usr/local/bin:$PATH" DISABLE_AUTOUPDATER=1 NO_COLOR=1
 M=/etc/orb/image-manifest.json
+NU=orbnode
+NH=/var/lib/orb-node
+EH=$NH/work/caches/elan
+NUID=$(id -u $NU 2>/dev/null || echo 0)
 fails=0
 pass() { printf 'PASS %s\n' "$*"; }
 fail() { printf 'FAIL %s\n' "$*"; fails=$((fails+1)); }
 check() { local name=$1; shift; if out=$("$@" 2>&1); then pass "$name: $(echo "$out" | head -1 | cut -c1-120)"; else fail "$name: $(echo "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)"; fi; }
+as_node() { sudo -u $NU -H env HOME=$NH ELAN_HOME=$EH XDG_RUNTIME_DIR=/run/user/$NUID \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$NUID/bus DISABLE_AUTOUPDATER=1 NO_COLOR=1 \
+  PATH=$EH/bin:/opt/orb/bin:/usr/local/bin:/usr/bin:/bin "$@"; }
 
 [ "$(id -un)" = user ] || fail "must run as user (is $(id -un))"
 [ -r "$M" ] && jq -e '.image=="orb-node-base"' "$M" >/dev/null && pass "manifest present" || fail "manifest missing/invalid"
 
+# --- service account isolation
+id $NU >/dev/null 2>&1 && pass "account $NU exists (uid $NUID)" || fail "account $NU missing"
+groups=$(id -nG $NU 2>/dev/null)
+grep -qwE 'sudo|adm|admin|wheel|docker|lxd' <<<"$groups" && fail "$NU in privileged group: $groups" || pass "$NU groups: $groups"
+if as_node sudo -n true >/dev/null 2>&1; then fail "$NU can sudo"; else pass "$NU cannot sudo"; fi
+sudo install -m 600 -o user -g user /dev/null /home/user/.orb/enroll.env.smoke
+echo canary | sudo tee /home/user/.orb/enroll.env.smoke >/dev/null
+if as_node cat /home/user/.orb/enroll.env.smoke >/dev/null 2>&1; then fail "$NU can read /home/user/.orb"; else pass "$NU cannot read /home/user/.orb/*"; fi
+sudo rm -f /home/user/.orb/enroll.env.smoke
+[ "$(stat -c '%U %a' /home/user/.orb)" = "user 700" ] && pass "/home/user/.orb is user 700" || fail "/home/user/.orb perms $(stat -c '%U %a' /home/user/.orb)"
+check "unit runs as $NU" grep -qx "User=$NU" /etc/systemd/system/orb-node.service
+check "unit work dir" grep -qx "Environment=SANDBOXED_NODE_WORK_DIR=$NH/work" /etc/systemd/system/orb-node.service
+check "orb-node.service not enabled" sh -c "! systemctl is-enabled orb-node.service 2>/dev/null | grep -qx enabled"
+check "orb-linger.service enabled" sh -c "systemctl is-enabled orb-linger.service | grep -qx enabled"
+for _ in $(seq 1 30); do [ -S /run/user/$NUID/bus ] && break; sleep 0.5; done
+check "linger enabled for $NU (after boot)" sh -c "loginctl show-user $NU -p Linger | grep -q yes"
+check "user bus /run/user/$NUID/bus" test -S /run/user/$NUID/bus
+check "systemd-run --user --scope true (as $NU)" as_node timeout 30 systemd-run --user --scope --quiet true
+
+# --- harnesses and tools, as orbnode
 for h in claude codex opencode gemini agy; do
   want=$(jq -r ".harnesses[\"$h\"] // empty" "$M")
-  got=$(timeout 60 "$h" --version 2>&1 | head -3)
-  if [ -n "$want" ] && grep -qF -- "$want" <<<"$got"; then pass "$h --version $want"
+  got=$(as_node timeout 60 "$h" --version 2>&1 | head -3)
+  if [ -n "$want" ] && grep -qF -- "$want" <<<"$got"; then pass "$h --version $want (as $NU)"
   else fail "$h --version: want '$want' got '$(echo "$got" | head -1 | cut -c1-100)'"; fi
 done
 for t in claude codex opencode gemini agy lake lean elan turbo-lean lean-native certified-search research-governor sandboxed-node node; do
-  command -v "$t" >/dev/null || fail "$t not on PATH"
+  as_node sh -c "command -v $t" >/dev/null || fail "$t not on PATH for $NU"
 done
+check "lake --version" as_node lake --version
+check "lean default v4.35.0" as_node sh -c "lean --version | grep -F 'version 4.35.0'"
+check "turbo-lean --version" as_node turbo-lean --version
+check "lean-native --version" as_node lean-native --version
+check "certified-search --help" as_node certified-search --help
+check "research-governor-core present" test -x /opt/orb/bin/research-governor-core
 
-check "lake --version" lake --version
-check "lean default" sh -c "elan show | grep -q 'v4.35.0' && lean --version | grep -F 4.35.0"
-check "turbo-lean --version" turbo-lean --version
-check "lean-native --version" lean-native --version
-check "certified-search --help" certified-search --help
-check "research-governor-core present" test -x /usr/local/bin/research-governor-core
-
-proj=$(mktemp -d)/smoke
-mkdir -p "$proj"
-cat >"$proj/lakefile.lean" <<'EOF'
+proj=$(as_node mktemp -d -p $NH)
+as_node sh -c "cat >'$proj/lakefile.lean'" <<'EOF'
 import Lake
 open Lake DSL
 package smoke
 @[default_target] lean_lib Smoke
 EOF
-echo "leanprover/lean4:v4.35.0" >"$proj/lean-toolchain"
-echo 'theorem smoke_add : 2 + 2 = 4 := rfl
-def hello : String := "orb"' >"$proj/Smoke.lean"
-check "lake build tiny project" sh -c "cd '$proj' && timeout 300 lake build"
-rm -rf "$(dirname "$proj")"
+as_node sh -c "echo 'leanprover/lean4:v4.35.0' >'$proj/lean-toolchain'; printf 'theorem smoke_add : 2 + 2 = 4 := rfl\ndef hello : String := \"orb\"\n' >'$proj/Smoke.lean'"
+check "lake build tiny project (as $NU)" as_node sh -c "cd '$proj' && timeout 300 lake build"
+check "no extra toolchain downloaded" sh -c "[ \"\$(sudo ls $EH/toolchains)\" = leanprover--lean4---v4.35.0 ]"
+sudo rm -rf "$proj"
 
-check "systemd-run --user --scope true" timeout 30 systemd-run --user --scope --quiet true
-check "linger enabled" sh -c "loginctl show-user user -p Linger | grep -q yes"
-check "orb-node.service installed" sh -c "systemctl cat orb-node.service >/dev/null && grep -q '^User=user' /etc/systemd/system/orb-node.service"
-check "orb-node.service not enabled" sh -c "! systemctl is-enabled orb-node.service 2>/dev/null | grep -qx enabled"
-
-# sandboxed-node: starts as user, answers an authenticated heartbeat.
-pkill -u user -f '^/usr/local/bin/sandboxed-node' 2>/dev/null; sleep 0.5
-wd=$(mktemp -d)
-env -u SANDBOXED_NODE_ALLOW_ROOT SANDBOXED_NODE_TOKEN=smoke SANDBOXED_NODE_BIND=127.0.0.1:3088 \
-  SANDBOXED_NODE_WORK_DIR="$wd" SANDBOXED_NODE_ID=smoke /usr/local/bin/sandboxed-node >"$wd.log" 2>&1 &
-npid=$!
+# --- sandboxed-node as orbnode: authenticated heartbeat
+sudo pkill -u $NU -f '^/opt/orb/bin/sandboxed-node' 2>/dev/null; sleep 0.5
+wd=$(as_node mktemp -d -p $NH)
+as_node env -u SANDBOXED_NODE_ALLOW_ROOT SANDBOXED_NODE_TOKEN=smoke SANDBOXED_NODE_BIND=127.0.0.1:3088 \
+  SANDBOXED_NODE_WORK_DIR="$wd/work" SANDBOXED_NODE_ID=smoke /opt/orb/bin/sandboxed-node >/tmp/smoke-node.log 2>&1 &
 hb=""
 for _ in $(seq 1 40); do
   hb=$(curl -fsS -m 3 -H 'Authorization: Bearer smoke' http://127.0.0.1:3088/heartbeat 2>/dev/null) && break
-  kill -0 $npid 2>/dev/null || break; sleep 0.5
+  sleep 0.5
 done
 if [ -n "$hb" ] && jq -e '.node_id=="smoke"' >/dev/null <<<"$hb"; then
-  pass "sandboxed-node heartbeat: $(jq -c '{node_id,online,version,protocol_version,lean_runtime_ready}' <<<"$hb")"
+  pass "sandboxed-node heartbeat (as $NU): $(jq -c '{node_id,online,version,protocol_version,lean_runtime_ready}' <<<"$hb")"
   want=$(jq -r '.node_version // empty' "$M"); got=$(jq -r '.version // empty' <<<"$hb")
   case "$want" in *"$got"*) pass "node version $got in manifest '$want'";; *) fail "node version $got not in manifest '$want'";; esac
+  owner=$(ps -o user= -p "$(pgrep -f '^/opt/orb/bin/sandboxed-node' | head -1)" 2>/dev/null)
+  [ "$owner" = $NU ] && pass "node process user $owner" || fail "node process user '$owner'"
 else
-  fail "sandboxed-node heartbeat: $(tail -5 "$wd.log" | tr '\n' ' ' | cut -c1-400)"
+  fail "sandboxed-node heartbeat: $(tail -5 /tmp/smoke-node.log | tr '\n' ' ' | cut -c1-400)"
 fi
 code=$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:3088/heartbeat)
 [ "$code" = 401 ] && pass "heartbeat without token -> 401" || fail "heartbeat without token -> $code"
-kill $npid 2>/dev/null; wait $npid 2>/dev/null; rm -rf "$wd" "$wd.log"
+sudo pkill -u $NU -f '^/opt/orb/bin/sandboxed-node' 2>/dev/null; sleep 0.5
+sudo rm -rf "$wd" /tmp/smoke-node.log
 
-# Secrets scan.
+# --- secrets scan
 # Boat writes ~/.config/ascii/boat/config.json at every boot; on a noEnv sandbox it holds
 # only {api_url, channel}. Anything more (an API key) is a leak.
-for f in "$HOME/.config/ascii/boat/config.json" /root/.config/ascii/boat/config.json; do
+for f in /home/user/.config/ascii/boat/config.json /root/.config/ascii/boat/config.json; do
   sudo test -e "$f" || continue
   extra=$(sudo jq -r 'keys - ["api_url","channel"] | join(",")' "$f" 2>/dev/null || echo unparsable)
   [ -z "$extra" ] && pass "boat config $f has no credentials" || fail "boat config $f has extra keys: $extra"
 done
-for f in "$HOME/.config/gh/hosts.yml" /root/.config/gh/hosts.yml "$HOME/.orb/enroll.env" "$HOME/.orb/node.cred" "$HOME/.git-credentials"; do
+for f in /home/user/.config/gh/hosts.yml /root/.config/gh/hosts.yml $NH/.config/gh/hosts.yml /home/user/.orb/enroll.env \
+         $NH/node.cred $NH/work/node.cred /home/user/.git-credentials; do
   sudo test -e "$f" && fail "secret file present: $f"
 done
-hits=$(sudo grep -rIlE --exclude-dir=proc --exclude-dir=.elan --exclude-dir=node_modules \
+# /opt/sandboxed-tools holds sha256-pinned upstream harness bundles whose secret-redaction
+# code contains these regexes; it is verified by hash, not scanned.
+hits=$(sudo grep -rIlE --exclude-dir=proc --exclude-dir=toolchains --exclude-dir=node_modules --exclude-dir=sandboxed-tools \
   '(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|gho_[A-Za-z0-9]{36}|sk-ant-[A-Za-z0-9_-]{20,}|boat_[A-Za-z0-9]{24,}|sk-proj-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})' \
-  /home /etc /opt /root 2>/dev/null | head -20)
-[ -z "$hits" ] && pass "secrets scan (home, etc, opt, root)" || fail "secrets scan hits: $(echo $hits)"
+  /home /etc /opt /root /var/lib/orb-node 2>/dev/null | head -20)
+[ -z "$hits" ] && pass "secrets scan (home, etc, opt, root, /var/lib/orb-node)" || fail "secrets scan hits: $(echo $hits)"
 env | grep -qE '^(GH_TOKEN|GITHUB_TOKEN|BOAT_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY)=' && fail "secret env var present" || pass "no secret env vars"
 
 echo "SMOKE SUMMARY: $fails failure(s)"

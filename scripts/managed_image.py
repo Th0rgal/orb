@@ -363,13 +363,28 @@ def fleet_tools():
 
 def certified_search():
     env = {k: v for k, v in os.environ.items() if k not in ('GH_TOKEN', 'GITHUB_TOKEN')}
-    sha = subprocess.run(['gh', 'api', f'repos/{CERTIFIED_SEARCH_REPO}/commits/main', '--jq', '.sha'],
-                         capture_output=True, text=True, check=True, env=env).stdout.strip()
+    # Pinned: must match CERTIFIED_SEARCH_COMMIT/SHA256 in the recipe.
+    sha = recipe_pin('CERTIFIED_SEARCH_COMMIT')
     path = ARTIFACTS / f'certified-search-{sha[:7]}.tar.gz'
     if not path.exists():
         with path.open('wb') as fh:
             subprocess.run(['gh', 'api', f'repos/{CERTIFIED_SEARCH_REPO}/tarball/{sha}'], stdout=fh, check=True, env=env)
     return path, sha
+
+
+def recipe_pin(name):
+    for line in RECIPE.read_text().splitlines():
+        if line.startswith(name + '='):
+            return line.split('=', 1)[1].strip()
+    raise KeyError(name)
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as fh:
+        while chunk := fh.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def recipe_sha():
@@ -406,7 +421,10 @@ def cmd_build(args):
         cs_tar, cs_sha = certified_search()
         tools['certified-search'] = {'source': f'github:{CERTIFIED_SEARCH_REPO}', 'commit': cs_sha,
                                      'note': 'CLI = research-governor (built from this repo, copied from fleet)'}
-        info = {'node_version': version, 'node_commit': sha, 'recipe_sha': recipe_sha(), 'tools': tools}
+        if sha256_file(cs_tar) != recipe_pin('CERTIFIED_SEARCH_SHA256'):
+            raise RuntimeError(f'{cs_tar} does not match the pinned CERTIFIED_SEARCH_SHA256')
+        info = {'node_version': version, 'node_commit': sha, 'node_sha256': sha256_file(binary),
+                'recipe_sha': recipe_sha(), 'tools': tools}
         sid = create_sandbox('image', 'small', ttl=7200)
         created.append(sid)
         with tempfile.TemporaryDirectory() as tmp:
@@ -423,10 +441,7 @@ def cmd_build(args):
         if not smoke_in(sid):
             raise RuntimeError(f'smoke failed in {sid}; alias not moved')
         run(sid, 'rm -rf ~/.bash_history ~/.cache/* /tmp/* 2>/dev/null; sudo journalctl --vacuum-time=1s >/dev/null 2>&1; sync', quiet=True)
-        for name in snapshot_names(sha):
-            save_snapshot(sid, name)
-        if not args.skip_verify:
-            verify(snapshot_names(sha)[0], created)
+        publish(sid, sha, created, verify_snapshot=not args.skip_verify)
     finally:
         report(created)
 
@@ -447,18 +462,31 @@ def cmd_refresh_node(args):
         created.append(sid)
         upload(sid, binary, f'{STAGE}/sandboxed-node')
         script = f'''set -euo pipefail
+echo '{sha256_file(binary)}  {STAGE}/sandboxed-node' | sha256sum -c -
 sudo install -m0755 -o root -g root {STAGE}/sandboxed-node /usr/local/bin/sandboxed-node
-sudo python3 -c 'import json,sys,datetime;p="/etc/orb/image-manifest.json";m=json.load(open(p));m["node_version"]=sys.argv[1];m["node_refreshed_at"]=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ");open(p,"w").write(json.dumps(m,indent=2,sort_keys=True))' '{version}'
+sudo python3 -c 'import json,sys,datetime;p="/etc/orb/image-manifest.json";m=json.load(open(p));m["node_version"]=sys.argv[1];m["node_sha256"]=sys.argv[2];m["node_refreshed_at"]=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ");open(p,"w").write(json.dumps(m,indent=2,sort_keys=True))' '{version}' '{sha256_file(binary)}'
 rm -rf {STAGE}
 jq .node_version /etc/orb/image-manifest.json'''
         if run(sid, script, timeout=120)['exitCode'] != 0:
             raise RuntimeError('binary swap failed')
         if not smoke_in(sid):
             raise RuntimeError(f'smoke failed in {sid}; alias not moved')
-        for name in snapshot_names(sha):
-            save_snapshot(sid, name)
+        publish(sid, sha, created, verify_snapshot=True)
     finally:
         report(created)
+
+
+def publish(sid, sha, created, verify_snapshot=True):
+    """Save the dated snapshot, smoke a fresh sandbox booted from it, then move the alias.
+
+    Boat re-provisions parts of the disk at boot, so only a smoke run from the saved
+    snapshot proves the image; the alias moves only after that passes."""
+    dated, alias = snapshot_names(sha)
+    save_snapshot(sid, dated)
+    stop_sandbox(sid)
+    if verify_snapshot:
+        verify(dated, created)
+    save_snapshot(sid, alias)
 
 
 def verify(snapshot, created):

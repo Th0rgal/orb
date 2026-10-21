@@ -5,135 +5,241 @@
 # passwordless sudo. Idempotent: re-running converges to the same state.
 # Binding contract: ~/work/paloma/boat/CONTRACT.md ("Image orb-node-base").
 #
+# Security properties:
+# - The node runs as the dedicated, unprivileged system account `orbnode`
+#   (no sudo, not in sudo/adm). `user` keeps sudo for Core's boat exec calls.
+# - Every downloaded or staged artifact is pinned by sha256 below and verified
+#   before it is unpacked; any mismatch aborts the build. No self-updaters run.
+#
 # Inputs staged by scripts/managed_image.py (boat files API) in $ORB_STAGE:
-#   sandboxed-node                Linux x86_64 binary (built in a boat sandbox)
+#   sandboxed-node                Linux x86_64 binary (built in a boat sandbox);
+#                                 its sha256 is passed in build-info.json
 #   fleet-tools-x86_64.tar.gz     agy turbo-lean lean-native lean-native-core
 #                                 research-governor research-governor-core
-#                                 (x86_64 builds copied read-only from a fleet host)
+#                                 (x86_64 builds copied read-only from fleet host ashur)
 #   certified-search.tar.gz       GitHub tarball of Th0rgal/certified-search (private)
-#   build-info.json               {"node_version", "recipe_sha", "tools": {...provenance}}
-# The sandbox is created with noEnv: it has no GitHub or boat credentials, and
-# this recipe must never write any secret into the image.
+#   build-info.json               {"node_version","node_sha256","recipe_sha","tools":{...}}
+# The sandbox is created with noEnv: no GitHub or boat credentials, and this
+# recipe never writes a secret into the image.
 set -euo pipefail
 
 ORB_STAGE=${ORB_STAGE:-/home/user/.orb-stage}
-CLAUDE_VERSION=${CLAUDE_VERSION:-2.1.306}
-CODEX_VERSION=${CODEX_VERSION:-0.163.0}
-OPENCODE_VERSION=${OPENCODE_VERSION:-1.19.3}
-GEMINI_VERSION=${GEMINI_VERSION:-0.65.0}
-NODEJS_VERSION=${NODEJS_VERSION:-22.20.0}
-LEAN_TOOLCHAIN=${LEAN_TOOLCHAIN:-leanprover/lean4:v4.35.0}
 TOOLS=/opt/sandboxed-tools
-USER_NAME=user
-USER_HOME=/home/user
+NODE_USER=orbnode
+NODE_HOME=/var/lib/orb-node
+NODE_WORK=$NODE_HOME/work
+# sandboxed-node's Lean runner uses <work>/caches/elan as ELAN_HOME (src/node/lean.rs).
+ELAN_HOME_DIR=$NODE_WORK/caches/elan
+# Boat's platform layer re-provisions some /usr/local/bin names (claude, ...) at every
+# boot, so the image's pinned tools live in /opt/orb/bin, first on every PATH we control.
+ORB_BIN=/opt/orb/bin
+
+# ---------------------------------------------------------------- pins
+CLAUDE_VERSION=2.1.306
+CLAUDE_URL=https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-$CLAUDE_VERSION.tgz
+CLAUDE_SHA256=20d4bced0c1cab2b608d5431188cbd0c141cf7074dafb49afbdac8c13006bb75
+CODEX_VERSION=0.163.0
+CODEX_URL=https://registry.npmjs.org/@openai/codex/-/codex-$CODEX_VERSION-linux-x64.tgz
+CODEX_SHA256=30efc97738b975940d78b59a9bea115fa34040b732807d54ec35ae6b7528de94
+GEMINI_VERSION=0.65.0
+GEMINI_URL=https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-$GEMINI_VERSION.tgz
+GEMINI_SHA256=97f1f7f1e7e189054d27edfb9c62c6a45cec15b678840dfdde3c0ccd87fab376
+OPENCODE_VERSION=1.19.3
+OPENCODE_URL=https://github.com/anomalyco/opencode/releases/download/v$OPENCODE_VERSION/opencode-linux-x64-baseline.tar.gz
+OPENCODE_SHA256=531cff2441129c30f0edd5878af494108ad07f5feb46d7ee29a2a5b830a5765d
+NODEJS_VERSION=22.20.0
+NODEJS_URL=https://nodejs.org/dist/v$NODEJS_VERSION/node-v$NODEJS_VERSION-linux-x64.tar.xz
+NODEJS_SHA256=00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc
+ELAN_VERSION=4.2.4
+ELAN_URL=https://github.com/leanprover/elan/releases/download/v$ELAN_VERSION/elan-x86_64-unknown-linux-gnu.tar.gz
+ELAN_SHA256=42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
+LEAN_VERSION=4.35.0
+LEAN_TOOLCHAIN=leanprover/lean4:v$LEAN_VERSION
+LEAN_URL=https://github.com/leanprover/lean4/releases/download/v$LEAN_VERSION/lean-$LEAN_VERSION-linux.tar.zst
+LEAN_SHA256=7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d
+CERTIFIED_SEARCH_COMMIT=967325bc3cd42ac20581e6140390a93e6877b03e
+CERTIFIED_SEARCH_SHA256=f000c7a8fc5e240747511be546582a3b62335daccfb03a202b08dcd9aead717a
+# Fleet builds copied from ashur:/usr/local/bin (agy 1.4.3; others built 2026-10-21).
+declare -A FLEET_SHA256=(
+  [agy]=d003c9d47e12f689d3448cad0f614289ccde5fb4c58bf8b4b543a9b514c097bc
+  [turbo-lean]=bca7599edf07f545e7ca1e70779242124fe40ba237fa9141ea2fb6e4306e3dbf
+  [lean-native]=d63e583a5bc70f0288ad3857a531c2bb29ac957c9363b8a1903a5d0a2aa36e28
+  [lean-native-core]=ef83beae76e57df01a1ac6e9ee9cd8e2c6ad7dbc4bc7cc5117330ad9cdbcf4ac
+  [research-governor]=8549b164ae5f9ae5c86c66cff0c99a2fdcdf96a2a3a963b043a8a8cd38e85b68
+  [research-governor-core]=04f82545ea543317a72244dc3470bf26b8acf314c38fa9db48f8e43218e0c7d7
+)
 
 log() { printf '[recipe %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-as_user() { sudo -u "$USER_NAME" -H env HOME="$USER_HOME" PATH="$USER_HOME/.elan/bin:/usr/local/bin:/usr/bin:/bin" "$@"; }
-[ "$(uname -m)" = x86_64 ] || { echo "x86_64 only" >&2; exit 1; }
-for f in sandboxed-node fleet-tools-x86_64.tar.gz certified-search.tar.gz build-info.json; do
-  [ -s "$ORB_STAGE/$f" ] || { echo "missing staged input $ORB_STAGE/$f" >&2; exit 1; }
-done
+die() { echo "RECIPE ERROR: $*" >&2; exit 1; }
+verify() { # file sha256
+  local got; got=$(sha256sum "$1" | cut -d' ' -f1)
+  [ "$got" = "$2" ] || die "sha256 mismatch for $1: expected $2, got $got"
+}
+fetch() { # url sha256 dest  (download unprivileged, verify, then use)
+  curl -fsSL --proto '=https' --retry 3 "$1" -o "$3"
+  verify "$3" "$2"
+}
+as_node() { sudo -u "$NODE_USER" -H env HOME="$NODE_HOME" ELAN_HOME="$ELAN_HOME_DIR" \
+  PATH="$ELAN_HOME_DIR/bin:$ORB_BIN:/usr/local/bin:/usr/bin:/bin" "$@"; }
 
-log "apt base packages"
+[ "$(uname -m)" = x86_64 ] || die "x86_64 only"
+for f in sandboxed-node fleet-tools-x86_64.tar.gz certified-search.tar.gz build-info.json; do
+  [ -s "$ORB_STAGE/$f" ] || die "missing staged input $ORB_STAGE/$f"
+done
+NODE_BIN_SHA256=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["node_sha256"])' "$ORB_STAGE/build-info.json")
+verify "$ORB_STAGE/sandboxed-node" "$NODE_BIN_SHA256"
+verify "$ORB_STAGE/certified-search.tar.gz" "$CERTIFIED_SEARCH_SHA256"
+DL=$(mktemp -d)   # owned by user; root only reads verified files from it
+trap 'rm -rf "$DL"' EXIT
+
+log "apt base packages (signed Ubuntu archive)"
 export DEBIAN_FRONTEND=noninteractive
 need=()
-for p in curl ca-certificates git jq xz-utils tar gzip python3 build-essential libssl3 dbus-user-session systemd-container; do
+for p in curl ca-certificates git jq xz-utils zstd tar gzip python3 build-essential libssl3 dbus-user-session; do
   dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
 done
 if [ ${#need[@]} -gt 0 ]; then
-  sudo apt-get update -qq
+  sudo apt-get update -qq || true
   sudo apt-get install -y -qq --no-install-recommends "${need[@]}"
 fi
 
-log "node.js $NODEJS_VERSION (runtime for npm-based harnesses)"
+log "service account $NODE_USER"
+if ! id "$NODE_USER" >/dev/null 2>&1; then
+  sudo useradd --system --home-dir "$NODE_HOME" --create-home --shell /bin/bash "$NODE_USER"
+fi
+for g in sudo adm admin wheel docker lxd; do sudo gpasswd -d "$NODE_USER" "$g" >/dev/null 2>&1 || true; done
+sudo rm -f "/etc/sudoers.d/$NODE_USER"
+# Traversable (not listable) so other users can run the shared elan toolchain.
+sudo install -d -m 0711 -o "$NODE_USER" -g "$NODE_USER" "$NODE_HOME" "$NODE_WORK" "$NODE_WORK/caches"
+sudo loginctl enable-linger "$NODE_USER"
+# Core writes enroll.env here; PID1 (root) reads it for EnvironmentFile=, orbnode must not.
+install -d -m 0700 /home/user/.orb
+chmod 0700 /home/user/.orb
+sudo chmod 0750 /home/user
+
+sudo install -d -m 0755 "$ORB_BIN"
+
+log "node.js $NODEJS_VERSION (runtime for gemini)"
 NODE_DIR=$TOOLS/node/$NODEJS_VERSION
 if [ ! -x "$NODE_DIR/bin/node" ]; then
-  tmp=$(mktemp -d)
-  curl -fsSL "https://nodejs.org/dist/v$NODEJS_VERSION/node-v$NODEJS_VERSION-linux-x64.tar.xz" -o "$tmp/node.tar.xz"
-  curl -fsSL "https://nodejs.org/dist/v$NODEJS_VERSION/SHASUMS256.txt" -o "$tmp/SHASUMS256.txt"
-  (cd "$tmp" && grep " node-v$NODEJS_VERSION-linux-x64.tar.xz\$" SHASUMS256.txt | sed 's/node-v.*/node.tar.xz/' | sha256sum -c -)
+  fetch "$NODEJS_URL" "$NODEJS_SHA256" "$DL/node.tar.xz"
   sudo mkdir -p "$NODE_DIR"
-  sudo tar -xJf "$tmp/node.tar.xz" -C "$NODE_DIR" --strip-components=1
-  rm -rf "$tmp"
+  sudo tar -xJf "$DL/node.tar.xz" -C "$NODE_DIR" --strip-components=1 --no-same-owner
 fi
-for b in node npm npx; do sudo ln -sfn "$NODE_DIR/bin/$b" /usr/local/bin/$b; done
-NPM="$NODE_DIR/bin/npm"
+for b in node npm npx; do sudo ln -sfn "$NODE_DIR/bin/$b" $ORB_BIN/$b; done
 
-npm_tool() { # name package version bin
-  local name=$1 pkg=$2 ver=$3 bin=$4 prefix=$TOOLS/$1/$3
-  if [ ! -x "$prefix/bin/$bin" ]; then
-    sudo mkdir -p "$prefix"
-    sudo env PATH="$NODE_DIR/bin:/usr/bin:/bin" npm_config_update_notifier=false npm_config_fund=false \
-      "$NPM" install -g --prefix "$prefix" --no-audit --loglevel=error "$pkg@$ver"
-  fi
-  sudo ln -sfn "$prefix/bin/$bin" "/usr/local/bin/$name"
-}
-log "harness: claude $CLAUDE_VERSION";  npm_tool claude @anthropic-ai/claude-code "$CLAUDE_VERSION" claude
-log "harness: codex $CODEX_VERSION";    npm_tool codex @openai/codex "$CODEX_VERSION" codex
-log "harness: gemini $GEMINI_VERSION";  npm_tool gemini @google/gemini-cli "$GEMINI_VERSION" gemini
+log "harness: claude $CLAUDE_VERSION (native binary from npm platform package)"
+d=$TOOLS/claude/$CLAUDE_VERSION
+if [ ! -x "$d/claude" ]; then
+  fetch "$CLAUDE_URL" "$CLAUDE_SHA256" "$DL/claude.tgz"
+  sudo mkdir -p "$d"
+  sudo tar -xzf "$DL/claude.tgz" -C "$d" --strip-components=1 --no-same-owner package/claude
+  sudo chmod 755 "$d/claude"
+fi
+sudo ln -sfn "$d/claude" $ORB_BIN/claude
+
+log "harness: codex $CODEX_VERSION (native binary from npm platform package)"
+d=$TOOLS/codex/$CODEX_VERSION
+if [ ! -x "$d/vendor/x86_64-unknown-linux-musl/bin/codex" ]; then
+  fetch "$CODEX_URL" "$CODEX_SHA256" "$DL/codex.tgz"
+  sudo mkdir -p "$d"
+  sudo tar -xzf "$DL/codex.tgz" -C "$d" --strip-components=1 --no-same-owner
+fi
+sudo tee $ORB_BIN/codex >/dev/null <<EOF
+#!/bin/sh
+# codex $CODEX_VERSION: same layout bin/codex.js uses (vendored rg on PATH).
+V=$d/vendor/x86_64-unknown-linux-musl
+PATH="\$V/codex-path:\$PATH" CODEX_MANAGED_BY_NPM=1 exec "\$V/bin/codex" "\$@"
+EOF
+sudo chmod 755 $ORB_BIN/codex
+
+log "harness: gemini $GEMINI_VERSION (self-contained bundle)"
+d=$TOOLS/gemini/$GEMINI_VERSION
+if [ ! -f "$d/bundle/gemini.js" ]; then
+  fetch "$GEMINI_URL" "$GEMINI_SHA256" "$DL/gemini.tgz"
+  sudo mkdir -p "$d"
+  sudo tar -xzf "$DL/gemini.tgz" -C "$d" --strip-components=1 --no-same-owner
+fi
+sudo tee $ORB_BIN/gemini >/dev/null <<EOF
+#!/bin/sh
+exec $NODE_DIR/bin/node --no-warnings=DEP0040 $d/bundle/gemini.js "\$@"
+EOF
+sudo chmod 755 $ORB_BIN/gemini
 
 log "harness: opencode $OPENCODE_VERSION"
-OC_DIR=$TOOLS/opencode/$OPENCODE_VERSION
-if [ ! -x "$OC_DIR/opencode" ]; then
-  tmp=$(mktemp -d)
-  curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v$OPENCODE_VERSION/opencode-linux-x64-baseline.tar.gz" -o "$tmp/oc.tgz"
-  sudo mkdir -p "$OC_DIR"
-  sudo tar -xzf "$tmp/oc.tgz" -C "$OC_DIR" opencode
-  sudo chmod 755 "$OC_DIR/opencode"
-  rm -rf "$tmp"
+d=$TOOLS/opencode/$OPENCODE_VERSION
+if [ ! -x "$d/opencode" ]; then
+  fetch "$OPENCODE_URL" "$OPENCODE_SHA256" "$DL/oc.tgz"
+  sudo mkdir -p "$d"
+  sudo tar -xzf "$DL/oc.tgz" -C "$d" --no-same-owner opencode
+  sudo chmod 755 "$d/opencode"
 fi
-sudo ln -sfn "$OC_DIR/opencode" /usr/local/bin/opencode
+sudo ln -sfn "$d/opencode" $ORB_BIN/opencode
 
-log "fleet tools: agy, turbo-lean, lean-native, research-governor"
-tmp=$(mktemp -d)
-tar -xzf "$ORB_STAGE/fleet-tools-x86_64.tar.gz" -C "$tmp"
-for b in agy turbo-lean lean-native lean-native-core research-governor research-governor-core; do
-  sudo install -m 0755 -o root -g root "$tmp/$b" "/usr/local/bin/$b"
+log "fleet tools: agy, turbo-lean, lean-native, research-governor (pinned sha256)"
+mkdir -p "$DL/fleet"
+tar -xzf "$ORB_STAGE/fleet-tools-x86_64.tar.gz" -C "$DL/fleet" --no-same-owner
+for b in "${!FLEET_SHA256[@]}"; do
+  verify "$DL/fleet/$b" "${FLEET_SHA256[$b]}"
 done
-rm -rf "$tmp"
-# Antigravity ships its own verified self-updater (see scripts/update-node-harnesses.py).
-# Try to move to the newest release; keep the fleet binary if the update fails.
-sudo cp /usr/local/bin/agy /usr/local/bin/agy.previous
-if sudo env HOME=/root timeout 300 /usr/local/bin/agy update >/tmp/agy-update.log 2>&1 \
-   && /usr/local/bin/agy --version >/dev/null 2>&1; then
-  log "agy updated: $(/usr/local/bin/agy --version | head -1)"
-else
-  log "agy update failed or unavailable; keeping fleet binary"; sudo cp /usr/local/bin/agy.previous /usr/local/bin/agy
-fi
-sudo rm -f /usr/local/bin/agy.previous /tmp/agy-update.log
-sudo rm -rf /root/.config/agy /root/.antigravity* 2>/dev/null || true
+for b in "${!FLEET_SHA256[@]}"; do
+  sudo install -m 0755 -o root -g root "$DL/fleet/$b" "$ORB_BIN/$b"
+done
+# No `agy update`: self-updaters never run in the image build.
 
-log "certified-search source + CLI"
+log "certified-search $CERTIFIED_SEARCH_COMMIT source + CLI"
 sudo rm -rf /opt/certified-search.new && sudo mkdir -p /opt/certified-search.new
-sudo tar -xzf "$ORB_STAGE/certified-search.tar.gz" -C /opt/certified-search.new --strip-components=1
+sudo tar -xzf "$ORB_STAGE/certified-search.tar.gz" -C /opt/certified-search.new --strip-components=1 --no-same-owner
+echo "$CERTIFIED_SEARCH_COMMIT" | sudo tee /opt/certified-search.new/COMMIT >/dev/null
 sudo rm -rf /opt/certified-search && sudo mv /opt/certified-search.new /opt/certified-search
-sudo chmod -R a+rX /opt/certified-search
-# certified-search is the repo that builds research-governor; expose it under the repo name too.
-sudo tee /usr/local/bin/certified-search >/dev/null <<'EOF'
+sudo chmod -R a+rX,go-w /opt/certified-search
+sudo tee $ORB_BIN/certified-search >/dev/null <<'EOF'
 #!/bin/sh
 # certified-search (Th0rgal/certified-search) CLI: the research-governor sidecar.
-exec /usr/local/bin/research-governor "$@"
+exec /opt/orb/bin/research-governor "$@"
 EOF
-sudo chmod 755 /usr/local/bin/certified-search
+sudo chmod 755 $ORB_BIN/certified-search
 
-log "elan + $LEAN_TOOLCHAIN (user $USER_NAME)"
-if [ ! -x "$USER_HOME/.elan/bin/elan" ]; then
-  curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
-  as_user sh /tmp/elan-init.sh -y --no-modify-path --default-toolchain none
-  rm -f /tmp/elan-init.sh
+log "elan $ELAN_VERSION + Lean $LEAN_VERSION for $NODE_USER (ELAN_HOME=$ELAN_HOME_DIR)"
+if ! as_node test -x "$ELAN_HOME_DIR/bin/elan"; then
+  fetch "$ELAN_URL" "$ELAN_SHA256" "$DL/elan.tgz"
+  mkdir -p "$DL/elan" && tar -xzf "$DL/elan.tgz" -C "$DL/elan"
+  sudo install -m 0755 -o "$NODE_USER" -g "$NODE_USER" "$DL/elan/elan-init" "$NODE_HOME/elan-init"
+  as_node "$NODE_HOME/elan-init" -y --no-modify-path --default-toolchain none
+  sudo rm -f "$NODE_HOME/elan-init"
 fi
-as_user elan toolchain install "$LEAN_TOOLCHAIN"
-as_user elan default "$LEAN_TOOLCHAIN"
-grep -q '.elan/bin' "$USER_HOME/.profile" 2>/dev/null || echo 'export PATH="$HOME/.elan/bin:$PATH"' | sudo -u $USER_NAME tee -a "$USER_HOME/.profile" >/dev/null
-grep -q '.elan/bin' "$USER_HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.elan/bin:$PATH"' | sudo -u $USER_NAME tee -a "$USER_HOME/.bashrc" >/dev/null
+TC_DIR=$ELAN_HOME_DIR/toolchains/leanprover--lean4---v$LEAN_VERSION
+if ! as_node test -x "$TC_DIR/bin/lean"; then
+  fetch "$LEAN_URL" "$LEAN_SHA256" "$DL/lean.tar.zst"
+  sudo chmod 0644 "$DL/lean.tar.zst"; sudo chmod 0755 "$DL"
+  as_node mkdir -p "$TC_DIR.tmp"
+  as_node tar --zstd -xf "$DL/lean.tar.zst" -C "$TC_DIR.tmp" --strip-components=1
+  as_node mv "$TC_DIR.tmp" "$TC_DIR"
+fi
+as_node elan default "$LEAN_TOOLCHAIN"
+as_node lean --version | grep -qF "version $LEAN_VERSION" || die "lean toolchain not active"
+sudo chmod -R a+rX "$ELAN_HOME_DIR"
+sudo tee /etc/profile.d/orb-elan.sh >/dev/null <<EOF
+# Shared elan/Lean toolchain owned by $NODE_USER (read-only for other users).
+export ELAN_HOME=$ELAN_HOME_DIR
+case ":\$PATH:" in *":$ORB_BIN:"*) ;; *) export PATH="$ELAN_HOME_DIR/bin:$ORB_BIN:\$PATH";; esac
+EOF
+sudo chmod 644 /etc/profile.d/orb-elan.sh
+
+log "auto-update off (global)"
+sudo tee /etc/profile.d/orb-no-autoupdate.sh >/dev/null <<'EOF'
+export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1
+EOF
+sudo chmod 644 /etc/profile.d/orb-no-autoupdate.sh
+for kv in DISABLE_AUTOUPDATER=1 NO_UPDATE_NOTIFIER=1; do
+  grep -qx "$kv" /etc/environment 2>/dev/null || echo "$kv" | sudo tee -a /etc/environment >/dev/null
+done
 
 log "sandboxed-node"
-sudo install -m 0755 -o root -g root "$ORB_STAGE/sandboxed-node" /usr/local/bin/sandboxed-node
-as_user mkdir -p "$USER_HOME/.orb/work"
-chmod 700 "$USER_HOME/.orb"
+sudo install -m 0755 -o root -g root "$ORB_STAGE/sandboxed-node" $ORB_BIN/sandboxed-node
 
 log "orb-node.service (installed, not enabled)"
-UID_N=$(id -u $USER_NAME)
+UID_N=$(id -u $NODE_USER)
 sudo tee /etc/systemd/system/orb-node.service >/dev/null <<EOF
 [Unit]
 Description=Orb managed machine node (sandboxed-node, dial-out)
@@ -141,27 +247,49 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=$USER_NAME
-Group=$USER_NAME
-EnvironmentFile=$USER_HOME/.orb/enroll.env
-WorkingDirectory=$USER_HOME
-Environment=SANDBOXED_NODE_WORK_DIR=$USER_HOME/.orb/work
+User=$NODE_USER
+Group=$NODE_USER
+# Read by PID1 as root; /home/user/.orb is 0700 user so $NODE_USER cannot read it.
+EnvironmentFile=/home/user/.orb/enroll.env
+WorkingDirectory=$NODE_HOME
+Environment=SANDBOXED_NODE_WORK_DIR=$NODE_WORK
 Environment=SANDBOXED_NODE_BIND=127.0.0.1:3088
-Environment=PATH=$USER_HOME/.elan/bin:/usr/local/bin:$NODE_DIR/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HOME=$USER_HOME
+Environment=PATH=$ELAN_HOME_DIR/bin:$ORB_BIN:/usr/local/bin:$NODE_DIR/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=$NODE_HOME
+Environment=ELAN_HOME=$ELAN_HOME_DIR
 Environment=XDG_RUNTIME_DIR=/run/user/$UID_N
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_N/bus
-Environment=DISABLE_AUTOUPDATER=1
-ExecStart=/usr/local/bin/sandboxed-node
+Environment=DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1
+NoNewPrivileges=true
+# Boat resets /var/lib/systemd/linger on boot: re-enable linger and wait for the user bus.
+ExecStartPre=+/bin/sh -c 'loginctl enable-linger $NODE_USER; for i in \$\$(seq 100); do [ -S /run/user/$UID_N/bus ] && exit 0; sleep 0.2; done; echo user bus missing >&2; exit 1'
+ExecStart=$ORB_BIN/sandboxed-node
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
+sudo tee /etc/systemd/system/orb-linger.service >/dev/null <<EOF
+[Unit]
+Description=Enable lingering for $NODE_USER (boat resets /var/lib/systemd/linger at boot)
+After=systemd-logind.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/loginctl enable-linger $NODE_USER
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
 sudo systemctl daemon-reload
+sudo systemctl enable orb-linger.service >/dev/null 2>&1
 sudo systemctl disable orb-node.service >/dev/null 2>&1 || true
-sudo loginctl enable-linger $USER_NAME
+
+log "convenience links in /usr/local/bin (boat may override platform names at boot)"
+for b in "$ORB_BIN"/*; do
+  n=$(basename "$b"); if [ -e "/usr/local/bin/$n" ] && [ ! -L "/usr/local/bin/$n" ]; then continue; fi
+  sudo ln -sfn "$b" "/usr/local/bin/$n"
+done
 
 log "manifest"
 ver() { "$@" 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?' | head -1; }
@@ -174,20 +302,29 @@ m = {
   "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
   "recipe_sha": info.get("recipe_sha"),
   "node_version": info.get("node_version"),
+  "node_sha256": info.get("node_sha256"),
+  "node_user": "$NODE_USER",
   "harnesses": {
-    "claude": "$(ver /usr/local/bin/claude --version)",
-    "codex": "$(ver /usr/local/bin/codex --version)",
-    "opencode": "$(ver /usr/local/bin/opencode --version)",
-    "gemini": "$(ver /usr/local/bin/gemini --version)",
-    "agy": "$(ver /usr/local/bin/agy --version)",
+    "claude": "$(ver as_node $ORB_BIN/claude --version)",
+    "codex": "$(ver as_node $ORB_BIN/codex --version)",
+    "opencode": "$(ver as_node $ORB_BIN/opencode --version)",
+    "gemini": "$(ver as_node $ORB_BIN/gemini --version)",
+    "agy": "$(ver as_node $ORB_BIN/agy --version)",
   },
-  "lean": {"default_toolchain": "$LEAN_TOOLCHAIN", "lean": "$(as_user lean --version | head -1)",
-           "lake": "$(as_user lake --version | head -1)", "elan": "$(ver as_user elan --version)"},
+  "lean": {"default_toolchain": "$LEAN_TOOLCHAIN", "elan_home": "$ELAN_HOME_DIR",
+           "lean": "$(as_node lean --version | head -1)", "lake": "$(as_node lake --version | head -1)",
+           "elan": "$(ver as_node elan --version)"},
   "nodejs": "$NODEJS_VERSION",
   "tools": {
-    "turbo-lean": "$(ver /usr/local/bin/turbo-lean --version)",
-    "lean-native": "$(ver /usr/local/bin/lean-native --version)",
-    "certified-search": (info.get("tools", {}).get("certified-search") or {}).get("commit"),
+    "turbo-lean": "$(ver $ORB_BIN/turbo-lean --version)",
+    "lean-native": "$(ver $ORB_BIN/lean-native --version)",
+    "certified-search": "$CERTIFIED_SEARCH_COMMIT",
+  },
+  "pins_sha256": {
+    "claude": "$CLAUDE_SHA256", "codex": "$CODEX_SHA256", "gemini": "$GEMINI_SHA256",
+    "opencode": "$OPENCODE_SHA256", "nodejs": "$NODEJS_SHA256", "elan": "$ELAN_SHA256",
+    "lean": "$LEAN_SHA256", "certified-search": "$CERTIFIED_SEARCH_SHA256",
+    $(for b in "${!FLEET_SHA256[@]}"; do printf '"%s": "%s", ' "$b" "${FLEET_SHA256[$b]}"; done)
   },
   "tool_provenance": info.get("tools", {}),
   "os": "$(. /etc/os-release; echo "$PRETTY_NAME")",
@@ -198,7 +335,7 @@ EOF
 sudo chmod 644 /etc/orb/image-manifest.json
 
 log "cleanup (no secrets, no caches)"
-sudo rm -rf /root/.npm "$USER_HOME/.npm" /root/.cache/* /tmp/npm-* 2>/dev/null || true
+sudo rm -rf /root/.npm /home/user/.npm "$NODE_HOME/.cache" /root/.cache/* 2>/dev/null || true
 sudo apt-get clean
 rm -rf "$ORB_STAGE"
 log "done"
