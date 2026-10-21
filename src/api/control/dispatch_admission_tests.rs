@@ -6564,9 +6564,8 @@ async fn typed_remote_launch_is_server_planned_idempotent_and_explicit_about_sup
     let payload = &submissions[0]["payload"];
     let command = payload["command"].as_str().unwrap();
     assert!(
-        command.contains(
-            "opencode run --format json --thinking --model 'builtin/xai/grok-4.6' 'find the fastest kernel'"
-        ),
+        command
+            .contains("opencode run --format json --thinking --model 'builtin/xai/grok-4.6' <&3"),
         "{command}"
     );
     let config: Value =
