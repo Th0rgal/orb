@@ -313,7 +313,7 @@ struct OrbSideQuestionSheet: View {
     @State private var pending: String?
     @State private var askedAt: Date?
     @State private var autoAsked = false
-    @State private var scrolledToLatest = false
+    @State private var scroller = OrbTranscriptScroller()
 
     init(parentID: String, question: String) {
         self.parentID = parentID
@@ -335,18 +335,16 @@ struct OrbSideQuestionSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollViewReader { scroll in
-                ScrollView {
-                    transcript
-                }
-                .scrollDismissesKeyboard(.interactively)
-                // Tapping the transcript hides the keyboard, like the conversation tab.
-                .simultaneousGesture(TapGesture().onEnded { focused = false })
-                .onAppear { scrollToLatest(scroll, animated: false) }
-                .onChange(of: store.turns.count) { _, _ in scrollToLatest(scroll, animated: scrolledToLatest) }
-                .onChange(of: store.open?.answer) { _, _ in scrollToBottom(scroll) }
-                .onChange(of: pending) { _, value in if value != nil { scrollToBottom(scroll) } }
+            OrbTranscriptScrollView(identifier: "btw", scroller: scroller, working: waiting) {
+                transcript
             }
+            .scrollDismissesKeyboard(.interactively)
+            // Tapping the transcript hides the keyboard, like the conversation tab
+            // (simultaneous: links and buttons in the transcript still get the tap).
+            .simultaneousGesture(TapGesture().onEnded { if focused { focused = false } })
+            .onChange(of: store.turns.count) { _, _ in if scroller.pinned { scroller.scrollToBottom(animated: true) } }
+            .onChange(of: pending) { _, value in if value != nil { scroller.scrollToBottom(animated: true) } }
+            .onChange(of: focused) { _, value in if value && scroller.metrics.distanceFromBottom <= OrbTranscriptScroller.pillThreshold { scroller.scrollToBottom(animated: true) } }
             .background(OrbStyle.background)
             .safeAreaInset(edge: .bottom, spacing: 0) { composer }
             .navigationTitle("Side question").navigationBarTitleDisplayMode(.inline)
@@ -373,19 +371,6 @@ struct OrbSideQuestionSheet: View {
         .presentationContentInteraction(.scrolls)
     }
 
-    private func scrollToLatest(_ scroll: ScrollViewProxy, animated: Bool) {
-        guard let last = store.turns.last else { return }
-        let target = store.open != nil || pendingBubble != nil ? "btw.bottom" : last.id
-        let anchor: UnitPoint = target == "btw.bottom" ? .bottom : .top
-        if animated { withAnimation(.snappy(duration: 0.2)) { scroll.scrollTo(target, anchor: anchor) } }
-        else { scroll.scrollTo(target, anchor: anchor) }
-        scrolledToLatest = true
-    }
-
-    private func scrollToBottom(_ scroll: ScrollViewProxy) {
-        withAnimation(.snappy(duration: 0.2)) { scroll.scrollTo("btw.bottom", anchor: .bottom) }
-    }
-
     private var transcript: some View {
         VStack(alignment: .leading, spacing: 16) {
             if !error.isEmpty { OrbNotice(message: error) }
@@ -409,7 +394,6 @@ struct OrbSideQuestionSheet: View {
                 OrbUserBubble(text: pendingBubble, pending: true)
                 if store.open == nil { liveRow(nil) }
             }
-            Color.clear.frame(height: 1).id("btw.bottom")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -470,7 +454,8 @@ struct OrbSideQuestionSheet: View {
                 if running { Button("Stop side agent", role: .destructive) { Task { await stop() } } }
                 Button("New side session") { freshSession = true; error = "" }.disabled(running || store.boundID == nil || freshSession)
                 Text("\(OrbStyle.serviceName(OrbBtwConfig.harness)) · \(OrbBtwConfig.model)")
-            } label: { Image(systemName: "ellipsis") }
+            } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(Rectangle()) }
+            .accessibilityLabel("Side question options")
         }
     }
 
