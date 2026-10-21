@@ -1,3 +1,4 @@
+import Synchronization
 import SwiftUI
 import UIKit
 
@@ -35,17 +36,8 @@ enum OrbStyle {
 
     static func statusLabel(_ state: String) -> String { MissionState.label(state) }
 
-    nonisolated(unsafe) private static let isoFractionalFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-    nonisolated(unsafe) private static let isoFallbackFormatter = ISO8601DateFormatter()
 
-    static func parseDate(_ raw: String) -> Date? {
-        guard !raw.isEmpty else { return nil }
-        return isoFractionalFormatter.date(from: raw) ?? isoFallbackFormatter.date(from: raw)
-    }
+    static func parseDate(_ raw: String) -> Date? { OrbDateCache.parse(raw) }
 
     static func relativeTime(_ raw: String, now: Date = Date()) -> String {
         guard let date = parseDate(raw) else { return "" }
@@ -111,61 +103,115 @@ struct OrbPressButtonStyle: ButtonStyle {
 }
 
 /// Cursor-style 3×3 animated dot matrix for running agents and tool folds.
+/// Animated by Core Animation on the render server: a list of running agents
+/// no longer re-evaluates SwiftUI bodies on every frame (it used to drive a
+/// display-link TimelineView that competed with navigation pushes).
 struct OrbRunningDots: View {
     var size: CGFloat = 12
-    private static let delays: [Double] = [0.0, 0.15, 0.30, 0.20, 0.35, 0.50, 0.40, 0.55, 0.70]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.12)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let dotSize = max(1.8, size / 5.2)
-            let step = (size - dotSize) / 2
-            Canvas { ctx, _ in
-                for index in 0..<9 {
-                    let row = CGFloat(index / 3)
-                    let col = CGFloat(index % 3)
-                    let phase = (t / 1.2 + Self.delays[index]).truncatingRemainder(dividingBy: 1.0)
-                    let wave = 0.5 - 0.5 * cos(phase * 2 * .pi)
-                    let alpha = 0.18 + 0.72 * wave
-                    let rect = CGRect(x: col * step, y: row * step, width: dotSize, height: dotSize)
-                    ctx.fill(Path(ellipseIn: rect), with: .color(.white.opacity(alpha)))
-                }
-            }
+        OrbRunningDotsLayer(size: size, animated: !reduceMotion)
             .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct OrbRunningDotsLayer: UIViewRepresentable {
+    let size: CGFloat
+    let animated: Bool
+    private static let delays: [Double] = [0.0, 0.15, 0.30, 0.20, 0.35, 0.50, 0.40, 0.55, 0.70]
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: CGRect(x: 0, y: 0, width: size, height: size))
+        view.isUserInteractionEnabled = false
+        configure(view)
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        if (view.layer.sublayers?.count ?? 0) != 9 || view.layer.value(forKey: "orbSize") as? CGFloat != size
+            || view.layer.value(forKey: "orbAnimated") as? Bool != animated { configure(view) }
+    }
+
+    private func configure(_ view: UIView) {
+        view.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        view.layer.setValue(size, forKey: "orbSize")
+        view.layer.setValue(animated, forKey: "orbAnimated")
+        let dot = max(1.8, size / 5.2)
+        let step = (size - dot) / 2
+        let now = CACurrentMediaTime()
+        for index in 0..<9 {
+            let layer = CALayer()
+            layer.frame = CGRect(x: CGFloat(index % 3) * step, y: CGFloat(index / 3) * step, width: dot, height: dot)
+            layer.cornerRadius = dot / 2
+            layer.backgroundColor = UIColor.white.cgColor
+            layer.opacity = 0.5
+            if animated {
+                let pulse = CABasicAnimation(keyPath: "opacity")
+                pulse.fromValue = 0.18
+                pulse.toValue = 0.9
+                pulse.duration = 0.6
+                pulse.autoreverses = true
+                pulse.repeatCount = .infinity
+                pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                pulse.beginTime = now - Self.delays[index] * 1.2
+                pulse.isRemovedOnCompletion = false
+                layer.add(pulse, forKey: "pulse")
+            }
+            view.layer.addSublayer(layer)
         }
-        .accessibilityHidden(true)
     }
 }
 
 /// Subtle metallic sweep matching Cursor's `.ui-collapsible-shimmer` and Orb desktop `.work-shimmer`.
+/// The sweep is a Core Animation gradient, masked by the content.
 struct OrbShimmerModifier: ViewModifier {
     let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func body(content: Content) -> some View {
-        if active {
-            TimelineView(.animation(minimumInterval: 0.05)) { context in
-                let phase = CGFloat((context.date.timeIntervalSinceReferenceDate / 1.9).truncatingRemainder(dividingBy: 1.0))
-                content.overlay {
-                    GeometryReader { geo in
-                        let width = max(1, geo.size.width)
-                        LinearGradient(
-                            stops: [
-                                .init(color: .clear, location: 0),
-                                .init(color: .white.opacity(0.26), location: 0.5),
-                                .init(color: .clear, location: 1),
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                        .frame(width: width * 0.65)
-                        .offset(x: (phase * 1.65 - 0.5) * width)
-                    }
+        if active && !reduceMotion {
+            content.overlay {
+                OrbShimmerLayer()
                     .mask(content)
                     .allowsHitTesting(false)
-                }
+                    .accessibilityHidden(true)
             }
         } else {
             content
         }
     }
+}
+
+private struct OrbShimmerLayer: UIViewRepresentable {
+    final class Sweep: UIView {
+        private let gradient = CAGradientLayer()
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+            clipsToBounds = true
+            gradient.colors = [UIColor.clear.cgColor, UIColor.white.withAlphaComponent(0.26).cgColor, UIColor.clear.cgColor]
+            gradient.startPoint = CGPoint(x: 0, y: 0.5)
+            gradient.endPoint = CGPoint(x: 1, y: 0.5)
+            layer.addSublayer(gradient)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            let width = max(1, bounds.width)
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            gradient.frame = CGRect(x: 0, y: 0, width: width * 0.65, height: bounds.height)
+            CATransaction.commit()
+            let sweep = CABasicAnimation(keyPath: "position.x")
+            sweep.fromValue = -0.5 * width + width * 0.325
+            sweep.toValue = 1.15 * width + width * 0.325
+            sweep.duration = 1.9
+            sweep.repeatCount = .infinity
+            sweep.isRemovedOnCompletion = false
+            gradient.add(sweep, forKey: "sweep")
+        }
+    }
+    func makeUIView(context: Context) -> Sweep { Sweep() }
+    func updateUIView(_ view: Sweep, context: Context) {}
 }
 
 extension View {
@@ -1936,5 +1982,31 @@ struct OrbConnectionIssueCard: View {
                 .background(primary ? Color.white : Color.white.opacity(0.08), in: Capsule())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// ISO 8601 timestamps from Core, parsed once: list rows, turn summaries and the
+/// Working clock re-read the same strings on every render.
+enum OrbDateCache {
+    private struct State {
+        var dates: [String: Date] = [:]
+        let fractional: ISO8601DateFormatter = {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return f
+        }()
+        let plain = ISO8601DateFormatter()
+    }
+    private static let state = Mutex(State())
+
+    static func parse(_ raw: String) -> Date? {
+        guard !raw.isEmpty else { return nil }
+        return state.withLock { s in
+            if let hit = s.dates[raw] { return hit }
+            guard let date = s.fractional.date(from: raw) ?? s.plain.date(from: raw) else { return nil }
+            if s.dates.count > 4096 { s.dates.removeAll(keepingCapacity: true) }
+            s.dates[raw] = date
+            return date
+        }
     }
 }

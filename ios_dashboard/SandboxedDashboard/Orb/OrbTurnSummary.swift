@@ -22,11 +22,7 @@ enum OrbTurnSummary {
         return parseDate(last.timestamp)
     }
 
-    static func parseDate(_ raw: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
-    }
+    static func parseDate(_ raw: String) -> Date? { OrbDateCache.parse(raw) }
 
     /// Desktop `formatElapsed`: "20:12" read as a time of day next to the status bar clock.
     static func clock(_ seconds: Int) -> String {
