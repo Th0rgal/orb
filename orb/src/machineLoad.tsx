@@ -61,7 +61,7 @@ export function byLeastLoaded<T>(rows: T[], machine: (row: T) => string): T[] {
 
 /** First automatically schedulable compute node from the sorted list (online, uncordoned, non-manual). */
 export function firstAvailableNodeId(nodes: RemoteNodeView[]): string | undefined {
-  const usable = nodes.filter(node => node.status === "online" && !node.cordoned && !node.labels?.includes("manual-only"));
+  const usable = nodes.filter(node => node.status === "online" && !node.cordoned && !node.labels?.includes("manual-only") && !node.labels?.includes("managed"));
   return byLeastLoaded(usable, node => node.id)[0]?.id;
 }
 
