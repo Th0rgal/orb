@@ -181,7 +181,6 @@ struct OrbConversation: View {
             conversationContainer(scroll: scroll)
                 .background(OrbStyle.background)
                 .scrollDismissesKeyboard(.interactively)
-                .background(OrbDoubleTapDismissesKeyboard(active: composerFocused) { composerFocused = false })
                 .navigationTitle(resolvedNavigationTitle)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
@@ -348,7 +347,7 @@ struct OrbConversation: View {
 
     @ViewBuilder
     func conversationContainer(scroll: ScrollViewProxy) -> some View {
-        OrbTranscriptScrollView(identifier: "conversation", scroller: scroller, working: working) {
+        OrbTranscriptScrollView(identifier: "conversation", scroller: scroller, working: working, onDoubleTap: composerFocused ? { composerFocused = false } : nil) {
             VStack(alignment: .leading, spacing: 14) {
                 if unavailable {
                     ContentUnavailableView("Available on your Mac", systemImage: "laptopcomputer", description: Text("This conversation runs locally in Orb and cannot be controlled from iOS."))

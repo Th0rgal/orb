@@ -113,6 +113,8 @@ struct OrbTranscriptScrollView<Content: View>: View {
     let identifier: String
     @Bindable var scroller: OrbTranscriptScroller
     var working = false
+    /// When set, a double tap on the transcript runs it (the conversation hides the keyboard).
+    var onDoubleTap: (() -> Void)? = nil
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -126,6 +128,7 @@ struct OrbTranscriptScrollView<Content: View>: View {
         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
         .scrollIndicators(.hidden)
         .background(OrbHorizontalScrollLock())
+        .background(OrbDoubleTapDismissesKeyboard(active: onDoubleTap != nil) { onDoubleTap?() })
         .onScrollGeometryChange(for: OrbScrollMetrics.self) { OrbScrollMetrics($0) } action: { _, value in
             scroller.update(value)
         }
@@ -263,6 +266,18 @@ struct OrbFastScrollThumb: View {
 /// SwiftUI has no switch for it: stop the enclosing UIScrollView from ever moving
 /// sideways (directional lock, no horizontal bounce).
 struct OrbHorizontalScrollLock: UIViewRepresentable {
+    /// The UIScrollView backing the SwiftUI ScrollView this view is a background of
+    /// (an ancestor, or a sibling of one of its ancestors).
+    static func transcriptScrollView(near view: UIView) -> UIScrollView? {
+        var current = view.superview
+        while let node = current {
+            if let scroll = node as? UIScrollView, !(scroll is UITextView) { return scroll }
+            if let scroll = node.subviews.lazy.compactMap({ $0 as? UIScrollView }).first(where: { !($0 is UITextView) }) { return scroll }
+            current = node.superview
+        }
+        return nil
+    }
+
     func makeUIView(context: Context) -> UIView { Probe() }
     func updateUIView(_ uiView: UIView, context: Context) { (uiView as? Probe)?.lock() }
 
@@ -272,21 +287,9 @@ struct OrbHorizontalScrollLock: UIViewRepresentable {
         override func didMoveToWindow() { super.didMoveToWindow(); lock() }
         func lock() {
             DispatchQueue.main.async { [weak self] in
-                var view = self?.superview
-                while let current = view {
-                    if let scroll = current as? UIScrollView, !(scroll is UITextView) {
-                        scroll.alwaysBounceHorizontal = false
-                        scroll.isDirectionalLockEnabled = true
-                        return
-                    }
-                    // The ScrollView is a sibling of the background host: look in its children.
-                    if let scroll = current.subviews.lazy.compactMap({ $0 as? UIScrollView }).first {
-                        scroll.alwaysBounceHorizontal = false
-                        scroll.isDirectionalLockEnabled = true
-                        return
-                    }
-                    view = current.superview
-                }
+                guard let self, let scroll = OrbHorizontalScrollLock.transcriptScrollView(near: self) else { return }
+                scroll.alwaysBounceHorizontal = false
+                scroll.isDirectionalLockEnabled = true
             }
         }
     }

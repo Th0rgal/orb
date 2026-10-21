@@ -238,30 +238,13 @@ extension ButtonStyle where Self == GlassButtonStyle {
 
 // MARK: - Haptics
 
+/// The app's one haptics vocabulary (matches the ChatGPT/Claude conventions):
+/// selection for pickers, pills and folds; light impact for sends and copies;
+/// success/error for completed or failed actions.
 @MainActor
-enum HapticService {
-    static func lightTap() {
-        let generator = UIImpactFeedbackGenerator(style: .light)
-        generator.impactOccurred()
-    }
-    
-    static func mediumTap() {
-        let generator = UIImpactFeedbackGenerator(style: .medium)
-        generator.impactOccurred()
-    }
-    
-    static func selectionChanged() {
-        let generator = UISelectionFeedbackGenerator()
-        generator.selectionChanged()
-    }
-    
-    static func success() {
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.success)
-    }
-    
-    static func error() {
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.error)
-    }
+enum OrbHaptics {
+    static func selection() { UISelectionFeedbackGenerator().selectionChanged() }
+    static func light() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+    static func error() { UINotificationFeedbackGenerator().notificationOccurred(.error) }
 }

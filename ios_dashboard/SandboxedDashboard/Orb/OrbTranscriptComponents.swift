@@ -57,13 +57,19 @@ struct OrbDoubleTapDismissesKeyboard: UIViewRepresentable {
 
         @objc private func fire() { dismiss() }
 
+        /// Scoped to the transcript: double taps on text inputs, controls, the navigation
+        /// bar or a presented sheet keep their own meaning (word selection, buttons).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             var view = touch.view
+            var insideScroll = false
             while let current = view {
-                if current.isFirstResponder { return false }
+                if current.isFirstResponder || current is UITextField || current is UITextView || current is UIControl
+                    || current is UINavigationBar || current is UIToolbar { return false }
+                if current is UIScrollView { insideScroll = true }
+                if let controller = current.next as? UIViewController, controller.presentingViewController != nil { return false }
                 view = current.superview
             }
-            return true
+            return insideScroll
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }

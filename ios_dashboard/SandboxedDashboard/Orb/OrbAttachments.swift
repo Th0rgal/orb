@@ -119,7 +119,7 @@ struct OrbAttachments: View {
                         .frame(width: 32, height: 32)
                         .background(Color.white.opacity(0.06), in: Circle())
                         .overlay(Circle().stroke(OrbStyle.border, lineWidth: 1))
-                        .frame(width: 36, height: 40)
+                        .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("Add context, attachments, or mode")
@@ -135,8 +135,22 @@ struct OrbAttachments: View {
                             }
                             .lineLimit(1)
                             .truncationMode(.middle)
-                            Button { files.removeAll { $0.id == file.id } } label: { Image(systemName: "xmark.circle") }.accessibilityLabel("Remove \(file.name)")
-                        }.padding(8).background(.white.opacity(0.07), in: Capsule())
+                            Button {
+                                OrbHaptics.selection()
+                                withAnimation(.snappy(duration: 0.18)) { files.removeAll { $0.id == file.id } }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .symbolRenderingMode(.hierarchical)
+                                    .foregroundStyle(OrbStyle.textSecondary)
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(file.name)")
+                            .accessibilityIdentifier("attachment.remove")
+                        }
+                        .padding(.leading, 12)
+                        .background(.white.opacity(0.07), in: Capsule())
                     }
                 }
             } }

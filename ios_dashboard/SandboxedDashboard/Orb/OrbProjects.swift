@@ -85,11 +85,6 @@ enum OrbStyle {
 }
 
 @MainActor
-enum OrbHaptics {
-    static func selection() { UISelectionFeedbackGenerator().selectionChanged() }
-    static func light() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
-    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
-}
 
 /// Tactile press scale effect for interactive rows and buttons.
 struct OrbPressButtonStyle: ButtonStyle {

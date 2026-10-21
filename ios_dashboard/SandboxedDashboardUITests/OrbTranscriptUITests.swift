@@ -30,7 +30,14 @@ final class OrbTranscriptUITests: XCTestCase {
     @MainActor private func launch(_ extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-api_base_url", "http://127.0.0.1:18766", "-orb_test_reset", "YES", "-orb_slow_thumb_fade", "YES"] + extra
-        app.launch()
+        // The first UI launch of an xcodebuild invocation sometimes comes up without its
+        // arguments (signed-in endpoint, default text size). Relaunch once if the fixture
+        // project is missing, so the test always runs against the fixture.
+        for _ in 0..<2 {
+            app.terminate()
+            app.launch()
+            if app.buttons["project.orb-test"].waitForExistence(timeout: 15) || app.buttons["home.tab.inbox"].isSelected { break }
+        }
         return app
     }
 
@@ -178,6 +185,67 @@ final class OrbTranscriptUITests: XCTestCase {
         XCTAssertTrue(app.buttons["conversation.menu"].isHittable)
         XCTAssertLessThanOrEqual(app.buttons["Send message"].frame.maxX, app.frame.maxX)
         capture(app, "a11y-xl-conversation")
+    }
+
+    /// Move picks a project from the roster instead of typing a slug.
+    @MainActor func testMoveSheetListsProjects() throws {
+        let app = open("long-rich")
+        let menu = app.buttons["conversation.menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 10))
+        menu.tap()
+        app.buttons["Move"].tap()
+        let row = app.buttons["move.project.orb-test"]
+        XCTAssertTrue(row.waitForExistence(timeout: 8), "the project roster is listed")
+        XCTAssertTrue(row.isSelected, "the current project is preselected")
+        XCTAssertTrue(app.textFields["move.folder"].exists)
+        capture(app, "move-sheet")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.textFields["composer"].waitForExistence(timeout: 5))
+    }
+
+    /// The Inbox reply uses the shared composer box.
+    @MainActor func testInboxReplyUsesSharedComposer() throws {
+        let app = launch()
+        XCTAssertTrue(app.buttons["home.tab.inbox"].waitForExistence(timeout: 20))
+        app.buttons["home.tab.inbox"].tap()
+        XCTAssertTrue(app.buttons["inbox.filter.all"].waitForExistence(timeout: 10))
+        app.buttons["inbox.filter.all"].tap()
+        let reply = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.reply.'")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 15))
+        let id = reply.identifier.replacingOccurrences(of: "inbox.reply.", with: "")
+        reply.tap()
+        let field = app.textFields["inbox.reply.field.\(id)"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "shared composer field")
+        XCTAssertTrue(app.buttons["dictation.microphone"].exists)
+        let send = app.buttons["inbox.send.\(id)"]
+        XCTAssertTrue(send.exists)
+        XCTAssertFalse(send.isEnabled, "send waits for text")
+        field.tap(); field.typeText("Inbox words")
+        XCTAssertEqual(field.value as? String, "Inbox words")
+        XCTAssertTrue(send.isEnabled)
+        XCTAssertGreaterThanOrEqual(send.frame.width, 44)
+        capture(app, "inbox-shared-composer")
+    }
+
+    /// With no server and nothing cached, the Inbox shows an error with Retry, not "Inbox zero".
+    @MainActor func testInboxErrorStateOffersRetry() async throws {
+        var fail = URLRequest(url: URL(string: "http://127.0.0.1:18766/__fail_missions")!)
+        fail.httpMethod = "POST"
+        _ = try await URLSession.shared.data(for: fail)
+        defer {
+            var reset = URLRequest(url: URL(string: "http://127.0.0.1:18766/__reset")!)
+            reset.httpMethod = "POST"
+            Task { _ = try? await URLSession.shared.data(for: reset) }
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18766", "-orb_test_reset", "YES"]
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["home.tab.inbox"].waitForExistence(timeout: 20))
+        app.buttons["home.tab.inbox"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["inbox.error"].waitForExistence(timeout: 30), "error state")
+        XCTAssertTrue(app.buttons["inbox.retry"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.descendants(matching: .any)["inbox.empty"].exists, "not Inbox zero")
+        capture(app, "inbox-error")
     }
 
     /// Only the unanswered permission request shows a card (questions are decoded once per event change).

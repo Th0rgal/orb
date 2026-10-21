@@ -220,7 +220,7 @@ struct SetupSheet: View {
             } else { api.authSessionExpired = false }
             password = ""
             api.connectionGeneration += 1
-            HapticService.success()
+            OrbHaptics.success()
             // No artificial delay before dismissing — the haptic + checkmark
             // already convey success, and adding 500 ms here just felt slow.
             // (UX audit item #24.)
@@ -233,7 +233,7 @@ struct SetupSheet: View {
             } else {
                 errorMessage = "Could not connect. Check the server address and your connection."
             }
-            HapticService.error()
+            OrbHaptics.error()
         }
 
         isTestingConnection = false
@@ -435,7 +435,7 @@ struct LoginView: View {
                         UserDefaults.standard.set(trimmed, forKey: "last_username")
                     }
                 }
-                HapticService.success()
+                OrbHaptics.success()
                 onLogin()
             } catch {
                 if let apiError = error as? OrbHTTPError {
@@ -445,7 +445,7 @@ struct LoginView: View {
                 } else {
                     errorMessage = error.localizedDescription
                 }
-                HapticService.error()
+                OrbHaptics.error()
             }
             isLoading = false
         }

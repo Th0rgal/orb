@@ -52,12 +52,12 @@ final class FidoApprovalState {
                     await approve(request.id)
                 } else {
                     pendingRequests.append(request)
-                    HapticService.error()
+                    OrbHaptics.error()
                 }
             }
         } else {
             pendingRequests.append(request)
-            HapticService.error()
+            OrbHaptics.error()
         }
     }
 
@@ -69,7 +69,7 @@ final class FidoApprovalState {
         guard !inFlightRequestIds.contains(requestId) else { return }
         guard await authenticateDeviceOwner() else {
             lastError = "Authentication was not completed."
-            HapticService.error()
+            OrbHaptics.error()
             return
         }
         await approve(requestId)
@@ -85,7 +85,7 @@ final class FidoApprovalState {
         defer { inFlightRequestIds.remove(requestId) }
         do {
             try await api.fidoRespond(requestId: requestId, approved: true)
-            HapticService.success()
+            OrbHaptics.success()
         } catch {
             // Usually the 60 s server timeout already expired the request.
             lastError = error.localizedDescription

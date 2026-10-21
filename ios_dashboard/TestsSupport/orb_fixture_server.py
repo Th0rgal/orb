@@ -14,6 +14,8 @@ MISSIONS = {}
 RECEIPTS = {}
 PROVIDERS = {}
 CORDONED = False
+# /__fail_missions: the mission list returns 500 until the next /__reset (Inbox error state).
+FAIL_MISSIONS = False
 INBOX_STATE = {}
 QUEUE = []
 RECEIVED = []
@@ -23,7 +25,8 @@ PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
 PROMPT = "Please test the new interface"
 def reset():
-    global CORDONED, HEALTH_DELAY
+    global CORDONED, HEALTH_DELAY, FAIL_MISSIONS
+    FAIL_MISSIONS = False
     CORDONED = False; HEALTH_DELAY = 0
     QUEUE.clear(); RECEIVED.clear(); QUEUE_EVENTS.clear(); SCHEDULE.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
     PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
@@ -177,6 +180,7 @@ class Handler(BaseHTTPRequestHandler):
         if p=='/api/ai/providers/usage': return self.send({'entries': {'fixture-provider': {'provider_type':'openai', 'codex_primary_used_percent':25}}})
         if p=='/api/cloud/usage': return self.send({'accounts':{}})
         if p=='/api/projects': return self.send({'projects':PROJECTS})
+        if p=='/api/control/missions' and FAIL_MISSIONS: return self.send({'error':'fixture: missions unavailable'},500)
         if p=='/api/control/missions':
             time.sleep(LIST_DELAY)
             return self.send(list(MISSIONS.values()))
@@ -212,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         with LOCK: self.mutate()
     def mutate(self):
-        global VALID_TOKEN, CORDONED, HEALTH_DELAY
+        global VALID_TOKEN, CORDONED, HEALTH_DELAY, FAIL_MISSIONS
         p=unquote(urlparse(self.path).path); size=int(self.headers.get('Content-Length',0))
         if p == '/api/voice/transcribe':
             audio = self.rfile.read(size)
@@ -228,6 +232,7 @@ class Handler(BaseHTTPRequestHandler):
             if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
             return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})
+        if p=='/__fail_missions': FAIL_MISSIONS = True; return self.send({})
         if p=='/__health_delay': HEALTH_DELAY=float(body.get('seconds',0)); return self.send({})
         if p=='/api/control/inbox-state/preferences':
             INBOX_STATE['preferences'] = body; return self.send({})

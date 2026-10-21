@@ -50,19 +50,8 @@ extension OrbConversation {
     }
 
     var moveConversationSheet: some View {
-        NavigationStack {
-            Form {
-                if !error.isEmpty { OrbNotice(message: error) }
-                TextField("Project slug", text: $destinationProject).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Folder", text: $destinationFolder).textInputAutocapitalization(.never).autocorrectionDisabled()
-            }
-            .navigationTitle("Move conversation")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { moving = false } }
-                ToolbarItem(placement: .topBarTrailing) { Button("Move") { Task { await move() } }.disabled(destinationProject.trimmingCharacters(in: .whitespaces).isEmpty) }
-            }
-        }
+        OrbMoveSheet(project: $destinationProject, folder: $destinationFolder, error: error,
+                     onCancel: { moving = false }, onMove: { Task { await move() } })
     }
 
 }
