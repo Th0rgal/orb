@@ -3,6 +3,7 @@ import { connectionVersion, getApiUrl, getJwt, isConnected, type Mission } from 
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { formatToolDetail, isSyntheticUserMessage } from "./inboxModel";
 import { inboxConfig } from "./inboxSettings";
+import { isLive } from "./missionStatus";
 import { messageImages } from "./messageImages";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
 import { remoteLog as parseRemoteLog } from "./remoteLog";
@@ -388,17 +389,36 @@ async function fetchSharedDigest(missionId: string, model: string, updatedMs: nu
   const digest = await response.json() as InboxDigest;
   if (connectionVersion() !== version) throw new Error("Connection changed");
   if (digest.schemaVersion !== 7 || !digest.outcome || !digest.sources?.length || !digest.sourceRevision) throw new Error("Invalid shared summary");
-  if (!(Date.parse(digest.sourceUpdatedAt ?? "") + 2000 >= updatedMs)) throw new Error("Core summary is behind this conversation");
+  // A summary of an earlier point of the conversation (Core throttles regeneration while a
+  // mission streams) is still the best display text; getCurrentInboxDigest keeps it out of
+  // reply context because its sourceUpdatedAt is older than updatedMs.
   return { ...digest, task: "", verdict: "waiting", aiGenerated: true, updatedMs };
 }
 
+/** Minimum gap between two summary requests for a mission that is still streaming. */
+export const LIVE_SUMMARY_INTERVAL_MS = 60_000;
+const lastRequestAt = new Map<string, number>();
+const deferred = new Map<string, { mission: Mission; updatedMs: number; priority: number; timer: ReturnType<typeof setTimeout> }>();
+const missionBusy = new Map<string, number>();
+
+function missionScope(missionId: string): string {
+  return `${currentStorageKey()}:${missionId}`;
+}
+
+/**
+ * One stable status per mission card. It is keyed by mission, not by updatedMs: a streaming
+ * mission changes updatedMs several times per second, and a per-timestamp state used to flip
+ * between "Generating summary…", "Summary unavailable" and "AI summary" on every event.
+ * While a previous summary exists it stays on screen and no label is shown.
+ */
 export function inboxSummaryState(missionId: string, updatedMs: number): string | undefined {
   inboxDigestVersion();
   const cfg = inboxConfig();
   if (!cfg.aiSummary) return;
-  const key = `${currentStorageKey()}:${makeCacheKey(missionId, updatedMs, cfg.model)}`;
-  if (inFlight.has(key)) return "Generating summary…";
-  if (failedKeys.has(key)) return "Summary unavailable";
+  if (getCachedInboxDigest(missionId, updatedMs, cfg.model)) return;
+  const scope = missionScope(missionId);
+  if ((missionBusy.get(scope) ?? 0) > 0 || deferred.has(scope)) return "Generating summary…";
+  if (failedKeys.has(`${currentStorageKey()}:${makeCacheKey(missionId, updatedMs, cfg.model)}`)) return "Summary unavailable";
 }
 
 export function requestInboxDigest(
@@ -410,15 +430,42 @@ export function requestInboxDigest(
   if (!isConnected()) return;
   const cfg = inboxConfig();
   if (!cfg.aiSummary) return;
-  const cacheKey = makeCacheKey(mission.id, updatedMs, cfg.model);
   if (getCurrentInboxDigest(mission.id, updatedMs, cfg.model)) return;
-  const scopeKey = `${currentStorageKey()}:${cacheKey}`;
-  const requestVersion = connectionVersion();
+  const scope = missionScope(mission.id);
+  const scopeKey = `${currentStorageKey()}:${makeCacheKey(mission.id, updatedMs, cfg.model)}`;
   if (inFlight.has(scopeKey)) return;
   const lastFail = failedKeys.get(scopeKey);
   if (lastFail && Date.now() - lastFail < 60_000) return;
+  // Coalesce: one request per mission at a time, and at most one per interval while it streams.
+  const pending = deferred.get(scope);
+  const busy = (missionBusy.get(scope) ?? 0) > 0;
+  const wait = isLive(mission.status) ? (lastRequestAt.get(scope) ?? -Infinity) + LIVE_SUMMARY_INTERVAL_MS - Date.now() : 0;
+  if (busy || wait > 0) {
+    if (pending) {
+      pending.mission = mission; pending.updatedMs = updatedMs; pending.priority = Math.min(pending.priority, priority);
+      return;
+    }
+    const entry = {
+      mission, updatedMs, priority,
+      timer: setTimeout(() => {
+        if ((missionBusy.get(scope) ?? 0) > 0) return; // the in-flight completion re-runs it
+        deferred.delete(scope);
+        requestInboxDigest(entry.mission, undefined, entry.updatedMs, entry.priority);
+        bumpDigestVersion();
+      }, Math.max(wait, 0)),
+    };
+    // A busy mission is re-run on completion; the timer only covers the live interval.
+    if (busy && wait <= 0) clearTimeout(entry.timer);
+    deferred.set(scope, entry);
+    bumpDigestVersion();
+    return;
+  }
+  if (pending) { clearTimeout(pending.timer); deferred.delete(scope); }
 
+  const requestVersion = connectionVersion();
   inFlight.add(scopeKey);
+  missionBusy.set(scope, (missionBusy.get(scope) ?? 0) + 1);
+  lastRequestAt.set(scope, Date.now());
   bumpDigestVersion();
   queue.push({
     priority,
@@ -427,8 +474,11 @@ export function requestInboxDigest(
         if (connectionVersion() !== requestVersion) return;
         const parsed = await fetchSharedDigest(mission.id, cfg.model, updatedMs);
         if (parsed?.schemaVersion === 7) {
-          failedKeys.delete(scopeKey);
           storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
+          // Core answered with an older summary (throttled or still syncing): show it, but back
+          // off this timestamp like a failure so a settled mission does not re-ask in a loop.
+          if (getCurrentInboxDigest(mission.id, updatedMs, cfg.model)) failedKeys.delete(scopeKey);
+          else failedKeys.set(scopeKey, Date.now());
         } else {
           failedKeys.set(scopeKey, Date.now());
         }
@@ -436,6 +486,14 @@ export function requestInboxDigest(
         failedKeys.set(scopeKey, Date.now());
       } finally {
         inFlight.delete(scopeKey);
+        const left = (missionBusy.get(scope) ?? 1) - 1;
+        if (left > 0) missionBusy.set(scope, left); else missionBusy.delete(scope);
+        const next = deferred.get(scope);
+        if (next && left === 0) {
+          clearTimeout(next.timer);
+          deferred.delete(scope);
+          requestInboxDigest(next.mission, undefined, next.updatedMs, next.priority);
+        }
         bumpDigestVersion();
       }
     },

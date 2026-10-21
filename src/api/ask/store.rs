@@ -186,6 +186,23 @@ impl AskStore {
         tokio::task::spawn_blocking(move || conn.blocking_lock().query_row(
             "SELECT digest_json FROM inbox_digests WHERE cache_key=?1 AND source_revision=?2",params![key,revision],|row|row.get(0)).optional().map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
     }
+    /// Latest summary for a key whatever its source revision (stale-while-revalidate).
+    pub async fn latest_inbox_digest(&self, key: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.clone();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || {
+            conn.blocking_lock()
+                .query_row(
+                    "SELECT digest_json FROM inbox_digests WHERE cache_key=?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
     pub async fn save_inbox_digest(
         &self,
         key: &str,
