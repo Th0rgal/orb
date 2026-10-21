@@ -1567,6 +1567,7 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 
 .mission-tasks { margin: 18px 0; padding: 12px 14px; border: 1px solid var(--stroke); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--bg-elev) 60%, transparent); }
 .mission-tasks.collapsed { padding: 9px 12px; }
+.mission-tasks.is-ended .tasks-count { color: var(--fg-3); font-style: italic; }
 .tasks-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; min-height: 22px; }
 .tasks-heading-toggle { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .tasks-heading-toggle:hover strong { color: var(--fg-strong); }
