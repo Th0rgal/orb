@@ -35,3 +35,14 @@ test("OpenCode narration bubbles and the final answer are not shown twice", () =
   ]);
   expect(items.filter(i => i.kind === "text").map(i => i.kind === "text" && i.text)).toEqual(["Reading files"]);
 });
+
+import { repairedFinal } from "../src/btwAgent";
+test("a /btw closing line written after a compaction does not replace the answer", () => {
+  const answer = "Voici le détail exact des **3 contre-exemples**. " + "x".repeat(3700);
+  const closing = "Everything has been explained and no further action is needed right now.";
+  const delta = `Je regarde les derniers messages.\n\nJe regarde aussi la fin.\n\n${answer}\n\n${closing}`;
+  expect(repairedFinal(closing, delta)).toBe(delta);
+  // A normal final that the stream merely prefixes with narration stays as is.
+  expect(repairedFinal(answer, `Je regarde.\n\n${answer}`)).toBe(answer);
+  expect(repairedFinal(closing, undefined)).toBe(closing);
+});

@@ -381,7 +381,10 @@ impl GrokStream {
                     self.opencode_answer_start = self.opencode_answer_start.min(start);
                     self.opencode_flushed = self.opencode_flushed.min(start);
                 }
-                self.opencode_segment_closed = true;
+                // Only a tool call closes the answer. After a compaction the
+                // model often adds a closing line; it must extend the answer,
+                // not replace it (/btw 412e22b7 seq 422 kept only "Everything
+                // has been explained…" and dropped the 3.8 KB answer).
             }
             return;
         }
@@ -3369,6 +3372,32 @@ mod tests {
         assert_eq!(usage.input_tokens, 300);
         assert_eq!(usage.output_tokens, 35);
         assert_eq!(usage.cache_read_input_tokens, Some(40));
+    }
+
+    /// /btw 412e22b7 job aea7c97e: answer, then a compaction (summary and
+    /// `compaction_continue`), then a short closing line.
+    #[test]
+    fn opencode_closing_line_after_compaction_keeps_the_answer() {
+        let mut stream = GrokStream::default();
+        let line = |v: serde_json::Value| format!("{v}\n");
+        let s = "ses_b";
+        for v in [
+            serde_json::json!({"type":"text","sessionID":s,"part":{"id":"p1","messageID":"m1","text":"Je regarde les derniers messages."}}),
+            serde_json::json!({"type":"tool_use","sessionID":s,"part":{"id":"p2","messageID":"m1","callID":"call_0","tool":"bash","state":{"status":"completed"}}}),
+            serde_json::json!({"type":"text","sessionID":s,"part":{"id":"p3","messageID":"m2","text":"Voici le détail exact des **3 contre-exemples**."}}),
+            serde_json::json!({"type":"step_finish","sessionID":s,"part":{"messageID":"m2","reason":"stop"}}),
+            serde_json::json!({"type":"text","sessionID":s,"part":{"id":"p4","messageID":"m3","text":"## Objective\n- summary"}}),
+            serde_json::json!({"type":"step_finish","sessionID":s,"part":{"messageID":"m3","reason":"stop"}}),
+            serde_json::json!({"type":"text","sessionID":s,"part":{"id":"p5","messageID":"m4","synthetic":true,"metadata":{"compaction_continue":true},"text":"Continue if you have next steps"}}),
+            serde_json::json!({"type":"text","sessionID":s,"part":{"id":"p6","messageID":"m5","text":"Everything has been explained."}}),
+            serde_json::json!({"type":"step_finish","sessionID":s,"part":{"messageID":"m5","reason":"stop"}}),
+        ] {
+            stream.feed(&line(v));
+        }
+        assert_eq!(
+            stream.final_text(),
+            "Voici le détail exact des **3 contre-exemples**.\n\nEverything has been explained."
+        );
     }
 
     #[tokio::test]
