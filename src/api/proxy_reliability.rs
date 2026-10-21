@@ -35,13 +35,15 @@ pub fn first_token_timeout() -> Duration {
 
 /// First-token limit for one chain entry. Gemini thinking models can think
 /// silently (no chunks at all) for minutes on large prompts, so they get
-/// `PROXY_GEMINI_FIRST_TOKEN_TIMEOUT_SECS` (default 120 s). Any upstream
+/// `PROXY_GEMINI_FIRST_TOKEN_TIMEOUT_SECS` (default 90 s: longer than the
+/// 45 s default, but under Cloudflare's 100 s origin limit, past which the
+/// client gets a 524 and the proxy can no longer fall back). Any upstream
 /// chunk — a thought part, a keepalive comment — resets the idle clock, so
 /// this only fires on a stream that is truly silent.
 pub fn first_token_timeout_for(provider: &str, model: &str) -> Duration {
     let gemini_provider = matches!(provider, "google" | "gemini" | "antigravity");
     if gemini_provider && crate::api::proxy::is_gemini_thinking_model(model) {
-        return Duration::from_secs(env_secs("PROXY_GEMINI_FIRST_TOKEN_TIMEOUT_SECS", 120))
+        return Duration::from_secs(env_secs("PROXY_GEMINI_FIRST_TOKEN_TIMEOUT_SECS", 90))
             .max(first_token_timeout());
     }
     first_token_timeout()
@@ -456,11 +458,11 @@ mod tests {
     fn gemini_thinking_models_get_a_longer_first_token_limit() {
         assert_eq!(
             first_token_timeout_for("google", "gemini-4-argon-eap").as_secs(),
-            120
+            90
         );
         assert_eq!(
             first_token_timeout_for("antigravity", "gemini-4-argon-high").as_secs(),
-            120
+            90
         );
         assert_eq!(first_token_timeout_for("zai", "glm-5.3").as_secs(), 45);
         assert_eq!(

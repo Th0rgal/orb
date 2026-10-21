@@ -2610,6 +2610,19 @@ pub(crate) async fn chat_completions_inner(
                 .health_tracker
                 .any_subscription_cooldown_active(&candidate_subscription_keys)
                 .await;
+        if provider_in_cooldown {
+            // Retry-After = when the first candidate account becomes usable.
+            if let Some(remaining) = state
+                .health_tracker
+                .min_remaining_cooldown(&candidate_account_ids)
+                .await
+            {
+                return cooldown_error_response_with_retry_after(
+                    &chain_id,
+                    remaining.as_secs().max(1),
+                );
+            }
+        }
         return unavailable_chain_response(&chain_id, provider_in_cooldown);
     }
 
@@ -3079,6 +3092,7 @@ pub(crate) async fn chat_completions_inner(
 
         let mut status = upstream_resp.status();
         outcome.attempt_http.insert(entry_idx, status.as_u16());
+        let upstream_headers_ms = request_start.elapsed().as_millis() as u64;
 
         // Reactive recovery for stale extended-thinking blocks. Anthropic
         // rejects a replayed thinking/redacted_thinking block that no longer
@@ -3190,6 +3204,10 @@ pub(crate) async fn chat_completions_inner(
                     HeaderValue::from_static(TEXT_EVENT_STREAM),
                 );
                 response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_CACHE));
+                response_headers.insert(
+                    header::HeaderName::from_static("x-accel-buffering"),
+                    HeaderValue::from_static("no"),
+                );
 
                 // Translate, then hold the stream until its first content
                 // chunk so an error or empty answer can still be retried or
@@ -3274,6 +3292,16 @@ pub(crate) async fn chat_completions_inner(
                         outcome.attempt_rows(&entries, &pending_fallback_events),
                     );
                     let client_ttft = outcome.started.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        provider = %entry.provider_id,
+                        model = %entry.model_id,
+                        upstream_headers_ms,
+                        upstream_first_content_ms = ttft_ms,
+                        client_ttft_ms = client_ttft,
+                        proxy_before_upstream_ms = client_ttft.saturating_sub(ttft_ms),
+                        retries = outcome.retries,
+                        "Proxy stream ready"
+                    );
                     Some(proxy_outcome_sink(
                         state.clone(),
                         outcome.record(
@@ -3317,7 +3345,11 @@ pub(crate) async fn chat_completions_inner(
                     state.health_tracker.record_fallback_event(evt).await;
                 }
 
-                return (status, response_headers, Body::from_stream(tracked_stream))
+                return (
+                    status,
+                    response_headers,
+                    Body::from_stream(sse_error_terminated(tracked_stream)),
+                )
                     .into_response();
             }
 
@@ -3591,6 +3623,10 @@ pub(crate) async fn chat_completions_inner(
                         );
                         response_headers
                             .insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_CACHE));
+                        response_headers.insert(
+                            header::HeaderName::from_static("x-accel-buffering"),
+                            HeaderValue::from_static("no"),
+                        );
 
                         let stream_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
                         let stream_created = chrono::Utc::now().timestamp();
@@ -3613,6 +3649,16 @@ pub(crate) async fn chat_completions_inner(
                                 outcome.attempt_rows(&entries, &pending_fallback_events),
                             );
                             let client_ttft = outcome.started.elapsed().as_millis() as u64;
+                            tracing::info!(
+                                provider = %entry.provider_id,
+                                model = %entry.model_id,
+                                upstream_headers_ms,
+                                upstream_first_content_ms = ttft_ms,
+                                client_ttft_ms = client_ttft,
+                                proxy_before_upstream_ms = client_ttft.saturating_sub(ttft_ms),
+                                retries = outcome.retries,
+                                "Proxy stream ready"
+                            );
                             Some(proxy_outcome_sink(
                                 state.clone(),
                                 outcome.record(
@@ -3656,8 +3702,50 @@ pub(crate) async fn chat_completions_inner(
                             state.health_tracker.record_fallback_event(evt).await;
                         }
 
-                        return (status, response_headers, Body::from_stream(tracked_stream))
+                        return (
+                            status,
+                            response_headers,
+                            Body::from_stream(sse_error_terminated(tracked_stream)),
+                        )
                             .into_response();
+                    }
+                    Err((_, detail)) if detail.contains("finishReason=MAX_TOKENS") => {
+                        // Even with more room the budget ran out before any
+                        // text: answer like OpenAI does (empty, "length")
+                        // rather than a 502 that also cools the account down.
+                        tracing::info!(
+                            provider = %entry.provider_id,
+                            model = %entry.model_id,
+                            retries,
+                            "Gemini output budget exhausted before content; relaying an empty length completion"
+                        );
+                        state.health_tracker.record_entry_success(entry).await;
+                        let mut rows = outcome.attempt_rows(&entries, &pending_fallback_events);
+                        rows.push(outcome.record(
+                            Some(entry),
+                            reliability::OutcomeStatus::Ok,
+                            Some(status.as_u16()),
+                            Some(outcome.started.elapsed().as_millis() as u64),
+                            entry_idx as u32,
+                            false,
+                        ));
+                        record_proxy_outcomes(&state, rows);
+                        for evt in pending_fallback_events {
+                            state.health_tracker.record_fallback_event(evt).await;
+                        }
+                        return Response::builder()
+                            .status(StatusCode::OK)
+                            .header(header::CONTENT_TYPE, TEXT_EVENT_STREAM)
+                            .header(header::CACHE_CONTROL, NO_CACHE)
+                            .header("x-accel-buffering", "no")
+                            .body(Body::from(empty_length_sse(&entry.model_id)))
+                            .unwrap_or_else(|_| {
+                                error_response(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "Failed to build response".to_string(),
+                                    "internal_error",
+                                )
+                            });
                     }
                     Err((reason, detail)) => {
                         let elapsed_ms = request_start.elapsed().as_millis() as u64;
@@ -4235,6 +4323,16 @@ pub(crate) async fn chat_completions_inner(
                             outcome.attempt_rows(&entries, &pending_fallback_events),
                         );
                         let client_ttft = outcome.started.elapsed().as_millis() as u64;
+                        tracing::info!(
+                            provider = %entry.provider_id,
+                            model = %entry.model_id,
+                            upstream_headers_ms,
+                            upstream_first_content_ms = ttft_ms,
+                            client_ttft_ms = client_ttft,
+                            proxy_before_upstream_ms = client_ttft.saturating_sub(ttft_ms),
+                            retries = outcome.retries,
+                            "Proxy stream ready"
+                        );
                         Some(proxy_outcome_sink(
                             state.clone(),
                             outcome.record(
@@ -4277,6 +4375,10 @@ pub(crate) async fn chat_completions_inner(
                     response_headers
                         .insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
                     response_headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+                    response_headers.insert(
+                        header::HeaderName::from_static("x-accel-buffering"),
+                        HeaderValue::from_static("no"),
+                    );
 
                     // Prepend the peeked bytes, then stream the rest
                     let peek_stream = futures::stream::once(async {
@@ -4300,7 +4402,11 @@ pub(crate) async fn chat_completions_inner(
                         outcome_sink,
                     );
 
-                    return (status, response_headers, Body::from_stream(tracked_stream))
+                    return (
+                        status,
+                        response_headers,
+                        Body::from_stream(sse_error_terminated(tracked_stream)),
+                    )
                         .into_response();
                 }
                 Err((reason, detail)) => {
@@ -7981,6 +8087,14 @@ where
                         .and_then(|c| c.get("finish_reason"))
                         .and_then(|v| v.as_str())
                     {
+                        // The client's own max_tokens ran out (often spent on
+                        // hidden reasoning): a valid, if empty, answer. Relay
+                        // it — retrying the same request ends the same way,
+                        // and failing it turned tiny "pong" streams into 502s
+                        // plus a cooldown of the only account.
+                        if fr == "length" {
+                            return Ok((peek_buf, stream));
+                        }
                         last_empty_reason = Some(format!("empty choice finish_reason={}", fr));
                     }
                 }
@@ -8001,6 +8115,62 @@ where
         }
     }
     Ok((peek_buf, stream))
+}
+
+/// OpenAI-style SSE for a completion that produced no content because the
+/// output budget ran out (`finish_reason: "length"`).
+fn empty_length_sse(model: &str) -> bytes::Bytes {
+    let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let created = chrono::Utc::now().timestamp();
+    let chunk = |delta: serde_json::Value, finish: serde_json::Value| {
+        serde_json::json!({
+            "id": id, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }]
+        })
+    };
+    let mut out = String::new();
+    for value in [
+        chunk(
+            serde_json::json!({ "role": "assistant", "content": "" }),
+            serde_json::Value::Null,
+        ),
+        chunk(serde_json::json!({}), serde_json::json!("length")),
+    ] {
+        out.push_str("data: ");
+        out.push_str(&value.to_string());
+        out.push_str("\n\n");
+    }
+    out.push_str("data: [DONE]\n\n");
+    bytes::Bytes::from(out)
+}
+
+/// End a relayed chat-completions SSE stream cleanly when the upstream fails
+/// after headers were sent: emit an OpenAI-style `error` event and `[DONE]`
+/// instead of aborting the chunked body, which proxies (nginx, Cloudflare)
+/// surface to the client as a broken connection or a 502.
+fn sse_error_terminated(
+    inner: impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+    async_stream::stream! {
+        let mut inner = std::pin::pin!(inner);
+        while let Some(item) = inner.next().await {
+            match item {
+                Ok(chunk) => yield Ok(chunk),
+                Err(error) => {
+                    let code = if error.kind() == std::io::ErrorKind::TimedOut {
+                        "upstream_stalled"
+                    } else {
+                        "upstream_stream_error"
+                    };
+                    let event = serde_json::json!({
+                        "error": { "message": format!("Upstream stream failed: {error}"), "type": "server_error", "code": code }
+                    });
+                    yield Ok(bytes::Bytes::from(format!("\n\ndata: {event}\n\ndata: [DONE]\n\n")));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Which SSE dialect to peek for the first content chunk.
@@ -10836,6 +11006,74 @@ mod tests {
         assert!(seen.lock().unwrap()[0].contains("MAX_TOKENS"));
     }
 
+    #[tokio::test]
+    async fn length_finish_without_content_is_relayed_not_retried() {
+        // Leanstral / Opus with a tiny max_tokens: role chunk, then length.
+        let tiny = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+        let reopened = std::sync::atomic::AtomicU32::new(0);
+        let policy = reliability::RetryPolicy::immediate(2);
+        let (result, retries) = open_sse_with_retry(
+            sse(&[tiny]),
+            PeekKind::OpenAi,
+            |_: &(CooldownReason, String)| {
+                reopened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Some(sse(&[HELLO])) }
+            },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("mistral", "labs-leanstral-1-5-1"),
+        )
+        .await;
+        let (peek, _) = result.expect("a length finish is a valid answer");
+        assert!(String::from_utf8(peek).unwrap().contains("\"length\""));
+        assert_eq!(retries, 0);
+        assert_eq!(reopened.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A stop with nothing in it is still an upstream failure.
+        let (result, _) = open_sse_with_retry(
+            sse(&[EMPTY_STOP]),
+            PeekKind::OpenAi,
+            |_: &(CooldownReason, String)| async { None },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("mistral", "labs-leanstral-1-5-1"),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_length_sse_is_a_well_formed_openai_stream() {
+        let text = String::from_utf8(empty_length_sse("gemini-4-argon-eap").to_vec()).unwrap();
+        let events: Vec<&str> = text
+            .split("\n\n")
+            .filter_map(|e| e.strip_prefix("data: "))
+            .collect();
+        assert_eq!(events.len(), 3);
+        let last: serde_json::Value = serde_json::from_str(events[1]).unwrap();
+        assert_eq!(last["choices"][0]["finish_reason"], "length");
+        assert_eq!(last["object"], "chat.completion.chunk");
+        assert_eq!(events[2], "[DONE]");
+    }
+
+    #[tokio::test]
+    async fn mid_stream_failure_ends_with_an_sse_error_event_not_a_reset() {
+        let failing = futures::stream::iter(vec![
+            Ok(bytes::Bytes::from(HELLO)),
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "idle")),
+            Ok(bytes::Bytes::from("never")),
+        ]);
+        let out: Vec<_> = sse_error_terminated(failing).collect().await;
+        assert!(out.iter().all(|item| item.is_ok()), "no Err reaches hyper");
+        let text: String = out
+            .into_iter()
+            .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+            .collect();
+        assert!(text.starts_with(HELLO));
+        assert!(text.contains("\"code\":\"upstream_stalled\""));
+        assert!(text.trim_end().ends_with("data: [DONE]"));
+        assert!(!text.contains("never"));
+    }
+
     #[test]
     fn payment_required_is_an_account_error_not_a_wrong_model() {
         assert!(matches!(
@@ -11032,10 +11270,11 @@ mod tests {
         // Stream is closed after the error.
         assert!(tracked.next().await.is_none());
 
-        // Health tracker should have recorded a Timeout-cause failure.
+        // Health tracker should have recorded a Timeout-cause failure, but
+        // one stall alone must not park the account.
         let h = tracker.get_health(account_id).await;
         assert_eq!(h.last_failure_reason.as_deref(), Some("timeout"));
-        assert!(!h.is_healthy, "account should be in cooldown after timeout");
+        assert!(h.is_healthy, "a single stall is not a cooldown");
     }
 
     #[tokio::test(start_paused = true)]
