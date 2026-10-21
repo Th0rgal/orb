@@ -62,3 +62,42 @@ final class OrbTranscriptScrollTests: XCTestCase {
         XCTAssertEqual(OrbNativeMarkdownView.inlinePreview("short", limit: 300), "short")
     }
 }
+
+final class OrbDateCacheTests: XCTestCase {
+    func testParsesBothCoreTimestampShapesAndMemoizes() {
+        let a = OrbDateCache.parse("2026-10-21T06:50:29.656722494+00:00")
+        let b = OrbDateCache.parse("2026-10-21T06:50:29Z")
+        XCTAssertNotNil(a); XCTAssertNotNil(b)
+        XCTAssertEqual(a!.timeIntervalSince1970, b!.timeIntervalSince1970, accuracy: 1)
+        XCTAssertEqual(OrbDateCache.parse("2026-10-21T06:50:29Z"), b, "cached value is stable")
+        XCTAssertNil(OrbDateCache.parse(""))
+        XCTAssertNil(OrbDateCache.parse("not a date"))
+        XCTAssertEqual(OrbStyle.parseDate("2026-10-21T06:50:29Z"), b)
+        XCTAssertEqual(OrbTurnSummary.parseDate("2026-10-21T06:50:29Z"), b)
+    }
+}
+
+final class OrbPendingQuestionTests: XCTestCase {
+    private func event(_ id: Int64, _ type: String, call: String?, tool: String? = nil, content: String = "{}") -> StoredEvent {
+        StoredEvent(id: id, missionId: "m", sequence: id, eventType: type, timestamp: "", eventId: nil, toolCallId: call, toolName: tool, content: content, metadata: [:])
+    }
+
+    func testOnlyUnansweredDecodableQuestionsRemain() {
+        let events = [
+            event(1, "tool_call", call: "a", tool: "AskUserQuestion", content: #"{"question":"Pick one"}"#),
+            event(2, "tool_call", call: "b", tool: "question", content: #"{"question":"Answered"}"#),
+            event(3, "tool_result", call: "b"),
+            event(4, "tool_call", call: "c", tool: "bash", content: "{}"),
+            event(5, "tool_call", call: "d", tool: "ui_native_request", content: "not json"),
+        ]
+        let open = OrbPendingQuestion.extract(events)
+        XCTAssertEqual(open.map(\.id), [1])
+        XCTAssertEqual(open.first?.request["question"].text, "Pick one")
+    }
+
+    func testLinearOnLongTranscripts() {
+        var events: [StoredEvent] = []
+        for i in 0..<20_000 { events.append(event(Int64(i), i % 2 == 0 ? "tool_call" : "tool_result", call: "c\(i / 2)", tool: "bash")) }
+        measure { _ = OrbPendingQuestion.extract(events) }
+    }
+}

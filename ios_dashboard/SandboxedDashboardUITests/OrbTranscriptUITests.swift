@@ -157,6 +157,16 @@ final class OrbTranscriptUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 2), "one tap opens the menu")
     }
 
+    /// Only the unanswered permission request shows a card (questions are decoded once per event change).
+    @MainActor func testOnlyOpenQuestionShowsACard() throws {
+        let app = open("ask-question")
+        XCTAssertTrue(app.staticTexts["OPEN_REQUEST run the suite"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["OLD_REQUEST lint"].exists, "an answered request has no card")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label == 'Review request'")).count, 1)
+        XCTAssertTrue(app.buttons["Approve"].exists)
+        capture(app, "open-question-card")
+    }
+
     /// /btw uses the same transcript system: opens at the bottom, never scrolls sideways,
     /// same composer, and stays a single large sheet.
     @MainActor func testSideSheetStaysConsistent() async throws {
