@@ -746,6 +746,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_prefixed_gemini_4_argon_is_priced() {
+        let usage = TokenUsage {
+            input_tokens: 324_582,
+            output_tokens: 381,
+            cache_read_input_tokens: Some(0),
+            cache_creation_input_tokens: Some(0),
+        };
+        let (cents, source) =
+            resolve_cost_cents_and_source(None, Some("google/gemini-4-argon"), &usage);
+        assert_eq!(source, crate::agents::CostSource::Estimated);
+        assert!(cents > 0);
+    }
+
+    #[test]
     fn muse_subscription_usage_stays_separate_from_paid_api() {
         let model = "muse-code/muse-spark-1.3";
         assert_eq!(normalized_model(model), model);

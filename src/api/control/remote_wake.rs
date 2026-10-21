@@ -858,12 +858,19 @@ pub(super) async fn finalize_remote_mission(
         None
     };
     let model_normalized = model.as_deref().map(crate::cost::normalized_model);
+    // Price the turn's own usage like local runners do; the proxy ledger
+    // keeps billing, this is what the transcript shows (4ad4bc01 had usage
+    // and a gemini-4-argon price but showed cost unknown).
+    let (cost_cents, cost_source) = usage
+        .as_ref()
+        .map(|usage| crate::cost::resolve_cost_cents_and_source(None, model.as_deref(), usage))
+        .unwrap_or((0, crate::agents::CostSource::Unknown));
     let event = AgentEvent::AssistantMessage {
         id: Uuid::new_v4(),
         content,
         success,
-        cost_cents: 0,
-        cost_source: crate::agents::CostSource::Unknown,
+        cost_cents,
+        cost_source,
         usage,
         model,
         model_normalized,
