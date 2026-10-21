@@ -89,7 +89,7 @@ extension OrbConversation {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 11, weight: .semibold))
                             Text("\(currentFolder)/")
-                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .font(.system(.caption, design: .monospaced, weight: .semibold))
                                 .lineLimit(1)
                                 .truncationMode(.head)
                         }
@@ -130,7 +130,7 @@ extension OrbConversation {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(OrbStyle.textSecondary)
                     Text("PROJECT CONTEXT")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(.caption2, weight: .semibold))
                         .foregroundStyle(OrbStyle.textMuted)
                     Spacer()
                     Button {
@@ -168,7 +168,7 @@ extension OrbConversation {
                     VStack(alignment: .leading, spacing: 2) {
                         if !folderRows.isEmpty {
                             Text("FOLDERS")
-                                .font(.system(size: 9.5, weight: .semibold))
+                                .font(.system(.caption2, weight: .semibold))
                                 .foregroundStyle(OrbStyle.textMuted)
                                 .padding(.horizontal, 10)
                                 .padding(.top, 4)
@@ -184,7 +184,7 @@ extension OrbConversation {
                                                 .foregroundStyle(OrbStyle.textSecondary)
                                                 .frame(width: 20)
                                             Text(item.label)
-                                                .font(.system(size: 13, design: .monospaced))
+                                                .font(.system(.footnote, design: .monospaced))
                                                 .foregroundStyle(.primary)
                                                 .lineLimit(1)
                                                 .truncationMode(.middle)
@@ -220,7 +220,7 @@ extension OrbConversation {
                         }
                         if !fileRows.isEmpty {
                             Text("FILES")
-                                .font(.system(size: 9.5, weight: .semibold))
+                                .font(.system(.caption2, weight: .semibold))
                                 .foregroundStyle(OrbStyle.textMuted)
                                 .padding(.horizontal, 10)
                                 .padding(.top, folderRows.isEmpty ? 4 : 6)
@@ -235,7 +235,7 @@ extension OrbConversation {
                                             .foregroundStyle(OrbStyle.textSecondary)
                                             .frame(width: 20)
                                         Text(item.label)
-                                            .font(.system(size: 13, design: .monospaced))
+                                            .font(.system(.footnote, design: .monospaced))
                                             .foregroundStyle(.primary)
                                             .lineLimit(1)
                                             .truncationMode(.middle)
@@ -268,7 +268,7 @@ extension OrbConversation {
     var modePicker: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("MODES")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(.caption2, weight: .semibold))
                 .foregroundStyle(OrbStyle.textMuted)
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
@@ -476,7 +476,7 @@ extension OrbConversation {
                                     .font(.system(size: 9.5, weight: .medium))
                                     .foregroundStyle(OrbStyle.textSecondary)
                                 Text(item.label)
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(.primary.opacity(0.9))
                                     .lineLimit(1)
                             }
@@ -546,7 +546,7 @@ extension OrbConversation {
                                 .font(.system(size: 9, weight: .medium))
                                 .foregroundStyle(OrbStyle.textMuted)
                             Text(nodeBadge)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(.caption, weight: .medium))
                                 .foregroundStyle(OrbStyle.textSecondary)
                                 .lineLimit(1)
                                 .truncationMode(.tail)

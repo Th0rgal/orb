@@ -361,7 +361,7 @@ struct OrbNativeMarkdownView: View {
                             HStack(spacing: 0) {
                                 ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
                                     inlineMarkdownText(h)
-                                        .font(.system(size: 13, weight: .semibold))
+                                        .font(.system(.footnote, weight: .semibold))
                                         .foregroundStyle(Color.white)
                                         .frame(minWidth: 100, maxWidth: 240, alignment: .leading)
                                         .padding(.horizontal, 10)
@@ -375,7 +375,7 @@ struct OrbNativeMarkdownView: View {
                                     ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
                                         let cell = cIdx < row.count ? row[cIdx] : ""
                                         inlineMarkdownText(cell)
-                                            .font(.system(size: 13))
+                                            .font(.system(.footnote))
                                             .foregroundStyle(Color(white: 0.88))
                                             .frame(minWidth: 100, maxWidth: 240, alignment: .leading)
                                             .padding(.horizontal, 10)
@@ -391,7 +391,7 @@ struct OrbNativeMarkdownView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
                             Text(lang.isEmpty ? "code" : lang)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(OrbStyle.textMuted)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
@@ -406,7 +406,7 @@ struct OrbNativeMarkdownView: View {
                                 }
                             } label: {
                                 Text(copiedBlockIndex == index ? "Copied ✓" : "Copy code")
-                                    .font(.system(size: 11.5))
+                                    .font(.system(.caption))
                                     .foregroundStyle(copiedBlockIndex == index ? OrbStyle.success : OrbStyle.textSecondary)
                                     .lineLimit(1)
                                     .fixedSize(horizontal: true, vertical: false)
@@ -420,7 +420,7 @@ struct OrbNativeMarkdownView: View {
                         }
                         ScrollView(.horizontal, showsIndicators: false) {
                             Text(code.count > 12000 ? String(code.prefix(12000)) + "\n… [truncated for display, Copy code copies full block]" : code)
-                                .font(.system(size: 13, design: .monospaced))
+                                .font(.system(.footnote, design: .monospaced))
                                 .foregroundStyle(Color(white: 0.9))
                                 .textSelection(.enabled)
                                 .padding(.horizontal, 14)

@@ -149,19 +149,31 @@ struct OrbChangesCard: View {
         .accessibilityIdentifier("turn.changes")
     }
 
+    /// One row when it fits; at large text sizes the PR link moves under the summary
+    /// instead of squeezing "3 files changed" into one character per line.
     private var header: some View {
-        HStack(spacing: 8) {
-            Button {
-                withAnimation(.snappy(duration: 0.18)) { expanded.toggle() }
-            } label: {
-                summary
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                summaryButton
+                Spacer(minLength: 4)
+                if let pr { prButton(pr) }
             }
-            .buttonStyle(.plain)
-            .disabled(files.isEmpty)
-            .accessibilityIdentifier("turn.changes.summary")
-            Spacer(minLength: 4)
-            if let pr { prButton(pr) }
+            VStack(alignment: .leading, spacing: 6) {
+                summaryButton
+                if let pr { prButton(pr) }
+            }
         }
+    }
+
+    private var summaryButton: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.18)) { expanded.toggle() }
+        } label: {
+            summary
+        }
+        .buttonStyle(.plain)
+        .disabled(files.isEmpty)
+        .accessibilityIdentifier("turn.changes.summary")
     }
 
     private var summary: some View {
@@ -174,6 +186,7 @@ struct OrbChangesCard: View {
             } else {
                 Text("\(files.count) file\(files.count == 1 ? "" : "s") changed")
                     .font(.caption.weight(.medium)).foregroundStyle(OrbStyle.textSecondary)
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
                 Text("+\(additions)").font(.caption.monospacedDigit()).foregroundStyle(OrbStyle.success)
                 Text("−\(deletions)").font(.caption.monospacedDigit()).foregroundStyle(OrbStyle.error)
                 Image(systemName: "chevron.right")

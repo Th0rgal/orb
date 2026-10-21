@@ -1979,12 +1979,12 @@ struct OrbInboxView: View {
     private func sectionHeader(title: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Text(title)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(.caption, weight: .medium))
                 .foregroundStyle(OrbStyle.textMuted)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
             Text("\(count)")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(.caption, weight: .medium))
                 .foregroundStyle(OrbStyle.textMuted)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -2078,14 +2078,14 @@ struct OrbInboxView: View {
 
                     if isPeeked, let receipt = item.workReceipt, !receipt.isEmpty {
                         Text(receipt)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(OrbStyle.textMuted)
                             .lineLimit(1)
                     }
 
                     if let cmd = item.interaction?.commandPreview, !cmd.isEmpty {
                         Text(cmd)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(OrbStyle.textSecondary)
                             .lineLimit(1)
                             .padding(.horizontal, 8)
@@ -2324,7 +2324,7 @@ struct OrbInboxView: View {
                             } label: {
                                 HStack(alignment: .top, spacing: 7) {
                                     Text("\(idx + 1)")
-                                        .font(.system(size: 10.5, weight: .medium))
+                                        .font(.system(.caption2, weight: .medium))
                                         .foregroundStyle(OrbStyle.textMuted)
                                         .frame(minWidth: 16, minHeight: 16)
                                         .padding(.horizontal, 3)
@@ -2443,7 +2443,7 @@ struct OrbInboxView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack(alignment: .top, spacing: 8) {
                                     Text(turn.role == "user" ? "YOU" : (turn.role == "error" ? "ERROR" : "AGENT"))
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .font(.system(.caption2, weight: .semibold))
                                         .foregroundStyle(
                                             turn.role == "error"
                                                 ? OrbStyle.error
@@ -2463,7 +2463,7 @@ struct OrbInboxView: View {
                                 }
                                 if let receipt = turn.workReceipt, !receipt.isEmpty {
                                     Text(receipt)
-                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .font(.system(.caption2, design: .monospaced))
                                         .foregroundStyle(OrbStyle.textMuted)
                                         .padding(.leading, 50)
                                 }

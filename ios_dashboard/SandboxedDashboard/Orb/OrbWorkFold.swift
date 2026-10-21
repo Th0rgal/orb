@@ -313,7 +313,7 @@ struct OrbWorkFold: View {
                                 .orbShimmer(active: true)
                             if !headline.detail.isEmpty {
                                 Text(headline.detail)
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(OrbStyle.textMuted)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -352,7 +352,7 @@ struct OrbWorkFold: View {
                         Text(model.completedSummary)
                             .font(.footnote)
                             .foregroundStyle(OrbStyle.textSecondary)
-                            .lineLimit(1)
+                            .orbAdaptiveLineLimit()
                         Spacer()
                     }
                     .padding(.vertical, 2)
@@ -436,7 +436,7 @@ private struct OrbToolRow: View {
                     let combined = [tool.argsText, tool.outputText].filter { !$0.isEmpty }.joined(separator: "\n\n")
                     HStack {
                         Text(tool.rawName)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(OrbStyle.textMuted)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -463,7 +463,7 @@ private struct OrbToolRow: View {
                     }
                     ScrollView {
                         Text(combined)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(OrbStyle.textSecondary)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -504,7 +504,7 @@ private struct OrbToolRow: View {
 
                     if !tool.target.isEmpty {
                         Text(tool.target)
-                            .font(.system(size: 11.5, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(OrbStyle.textMuted)
                             .lineLimit(1)
                             .truncationMode(.middle)

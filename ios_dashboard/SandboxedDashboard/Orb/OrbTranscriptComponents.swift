@@ -366,3 +366,20 @@ struct OrbPendingQuestion: Identifiable {
         }
     }
 }
+
+/// Row titles and one-line summaries: one line normally, up to three at accessibility
+/// text sizes, where a single line would truncate almost everything.
+struct OrbAdaptiveLineLimit: ViewModifier {
+    @Environment(\.dynamicTypeSize) private var typeSize
+    var regular = 1
+    var accessibility = 3
+    func body(content: Content) -> some View {
+        content.lineLimit(typeSize.isAccessibilitySize ? accessibility : regular)
+    }
+}
+
+extension View {
+    func orbAdaptiveLineLimit(_ regular: Int = 1, accessibility: Int = 3) -> some View {
+        modifier(OrbAdaptiveLineLimit(regular: regular, accessibility: accessibility))
+    }
+}

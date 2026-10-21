@@ -280,7 +280,7 @@ struct OrbNotice: View {
                 if showTail {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(tail)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(OrbStyle.textSecondary)
                             .textSelection(.enabled)
                     }
@@ -408,6 +408,7 @@ struct OrbHome: View {
     @State private var deepLinks = OrbDeepLinks.shared
     @State private var homeReady = false
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var typeSize
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
     private static let archiveDaySeconds: TimeInterval = 24 * 60 * 60
@@ -573,7 +574,7 @@ struct OrbHome: View {
                         .fixedSize()
                     if tabInboxCount > 0 {
                         Text("\(tabInboxCount)")
-                            .font(.system(size: 10.5, weight: .bold))
+                            .font(.system(.caption2, weight: .bold))
                             .foregroundStyle(homeTab == "inbox" ? OrbStyle.background : .primary)
                             .monospacedDigit()
                             .fixedSize()
@@ -818,7 +819,7 @@ struct OrbHome: View {
                                     Image(systemName: "target")
                                         .font(.system(size: 9, weight: .semibold))
                                     Text("Goal")
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .font(.system(.caption2, weight: .semibold))
                                         .lineLimit(1)
                                         .fixedSize(horizontal: true, vertical: false)
                                 }
@@ -829,7 +830,7 @@ struct OrbHome: View {
                             }
                             Text(cleanTitle)
                                 .font(.subheadline.weight(.medium))
-                                .lineLimit(1)
+                                .orbAdaptiveLineLimit()
                                 .truncationMode(.tail)
                                 .foregroundStyle(.primary)
                             Spacer(minLength: 4)
@@ -935,32 +936,41 @@ struct OrbHome: View {
                     NavigationLink { OrbProjectPage(project: project) } label: {
                         HStack(spacing: 14) {
                             OrbListIcon(symbol: "folder", color: appearance.color(project.id))
-                            Text(project.name)
-                                .font(.body.weight(.medium))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                            Spacer()
-                            if let working = workingByProject[project.id], working > 0 {
-                                HStack(spacing: 5) {
-                                    OrbRunningDots(size: 10)
-                                    Text("\(working) working")
-                                        .font(.caption)
-                                        .foregroundStyle(OrbStyle.textSecondary)
-                                        .monospacedDigit()
-                                        .lineLimit(1)
-                                        .fixedSize(horizontal: true, vertical: false)
+                            // At accessibility text sizes the name gets the full width and the
+                            // working count and age move below it, instead of truncating "Orb t…".
+                            let stacked = typeSize.isAccessibilitySize
+                            let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 14))
+                            layout {
+                                Text(project.name)
+                                    .font(.body.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(stacked ? 3 : 1)
+                                    .truncationMode(.tail)
+                                if !stacked { Spacer() }
+                                HStack(spacing: 10) {
+                                    if let working = workingByProject[project.id], working > 0 {
+                                        HStack(spacing: 5) {
+                                            OrbRunningDots(size: 10)
+                                            Text("\(working) working")
+                                                .font(.caption)
+                                                .foregroundStyle(OrbStyle.textSecondary)
+                                                .monospacedDigit()
+                                                .lineLimit(1)
+                                                .fixedSize(horizontal: !stacked, vertical: false)
+                                        }
+                                        .accessibilityIdentifier("project.working.\(project.id)")
+                                    }
+                                    if !project.updatedAt.isEmpty {
+                                        Text(OrbStyle.relativeTime(project.updatedAt))
+                                            .font(.caption)
+                                            .foregroundStyle(OrbStyle.textMuted)
+                                            .monospacedDigit()
+                                            .lineLimit(1)
+                                            .fixedSize(horizontal: !stacked, vertical: false)
+                                    }
                                 }
-                                .accessibilityIdentifier("project.working.\(project.id)")
                             }
-                            if !project.updatedAt.isEmpty {
-                                Text(OrbStyle.relativeTime(project.updatedAt))
-                                    .font(.caption)
-                                    .foregroundStyle(OrbStyle.textMuted)
-                                    .monospacedDigit()
-                                    .lineLimit(1)
-                                    .fixedSize(horizontal: true, vertical: false)
-                            }
+                            if stacked { Spacer(minLength: 0) }
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(.tertiary)
@@ -1597,7 +1607,7 @@ struct OrbProjectPage: View {
                                     Image(systemName: "target")
                                         .font(.system(size: 9, weight: .semibold))
                                     Text("Goal")
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .font(.system(.caption2, weight: .semibold))
                                         .lineLimit(1)
                                         .fixedSize(horizontal: true, vertical: false)
                                 }
@@ -1608,7 +1618,7 @@ struct OrbProjectPage: View {
                             }
                             Text(cleanTitle)
                                 .font(.subheadline.weight(.medium))
-                                .lineLimit(1)
+                                .orbAdaptiveLineLimit()
                                 .truncationMode(.tail)
                                 .foregroundStyle(.primary)
                             Spacer(minLength: 4)
@@ -1624,7 +1634,7 @@ struct OrbProjectPage: View {
                         Text("\(OrbStyle.serviceName(row.backend)) · \(OrbStyle.statusLabel(row.state))")
                             .font(.caption)
                             .foregroundStyle(row.active ? OrbStyle.textSecondary : OrbStyle.textMuted)
-                            .lineLimit(1)
+                            .orbAdaptiveLineLimit(1, accessibility: 2)
                     }
                 }
                 .padding(.vertical, 10)

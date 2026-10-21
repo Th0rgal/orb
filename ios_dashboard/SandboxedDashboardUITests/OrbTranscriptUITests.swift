@@ -27,9 +27,9 @@ final class OrbTranscriptUITests: XCTestCase {
         }
     }
 
-    @MainActor private func launch() -> XCUIApplication {
+    @MainActor private func launch(_ extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18766", "-orb_test_reset", "YES", "-orb_slow_thumb_fade"]
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18766", "-orb_test_reset", "YES", "-orb_slow_thumb_fade", "YES"] + extra
         app.launch()
         return app
     }
@@ -157,6 +157,29 @@ final class OrbTranscriptUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 2), "one tap opens the menu")
     }
 
+    /// At Accessibility XL text the transcript still opens at the bottom, never scrolls
+    /// sideways, and the composer and menu stay reachable.
+    @MainActor func testAccessibilityTextSizeKeepsLayoutUsable() throws {
+        let app = launch(["-orb_dynamic_type", "accessibility3"])
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        capture(app, "a11y-xl-projects")
+        app.buttons["project.orb-test"].tap()
+        XCTAssertTrue(app.buttons["mission.agent-done"].waitForExistence(timeout: 10))
+        capture(app, "a11y-xl-missions")
+        app.buttons["mission.agent-done"].tap()
+        let composer = app.textFields["composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil(8) { probe(app).fromBottom < 4 }, "opens at the bottom: \(probe(app))")
+        app.scrollViews.firstMatch.swipeLeft()
+        let p = probe(app)
+        XCTAssertEqual(p.maxX, 0, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(p.contentW, p.containerW + 0.5)
+        XCTAssertTrue(composer.isHittable)
+        XCTAssertTrue(app.buttons["conversation.menu"].isHittable)
+        XCTAssertLessThanOrEqual(app.buttons["Send message"].frame.maxX, app.frame.maxX)
+        capture(app, "a11y-xl-conversation")
+    }
+
     /// Only the unanswered permission request shows a card (questions are decoded once per event change).
     @MainActor func testOnlyOpenQuestionShowsACard() throws {
         let app = open("ask-question")
@@ -202,7 +225,7 @@ final class OrbTranscriptLiveCapture: XCTestCase {
             throw XCTSkip("set TEST_RUNNER_ORB_UX_LIVE_MISSION")
         }
         let app = XCUIApplication()
-        app.launchArguments = ["-orb_slow_thumb_fade"]
+        app.launchArguments = ["-orb_slow_thumb_fade", "YES"]
         app.launch()
         app.open(URL(string: "orb://mission/\(mission)")!)
         let composer = app.textFields["composer"]

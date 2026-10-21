@@ -30,6 +30,7 @@ struct SandboxedDashboardApp: App {
         WindowGroup {
             ContentView()
                 .preferredColorScheme(.dark)
+                .modifier(OrbTestTypeSize())
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { OrbBackgroundRefresh.schedule() }
@@ -37,5 +38,22 @@ struct SandboxedDashboardApp: App {
         .backgroundTask(.appRefresh(OrbBackgroundRefresh.identifier)) {
             await OrbBackgroundRefresh.run()
         }
+    }
+}
+
+/// DEBUG: `-orb_dynamic_type accessibility3` renders the app at that Dynamic Type size,
+/// so UI tests can check large-text layouts without changing simulator settings.
+private struct OrbTestTypeSize: ViewModifier {
+    func body(content: Content) -> some View {
+        #if DEBUG
+        if let raw = UserDefaults.standard.string(forKey: "orb_dynamic_type"),
+           let size = DynamicTypeSize.allCases.first(where: { "\($0)" == raw }) {
+            content.dynamicTypeSize(size)
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }
