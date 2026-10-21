@@ -317,7 +317,7 @@ struct OrbNativeMarkdownView: View {
 
     var body: some View {
         let truncated = !showFullSource && source.count > Self.maxInlineSourceChars
-        let effectiveSource = truncated ? String(source.prefix(Self.maxInlineSourceChars)) : source
+        let effectiveSource = truncated ? OrbNativeMarkdownView.inlinePreview(source, limit: Self.maxInlineSourceChars) : source
         let blocks = Self.cachedBlocks(effectiveSource)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
@@ -863,5 +863,32 @@ struct OrbBackgroundWake: Equatable {
         }
         let note = rawNote.trimmingCharacters(in: .whitespacesAndNewlines)
         return OrbBackgroundWake(task: task, command: command, output: output, killed: output == "[killed]", note: note)
+    }
+}
+
+extension OrbNativeMarkdownView {
+    /// The first `limit` characters cut back to a whole Markdown block, so a long answer's
+    /// preview never ends inside a table row or an open code fence.
+    nonisolated static func inlinePreview(_ source: String, limit: Int) -> String {
+        guard source.count > limit else { return source }
+        let prefix = String(source.prefix(limit))
+        var lastBoundary: String.Index?
+        var fenceStart: String.Index?
+        var index = prefix.startIndex
+        var previousBlank = true
+        while index < prefix.endIndex {
+            let lineEnd = prefix[index...].firstIndex(of: "\n") ?? prefix.endIndex
+            let line = prefix[index..<lineEnd].trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                if fenceStart == nil { fenceStart = index } else { fenceStart = nil; lastBoundary = lineEnd }
+            } else if fenceStart == nil && line.isEmpty && !previousBlank {
+                lastBoundary = index
+            }
+            previousBlank = line.isEmpty
+            index = lineEnd < prefix.endIndex ? prefix.index(after: lineEnd) : prefix.endIndex
+        }
+        let cut = fenceStart.map { start in lastBoundary.map { min($0, start) } ?? start } ?? lastBoundary
+        guard let cut, cut > prefix.startIndex else { return prefix }
+        return String(prefix[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
