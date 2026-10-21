@@ -300,6 +300,9 @@ pub(crate) struct GrokStream {
     /// OpenCode: byte offset in `text` up to which narration is already
     /// durable as its own bubble.
     opencode_flushed: usize,
+    /// OpenCode: part id of the latest tool call. Part ids sort by creation
+    /// time, and a step's tool parts are printed before its text part.
+    opencode_last_tool_part: Option<String>,
     /// OpenCode: tokens summed over the job's `step_finish` parts.
     pub(crate) opencode_usage: Option<crate::cost::TokenUsage>,
 }
@@ -370,7 +373,7 @@ impl GrokStream {
     /// when it ends). Auto-compaction writes its summary as an assistant text
     /// part and then a synthetic `compaction_continue` user part; neither is
     /// something the model said to the operator.
-    fn feed_opencode_text(&mut self, part: &serde_json::Value) {
+    fn feed_opencode_text(&mut self, part: &serde_json::Value, updates: &mut Vec<StreamUpdate>) {
         let Some(text) = part["text"].as_str() else {
             return;
         };
@@ -390,6 +393,27 @@ impl GrokStream {
         }
         if text.trim().is_empty() {
             return;
+        }
+        // Written before a tool call already seen: it introduces that call,
+        // so it is narration (Gemini runs printed "J'exécute `cat`…" after the
+        // bash part, and it ended up in the final answer).
+        if let (Some(id), Some(tool)) =
+            (part["id"].as_str(), self.opencode_last_tool_part.as_deref())
+        {
+            if id < tool {
+                if !self.text.is_empty() {
+                    self.text.push_str("\n\n");
+                }
+                self.text.push_str(text);
+                self.opencode_answer_start = self.text.len();
+                self.opencode_flushed = self.text.len();
+                self.opencode_segment_closed = true;
+                updates.push(StreamUpdate::NativeText(serde_json::json!({
+                    "bubble_id": format!("opencode:{}:{id}", self.session_id.as_deref().unwrap_or("unknown")),
+                    "ops": [{"type":"snapshot","text":text.trim(),"revision":1},{"type":"finalize"}],
+                })));
+                return;
+            }
         }
         let message = part["messageID"].as_str().map(str::to_string);
         let start = self.text.len();
@@ -675,7 +699,7 @@ impl GrokStream {
             }
             let part = &value["part"];
             match value["type"].as_str() {
-                Some("text") => self.feed_opencode_text(part),
+                Some("text") => self.feed_opencode_text(part, updates),
                 Some("reasoning") => {
                     if let Some(text) = part["text"].as_str().filter(|t| !t.is_empty()) {
                         self.thinking = text.to_string();
@@ -685,6 +709,15 @@ impl GrokStream {
                 Some("tool_use") => {
                     self.flush_opencode_narration(updates);
                     self.opencode_segment_closed = true;
+                    if let Some(id) = part["id"].as_str() {
+                        if self
+                            .opencode_last_tool_part
+                            .as_deref()
+                            .is_none_or(|last| id > last)
+                        {
+                            self.opencode_last_tool_part = Some(id.to_string());
+                        }
+                    }
                     // OpenCode's callID is the provider's per-response index for
                     // Gemini and other OpenAI-compatible models (`call_0` 1,371
                     // times in mission 4ad4bc01), and clients pair tool rows by
@@ -3398,6 +3431,27 @@ mod tests {
             stream.final_text(),
             "Voici le détail exact des **3 contre-exemples**.\n\nEverything has been explained."
         );
+    }
+
+    /// Test mission f2a93461 (gemini-4-argon): the bash part prt_b427a was
+    /// printed before the text part prt_b4000 that introduces it.
+    #[test]
+    fn opencode_text_printed_after_its_tool_is_narration() {
+        let mut stream = GrokStream::default();
+        let mut updates = Vec::new();
+        for v in [
+            serde_json::json!({"type":"tool_use","sessionID":"s","part":{"id":"prt_b427a","messageID":"m1","callID":"call_0","tool":"bash","state":{"status":"completed"}}}),
+            serde_json::json!({"type":"text","sessionID":"s","part":{"id":"prt_b4000","messageID":"m1","text":"J'exécute `cat note.txt`."}}),
+            serde_json::json!({"type":"text","sessionID":"s","part":{"id":"prt_b5000","messageID":"m2","text":"RÉSULTAT: beta"}}),
+            serde_json::json!({"type":"step_finish","sessionID":"s","part":{"messageID":"m2","reason":"stop"}}),
+        ] {
+            updates.extend(stream.feed(&format!("{v}\n")));
+        }
+        assert_eq!(stream.final_text(), "RÉSULTAT: beta");
+        assert!(updates
+            .iter()
+            .any(|u| matches!(u, StreamUpdate::NativeText(v)
+            if v["bubble_id"] == "opencode:s:prt_b4000")));
     }
 
     #[tokio::test]

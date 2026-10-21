@@ -46,3 +46,14 @@ test("a /btw closing line written after a compaction does not replace the answer
   expect(repairedFinal(answer, `Je regarde.\n\n${answer}`)).toBe(answer);
   expect(repairedFinal(closing, undefined)).toBe(closing);
 });
+
+test("OpenCode narration printed after its tool still renders before it", () => {
+  const items = buildTranscript([
+    { type: "user_message", data: { id: "u1", content: "go" } },
+    { type: "tool_call", data: { tool_call_id: "prt_200:call_0", name: "write", args: { a: 1 } } },
+    { type: "tool_result", data: { tool_call_id: "prt_200:call_0", name: "write", result: "ok" } },
+    { type: "text_op", data: { bubble_id: "opencode:s:prt_100", ops: [{ type: "snapshot", text: "I will write", revision: 1 }, { type: "finalize" }] } },
+    { type: "tool_call", data: { tool_call_id: "prt_300:call_0", name: "bash", args: { b: 1 } } },
+  ]);
+  expect(items.map(i => i.kind === "text" ? i.text : i.kind === "tool" ? i.name : i.kind)).toEqual(["user", "I will write", "write", "bash"]);
+});
