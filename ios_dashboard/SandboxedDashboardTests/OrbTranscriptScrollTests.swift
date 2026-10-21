@@ -101,3 +101,29 @@ final class OrbPendingQuestionTests: XCTestCase {
         measure { _ = OrbPendingQuestion.extract(events) }
     }
 }
+
+@MainActor
+final class OrbTranscriptModelTests: XCTestCase {
+    private func userEvent(_ seq: Int64, _ text: String) -> StoredEvent {
+        StoredEvent(id: seq, missionId: "m", sequence: seq, eventType: "user_message", timestamp: "", eventId: nil, toolCallId: nil, toolName: nil, content: text, metadata: [:])
+    }
+
+    func testEventUserMessagesAreAddedOnceAndHistoryReportsGrowth() {
+        let mission: OrbJSON = .object(["history": .array([
+            .object(["role": .string("user"), "content": .string("first")]),
+            .object(["role": .string("assistant"), "content": .string("reply")]),
+        ])])
+        let model = OrbTranscriptModel()
+        model.events = [userEvent(1, "first "), userEvent(2, "second"), userEvent(3, " second")]
+        XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: nil), 3)
+        XCTAssertEqual(model.history.map(\.2), ["first", "reply", "second"], "trimmed duplicates are not repeated")
+        XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: "third"), 1)
+        XCTAssertEqual(model.history.last?.2, "third")
+        XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: "third"), 0)
+    }
+
+    func testHistoryIsLinearOnManyUserEvents() {
+        let events = (0..<5_000).map { userEvent(Int64($0), "message \($0)") }
+        measure { _ = OrbTranscriptModel.computeHistory(isCloud: false, turns: [], mission: .null, events: events, optimisticPrompt: nil) }
+    }
+}
