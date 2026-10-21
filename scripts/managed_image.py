@@ -305,20 +305,27 @@ fi
 rustc --version
 rm -rf "$HOME/src" && mkdir -p "$HOME/src" && tar -xf "$HOME/src.tar" -C "$HOME/src"
 cd "$HOME/src"
-CARGO_TERM_PROGRESS_WHEN=never cargo build --release --locked --bin sandboxed-node 2>&1 | grep -vE '^\s+(Compiling|Downloaded|Downloading)' || { echo BUILD_FAILED; exit 1; }
+CARGO_TERM_PROGRESS_WHEN=never cargo build --release --locked --bin sandboxed-node --bin sandboxed-mcp 2>&1 | grep -vE '^\s+(Compiling|Downloaded|Downloading)' || { echo BUILD_FAILED; exit 1; }
 install -m755 target/release/sandboxed-node "$HOME/sandboxed-node.out"
-sha256sum "$HOME/sandboxed-node.out"
+install -m755 target/release/sandboxed-mcp "$HOME/sandboxed-mcp.out"
+sha256sum "$HOME/sandboxed-node.out" "$HOME/sandboxed-mcp.out"
 file "$HOME/sandboxed-node.out" 2>/dev/null || true
 echo BUILD_OK
 '''
+
+
+def mcp_path(node_binary):
+    """sandboxed-mcp is cached next to sandboxed-node-<sha> as sandboxed-mcp-<sha>."""
+    node_binary = Path(node_binary)
+    return node_binary.with_name(node_binary.name.replace('sandboxed-node', 'sandboxed-mcp', 1))
 
 
 def build_node_binary(source, created):
     repo, treeish, sha = resolve_source(source)
     cached = BOAT_DIR / f'sandboxed-node-{sha[:12]}'
     version = node_version_for(repo, treeish, sha)
-    if cached.exists():
-        log(f'using cached binary {cached}')
+    if cached.exists() and mcp_path(cached).exists():
+        log(f'using cached binaries {cached} (+ {mcp_path(cached).name})')
         return cached, version, sha
     with tempfile.TemporaryDirectory() as tmp:
         tarball = Path(tmp) / 'src.tar'
@@ -334,7 +341,9 @@ def build_node_binary(source, created):
             if code != 0:
                 raise RuntimeError(f'node build failed (exit {code}); see /home/user/build.log in {sid}')
             download(sid, '/home/user/sandboxed-node.out', cached)
+            download(sid, '/home/user/sandboxed-mcp.out', mcp_path(cached))
             cached.chmod(0o755)
+            mcp_path(cached).chmod(0o755)
         finally:
             stop_sandbox(sid)
     return cached, version, sha
@@ -363,13 +372,28 @@ def fleet_tools():
 
 def certified_search():
     env = {k: v for k, v in os.environ.items() if k not in ('GH_TOKEN', 'GITHUB_TOKEN')}
-    sha = subprocess.run(['gh', 'api', f'repos/{CERTIFIED_SEARCH_REPO}/commits/main', '--jq', '.sha'],
-                         capture_output=True, text=True, check=True, env=env).stdout.strip()
+    # Pinned: must match CERTIFIED_SEARCH_COMMIT/SHA256 in the recipe.
+    sha = recipe_pin('CERTIFIED_SEARCH_COMMIT')
     path = ARTIFACTS / f'certified-search-{sha[:7]}.tar.gz'
     if not path.exists():
         with path.open('wb') as fh:
             subprocess.run(['gh', 'api', f'repos/{CERTIFIED_SEARCH_REPO}/tarball/{sha}'], stdout=fh, check=True, env=env)
     return path, sha
+
+
+def recipe_pin(name):
+    for line in RECIPE.read_text().splitlines():
+        if line.startswith(name + '='):
+            return line.split('=', 1)[1].strip()
+    raise KeyError(name)
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as fh:
+        while chunk := fh.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def recipe_sha():
@@ -393,7 +417,7 @@ def cmd_node_binary(args):
     created = []
     try:
         path, version, _ = build_node_binary(args.node_source, created)
-        print(json.dumps({'binary': str(path), 'node_version': version}))
+        print(json.dumps({'binary': str(path), 'mcp_binary': str(mcp_path(path)), 'node_version': version}))
     finally:
         report(created)
 
@@ -406,13 +430,17 @@ def cmd_build(args):
         cs_tar, cs_sha = certified_search()
         tools['certified-search'] = {'source': f'github:{CERTIFIED_SEARCH_REPO}', 'commit': cs_sha,
                                      'note': 'CLI = research-governor (built from this repo, copied from fleet)'}
-        info = {'node_version': version, 'node_commit': sha, 'recipe_sha': recipe_sha(), 'tools': tools}
+        if sha256_file(cs_tar) != recipe_pin('CERTIFIED_SEARCH_SHA256'):
+            raise RuntimeError(f'{cs_tar} does not match the pinned CERTIFIED_SEARCH_SHA256')
+        info = {'node_version': version, 'node_commit': sha, 'node_sha256': sha256_file(binary),
+                'mcp_sha256': sha256_file(mcp_path(binary)),
+                'recipe_sha': recipe_sha(), 'tools': tools}
         sid = create_sandbox('image', 'small', ttl=7200)
         created.append(sid)
         with tempfile.TemporaryDirectory() as tmp:
             bi = Path(tmp) / 'build-info.json'
             bi.write_text(json.dumps(info))
-            for local, name in [(binary, 'sandboxed-node'), (tools_tar, 'fleet-tools-x86_64.tar.gz'),
+            for local, name in [(binary, 'sandboxed-node'), (mcp_path(binary), 'sandboxed-mcp'), (tools_tar, 'fleet-tools-x86_64.tar.gz'),
                                 (cs_tar, 'certified-search.tar.gz'), (bi, 'build-info.json'),
                                 (RECIPE, 'recipe.sh')]:
                 upload(sid, local, f'{STAGE}/{name}')
@@ -423,10 +451,7 @@ def cmd_build(args):
         if not smoke_in(sid):
             raise RuntimeError(f'smoke failed in {sid}; alias not moved')
         run(sid, 'rm -rf ~/.bash_history ~/.cache/* /tmp/* 2>/dev/null; sudo journalctl --vacuum-time=1s >/dev/null 2>&1; sync', quiet=True)
-        for name in snapshot_names(sha):
-            save_snapshot(sid, name)
-        if not args.skip_verify:
-            verify(snapshot_names(sha)[0], created)
+        publish(sid, sha, created, verify_snapshot=not args.skip_verify)
     finally:
         report(created)
 
@@ -445,20 +470,40 @@ def cmd_refresh_node(args):
     try:
         sid = create_sandbox('refresh', 'small', from_snapshot=args.base, ttl=3600)
         created.append(sid)
+        mcp = mcp_path(binary)
+        if not mcp.exists():
+            raise RuntimeError(f'{mcp} missing: run node-binary first (it builds both binaries)')
         upload(sid, binary, f'{STAGE}/sandboxed-node')
+        upload(sid, mcp, f'{STAGE}/sandboxed-mcp')
         script = f'''set -euo pipefail
-sudo install -m0755 -o root -g root {STAGE}/sandboxed-node /usr/local/bin/sandboxed-node
-sudo python3 -c 'import json,sys,datetime;p="/etc/orb/image-manifest.json";m=json.load(open(p));m["node_version"]=sys.argv[1];m["node_refreshed_at"]=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ");open(p,"w").write(json.dumps(m,indent=2,sort_keys=True))' '{version}'
+echo '{sha256_file(binary)}  {STAGE}/sandboxed-node' | sha256sum -c -
+echo '{sha256_file(mcp)}  {STAGE}/sandboxed-mcp' | sha256sum -c -
+sudo install -m0755 -o root -g root {STAGE}/sandboxed-node /opt/orb/bin/sandboxed-node
+sudo install -m0755 -o root -g root {STAGE}/sandboxed-mcp /opt/orb/bin/sandboxed-mcp
+sudo ln -sfn /opt/orb/bin/sandboxed-mcp /usr/local/bin/sandboxed-mcp
+sudo python3 -c 'import json,sys,datetime;p="/etc/orb/image-manifest.json";m=json.load(open(p));m["node_version"]=sys.argv[1];m["node_sha256"]=sys.argv[2];m["mcp_sha256"]=sys.argv[3];m["node_refreshed_at"]=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ");open(p,"w").write(json.dumps(m,indent=2,sort_keys=True))' '{version}' '{sha256_file(binary)}' '{sha256_file(mcp)}'
 rm -rf {STAGE}
 jq .node_version /etc/orb/image-manifest.json'''
         if run(sid, script, timeout=120)['exitCode'] != 0:
             raise RuntimeError('binary swap failed')
         if not smoke_in(sid):
             raise RuntimeError(f'smoke failed in {sid}; alias not moved')
-        for name in snapshot_names(sha):
-            save_snapshot(sid, name)
+        publish(sid, sha, created, verify_snapshot=True)
     finally:
         report(created)
+
+
+def publish(sid, sha, created, verify_snapshot=True):
+    """Save the dated snapshot, smoke a fresh sandbox booted from it, then move the alias.
+
+    Boat re-provisions parts of the disk at boot, so only a smoke run from the saved
+    snapshot proves the image; the alias moves only after that passes."""
+    dated, alias = snapshot_names(sha)
+    save_snapshot(sid, dated)
+    stop_sandbox(sid)
+    if verify_snapshot:
+        verify(dated, created)
+    save_snapshot(sid, alias)
 
 
 def verify(snapshot, created):
