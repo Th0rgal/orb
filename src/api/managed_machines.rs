@@ -5,6 +5,8 @@
 //! `relay/respond` (node credential), and the loopback `relay/tunnel` that
 //! Core's own node client uses (node credential as bearer, like a real node).
 
+#![allow(clippy::result_large_err)] // axum Response as the early-return error
+
 use std::sync::Arc;
 use std::time::Duration;
 

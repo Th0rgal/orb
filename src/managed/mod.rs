@@ -654,7 +654,7 @@ impl ManagedManager {
             .filter(|m| m.state.is_live() || m.created_at >= cutoff)
             .cloned()
             .collect();
-        machines.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        machines.sort_by_key(|m| std::cmp::Reverse(m.created_at));
         ListView {
             enabled: self.settings.enabled && self.provider.is_some(),
             provider: self.settings.provider.clone(),
