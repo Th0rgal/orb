@@ -10,6 +10,8 @@ struct OrbConversation: View {
     @State private var loading = true
     @State private var visibleCount = 20
     @State private var scroller = OrbTranscriptScroller()
+    /// Unanswered question tool calls with their decoded requests, rebuilt when events change.
+    @State private var openQuestions: [OrbPendingQuestion] = []
     @State private var mission: OrbJSON = .null
     @State private var execution: OrbJSON = .null
     @State private var text = ""
@@ -94,6 +96,8 @@ struct OrbConversation: View {
         }
         let files = OrbTurnSummary.changedFiles(events)
         if changedFiles != files { changedFiles = files }
+        let questions = OrbPendingQuestion.extract(events)
+        if questions.map(\.id) != openQuestions.map(\.id) { openQuestions = questions }
     }
 
     private func rebuildHistory() {
@@ -258,6 +262,9 @@ struct OrbConversation: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
                 .toolbarBackground(.visible, for: .navigationBar)
+                // The project list's search field lives in the bottom toolbar; hiding it here
+                // makes UIKit slide it out with the push instead of drawing over the composer.
+                .toolbarVisibility(.hidden, for: .bottomBar)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         conversationToolbarMenu
@@ -589,10 +596,8 @@ struct OrbConversation: View {
             })
             .transition(.opacity)
         }
-        ForEach(pendingQuestionEvents) { event in
-            if let data = event.content.data(using: .utf8), let request = try? JSONDecoder().decode(OrbJSON.self, from: data) {
-                OrbQuestion(event: event, request: request) { answered.insert(event.toolCallId ?? "") }
-            }
+        ForEach(pendingQuestions) { question in
+            OrbQuestion(event: question.event, request: question.request) { answered.insert(question.event.toolCallId ?? "") }
         }
         if let planKey = completedPlanTurnKey {
             completedPlanReviewCard(key: planKey)
@@ -645,11 +650,10 @@ struct OrbConversation: View {
         .accessibilityLabel("Loading conversation")
     }
 
-    private var pendingQuestionEvents: [StoredEvent] {
-        events.filter { event in
-            event.eventType == "tool_call" && ["ui_native_request", "AskUserQuestion", "question"].contains(event.toolName ?? "") && !answered.contains(event.toolCallId ?? "") && !events.contains(where: { $0.eventType == "tool_result" && $0.toolCallId == event.toolCallId })
-        }
+    private var pendingQuestions: [OrbPendingQuestion] {
+        openQuestions.filter { !answered.contains($0.event.toolCallId ?? "") }
     }
+    private var pendingQuestionEvents: [StoredEvent] { pendingQuestions.map(\.event) }
 
     @ViewBuilder
     private func messageHistoryRow(item: (String, String, String)) -> some View {
@@ -3289,5 +3293,25 @@ struct OrbConversationMenu: View, Equatable {
         }
         .accessibilityLabel("Conversation actions")
         .accessibilityIdentifier("conversation.menu")
+    }
+}
+
+/// A question tool call (ui_native_request / AskUserQuestion / question) that has no
+/// result yet, decoded once per event change instead of on every render.
+struct OrbPendingQuestion: Identifiable {
+    let event: StoredEvent
+    let request: OrbJSON
+    var id: Int64 { event.id }
+
+    static let toolNames: Set<String> = ["ui_native_request", "AskUserQuestion", "question"]
+
+    static func extract(_ events: [StoredEvent]) -> [OrbPendingQuestion] {
+        let resolved = Set(events.lazy.filter { $0.eventType == "tool_result" }.map { $0.toolCallId ?? "" })
+        return events.compactMap { event in
+            guard event.eventType == "tool_call", toolNames.contains(event.toolName ?? ""),
+                  !resolved.contains(event.toolCallId ?? ""),
+                  let request = try? JSONDecoder().decode(OrbJSON.self, from: Data(event.content.utf8)) else { return nil }
+            return OrbPendingQuestion(event: event, request: request)
+        }
     }
 }
