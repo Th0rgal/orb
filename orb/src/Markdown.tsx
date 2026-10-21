@@ -62,8 +62,19 @@ function plainInline(text: string, links: boolean): JSX.Element[] {
   return result;
 }
 
+// Rendered formulas by source: a transcript row that remounts while scrolling
+// reuses the markup instead of running KaTeX again in that frame.
+const formulas = new Map<string, string>();
+function renderFormula(text: string, display: boolean): string {
+  const key = `${display ? "D" : "I"}${text}`;
+  let html = formulas.get(key);
+  if (html !== undefined) { formulas.delete(key); formulas.set(key, html); return html; }
+  html = katex.renderToString(text, {displayMode: display, throwOnError: false, trust: false, strict: "ignore", maxExpand: 1000});
+  if (text.length < 4000) { formulas.set(key, html); if (formulas.size > 1500) formulas.delete(formulas.keys().next().value!); }
+  return html;
+}
 function MathFormula(p: {text: string; display?: boolean}) {
-  const html = createMemo(() => katex.renderToString(p.text, {displayMode: !!p.display, throwOnError: false, trust: false, strict: "ignore", maxExpand: 1000}));
+  const html = createMemo(() => renderFormula(p.text, !!p.display));
   return <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={html()} />;
 }
 /** `<image>`/`<file>` tags are taken before any other inline syntax so their
@@ -486,9 +497,21 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
   );
 }
 
+// Parsed blocks of recently shown messages: rows that remount while a long
+// transcript scrolls skip re-parsing. Blocks are immutable data.
+const parsedMessages = new Map<string, Block[]>();
 export function MdView(p: { text: string; compact?: boolean }) {
   const parse = incrementalMarkdown();
-  const blocks = createMemo(() => parse(p.text));
+  let parsedOnce = false;
+  const blocks = createMemo(() => {
+    // Only a mount consults or fills the cache; streamed updates stay incremental.
+    const text = p.text, mount = !parsedOnce, hit = mount ? parsedMessages.get(text) : undefined;
+    parsedOnce = true;
+    if (hit) { parsedMessages.delete(text); parsedMessages.set(text, hit); return hit; }
+    const out = parse(text);
+    if (mount && text.length < 50_000) { parsedMessages.set(text, out); if (parsedMessages.size > 400) parsedMessages.delete(parsedMessages.keys().next().value!); }
+    return out;
+  });
   return (
     <div class={`md ${p.compact ? "md-compact" : ""}`}>
       <For each={blocks()}>{(b) => renderBlock(b, p.compact)}</For>

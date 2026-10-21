@@ -1,22 +1,27 @@
-import { requestHighlight } from "./codeHighlightClient";
+import { cachedHighlight, requestHighlight } from "./codeHighlightClient";
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { copyText } from "./clipboard";
 import { CopyIcon, CheckIcon } from "./icons";
 
 export function CodeBlock(p: {text:string;lang:string}) {
-  const [html,setHtml]=createSignal<string|null>(null);
+  const [html,setHtml]=createSignal<string|null>(p.lang?cachedHighlight(p.text,p.lang):null);
   const [feedback,setFeedback]=createSignal("");
   let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(()=>clearTimeout(feedbackTimer));
+  let mounted=false;
   createEffect(()=>{
     const text=p.text, lang=p.lang;
-    setHtml(null);
-    if (!lang || text.length>100_000 || typeof Worker === "undefined") return;
+    const hit=lang?cachedHighlight(text,lang):null;
+    setHtml(hit);
+    if (hit!==null || !lang || text.length>100_000 || typeof Worker === "undefined") return;
     let cancel: (()=>void) | undefined;
     // Coalesce streaming updates; completed blocks retain their highlighted DOM.
+    // A block that mounts with its text (a turn paged in by the virtual list
+    // ahead of the viewport) asks at once, so it is coloured before it shows.
     const timer=setTimeout(()=>{
       cancel=requestHighlight(text,lang,setHtml);
-    },120);
+    },mounted?120:0);
+    mounted=true;
     onCleanup(()=>{clearTimeout(timer);cancel?.();});
   });
   const copy=async()=>{
