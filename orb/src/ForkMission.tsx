@@ -4,7 +4,7 @@ import {CodexSpeedPicker,missionSpeed,requireSpeedSupport} from './CodexSpeedPic
 import {localBinding} from './localAgents';
 import type {CodexServiceTier} from './api';
 import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, on, onMount } from "solid-js";
 import { archiveMission, cancelMission, forkMission, getMission, shortModelLabel, type HarnessChoice, type Mission } from "./api";
 import { effortLabel, supportedEfforts } from "./effort";
 import { Menu } from "./Menu";
@@ -20,6 +20,13 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
   const unavailable = (id: string) => !!p.mission.remote_node_id && !isHarness(id);
   const key = crypto.randomUUID();
   onMount(() => p.onOpen?.());
+  // The harness catalog refreshes while the menu is open (e.g. late Antigravity models),
+  // which re-renders the rows. Hand open submenus the live row so they stay beside it.
+  const live = (anchor: HTMLButtonElement | undefined, selector: string) => anchor && !anchor.isConnected ? anchor.closest('[role="menu"]')?.querySelector<HTMLButtonElement>(selector) ?? document.querySelector<HTMLButtonElement>(selector) ?? undefined : anchor;
+  createEffect(on(() => p.choices, () => queueMicrotask(() => {
+    setModelAnchor(a => live(a, `.fork-harnesses [data-backend="${CSS.escape(backend())}"]`));
+    setEffortAnchor(a => live(a, `.fork-models [data-model="${CSS.escape(model())}"]`));
+  }), {defer: true}));
   const fork = async (effort = "") => {
     if (busy() || !backend() || unavailable(backend()) || !choices().some(choice => choice.value === model())) return;
     setBusy(true); setError("");
@@ -34,7 +41,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
   };
   return <Menu label="Transfer to another agent" class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={p.onClose}>
     <Show when={!p.anchor}><div class="menu-group">Transfer to another agent</div></Show>
-    <For each={p.choices}>{choice => <button type="button" class="menu-item" role="menuitem" aria-haspopup="menu" aria-expanded={!!modelAnchor() && backend() === choice.backend.id} disabled={busy() || unavailable(choice.backend.id)}
+    <For each={p.choices}>{choice => <button type="button" class="menu-item" role="menuitem" data-backend={choice.backend.id} aria-haspopup="menu" aria-expanded={!!modelAnchor() && backend() === choice.backend.id} disabled={busy() || unavailable(choice.backend.id)}
       title={unavailable(choice.backend.id) ? "Not supported on this remote workspace" : choice.backend.name}
       onMouseEnter={e => openModels(choice.backend.id, e.currentTarget)} onClick={e => openModels(choice.backend.id,e.currentTarget)}
       onKeyDown={e => {if(e.key === "ArrowRight"){e.preventDefault();e.stopPropagation();openModels(choice.backend.id,e.currentTarget);}}}>
@@ -43,7 +50,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
     <Show when={modelAnchor()}>{anchor => <Menu label="Choose a model" class="fork-models" anchor={anchor()} placement="right-start" busy={busy()} onClose={() => setModelAnchor(undefined)}>
       <For each={choices()}>{choice => {
         const choose = (anchor: HTMLButtonElement) => {if (busy()) return; setModel(choice.value); if (supportedEfforts(backend()).length) setEffortAnchor(anchor); else void fork();};
-        return <button type="button" class="menu-item" role="menuitem" disabled={busy()} aria-haspopup={supportedEfforts(backend()).length ? "menu" : undefined}
+        return <button type="button" class="menu-item" role="menuitem" data-model={choice.value} disabled={busy()} aria-haspopup={supportedEfforts(backend()).length ? "menu" : undefined}
           title={`Fork into ${shortModelLabel(choice.label)} · same workspace on ${p.destination}`}
           onClick={e => choose(e.currentTarget)} onMouseEnter={e => {if (!busy() && supportedEfforts(backend()).length) {setModel(choice.value);setEffortAnchor(e.currentTarget);}}}
           onKeyDown={e => {if(e.key === "ArrowRight" && supportedEfforts(backend()).length){e.preventDefault();e.stopPropagation();choose(e.currentTarget);}}}>
