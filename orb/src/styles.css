@@ -3753,7 +3753,12 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-thread .agent-activity.is-completed { margin: 0; }
 
 /* Chapters: floating jump list for long conversations. */
-.mission-tools { position: absolute; top: calc(var(--tb-h, 35px) + 8px); right: 14px; z-index: 6; display: flex; gap: 6px; }
+/* The pills live in the title-bar row (#tb-tools), centred with the title and its
+   icons; the title flexes and truncates before them. */
+.tb-tools { flex: none; display: flex; align-items: center; position: relative; z-index: 7; margin-right: -4px; }
+.tb-tools:empty { display: none; }
+.tb-tools > div { display: contents; }
+.mission-tools { display: flex; align-items: center; gap: 6px; padding-top: 3px; }
 .chapters, .changes { position: relative; }
 .chapters-btn { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; color: var(--fg-3); background: color-mix(in srgb, var(--bg) 85%, transparent); border: 1px solid var(--stroke-soft); backdrop-filter: blur(8px); font-variant-numeric: tabular-nums; }
 .chapters-btn:hover, .chapters-btn.on { color: var(--fg); border-color: var(--stroke); }
