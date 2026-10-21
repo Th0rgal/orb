@@ -14,6 +14,7 @@
 		0D00520E1A6F2454E3B18A7F /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4CA8C69928B3838868EE34A /* AnyCodable.swift */; };
 		10EE88187305C6ECFA6DD140 /* OrbLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4BFC16F121E10DCFD755BC /* OrbLog.swift */; };
 		13626B5B8FB1869DC1214443 /* OrbLegacyCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 424CC90454DE36077DB56858 /* OrbLegacyCleanup.swift */; };
+		16A8B03318B0155BB0CF1E38 /* OrbMoveSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5842FF467EAE932385EE76A /* OrbMoveSheet.swift */; };
 		1DCED0C8F1420C72B5EEFC73 /* StoredEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56E927302FF09F1E5C329756 /* StoredEvent.swift */; };
 		226AFC0BA710210493AF4569 /* OrbAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = C623C7A6712001F7E32CA623 /* OrbAttachments.swift */; };
 		261FF1C97AB22C610717474F /* OrbWorkFold.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3979C1C08E28A7026D135CE9 /* OrbWorkFold.swift */; };
@@ -199,6 +200,7 @@
 		D361F38D66FC44DB9F7A4874 /* OrbDebugInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDebugInfo.swift; sourceTree = "<group>"; };
 		D3B499BE2EC4EB4545CB79EC /* OrbBitwardenSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbBitwardenSettings.swift; sourceTree = "<group>"; };
 		D427073D171A43F58458E2BD /* OrbTranscriptUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTranscriptUITests.swift; sourceTree = "<group>"; };
+		D5842FF467EAE932385EE76A /* OrbMoveSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMoveSheet.swift; sourceTree = "<group>"; };
 		D66A573BB80DD183D3B5A85B /* OrbTurnSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTurnSummary.swift; sourceTree = "<group>"; };
 		E252454398E17C81E0936682 /* OrbLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbLiveActivityBundle.swift; sourceTree = "<group>"; };
 		E26C0B52815B686DE4AE0804 /* OrbProjectAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjectAppearance.swift; sourceTree = "<group>"; };
@@ -289,6 +291,7 @@
 				BDD651E846151C5070BA0765 /* OrbMath.swift */,
 				6E793D17A373009D35033D9E /* OrbMessageImages.swift */,
 				2B18EE0CF61F06F5599C3DAC /* OrbMissionState.swift */,
+				D5842FF467EAE932385EE76A /* OrbMoveSheet.swift */,
 				A3A9EEA92978894DB2B0A410 /* OrbNotifications.swift */,
 				43B50A676C80BCCD3710647A /* OrbPoller.swift */,
 				E26C0B52815B686DE4AE0804 /* OrbProjectAppearance.swift */,
@@ -557,6 +560,7 @@
 				C565A0819B851735DAA71172 /* OrbMath.swift in Sources */,
 				A93C114237EAF4604D4B9571 /* OrbMessageImages.swift in Sources */,
 				0693D4053A9B20410B6E92A5 /* OrbMissionState.swift in Sources */,
+				16A8B03318B0155BB0CF1E38 /* OrbMoveSheet.swift in Sources */,
 				C7AB925DE11602AB4B34D1EE /* OrbNotifications.swift in Sources */,
 				5B06E5146C4E6EEA0BDF9458 /* OrbPoller.swift in Sources */,
 				57464CF87C1C599592030E8A /* OrbProjectAppearance.swift in Sources */,
