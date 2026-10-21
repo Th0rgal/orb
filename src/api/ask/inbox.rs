@@ -258,6 +258,14 @@ fn parse(raw: &str, evidence: &[(String, Option<i64>)]) -> Result<Summary, Error
     })
 }
 // Weak locks coalesce concurrent devices without keeping every historic revision in memory.
+/// Minimum gap between two generated summaries of a mission that is still running.
+const LIVE_SUMMARY_INTERVAL: chrono::Duration = chrono::Duration::seconds(60);
+fn recently_generated(generated_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(generated_at)
+        .map(|t| now.signed_duration_since(t) < LIVE_SUMMARY_INTERVAL)
+        .unwrap_or(false)
+}
+
 fn flight(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
@@ -404,6 +412,21 @@ pub async fn generate(
             return Ok(Json(summary));
         }
     }
+    // While a mission streams, every event changes its revision. Reuse a summary generated
+    // in the last interval instead of paying one LLM call per poll (most were discarded).
+    if crate::api::controller_honesty::is_live_writer_status(mission.status) {
+        if let Some(summary) = store
+            .latest_inbox_digest(&key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<Summary>(&v).ok())
+        {
+            if recently_generated(&summary.generated_at, chrono::Utc::now()) {
+                return Ok(Json(summary));
+            }
+        }
+    }
     let cfg = crate::api::metadata_llm::build_assistant_llm_config(
         &state.ai_providers,
         &state.chain_store,
@@ -435,13 +458,9 @@ pub async fn generate(
             "Summary requested tools; nothing was executed".into(),
         ));
     }
-    let (current, current_text, _) = recorded_snapshot(&control.mission_store, id).await?;
-    if revision(&current, &current_text) != source_revision {
-        return Err((
-            StatusCode::CONFLICT,
-            "Conversation changed during summary generation; retry".into(),
-        ));
-    }
+    // If the conversation moved on during generation the summary still describes
+    // `source_revision` exactly (source_updated_at says so); keep it instead of discarding
+    // a paid LLM call and making every client retry into the same race.
     let mut summary = parse(&result.content.unwrap_or_default(), &evidence)?;
     summary.model = resolved_model;
     summary.source_updated_at = mission.updated_at;
@@ -892,6 +911,36 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+    #[test]
+    fn live_summaries_are_throttled_to_one_per_interval() {
+        let now = chrono::Utc::now();
+        assert!(recently_generated(
+            &(now - chrono::Duration::seconds(5)).to_rfc3339(),
+            now
+        ));
+        assert!(!recently_generated(
+            &(now - chrono::Duration::seconds(61)).to_rfc3339(),
+            now
+        ));
+        assert!(!recently_generated("", now));
+    }
+    #[tokio::test]
+    async fn latest_summary_is_served_across_revisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::AskStore::open(dir.path().join("ask.db"))
+            .await
+            .unwrap();
+        store.save_inbox_digest("k", "rev1", "first").await.unwrap();
+        store
+            .save_inbox_digest("k", "rev2", "second")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.latest_inbox_digest("k").await.unwrap().as_deref(),
+            Some("second")
+        );
+        assert!(store.latest_inbox_digest("other").await.unwrap().is_none());
     }
     #[tokio::test]
     async fn concurrent_devices_share_lock() {

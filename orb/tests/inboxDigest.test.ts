@@ -152,7 +152,8 @@ describe("structured inbox digests", () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(getCurrentInboxDigest(mission.id, updatedMs)).toBeUndefined();
-    expect(inboxSummaryState(mission.id, updatedMs)).toBe("Summary unavailable");
+    // The older Core summary is kept for display only; no flickering status replaces it.
+    expect(inboxSummaryState(mission.id, updatedMs)).toBeUndefined();
     requestInboxDigest(mission, undefined, updatedMs);
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -175,4 +176,48 @@ describe("structured inbox digests", () => {
     } finally { vi.restoreAllMocks(); }
   });
 
+  it("keeps one stable status and one request while a mission streams for 3 s", async () => {
+    vi.useFakeTimers();
+    try {
+      const { requestInboxDigest, inboxSummaryState, getCachedInboxDigest, LIVE_SUMMARY_INTERVAL_MS } = await import("../src/inboxDigest");
+      let resolveFetch!: (r: Response) => void;
+      const fetchMock = vi.fn(() => new Promise<Response>((r) => { resolveFetch = r; }));
+      vi.stubGlobal("fetch", fetchMock);
+      const start = Date.parse("2026-10-21T10:00:00Z");
+      vi.setSystemTime(start);
+      const mission: Mission = { id: "streaming", status: "running", created_at: "2026-10-21", updated_at: new Date(start).toISOString() };
+      const states: Array<string | undefined> = [];
+      let updatedMs = start;
+      for (let t = 0; t < 3000; t += 16) {
+        if (t % 48 === 0) { updatedMs += 48; requestInboxDigest({ ...mission, updated_at: new Date(updatedMs).toISOString() }, undefined, updatedMs, 0); }
+        if (t === 800) resolveFetch(new Response(JSON.stringify({ ...JSON.parse(response()), sourceRevision: "r1", sourceUpdatedAt: new Date(start).toISOString() })));
+        await vi.advanceTimersByTimeAsync(16);
+        states.push(inboxSummaryState(mission.id, updatedMs));
+      }
+      const changes = states.filter((s, i) => i > 0 && s !== states[i - 1]).length;
+      expect(changes).toBeLessThanOrEqual(1);
+      expect(states.at(-1)).toBeUndefined();
+      expect(getCachedInboxDigest(mission.id, updatedMs)?.outcome).toBeTruthy();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(LIVE_SUMMARY_INTERVAL_MS);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(inboxSummaryState(mission.id, updatedMs)).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
+  it("shows no status at all while refreshing a mission that already has a summary", async () => {
+    vi.useFakeTimers();
+    try {
+      const { parseDigestJson, storeInboxDigest, requestInboxDigest, inboxSummaryState } = await import("../src/inboxDigest");
+      storeInboxDigest("cached", 100, "builtin/smart", parseDigestJson(response(), 100, "m", snapshot)!);
+      vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+      const mission: Mission = { id: "cached", status: "running", created_at: "2026-10-21", updated_at: "2026-10-21" };
+      const seen = new Set<string | undefined>();
+      for (let t = 0, ms = 101; t < 3000; t += 16, ms += 16) {
+        requestInboxDigest(mission, undefined, ms, 0);
+        await vi.advanceTimersByTimeAsync(16);
+        seen.add(inboxSummaryState(mission.id, ms));
+      }
+      expect([...seen]).toEqual([undefined]);
+    } finally { vi.useRealTimers(); }
+  });
 });
