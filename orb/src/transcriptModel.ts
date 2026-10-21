@@ -57,6 +57,15 @@ export class TranscriptReducer {
         if(row.kind==='tool'&&row.callId.startsWith(conversation+':')&&Number(row.callId.slice(conversation.length+1))>Number(step)){index=i;break;}
       }
       item={...item,key:`text:${bubble}`};
+    }else if(bubble.startsWith('opencode:')){
+      // OpenCode prints a step's tool parts before its text part. Part ids
+      // sort by creation time; tool ids are `<partID>:<callID>`.
+      const part=bubble.slice(bubble.lastIndexOf(':')+1);
+      for(let i=this.lastUser+1;i<this.items.length;i++){
+        const row=this.items[i];
+        if(row.kind==='tool'&&row.callId.startsWith('prt_')&&row.callId.split(':')[0]>part){index=i;break;}
+      }
+      item={...item,key:`text:${bubble}`};
     }
     // Appending (the common case) moves no other item.
     if(index<this.items.length){
