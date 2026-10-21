@@ -115,8 +115,8 @@ pub async fn execute(
             .remote_nodes
             .node(&placement.node_id)
             .ok_or("Mission node unavailable")?;
-        let secret =
-            std::env::var(&node.token_env).map_err(|_| "Node authentication unavailable")?;
+        let secret = crate::remote_node::node_token(&node.token_env)
+            .map_err(|_| "Node authentication unavailable")?;
         let workspace_id = mission
             .project
             .tags

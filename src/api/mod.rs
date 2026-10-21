@@ -49,6 +49,7 @@ pub(crate) mod grok_tool_bridge;
 pub mod hermes_control_route;
 pub(crate) mod kimi_usage;
 pub mod library;
+pub mod managed_machines;
 pub mod mcp;
 pub mod metadata_llm;
 pub(crate) mod minimax_usage;

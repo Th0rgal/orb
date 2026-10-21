@@ -70,6 +70,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Dial-out mode (managed machines with no inbound path): enroll with
+    // Core first; the credential becomes this node's bearer token.
+    let dial = sandboxed_sh::node::dial::enroll_from_env().await?;
+    if let Some(cred) = &dial {
+        std::env::set_var("SANDBOXED_NODE_TOKEN", &cred.node_token);
+        if !cred.node_id.is_empty() {
+            std::env::set_var("SANDBOXED_NODE_ID", &cred.node_id);
+        }
+        std::env::remove_var("SANDBOXED_NODE_ENROLL_TOKEN");
+    }
     let node_id = std::env::var("SANDBOXED_NODE_ID").unwrap_or_else(|_| "local-node".to_string());
     let shared_token = std::env::var("SANDBOXED_NODE_TOKEN")
         .ok()
@@ -222,6 +232,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("starting sandboxed-node on {bind}");
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    if let Some(cred) = dial {
+        let local = listener.local_addr()?;
+        info!(core = %cred.core_url, "dial-out relay to Core started");
+        sandboxed_sh::node::dial::spawn_relay(cred, local);
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }

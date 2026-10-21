@@ -863,7 +863,7 @@ pub struct SparkOffloadStatus {
 
 /// Probe one node and record the result into the monitor cache.
 pub async fn probe_node(fleet: &FleetMonitor, client: &RemoteNodeClient, node: &RemoteNodeConfig) {
-    let token = std::env::var(&node.token_env)
+    let token = super::node_token(&node.token_env)
         .ok()
         .filter(|token| !token.trim().is_empty());
     match token {
@@ -897,7 +897,7 @@ pub fn spawn_fleet_monitor(fleet: Arc<FleetMonitor>, settings: RemoteNodeSetting
         tracing::info!("Fleet monitor disabled (REMOTE_NODE_MONITOR_SECS=0)");
         return;
     }
-    if !settings.enabled || settings.nodes.is_empty() {
+    if !settings.enabled {
         return;
     }
     tracing::info!(
@@ -908,9 +908,12 @@ pub fn spawn_fleet_monitor(fleet: Arc<FleetMonitor>, settings: RemoteNodeSetting
     tokio::spawn(async move {
         let client = RemoteNodeClient::default();
         loop {
+            // Managed (dial-out) nodes join the probe set while they live.
+            let managed = crate::managed::node_configs();
             let probes = settings
                 .nodes
                 .iter()
+                .chain(managed.iter().copied())
                 .map(|node| probe_node(&fleet, &client, node));
             futures::future::join_all(probes).await;
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;

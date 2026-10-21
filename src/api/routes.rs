@@ -607,7 +607,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // (REMOTE_NODE_MONITOR_SECS, default 15s, 0 disables). Only spawned when
     // remote nodes are enabled and configured.
     super::project_files::start_context_observer(config.working_dir.clone());
-    if config.remote_nodes.enabled && !config.remote_nodes.nodes.is_empty() {
+    // Managed machines (boat.dev): registry, caps, reaper and reconciler.
+    crate::managed::start(&config.working_dir, config.port).await;
+    if config.remote_nodes.enabled
+        && (!config.remote_nodes.nodes.is_empty()
+            || crate::managed::global().is_some_and(|m| m.settings.enabled))
+    {
         crate::remote_node::spawn_fleet_monitor(
             Arc::clone(&state.fleet),
             config.remote_nodes.clone(),
@@ -732,6 +737,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     );
 
     let public_routes = Router::new()
+        .merge(super::managed_machines::public_routes())
         .route("/api/health", get(health))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/github/start", get(github_auth::start))
@@ -848,6 +854,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(super::agent_software::cancel),
         )
         .route("/api/remote-nodes", get(list_remote_nodes))
+        .merge(super::managed_machines::protected_routes())
         .route("/api/nodes/:name/cordon", post(cordon_remote_node))
         .route("/api/nodes/:name/uncordon", post(uncordon_remote_node))
         .route("/api/ai/usage/summary", get(get_ai_usage_summary))
@@ -1810,7 +1817,8 @@ async fn list_remote_nodes(
 ) -> Json<crate::remote_node::RemoteNodesResponse> {
     let settings = &state.config.remote_nodes;
     let mut nodes = Vec::new();
-    for node in &settings.nodes {
+    let managed = crate::managed::node_configs();
+    for node in settings.nodes.iter().chain(managed.iter().copied()) {
         if state.fleet.get(&node.id).is_none() {
             let client = crate::remote_node::RemoteNodeClient::default();
             crate::remote_node::probe_node(&state.fleet, &client, node).await;

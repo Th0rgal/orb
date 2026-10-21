@@ -1152,7 +1152,7 @@ pub(super) async fn remote_library_skills(
         if archive.len() > crate::uploads::MAX_BYTES {
             return Err(format!("archive is {} bytes", archive.len()));
         }
-        let token = std::env::var(&node.token_env)
+        let token = crate::remote_node::node_token(&node.token_env)
             .ok()
             .filter(|t| !t.trim().is_empty())
             .ok_or("node token unavailable")?;

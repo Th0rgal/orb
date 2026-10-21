@@ -454,6 +454,7 @@ async fn authorize(
         && args.get("cloud").is_none_or(Value::is_null)
         && match args.get("remote_node_id").and_then(Value::as_str) {
             Some(r) if r.eq_ignore_ascii_case("auto") => true,
+            Some(r) if r.to_ascii_lowercase().starts_with("auto-managed") => true,
             Some(r) => {
                 if state.config.remote_nodes.node(r).is_none() {
                     return Err(ToolError::denied("Unknown remote node"));

@@ -151,7 +151,7 @@ pub(super) async fn submit_leased_remote_job(
         RemoteHarnessPlan::Codex { model, .. } => cyber_selection.mode.program(model)?,
         _ => None,
     };
-    let shared_token = std::env::var(&node.token_env)
+    let shared_token = crate::remote_node::node_token(&node.token_env)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
@@ -1223,7 +1223,7 @@ pub(super) async fn reconcile_pending_handles(
                 let node = state.config.remote_nodes.node(&handle.node_id).cloned();
                 let shared_token = node
                     .as_ref()
-                    .and_then(|node| std::env::var(&node.token_env).ok())
+                    .and_then(|node| crate::remote_node::node_token(&node.token_env).ok())
                     .filter(|value| !value.trim().is_empty());
                 match (node, shared_token) {
                     (Some(node), Some(shared_token)) => {
@@ -1286,7 +1286,7 @@ pub(super) async fn reconcile_pending_handles(
                 let node = state.config.remote_nodes.node(&handle.node_id).cloned();
                 let shared_token = node
                     .as_ref()
-                    .and_then(|node| std::env::var(&node.token_env).ok())
+                    .and_then(|node| crate::remote_node::node_token(&node.token_env).ok())
                     .filter(|value| !value.trim().is_empty());
                 match (node, shared_token) {
                     (Some(node), Some(shared_token)) => {
@@ -1331,7 +1331,7 @@ pub(super) async fn reconcile_pending_handles(
             let node = state.config.remote_nodes.node(&handle.node_id).cloned();
             let shared_token = node
                 .as_ref()
-                .and_then(|n| std::env::var(&n.token_env).ok())
+                .and_then(|n| crate::remote_node::node_token(&n.token_env).ok())
                 .filter(|v| !v.trim().is_empty());
             match (node, shared_token) {
                 (Some(node), Some(shared_token)) => {

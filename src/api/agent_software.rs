@@ -40,7 +40,7 @@ async fn remote(
         .remote_nodes
         .node(node)
         .ok_or((StatusCode::NOT_FOUND, "Machine not found".into()))?;
-    let token = std::env::var(&config.token_env).map_err(|_| {
+    let token = crate::remote_node::node_token(&config.token_env).map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Machine credentials unavailable".into(),

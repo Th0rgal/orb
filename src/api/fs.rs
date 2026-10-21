@@ -1102,7 +1102,7 @@ pub async fn remote_node_list(
             format!("Remote node '{node_id}' not found"),
         )
     })?;
-    let token = std::env::var(&node.token_env).map_err(|_| {
+    let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("Token env '{}' is not configured", node.token_env),
@@ -1147,7 +1147,7 @@ pub async fn remote_node_mkdir(
             format!("Remote node '{node_id}' not found"),
         )
     })?;
-    let token = std::env::var(&node.token_env).map_err(|_| {
+    let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("Token env '{}' is not configured", node.token_env),

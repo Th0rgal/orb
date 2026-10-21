@@ -106,7 +106,7 @@ pub async fn operate(
                 .as_str()
                 .and_then(|id| state.config.remote_nodes.node(id))
                 .ok_or((StatusCode::CONFLICT, "Destination unavailable".into()))?;
-            let token = std::env::var(&node.token_env).map_err(|_| {
+            let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Destination authentication unavailable".into(),
@@ -142,7 +142,7 @@ pub async fn operate(
             let job = remote["job_id"]
                 .as_str()
                 .ok_or((StatusCode::CONFLICT, "Remote job is unavailable".into()))?;
-            let token = std::env::var(&node.token_env).map_err(|_| {
+            let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Remote file source is unavailable".into(),

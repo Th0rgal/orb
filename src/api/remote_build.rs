@@ -814,7 +814,7 @@ fn job_status_error_status(err: &RemoteNodeError) -> StatusCode {
 }
 
 fn node_shared_token(node: &RemoteNodeConfig) -> Result<String, (StatusCode, String)> {
-    std::env::var(&node.token_env)
+    crate::remote_node::node_token(&node.token_env)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or((

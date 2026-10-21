@@ -4,6 +4,7 @@
 //! store and the job runner are unit-testable with `cargo test --lib`.
 
 pub mod capacity;
+pub mod dial;
 pub mod job_store;
 pub mod lean;
 pub mod managed_auth;
