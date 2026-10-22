@@ -27,9 +27,11 @@ struct OrbManagedMachine: Codable, Equatable, Identifiable, Sendable {
 struct OrbManagedBudget: Codable, Equatable, Sendable {
     var spent_today_usd: Double
     var committed_usd: Double?
-    var daily_cap_usd: Double
+    /// `nil` = unlimited (the default).
+    var daily_cap_usd: Double?
     var active: Int
-    var max_concurrent: Int
+    /// `nil` = unlimited (the default).
+    var max_concurrent: Int?
     var default_ttl_minutes: Int?
     var max_ttl_minutes: Int?
     var default_size: String?
@@ -85,8 +87,10 @@ enum OrbManaged {
 
     static func date(_ value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
+        // Backends emit nanosecond fractions; the formatter only takes milliseconds.
+        let trimmed = value.replacingOccurrences(of: #"(\.\d{3})\d+"#, with: "$1", options: .regularExpression)
         let precise = ISO8601DateFormatter(); precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return precise.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        return precise.date(from: trimmed) ?? ISO8601DateFormatter().date(from: trimmed)
     }
 
     /// "$0.42", "$12.30", "<$0.01" for tiny non-zero amounts.
@@ -126,9 +130,44 @@ enum OrbManaged {
     static func sizeSpec(cpu: Double, ramGB: Double, diskGB: Double? = nil) -> String {
         "\(number(cpu)) vCPU · \(number(ramGB)) GB" + (diskGB.map { " · \(number($0)) GB disk" } ?? "")
     }
-    /// "$1.20 spent today of $20.00 · 1 of 3 running".
+    /// "$1.20 spent today of $20.00 · 1 of 3 running"; unlimited caps drop "of …":
+    /// "$0.11 spent today · 1 running".
     static func budgetLine(_ b: OrbManagedBudget) -> String {
-        "\(usd(b.spent_today_usd)) spent today of \(usd(b.daily_cap_usd)) · \(b.active) of \(b.max_concurrent) running"
+        let spent = usd(b.spent_today_usd) + " spent today" + (b.daily_cap_usd.map { " of \(usd($0))" } ?? "")
+        let running = "\(b.active)" + (b.max_concurrent.map { " of \($0)" } ?? "") + " running"
+        return spent + " · " + running
+    }
+    /// Size label for display: the backend's "default" size is the medium one.
+    static func sizeLabel(_ size: String) -> String { size == "default" ? "medium" : size }
+    /// "4 vCPU · 8 GB RAM · 50 GB".
+    static func specLine(_ m: OrbManagedMachine) -> String {
+        var parts = ["\(number(m.cpu)) vCPU", "\(number(m.ram_gb)) GB RAM"]
+        if let disk = m.disk_gb { parts.append("\(number(disk)) GB") }
+        return parts.joined(separator: " · ")
+    }
+    /// Compact TTL: "21 min left", "1 h 05 min left", "<1 min left", "Expired".
+    static func ttlShort(_ expiresAt: String, now: Date = .now) -> String {
+        guard let end = date(expiresAt) else { return "—" }
+        let s = Int(floor(end.timeIntervalSince(now)))
+        if s <= 0 { return "Expired" }
+        if s < 60 { return "<1 min left" }
+        let minutes = s / 60
+        if minutes < 60 { return "\(minutes) min left" }
+        return "\(minutes / 60) h " + String(format: "%02d", minutes % 60) + " min left"
+    }
+    /// Remaining share of the machine's lifetime (created → expires), 0…1.
+    static func ttlFraction(_ m: OrbManagedMachine, now: Date = .now) -> Double {
+        guard let start = date(m.created_at), let end = date(m.expires_at) else { return 0 }
+        let total = end.timeIntervalSince(start)
+        guard total > 0 else { return 0 }
+        return min(1, max(0, end.timeIntervalSince(now) / total))
+    }
+    /// "<$0.01 so far · $0.036/h".
+    static func costLine(_ cost: Double, rate: Double) -> String { "\(usd(cost)) so far · \(usdPerHour(rate))" }
+    /// Mission chip text: the mission title, else the short id.
+    static func missionLabel(title: String?, id: String) -> String {
+        if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
+        return String(id.prefix(8))
     }
     /// Machines destroyed or failed during the last 24 hours, newest first.
     static func recent(_ machines: [OrbManagedMachine], now: Date = .now) -> [OrbManagedMachine] {
@@ -168,76 +207,179 @@ struct OrbManagedBadge: View {
     }
 }
 
-/// Settings > Machines section: live managed machines with TTL countdown,
-/// running cost, Extend (+1 h) and Destroy. No spawn UI on mobile.
+/// Mission titles for owner chips, fetched once per mission and cached for the session.
+@MainActor enum OrbMissionTitles {
+    private(set) static var cache: [String: String] = [:]
+    private static var inFlight: Set<String> = []
+    static func load(_ id: String) async -> String? {
+        if let cached = cache[id] { return cached }
+        guard !inFlight.contains(id) else { return nil }
+        inFlight.insert(id); defer { inFlight.remove(id) }
+        guard let mission = try? await OrbSettingsClient().call("/api/control/missions/\(OrbCore.escape(id))") else { return nil }
+        let title = mission["title"].text
+        cache[id] = title
+        return title
+    }
+}
+
+/// Settings > Machines section: managed machines laid out like desktop rows,
+/// Extend (+1 h) and Destroy via swipe or long-press. No spawn UI on mobile.
 struct OrbManagedMachinesSection: View {
     let response: OrbManagedMachinesResponse
     let fetchedAt: Date
     let busy: Bool
     let onDestroy: (OrbManagedMachine) -> Void
     let onExtend: (OrbManagedMachine) -> Void
+    let onOpenMission: (String) -> Void
     @State private var destroying: OrbManagedMachine?
+    @State private var titles: [String: String] = [:]
 
     var body: some View {
-        let live = response.machines.filter(OrbManaged.isLive)
-        let recent = OrbManaged.recent(response.machines)
+        let live: [OrbManagedMachine] = response.machines.filter(OrbManaged.isLive)
+        let recent: [OrbManagedMachine] = OrbManaged.recent(response.machines)
         Section {
             if !response.enabled { Text("Managed machines are disabled on this backend.").foregroundStyle(.secondary) }
             else if live.isEmpty { Text("No managed machines running.").foregroundStyle(.secondary) }
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                ForEach(live) { machine in row(machine, now: context.date) }
+            ForEach(live) { machine in
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    OrbManagedMachineRow(machine: machine, now: context.date, cost: OrbManaged.liveCost(machine, fetchedAt: fetchedAt, now: context.date),
+                                         missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: false, onOpenMission: onOpenMission)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button("Destroy", role: .destructive) { destroying = machine }.disabled(!canAct(machine))
+                    Button("+1 h") { onExtend(machine) }.tint(.accentColor).disabled(!canAct(machine))
+                }
+                .contextMenu { menu(machine, live: true) }
+                .accessibilityIdentifier("managed.machine.\(machine.id)")
             }
             ForEach(recent) { machine in
-                VStack(alignment: .leading) {
-                    Text(OrbManaged.title(machine))
-                    Text(Self.recentSummary(machine))
-                        .font(.caption).foregroundStyle(OrbStyle.textMuted)
-                }
+                OrbManagedMachineRow(machine: machine, now: .now, cost: machine.cost_usd,
+                                     missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: true, onOpenMission: onOpenMission)
+                    .contextMenu { menu(machine, live: false) }
             }
         } header: { Text("Managed machines") } footer: {
             Text(OrbManaged.budgetLine(response.budget)).accessibilityIdentifier("managed.budget")
         }
+        .task(id: response.machines.compactMap(\.owner_mission_id)) { await loadTitles() }
         .alert("Destroy machine?", isPresented: Binding(get: { destroying != nil }, set: { if !$0 { destroying = nil } }), presenting: destroying) { machine in
             Button("Destroy", role: .destructive) { onDestroy(machine) }
             Button("Cancel", role: .cancel) {}
-        } message: { Text("Destroy \(OrbManaged.title($0)) (\($0.size))? Running jobs on it stop and its disk is deleted.") }
+        } message: { Text("Destroy \(OrbManaged.title($0)) (\(OrbManaged.sizeLabel($0.size)))? Running jobs on it stop and its disk is deleted.") }
     }
 
-    static func recentSummary(_ m: OrbManagedMachine) -> String {
-        let state: String = OrbManaged.stateLabel(m.state)
-        let cost: String = OrbManaged.usd(m.cost_usd)
-        var parts: [String] = [state, cost]
-        if let error = m.error, !error.isEmpty { parts.append(error) }
-        return parts.joined(separator: " · ")
-    }
+    private func canAct(_ m: OrbManagedMachine) -> Bool { !busy && m.state != "destroying" }
 
-    private func row(_ m: OrbManagedMachine, now: Date) -> some View {
-        DisclosureGroup {
-            LabeledContent("Specs", value: OrbManaged.sizeSpec(cpu: m.cpu, ramGB: m.ram_gb, diskGB: m.disk_gb))
-            LabeledContent("Rate", value: OrbManaged.usdPerHour(m.usd_per_hour))
-            if let node = m.node_id, !node.isEmpty { LabeledContent("Node", value: node) }
-            if let reason = m.reason, !reason.isEmpty { LabeledContent("Reason", value: reason) }
-            if let error = m.error, !error.isEmpty { Text(error).foregroundStyle(OrbStyle.error) }
-            Button("Extend 1 h") { onExtend(m) }.disabled(busy || m.state == "destroying")
+    /// Long-press details: the raw reason, node and error live here, never inline.
+    @ViewBuilder private func menu(_ m: OrbManagedMachine, live: Bool) -> some View {
+        if live {
+            Button("Extend 1 h", systemImage: "clock.arrow.circlepath") { onExtend(m) }.disabled(!canAct(m))
                 .accessibilityIdentifier("managed.extend")
-            Button("Destroy", role: .destructive) { destroying = m }.disabled(busy || m.state == "destroying")
+            Button("Destroy", systemImage: "trash", role: .destructive) { destroying = m }.disabled(!canAct(m))
                 .accessibilityIdentifier("managed.destroy")
-        } label: {
-            VStack(alignment: .leading) {
-                Text(OrbManaged.title(m))
-                Text("\(m.size) · \(OrbManaged.sizeSpec(cpu: m.cpu, ramGB: m.ram_gb))")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack(spacing: 0) {
-                    Text(OrbManaged.stateLabel(m.state) + " · ")
-                    Text(OrbManaged.ttlLeft(m.expires_at, now: now))
-                        .foregroundStyle(OrbManaged.ttlUrgent(m.expires_at, now: now) ? OrbStyle.warning : .secondary)
-                        .monospacedDigit()
-                    Text(" · \(OrbManaged.usd(OrbManaged.liveCost(m, fetchedAt: fetchedAt, now: now))) · \(OrbManaged.usdPerHour(m.usd_per_hour))")
-                        .monospacedDigit()
+        }
+        if let mission = m.owner_mission_id, !mission.isEmpty {
+            Button("Open mission", systemImage: "bubble.left") { onOpenMission(mission) }
+        }
+        Section {
+            if let reason = m.reason, !reason.isEmpty { Text(reason) }
+            if let node = m.node_id, !node.isEmpty { Text("Node \(node)") }
+            if let error = m.error, !error.isEmpty { Text(error) }
+        }
+    }
+
+    private func loadTitles() async {
+        for id in Set(response.machines.compactMap(\.owner_mission_id)) where titles[id] == nil {
+            if let title = await OrbMissionTitles.load(id) { titles[id] = title }
+        }
+    }
+}
+
+/// One managed machine: status dot + bold name + size + status, then specs, TTL ring and cost.
+struct OrbManagedMachineRow: View {
+    let machine: OrbManagedMachine
+    let now: Date
+    let cost: Double
+    let missionTitle: String?
+    let muted: Bool
+    let onOpenMission: (String) -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    static func statusColor(_ state: String) -> Color {
+        switch state {
+        case "online": OrbStyle.success
+        case "provisioning", "enrolling": OrbStyle.warning
+        case "failed": OrbStyle.error
+        default: OrbStyle.textMuted
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            titleLine
+            detailLine
+            if let mission = machine.owner_mission_id, !mission.isEmpty { missionChip(mission) }
+        }
+        .padding(.vertical, 2)
+        .opacity(muted ? 0.6 : 1)
+    }
+
+    private var titleLine: some View {
+        let status: String = OrbManaged.stateLabel(machine.state)
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Circle().fill(Self.statusColor(machine.state)).frame(width: 8, height: 8)
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                .accessibilityHidden(true)
+            Text(OrbManaged.title(machine)).font(.body.weight(.semibold)).lineLimit(1)
+            Text(OrbManaged.sizeLabel(machine.size)).font(.subheadline).foregroundStyle(OrbStyle.textSecondary).lineLimit(1)
+            Spacer(minLength: 4)
+            Text(status).font(.subheadline).foregroundStyle(OrbStyle.textSecondary).lineLimit(1)
+        }
+    }
+
+    @ViewBuilder private var detailLine: some View {
+        let specs = Text(OrbManaged.specLine(machine)).lineLimit(1)
+        let ttl = ttlView
+        let costText = Text(OrbManaged.costLine(cost, rate: machine.usd_per_hour)).monospacedDigit().lineLimit(1)
+        Group {
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 2) { specs; ttl; costText }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { specs; ttl; costText }
+                    VStack(alignment: .leading, spacing: 2) { specs; HStack(spacing: 8) { ttl; costText } }
                 }
-                .font(.caption).foregroundStyle(.secondary)
             }
         }
-        .accessibilityIdentifier("managed.machine.\(m.id)")
+        .font(.footnote).foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder private var ttlView: some View {
+        if !muted {
+            let fraction: Double = OrbManaged.ttlFraction(machine, now: now)
+            let urgent: Bool = OrbManaged.ttlUrgent(machine.expires_at, now: now)
+            HStack(spacing: 4) {
+                ZStack {
+                    Circle().stroke(OrbStyle.border, lineWidth: 2)
+                    Circle().trim(from: 0, to: fraction).stroke(urgent ? OrbStyle.warning : OrbStyle.icon, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 11, height: 11).accessibilityHidden(true)
+                Text(OrbManaged.ttlShort(machine.expires_at, now: now)).monospacedDigit().lineLimit(1)
+                    .foregroundStyle(urgent ? OrbStyle.warning : .secondary)
+            }
+        }
+    }
+
+    private func missionChip(_ id: String) -> some View {
+        Button { onOpenMission(id) } label: {
+            Label(OrbManaged.missionLabel(title: missionTitle, id: id), systemImage: "bubble.left")
+                .font(.caption.weight(.medium)).lineLimit(1).truncationMode(.tail)
+                .foregroundStyle(OrbStyle.textSecondary)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Color.white.opacity(0.07), in: Capsule())
+                .overlay(Capsule().stroke(OrbStyle.border))
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier("managed.mission")
     }
 }
