@@ -274,7 +274,7 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Loading conversations…"].exists)
     }
     @MainActor func testRichResponseStaysAtBottomAfterLayoutGrowth() async throws {
-        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18790/__reset")!)
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18766/__reset")!)
         reset.httpMethod = "POST"
         _ = try await URLSession.shared.data(for: reset)
         let app = launch()

@@ -239,8 +239,18 @@ impl MissionAccess {
         }
     }
 
+    /// Best-effort save (pruning, audit of reads).
     async fn save(&self, data: &Persisted) {
-        approval_flow::persist_private(&self.path, data).await;
+        if let Err(e) = approval_flow::persist_private(&self.path, data).await {
+            tracing::warn!("mission access state not saved: {e}");
+        }
+    }
+
+    /// Save that must succeed: a decision is only reported once it is on disk.
+    async fn commit(&self, data: &Persisted) -> Result<(), String> {
+        approval_flow::persist_private(&self.path, data)
+            .await
+            .map_err(|e| format!("Could not save the decision ({e}); nothing changed"))
     }
 
     /// Open a request, or return the pending request / live grant that
@@ -294,7 +304,11 @@ impl MissionAccess {
         };
         data.requests.push(r.clone());
         data.log(&r, "requested", None, now);
-        self.save(&data).await;
+        if let Err(e) = self.commit(&data).await {
+            data.requests.pop();
+            data.audit.pop();
+            return Err(e);
+        }
         drop(data);
         self.changed.notify_waiters();
         Ok(r)
@@ -322,11 +336,13 @@ impl MissionAccess {
         let now = Utc::now();
         let mut data = self.data.lock().await;
         data.prune(now);
-        let r = data
+        let idx = data
             .requests
-            .iter_mut()
-            .find(|r| r.id == id && r.owner == owner)
+            .iter()
+            .position(|r| r.id == id && r.owner == owner)
             .ok_or("Request not found")?;
+        let before = data.requests[idx].clone();
+        let r = &mut data.requests[idx];
         let next = r.state.apply(event)?;
         let detail = match event {
             ApprovalEvent::Approve => {
@@ -355,7 +371,13 @@ impl MissionAccess {
             ApprovalEvent::Expire => "expired",
         };
         data.log(&out, action, detail, now);
-        self.save(&data).await;
+        if let Err(e) = self.commit(&data).await {
+            // Roll back: memory must match disk, or a restart would undo a
+            // revoke (or resurrect a denied request).
+            data.requests[idx] = before;
+            data.audit.pop();
+            return Err(e);
+        }
         drop(data);
         self.changed.notify_waiters();
         Ok(out)
@@ -1059,6 +1081,31 @@ mod tests {
         // Revoked: hidden again.
         let gone = s.revoke("thomas", r2.id).await.unwrap();
         assert!(agent_view(&gone)["target_title"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_revoke_that_cannot_be_saved_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("mission-access-{}", Uuid::new_v4()));
+        let path = dir.join("mission_access.json");
+        let s = MissionAccess::open(path.clone());
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let r = s.request(new("thomas", a, b)).await.unwrap();
+        s.approve("thomas", r.id, None).await.unwrap();
+        // Make the state path unwritable: a directory where the temp file goes.
+        std::fs::create_dir_all(path.with_extension("json.tmp")).unwrap();
+        assert!(s.revoke("thomas", r.id).await.is_err());
+        assert_eq!(
+            s.read_grant("thomas", a, b).await,
+            Some(r.id),
+            "memory must match disk"
+        );
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        s.revoke("thomas", r.id).await.unwrap();
+        // After a restart the revoke holds.
+        assert_eq!(
+            MissionAccess::open(path).read_grant("thomas", a, b).await,
+            None
+        );
     }
 
     #[test]

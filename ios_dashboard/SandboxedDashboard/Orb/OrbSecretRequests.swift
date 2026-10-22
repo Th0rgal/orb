@@ -321,6 +321,8 @@ final class OrbMissionAccessMonitor {
     static let shared = OrbMissionAccessMonitor()
     private(set) var requests: [OrbJSON] = []
     private(set) var audit: [OrbJSON] = []
+    /// Set when a mission access notification is tapped; the home view opens the sheet.
+    var openRequested = false
     private var endpoint = ""
     private var announced: Set<String> = []
 

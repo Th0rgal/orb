@@ -449,6 +449,9 @@ struct OrbHome: View {
         .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
         .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
         .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet() }
+        .onChange(of: accessRequests.openRequested, initial: true) { _, open in
+            if open { accessRequests.openRequested = false; accessSheet = true }
+        }
         .task(id: scenePhase) { if scenePhase == .active { await secretRequests.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await accessRequests.poll() } }
     }

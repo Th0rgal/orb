@@ -104,23 +104,30 @@ where
 }
 
 /// Write `value` as JSON to `path` atomically (temp file + rename), readable
-/// by the backend user only.
-pub async fn persist_private<T: Serialize>(path: &Path, value: &T) {
-    let Ok(text) = serde_json::to_string_pretty(value) else {
-        return;
-    };
+/// by the backend user only. Errors when the state did not reach disk, so a
+/// decision (approve, revoke) is never reported done while a restart would
+/// bring back the old state.
+pub async fn persist_private<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).map_err(|e| format!("Encode state: {e}"))?;
     if let Some(dir) = path.parent() {
-        let _ = tokio::fs::create_dir_all(dir).await;
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| format!("Create state dir: {e}"))?;
     }
     let tmp = path.with_extension("json.tmp");
-    if tokio::fs::write(&tmp, text).await.is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-        }
-        let _ = tokio::fs::rename(&tmp, path).await;
+    tokio::fs::write(&tmp, text)
+        .await
+        .map_err(|e| format!("Write state: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|e| format!("Protect state: {e}"))?;
     }
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| format!("Save state: {e}"))
 }
 
 #[cfg(test)]
@@ -168,6 +175,18 @@ mod tests {
             t0 + ttl + chrono::Duration::seconds(1),
             ttl
         ));
+    }
+
+    #[tokio::test]
+    async fn persist_reports_failure() {
+        let blocker = std::env::temp_dir().join(format!("approval-flow-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&blocker, b"a file, not a directory").unwrap();
+        // The parent is a file: nothing can be written beneath it.
+        assert!(persist_private(&blocker.join("state.json"), &1)
+            .await
+            .is_err());
+        let ok = std::env::temp_dir().join(format!("approval-flow-{}", uuid::Uuid::new_v4()));
+        assert!(persist_private(&ok.join("state.json"), &1).await.is_ok());
     }
 
     #[tokio::test]

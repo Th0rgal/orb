@@ -246,7 +246,9 @@ pub struct Caller {
 
 impl SecretBroker {
     async fn save(&self, data: &Persisted) {
-        approval_flow::persist_private(&self.path, data).await;
+        if let Err(e) = approval_flow::persist_private(&self.path, data).await {
+            tracing::warn!("secret broker state not saved: {e}");
+        }
     }
 
     /// Drop expired grants and expire stale pending requests.
