@@ -609,7 +609,12 @@ object OrbReadCache {
     }
 }
 
-class OrbError(override val message: String, val status: Int? = null) : Exception(message)
+class OrbError(
+    override val message: String,
+    val status: Int? = null,
+    /** Raw response body, so callers can read structured `{error, message}` errors. */
+    val body: String? = null
+) : Exception(message)
 
 object OrbKeychain {
     private const val PREFS_NAME = "orb_secure_store"
@@ -1206,7 +1211,7 @@ class OrbCore private constructor(context: Context) {
             val message = OrbJSON.str(parsed, "error", "message", "detail")
                 ?: if (raw.isEmpty()) "HTTP $code" else raw.take(240)
             recordErrorLog("$method $path -> HTTP $code\n${raw.take(2000)}", "$method $path -> HTTP $code")
-            throw OrbError(message, status = code)
+            throw OrbError(message, status = code, body = raw.take(2000))
         }
         if (bytes.isEmpty()) return@withContext emptyMap<String, Any?>()
         OrbJSON.parse(bytes) ?: emptyMap<String, Any?>()
