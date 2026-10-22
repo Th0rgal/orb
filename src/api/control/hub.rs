@@ -322,6 +322,16 @@ impl ControlHub {
         self.identities.read().await.get(&owner).cloned()
     }
 
+    /// The mission store of an already-loaded session for `user_id`, without
+    /// spawning one. `None` when that tenant's session is not loaded.
+    pub async fn loaded_mission_store(&self, user_id: &str) -> Option<Arc<dyn MissionStore>> {
+        self.sessions
+            .read()
+            .await
+            .get(user_id)
+            .map(|s| Arc::clone(&s.mission_store))
+    }
+
     pub async fn get_or_spawn(&self, user: &AuthUser) -> ControlState {
         self.identities
             .write()

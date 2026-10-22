@@ -612,20 +612,19 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         let manager = crate::managed::start(&config.working_dir, config.port).await;
         // Destroy managed VMs as soon as their owning mission has ended.
         let probe_state = Arc::clone(&state);
-        manager.set_owner_probe(Arc::new(move |id: String| {
+        manager.set_owner_probe(Arc::new(move |tenant: String, id: String| {
             let st = Arc::clone(&probe_state);
             Box::pin(async move {
                 let uuid = uuid::Uuid::parse_str(&id).ok()?;
-                let store = st.control.get_mission_store().await;
+                // Only the owner's own tenant store is authoritative; if it is
+                // not loaded the state is unknown and nothing is destroyed.
+                let store = st.control.loaded_mission_store(&tenant).await?;
                 match store.get_mission(uuid).await {
                     Ok(Some(m)) => Some(crate::managed::owner_state_for_status(
                         &m.status.to_string(),
                     )),
-                    // "Deleted" is only conclusive with one tenant store.
-                    Ok(None) if st.control.session_user_ids().await.len() <= 1 => {
-                        Some(crate::managed::OwnerState::Missing)
-                    }
-                    _ => None,
+                    Ok(None) => Some(crate::managed::OwnerState::Missing),
+                    Err(_) => None,
                 }
             })
         }));

@@ -94,7 +94,12 @@ async fn get_one(Path(id): Path<String>) -> Response {
     }
 }
 
-async fn spawn(Json(req): Json<SpawnRequest>) -> Response {
+async fn spawn(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Json(mut req): Json<SpawnRequest>,
+) -> Response {
+    // The owner's tenant comes from the authenticated caller, never the body.
+    req.owner_user_id = Some(user.id.clone());
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,

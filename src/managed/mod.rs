@@ -279,6 +279,9 @@ pub struct ManagedMachine {
     pub cost_is_metered: bool,
     #[serde(default)]
     pub owner_mission_id: Option<String>,
+    /// Tenant (user id) whose mission store holds `owner_mission_id`.
+    #[serde(default)]
+    pub owner_user_id: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
@@ -321,6 +324,9 @@ pub struct SpawnRequest {
     pub image: Option<String>,
     pub reason: Option<String>,
     pub owner_mission_id: Option<String>,
+    /// Set by the API from the authenticated caller; never from the body.
+    #[serde(skip)]
+    pub owner_user_id: Option<String>,
     /// Wait until the node is online (default true).
     pub wait: Option<bool>,
 }
@@ -374,6 +380,7 @@ pub enum OwnerState {
 
 pub type OwnerProbe = Arc<
     dyn Fn(
+            String,
             String,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<OwnerState>> + Send>>
@@ -873,6 +880,7 @@ impl ManagedManager {
                 cost_usd: 0.0,
                 cost_is_metered: false,
                 owner_mission_id: req.owner_mission_id.clone(),
+                owner_user_id: req.owner_user_id.clone(),
                 reason: req.reason.clone(),
                 error: None,
                 ledger_closed: false,
@@ -1219,11 +1227,13 @@ impl ManagedManager {
                         // The owning mission ended: destroy now unless a job
                         // (e.g. a child still running there) keeps it busy.
                         if !busy {
-                            if let Some(owner) = m.owner_mission_id.clone() {
+                            if let (Some(owner), Some(tenant)) =
+                                (m.owner_mission_id.clone(), m.owner_user_id.clone())
+                            {
                                 let probe = self.owner_probe.read().ok().and_then(|p| p.clone());
                                 if let Some(probe) = probe {
                                     if matches!(
-                                        probe(owner).await,
+                                        probe(tenant, owner).await,
                                         Some(OwnerState::Terminal | OwnerState::Missing)
                                     ) {
                                         let _ = self

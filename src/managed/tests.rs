@@ -453,6 +453,7 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         cost_usd: 0.0,
         cost_is_metered: false,
         owner_mission_id: None,
+        owner_user_id: None,
         reason: None,
         error: None,
         ledger_closed: false,
@@ -476,9 +477,16 @@ fn managed_nodes_are_excluded_from_static_lookup() {
 
 fn probe_from(map: std::collections::HashMap<String, OwnerState>) -> OwnerProbe {
     let map = Arc::new(map);
-    Arc::new(move |id: String| {
+    // Models the routes.rs probe: only tenant "t1" has a loaded store; any
+    // other tenant is unknown (None) and must never cause a destroy.
+    Arc::new(move |tenant: String, id: String| {
         let map = Arc::clone(&map);
-        Box::pin(async move { Some(map.get(&id).copied().unwrap_or(OwnerState::Missing)) })
+        Box::pin(async move {
+            if tenant != "t1" {
+                return None;
+            }
+            Some(map.get(&id).copied().unwrap_or(OwnerState::Missing))
+        })
     })
 }
 
@@ -488,6 +496,7 @@ async fn online_machine(m: &Arc<ManagedManager>, owner: &str) -> ManagedMachine 
             wait: Some(false),
             ttl_minutes: Some(60),
             owner_mission_id: Some(owner.to_string()),
+            owner_user_id: Some("t1".to_string()),
             ..Default::default()
         })
         .await
@@ -573,7 +582,37 @@ async fn unknown_owner_status_keeps_machine() {
     let dir = tempfile::tempdir().unwrap();
     let (m, _) = manager(dir.path(), settings());
     let a = online_machine(&m, "unknowable").await;
-    m.set_owner_probe(Arc::new(|_id: String| Box::pin(async { None })));
+    m.set_owner_probe(Arc::new(|_t: String, _id: String| Box::pin(async { None })));
     m.reap_once().await;
     assert_eq!(m.get(&a.id).await.unwrap().state, MachineState::Online);
+}
+
+#[tokio::test]
+async fn store_miss_in_unknown_tenant_never_destroys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = 4;
+    let (m, _) = manager(dir.path(), s);
+    // Owner mission lives in another tenant whose store is not loaded.
+    let foreign = online_machine(&m, "foreign-mission").await;
+    m.update(&foreign.id, |x| x.owner_user_id = Some("t2".into()))
+        .await;
+    // Legacy row without a recorded tenant.
+    let legacy = online_machine(&m, "legacy-mission").await;
+    m.update(&legacy.id, |x| x.owner_user_id = None).await;
+    // Terminal owner in the known tenant.
+    let ended = online_machine(&m, "ended-mission").await;
+    let mut map = std::collections::HashMap::new();
+    map.insert("ended-mission".to_string(), OwnerState::Terminal);
+    m.set_owner_probe(probe_from(map)); // foreign/legacy would be "Missing" in t1
+    m.reap_once().await;
+    assert_eq!(
+        m.get(&foreign.id).await.unwrap().state,
+        MachineState::Online
+    );
+    assert_eq!(m.get(&legacy.id).await.unwrap().state, MachineState::Online);
+    assert_eq!(
+        m.get(&ended.id).await.unwrap().state,
+        MachineState::Destroyed
+    );
 }
