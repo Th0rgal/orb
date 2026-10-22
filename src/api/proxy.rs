@@ -2656,8 +2656,23 @@ fn client_stream_response(
                                 "Upstream stalled before any output reached the client; re-routing transparently"
                             );
                             cell.note_transparent_retry();
-                            let resp =
-                                super::proxy_timing::scope(cell.clone(), reroute(exclude)).await;
+                            // Keep the client alive while the reroute waits for its
+                            // own first content.
+                            let mut pending = std::pin::pin!(super::proxy_timing::scope(
+                                cell.clone(),
+                                reroute(exclude)
+                            ));
+                            let resp = loop {
+                                tokio::select! {
+                                    resp = &mut pending => break resp,
+                                    _ = tokio::time::sleep(keepalive) => {
+                                        if &tail == b"\n\n" {
+                                            cell.client_gap(last_item.elapsed(), true);
+                                            yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
+                                        }
+                                    }
+                                }
+                            };
                             if resp.status().is_success() {
                                 data = resp.into_body().into_data_stream();
                                 last_item = std::time::Instant::now();
@@ -12890,6 +12905,8 @@ mod latency_tests {
         let reroute: StallRetry = Arc::new(move |exclude| {
             seen.lock().unwrap().push(exclude);
             Box::pin(async {
+                // The reroute itself waits 40 s for its first content.
+                tokio::time::sleep(Duration::from_secs(40)).await;
                 sse_response(vec![(
                     Duration::from_secs(1),
                     "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n",
@@ -12903,7 +12920,10 @@ mod latency_tests {
         let r = cell.snapshot();
         assert_eq!(r.transparent_retries, 1);
         assert_eq!(r.outcome, "ok");
-        assert!(r.keepalives >= 3, "keepalives during the 60 s silence");
+        // 60 s stall + 40 s reroute wait, one keepalive every 15 s.
+        // Some during the 40 s reroute wait, not only during the stall.
+        assert!(r.keepalives >= 5, "keepalives: {}", r.keepalives);
+        assert!(r.max_client_gap_ms <= 15_000, "gap {}", r.max_client_gap_ms);
     }
 
     #[tokio::test(start_paused = true)]

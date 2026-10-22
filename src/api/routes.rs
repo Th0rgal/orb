@@ -2114,14 +2114,41 @@ pub struct ProxyTimingQuery {
 /// router since the last restart: p50/p90 time to headers / first content /
 /// total, queue wait, prompt tokens, cache reads, in-flight counts, failure
 /// reasons and hedges, per provider/model. No prompt content.
+///
+/// The data is process-wide (every caller's traffic), so it is served only
+/// in single-tenant / auth-disabled deployments, never to individual users
+/// of a multi-user deployment.
 async fn get_ai_proxy_timing(
+    State(state): State<Arc<AppState>>,
     Extension(_user): Extension<AuthUser>,
     Query(params): Query<ProxyTimingQuery>,
-) -> Json<super::proxy_timing::TimingSummary> {
+) -> Result<Json<super::proxy_timing::TimingSummary>, (StatusCode, String)> {
+    if proxy_timing_forbidden(state.config.auth.auth_mode(state.config.dev_mode)) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Proxy timing covers all users and is not available in multi-user mode".to_string(),
+        ));
+    }
     let minutes = params.minutes.unwrap_or(60).clamp(1, 24 * 60);
-    Json(super::proxy_timing::summary(
+    Ok(Json(super::proxy_timing::summary(
         std::time::Duration::from_secs(minutes * 60),
-    ))
+    )))
+}
+
+fn proxy_timing_forbidden(mode: AuthMode) -> bool {
+    matches!(mode, AuthMode::MultiUser)
+}
+
+#[cfg(test)]
+mod proxy_timing_route_tests {
+    use super::*;
+
+    #[test]
+    fn process_wide_timing_is_hidden_in_multi_user_mode() {
+        assert!(proxy_timing_forbidden(AuthMode::MultiUser));
+        assert!(!proxy_timing_forbidden(AuthMode::SingleTenant));
+        assert!(!proxy_timing_forbidden(AuthMode::Disabled));
+    }
 }
 
 /// Shared client for every upstream LLM call.
