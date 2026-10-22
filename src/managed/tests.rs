@@ -453,6 +453,7 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         cost_usd: 0.0,
         cost_is_metered: false,
         owner_mission_id: None,
+        owner_user_id: None,
         reason: None,
         error: None,
         ledger_closed: false,
@@ -472,4 +473,146 @@ fn managed_nodes_are_excluded_from_static_lookup() {
     assert!(std::env::var(token_env_for("mmtrust01")).is_err());
     unregister_node(&machine);
     assert!(settings.node("managed-mmtrust01").is_none());
+}
+
+fn probe_from(map: std::collections::HashMap<String, OwnerState>) -> OwnerProbe {
+    let map = Arc::new(map);
+    // Models the routes.rs probe: only tenant "t1" has a loaded store; any
+    // other tenant is unknown (None) and must never cause a destroy.
+    Arc::new(move |tenant: String, id: String| {
+        let map = Arc::clone(&map);
+        Box::pin(async move {
+            if tenant != "t1" {
+                return None;
+            }
+            Some(map.get(&id).copied().unwrap_or(OwnerState::Missing))
+        })
+    })
+}
+
+async fn online_machine(m: &Arc<ManagedManager>, owner: &str) -> ManagedMachine {
+    let machine = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            ttl_minutes: Some(60),
+            owner_mission_id: Some(owner.to_string()),
+            owner_user_id: Some("t1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // Let the background provisioner record the provider id, then mark online.
+    for _ in 0..100 {
+        if m.get(&machine.id).await.unwrap().provider_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    m.update(&machine.id, |x| {
+        x.state = MachineState::Online;
+        x.last_busy_at = Some(Utc::now());
+    })
+    .await
+    .unwrap()
+}
+
+#[test]
+fn owner_status_mapping() {
+    for s in ["completed", "failed", "not_feasible", "acknowledged"] {
+        assert_eq!(owner_state_for_status(s), OwnerState::Terminal, "{s}");
+    }
+    // Deploy restarts interrupt missions that are then resumed; keep their VMs.
+    for s in [
+        "active",
+        "pending",
+        "awaiting_user",
+        "interrupted",
+        "blocked",
+        "paused",
+        "waiting_background",
+    ] {
+        assert_eq!(owner_state_for_status(s), OwnerState::Live, "{s}");
+    }
+}
+
+#[tokio::test]
+async fn machine_is_destroyed_when_owner_ends_and_kept_while_owner_lives() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let live = online_machine(&m, "owner-live").await;
+    let done = online_machine(&m, "owner-done").await;
+    let gone_m = {
+        // Raise the cap: three machines.
+        m.update(&done.id, |_| {}).await;
+        done.clone()
+    };
+    let mut map = std::collections::HashMap::new();
+    map.insert("owner-live".to_string(), OwnerState::Live);
+    map.insert("owner-done".to_string(), OwnerState::Terminal);
+    m.set_owner_probe(probe_from(map));
+    m.reap_once().await;
+    assert_eq!(m.get(&live.id).await.unwrap().state, MachineState::Online);
+    let after = m.get(&gone_m.id).await.unwrap();
+    assert_eq!(after.state, MachineState::Destroyed);
+    assert_eq!(after.destroy_reason.as_deref(), Some("owner_ended"));
+    assert!(after.ledger_closed);
+}
+
+#[tokio::test]
+async fn deleted_owner_destroys_and_adoption_keeps_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let a = online_machine(&m, "deleted-parent").await;
+    let b = online_machine(&m, "finished-parent").await;
+    // A live child took b over (e.g. via extend_managed_machine).
+    m.adopt(&b.id, "live-child").await.unwrap();
+    let mut map = std::collections::HashMap::new();
+    map.insert("finished-parent".to_string(), OwnerState::Terminal);
+    map.insert("live-child".to_string(), OwnerState::Live);
+    m.set_owner_probe(probe_from(map)); // deleted-parent -> Missing
+    m.reap_once().await;
+    assert_eq!(m.get(&a.id).await.unwrap().state, MachineState::Destroyed);
+    let kept = m.get(&b.id).await.unwrap();
+    assert_eq!(kept.state, MachineState::Online);
+    assert_eq!(kept.owner_mission_id.as_deref(), Some("live-child"));
+}
+
+#[tokio::test]
+async fn unknown_owner_status_keeps_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let a = online_machine(&m, "unknowable").await;
+    m.set_owner_probe(Arc::new(|_t: String, _id: String| Box::pin(async { None })));
+    m.reap_once().await;
+    assert_eq!(m.get(&a.id).await.unwrap().state, MachineState::Online);
+}
+
+#[tokio::test]
+async fn store_miss_in_unknown_tenant_never_destroys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = 4;
+    let (m, _) = manager(dir.path(), s);
+    // Owner mission lives in another tenant whose store is not loaded.
+    let foreign = online_machine(&m, "foreign-mission").await;
+    m.update(&foreign.id, |x| x.owner_user_id = Some("t2".into()))
+        .await;
+    // Legacy row without a recorded tenant.
+    let legacy = online_machine(&m, "legacy-mission").await;
+    m.update(&legacy.id, |x| x.owner_user_id = None).await;
+    // Terminal owner in the known tenant.
+    let ended = online_machine(&m, "ended-mission").await;
+    let mut map = std::collections::HashMap::new();
+    map.insert("ended-mission".to_string(), OwnerState::Terminal);
+    m.set_owner_probe(probe_from(map)); // foreign/legacy would be "Missing" in t1
+    m.reap_once().await;
+    assert_eq!(
+        m.get(&foreign.id).await.unwrap().state,
+        MachineState::Online
+    );
+    assert_eq!(m.get(&legacy.id).await.unwrap().state, MachineState::Online);
+    assert_eq!(
+        m.get(&ended.id).await.unwrap().state,
+        MachineState::Destroyed
+    );
 }

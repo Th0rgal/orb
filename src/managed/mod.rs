@@ -279,6 +279,9 @@ pub struct ManagedMachine {
     pub cost_is_metered: bool,
     #[serde(default)]
     pub owner_mission_id: Option<String>,
+    /// Tenant (user id) whose mission store holds `owner_mission_id`.
+    #[serde(default)]
+    pub owner_user_id: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
@@ -321,6 +324,9 @@ pub struct SpawnRequest {
     pub image: Option<String>,
     pub reason: Option<String>,
     pub owner_mission_id: Option<String>,
+    /// Set by the API from the authenticated caller; never from the body.
+    #[serde(skip)]
+    pub owner_user_id: Option<String>,
     /// Wait until the node is online (default true).
     pub wait: Option<bool>,
 }
@@ -360,6 +366,39 @@ static NODES: LazyLock<RwLock<HashMap<String, &'static RemoteNodeConfig>>> =
 static TOKENS: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static MANAGER: OnceLock<Arc<ManagedManager>> = OnceLock::new();
+
+/// Lifecycle of a machine's owning mission, as seen by the reaper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerState {
+    /// Running, queued, awaiting the user, interrupted (resumable), paused...
+    Live,
+    /// Completed, failed, not feasible or acknowledged: it will not run again.
+    Terminal,
+    /// The mission no longer exists (deleted).
+    Missing,
+}
+
+pub type OwnerProbe = Arc<
+    dyn Fn(
+            String,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<OwnerState>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Map a mission status (its Display string) to an [`OwnerState`].
+/// `interrupted` and `blocked` stay live: deploy restarts interrupt missions
+/// that are then resumed, and blocked missions await resolution.
+pub fn owner_state_for_status(status: &str) -> OwnerState {
+    match status {
+        "completed" | "failed" | "not_feasible" | "acknowledged" | "cancelled" => {
+            OwnerState::Terminal
+        }
+        _ => OwnerState::Live,
+    }
+}
 
 pub fn node_config(node_id: &str) -> Option<&'static RemoteNodeConfig> {
     NODES.read().ok()?.get(node_id).copied()
@@ -443,6 +482,7 @@ pub struct ManagedManager {
     /// Serialises spawn admission so two callers cannot both pass the caps.
     admission: Mutex<()>,
     pub relay: relay::RelayHub,
+    owner_probe: std::sync::RwLock<Option<OwnerProbe>>,
 }
 
 fn random_id() -> String {
@@ -518,7 +558,31 @@ impl ManagedManager {
             secrets: Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             relay: relay::RelayHub::default(),
+            owner_probe: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Install the mission-status lookup used to destroy machines whose
+    /// owning mission has ended.
+    pub fn set_owner_probe(&self, probe: OwnerProbe) {
+        if let Ok(mut slot) = self.owner_probe.write() {
+            *slot = Some(probe);
+        }
+    }
+
+    /// Hand a live machine to another mission of the owner's tree (the
+    /// gateway has already checked lineage). The new owner's lifetime then
+    /// governs the machine.
+    pub async fn adopt(&self, id: &str, mission_id: &str) -> Option<ManagedMachine> {
+        let m = self.get(id).await?;
+        if !m.state.is_live() || m.owner_mission_id.as_deref() == Some(mission_id) {
+            return Some(m);
+        }
+        let m = self
+            .update(&m.id, |m| m.owner_mission_id = Some(mission_id.to_string()))
+            .await?;
+        self.ledger("adopted", &m);
+        Some(m)
     }
 
     fn machines_path(&self) -> PathBuf {
@@ -816,6 +880,7 @@ impl ManagedManager {
                 cost_usd: 0.0,
                 cost_is_metered: false,
                 owner_mission_id: req.owner_mission_id.clone(),
+                owner_user_id: req.owner_user_id.clone(),
                 reason: req.reason.clone(),
                 error: None,
                 ledger_closed: false,
@@ -1159,6 +1224,26 @@ impl ManagedManager {
                             .is_some_and(|hb| {
                                 hb.active_jobs > 0 || hb.active_leases > 0 || hb.queued_jobs > 0
                             });
+                        // The owning mission ended: destroy now unless a job
+                        // (e.g. a child still running there) keeps it busy.
+                        if !busy {
+                            if let (Some(owner), Some(tenant)) =
+                                (m.owner_mission_id.clone(), m.owner_user_id.clone())
+                            {
+                                let probe = self.owner_probe.read().ok().and_then(|p| p.clone());
+                                if let Some(probe) = probe {
+                                    if matches!(
+                                        probe(tenant, owner).await,
+                                        Some(OwnerState::Terminal | OwnerState::Missing)
+                                    ) {
+                                        let _ = self
+                                            .destroy_inner(&m.id, Some("owner_ended".into()), false)
+                                            .await;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         if busy {
                             self.update(&m.id, |m| m.last_busy_at = Some(now)).await;
                         } else if self.settings.idle_minutes > 0 {
