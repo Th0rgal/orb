@@ -439,6 +439,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
 .c-red { color: var(--red) !important; }
 .c-purple { color: var(--purple) !important; }
 .c-green { color: var(--green); }
+.c-amber { color: var(--amber); }
 
 .sb-resize { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 5; }
 .sb-resize:hover, body.resizing .sb-resize { background: linear-gradient(90deg, transparent 2px, var(--stroke) 2px 4px, transparent 4px); }

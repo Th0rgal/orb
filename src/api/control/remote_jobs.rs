@@ -799,7 +799,12 @@ pub fn spawn_remote_job_reconciler(state: Arc<AppState>) {
                     .await;
                 sweep_done = true;
             }
-            let pending: Vec<_> = handles
+            // Only handles from the previous process: a launch started after
+            // this boot owns its own submit/poll loop. Treating its tentative
+            // handle as a leftover cancelled live launches whenever this
+            // loop was still running (it keeps passing while any old job is
+            // unresolved).
+            let pending: Vec<_> = boot_leftovers(handles, boot_cutoff)
                 .into_iter()
                 .filter(|h| !settled.contains(&h.job_id))
                 .collect();
@@ -822,7 +827,9 @@ pub fn spawn_remote_job_reconciler(state: Arc<AppState>) {
             }
             reconcile_pending_handles(&state, &working_dir, pending, &mut settled).await;
             let unresolved = match crate::remote_node::job_ledger::load(&working_dir).await {
-                Ok(handles) => handles.into_iter().any(|h| !settled.contains(&h.job_id)),
+                Ok(handles) => boot_leftovers(handles, boot_cutoff)
+                    .into_iter()
+                    .any(|h| !settled.contains(&h.job_id)),
                 Err(err) => {
                     tracing::warn!(
                         ?err,
@@ -1210,6 +1217,17 @@ pub(super) async fn settle_interrupted_remote_launch(
             tracing::warn!(%mission_id, %job_id, %error, "interrupted remote launch status could not be persisted; will retry");
         }
     }
+}
+
+/// Ledger handles created before `boot_cutoff`, i.e. by a previous process.
+pub(super) fn boot_leftovers(
+    handles: Vec<crate::remote_node::job_ledger::JobHandle>,
+    boot_cutoff: chrono::DateTime<chrono::Utc>,
+) -> Vec<crate::remote_node::job_ledger::JobHandle> {
+    handles
+        .into_iter()
+        .filter(|h| h.started_at < boot_cutoff)
+        .collect()
 }
 
 pub(super) async fn reconcile_pending_handles(
@@ -2048,5 +2066,32 @@ pub(super) async fn poll_remote_job(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod boot_leftover_tests {
+    use super::boot_leftovers;
+
+    fn handle(
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::remote_node::job_ledger::JobHandle {
+        serde_json::from_value(serde_json::json!({
+            "mission_id": uuid::Uuid::new_v4(),
+            "node_id": "managed-mmabc",
+            "job_id": uuid::Uuid::new_v4(),
+            "started_at": started_at,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn post_restart_reconciler_never_touches_launches_of_this_process() {
+        let boot = chrono::Utc::now();
+        let old = handle(boot - chrono::Duration::minutes(5));
+        let live = handle(boot + chrono::Duration::seconds(30));
+        let kept = boot_leftovers(vec![old.clone(), live], boot);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].job_id, old.job_id);
     }
 }

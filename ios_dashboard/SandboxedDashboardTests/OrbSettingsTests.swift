@@ -10,6 +10,22 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertTrue(OrbConversation.sameMessage("\nVas y\n", "Vas y"))
         XCTAssertFalse(OrbConversation.sameMessage("Vas y", "Vas-y"))
     }
+    func testUsageLimitStatusMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/usage-limit-status.json")
+        let cases = try XCTUnwrap(spec["cases"] as? [[String: Any]])
+        for c in cases {
+            let name = c["name"] as? String ?? "?"
+            let data = try JSONSerialization.data(withJSONObject: c["usage"] ?? [:])
+            let usage = try JSONDecoder().decode(OrbJSON.self, from: data)
+            let got = OrbUsageLimitStatus.from(usage, now: try XCTUnwrap(c["nowSec"] as? Double))
+            if let expected = c["expected"] as? [String: String] {
+                XCTAssertEqual(got?.tone.rawValue, expected["tone"], name)
+                XCTAssertEqual(got?.label, expected["label"], name)
+            } else {
+                XCTAssertNil(got, name)
+            }
+        }
+    }
     func testQuotaUnitsAndRemainingPercent() {
         let values: OrbJSON = .object(["unified_5h_utilization": .number(0.4), "codex_primary_used_percent": .number(20), "minimax_weekly_remaining_percent": .number(70)])
         let windows = OrbProviderQuota.windows(values)

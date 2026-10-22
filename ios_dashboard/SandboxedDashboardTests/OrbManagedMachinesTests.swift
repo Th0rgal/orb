@@ -91,6 +91,9 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(OrbManaged.budgetLine(b), "$0.11 spent today · 1 running")
         let json = #"{"spent_today_usd":0.11,"daily_cap_usd":null,"active":1,"max_concurrent":null}"#
         XCTAssertEqual(try JSONDecoder().decode(OrbManagedBudget.self, from: Data(json.utf8)), b)
+        // Exactly what the live backend sends with unlimited caps.
+        let live = #"{"spent_today_usd":0.15,"committed_usd":0,"daily_cap_usd":null,"active":0,"max_concurrent":null,"default_ttl_minutes":120,"max_ttl_minutes":720,"default_size":"small","max_size":"xlarge","image":"orb-node-base"}"#
+        XCTAssertEqual(OrbManaged.budgetLine(try JSONDecoder().decode(OrbManagedBudget.self, from: Data(live.utf8))), "$0.15 spent today · 0 running")
     }
 
     func testRowFormatting() throws {

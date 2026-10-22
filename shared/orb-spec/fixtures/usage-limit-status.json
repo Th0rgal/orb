@@ -1,0 +1,20 @@
+{
+  "description": "usageLimitStatus: Anthropic unified rate-limit status -> UI badge (null = show nothing). allowed/ok/missing -> null. allowed_warning -> warning 'Approaching limit', plus ' · <window> <pct>%' from unified_representative_claim (five_hour -> 5h using unified_5h_utilization, seven_day -> weekly using unified_7d_utilization; seven_day_opus / seven_day_sonnet -> 'weekly Opus' / 'weekly Sonnet' without a percentage). rejected -> error 'Limit reached', plus ' · resets in <d>' from unified_reset (epoch seconds) vs nowSec: <60 min -> 'Nm' (at least 1m), <48 h -> 'Nh', else 'Nd' (floored). Any other value -> warning 'Limit status unknown'. Status matching is case-insensitive. A raw snake_case status is never shown.",
+  "cases": [
+    { "name": "allowed", "usage": { "unified_status": "allowed" }, "nowSec": 1000, "expected": null },
+    { "name": "missing", "usage": {}, "nowSec": 1000, "expected": null },
+    { "name": "ok", "usage": { "unified_status": "ok" }, "nowSec": 1000, "expected": null },
+    { "name": "warning weekly", "usage": { "unified_status": "allowed_warning", "unified_representative_claim": "seven_day", "unified_7d_utilization": 0.88, "unified_5h_utilization": 0.01 }, "nowSec": 1000, "expected": { "tone": "warning", "label": "Approaching limit · weekly 88%" } },
+    { "name": "warning 5h", "usage": { "unified_status": "ALLOWED_WARNING", "unified_representative_claim": "five_hour", "unified_5h_utilization": 0.934 }, "nowSec": 1000, "expected": { "tone": "warning", "label": "Approaching limit · 5h 93%" } },
+    { "name": "warning opus", "usage": { "unified_status": "allowed_warning", "unified_representative_claim": "seven_day_opus" }, "nowSec": 1000, "expected": { "tone": "warning", "label": "Approaching limit · weekly Opus" } },
+    { "name": "warning no claim", "usage": { "unified_status": "allowed_warning" }, "nowSec": 1000, "expected": { "tone": "warning", "label": "Approaching limit" } },
+    { "name": "warning claim without utilization", "usage": { "unified_status": "allowed_warning", "unified_representative_claim": "seven_day" }, "nowSec": 1000, "expected": { "tone": "warning", "label": "Approaching limit · weekly" } },
+    { "name": "rejected hours", "usage": { "unified_status": "rejected", "unified_reset": 19000 }, "nowSec": 1000, "expected": { "tone": "error", "label": "Limit reached · resets in 5h" } },
+    { "name": "rejected minutes", "usage": { "unified_status": "rejected", "unified_reset": 1030 }, "nowSec": 1000, "expected": { "tone": "error", "label": "Limit reached · resets in 1m" } },
+    { "name": "rejected days", "usage": { "unified_status": "rejected", "unified_reset": 260200 }, "nowSec": 1000, "expected": { "tone": "error", "label": "Limit reached · resets in 3d" } },
+    { "name": "rejected 32h", "usage": { "unified_status": "rejected", "unified_reset": 116200 }, "nowSec": 1000, "expected": { "tone": "error", "label": "Limit reached · resets in 32h" } },
+    { "name": "rejected no reset", "usage": { "unified_status": "rejected" }, "nowSec": 1000, "expected": { "tone": "error", "label": "Limit reached" } },
+    { "name": "rejected past reset", "usage": { "unified_status": "rejected", "unified_reset": 500 }, "nowSec": 1000, "expected": { "tone": "error", "label": "Limit reached" } },
+    { "name": "unknown", "usage": { "unified_status": "something_new" }, "nowSec": 1000, "expected": { "tone": "warning", "label": "Limit status unknown" } }
+  ]
+}
