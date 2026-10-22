@@ -1,4 +1,5 @@
 import { movedMission, withMovedMissions } from "./moves";
+import { MissionLookupContext } from "./orchestrationModel";
 import { renamedTitle, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
 import { nodeLabel } from "./machines/nodes";
@@ -1312,7 +1313,7 @@ export default function App() {
           </Match>
           <Match when={currentMissionId() || (selected()===null && launchPreview())}>
             <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
-              <Show when={viewKey===launchViewKey()} fallback={<MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/>}>
+              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/></MissionLookupContext.Provider>}>
                 <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={setOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/>
               </Show>
             }</Show>

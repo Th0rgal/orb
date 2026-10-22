@@ -118,6 +118,9 @@ extension OrbConversation {
         ForEach(turns.indices, id: \.self) { index in
             turnSummaryRow(turn: turns[index])
         }
+        if !transcript.orchestration.isEmpty {
+            OrbOrchestrationCards(refs: transcript.orchestration, project: project)
+        }
         if !workModel.todos.isEmpty {
             OrbMissionTasksCard(todos: workModel.todos, ended: !working)
         }

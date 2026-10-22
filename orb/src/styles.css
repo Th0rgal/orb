@@ -3943,3 +3943,19 @@ select.orb-select-native:disabled { cursor: default; }
 .managed-size-check { display: inline-flex; color: var(--toggle); }
 .fleet-group-label { padding: 10px 14px 4px; border-top: 1px solid var(--stroke-soft); }
 .p-native-managed { display: flex; align-items: center; gap: 12px; padding: 10px 0 2px; border-top: 1px solid var(--stroke-soft); margin-top: 8px; }
+
+/* ---------- subagent / machine cards (orchestration tool calls) ---------- */
+.st-orch { margin: 6px 10px; padding: 7px 10px; border: 1px solid var(--stroke-soft); border-radius: var(--radius-md); background: var(--bg-inset); font-size: 13px; min-width: 0; }
+.st-orch-head { display: flex; align-items: center; gap: 6px; min-width: 0; line-height: 20px; }
+.st-orch-kind { flex: none; color: var(--fg-3); font-weight: 450; }
+.st-orch-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.st-orch-status { flex: none; font-size: 12px; color: var(--fg-3); }
+.st-orch-status[data-status="done"], .st-orch-status[data-status="online"] { color: var(--green, #70b489); }
+.st-orch-status[data-status="failed"] { color: var(--red, #fc6b83); }
+.st-orch-cost { flex: none; font: 11.5px/16px var(--mono); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.st-orch-open { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: var(--radius-xs); color: var(--fg-3); }
+.st-orch-open:hover { color: var(--fg); background: var(--bg-elev); }
+.st-orch-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 0 19px; color: var(--fg-4); font-size: 12px; }
+.st-orch-machine { display: inline-flex; align-items: center; gap: 4px; }
+.st-orch-summary, .st-orch-error { margin: 4px 0 0 19px; font-size: 12.5px; line-height: 18px; color: var(--fg-2); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.st-orch-error { color: var(--red, #fc6b83); }

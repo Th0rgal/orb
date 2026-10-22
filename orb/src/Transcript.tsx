@@ -28,6 +28,8 @@ import { isTaskTool, latestTaskList, parseTaskList, taskCardView } from "./taskL
 import { messagePresentation, isAutomaticRecovery, isResumePrompt } from "./messagePresentation";
 import { computeDiffStats, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
+import { collectFollowUps, isOrchestrationTool, isSubagentTool } from "./orchestrationModel";
+import { FollowUpsContext, OrchestrationCard } from "./OrchestrationCard";
 export { buildTranscript, applyStreamEvent } from "./transcriptModel";
 export type { StreamItem } from "./transcriptModel";
 
@@ -155,7 +157,7 @@ function toolArgsBadges(name: string, args: unknown): string[] {
 function ToolGlyph(p: { name: string }) {
   const kind = () => {
     const n = toolName(p.name);
-    if (n === "task" || n === "agent" || n === "delegate_task" || n === "subagent" || n === "spawn_subagent") return "agent";
+    if (isSubagentTool(p.name)) return "agent";
     if (isTaskTool(p.name)) return "plan";
     if (n === "webfetch" || n === "web_fetch" || n === "websearch" || n === "web_search" || n === "search_web" || n === "read_url_content") return "web";
     return workKind(p.name);
@@ -469,7 +471,11 @@ function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
   const items = visibleTranscript(input);
   for (const it of items) {
     const last = out[out.length - 1];
-    if (it.kind === "tool" || it.kind === "think") {
+    // Starting a subagent or a machine is what the run is about, not plumbing:
+    // it stands on its own instead of hiding among "N other tools".
+    if (it.kind === "tool" && isOrchestrationTool(it.name)) {
+      out.push(it);
+    } else if (it.kind === "tool" || it.kind === "think") {
       if (last && last.kind === "work") last.items.push(it);
       else out.push({ kind: "work", key: it.key, items: [it] });
     } else {
@@ -624,6 +630,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   const disclosures=new Map<string,boolean>();
   const reminders = createMemo(() => reminderMessages(p.items));
   const checklist = createMemo(() => latestTaskList(p.items));
+  const followUps = createMemo(() => collectFollowUps(p.items));
   const groups = createMemo<Grouped[]>((previous) => groupWork(p.items.filter(item => item.kind !== "user" || !item.queued), previous), []);
   /** Key of the last user turn, when nothing follows it yet. Compared by key
    * rather than identity: `reconcile` hands the loop store proxies, not the
@@ -654,7 +661,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   const estimateTurn=(turn:{items:Grouped[]})=>turn.items.reduce((h,item)=>h+(item.kind==='user'?54+21*wrapped(item.text,92):item.kind==='text'?12+23*wrapped(item.text,100):item.kind==='error'?64:34),0);
   const turnTip = useTooltip<TurnTiming>(TURN_TIP_ID, t => <><div class="row-tip-title">{turnDate(t.completedAt)}</div><Show when={t.workedMs !== undefined}><div class="row-tip-meta">Worked for {workedFor(t.workedMs!)}</div></Show></>, { placement: "top-end", width: 200, class: "turn-tip" });
   return (
-    <TurnTipContext.Provider value={turnTip}>
+    <TurnTipContext.Provider value={turnTip}><FollowUpsContext.Provider value={followUps}>
       <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
@@ -684,7 +691,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
               );
             }
             case "tool":
-              return <ToolRow item={item} />;
+              return isOrchestrationTool(item.name) ? <OrchestrationCard item={item} /> : <ToolRow item={item} />;
             case "error":
               return <ErrorNotice error={item.text} title={item.cancelled ? "Mission cancelled" : "Mission failed"}>
                 <Show when={!item.cancelled && p.onResume && item.key === lastErrorKey()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
@@ -697,7 +704,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
         <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} />
       </Show>
       {turnTip.surface}
-    </TurnTipContext.Provider>
+    </FollowUpsContext.Provider></TurnTipContext.Provider>
   );
 }
 
