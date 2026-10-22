@@ -104,9 +104,26 @@ An answer from the desktop journal while Core is unreachable is *partial*
 (`partialList`). It updates rows and never counts as a miss. Reconnects and
 restarts therefore reconcile what is on screen and never replace it.
 
-**M2. Open missions are always listed.** A project's rows are the union of its
-recent history page (`all=true&limit=100`, archived rows included) and all of
-its open missions (`limit=200`, paged up to 1000).
+**M2. Missions that still matter are always listed; history stays history.**
+A project's rows are its recent history page (`all=true&limit=100`, archived
+rows included). Open missions older than that page (`limit=200`, paged up to
+1000) are added only through `openBeyondPage`:
+
+- *live* ones (`active`, `running`, `pending`, `queued`, `awaiting_user`,
+  `resuming`, `starting`, `waiting_background`) are always added, however old;
+- *stopped* ones (`interrupted`, `failed`, `paused`, `blocked`) are added only
+  if updated in the last 7 days (`RECENT_OPEN_MS`). Older ones are history:
+  they stay in the archive and in the normal paged list, never resurfaced;
+- a *child* is added only if it is live itself, in which case its parent is
+  fetched and it nests there, or if its parent is already listed. A stale
+  child of a completed, acknowledged or archived parent never brings that
+  parent in. It is never shown at the root or under a placeholder either.
+
+In production on 2026-10-22, `verity`, `verity-core` and `verity-lido` held
+465 open rows. 396 of them were interrupted or failed rows from July to
+September, many of them children of completed or acknowledged parents. #1253
+resurfaced them all; this rule hides them, while open `cloud_hermes`
+missions, live or recently interrupted, still show.
 
 ## Implementation (desktop)
 
@@ -161,7 +178,9 @@ placeholder is the follow-up.
   a callback child resumed while its derived link is absent; a resumed parent
   with children; a parent moved to another project; a reload during
   streaming; Hermes missions through a restart (error, error, empty, full,
-  empty, full); open missions older than the history page.
+  empty, full); open missions older than the history page; real `verity-core`
+  open rows (`tests/fixtures/verity-core-open-missions.json`, 60 stale and 40
+  recent or live): no stale row is drawn, while live and recent roots are.
 - Core: `callback_parent::tests::attach_adds_a_derived_parent_and_keeps_an_existing_one`.
 - Mobile: `OrbContractTests.testParentLinkIsStickyAcrossPayloadsThatOmitIt`,
   `OrbMissionTreeTest.parentLinkIsStickyAcrossPayloadsThatOmitIt`.

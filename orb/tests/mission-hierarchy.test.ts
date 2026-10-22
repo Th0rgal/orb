@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from "vitest";
-import { configureParentResolver, mergeMission, observeMission, partialList, reconcileMissionList, reparentMission, resetMissionHierarchy, resolveParent, stickHierarchy, withHierarchy, type HierarchyFields, type Misses } from "../src/missionHierarchy";
+import { configureParentResolver, mergeMission, observeMission, openBeyondPage, partialList, reconcileMissionList, reparentMission, resetMissionHierarchy, resolveParent, stickHierarchy, withHierarchy, type HierarchyFields, type Misses } from "../src/missionHierarchy";
 import { nestMissions, type NestedMission } from "../src/missionTree";
 
 type Row = HierarchyFields & { status: string; updated_at?: string; status_message?: string | null; [k: string]: unknown };
@@ -172,4 +172,21 @@ test("reconciling keeps object identity for unchanged rows", () => {
   const a = row("a");
   const [kept] = reconcileMissionList([a], [{ ...a }], misses, false);
   expect(kept).toBe(a);
+});
+
+test("open missions beyond the page: live always, stopped only while recent, children only if live or nested", () => {
+  const now = Date.parse("2026-10-22T12:00:00Z");
+  const day = (n: number) => new Date(now - n * 86_400_000).toISOString();
+  const history = [row("page-parent")];
+  const extra = [
+    row("old-live", { status: "awaiting_user", updated_at: day(80) }),
+    row("old-dead", { status: "interrupted", updated_at: day(40) }),
+    row("old-failed-child", { status: "failed", updated_at: day(50), parent_mission_id: "done-parent" }),
+    row("recent-root", { status: "interrupted", updated_at: day(2) }),
+    row("recent-orphan-child", { status: "interrupted", updated_at: day(1), parent_mission_id: "done-parent" }),
+    row("recent-nested-child", { status: "failed", updated_at: day(1), parent_mission_id: "page-parent" }),
+    row("live-child", { status: "running", updated_at: day(30), parent_mission_id: "done-parent" }),
+    row("page-parent", { status: "active" }),
+  ];
+  expect(openBeyondPage(history, extra, now).map(m => m.id)).toEqual(["old-live", "recent-root", "recent-nested-child", "live-child"]);
 });

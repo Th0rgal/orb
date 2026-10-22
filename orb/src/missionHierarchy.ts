@@ -214,3 +214,30 @@ export function reconcileMissionList<M extends HierarchyFields>(prev: readonly M
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Open missions beyond the history page (sidebar-hierarchy.md, M2).
+
+/** Running or waiting on the user: always worth showing, however old. */
+export const LIVE_OPEN = new Set(["active", "running", "pending", "queued", "awaiting_user", "resuming", "starting", "waiting_background"]);
+/** Stopped but maybe still wanted: shown beyond the page only while recent. */
+export const RECENT_OPEN = new Set(["interrupted", "failed", "paused", "blocked"]);
+export const RECENT_OPEN_MS = 7 * 24 * 60 * 60 * 1000;
+
+type OpenRow = HierarchyFields & { status: string; updated_at?: string | null; created_at?: string | null };
+/**
+ * Which open missions older than the history page are added to it. Live ones
+ * always; interrupted/failed/paused/blocked ones only if updated in the last
+ * `RECENT_OPEN_MS` (older ones are history, left to the archive). A child is
+ * added only if it is live itself (its parent is then fetched) or if its
+ * parent is already listed: a stale child never brings in, or stands in for,
+ * a finished parent.
+ */
+export function openBeyondPage<M extends OpenRow>(history: readonly M[], extra: readonly M[], now = Date.now()): M[] {
+  const listed = new Set(history.map(m => m.id));
+  const at = (m: M) => Date.parse(m.updated_at || m.created_at || "") || 0;
+  const wanted = extra.filter(m => !listed.has(m.id) && (LIVE_OPEN.has(m.status) || (RECENT_OPEN.has(m.status) && now - at(m) <= RECENT_OPEN_MS)));
+  const ids = new Set([...listed, ...wanted.map(m => m.id)]);
+  const parentOf = (m: M) => nonEmpty(m.parent_mission_id) ?? nonEmpty(m.callback_parent_mission_id);
+  return wanted.filter(m => { const p = parentOf(m); return !p || LIVE_OPEN.has(m.status) || ids.has(p); });
+}
