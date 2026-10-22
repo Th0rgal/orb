@@ -1,6 +1,11 @@
 # Orb frontend
 
-Follow the repository's root instructions. Before adding or changing a modal,
+Follow the repository's root instructions, especially the Principles and the
+UX and performance rules: fine-grained updates, optimistic feedback with
+rollback, skeletons, no layout jumps, lazy-loaded heavy dependencies. A
+desktop feature should get its iOS/Android counterpart, or a noted gap.
+
+Before adding or changing a modal,
 menu, picker, preview, or other overlay, read [the overlay contract](../docs/ui/overlays.md).
 Use the existing SolidJS primitives and tokens; do not add per-view positioning,
 stacking, focus trapping, outside-click or Escape listeners.
