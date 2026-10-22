@@ -24,11 +24,16 @@ SCHEDULE = []
 PROJECTS = [{"slug": "orb-test", "title": "Orb test", "status": "active"}]
 DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1}
 PROMPT = "Please test the new interface"
+ACCESS=[]
+ACCESS_AUDIT=[]
 def reset():
     global CORDONED, HEALTH_DELAY, FAIL_MISSIONS
     FAIL_MISSIONS = False
     CORDONED = False; HEALTH_DELAY = 0
     QUEUE.clear(); RECEIVED.clear(); QUEUE_EVENTS.clear(); SCHEDULE.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
+    ACCESS.clear()
+    ACCESS.append(dict(id='acc-1', requester_mission_id='7c1d2e3f-0000-4000-8000-000000000001', requester_title='Benchmark report', target_mission_id='9a8b7c6d-0000-4000-8000-000000000002', target_title='Lean eval run #42', scope='read', reason='Compare its pass rate with mine before writing the report.', ttl_hours=24, state='pending', created_at=iso(time.time()-60)))
+    ACCESS.append(dict(id='acc-2', requester_mission_id='7c1d2e3f-0000-4000-8000-000000000005', requester_title='Supervisor', target_mission_id='9a8b7c6d-0000-4000-8000-000000000006', target_title='DGX Spark setup', scope='read', reason='Check progress', ttl_hours=24, state='approved', created_at=iso(time.time()-7200), decided_at=iso(time.time()-3600), expires_at=iso(time.time()+23*3600)))
     PROVIDERS['fixture-provider'] = dict(id='fixture-provider', name='Fixture provider', provider_type='openai', uses_oauth=False, enabled=True, status={'type':'connected'})
     for mid, title, tags in [('existing', 'Improve image previews', ['orb-folder:Design/Images']), ('local-only','Local Mac session',['placement:client'])]:
         MISSIONS[mid] = dict(id=mid,title=title,status='awaiting_user',project='orb-test',backend='claudecode',tags=tags,model_override='test-model',history=[dict(role='user',content=PROMPT),dict(role='assistant',content='# Ready\n\n- [x] Review complete\n\n| Feature | Status |\n| --- | --- |\n| Images | Ready |\n\n```swift\nlet orb = true\n```')])
@@ -176,6 +181,7 @@ class Handler(BaseHTTPRequestHandler):
             since=int(parse_qs(u.query).get('since_seq',['0'])[0] or 0)
             return self.send([e for e in QUEUE_EVENTS[p.split('/')[4]] if e['sequence']>since])
         if p=='/api/control/inbox-state': return self.send(INBOX_STATE)
+        if p=='/api/mission-access': return self.send({'requests':list(reversed(ACCESS)),'audit':list(reversed(ACCESS_AUDIT))})
         if p=='/api/ai/providers': return self.send(list(PROVIDERS.values()))
         if p=='/api/ai/providers/usage': return self.send({'entries': {'fixture-provider': {'provider_type':'openai', 'codex_primary_used_percent':25}}})
         if p=='/api/cloud/usage': return self.send({'accounts':{}})
@@ -232,6 +238,20 @@ class Handler(BaseHTTPRequestHandler):
             if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
             return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})
+        if p.startswith('/api/mission-access/'):
+            # Mission access: approve (Core requires a device signature; the simulator
+            # cannot sign, so the fixture records whether one was sent), deny, revoke.
+            parts=p.split('/'); r=next((x for x in ACCESS if x['id']==parts[3]),None)
+            if not r: return self.send({'error':'Request not found'},404)
+            action=parts[4] if len(parts)>4 else ('revoke' if self.command=='DELETE' else '')
+            ok={'approve':'pending','deny':'pending','revoke':'approved'}.get(action)
+            if ok is None or r['state']!=ok: return self.send({'error':'Request is no longer pending'},409)
+            r['state']={'approve':'approved','deny':'denied','revoke':'revoked'}[action]
+            if action=='approve':
+                r['ttl_hours']=int(body.get('ttl_hours',24)); r['decided_at']=iso(time.time()); r['expires_at']=iso(time.time()+3600*r['ttl_hours'])
+            ACCESS_AUDIT.append(dict(at=iso(time.time()),request_id=r['id'],requester_mission_id=r['requester_mission_id'],target_mission_id=r['target_mission_id'],action=r['state'],detail=None,signed=bool(self.headers.get('X-Paloma-Approval'))))
+            RECEIVED.append(f"{self.command} {p}")
+            return self.send(r)
         if p=='/__fail_missions': FAIL_MISSIONS = True; return self.send({})
         if p=='/__health_delay': HEALTH_DELAY=float(body.get('seconds',0)); return self.send({})
         if p=='/api/control/inbox-state/preferences':

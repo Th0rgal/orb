@@ -1542,6 +1542,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/bitwarden", super::bitwarden::routes())
         // Device-signed approvals (Secure Enclave / Android Keystore keys)
         .nest("/api/approvals", super::approvals::routes())
+        .nest("/api/mission-access", super::mission_access::routes())
         // Global settings endpoints
         .nest("/api/settings", settings_api::routes())
         // Desktop session management endpoints

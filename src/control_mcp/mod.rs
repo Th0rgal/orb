@@ -180,6 +180,17 @@ pub fn registry() -> Vec<Tool> {
                 mutation: false,
             }),
     );
+    // Read-only access to missions outside the caller's tree; approval-gated.
+    entries.extend(
+        crate::api::mission_access::tool_definitions()
+            .into_iter()
+            .map(|definition| Tool {
+                definition,
+                handler: Handler::Capabilities,
+                minimum_role: Role::Executor,
+                mutation: false,
+            }),
+    );
     for (handler, definitions) in [
         (Handler::Assistant, assistant::AssistantMcp::tools()),
         (

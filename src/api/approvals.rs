@@ -332,7 +332,7 @@ async fn secret_label(state: &Arc<AppState>, id: &str) -> String {
 }
 
 /// A mission-controlled string, safe to show in a biometric prompt.
-fn quoted(raw: &str) -> String {
+pub(crate) fn quoted(raw: &str) -> String {
     let clean: String = raw
         .chars()
         // Drop control, zero-width and bidirectional override characters.
@@ -366,6 +366,7 @@ fn no_body(body: &str) -> Result<(), String> {
 /// own types, and a request that would not parse gets no challenge.
 async fn describe(
     state: &Arc<AppState>,
+    owner: &str,
     method: &Method,
     path: &str,
     body: &str,
@@ -449,6 +450,15 @@ async fn describe(
                 }
                 _ => return Err("Unknown request action".into()),
             }
+        }
+        (&Method::POST, ["", "api", "mission-access", id, action @ ("approve" | "deny")]) => {
+            let ttl = if *action == "approve" {
+                typed::<super::mission_access::ApproveBody>(body)?.ttl_hours
+            } else {
+                no_body(body)?;
+                None
+            };
+            super::mission_access::describe_for_approval(state, owner, id, action, ttl).await?
         }
         (&Method::PUT, ["", "api", "bitwarden", "default-access", slug]) => {
             let req: DefaultAccessRequest = typed(body)?;
@@ -599,6 +609,7 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
     let seg: Vec<&str> = p.split('/').collect();
     match (method, seg.as_slice()) {
         (&Method::POST, ["", "api", "bitwarden", "requests", _, "approve" | "reject"]) => true,
+        (&Method::POST, ["", "api", "mission-access", _, "approve" | "deny"]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "default-access", _]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => true,
         (&Method::GET, ["", "api", "bitwarden", "secrets", _, "reveal"]) => true,
@@ -614,6 +625,17 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
     }
 }
 
+/// Protected operations that need a device signature even when the approval
+/// mode is `off` or `warn`: granting a mission access to another mission is
+/// only ever decided with Touch ID / Face ID.
+pub fn always_signed(method: &Method, path: &str) -> bool {
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    matches!(
+        (method, seg.as_slice()),
+        (&Method::POST, ["", "api", "mission-access", _, "approve"])
+    )
+}
+
 /// Middleware: runs after authentication; only acts on protected operations.
 pub async fn require_device_approval(
     State(state): State<Arc<AppState>>,
@@ -622,7 +644,9 @@ pub async fn require_device_approval(
 ) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
-    let guarded_prefix = path.starts_with("/api/bitwarden") || path.starts_with("/api/approvals");
+    let guarded_prefix = path.starts_with("/api/bitwarden")
+        || path.starts_with("/api/approvals")
+        || path.starts_with("/api/mission-access");
     if guarded_prefix
         && (path.contains("//")
             || path.contains('%')
@@ -635,7 +659,11 @@ pub async fn require_device_approval(
         return next.run(req).await;
     }
     let store = approvals(&state);
-    let mode = store.mode().await;
+    let mode = if always_signed(&method, &path) {
+        Mode::Enforce
+    } else {
+        store.mode().await
+    };
     if mode == Mode::Off {
         return next.run(req).await;
     }
@@ -710,6 +738,7 @@ struct ChallengeRequest {
 
 async fn challenge(
     State(state): State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<super::auth::AuthUser>,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let method = req.method.trim().to_ascii_uppercase();
@@ -745,7 +774,7 @@ async fn challenge(
         }
         None => sha256_hex(req.body.as_bytes()),
     };
-    let summary = describe(&state, &method_parsed, &path, &req.body)
+    let summary = describe(&state, &user.id, &method_parsed, &path, &req.body)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let (id, c) = approvals(&state)
@@ -979,6 +1008,20 @@ mod tests {
         assert!(!is_protected(&Method::GET, "/api/bitwarden/secrets"));
         assert!(!is_protected(&Method::GET, "/api/bitwarden/broker"));
         assert!(!is_protected(&Method::DELETE, "/api/bitwarden/grants/abc"));
+        assert!(is_protected(
+            &Method::POST,
+            "/api/mission-access/abc/approve"
+        ));
+        assert!(is_protected(&Method::POST, "/api/mission-access/abc/deny"));
+        assert!(always_signed(
+            &Method::POST,
+            "/api/mission-access/abc/approve"
+        ));
+        assert!(!always_signed(
+            &Method::POST,
+            "/api/bitwarden/requests/abc/approve"
+        ));
+        assert!(!is_protected(&Method::GET, "/api/mission-access"));
     }
 
     #[test]

@@ -66,14 +66,10 @@ pub enum RequestKind {
     Move,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestStatus {
-    Pending,
-    Approved,
-    Rejected,
-    Expired,
-}
+/// Request state: the shared approval state machine (`rejected` in older
+/// files reads as `denied`).
+pub use super::approval_flow::ApprovalState as RequestStatus;
+use super::approval_flow::{self, ApprovalEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRequest {
@@ -250,21 +246,8 @@ pub struct Caller {
 
 impl SecretBroker {
     async fn save(&self, data: &Persisted) {
-        let Ok(text) = serde_json::to_string_pretty(data) else {
-            return;
-        };
-        if let Some(dir) = self.path.parent() {
-            let _ = tokio::fs::create_dir_all(dir).await;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        if tokio::fs::write(&tmp, text).await.is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-            }
-            let _ = tokio::fs::rename(&tmp, &self.path).await;
+        if let Err(e) = approval_flow::persist_private(&self.path, data).await {
+            tracing::warn!("secret broker state not saved: {e}");
         }
     }
 
@@ -272,8 +255,12 @@ impl SecretBroker {
     fn prune(data: &mut Persisted, now: DateTime<Utc>) {
         data.grants.retain(|g| g.expires_at > now);
         for r in data.requests.iter_mut() {
-            if r.status == RequestStatus::Pending
-                && now - r.created_at > chrono::Duration::hours(REQUEST_TTL_HOURS)
+            if r.status.is_pending()
+                && approval_flow::pending_timed_out(
+                    r.created_at,
+                    now,
+                    chrono::Duration::hours(REQUEST_TTL_HOURS),
+                )
             {
                 r.status = RequestStatus::Expired;
                 r.resolved_at = Some(now);
@@ -453,19 +440,11 @@ impl SecretBroker {
 
     /// Wait until the request leaves `pending` or the wait elapses.
     async fn wait_resolved(&self, id: Uuid, wait: Duration) -> Option<SecretRequest> {
-        let deadline = Instant::now() + wait;
-        loop {
-            let notified = self.changed.notified();
-            let current = self.request(id).await?;
-            if current.status != RequestStatus::Pending {
-                return Some(current);
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Some(current);
-            }
-            let _ = tokio::time::timeout(left, notified).await;
-        }
+        approval_flow::wait_settled(&self.changed, wait, move || async move {
+            self.request(id).await.map(|r| r.status)
+        })
+        .await?;
+        self.request(id).await
     }
 
     pub async fn snapshot(&self) -> Value {
@@ -513,10 +492,7 @@ impl SecretBroker {
             .iter_mut()
             .find(|r| r.id == id)
             .ok_or("Request not found")?;
-        if r.status != RequestStatus::Pending {
-            return Err("Request is no longer pending".into());
-        }
-        r.status = RequestStatus::Rejected;
+        r.status = r.status.apply(ApprovalEvent::Deny)?;
         r.resolved_at = Some(Utc::now());
         r.encrypted_value = None;
         let out = r.clone();
@@ -537,9 +513,7 @@ impl SecretBroker {
     ) -> Result<SecretRequest, String> {
         let _resolving = self.resolving.lock().await;
         let request = self.request(id).await.ok_or("Request not found")?;
-        if request.status != RequestStatus::Pending {
-            return Err("Request is no longer pending".into());
-        }
+        request.status.apply(ApprovalEvent::Approve)?;
         let now = Utc::now();
         let mut error = None;
         match request.kind {
@@ -648,11 +622,11 @@ impl SecretBroker {
             .ok_or("Request not found")?;
         r.resolved_at = Some(now);
         r.encrypted_value = None;
-        r.status = if error.is_some() {
-            RequestStatus::Rejected
+        r.status = r.status.apply(if error.is_some() {
+            ApprovalEvent::Deny
         } else {
-            RequestStatus::Approved
-        };
+            ApprovalEvent::Approve
+        })?;
         r.error = error.clone();
         let out = r.clone();
         let via = match out.kind {
@@ -884,7 +858,7 @@ pub async fn handle_tool(
                 let resolved = broker.wait_resolved(request.id, APPROVAL_WAIT).await;
                 match resolved.map(|r| r.status) {
                     Some(RequestStatus::Approved) => {}
-                    Some(RequestStatus::Rejected) => {
+                    Some(RequestStatus::Denied) => {
                         return Err(format!("Thomas declined access to `{key}`."))
                     }
                     Some(RequestStatus::Expired) => {
@@ -977,7 +951,7 @@ pub async fn handle_tool(
                 Some(RequestStatus::Approved) => {
                     Ok(json!({"status":"granted","message":"Approved; use secret_get."}))
                 }
-                Some(RequestStatus::Rejected) => Err("Thomas declined the request.".into()),
+                Some(RequestStatus::Denied) => Err("Thomas declined the request.".into()),
                 Some(RequestStatus::Expired) => Err("The request expired.".into()),
                 _ => Ok(pending_reply(&request)),
             }
@@ -1046,7 +1020,7 @@ pub async fn handle_tool(
                 Some(r) if r.status == RequestStatus::Approved => {
                     Ok(json!({"status":"stored","request_id": r.id}))
                 }
-                Some(r) if r.status == RequestStatus::Rejected => Err(r
+                Some(r) if r.status == RequestStatus::Denied => Err(r
                     .error
                     .unwrap_or_else(|| "Thomas declined the write.".into())),
                 Some(r) if r.status == RequestStatus::Expired => Err("The request expired.".into()),
@@ -1158,7 +1132,7 @@ pub async fn handle_tool(
                     }
                     Ok(out)
                 }
-                Some(r) if r.status == RequestStatus::Rejected => Err(r
+                Some(r) if r.status == RequestStatus::Denied => Err(r
                     .error
                     .unwrap_or_else(|| "Thomas declined the change.".into())),
                 Some(r) if r.status == RequestStatus::Expired => Err("The request expired.".into()),

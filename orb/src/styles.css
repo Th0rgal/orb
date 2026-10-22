@@ -3676,7 +3676,9 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-log-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; flex-wrap: wrap; }
 .bw-log-status { font: 10.5px/1.4 var(--mono); min-width: 64px; color: var(--fg-3); }
 .bw-log-status.approved, .bw-log-status.default { color: var(--green); }
-.bw-log-status.rejected, .bw-log-status.expired { color: var(--red); }
+.bw-log-status.rejected, .bw-log-status.denied, .bw-log-status.revoked, .bw-log-status.expired { color: var(--red); }
+.bw-log-status.read, .bw-log-status.requested { color: var(--fg-2); }
+.access-card .access-scope { display: block; font-size: 11px; color: var(--fg-3); margin-top: 2px; }
 .bw-log-status.grant, .bw-log-status.write { color: var(--purple); }
 .bw-project-chips { display: flex; gap: 6px; flex-wrap: wrap; width: 100%; }
 .bw-chip { height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12px; color: var(--fg-2); border: 1px solid var(--stroke-soft); background: var(--bg-elev); display: inline-flex; align-items: center; gap: 6px; }

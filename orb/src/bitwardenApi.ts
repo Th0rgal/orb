@@ -154,7 +154,7 @@ export interface SecretGrant {
 export interface SecretAccessRequest {
   id: string;
   kind: "read" | "write" | "delete" | "move";
-  status: "pending" | "approved" | "rejected" | "expired";
+  status: "pending" | "approved" | "denied" | "rejected" | "expired" | "revoked";
   mission_id: string;
   mission_title?: string | null;
   paloma_project?: string | null;

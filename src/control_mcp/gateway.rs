@@ -369,9 +369,21 @@ async fn authorize(
                     .map_err(|_| ToolError::denied("Mission unavailable"))?
                     .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
                 if mission.project.project.as_deref() != Some(project) {
-                    return Err(ToolError::denied(
-                        "Mission is outside this session's project",
-                    ));
+                    // An approved read grant crosses projects for read tools
+                    // only. Executors are audited by the tree check below.
+                    match granted_read(state, p, &tool.definition.name, id).await {
+                        Some(grant) => {
+                            if p.role != Role::Executor {
+                                record_granted_read(state, p, grant, &tool.definition.name).await;
+                            }
+                        }
+                        None => {
+                            return Err(ToolError::denied(&format!(
+                                "Mission is outside this session's project. {}",
+                                crate::api::mission_access::scope_hint(&tool.definition.name, id)
+                            )))
+                        }
+                    }
                 }
             }
         }
@@ -437,7 +449,19 @@ async fn authorize(
             let reads_btw_parent =
                 btw_parent_read_allowed(&tool.definition.name, &owner.project.tags, id);
             if id != own && m.parent_mission_id != Some(own) && !reads_btw_parent {
-                return Err(ToolError::denied("Mission is outside this session's scope"));
+                // Read-only grant approved by Thomas (request_mission_access).
+                // Only READ_TOOLS consult it; control tools stay denied.
+                match granted_read(state, p, &tool.definition.name, id).await {
+                    Some(grant) => {
+                        record_granted_read(state, p, grant, &tool.definition.name).await
+                    }
+                    None => {
+                        return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
+                            &tool.definition.name,
+                            id,
+                        )))
+                    }
+                }
             }
             if tool.definition.name == "start_workspace_job" && m.workspace_id != owner.workspace_id
             {
@@ -553,6 +577,25 @@ async fn authorize(
         args["parent_mission_id"] = json!(own);
     }
     Ok(())
+}
+
+/// Live read grant of the calling mission on `target`, for read-only tools.
+async fn granted_read(
+    state: &Arc<AppState>,
+    p: &Principal,
+    tool: &str,
+    target: Uuid,
+) -> Option<Uuid> {
+    let own = p.mission_id?;
+    crate::api::mission_access::store(state)
+        .grant_for_tool(&p.sub, own, target, tool)
+        .await
+}
+
+async fn record_granted_read(state: &Arc<AppState>, p: &Principal, grant: Uuid, tool: &str) {
+    crate::api::mission_access::store(state)
+        .record_read(&p.sub, grant, tool)
+        .await;
 }
 
 /// Mission ids from `id` up through its parents (bounded).
@@ -719,6 +762,11 @@ async fn call_inner(
             .map(|t| json!({"name":t.definition.name,"mutation":t.mutation}))
             .collect::<Vec<_>>());
         return Ok(value);
+    }
+    if crate::api::mission_access::TOOL_NAMES.contains(&call.name.as_str()) {
+        return crate::api::mission_access::handle_tool(&state, p, &call.name, &call.arguments)
+            .await
+            .map_err(|e| ToolError::denied(&e));
     }
     if crate::api::secret_broker::TOOL_NAMES.contains(&call.name.as_str()) {
         return crate::api::secret_broker::handle_tool(&state, p, &call.name, &call.arguments)

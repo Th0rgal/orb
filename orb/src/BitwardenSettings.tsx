@@ -28,6 +28,7 @@ import {
   type BitwardenStatus,
 } from "./bitwardenApi";
 import { SecretAccessPanel } from "./SecretAccessPanel";
+import { MissionAccessPanel } from "./MissionAccessPanel";
 import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
 import { enrolledDeviceId } from "./deviceApproval";
 import { copyText } from "./clipboard";
@@ -621,8 +622,11 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
               onError={(m) => setToastError(m)}
               onSecretsChanged={() => void loadSecretsForProject()}
             />
-            <ApprovalDevicesPanel onError={(m) => setToastError(m)} />
           </Show>
+
+          <MissionAccessPanel onError={(m) => setToastError(m)} />
+          {/* Mission access approvals always need an enrolled device, Bitwarden or not. */}
+          <ApprovalDevicesPanel onError={(m) => setToastError(m)} />
 
           {/* Secrets Table Section */}
           <Show when={status()?.configured}>

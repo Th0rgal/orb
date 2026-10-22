@@ -521,6 +521,15 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
+        // Mission access requests open the access sheet, not a mission.
+        if userInfo["orb_mission_access"] is String {
+            nonisolated(unsafe) let finish = completionHandler
+            Task { @MainActor in
+                OrbMissionAccessMonitor.shared.openRequested = true
+                finish()
+            }
+            return
+        }
         let missionID = (userInfo["mission_id"] as? String) ?? ""
         let callID = userInfo["call_id"] as? String
         let toolName = userInfo["tool_name"] as? String

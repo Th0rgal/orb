@@ -30,6 +30,8 @@ struct OrbSettingsHome: View {
                     .accessibilityIdentifier("settings.providers")
                 NavigationLink { OrbBitwardenSettings() } label: { Label("Secrets", systemImage: "lock.shield") }
                     .accessibilityIdentifier("settings.secrets")
+                NavigationLink { OrbMissionAccessList().navigationTitle("Mission access").navigationBarTitleDisplayMode(.inline) } label: { Label("Mission access", systemImage: "eye") }
+                    .accessibilityIdentifier("settings.mission-access")
                 NavigationLink { OrbRoutingSettings() } label: { Label("Models & Routing", systemImage: "arrow.triangle.swap") }
                     .accessibilityIdentifier("settings.routing")
                 NavigationLink { OrbProxyKeysSettings() } label: { Label("Proxy API keys", systemImage: "key") }

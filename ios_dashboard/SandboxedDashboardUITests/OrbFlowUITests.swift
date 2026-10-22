@@ -82,6 +82,55 @@ final class OrbFlowUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    /// Also writes the screenshot to $ORB_SHOT_DIR (TEST_RUNNER_ORB_SHOT_DIR) when set.
+    @MainActor private func captureFile(_ app: XCUIApplication, _ name: String) {
+        capture(app, name)
+        if let dir = ProcessInfo.processInfo.environment["ORB_SHOT_DIR"] {
+            try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: dir).appendingPathComponent("ios-\(name).png"))
+        }
+    }
+    /// Mission access on its own fixture instance (18790, start with --port 18790): one pending request
+    /// (acc-1) and one live grant (acc-2). The simulator has no enrolled
+    /// biometry and no Secure Enclave approval key; the DEBUG loopback hook
+    /// `-orb_test_biometric_pass` stands in for Face ID, so the approval goes through and the request goes out unsigned; the fixture accepts
+    /// it (real Core rejects an unsigned approve). Face ID itself needs a device.
+    @MainActor func testMissionAccessApproveDenyAndRevoke() throws {
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18790/__reset")!); reset.httpMethod = "POST"
+        let done = expectation(description: "fixture reset")
+        URLSession.shared.dataTask(with: reset) { _, _, _ in done.fulfill() }.resume()
+        wait(for: [done], timeout: 10)
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18790", "-orb_test_reset", "YES", "-orb_test_biometric_pass", "YES"]
+        app.launch()
+        let banner = app.buttons["home.access-requests"]
+        XCTAssertTrue(banner.waitForExistence(timeout: 30))
+        captureFile(app, "access-home-banner")
+        banner.tap()
+        let approve = app.buttons["access.approve.acc-1"]
+        XCTAssertTrue(approve.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Lean eval run #42"].exists)
+        XCTAssertTrue(app.buttons["access.revoke.acc-2"].exists, "live grant listed")
+        captureFile(app, "access-sheet-pending")
+        approve.tap()
+        let revoke = app.buttons["access.revoke.acc-1"]
+        XCTAssertTrue(revoke.waitForExistence(timeout: 10), "approved request becomes a grant")
+        XCTAssertFalse(app.buttons["access.approve.acc-1"].exists)
+        captureFile(app, "access-sheet-approved")
+        revoke.tap()
+        XCTAssertTrue(revoke.waitForNonExistence(timeout: 10), "revoked grant leaves the list")
+        app.buttons["access.revoke.acc-2"].tap()
+        XCTAssertTrue(app.buttons["access.revoke.acc-2"].waitForNonExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["No active grants."].waitForExistence(timeout: 5))
+        captureFile(app, "access-sheet-revoked")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 15), "no pending request left")
+        app.buttons["Settings"].tap()
+        let link = app.buttons["settings.mission-access"]
+        XCTAssertTrue(link.waitForExistence(timeout: 10))
+        link.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ==[c] 'History'")).firstMatch.waitForExistence(timeout: 10))
+        captureFile(app, "access-settings-history")
+    }
     @MainActor func testMissionLongPressRenameMoveAndStopArchive() throws {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
