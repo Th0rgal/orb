@@ -2496,7 +2496,11 @@ impl AssistantMcp {
         let started_by_mission =
             params.caller.as_deref() == Some("mission") && params.parent_mission_id.is_some();
         let tags = mission_start_tags(
-            if started_by_mission { "origin:mission" } else { "origin:hermes-assistant" },
+            if started_by_mission {
+                "origin:mission"
+            } else {
+                "origin:hermes-assistant"
+            },
             params.tags,
             params.request_merge_authority.unwrap_or(false),
             writer,
@@ -6871,10 +6875,42 @@ mod tests {
             authority_source: "owner-grant".to_string(),
             repositories: vec!["owner/repo".to_string()],
         };
-        assert!(mission_start_tags("origin:hermes-assistant", None, true, true, Some("owner/repo#1"), None).is_err());
-        assert!(mission_start_tags("origin:hermes-assistant", None, true, true, Some("owner/repo"), Some(&grant)).is_err());
-        assert!(mission_start_tags("origin:hermes-assistant", None, true, true, Some("other/repo#1"), Some(&grant)).is_err());
-        assert!(mission_start_tags("origin:hermes-assistant", None, true, false, Some("owner/repo#1"), Some(&grant)).is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            true,
+            Some("owner/repo#1"),
+            None
+        )
+        .is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            true,
+            Some("owner/repo"),
+            Some(&grant)
+        )
+        .is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            true,
+            Some("other/repo#1"),
+            Some(&grant)
+        )
+        .is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            false,
+            Some("owner/repo#1"),
+            Some(&grant)
+        )
+        .is_err());
         let tags = mission_start_tags(
             "origin:hermes-assistant",
             Some(vec![
