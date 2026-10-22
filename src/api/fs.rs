@@ -163,6 +163,23 @@ fn resolve_download_path(
     ))
 }
 
+/// Workspace files are agent-written and untrusted. A download is never
+/// sniffed into another type, and if it is ever opened as a document (an SVG
+/// or HTML file navigated to directly) it runs no script and loads nothing:
+/// only inline styles apply, inside an opaque sandboxed origin.
+pub const DOWNLOAD_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+
+pub fn harden_download_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(DOWNLOAD_CSP),
+    );
+}
+
 pub fn content_type_for_path(path: &Path) -> &'static str {
     let ext = path
         .extension()
@@ -1276,10 +1293,7 @@ pub async fn download(
             header::CONTENT_DISPOSITION,
             HeaderValue::from_static("attachment"),
         );
-        headers.insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        );
+        harden_download_headers(&mut headers);
         return Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response());
     }
     let resolved_path = if let Some(workspace_id) = q.workspace_id {
@@ -1321,6 +1335,7 @@ pub async fn download(
             .parse()
             .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
+    harden_download_headers(&mut headers);
 
     let file = tokio::fs::File::open(&resolved_path)
         .await
@@ -1667,6 +1682,21 @@ pub async fn upload_finalize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn svg_downloads_are_typed_and_inert() {
+        assert_eq!(
+            super::content_type_for_path(std::path::Path::new("logos/svg/Maxwell.SVG")),
+            "image/svg+xml"
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        super::harden_download_headers(&mut headers);
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.starts_with("default-src 'none';"));
+        assert!(csp.contains("sandbox"));
+        assert!(!csp.contains("script-src"));
+    }
+
     use super::{
         api_context_root_for_config, context_mirror_suffix, context_upload_suffix_for_dir,
         is_context_upload_path_for_dir, is_within_workspace_or_mission,

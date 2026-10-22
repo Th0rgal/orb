@@ -1,0 +1,13 @@
+{
+  "description": "Agent-written SVGs on mobile (OrbSvg on iOS and Android). The aspect ratio sizes the inline frame before the SVG draws; the page wraps the SVG in <img> so it never runs script or loads anything. Desktop shows SVGs through <img> directly.",
+  "limit_bytes": 5242880,
+  "aspect": [
+    { "name": "width and height", "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"240\" height=\"120\"></svg>", "ratio": 2.0 },
+    { "name": "px units and single quotes", "svg": "<?xml version='1.0'?><svg width='300px' height='150px' xmlns='http://www.w3.org/2000/svg'/>", "ratio": 2.0 },
+    { "name": "viewBox when size is relative", "svg": "<svg width=\"100%\" viewBox=\"0 0 512 256\" xmlns=\"http://www.w3.org/2000/svg\"></svg>", "ratio": 2.0 },
+    { "name": "viewBox with commas", "svg": "<svg viewBox=\"0,0,100,200\"></svg>", "ratio": 0.5 },
+    { "name": "comment before root", "svg": "<!-- <svg width=\"1\" height=\"9\"> --><svg viewBox=\"0 0 64 64\"/>", "ratio": 1.0 },
+    { "name": "no size", "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>", "ratio": null },
+    { "name": "not svg", "svg": "<html><body>hi</body></html>", "ratio": null }
+  ]
+}

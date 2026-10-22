@@ -33,6 +33,15 @@ describe("rich image tags", () => {
     expect(container.textContent).not.toContain("<image");
   });
 
+  it("renders an SVG through <img>, never inlining its markup", async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const loadImage = vi.fn(async () => `data:image/svg+xml;base64,${btoa(svg)}`);
+    const { container } = render(() => <FileReferenceContext.Provider value={resolver(loadImage)}><MdView text={'<image path="logos/svg/maxwell.svg" alt="Maxwell" />\n\n![Lean](logos/lean.svg)'} /></FileReferenceContext.Provider>);
+    await waitFor(() => expect(container.querySelectorAll(".md-workspace-image img")).toHaveLength(2));
+    expect(loadImage.mock.calls.map(c => c[0])).toEqual(["logos/svg/maxwell.svg", "logos/lean.svg"]);
+    expect(container.querySelector("script")).toBeNull();
+  });
+
   it("shows a labelled placeholder when no resolver can load the image", () => {
     const { container } = render(() => <MdView text={'<image path="./a.png" alt="Chart" />'} />);
     expect(container.querySelector(".md-workspace-image-missing")?.textContent).toContain("Chart");

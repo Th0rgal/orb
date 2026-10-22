@@ -39,7 +39,8 @@ import { ErrorNotice } from "./ErrorNotice";
 import { connectionVersion } from "./api";
 import * as Ic from "./icons";
 
-import ImagePreview, { imageMime } from "./ImagePreview";
+import ImagePreview from "./ImagePreview";
+import { imageByteLimit, imageMime } from "./imageTypes";
 
 const PdfPreview = lazy(() => import("./PdfPreview"));
 
@@ -417,9 +418,9 @@ export function FilePanelProvider(p: {
       const c = client;
       const preview = c.imagePreview(path);
       if (preview) return preview;
-      const extension = path.split(".").at(-1)?.toLowerCase();
-      const mime = ({png:"image/png",jpg:"image/jpeg",jpeg:"image/jpeg",webp:"image/webp",gif:"image/gif"} as Record<string,string>)[extension ?? ""];
+      const mime = imageMime(path);
       if (!mime) return null;
+      const limit = imageByteLimit(mime);
       // Failed lookups must be retriable after upload/provisioning completes.
       cache.delete(path);
       const refs = await resolver.resolve(path);
@@ -436,11 +437,11 @@ export function FilePanelProvider(p: {
       while (true) {
         const part = await c.call(ref.source,{action:"download",path:ref.path,offset});
         if (g !== generation) return null;
-        if (!part.bytes?.length || !part.size || part.size > 20 * 1024 * 1024) return null;
+        if (!part.bytes?.length || !part.size || part.size > limit) return null;
         chunks.push(new Uint8Array(part.bytes));
         offset += part.bytes.length;
         if (offset >= part.size) break;
-        if (offset > 20 * 1024 * 1024) return null;
+        if (offset > limit) return null;
       }
       return URL.createObjectURL(new Blob(chunks as BlobPart[],{type:mime}));
     },

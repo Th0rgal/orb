@@ -13,6 +13,7 @@ import {
   type Mission,
 } from "./api";
 import { localBinding } from "./localAgents";
+import { imageByteLimit, imageMime } from "./imageTypes";
 export interface FileScope {
   mission?: Mission | null;
   project?: string;
@@ -330,7 +331,10 @@ export function createFileClient(scope: FileScope) {
     // The initial Core upload predates the mission and lives in context/, outside
     // its workspace root. Use the upload API's authenticated, path-checked reader.
     // Never reinterpret a node/local path as a Core path.
-    if (version !== connectionVersion() || destination !== "core" || !mission || !/\.(png|jpe?g|webp|gif)$/i.test(path)) return null;
+    if (version !== connectionVersion() || destination !== "core" || !mission) return null;
+    const mime = imageMime(path);
+    if (!mime) return null;
+    const limit = imageByteLimit(mime);
     const queries: URLSearchParams[] = [];
     if (mission.workspace_id) queries.push(new URLSearchParams({path, workspace_id:mission.workspace_id, mission_id:mission.id}));
     queries.push(new URLSearchParams({path}));
@@ -354,13 +358,12 @@ export function createFileClient(scope: FileScope) {
           const {value,done} = await reader.read();
           if (done) break;
           size += value.byteLength;
-          if (version !== connectionVersion() || size > 20 * 1024 * 1024) { await reader.cancel(); return null; }
+          if (version !== connectionVersion() || size > limit) { await reader.cancel(); return null; }
           chunks.push(value);
         }
       } finally { reader.releaseLock(); }
       if (!size || version !== connectionVersion()) return null;
-      const extension = path.split(".").at(-1)!.toLowerCase();
-      return URL.createObjectURL(new Blob(chunks as BlobPart[], {type: extension === "jpg" ? "image/jpeg" : `image/${extension}`}));
+      return URL.createObjectURL(new Blob(chunks as BlobPart[], {type: mime}));
     }
     return null;
   }
