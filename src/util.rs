@@ -237,6 +237,25 @@ pub fn frame_turn_prompt(history_context: &str, user_message: &str) -> String {
     )
 }
 
+/// Standing guidance for harnesses with a task-list tool (OpenCode `todowrite`,
+/// Claude Code `TodoWrite`/`TaskUpdate`, Codex `update_plan`, Grok/Vibe todo).
+/// Mission ccd5a32b finished every phase after its last `todowrite`, so Orb
+/// showed a stale half-done list.
+pub const TASK_LIST_FINAL_STATUS: &str = "Task list: if you used a todo/plan tool this turn, update it before your final answer so every item reflects its final status (completed, or explicitly left pending/cancelled with why).";
+
+/// Append [`TASK_LIST_FINAL_STATUS`] to a turn prompt once. `/goal` and
+/// `/plan` prompts keep their raw form: the command text is parsed as-is.
+pub fn with_task_list_guidance(prompt: &str) -> String {
+    let head = prompt.trim_start();
+    if head.starts_with("/goal ")
+        || head.starts_with("/plan")
+        || prompt.contains(TASK_LIST_FINAL_STATUS)
+    {
+        return prompt.to_string();
+    }
+    format!("{prompt}\n\n{TASK_LIST_FINAL_STATUS}")
+}
+
 /// Deduplicate and trim a list of skill names, preserving order.
 pub fn sanitize_skill_list(skills: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -706,5 +725,19 @@ mod tests {
             "bar".to_string(),
         ];
         assert_eq!(sanitize_skill_list(skills), vec!["foo", "bar"]);
+    }
+}
+
+#[cfg(test)]
+mod task_list_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn guidance_is_appended_once_and_skips_commands() {
+        let once = with_task_list_guidance("do it");
+        assert!(once.starts_with("do it\n\n") && once.ends_with(TASK_LIST_FINAL_STATUS));
+        assert_eq!(with_task_list_guidance(&once), once);
+        assert_eq!(with_task_list_guidance("/goal ship"), "/goal ship");
+        assert_eq!(with_task_list_guidance("/plan x"), "/plan x");
     }
 }

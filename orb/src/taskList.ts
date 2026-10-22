@@ -104,17 +104,46 @@ export function latestTaskList(items: StreamItem[]): Checklist | null {
   return null;
 }
 
+/** How the turn that followed a task list ended, read from the transcript:
+ * "finished" when a final answer arrived after it and nothing failed,
+ * "stopped" when an error/cancel row follows or no final answer exists. */
+export type TurnOutcome = "finished" | "stopped";
+export function turnOutcomeAfter(items: StreamItem[], key: string): TurnOutcome {
+  const start = items.findIndex(i => i.key === key);
+  if (start < 0) return "stopped";
+  let answered = false;
+  for (const item of items.slice(start + 1)) {
+    if (item.kind === "error") return "stopped";
+    if (item.kind === "text" && !item.live && item.text.trim()) answered = true;
+  }
+  return answered ? "finished" : "stopped";
+}
+
+export type ShownTask = { text: string; status: TaskStatus | "stale" };
+export type TaskCardView = { tasks: ShownTask[]; label: string; state: "live" | "done" | "stale" | "stopped" };
+
 /** How the Tasks card shows a plan. Once the turn is no longer running an
- * unfinished plan is a record of where the agent stopped, not live progress:
- * no item is "in progress" any more (4ad4bc01 kept a spinning step 4/5 after
- * its turn ended on a wake-up). */
-export function taskCardView(tasks: TaskItem[], ended: boolean): { tasks: TaskItem[]; label: string } {
+ * unfinished plan is not live progress: no item is "in progress" any more
+ * (4ad4bc01 kept a spinning step 4/5 after its turn ended on a wake-up).
+ * A turn that ended normally with open items only means the agent stopped
+ * updating its list (ccd5a32b finished all phases after its last todowrite),
+ * so it reads "not updated", never "Stopped"; open items become "stale"
+ * rather than unchecked. "Stopped" is kept for failed or interrupted turns. */
+export function taskCardView(tasks: TaskItem[], ended: boolean, outcome: TurnOutcome = "stopped"): TaskCardView {
   const done = tasks.filter(t => t.status === "completed").length;
   const finished = tasks.every(t => t.status === "completed" || t.status === "cancelled");
-  if (!ended || finished) return { tasks, label: `${done}/${tasks.length} completed` };
+  const counted = `${done}/${tasks.length} completed`;
+  if (!ended) return { tasks, label: counted, state: "live" };
+  if (finished) return { tasks, label: counted, state: "done" };
+  if (outcome === "finished") return {
+    tasks: tasks.map(t => t.status === "in_progress" || t.status === "pending" ? { ...t, status: "stale" as const } : t),
+    label: `Task list not updated · turn finished (${counted})`,
+    state: "stale",
+  };
   const stop = tasks.findIndex(t => t.status === "in_progress" || t.status === "pending");
   return {
     tasks: tasks.map(t => t.status === "in_progress" ? { ...t, status: "pending" as const } : t),
     label: `Stopped at step ${stop + 1}/${tasks.length}`,
+    state: "stopped",
   };
 }

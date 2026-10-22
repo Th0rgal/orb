@@ -8,6 +8,10 @@ final class OrbTurnSummaryTests: XCTestCase {
         sequence += 1
         return StoredEvent(id: sequence, missionId: "m", sequence: sequence, eventType: type, timestamp: at, eventId: "e\(sequence)", toolCallId: call, toolName: tool, content: content, metadata: [:])
     }
+    private func answer(_ content: String, success: Bool) -> StoredEvent {
+        sequence += 1
+        return StoredEvent(id: sequence, missionId: "m", sequence: sequence, eventType: "assistant_message", timestamp: "2026-10-22T09:02:02Z", eventId: "e\(sequence)", toolCallId: nil, toolName: nil, content: content, metadata: ["success": AnyCodable(success)])
+    }
     private func json(_ value: Any) -> String {
         String(data: try! JSONSerialization.data(withJSONObject: value), encoding: .utf8)!
     }
@@ -18,6 +22,43 @@ final class OrbTurnSummaryTests: XCTestCase {
         XCTAssertEqual(OrbTurnSummary.taskStatus("canceled"), "cancelled")
         XCTAssertEqual(OrbTurnSummary.taskStatus("blocked"), "pending")
         XCTAssertEqual(OrbTurnSummary.taskStatus(""), "pending")
+    }
+
+    /// Mission ccd5a32b (statuses only, same as desktop
+    /// `fixtures/stale-tasks-ccd5a32b.json`): three todowrites, the last one
+    /// [completed, completed, in_progress, pending], then phases 3-4 done
+    /// without another todowrite and a successful final answer.
+    private func ccd5a32b(final: StoredEvent?) -> [StoredEvent] {
+        let todos = { (s: [String]) in self.json(["todos": s.enumerated().map { ["content": "Phase \($0.offset + 1)", "status": $0.element] }]) }
+        var events = [event("user_message", "Continue mission")]
+        for (i, statuses) in [["in_progress", "pending", "pending", "pending"], ["completed", "in_progress", "pending", "pending"], ["completed", "completed", "in_progress", "pending"]].enumerated() {
+            events.append(event("tool_call", todos(statuses), tool: "todowrite", call: "todo\(i)"))
+            events.append(event("tool_call", json(["command": "make"]), tool: "bash", call: "b\(i)"))
+            events.append(event("tool_result", "ok", tool: "bash", call: "b\(i)"))
+        }
+        if let final { events.append(final) }
+        return events
+    }
+
+    func testFinishedTurnWithStaleTodosIsNotStopped() {
+        let model = OrbWorkModel.build(from: ccd5a32b(final: answer("All 4 phases of the implementation plan are complete.", success: true)), working: false)
+        XCTAssertEqual(model.todos.map(\.status), ["completed", "completed", "in_progress", "pending"])
+        XCTAssertEqual(model.outcomeAfterTodos, .finished)
+        XCTAssertEqual(OrbMissionTasksCard.state(todos: model.todos, ended: true, outcome: model.outcomeAfterTodos), .stale)
+        let label = OrbMissionTasksCard.label(todos: model.todos, ended: true, outcome: model.outcomeAfterTodos)
+        XCTAssertEqual(label, "Task list not updated · turn finished (2/4)")
+        XCTAssertEqual(model.todos.map { OrbMissionTasksCard.shownStatus($0.status, state: .stale) }, ["completed", "completed", "stale", "stale"])
+    }
+
+    func testInterruptedOrFailedTurnStaysStopped() {
+        for final in [nil, answer("Interrupted", success: false)] {
+            let model = OrbWorkModel.build(from: ccd5a32b(final: final), working: false)
+            XCTAssertEqual(model.outcomeAfterTodos, .stopped)
+            XCTAssertEqual(OrbMissionTasksCard.label(todos: model.todos, ended: true, outcome: model.outcomeAfterTodos), "Stopped at step 3/4")
+        }
+        let done = [OrbWorkModel.TodoItem(id: "a", content: "a", status: "completed")]
+        XCTAssertEqual(OrbMissionTasksCard.state(todos: done, ended: true, outcome: .finished), .done)
+        XCTAssertEqual(OrbMissionTasksCard.state(todos: done, ended: false, outcome: .stopped), .live)
     }
 
     func testWorkModelDescribesOnlyTheCurrentTurn() {

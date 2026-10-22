@@ -13,11 +13,13 @@ for (let i=0;i<300;i++) events.push(
  {type:"assistant_message",data:{content:`Inspect file ${i}. Done.`,id:`a${i}`}}
 );
 const [items,setItems]=createSignal(buildTranscript(events));
+const [working,setWorking]=createSignal<boolean|undefined>(undefined);
 // Match the bounded conversation scroller used by the app. Without it the
 // transcript deliberately renders every turn for non-scrolling embeddings.
-render(()=><main id="transcript" class="scroll" style={{height:'100vh',overflow:'auto'}}><Transcript items={items()}/></main>,document.getElementById("root")!);
+render(()=><main id="transcript" class="scroll" style={{height:'100vh',overflow:'auto'}}><Transcript items={items()} working={working()}/></main>,document.getElementById("root")!);
 Object.assign(window,{transcriptHarness:{
  reset:(ev:StreamEvent[])=>setItems(buildTranscript(ev)),
+ setWorking:(value:boolean|undefined)=>setWorking(value),
  apply:(ev:StreamEvent)=>setItems(v=>applyStreamEvent(v,ev)),
  benchmark:async()=>{
  const renderTimes:number[]=[], replayTimes:number[]=[];

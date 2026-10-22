@@ -23,7 +23,7 @@ import * as Ic from "./icons";
 import { markdownText, MdView } from "./Markdown";
 import { createStore, reconcile } from "solid-js/store";
 import { goalDraft, planObjective } from "./goal";
-import { isTaskTool, latestTaskList, parseTaskList, taskCardView } from "./taskList";
+import { isTaskTool, latestTaskList, parseTaskList, taskCardView, turnOutcomeAfter, type TurnOutcome } from "./taskList";
 
 import { messagePresentation, isAutomaticRecovery, isResumePrompt } from "./messagePresentation";
 import { computeDiffStats, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
@@ -565,13 +565,13 @@ export function ThoughtSequence(p: { items: ThinkItem[] }) {
   );
 }
 
-function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean }) {
+function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; outcome?: TurnOutcome }) {
   const [collapsed, setCollapsed] = createSignal(false);
   const [dismissed, setDismissed] = createSignal(dismissedChecklists.has(p.key));
   createEffect(() => {
     setDismissed(dismissedChecklists.has(p.key));
   });
-  const view = () => taskCardView(p.tasks, p.ended === true);
+  const view = () => taskCardView(p.tasks, p.ended === true, p.outcome);
   const completedCount = () => p.tasks.filter(task => task.status === "completed").length;
   const allDone = () => p.tasks.length > 0 && p.tasks.every(task => task.status === "completed" || task.status === "cancelled");
   const activeTask = () =>
@@ -585,7 +585,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean }
   };
   return (
     <Show when={!dismissed()}>
-      <section class={`mission-tasks ${collapsed() ? "collapsed" : ""} ${allDone() ? "is-done" : ""} ${p.ended && !allDone() ? "is-ended" : ""}`} id="mission-tasks" aria-label="Tasks" tabIndex={-1}>
+      <section class={`mission-tasks ${collapsed() ? "collapsed" : ""} ${allDone() ? "is-done" : ""} ${view().state === "stopped" ? "is-ended" : ""} ${view().state === "stale" ? "is-stale" : ""}`} data-state={view().state} id="mission-tasks" aria-label="Tasks" tabIndex={-1}>
         <div class="tasks-heading">
           <button type="button" class="tasks-heading-toggle" aria-expanded={!collapsed()} onClick={() => setCollapsed(v => !v)}>
             <Ic.ChevronDown size={13} class={`tasks-chev ${collapsed() ? "collapsed" : ""}`} />
@@ -610,7 +610,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean }
         <Show when={!collapsed()}>
           <progress aria-label="Task progress" max={p.tasks.length} value={completedCount()} />
           <ol><For each={view().tasks}>{task => <li data-status={task.status}>
-            <span class={`task-state ${task.status === "in_progress" ? "shimmer" : ""}`} aria-label={task.status.replaceAll("_", " ")}>{task.status === "completed" ? "✓" : task.status === "cancelled" ? "−" : task.status === "in_progress" ? "◉" : "○"}</span><span class="task-text">{task.text}</span>
+            <span class={`task-state ${task.status === "in_progress" ? "shimmer" : ""}`} aria-label={task.status === "stale" ? "status not reported" : task.status.replaceAll("_", " ")} title={task.status === "stale" ? "The agent did not report a final status for this item" : undefined}>{task.status === "completed" ? "✓" : task.status === "cancelled" ? "−" : task.status === "in_progress" ? "◉" : task.status === "stale" ? "?" : "○"}</span><span class="task-text">{task.text}</span>
           </li>}</For></ol>
         </Show>
       </section>
@@ -694,7 +694,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
       </For>}</VirtualTurns></DisclosureState.Provider>
       <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} /></Show>
       <Show when={checklist()?.tasks.length}>
-        <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} />
+        <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} outcome={turnOutcomeAfter(p.items, checklist()!.key)} />
       </Show>
       {turnTip.surface}
     </TurnTipContext.Provider>

@@ -119,7 +119,7 @@ extension OrbConversation {
             turnSummaryRow(turn: turns[index])
         }
         if !workModel.todos.isEmpty {
-            OrbMissionTasksCard(todos: workModel.todos, ended: !working)
+            OrbMissionTasksCard(todos: workModel.todos, ended: !working, outcome: workModel.outcomeAfterTodos)
         }
         if working {
             TimelineView(.periodic(from: .now, by: 1)) { context in
