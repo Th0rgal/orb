@@ -1,4 +1,8 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn find_elan_tool(tool_name: &str) -> Option<PathBuf> {
     if let Ok(explicit) = env::var("ORB_LEAN") {
@@ -56,7 +60,7 @@ const ORB_EXPORTS: &[&str] = &[
     "leansys_mix64_word",
 ];
 
-fn build_orb_spec_cabi(root: &PathBuf, out_dir: &PathBuf) {
+fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
     println!("cargo:rerun-if-changed=lean/Orb/Kernel.lean");
     println!("cargo:rerun-if-changed=lean/Orb/Spec.lean");
     println!("cargo:rerun-if-changed=lean/lakefile.lean");
