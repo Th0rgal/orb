@@ -6,7 +6,7 @@ import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
-  | { kind: "text"; key: string; text: string; live: boolean; /** When the turn this text closes completed (ISO), when known. */ at?: string }
+  | { kind: "text"; key: string; text: string; live: boolean; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
   | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean }
   | {
       kind: "tool";
@@ -292,7 +292,7 @@ export class TranscriptReducer {
         }
         if (index == null) {
           if (!text) return;
-          index=this.placeText(bubble,{kind:"text",key:this.key("text"),text,live});
+          index=this.placeText(bubble,{kind:"text",key:this.key("text"),text,live,...(bubble==="text_delta_latest"?{cumulative:true}:{})});
         } else if (previous?.kind === "text" && (previous.text !== text || previous.live !== live)) this.put(index,{...previous,text,live});
         return;
       }

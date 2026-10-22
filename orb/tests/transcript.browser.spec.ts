@@ -243,3 +243,26 @@ test("a finished turn never ends with a dangling Thinking row",async({page})=>{
  const last=await page.locator(".st-text, .st-think, .st-think-fold, .st-work").evaluateAll(els=>els.at(-1)!.className);
  expect(last).toContain("st-text");
 });
+
+test("narration between tool calls folds into the work; the answer stays visible",async({page})=>{
+ await page.goto("/tests/transcript.html");
+ await page.waitForFunction(()=>!!(window as any).transcriptHarness);
+ const say=(id:string,text:string)=>({type:"text_op",data:{bubble_id:`opencode:ses_x:${id}`,ops:[{type:"insert",pos:0,text},{type:"finalize"}]}});
+ const call=(id:string,done=true)=>[{type:"tool_call",data:{tool_call_id:id,name:"bash",args:{command:`nm ${id}.o`}}},...(done?[{type:"tool_result",data:{tool_call_id:id,result:"ok"}}]:[])];
+ const long="WAIT A MINUTE! Why did `ld -r --gc-sections` keep `U initialize_Init`? HOLD ON! Look at the relocatable object again, the symbol table should be empty after strip. ".repeat(4);
+ await page.evaluate(([a,b,c,d])=>(window as any).transcriptHarness.reset([{type:"user_message",data:{content:"link the kernel",id:"u1"}},a,...c,b,...d]),[say("prt_1",long),say("prt_2","**Aha!** Look at that error."),call("t1"),call("t2",false)] as const);
+ await page.evaluate(()=>(window as any).transcriptHarness.setWorking(true));
+ await expect(page.locator(".st-text")).toHaveCount(0);
+ await expect(page.locator(".st-work")).toHaveCount(1);
+ const note=page.locator(".st-work-live-note");
+ await expect(note).toHaveText("Aha! Look at that error.");
+ expect((await note.boundingBox())!.height).toBeLessThanOrEqual(20);
+ await page.screenshot({path:"test-results/orb-narration-live.png"});
+ await page.evaluate(()=>{const h=(window as any).transcriptHarness;h.apply({type:"tool_result",data:{tool_call_id:"t2",result:"ok"}});h.apply({type:"text_op",data:{bubble_id:"opencode:ses_x:prt_9",ops:[{type:"insert",pos:0,text:"The kernel links now."},{type:"finalize"}]}});h.setWorking(false);});
+ await expect(page.locator(".st-text")).toHaveCount(1);
+ await expect(page.locator(".st-text")).toContainText("The kernel links now.");
+ await expect(note).toHaveCount(0);
+ await page.locator(".st-work-head").click();
+ await expect(page.locator(".st-work-note")).toHaveCount(2);
+ await page.screenshot({path:"test-results/orb-narration-folded.png"});
+});

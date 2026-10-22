@@ -42,6 +42,7 @@
 		480B0F5C7FF0C910CAF24912 /* OrbManagedMachinesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9988836186A90C53BA0E03C9 /* OrbManagedMachinesTests.swift */; };
 		49E481A8A26C33A25CD64BE2 /* OrbTranscriptUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D427073D171A43F58458E2BD /* OrbTranscriptUITests.swift */; };
 		4AAC36056E4CC05CC7185BA5 /* OrbProjectAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */; };
+		4AE0D482C73514CDD1AB8ED4 /* OrbNarrationFoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6DD2AB1561B02E9E7D2A27 /* OrbNarrationFoldTests.swift */; };
 		4CA1C40455E8DABE4CD24A9A /* OrbLiveUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A0C852566E4DC6B1E9620D /* OrbLiveUITests.swift */; };
 		50AD3F51FCD5F045B1715B24 /* OrbMachinesSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5BB808D250AF7F06FD9AC7 /* OrbMachinesSettings.swift */; };
 		5610DFBA5FB6D5110ECFF7C6 /* OrbPipeTablesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F53850B216B91D0B012B5A7B /* OrbPipeTablesTests.swift */; };
@@ -216,6 +217,7 @@
 		A3CAF136E3C506E3EC83371A /* MermaidAssets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = MermaidAssets; path = SandboxedDashboard/Orb/MermaidAssets; sourceTree = SOURCE_ROOT; };
 		A3CD1D35D37ACC8A7FC2EB5F /* OrbSvg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSvg.swift; sourceTree = "<group>"; };
 		AC3C9E662975DD7E0D3634C8 /* OrbManagedMachines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbManagedMachines.swift; sourceTree = "<group>"; };
+		AC6DD2AB1561B02E9E7D2A27 /* OrbNarrationFoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbNarrationFoldTests.swift; sourceTree = "<group>"; };
 		B053370536BB82FE142FF2E5 /* OrbQuestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbQuestions.swift; sourceTree = "<group>"; };
 		B134E3A21E30BFC16C6AC7AA /* OrbRichText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbRichText.swift; sourceTree = "<group>"; };
 		BA4DE96B58D59E4D20C580BB /* OrbTurnStatusUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTurnStatusUITests.swift; sourceTree = "<group>"; };
@@ -403,6 +405,7 @@
 				98CD2374A807C1FF479EFE74 /* OrbDictationTests.swift */,
 				3BFFBD04FCC178FC78D9FCCD /* OrbFileRefTests.swift */,
 				9988836186A90C53BA0E03C9 /* OrbManagedMachinesTests.swift */,
+				AC6DD2AB1561B02E9E7D2A27 /* OrbNarrationFoldTests.swift */,
 				19DEFD6DEF4AA10F64C572BB /* OrbOrchestrationTests.swift */,
 				F53850B216B91D0B012B5A7B /* OrbPipeTablesTests.swift */,
 				0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */,
@@ -670,6 +673,7 @@
 				382AC983DA8881DF18A6F5A6 /* OrbDictationTests.swift in Sources */,
 				0185E800C657153F3FC1D91D /* OrbFileRefTests.swift in Sources */,
 				480B0F5C7FF0C910CAF24912 /* OrbManagedMachinesTests.swift in Sources */,
+				4AE0D482C73514CDD1AB8ED4 /* OrbNarrationFoldTests.swift in Sources */,
 				EDF59F07CB1E3E17A8E534AF /* OrbOrchestrationTests.swift in Sources */,
 				5610DFBA5FB6D5110ECFF7C6 /* OrbPipeTablesTests.swift in Sources */,
 				4AAC36056E4CC05CC7185BA5 /* OrbProjectAppearanceTests.swift in Sources */,
@@ -763,7 +767,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102208;
+				CURRENT_PROJECT_VERSION = 2026102209;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -914,7 +918,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102208;
+				CURRENT_PROJECT_VERSION = 2026102209;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_PREVIEWS = YES;

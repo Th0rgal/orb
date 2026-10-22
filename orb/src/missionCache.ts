@@ -106,7 +106,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
      const spinePage = await getMissionEventPage(id, { before, view: "transcript" }).catch(() => null);
      check();
      if(spinePage?.events?.length){
-      const spine = spinePage.events.map(storedToStream).filter((e): e is StreamEvent => e !== null);
+      const spine = spineAnswers(spinePage.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
       stream = mergeStreamBySequence(spine, stream);
      }
     }
@@ -180,4 +180,25 @@ export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
   for(const item of previous.items)if(item.kind==='user'&&item.messageId)items=applyStreamEvent(items,{type:'user_message',data:{id:item.messageId,content:item.text,queued:item.queued,receipt:item.receipt,attached:item.attached}});
   return {...previous,stream,items,before:page.nextCursor??previous.before,hasOlder:page.hasMore};
  });
+}
+
+/** The conversational spine has user and assistant rows but none of the tool
+ * calls between them. Its narration (text written between tool calls) would
+ * read as one wall of "WAIT! Look at…" paragraphs, with nothing to fold it
+ * into, until older raw pages arrive. Keep each turn's last assistant row (its
+ * answer, or the newest narration of the running turn); the rest comes back,
+ * with its tools, when the reader pages up. */
+export function spineAnswers(spine: StreamEvent[]): StreamEvent[] {
+  const keep: StreamEvent[] = [];
+  let answered = false; // a later assistant row of the same turn is kept
+  for (let i = spine.length - 1; i >= 0; i--) {
+    const event = spine[i];
+    if (event.type === "user_message") answered = false;
+    else if (event.type === "assistant_message" && event.data.success !== false) {
+      if (answered) continue;
+      answered = true;
+    }
+    keep.push(event);
+  }
+  return keep.reverse();
 }

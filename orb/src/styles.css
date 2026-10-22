@@ -602,6 +602,8 @@ code {
 .st-work-body { margin: 2px 0 6px 5px; padding-left: 12px; border-left: 1px solid var(--stroke-soft); }
 .st-work-body .st-tool, .st-work-body .st-think { margin: 0; }
 .st-work-body .st-tool-head { height: 22px; }
+.st-work-body .st-work-note { margin: 2px 0 4px; color: var(--fg-2); }
+.st-work-live-note { margin: 0 0 2px 17px; color: var(--fg-3); font-size: 12px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Transcript prose: the document viewer's page metrics do not apply. */
 .md-table-wrap { overflow-x: auto; max-width: 100%; margin: 8px 0 12px; }
 .md table { width: max-content; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: normal; }
