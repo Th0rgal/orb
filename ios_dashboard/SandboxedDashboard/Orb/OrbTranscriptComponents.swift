@@ -137,6 +137,7 @@ struct OrbUserBubbleText: View {
 /// any extra controls (e.g. the remote log toggle).
 struct OrbAssistantMessage<Trailing: View>: View {
     let text: String
+    var timing: OrbTurnTiming? = nil
     var onArtifact: (String) -> Void = { _ in }
     @ViewBuilder let trailing: Trailing
     @State private var copied = false
@@ -170,6 +171,7 @@ struct OrbAssistantMessage<Trailing: View>: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(copied ? "Copied response" : "Copy response")
+                if let timing { OrbTurnTimeLabel(timing: timing) }
                 trailing
                 Spacer()
             }
@@ -178,8 +180,31 @@ struct OrbAssistantMessage<Trailing: View>: View {
 }
 
 extension OrbAssistantMessage where Trailing == EmptyView {
-    init(text: String, onArtifact: @escaping (String) -> Void = { _ in }) {
-        self.init(text: text, onArtifact: onArtifact) { EmptyView() }
+    init(text: String, timing: OrbTurnTiming? = nil, onArtifact: @escaping (String) -> Void = { _ in }) {
+        self.init(text: text, timing: timing, onArtifact: onArtifact) { EmptyView() }
+    }
+}
+
+/// "6d ago" next to the copy button; long press shows the date and how long the turn worked.
+/// Only this label redraws each minute.
+struct OrbTurnTimeLabel: View {
+    let timing: OrbTurnTiming
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            Text(OrbTurnTiming.ago(timing.completedAt, now: context.date))
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(OrbStyle.textMuted)
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+        }
+        .contextMenu {
+            Text(OrbTurnTiming.absolute(timing.completedAt))
+            if let worked = timing.workedSeconds { Text("Worked for \(OrbTurnTiming.workedFor(worked))") }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Completed \(OrbTurnTiming.absolute(timing.completedAt))" + (timing.workedSeconds.map { ", worked for \(OrbTurnTiming.workedFor($0))" } ?? ""))
+        .accessibilityIdentifier("turn-time")
     }
 }
 

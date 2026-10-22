@@ -104,7 +104,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       if (isGeneratedRemoteJobStatus(ev)) return null;
       // Canonical rows are the finalized text_op bubble; treat both as the
       // turn's final message (the reducer dedupes identical text).
-      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id, revision: ev.metadata?.revision, ...(isPartialTurn(ev.metadata) ? { partial: true } : {}) }), type: "assistant_message" };
+      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id, revision: ev.metadata?.revision, ...(isPartialTurn(ev.metadata) ? { partial: true } : {}), at: ev.timestamp }), type: "assistant_message" };
     case "text_op": {
       let ops: unknown = [];
       try {
@@ -217,6 +217,8 @@ export function streamMission(
           try {
             const parsed = JSON.parse(data);
             if (eventType === "assistant_message" && isPartialTurn(parsed)) parsed.partial = true;
+            // Live rows carry no stored timestamp: arrival is when the turn completed.
+            if (eventType === "assistant_message" && typeof parsed.at !== "string") parsed.at = new Date().toISOString();
             deliver({ type: eventType, data: parsed, eventId: parsed.event_id ?? parsed.id, sequence: parsed.sequence });
           } catch {
             /* malformed frame — skip */

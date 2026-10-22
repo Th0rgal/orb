@@ -299,7 +299,7 @@ extension OrbConversation {
         } else {
             let parsedRemote = OrbRemoteLog.parse(item.2)
             VStack(alignment: .leading, spacing: 4) {
-                OrbAssistantMessage(text: parsedRemote.text, onArtifact: { path in
+                OrbAssistantMessage(text: parsedRemote.text, timing: transcript.turnTimings[item.0], onArtifact: { path in
                     Task { await openWorkspaceOrArtifact(path) }
                 }) {
                     if parsedRemote.details != nil {

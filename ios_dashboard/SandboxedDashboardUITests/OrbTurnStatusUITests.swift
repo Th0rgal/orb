@@ -248,4 +248,25 @@ final class OrbTurnStatusUITests: XCTestCase {
         capture(app, "deep-link-cold-start")
         try await Self.resetFixture()
     }
+
+    /// A finished answer says when it completed; a long press shows the date and how long it worked.
+    @MainActor func testFinishedAnswerShowsCompletionTimeAndWorkedFor() async throws {
+        try await Self.resetFixture()
+        let app = open("idle-send")
+        let label = app.descendants(matching: .any)["turn-time"]
+        XCTAssertTrue(label.waitForExistence(timeout: 10))
+        XCTAssertTrue(label.label.hasPrefix("Completed "), label.label)
+        XCTAssertTrue(label.label.hasSuffix("worked for 10s"), label.label)
+        save(app, "ios-turn-time")
+        label.press(forDuration: 1.0)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Worked for 10s")).firstMatch.waitForExistence(timeout: 5))
+        save(app, "ios-turn-time-menu")
+    }
+
+    @MainActor private func save(_ app: XCUIApplication, _ name: String) {
+        capture(app, name)
+        if let dir = ProcessInfo.processInfo.environment["ORB_UI_REPORT_DIR"] {
+            try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
+        }
+    }
 }

@@ -10,6 +10,8 @@ final class OrbTranscriptModel {
     private(set) var changedFiles: [OrbTurnSummary.FileChange] = []
     private(set) var openQuestions: [OrbPendingQuestion] = []
     private(set) var history: [(String, String, String)] = []
+    /// Completion time of each stored assistant row, by row id.
+    private(set) var turnTimings: [String: OrbTurnTiming] = [:]
 
     /// Work fold, changed files and open questions from `events`.
     func rebuildDerived(working: Bool) {
@@ -29,6 +31,12 @@ final class OrbTranscriptModel {
         if history.count != next.count || zip(history, next).contains(where: { $0.0 != $1.0 || $0.1 != $1.1 || $0.2 != $1.2 }) {
             history = next
         }
+        let byAnswer = OrbTurnTiming.byAnswer(events)
+        var timings: [String: OrbTurnTiming] = [:]
+        for row in history where row.1 == "assistant" {
+            if let timing = byAnswer[row.2.trimmingCharacters(in: .whitespacesAndNewlines)] { timings[row.0] = timing }
+        }
+        if timings != turnTimings { turnTimings = timings }
         return grew
     }
 

@@ -1884,6 +1884,9 @@ button.fork-trigger:hover { color: var(--fg); }
 .st-text:hover .response-actions, .st-text:focus-within .response-actions, .response-actions:has(.response-copy[aria-label="Response copied"]), .response-actions:has(.response-copy-error) { opacity:1; }
 .response-actions .response-copy { width:24px;height:24px;padding:0;background:var(--bg-elev);border:1px solid var(--stroke-soft);box-shadow:0 1px 4px rgb(0 0 0 / 10%); }
 .response-actions .response-copy:hover { background:var(--bg-active);border-color:var(--stroke); }
+.response-time { display:inline-flex;align-items:center;height:24px;padding:0 6px;border-radius:var(--radius-sm);background:var(--bg-elev);border:1px solid var(--stroke-soft);color:var(--fg-3);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap;cursor:default;box-shadow:0 1px 4px rgb(0 0 0 / 10%); }
+.response-time:hover { color:var(--fg-2); }
+.turn-tip { width:auto !important;max-width:240px; }
 .response-copy-error { position:absolute;right:28px;bottom:0;width:240px;background:var(--bg);padding:6px 8px;border:1px solid var(--stroke);border-radius: var(--radius-sm); }
 @media (hover:none) { .response-actions { opacity:.75; } }
 @media(max-width:720px) { .response-actions { right:6px; } .st-text { padding-right:34px; } }

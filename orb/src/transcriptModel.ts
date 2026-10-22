@@ -6,7 +6,7 @@ import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
-  | { kind: "text"; key: string; text: string; live: boolean }
+  | { kind: "text"; key: string; text: string; live: boolean; /** When the turn this text closes completed (ISO), when known. */ at?: string }
   | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean }
   | {
       kind: "tool";
@@ -320,10 +320,11 @@ export class TranscriptReducer {
         const isNativeReceipt = native.length > 0 && (trimmed === native.map(i=>i.text).join('').trim() || trimmed === native.at(-1)!.text.trim());
         this.close();
         if(d.success===false){this.items.push({kind:"error",key:this.key("error"),text:text||"Mission failed",terminal:true,cancelled:text.trim().toLowerCase()==="cancelled"});return;}
+        const at=typeof d.at==="string"?{at:d.at}:{};
         if(!isNativeReceipt){
-          if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false});this.lastFinal=index;}
-          else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false});}
-        }
+          if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;}
+          else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false,...at});}
+        }else if(d.at){const i=this.bubbles.get(this.native.at(-1)!),row=i==null?undefined:this.items[i];if(row?.kind==="text")this.put(i!,{...row,...at});}
         // Settle the turn's shape only after the final text is in place.
         this.hoistTrailingThoughts();
         return;

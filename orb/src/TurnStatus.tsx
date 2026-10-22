@@ -20,6 +20,10 @@ export function rememberTurnStart(key: string, now = Date.now()): number {
   return now;
 }
 
+/** When a message was first seen, without recording it. */
+export function seenTurnStart(key: string): number | undefined {
+  return seenStore()[key] || undefined;
+}
 /** Turn start: the latest delivered user message's server time, else when it was first seen. */
 export function turnStartedAt(items: StreamItem[]): number | undefined {
   for (let i = items.length - 1; i >= 0; i--) {

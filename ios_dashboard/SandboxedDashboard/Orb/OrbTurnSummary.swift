@@ -231,3 +231,59 @@ struct OrbChangesCard: View {
         .padding(.top, 2)
     }
 }
+
+/// When an assistant turn completed and how long it worked; same rules as the
+/// desktop `turnTiming.ts` (response action row).
+struct OrbTurnTiming: Equatable {
+    let completedAt: Date
+    let workedSeconds: Int?
+
+    /// Completion time and duration of each assistant answer, keyed by its trimmed
+    /// text: the stored `assistant_message` time, measured from the latest user
+    /// message before it. The newest occurrence of a repeated answer wins.
+    static func byAnswer(_ events: [StoredEvent]) -> [String: OrbTurnTiming] {
+        var out: [String: OrbTurnTiming] = [:]
+        var start: Date?
+        for event in events {
+            switch event.eventType {
+            case "user_message": start = OrbDateCache.parse(event.timestamp) ?? start
+            case "assistant_message", "assistant_message_canonical":
+                guard let end = OrbDateCache.parse(event.timestamp) else { continue }
+                let text = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                let worked = start.flatMap { $0 <= end ? Int(end.timeIntervalSince($0)) : nil }
+                out[text] = OrbTurnTiming(completedAt: end, workedSeconds: worked)
+            default: continue
+            }
+        }
+        return out
+    }
+
+    /// "just now", "5m ago", "2h ago", "6d ago", then a short date from 30 days.
+    static func ago(_ date: Date, now: Date = Date()) -> String {
+        let minutes = Int(max(0, now.timeIntervalSince(date)) / 60)
+        if minutes < 1 { return "just now" }
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        if hours / 24 < 30 { return "\(hours / 24)d ago" }
+        let sameYear = Calendar.current.isDate(date, equalTo: now, toGranularity: .year)
+        return date.formatted(sameYear ? .dateTime.month(.abbreviated).day() : .dateTime.month(.abbreviated).day().year())
+    }
+
+    /// "Oct 16, 2026, 5:30 AM" in the device's locale and time zone.
+    static func absolute(_ date: Date) -> String {
+        date.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
+    }
+
+    /// "42s", "3m 5s", "12h 6m", "2d 3h".
+    static func workedFor(_ seconds: Int) -> String {
+        let s = max(0, seconds)
+        if s < 60 { return "\(s)s" }
+        let m = s / 60
+        if m < 60 { return s % 60 == 0 ? "\(m)m" : "\(m)m \(s % 60)s" }
+        let h = m / 60
+        if h < 24 { return m % 60 == 0 ? "\(h)h" : "\(h)h \(m % 60)m" }
+        return h % 24 == 0 ? "\(h / 24)d" : "\(h / 24)d \(h % 24)h"
+    }
+}

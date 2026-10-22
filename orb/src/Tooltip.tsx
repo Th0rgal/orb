@@ -1,9 +1,10 @@
 import { createEffect, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Popover } from "./Popover";
 import { hasInteractiveOverlay, hasOverlay } from "./overlayLayer";
+import type { OverlayPlacement } from "./overlayPosition";
 
 /** Delayed, non-interactive details; pending and visible tips share dismissal. */
-export function useTooltip<T>(id: string, render: (value: T) => JSX.Element) {
+export function useTooltip<T>(id: string, render: (value: T) => JSX.Element, options: {placement?: OverlayPlacement; width?: number; class?: string} = {}) {
   const [tip, setTip] = createSignal<{value: T; anchor: HTMLElement}>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let owner: HTMLElement | undefined;
@@ -41,6 +42,6 @@ export function useTooltip<T>(id: string, render: (value: T) => JSX.Element) {
         if (event.currentTarget.matches(":focus-visible") && !event.currentTarget.closest('[data-pointer-focus="true"]')) show(value, event.currentTarget);
       },
     }),
-    surface: <Show when={tip()}>{current => <Popover id={id} label="Details" role="tooltip" class="row-tip" anchor={current().anchor} width={280} placement="right-start" trap={false} restoreFocus={false} onClose={hide}>{render(current().value)}</Popover>}</Show>,
+    surface: <Show when={tip()}>{current => <Popover id={id} label="Details" role="tooltip" class={options.class ? `row-tip ${options.class}` : "row-tip"} anchor={current().anchor} width={options.width ?? 280} placement={options.placement ?? "right-start"} trap={false} restoreFocus={false} onClose={hide}>{render(current().value)}</Popover>}</Show>,
   };
 }

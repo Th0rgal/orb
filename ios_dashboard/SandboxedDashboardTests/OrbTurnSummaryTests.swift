@@ -176,4 +176,25 @@ final class OrbTurnSummaryTests: XCTestCase {
         XCTAssertEqual(OrbNotificationPayload.lead(project: "Verity", headline: "Verity", status: "Done"), ["Done"])
         XCTAssertEqual(OrbNotificationPayload.lead(project: "Default", headline: "DGX Spark", status: "Needs approval"), ["Default", "Needs approval"])
     }
+
+    func testTurnTimingMatchesDesktopFormatting() {
+        let events = [
+            event("user_message", "Refactor", at: "2026-10-15T17:24:00Z"),
+            event("text_delta", "Working", at: "2026-10-15T18:00:00Z"),
+            event("assistant_message", " Done. ", at: "2026-10-16T05:30:00Z"),
+            event("assistant_message", "Orphan", at: "bad"),
+        ]
+        let timing = OrbTurnTiming.byAnswer(events)["Done."]
+        XCTAssertEqual(timing?.workedSeconds, (12 * 60 + 6) * 60)
+        XCTAssertNil(OrbTurnTiming.byAnswer(events)["Orphan"])
+        let end = timing!.completedAt
+        XCTAssertEqual(OrbTurnTiming.ago(end, now: end.addingTimeInterval(59)), "just now")
+        XCTAssertEqual(OrbTurnTiming.ago(end, now: end.addingTimeInterval(300)), "5m ago")
+        XCTAssertEqual(OrbTurnTiming.ago(end, now: end.addingTimeInterval(2 * 3600 + 3540)), "2h ago")
+        XCTAssertEqual(OrbTurnTiming.ago(end, now: end.addingTimeInterval(6 * 86_400)), "6d ago")
+        XCTAssertEqual(OrbTurnTiming.workedFor(42), "42s")
+        XCTAssertEqual(OrbTurnTiming.workedFor(185), "3m 5s")
+        XCTAssertEqual(OrbTurnTiming.workedFor((12 * 60 + 6) * 60), "12h 6m")
+        XCTAssertEqual(OrbTurnTiming.workedFor(51 * 3600), "2d 3h")
+    }
 }
