@@ -30,9 +30,11 @@ export interface ManagedSize { size: string; cpu: number; ram_gb: number; disk_g
 
 export interface ManagedBudget {
   spent_today_usd: number;
-  daily_cap_usd: number;
+  /** null: unlimited. */
+  daily_cap_usd: number | null;
   active: number;
-  max_concurrent: number;
+  /** null: unlimited. */
+  max_concurrent: number | null;
   default_ttl_minutes: number;
   max_ttl_minutes: number;
   default_size: string;
@@ -128,9 +130,38 @@ export const stateLabel = (s: string) =>
 export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: number }) =>
   `${s.cpu} vCPU · ${s.ram_gb} GB${s.disk_gb != null ? ` · ${s.disk_gb} GB disk` : ""}`;
 
-/** "$1.20 spent today of $20.00 · 1 of 3 running". */
+/** "$1.20 spent today of $20.00 · 1 of 3 running"; unlimited caps drop their "of …". */
 export const budgetLine = (b: ManagedBudget) =>
-  `${usd(b.spent_today_usd)} spent today of ${usd(b.daily_cap_usd)} · ${b.active} of ${b.max_concurrent} running`;
+  `${usd(b.spent_today_usd)} spent today${b.daily_cap_usd != null ? ` of ${usd(b.daily_cap_usd)}` : ""} · ${b.active}${b.max_concurrent != null ? ` of ${b.max_concurrent}` : ""} running`;
+
+/** Budget still available today; null when there is no daily cap. */
+export const budgetLeft = (b: ManagedBudget) => b.daily_cap_usd == null ? null : b.daily_cap_usd - b.spent_today_usd;
+/** True when a set cap stops new machines. Null caps never block. */
+export const budgetFull = (b: ManagedBudget) =>
+  (b.max_concurrent != null && b.active >= b.max_concurrent) || (b.daily_cap_usd != null && b.spent_today_usd >= b.daily_cap_usd);
+
+/** Display name of a size: the provider's "default" size is medium. */
+export const sizeLabel = (size: string) => size === "default" ? "medium" : size;
+/** "4 vCPU · 8 GB RAM · 50 GB": proportional, for row secondary lines. */
+export const specLine = (s: { cpu: number; ram_gb: number; disk_gb?: number | null }) =>
+  [s.cpu ? `${s.cpu} vCPU` : "", s.ram_gb ? `${s.ram_gb} GB RAM` : "", s.disk_gb ? `${s.disk_gb} GB` : ""].filter(Boolean).join(" · ");
+/** "21 min left", "1 h 05 min left", "Expired". */
+export function ttlShort(expiresAt: string, now = Date.now()): string {
+  const end = Date.parse(expiresAt);
+  if (!Number.isFinite(end)) return "";
+  const min = Math.ceil((end - now) / 60_000);
+  if (min <= 0) return "Expired";
+  if (min < 60) return `${min} min left`;
+  return `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")} min left`;
+}
+/** Remaining share of the TTL window, 0..1. */
+export function ttlFraction(createdAt: string, expiresAt: string, now = Date.now()): number {
+  const start = Date.parse(createdAt), end = Date.parse(expiresAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
+  return Math.min(1, Math.max(0, (end - now) / (end - start)));
+}
+/** "<$0.01 so far · $0.036/h". */
+export const costLine = (cost: number, rate: number) => `${usd(cost)} so far · ${usdPerHour(rate)}`;
 
 /** Machines destroyed or failed during the last 24 hours, newest first. */
 export function recentMachines(machines: ManagedMachine[], now = Date.now()): ManagedMachine[] {
