@@ -2558,6 +2558,11 @@ fn timed_response(resp: Response, cell: Arc<super::proxy_timing::TimingCell>) ->
     client_stream_response(resp, cell, None)
 }
 
+/// The bytes sent so far end on a complete SSE event (blank line).
+fn at_sse_event_boundary(tail: &[u8]) -> bool {
+    tail.ends_with(b"\n\n") || tail.ends_with(b"\r\n\r\n")
+}
+
 /// True when an SSE chunk carries visible output: answer text or a tool
 /// call. Role-only, reasoning-only and keepalive chunks do not commit the
 /// response, so a stall after them can still be replayed invisibly.
@@ -2634,10 +2639,11 @@ fn client_stream_response(
     let mut data = body.into_data_stream();
     let stream = async_stream::stream! {
         let mut committed = false;
-        // Last two bytes sent: a keepalive goes only between whole events.
-        let mut tail: [u8; 2] = *b"\n\n";
+        // Last bytes sent: a keepalive goes only between whole events
+        // (LF or CRLF separators).
+        let mut tail: Vec<u8> = b"\n\n".to_vec();
         let mut retries = 0u32;
-        let mut last_item = std::time::Instant::now();
+        let mut last_item = tokio::time::Instant::now();
         loop {
             let next = if is_sse {
                 tokio::select! {
@@ -2649,8 +2655,9 @@ fn client_stream_response(
             };
             let item = match next {
                 None => {
-                    if &tail == b"\n\n" {
+                    if at_sse_event_boundary(&tail) {
                         cell.client_gap(last_item.elapsed(), true);
+                        last_item = tokio::time::Instant::now();
                         yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
                     }
                     continue;
@@ -2681,16 +2688,18 @@ fn client_stream_response(
                                 tokio::select! {
                                     resp = &mut pending => break resp,
                                     _ = tokio::time::sleep(keepalive) => {
-                                        if &tail == b"\n\n" {
+                                        if at_sse_event_boundary(&tail) {
                                             cell.client_gap(last_item.elapsed(), true);
+                        last_item = tokio::time::Instant::now();
                                             yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
                                         }
                                     }
                                 }
                             };
                             if resp.status().is_success() {
+                                // `last_item` stays: the client's silence
+                                // runs from the last keepalive it got.
                                 data = resp.into_body().into_data_stream();
-                                last_item = std::time::Instant::now();
                                 continue;
                             }
                             cell.mark_upstream_stream_failed("stalled");
@@ -2698,14 +2707,14 @@ fn client_stream_response(
                         }
                     }
                     cell.client_gap(last_item.elapsed(), false);
-                    last_item = std::time::Instant::now();
+                    last_item = tokio::time::Instant::now();
                     if !committed && sse_chunk_commits_output(&bytes) {
                         committed = true;
                     }
-                    match bytes.len() {
-                        0 => {}
-                        1 => tail = [tail[1], bytes[0]],
-                        n => tail = [bytes[n - 2], bytes[n - 1]],
+                    if !bytes.is_empty() {
+                        tail.extend_from_slice(&bytes[bytes.len().saturating_sub(4)..]);
+                        let excess = tail.len().saturating_sub(4);
+                        tail.drain(..excess);
                     }
                     yield Ok(bytes);
                 }
@@ -12860,6 +12869,28 @@ mod latency_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn keepalives_follow_crlf_events_and_gaps_reset() {
+        let cell = TimingCell::new("c", true);
+        let resp = sse_response(vec![
+            (Duration::ZERO, "data: {\"a\":1}\r\n\r\n"),
+            (Duration::from_secs(50), "data: [DONE]\r\n\r\n"),
+        ]);
+        let text = collect_text(client_stream_response(resp, cell.clone(), None)).await;
+        assert_eq!(text.matches(": keepalive").count(), 3);
+        let r = cell.snapshot();
+        // The client never waited more than one keepalive interval.
+        assert!(r.max_client_gap_ms <= 15_000, "gap {}", r.max_client_gap_ms);
+    }
+
+    #[test]
+    fn sse_boundaries() {
+        assert!(at_sse_event_boundary(b"x\n\n"));
+        assert!(at_sse_event_boundary(b"\r\n\r\n"));
+        assert!(!at_sse_event_boundary(b"x\r\n"));
+        assert!(!at_sse_event_boundary(b"x\n"));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn swallowed_upstream_activity_is_not_a_stall() {
         // Raw upstream sends a keepalive comment every 30 s for 3 minutes;
         // the translator (like the Gemini one) drops them, so the translated
@@ -12937,7 +12968,14 @@ mod latency_tests {
                 )])
             })
         });
-        let text = collect_text(client_stream_response(stalled, cell.clone(), Some(reroute))).await;
+        let t0 = tokio::time::Instant::now();
+        let resp = client_stream_response(stalled, cell.clone(), Some(reroute));
+        let mut data = resp.into_body().into_data_stream();
+        let mut text = String::new();
+        while let Some(chunk) = data.next().await {
+            let chunk = chunk.unwrap();
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
         assert!(!text.contains("upstream_stalled"), "{text}");
         assert!(text.contains("\"content\":\"done\""));
         assert_eq!(calls.lock().unwrap().as_slice(), &[None]); // same entry first
