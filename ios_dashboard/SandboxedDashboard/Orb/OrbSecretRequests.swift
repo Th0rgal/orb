@@ -20,6 +20,15 @@ enum OrbBiometric {
 
     /// Returns nil on success, or a message to show. Cancellation returns "".
     static func authenticate(reason: String) async -> String? {
+        #if DEBUG
+        // UI tests on the loopback fixture: the simulator cannot do Face ID and
+        // its passcode sheet blocks XCUITest. Same guard as `orb_test_reset`.
+        // Never in release builds; real Core still requires a device signature.
+        if UserDefaults.standard.bool(forKey: "orb_test_biometric_pass"),
+           UserDefaults.standard.string(forKey: "api_base_url")?.hasPrefix("http://127.0.0.1:") == true {
+            return nil
+        }
+        #endif
         let context = LAContext()
         context.localizedCancelTitle = "Cancel"
         var policyError: NSError?
@@ -446,8 +455,12 @@ struct OrbMissionAccessList: View {
             HStack {
                 Button {
                     act(r, approve: true)
-                } label: { Label("Allow read", systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid") }
+                } label: {
+                    Label("Allow read", systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                        .foregroundStyle(.black)
+                }
                 .buttonStyle(.borderedProminent)
+                .tint(OrbStyle.success)
                 .accessibilityIdentifier("access.approve.\(r["id"].text)")
                 Spacer()
                 Button("Deny", role: .destructive) { act(r, approve: false) }
@@ -532,6 +545,6 @@ struct OrbMissionAccessSheet: View {
                 .navigationTitle("Mission access").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }
-        .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+        .presentationDetents([.large]).presentationDragIndicator(.visible)
     }
 }

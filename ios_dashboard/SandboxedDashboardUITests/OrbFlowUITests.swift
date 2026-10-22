@@ -89,17 +89,19 @@ final class OrbFlowUITests: XCTestCase {
             try? app.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: dir).appendingPathComponent("ios-\(name).png"))
         }
     }
-    /// Mission access on the default fixture (18766): one pending request
+    /// Mission access on its own fixture instance (18790, start with --port 18790): one pending request
     /// (acc-1) and one live grant (acc-2). The simulator has no enrolled
-    /// biometry and no Secure Enclave approval key, so OrbBiometric lets the
-    /// approval through and the request goes out unsigned; the fixture accepts
+    /// biometry and no Secure Enclave approval key; the DEBUG loopback hook
+    /// `-orb_test_biometric_pass` stands in for Face ID, so the approval goes through and the request goes out unsigned; the fixture accepts
     /// it (real Core rejects an unsigned approve). Face ID itself needs a device.
     @MainActor func testMissionAccessApproveDenyAndRevoke() throws {
-        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18766/__reset")!); reset.httpMethod = "POST"
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18790/__reset")!); reset.httpMethod = "POST"
         let done = expectation(description: "fixture reset")
         URLSession.shared.dataTask(with: reset) { _, _, _ in done.fulfill() }.resume()
         wait(for: [done], timeout: 10)
-        let app = launch()
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18790", "-orb_test_reset", "YES", "-orb_test_biometric_pass", "YES"]
+        app.launch()
         let banner = app.buttons["home.access-requests"]
         XCTAssertTrue(banner.waitForExistence(timeout: 30))
         captureFile(app, "access-home-banner")
@@ -272,7 +274,7 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Loading conversations…"].exists)
     }
     @MainActor func testRichResponseStaysAtBottomAfterLayoutGrowth() async throws {
-        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18766/__reset")!)
+        var reset = URLRequest(url: URL(string: "http://127.0.0.1:18790/__reset")!)
         reset.httpMethod = "POST"
         _ = try await URLSession.shared.data(for: reset)
         let app = launch()

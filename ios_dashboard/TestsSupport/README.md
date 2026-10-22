@@ -29,6 +29,8 @@ xcodebuild -project ios_dashboard/SandboxedDashboard.xcodeproj \
 node ios_dashboard/TestsSupport/test_rich_renderer.cjs
 ```
 
+`OrbFlowUITests.testMissionAccessApproveDenyAndRevoke` needs `orb_fixture_server.py --port 18790` (pending request acc-1, live grant acc-2; set `TEST_RUNNER_ORB_SHOT_DIR` to also write PNGs).
+
 `OrbTurnStatusUITests` uses the default fixture (18766): `agent-work` is a coding turn
 in progress (task list in harness vocabulary, edits, a running command, turn started
 95 s before each request), `agent-done` is the finished turn with `github_pr`, and
