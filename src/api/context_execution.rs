@@ -64,8 +64,8 @@ pub async fn remote(
     if !super::projects_overview::is_plain_key(project) {
         return Err("Invalid context project".into());
     }
-    if crate::managed::is_managed_node(&node.id) {
-        return Err("Project context is not delivered to managed machines".into());
+    if let Some(passthrough) = managed_passthrough(&node.id, text) {
+        return Ok(passthrough);
     }
     let root = super::mission_payload::project_files_root(&state.config.working_dir, project);
     let metadata = state
@@ -128,9 +128,30 @@ pub async fn remote(
         prepared.root.to_string_lossy().into_owned(),
     ))
 }
+/// Managed (untrusted) machines receive no project context or project skills:
+/// the turn proceeds with the prompt as written. Refusing here would block
+/// every child mission, since children inherit their parent's project.
+pub(crate) fn managed_passthrough(node_id: &str, text: &str) -> Option<(String, String)> {
+    crate::managed::is_managed_node(node_id).then(|| (text.to_string(), String::new()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_nodes_get_the_prompt_without_project_context() {
+        // Regression: a child with project "default" placed on a managed VM
+        // must dispatch (prompt unchanged, no skill source), not fail.
+        assert_eq!(
+            managed_passthrough("managed-mm7c7aedcm", "Run the 20 GB job @context/AGENTS.md"),
+            Some((
+                "Run the 20 GB job @context/AGENTS.md".to_string(),
+                String::new()
+            ))
+        );
+        assert_eq!(managed_passthrough("ashur", "x"), None);
+    }
     #[test]
     fn context_reference_preserves_real_context_directory() {
         let mut manifest = Manifest::default();

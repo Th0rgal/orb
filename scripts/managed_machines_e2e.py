@@ -58,6 +58,7 @@ def main():
     ap.add_argument("--env-file", default="/etc/open_agent/open_agent.env")
     ap.add_argument("--size", default="small")
     ap.add_argument("--keep", action="store_true", help="do not destroy (debug)")
+    ap.add_argument("--child-backend", default="claudecode")
     args = ap.parse_args()
     if os.environ.get("BOAT_E2E") != "1":
         print("skipped: set BOAT_E2E=1")
@@ -98,6 +99,31 @@ def main():
         ev["mission_status"] = status
         ev["job_output_has_marker"] = "managed-e2e-ok" in out
         ok = ok and ev["job_output_has_marker"]
+        ev["raw_mission_completed"] = status == "completed"
+        ok = ok and ev["raw_mission_completed"]
+        # Typed child harness on the VM, inheriting a project (the real
+        # "parent spawns VM, starts a subagent on it" path).
+        st, child = api.call("POST", "/api/control/missions", {
+            "title": f"managed e2e child on {node}", "remote_node_id": node,
+            "backend": args.child_backend, "project": "default",
+            "prompt": "Run the shell command `echo managed-child-ok && nproc` and reply with exactly its output.",
+            "idempotency_key": f"managed-e2e-child-{mid}"})
+        ev["child_create_status"] = st
+        child_id = (child or {}).get("id")
+        ev["child_mission_id"] = child_id
+        cstatus = None
+        for _ in range(80):
+            time.sleep(5)
+            st, cm = api.call("GET", f"/api/control/missions/{child_id}")
+            cstatus = (cm or {}).get("status")
+            if cstatus and cstatus not in ("active", "pending"):
+                break
+        st, cevs = api.call("GET", f"/api/control/missions/{child_id}/events?limit=40")
+        ctext = json.dumps(cevs)
+        ev["child_status"] = cstatus
+        ev["child_output_has_marker"] = "managed-child-ok" in ctext
+        ev["child_refused_context"] = "not delivered to managed" in ctext
+        ok = ok and ev["child_output_has_marker"] and not ev["child_refused_context"]
     finally:
         if not args.keep:
             st, d = api.call("DELETE", f"/api/managed-machines/{mid}", timeout=120)
