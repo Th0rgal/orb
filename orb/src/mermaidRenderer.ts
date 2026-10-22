@@ -129,15 +129,27 @@ function size(svg: string): { width: number; height: number } {
   return vb ? { width: Number(vb[1]), height: Number(vb[2]) } : { width: 0, height: 0 };
 }
 
+/** As an <img> data URL: the SVG can then neither run script nor load anything (fonts, images, CSS) from the network. */
+export function svgDataUrl(svg: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 /** Sanitise mermaid's output: no scripts, event handlers, external references or foreign HTML beyond plain labels. */
 /** Directives (`%%{init: …}%%`) are removed before parsing: they could restyle the diagram. */
 export function stripDirectives(source: string): string {
   return source.replace(/%%\{[\s\S]*?\}%%/g, "");
 }
 
-/** CSS may only reference fragments in the same SVG (markers, gradients): no url() to anything else, no @import. */
-export function neutralizeCss(css: string): string {
-  return css.replace(/@import[^;]*;?/gi, "").replace(/url\(\s*(['"]?)(?!#)[^)]*\)/gi, "none");
+/**
+ * Author CSS is kept only when it is plainly harmless: no escapes, no image-set,
+ * no @-rule except mermaid's own @keyframes, and url() only to a fragment of the
+ * same SVG. Anything else is dropped whole rather than rewritten.
+ */
+export function safeCss(css: string): boolean {
+  if (/\\|image-set|-webkit-image-set|expression\s*\(/i.test(css)) return false;
+  if (/@(?!keyframes\b)/i.test(css)) return false;
+  for (const m of css.matchAll(/url\s*\(\s*(['"]?)([^)]*)\)/gi)) if (!m[2].trim().startsWith("#")) return false;
+  return true;
 }
 
 let hooked = false;
@@ -145,11 +157,11 @@ function installHooks(purify: Purify) {
   if (hooked) return;
   hooked = true;
   purify.addHook("uponSanitizeElement", (node, data) => {
-    if (data.tagName === "style" && node.textContent) node.textContent = neutralizeCss(node.textContent);
+    if (data.tagName === "style" && !safeCss(node.textContent ?? "")) node.textContent = "";
   });
   purify.addHook("uponSanitizeAttribute", (_node, data) => {
-    if (data.attrName === "style") data.attrValue = neutralizeCss(data.attrValue);
-    else if (/url\(/i.test(data.attrValue) && !/^\s*url\(\s*#[^)]*\)\s*$/i.test(data.attrValue)) data.keepAttr = false;
+    if (data.attrName === "style") { if (!safeCss(data.attrValue)) data.keepAttr = false; }
+    else if (/url\s*\(|\\/i.test(data.attrValue) && !/^\s*url\(\s*#[^)\\]*\)\s*$/i.test(data.attrValue)) data.keepAttr = false;
   });
 }
 
@@ -160,7 +172,7 @@ export function sanitizeSvg(purify: Purify, svg: string): string {
     // Mermaid draws labels as HTML inside <foreignObject>; DOMPurify checks lower-cased names.
     ADD_TAGS: ["foreignobject"],
     HTML_INTEGRATION_POINTS: { foreignobject: true },
-    FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "input", "button", "textarea", "a", "image", "use"],
+    FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "input", "button", "textarea", "a", "image", "use", "set", "animate", "animateMotion", "animateTransform", "animatemotion", "animatetransform", "link", "img", "video", "audio", "source"],
     FORBID_ATTR: ["href", "xlink:href", "action", "formaction", "srcset", "src"],
     ALLOW_DATA_ATTR: false,
   });
@@ -176,7 +188,9 @@ async function run(raw: string, theme: MermaidTheme): Promise<MermaidResult> {
       secure: ["secure", "securityLevel", "startOnLoad", "maxTextSize", "maxEdges", "suppressErrorRendering", "theme", "themeVariables", "themeCSS", "fontFamily", "darkMode", "htmlLabels", "dompurifyConfig"],
       // Labels are measured in the live document before our own pass: keep resources out of them too.
       dompurifyConfig: { FORBID_TAGS: ["img", "image", "a", "video", "audio", "source", "picture", "iframe", "object", "embed", "link", "style"], FORBID_ATTR: ["href", "xlink:href", "src", "srcset", "style", "background"] },
-      startOnLoad: false, securityLevel: "strict", theme: "base", themeVariables: theme, fontFamily: theme.fontFamily,
+      startOnLoad: false, securityLevel: "strict", theme: "base", themeVariables: theme,
+      // Mermaid fills ER cardinality circles white and draws gantt grids light regardless of theme.
+      themeCSS: `marker circle { fill: ${theme.background}; } .grid .tick line { stroke: ${theme.clusterBorder}; opacity: 1; }`, fontFamily: theme.fontFamily,
       maxTextSize: MAX_SOURCE, maxEdges: 800, suppressErrorRendering: true, htmlLabels: true,
       flowchart: { useMaxWidth: false, padding: 12, nodeSpacing: 36, rankSpacing: 44, curve: "basis" },
       sequence: { useMaxWidth: false, actorMargin: 44, boxMargin: 8, noteMargin: 10, messageMargin: 32, mirrorActors: false },

@@ -10,17 +10,20 @@ test("diagram is the default view and the toggle switches to the source", async 
   await page.goto("/tests/mermaid.html?only=flowchart");
   const block = page.locator(".mermaid-block");
   await expect(block).toHaveAttribute("data-state", "ready");
-  await expect(block.locator(".mermaid-svg svg")).toBeVisible();
+  await expect(block.locator(".mermaid-svg")).toBeVisible();
   await expect(block.getByRole("button", { name: "Diagram", exact: true })).toHaveAttribute("aria-pressed", "true");
   await block.getByRole("button", { name: "Code", exact: true }).click();
   await expect(block.locator("pre code")).toContainText("flowchart LR");
-  await expect(block.locator("svg.flowchart, .mermaid-svg")).toHaveCount(0);
+  await expect(block.locator(".mermaid-svg")).toHaveCount(0);
   await block.getByRole("button", { name: "Diagram", exact: true }).click();
-  await expect(block.locator(".mermaid-svg svg")).toBeVisible();
+  await expect(block.locator(".mermaid-svg")).toBeVisible();
   await block.getByRole("button", { name: "Copy diagram source" }).click();
   expect(await page.evaluate(() => (window as any).copied)).toBe(mermaidSamples.flowchart);
   // No script or handler survives sanitising.
-  expect(await block.locator("script, [onclick], [onload]").count()).toBe(0);
+  // The diagram is an <img> data URL: it cannot run script or fetch anything.
+  const src = await block.locator("img.mermaid-svg").getAttribute("src");
+  expect(src).toMatch(/^data:image\/svg\+xml/);
+  expect(decodeURIComponent(src!)).not.toMatch(/<script|onclick|onload/i);
 });
 
 test("invalid syntax falls back to the source with the parser message", async ({ page }) => {
@@ -51,12 +54,12 @@ test("streaming shows the source and renders once when the fence closes", async 
   await block.screenshot({ path: path.join(shots, "streaming-dark.png") });
   await page.evaluate((t) => (window as any).setText(t), src + "\n```\n\nDone.");
   await expect(block).toHaveAttribute("data-state", "ready");
-  await expect(block.locator(".mermaid-svg svg")).toBeVisible();
-  const id = await block.locator(".mermaid-svg svg").getAttribute("id");
+  await expect(block.locator(".mermaid-svg")).toBeVisible();
+  await block.locator(".mermaid-svg").evaluate((el) => { (el as any).__orbMark = 1; });
   // More text after the diagram does not render it again.
   await page.evaluate((t) => (window as any).setText(t), src + "\n```\n\nDone. And some more words after it.");
   await page.waitForTimeout(400);
-  expect(await page.locator(".mermaid-block .mermaid-svg svg").getAttribute("id")).toBe(id);
+  expect(await page.locator(".mermaid-block .mermaid-svg").evaluate((el) => (el as any).__orbMark)).toBe(1);
 });
 
 test("wide diagrams scroll inside the block and expand supports zoom", async ({ page }) => {
@@ -68,7 +71,7 @@ test("wide diagrams scroll inside the block and expand supports zoom", async ({ 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await block.getByRole("button", { name: "Expand diagram" }).click();
   const dialog = page.getByRole("dialog", { name: "Diagram", exact: true });
-  await expect(dialog.locator(".mermaid-zoom svg")).toBeVisible();
+  await expect(dialog.locator(".mermaid-zoom")).toBeVisible();
   const before = await dialog.locator(".mermaid-zoom-level").textContent();
   await dialog.getByRole("button", { name: "Zoom in" }).click();
   await expect(dialog.locator(".mermaid-zoom-level")).not.toHaveText(before!);
@@ -100,7 +103,7 @@ test("a hostile diagram renders neutralised", async ({ page }) => {
   await page.evaluate((t) => (window as any).setText(t), "```mermaid\n" + src + "\n```");
   const block = page.locator(".mermaid-block");
   await expect(block).toHaveAttribute("data-state", "ready");
-  const html = await block.locator(".mermaid-svg").innerHTML();
+  const html = decodeURIComponent((await block.locator(".mermaid-svg").getAttribute("src"))!);
   expect(html).not.toMatch(/evil\.example|javascript:|onerror|@import|<a[\s>]|href=/i);
   expect(html).not.toContain("#ff0000");
   await page.waitForTimeout(300);

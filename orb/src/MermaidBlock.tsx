@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-j
 import { copyText } from "./clipboard";
 import { Dialog } from "./Dialog";
 import { CheckIcon, CopyIcon } from "./icons";
-import { cachedMermaid, orbMermaidTheme, renderMermaid, type MermaidResult, type MermaidTheme } from "./mermaidRenderer";
+import { cachedMermaid, orbMermaidTheme, svgDataUrl, renderMermaid, type MermaidResult, type MermaidTheme } from "./mermaidRenderer";
 
 /** Fenced languages rendered as diagrams. */
 export const isMermaidLang = (lang: string) => /^\s*mermaid\s*$/i.test(lang);
@@ -84,7 +84,7 @@ export function MermaidBlock(p: { text: string; complete: boolean }) {
         <Show when={svg()} fallback={<div class="mermaid-skeleton" aria-label="Rendering diagram" role="status"><span /><span /><span /></div>}>
           {(r) => (
             <div class="mermaid-canvas" tabIndex={0} aria-label="Diagram" onDblClick={() => setExpanded(true)}>
-              <div class="mermaid-svg" style={{ width: `${r().width}px`, "max-width": "100%", "min-width": `${Math.round(r().width * MIN_FIT_SCALE)}px` }} innerHTML={r().svg} />
+              <img class="mermaid-svg" alt="Diagram" draggable={false} src={svgDataUrl(r().svg)} style={{ width: `${r().width}px`, "max-width": "100%", "min-width": `${Math.round(r().width * MIN_FIT_SCALE)}px` }} />
             </div>
           )}
         </Show>
@@ -125,7 +125,7 @@ function MermaidViewer(p: { svg: string; width: number; height: number; onClose:
         onPointerDown={(e) => { if (e.button !== 0 || (e.target as Element).closest(".mermaid-zoom-controls")) return; stage.setPointerCapture(e.pointerId); const o = pos(); drag = { x: e.clientX, y: e.clientY, ox: o.x, oy: o.y }; }}
         onPointerMove={(e) => { if (drag) setPos({ x: drag.ox + e.clientX - drag.x, y: drag.oy + e.clientY - drag.y }); }}
         onPointerUp={() => { drag = undefined; }} onPointerCancel={() => { drag = undefined; }}>
-        <div class="mermaid-zoom" style={{ width: `${p.width}px`, height: `${p.height}px`, transform: `translate(${pos().x}px, ${pos().y}px) scale(${scale()})` }} innerHTML={p.svg} />
+        <img class="mermaid-zoom" alt="Diagram" draggable={false} src={svgDataUrl(p.svg)} style={{ width: `${p.width}px`, height: `${p.height}px`, transform: `translate(${pos().x}px, ${pos().y}px) scale(${scale()})` }} />
         <div class="mermaid-zoom-controls">
           <button type="button" class="icon-btn" aria-label="Zoom out" onClick={() => zoomAt(0.8)}>−</button>
           <span class="mermaid-zoom-level">{Math.round(scale() * 100)}%</span>

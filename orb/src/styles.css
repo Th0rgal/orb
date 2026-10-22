@@ -1923,12 +1923,8 @@ button.fork-trigger:hover { color: var(--fg); }
 .md .mermaid-block pre { padding: 12px 14px; }
 .mermaid-canvas { overflow-x: auto; overflow-y: hidden; padding: 18px 16px; overscroll-behavior-x: contain; cursor: zoom-in; }
 .mermaid-canvas:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -2px; }
-.mermaid-svg { margin: 0 auto; }
-/* Mermaid fills some markers (ER cardinality circles) with white regardless of theme. */
-:is(.mermaid-svg, .mermaid-zoom) svg marker circle { fill: var(--bg-inset); }
-:is(.mermaid-svg, .mermaid-zoom) svg .grid .tick line { stroke: var(--stroke-strong); }
-.mermaid-svg svg, .mermaid-zoom svg { display: block; width: 100%; height: auto; max-width: none; }
-.mermaid-svg svg { font-family: var(--sans); }
+.mermaid-svg { display: block; margin: 0 auto; height: auto; user-select: none; }
+
 .mermaid-skeleton { display: grid; gap: 10px; padding: 22px 18px; }
 .mermaid-skeleton span { height: 12px; border-radius: var(--radius-xs); background: linear-gradient(90deg, var(--bg-code), var(--bg-active), var(--bg-code)); background-size: 200% 100%; animation: mermaid-shimmer 1.4s ease-in-out infinite; }
 .mermaid-skeleton span:nth-child(1) { width: 46%; } .mermaid-skeleton span:nth-child(2) { width: 72%; } .mermaid-skeleton span:nth-child(3) { width: 58%; }
@@ -1940,7 +1936,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .dlg-mermaid .dlg-body { flex: 1; overflow: hidden; padding: 0; display: flex; }
 .mermaid-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; background: var(--bg-inset); }
 .mermaid-stage:active { cursor: grabbing; }
-.mermaid-zoom { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.mermaid-zoom { max-width: none; user-select: none; pointer-events: none; position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
 .mermaid-zoom-controls { position: absolute; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--bg-btn); border: 1px solid var(--stroke); box-shadow: var(--composer-shadow); font: 12px var(--sans); color: var(--fg-2); cursor: default; }
 .mermaid-zoom-controls .icon-btn { font-size: 15px; }
 .mermaid-zoom-level { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }

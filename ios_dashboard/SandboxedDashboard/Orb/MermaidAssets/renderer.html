@@ -21,23 +21,32 @@ const message = (e) => String((e && (e.message || e.str)) || e || "Unknown synta
 // Same policy as desktop (orb/src/mermaidRenderer.ts): no directives, no links,
 // scripts or handlers, and CSS may only reference fragments inside the SVG.
 const stripDirectives = (src) => src.replace(/%%\{[\s\S]*?\}%%/g, "");
-const neutralizeCss = (css) => css.replace(/@import[^;]*;?/gi, "").replace(/url\(\s*(['"]?)(?!#)[^)]*\)/gi, "none");
-const FORBIDDEN = new Set(["script", "iframe", "object", "embed", "form", "input", "button", "textarea", "a", "image", "use", "img", "link", "video", "audio", "source"]);
+// Author CSS is kept only when plainly harmless (no escapes, image-set, @-rules
+// other than @keyframes, url() only to #fragments); otherwise it is dropped whole.
+function safeCss(css) {
+  if (/\\|image-set|expression\s*\(/i.test(css)) return false;
+  if (/@(?!keyframes\b)/i.test(css)) return false;
+  for (const m of css.matchAll(/url\s*\(\s*(['"]?)([^)]*)\)/gi)) if (!m[2].trim().startsWith("#")) return false;
+  return true;
+}
+const FORBIDDEN = new Set(["script", "iframe", "object", "embed", "form", "input", "button", "textarea", "a", "image", "use", "img", "link", "video", "audio", "source", "set", "animate", "animatemotion", "animatetransform", "iframe"]);
 function sanitize(svg) {
-  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
-  if (doc.querySelector("parsererror")) throw new Error("Rendered diagram was not valid SVG");
-  for (const el of [...doc.querySelectorAll("*")]) {
+  // Parsed as HTML (mermaid serialises labels like <br> that way), re-serialised as XML.
+  const root = new DOMParser().parseFromString(svg, "text/html").querySelector("svg");
+  if (!root) throw new Error("Rendered diagram was not valid SVG");
+  for (const el of [...root.querySelectorAll("*")]) {
     if (FORBIDDEN.has(el.localName.toLowerCase())) { el.remove(); continue; }
-    if (el.localName === "style") el.textContent = neutralizeCss(el.textContent || "");
+    if (el.localName === "style" && !safeCss(el.textContent || "")) el.textContent = "";
     for (const attr of [...el.attributes]) {
       const name = attr.name.toLowerCase(), value = attr.value;
       if (name.startsWith("on") || name === "href" || name.endsWith(":href") || name === "src" || name === "srcset" || name === "action" || name === "formaction") el.removeAttribute(attr.name);
-      else if (name === "style") el.setAttribute(attr.name, neutralizeCss(value));
-      else if (/url\(/i.test(value) && !/^\s*url\(\s*#[^)]*\)\s*$/i.test(value)) el.removeAttribute(attr.name);
+      else if (name === "style") { if (!safeCss(value)) el.removeAttribute(attr.name); }
+      else if (/url\s*\(|\\/i.test(value) && !/^\s*url\(\s*#[^)]*\)\s*$/i.test(value)) el.removeAttribute(attr.name);
       else if (/^\s*javascript:/i.test(value)) el.removeAttribute(attr.name);
     }
   }
-  return new XMLSerializer().serializeToString(doc.documentElement);
+  for (const attr of [...root.attributes]) if (attr.name.toLowerCase().startsWith("on")) root.removeAttribute(attr.name);
+  return new XMLSerializer().serializeToString(root);
 }
 let seq = 0;
 window.orbRender = async (raw) => {

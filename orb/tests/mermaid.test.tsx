@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@solidjs/testing-library";
 import DOMPurify from "dompurify";
 import { MdView, parseMarkdown } from "../src/Markdown";
-import { neutralizeCss, stripDirectives, cachedMermaid, clearMermaidCache, hashSource, mermaidCacheSize, renderMermaid, sanitizeSvg, setMermaidLoader } from "../src/mermaidRenderer";
+import { safeCss, stripDirectives, cachedMermaid, clearMermaidCache, hashSource, mermaidCacheSize, renderMermaid, sanitizeSvg, setMermaidLoader } from "../src/mermaidRenderer";
 
 const theme = { primaryColor: "#123456" };
 let parse: ReturnType<typeof vi.fn>, renderFn: ReturnType<typeof vi.fn>;
@@ -63,8 +63,11 @@ it("does not render while the fence is open", async () => {
 
 it("neutralises directives, external CSS and links", async () => {
   expect(stripDirectives('%%{init: {"themeCSS": "x"}}%%\nflowchart LR\nA-->B')).toBe("\nflowchart LR\nA-->B");
-  expect(neutralizeCss('@import "https://e.x/a.css"; .n{background:url(https://e.x/p.png)} .m{marker-end:url(#arrow)}')).toBe(' .n{background:none} .m{marker-end:url(#arrow)}');
-  const out = sanitizeSvg(DOMPurify, '<svg><style>@import url(https://e.x/a.css); .a{fill:url("https://e.x/t")}</style><rect style="fill:url(https://e.x/q)" filter="url(https://e.x/f)" marker-end="url(#m)"/><a xlink:href="https://e.x"><text>t</text></a></svg>');
+  expect(safeCss(".m{marker-end:url(#arrow)} @keyframes dash { to { stroke-dashoffset: 0 } }")).toBe(true);
+  for (const bad of ['@import "https://e.x/a.css";', ".n{background:url(https://e.x/p.png)}", ".n{background:u\\72l(https://e.x/p.png)}", ".n{background:\\75rl(x)}",
+    ".n{background-image:image-set('https://e.x/p.png' 1x)}", "@font-face{font-family:x;src:local(a)}", "@media all{.a{fill:red}}", ".n{fill:url( 'https://e.x' )}"]) expect(safeCss(bad), bad).toBe(false);
+  const out = sanitizeSvg(DOMPurify, '<svg><style>@import url(https://e.x/a.css); .a{fill:url("https://e.x/t")}</style><rect style="fill:u\\rl(https://e.x/q)" filter="url(https://e.x/f)" marker-end="url(#m)"/><a xlink:href="https://e.x"><text>t</text></a><set attributeName="href" to="https://e.x"/><animate attributeName="fill"/><animateTransform/></svg>');
+  expect(out).not.toMatch(/<set|<animate/i);
   expect(out).not.toMatch(/e\.x|@import|href/);
   expect(out).toContain('marker-end="url(#m)"');
   await renderMermaid('%%{init: {"theme":"dark"}}%%\ngraph TD\nA-->B', theme);

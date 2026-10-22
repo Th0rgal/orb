@@ -317,6 +317,8 @@ final class OrbRichTextTests: XCTestCase {
         guard case .svg(let neutral, _, _) = hostile else { return XCTFail("hostile diagram should still render: \(hostile)") }
         XCTAssertNil(neutral.range(of: #"evil\.example|javascript:|@import|<a[\s>]|href="#, options: [.regularExpression, .caseInsensitive]))
         XCTAssertFalse(neutral.contains("#ff0000"))
+        let escaped = await renderer.render("flowchart LR\n  A --> B\n  classDef x fill:#123,stroke:u\\72l(https://evil.example/e)\n  class A x")
+        if case .svg(let svg, _, _) = escaped { XCTAssertFalse(svg.contains("evil.example")) }
 
         for source in ["sequenceDiagram\n  A->>B: hi", "classDiagram\n  class A", "stateDiagram-v2\n  [*] --> A", "erDiagram\n  A ||--o{ B : has",
                        "gantt\n  dateFormat YYYY-MM-DD\n  section S\n  T :a, 2026-10-01, 2d", "pie\n  \"A\" : 1\n  \"B\" : 2", "mindmap\n  root((Orb))\n    A\n    B"] {
