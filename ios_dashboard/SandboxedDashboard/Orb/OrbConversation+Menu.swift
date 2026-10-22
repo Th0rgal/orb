@@ -26,6 +26,7 @@ extension OrbConversation {
             case .archive: Task { await mutate(["status": .string("acknowledged")]) }
             case .stop: Task { await cancel() }
             case .sideQuestion: sideQuestion = OrbSideQuestionRequest(parent: id ?? "", question: "")
+            case .files: showFiles = true
             case .fork: forking = true
             case .clone: cloning = true
             case .context: showContext = true

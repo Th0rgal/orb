@@ -144,7 +144,7 @@ struct OrbAssistantMessage<Trailing: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            OrbRichText(source: text, onArtifact: onArtifact)
+            OrbMessageWithFiles(text: text, onArtifact: onArtifact)
                 .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 12) {
                 Button {
@@ -317,7 +317,7 @@ struct OrbComposerBox<Top: View, Leading: View>: View {
 /// Working clock and 3 s polling do not rebuild it while a finger is on it (a rebuilt
 /// toolbar menu could swallow the first tap).
 struct OrbConversationMenu: View, Equatable {
-    enum Action { case rename, move, reopen, archive, stop, sideQuestion, fork, clone, context }
+    enum Action { case rename, move, reopen, archive, stop, sideQuestion, files, fork, clone, context }
 
     let hasMission: Bool
     let agentLabel: String
@@ -363,6 +363,7 @@ struct OrbConversationMenu: View, Equatable {
                 if local {
                     Divider()
                     Button { perform(.sideQuestion) } label: { Label("Side question (/btw)", systemImage: "bubble.left.and.text.bubble.right") }
+                    Button { perform(.files) } label: { Label("Files", systemImage: "folder") }.accessibilityIdentifier("conversation.files")
                     Button { perform(.fork) } label: { Label("Fork conversation", systemImage: "arrow.triangle.branch") }
                     Button { perform(.clone) } label: { Label("Clone", systemImage: "plus.square.on.square") }
                 }

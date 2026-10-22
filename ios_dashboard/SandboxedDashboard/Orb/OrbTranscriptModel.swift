@@ -12,6 +12,8 @@ final class OrbTranscriptModel {
     private(set) var history: [(String, String, String)] = []
     /// Completion time of each stored assistant row, by row id.
     private(set) var turnTimings: [String: OrbTurnTiming] = [:]
+    /// `metadata.shared_files` of assistant messages, for file chips (size, download url).
+    private(set) var sharedFiles: [OrbSharedFile] = []
 
     /// Work fold, changed files and open questions from `events`.
     func rebuildDerived(working: Bool) {
@@ -21,6 +23,9 @@ final class OrbTranscriptModel {
         if changedFiles != files { changedFiles = files }
         let questions = OrbPendingQuestion.extract(events)
         if questions.map(\.id) != openQuestions.map(\.id) { openQuestions = questions }
+        let shared = events.lazy.filter { $0.eventType == "assistant_message" && $0.metadata["shared_files"] != nil }
+            .flatMap { OrbFileRefs.sharedFiles($0.metadata.mapValues(\.value)) }
+        if sharedFiles != Array(shared) { sharedFiles = Array(shared) }
     }
 
     /// Rebuilds the message list; returns how many rows were added (0 when unchanged or shrunk).

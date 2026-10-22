@@ -16,6 +16,7 @@ struct SandboxedDashboardApp: App {
            UserDefaults.standard.string(forKey: "api_base_url")?.hasPrefix("http://127.0.0.1:") == true {
             let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Orb")
             try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: OrbFileService.cacheRoot)
             if UserDefaults.standard.bool(forKey: "orb_test_reset_auth") { OrbCore.shared.logout() }
         }
         #endif

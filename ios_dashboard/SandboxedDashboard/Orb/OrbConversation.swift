@@ -67,9 +67,15 @@ struct OrbConversation: View {
     @State var cloning = false
     @State var forkedMission: String?
     @State var sideQuestion: OrbSideQuestionRequest?
+    /// Shared file being previewed from a chip, and the Files tab.
+    @State var fileRef: OrbFileRef?
+    @State var showFiles = false
     @FocusState var composerFocused: Bool
     @Environment(\.scenePhase) var phase
     let api = OrbCore.shared
+    var fileScope: OrbFileService.Scope {
+        OrbFileService.Scope(missionID: id, workspaceID: mission["workspace_id"].text.isEmpty ? nil : mission["workspace_id"].text)
+    }
     var draftKey: String { "draft:\(missionID ?? "new:\(project):\(folder)")" }
     var pendingKey: String { draftKey + ":pending" }
     var turns: [OrbJSON] { execution["turns"].items }
@@ -200,6 +206,9 @@ struct OrbConversation: View {
                             .background(OrbStyle.background.ignoresSafeArea(edges: .bottom))
                     }
                 }
+                .environment(\.orbFiles, OrbFileContext(scope: fileScope, shared: transcript.sharedFiles) { fileRef = $0 })
+                .sheet(item: $fileRef) { OrbFileViewerSheet(ref: $0, scope: fileScope) }
+                .sheet(isPresented: $showFiles) { OrbFilesSheet(scope: fileScope) }
                 .sheet(item: $preview) { OrbPreviewSheet(file: $0) }
                 .sheet(isPresented: $showSelection) { OrbAgentPicker(selection: $selection, existing: id != nil) }
                 .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }

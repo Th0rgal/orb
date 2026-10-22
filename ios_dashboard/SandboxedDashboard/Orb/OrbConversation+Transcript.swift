@@ -144,7 +144,7 @@ extension OrbConversation {
             turnChangesCard
         }
         if working && !visibleLiveText.isEmpty {
-            OrbRichText(source: visibleLiveText, onArtifact: { path in
+            OrbMessageWithFiles(text: visibleLiveText, streaming: true, onArtifact: { path in
                 Task { await openWorkspaceOrArtifact(path) }
             })
             .transition(.opacity)
