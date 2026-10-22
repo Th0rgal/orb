@@ -1,5 +1,7 @@
 import { swallow } from "./log";
-import { turnStartedAt } from "./TurnStatus";
+import { seenTurnStart, turnStartedAt } from "./TurnStatus";
+import { turnAgo, turnDate, turnTiming, workedFor, type TurnTiming } from "./turnTiming";
+import { useTooltip } from "./Tooltip";
 import { formatElapsed, useNow } from "./time";
 import {AutomaticReminder, reminderMessages} from "./AutomaticReminder";
 import { ErrorToast } from "./toast";
@@ -650,8 +652,9 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   // correction when they are measured is small instead of hundreds of px.
   const wrapped=(text:string,width:number)=>text.split('\n').reduce((n,line)=>n+Math.max(1,Math.ceil(line.length/width)),0);
   const estimateTurn=(turn:{items:Grouped[]})=>turn.items.reduce((h,item)=>h+(item.kind==='user'?54+21*wrapped(item.text,92):item.kind==='text'?12+23*wrapped(item.text,100):item.kind==='error'?64:34),0);
+  const turnTip = useTooltip<TurnTiming>(TURN_TIP_ID, t => <><div class="row-tip-title">{turnDate(t.completedAt)}</div><Show when={t.workedMs !== undefined}><div class="row-tip-meta">Worked for {workedFor(t.workedMs!)}</div></Show></>, { placement: "top-end", width: 200, class: "turn-tip" });
   return (
-    <>
+    <TurnTipContext.Provider value={turnTip}>
       <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
@@ -672,12 +675,14 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
               </Show>;
             case "think":
               return <ThoughtSequence items={[item]} />;
-            case "text":
+            case "text": {
+              const timing = createMemo(() => item.live ? undefined : turnTiming(userStart(turn.items[0]), item.at), undefined, { equals: (a, b) => a?.completedAt === b?.completedAt && a?.workedMs === b?.workedMs });
               return (
                 <div class={`st-text ${item.live ? "live" : ""}`}>
-                  {p.renderText ? p.renderText(item, <AssistantText text={item.text} live={item.live} />) : <AssistantText text={item.text} live={item.live} />}
+                  {p.renderText ? p.renderText(item, <AssistantText text={item.text} live={item.live} timing={timing()} />) : <AssistantText text={item.text} live={item.live} timing={timing()} />}
                 </div>
               );
+            }
             case "tool":
               return <ToolRow item={item} />;
             case "error":
@@ -691,11 +696,24 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
       <Show when={checklist()?.tasks.length}>
         <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} />
       </Show>
-    </>
+      {turnTip.surface}
+    </TurnTipContext.Provider>
   );
 }
 
-function AssistantText(p: { text: string; live?: boolean }) {
+const TURN_TIP_ID = "turn-time-tip";
+type TurnTip = { bind: (value: TurnTiming) => Record<string, (event: never) => void> };
+/** One tooltip for every response row, so rows add no window listeners. */
+const TurnTipContext = createContext<TurnTip>();
+function TurnTime(p: { timing: TurnTiming }) {
+  const now = useNow(60_000);
+  const tip = useContext(TurnTipContext);
+  const label = createMemo(() => turnAgo(p.timing.completedAt, now()));
+  return <span class="response-time" tabindex="0" {...(tip?.bind(p.timing) ?? {})}><time datetime={new Date(p.timing.completedAt).toISOString()} aria-label={`Completed ${turnDate(p.timing.completedAt)}`}>{label()}</time></span>;
+}
+const userStart = (item: Grouped | undefined) => item?.kind === "user" ? item.at ?? seenTurnStart(item.messageId ?? item.key) : undefined;
+
+function AssistantText(p: { text: string; live?: boolean; timing?: TurnTiming }) {
   const references = useContext(FileReferenceContext);
   const content = createMemo(() => remoteLog(p.text));
   const [copied, setCopied] = createSignal(false);
@@ -724,6 +742,7 @@ function AssistantText(p: { text: string; live?: boolean }) {
         <button class="icon-btn response-copy" aria-label={copied() ? "Response copied" : "Copy response"} title={copied() ? "Copied" : "Copy response"} onClick={() => void copy()}>
           <Show when={copied()} fallback={<Ic.CopyIcon size={14} />}><Ic.CheckIcon size={14} /></Show>
         </button>
+        <Show when={!p.live && p.timing}>{timing => <TurnTime timing={timing()} />}</Show>
         <span class="sr-only" role="status">{copied() ? "Response copied" : ""}</span>
         <Show when={copyError()}><span class="response-copy-error" role="status">{copyError()}</span></Show>
       </div>
