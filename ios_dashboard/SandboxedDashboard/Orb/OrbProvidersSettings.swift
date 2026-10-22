@@ -162,7 +162,7 @@ struct OrbProvidersSettings: View {
         if p["enabled"] == .bool(false) { state = "Disabled" }
         else if p["status"]["type"].text == "needs_reauth" || detail["status"].text == "needs_reauth" { state = "Reconnect" }
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
-        else if OrbProviderQuota.windows(detail).contains(where: { $0.1 >= 1 }) { state = "Quota exhausted" }
+        else if let quota = OrbProviderQuota.quotaExhaustedLabel(OrbProviderQuota.windows(detail)) { state = quota }
         else { state = p["status"]["type"].text.replacingOccurrences(of: "_", with: " ") }
         return "\(p["provider_type"].text) · \(state)"
     }
@@ -248,6 +248,23 @@ struct OrbUsageLimitStatus: Equatable {
 
 struct OrbProviderQuota: View {
     let value: OrbJSON
+    /// "Gemini · 5h" belongs to the Gemini pool; a plain "5h" to the whole account ("").
+    static func quotaPool(_ label: String) -> String {
+        guard let range = label.range(of: " · ") else { return "" }
+        return String(label[..<range.lowerBound])
+    }
+    /// Same as orb/src/providerUsage.ts quotaExhaustedLabel; spec: shared/orb-spec/fixtures/quota-exhausted.json.
+    static func quotaExhaustedLabel(_ windows: [(String, Double)]) -> String? {
+        var pools: [String] = [], spent = Set<String>()
+        for (label, used) in windows {
+            let pool = quotaPool(label)
+            if !pools.contains(pool) { pools.append(pool) }
+            if used >= 1 { spent.insert(pool) }
+        }
+        if spent.isEmpty { return nil }
+        if spent.contains("") || spent.count == pools.count { return "Quota exhausted" }
+        return pools.filter { spent.contains($0) }.joined(separator: ", ") + " quota exhausted"
+    }
     static func windows(_ value: OrbJSON) -> [(String, Double)] {
         var result: [(String, Double)] = []
         func add(_ label: String, _ key: String, scale: Double = 100, remaining: Bool = false) {

@@ -1714,7 +1714,6 @@ button.fork-trigger:hover { color: var(--fg); }
 .p-usage-chip { flex-direction: column; gap: 3px; }
 .p-usage-chip .p-usage-label { width: auto; }
 .p-usage-chip .p-usage-pct { min-width: 30px; text-align: center; font-size: 12px; }
-.p-acc .s-row-title { overflow-wrap: anywhere; }
 @media (max-width: 600px) { .p-usage.compact { gap: 8px; margin-left: 4px; } }
 
 .m-list.s-card { gap: 0; }
@@ -2825,8 +2824,6 @@ select.orb-select-native:disabled { cursor: default; }
 /* Subscription meters use the entire account body, with metadata above. */
 .p-account-header { display:flex;align-items:center;padding-right:10px; }
 .p-account-header > .p-acc { flex:1;min-width:0; }
-.p-account-header .s-row-title { display:flex;flex-wrap:wrap;gap:4px 10px; }
-.p-account-email { font-size:12px;font-weight:400;color:var(--fg-3);overflow-wrap:anywhere; }
 .p-account-menu { flex:none;color:var(--fg-3);font-size:18px; }
 .p-acc-body { display:flex;flex-direction:column;align-items:stretch;gap:8px; }
 .p-acc-actions { align-self:flex-end; }
@@ -2837,7 +2834,24 @@ select.orb-select-native:disabled { cursor: default; }
 .p-usage-grid .p-bar { flex:none;width:100%;height:4px; }
 .p-usage.compact .p-usage-chip { flex-direction:row;gap:5px; }
 .p-usage.compact .p-usage-pct { font-size:11px;min-width:0; }
-@media(max-width:600px){.p-account-email{font-size:11px}.p-usage.compact{gap:6px;flex-wrap:wrap;justify-content:flex-end}.p-acc-body{padding-left:14px}}
+/* Account rows: the email gives way (ellipsis) before any quota number does.
+   Chips never shrink; under 520px the row keeps only the most-used chip + "+N". */
+.p-account-header { container-type:inline-size; }
+.p-acc > .s-row-text { flex:1 1 0;min-width:0; }
+.p-acc > .p-usage.compact { flex:none;overflow:visible; }
+.p-account-header .s-row-title { display:flex;align-items:baseline;gap:10px;min-width:0;white-space:nowrap; }
+.p-account-name { flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis; }
+.p-account-email { flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:12px;font-weight:400;color:var(--fg-3); }
+.p-usage.compact .p-usage-pct, .p-usage-more { font-variant-numeric:tabular-nums;color:var(--fg-3); }
+.p-usage.compact .p-usage-chip.exhausted .p-usage-pct, .p-usage.compact .p-usage-chip.exhausted .p-usage-label { color:var(--amber);font-weight:600; }
+.p-usage-more { display:none;font-size:11px; }
+.p-acc .s-row-desc .p-st { white-space:nowrap; }
+@container (max-width:520px) {
+  .p-usage.compact .p-usage-chip:not(.top) { display:none; }
+  .p-usage-more { display:inline; }
+  .p-account-email { font-size:11px; }
+}
+@media(max-width:600px){.p-acc-body{padding-left:14px}}
 
 .user-origin { display: block; color: var(--fg-3); font-size: 11px; line-height: 1.4; margin-bottom: 7px; font-weight: 400; }
 
@@ -3753,8 +3767,6 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-decline { margin-left: auto; color: var(--fg-3); }
 .bw-decline:hover { color: var(--red); }
 .bw-subhead { font-size: 12px; font-weight: 500; color: var(--fg-3); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
-.p-acc > .s-row-text { flex: 1 1 auto; min-width: 160px; }
-.p-acc > .p-usage.compact { flex: 0 1 auto; }
 
 /* Secrets page: pending requests in the notification card's shape. */
 .bw-requests { display: block; border: 1px solid var(--overlay-border); border-radius: 10px; overflow: hidden; background: var(--overlay-surface); margin-bottom: 10px; }

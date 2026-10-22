@@ -162,6 +162,22 @@ internal fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> 
     return result
 }
 
+/** "Gemini · 5h" belongs to the Gemini pool; a plain "5h" to the whole account (""). */
+internal fun quotaPool(label: String): String = label.indexOf(" · ").let { if (it < 0) "" else label.substring(0, it) }
+
+/** Same as orb/src/providerUsage.ts quotaExhaustedLabel; spec: shared/orb-spec/fixtures/quota-exhausted.json. */
+internal fun quotaExhaustedLabel(windows: List<Pair<String, Double>>): String? {
+    val pools = LinkedHashMap<String, Boolean>()
+    for ((label, used) in windows) {
+        val pool = quotaPool(label)
+        pools[pool] = (pools[pool] ?: false) || used >= 1.0
+    }
+    val spent = pools.filterValues { it }.keys
+    if (spent.isEmpty()) return null
+    if ("" in spent || spent.size == pools.size) return "Quota exhausted"
+    return spent.joinToString(", ") + " quota exhausted"
+}
+
 internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String {
     val providerType = provider.str("provider_type", "type") ?: ""
     val statusObj = provider.dict("status")
@@ -172,8 +188,7 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
         provider.bool("enabled") == false -> "Disabled"
         statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Reconnect"
         detailError.isNotEmpty() -> "Usage unavailable"
-        providerQuotaWindows(detail).any { it.second >= 1.0 } -> "Quota exhausted"
-        else -> statusType.replace("_", " ")
+        else -> quotaExhaustedLabel(providerQuotaWindows(detail)) ?: statusType.replace("_", " ")
     }
     return if (providerType.isNotEmpty()) "$providerType · $state" else state
 }
