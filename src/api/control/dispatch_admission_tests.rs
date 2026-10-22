@@ -7452,7 +7452,14 @@ async fn native_grok_auto_track_continuation(
             command.contains(&format!("--resume '{session_id}'")),
             "{command}"
         );
-        assert!(command.ends_with(&format!("-p '{text}'")), "{command}");
+        let prompt = crate::util::with_task_list_guidance(text);
+        assert!(
+            command.ends_with(&format!(
+                "-p {}",
+                super::remote_plan::shell_single_quote(&prompt)
+            )),
+            "{command}"
+        );
     }
     // Simulate process loss after node acceptance, before the queue receipt.
     // The persisted job binding must recover even after the ledger retired.
