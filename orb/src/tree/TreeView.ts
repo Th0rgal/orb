@@ -3,6 +3,7 @@ import { folderLabel } from "../folderLabels";
 import { displayTitle } from "../goal";
 import { isWorking } from "../missionStatus";
 import { countNested, countVersions, forkTitle, holds, missionParent, nestMissions, versionLabel, type NestedMission } from "../missionTree";
+import { resolveParent, seenMission } from "../missionHierarchy";
 import { filesMovedAway, filesMovedInto } from "../moves";
 import { renamedTitle } from "../renames";
 import type { TreeNode } from "../treeModel";
@@ -15,10 +16,26 @@ export type RowData = {
   launched?: number; launchedLive?: number;
   /** Earlier versions of this conversation (forks), listed inside it; `version` marks one of them. */
   versions?: number; version?: boolean;
+  /** Stand-in for a parent that is not loaded yet; its children are held inside it. */
+  placeholder?: boolean;
 };
 export type Node = TreeNode<RowData>;
 
 /** The folder a mission is filed under inside its project ("" = project root). */
+/**
+ * Stand-in row for a parent that is not in the loaded rows (paged out, filed in
+ * another project, or still being fetched). The resolver fetches it; only a
+ * parent confirmed gone (404) returns undefined, letting its children be roots.
+ */
+export function placeholderParent(slug: string) {
+  return (parentId: string, child: Mission): Mission | undefined => {
+    if (resolveParent(parentId) === "gone") return undefined;
+    const known = seenMission(parentId);
+    return { id: parentId, title: known?.title ?? null, status: known?.status ?? "unknown", project: known?.project ?? slug,
+      tags: (child.tags ?? []).filter(t => t.startsWith("orb-folder:")), history: [], created_at: child.created_at, updated_at: child.updated_at, orb_placeholder: true };
+  };
+}
+
 export const missionFolder = (mission: Mission) => mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice("orb-folder:".length) ?? "";
 
 /**
@@ -72,7 +89,7 @@ export function createProjectTree(deps: {
   };
   // Missions a mission launched are listed inside it. Closed by default,
   // except around the conversation that is open.
-  const rootMissions = (slug: string) => nestMissions(deps.visibleMissions(slug));
+  const rootMissions = (slug: string) => nestMissions(deps.visibleMissions(slug), { placeholder: placeholderParent(slug) });
   // A mission the project's controller created (a Hermes session, no parent
   // mission) is listed under the controller, like a child under its parent.
   const controllerLaunched = (mission: Mission) => !missionParent(mission) && mission.origin === "hermes" && !!mission.origin_session_id;
@@ -80,7 +97,7 @@ export function createProjectTree(deps: {
   const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
   const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
     const mission = nested.mission, id = `m:${mission.id}`;
-    const data: RowData = { kind: "mission", slug, mission, label: nested.version ? versionLabel(mission) : displayTitle(forkTitle(renamedTitle("mission", mission.id, mission.title))) || mission.id, ...(nested.version ? { version: true } : {}) };
+    const data: RowData = { kind: "mission", slug, mission, label: nested.version ? versionLabel(mission) : displayTitle(forkTitle(renamedTitle("mission", mission.id, mission.title))) || (mission.orb_placeholder ? "Parent mission" : mission.id), ...(nested.version ? { version: true } : {}), ...(mission.orb_placeholder ? { placeholder: true } : {}) };
     if (!nested.children.length) return { id, data };
     const selected = deps.selected();
     const open = expanded[id] ?? (!!selected?.startsWith("m:") && holds(nested, selected.slice(2)));
@@ -118,7 +135,7 @@ export function createProjectTree(deps: {
     }
     const groups = new Map<string, Node[]>();
     for (const [slug, rows] of byProject) {
-      groups.set(slug, nestMissions(rows).map(root => missionNode(slug, root)));
+      groups.set(slug, nestMissions(rows, { placeholder: placeholderParent(slug) }).map(root => missionNode(slug, root)));
     }
     for (const project of deps.projects()) {
       const job = controllers[project.slug]?.job;

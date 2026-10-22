@@ -2,9 +2,13 @@ package sh.sandboxed.dashboard.orb
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 class OrbMissionTreeTest {
+    @Before
+    fun clearHierarchy() = OrbMissionTree.resetHierarchy()
+
     private fun m(id: String, vararg extra: Pair<String, Any?>) =
         OrbRow(mapOf("id" to id, "status" to "completed", "updated_at" to "2026-10-19T10:00:00Z") + extra)
 
@@ -59,5 +63,19 @@ class OrbMissionTreeTest {
     fun liveUsesSharedStateTable() {
         assertTrue(OrbMissionTree.isLive(m("x", "status" to "waiting_background")))
         assertTrue(!OrbMissionTree.isLive(m("x", "status" to "paused")))
+    }
+
+    @Test
+    fun parentLinkIsStickyAcrossPayloadsThatOmitIt() {
+        OrbMissionTree.resetHierarchy()
+        val full = m("sticky-c", "callback_parent_mission_id" to "sticky-p")
+        assertEquals("sticky-p", OrbMissionTree.parentId(full))
+        // A resume answer or a list served while Hermes restarts: no derived link.
+        val partial = m("sticky-c", "status" to "running")
+        assertEquals("sticky-p", OrbMissionTree.parentId(partial))
+        assertEquals(listOf("sticky-p"), OrbMissionTree.nest(listOf(m("sticky-p"), partial)).map { it.id })
+        OrbMissionTree.reparent("sticky-c", null)
+        assertEquals(null, OrbMissionTree.parentId(partial))
+        OrbMissionTree.resetHierarchy()
     }
 }
