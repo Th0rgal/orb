@@ -56,7 +56,7 @@ class OrbManagedMachinesTest {
         val r = OrbManagedMachines.parse(emptyMap())
         assertFalse(r.enabled)
         assertTrue(r.machines.isEmpty())
-        assertEquals("$0.00 today of $0.00 · 0 of 0 running", OrbManagedMachines.budgetLine(r.budget))
+        assertEquals("$0.00 spent today · 0 running", OrbManagedMachines.budgetLine(r.budget))
     }
 
     @Test
@@ -132,7 +132,7 @@ class OrbManagedMachinesTest {
     @Test
     fun budgetAndSpec() {
         val r = parsed()
-        assertEquals("$1.20 today of $20.00 · 1 of 3 running", OrbManagedMachines.budgetLine(r.budget))
+        assertEquals("$1.20 spent today of $20.00 · 1 of 3 running", OrbManagedMachines.budgetLine(r.budget))
         assertEquals("2 vCPU · 4 GB · 40 GB disk", OrbManagedMachines.sizeSpec(r.machines[0]))
         assertEquals("8 vCPU · 15.5 GB", OrbManagedMachines.sizeSpec(r.machines[1]))
         assertEquals("Online", OrbManagedMachines.stateLabel("online"))
@@ -173,5 +173,65 @@ class OrbManagedMachinesTest {
         assertTrue(OrbManagedMachines.isLive(marked[0]))
         assertEquals(machines[1], marked[1])
         assertEquals(machines, OrbManagedMachines.revert(marked, machines[0]))
+    }
+
+    @Test
+    fun unlimitedBudget() {
+        val b = OrbManagedMachines.parse(OrbJSON.dict(OrbJSON.parse(
+            """{"enabled":true,"machines":[],"budget":{"spent_today_usd":0.11,"daily_cap_usd":null,"active":1,"max_concurrent":null}}"""
+        ))!!).budget
+        assertNull(b.dailyCapUsd)
+        assertNull(b.maxConcurrent)
+        assertEquals("$0.11 spent today · 1 running", OrbManagedMachines.budgetLine(b))
+        assertFalse(OrbManagedMachines.budgetFull(b))
+        val idle = b.copy(spentTodayUsd = 0.15, active = 0)
+        assertEquals("$0.15 spent today · 0 running", OrbManagedMachines.budgetLine(idle))
+        assertFalse(OrbManagedMachines.budgetLine(idle).contains("of"))
+        assertFalse(OrbManagedMachines.budgetLine(idle).contains("null"))
+        assertEquals("$0.11 spent today of $5.00 · 1 running", OrbManagedMachines.budgetLine(b.copy(dailyCapUsd = 5.0)))
+        assertTrue(OrbManagedMachines.budgetFull(b.copy(maxConcurrent = 1)))
+        assertTrue(OrbManagedMachines.budgetFull(b.copy(dailyCapUsd = 0.1)))
+    }
+
+    @Test
+    fun rowLabels() {
+        val (m1, m2) = parsed().machines
+        assertEquals("medium", OrbManagedMachines.sizeLabel("default"))
+        assertEquals("small", OrbManagedMachines.sizeLabel("small"))
+        assertEquals("2 vCPU · 4 GB RAM · 40 GB", OrbManagedMachines.specLine(m1))
+        assertEquals("8 vCPU · 15.5 GB RAM", OrbManagedMachines.specLine(m2))
+        val end = OrbManagedMachines.parseTime(m1.expiresAt)!!
+        assertEquals("21 min left", OrbManagedMachines.ttlShort(m1.expiresAt, end - 21 * 60_000L - 30_000))
+        assertEquals("1 h 05 min left", OrbManagedMachines.ttlShort(m1.expiresAt, end - 65 * 60_000L))
+        assertEquals("<1 min left", OrbManagedMachines.ttlShort(m1.expiresAt, end - 30_000))
+        assertEquals("Expired", OrbManagedMachines.ttlShort(m1.expiresAt, end))
+        // created 10:00, expires 11:00: at 10:45 a quarter is left.
+        assertEquals(0.25f, OrbManagedMachines.ttlFraction(m1, end - 15 * 60_000L)!!, 1e-6f)
+        assertEquals(0f, OrbManagedMachines.ttlFraction(m1, end + 1)!!, 0f)
+        assertNull(OrbManagedMachines.ttlFraction(m1.copy(createdAt = ""), end))
+        val cheap = m1.copy(costUsd = 0.004, usdPerHour = 0.036)
+        assertEquals("<$0.01 so far · $0.036/h", OrbManagedMachines.costLine(cheap, end, end))
+        assertEquals("$0.40 total", OrbManagedMachines.finalCostLine(m2))
+    }
+
+    @Test
+    fun missionChipAndTitle() {
+        assertEquals("abcdef12", OrbManagedMachines.missionChip("abcdef1234567", null))
+        assertEquals("abcdef12", OrbManagedMachines.missionChip("abcdef1234567", "  "))
+        assertEquals("Fix login", OrbManagedMachines.missionChip("abc", "Fix login"))
+        assertEquals("Refactor the paymen…", OrbManagedMachines.missionChip("abc", "Refactor the payment pipeline", max = 20))
+        assertEquals("T", OrbManagedMachines.missionTitle(mapOf("title" to "T")))
+        assertEquals("N", OrbManagedMachines.missionTitle(mapOf("mission" to mapOf("title" to "N"))))
+        assertNull(OrbManagedMachines.missionTitle(emptyMap()))
+    }
+
+    @Test
+    fun recentList() {
+        val ms = parsed().machines
+        val destroyedAt = OrbManagedMachines.parseTime("2026-10-22T09:00:00Z")!!
+        assertEquals(listOf("m2"), OrbManagedMachines.recentMachines(ms, destroyedAt + 3_600_000L).map { it.id })
+        assertTrue(OrbManagedMachines.recentMachines(ms, destroyedAt + 86_400_001L).isEmpty())
+        val failed = ms[0].copy(id = "m3", state = "failed", destroyedAt = "2026-10-22T10:00:00Z")
+        assertEquals(listOf("m3", "m2"), OrbManagedMachines.recentMachines(ms + failed, destroyedAt + 3_600_000L).map { it.id })
     }
 }
