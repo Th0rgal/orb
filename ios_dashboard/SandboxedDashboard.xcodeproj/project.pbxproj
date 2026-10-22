@@ -35,6 +35,7 @@
 		45E3B02A9F7E3B159E60CA3F /* OrbRichTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4734279056A622F4537AFA07 /* OrbRichTextTests.swift */; };
 		4627188EFF2F09A20DF680BE /* OrbTranscriptComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 638B9371C6F740D854A74424 /* OrbTranscriptComponents.swift */; };
 		46A6E7234A1670920A2C6F8A /* OrbConversation+Sync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EAB105440167654A8DE2602 /* OrbConversation+Sync.swift */; };
+		480B0F5C7FF0C910CAF24912 /* OrbManagedMachinesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9988836186A90C53BA0E03C9 /* OrbManagedMachinesTests.swift */; };
 		49E481A8A26C33A25CD64BE2 /* OrbTranscriptUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D427073D171A43F58458E2BD /* OrbTranscriptUITests.swift */; };
 		4AAC36056E4CC05CC7185BA5 /* OrbProjectAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */; };
 		4CA1C40455E8DABE4CD24A9A /* OrbLiveUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A0C852566E4DC6B1E9620D /* OrbLiveUITests.swift */; };
@@ -77,6 +78,7 @@
 		D84DB2DF7385515936A19412 /* OrbTranscriptScroll.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09A260D0FB0EF878A8811728 /* OrbTranscriptScroll.swift */; };
 		D88BAEAA28DF9920DCABF1A0 /* OrbDesktopParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9B49541166F5206D07B991A /* OrbDesktopParityTests.swift */; };
 		DB1B9522AC4B5CFD49E2F0B8 /* OrbTurnSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 122884E6E640D975AC7E46F5 /* OrbTurnSummaryTests.swift */; };
+		EB1CE471D547494B3C5A01B8 /* OrbManagedMachines.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC3C9E662975DD7E0D3634C8 /* OrbManagedMachines.swift */; };
 		EC78C00E9FAC162E39BD0B35 /* OrbContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12549983596F9F58C1C2A71C /* OrbContractTests.swift */; };
 		F25A7DDE190D5186F9A67316 /* OrbInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56259348FCD0E21FC531D8E9 /* OrbInbox.swift */; };
 		F27A47BB880A0287FE3BBB17 /* OrbSendFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 067CABDD48BEA5928AE8027E /* OrbSendFlow.swift */; };
@@ -183,9 +185,11 @@
 		94B98C32C31466233A2EFB2B /* OrbDictation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDictation.swift; sourceTree = "<group>"; };
 		985657C4A8D7B5A23C05B9EC /* OrbAgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbAgentPicker.swift; sourceTree = "<group>"; };
 		98CD2374A807C1FF479EFE74 /* OrbDictationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDictationTests.swift; sourceTree = "<group>"; };
+		9988836186A90C53BA0E03C9 /* OrbManagedMachinesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbManagedMachinesTests.swift; sourceTree = "<group>"; };
 		9F0103F58746466AC87D0A5A /* OrbComputers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbComputers.swift; sourceTree = "<group>"; };
 		A0FC617748B4C068829D9F3D /* OrbSideQuestion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSideQuestion.swift; sourceTree = "<group>"; };
 		A3A9EEA92978894DB2B0A410 /* OrbNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbNotifications.swift; sourceTree = "<group>"; };
+		AC3C9E662975DD7E0D3634C8 /* OrbManagedMachines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbManagedMachines.swift; sourceTree = "<group>"; };
 		B053370536BB82FE142FF2E5 /* OrbQuestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbQuestions.swift; sourceTree = "<group>"; };
 		B134E3A21E30BFC16C6AC7AA /* OrbRichText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbRichText.swift; sourceTree = "<group>"; };
 		BA4DE96B58D59E4D20C580BB /* OrbTurnStatusUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTurnStatusUITests.swift; sourceTree = "<group>"; };
@@ -288,6 +292,7 @@
 				424CC90454DE36077DB56858 /* OrbLegacyCleanup.swift */,
 				BB4BFC16F121E10DCFD755BC /* OrbLog.swift */,
 				2D5BB808D250AF7F06FD9AC7 /* OrbMachinesSettings.swift */,
+				AC3C9E662975DD7E0D3634C8 /* OrbManagedMachines.swift */,
 				BDD651E846151C5070BA0765 /* OrbMath.swift */,
 				6E793D17A373009D35033D9E /* OrbMessageImages.swift */,
 				2B18EE0CF61F06F5599C3DAC /* OrbMissionState.swift */,
@@ -351,6 +356,7 @@
 				12549983596F9F58C1C2A71C /* OrbContractTests.swift */,
 				E9B49541166F5206D07B991A /* OrbDesktopParityTests.swift */,
 				98CD2374A807C1FF479EFE74 /* OrbDictationTests.swift */,
+				9988836186A90C53BA0E03C9 /* OrbManagedMachinesTests.swift */,
 				0856A45602E91A8DEAB08242 /* OrbProjectAppearanceTests.swift */,
 				4734279056A622F4537AFA07 /* OrbRichTextTests.swift */,
 				61E0273040D5CCC300571EAB /* OrbSendFlowTests.swift */,
@@ -557,6 +563,7 @@
 				13626B5B8FB1869DC1214443 /* OrbLegacyCleanup.swift in Sources */,
 				10EE88187305C6ECFA6DD140 /* OrbLog.swift in Sources */,
 				50AD3F51FCD5F045B1715B24 /* OrbMachinesSettings.swift in Sources */,
+				EB1CE471D547494B3C5A01B8 /* OrbManagedMachines.swift in Sources */,
 				C565A0819B851735DAA71172 /* OrbMath.swift in Sources */,
 				A93C114237EAF4604D4B9571 /* OrbMessageImages.swift in Sources */,
 				0693D4053A9B20410B6E92A5 /* OrbMissionState.swift in Sources */,
@@ -594,6 +601,7 @@
 				EC78C00E9FAC162E39BD0B35 /* OrbContractTests.swift in Sources */,
 				D88BAEAA28DF9920DCABF1A0 /* OrbDesktopParityTests.swift in Sources */,
 				382AC983DA8881DF18A6F5A6 /* OrbDictationTests.swift in Sources */,
+				480B0F5C7FF0C910CAF24912 /* OrbManagedMachinesTests.swift in Sources */,
 				4AAC36056E4CC05CC7185BA5 /* OrbProjectAppearanceTests.swift in Sources */,
 				45E3B02A9F7E3B159E60CA3F /* OrbRichTextTests.swift in Sources */,
 				75E99993878487B1D727240C /* OrbSendFlowTests.swift in Sources */,
