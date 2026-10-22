@@ -35,9 +35,11 @@ data class ManagedMachine(
 data class ManagedBudget(
     val spentTodayUsd: Double,
     val committedUsd: Double,
-    val dailyCapUsd: Double,
+    /** null = unlimited. */
+    val dailyCapUsd: Double?,
     val active: Int,
-    val maxConcurrent: Int,
+    /** null = unlimited. */
+    val maxConcurrent: Int?,
     val defaultTtlMinutes: Int,
     val maxTtlMinutes: Int
 )
@@ -87,9 +89,9 @@ object OrbManagedMachines {
             budget = ManagedBudget(
                 spentTodayUsd = OrbJSON.double(b, "spent_today_usd") ?: 0.0,
                 committedUsd = OrbJSON.double(b, "committed_usd") ?: 0.0,
-                dailyCapUsd = OrbJSON.double(b, "daily_cap_usd") ?: 0.0,
+                dailyCapUsd = OrbJSON.double(b, "daily_cap_usd"),
                 active = OrbJSON.int(b, "active") ?: 0,
-                maxConcurrent = OrbJSON.int(b, "max_concurrent") ?: 0,
+                maxConcurrent = OrbJSON.int(b, "max_concurrent"),
                 defaultTtlMinutes = OrbJSON.int(b, "default_ttl_minutes") ?: 60,
                 maxTtlMinutes = OrbJSON.int(b, "max_ttl_minutes") ?: 0
             )
@@ -193,9 +195,71 @@ object OrbManagedMachines {
     fun sizeSpec(m: ManagedMachine): String =
         "${m.cpu} vCPU · ${num(m.ramGb)} GB" + (m.diskGb?.let { " · ${num(it)} GB disk" } ?: "")
 
-    /** "$1.20 today of $20.00 · 1 of 3 running". */
-    fun budgetLine(b: ManagedBudget): String =
-        "${usd(b.spentTodayUsd)} today of ${usd(b.dailyCapUsd)} · ${b.active} of ${b.maxConcurrent} running"
+    /**
+     * "$1.20 spent today of $20.00 · 1 of 3 running"; a null cap or limit is
+     * unlimited and drops its "of …" ("$0.11 spent today · 1 running").
+     */
+    fun budgetLine(b: ManagedBudget): String {
+        val spent = "${usd(b.spentTodayUsd)} spent today" + (b.dailyCapUsd?.let { " of ${usd(it)}" } ?: "")
+        val running = "${b.active}" + (b.maxConcurrent?.let { " of $it" } ?: "") + " running"
+        return "$spent · $running"
+    }
+
+    /** True when a cap or limit is set and reached. */
+    fun budgetFull(b: ManagedBudget): Boolean =
+        (b.maxConcurrent?.let { b.active >= it } ?: false) || (b.dailyCapUsd?.let { b.spentTodayUsd >= it } ?: false)
+
+    /** Size shown to people: the backend's "default" size is "medium". */
+    fun sizeLabel(size: String): String = if (size == "default") "medium" else size
+
+    /** "4 vCPU · 8 GB RAM · 50 GB" (disk dropped when unknown). */
+    fun specLine(m: ManagedMachine): String =
+        "${m.cpu} vCPU · ${num(m.ramGb)} GB RAM" + (m.diskGb?.let { " · ${num(it)} GB" } ?: "")
+
+    /** Short TTL: "21 min left", "1 h 05 min left", "<1 min left", "Expired". */
+    fun ttlShort(expiresAt: String, now: Long): String {
+        val end = parseTime(expiresAt) ?: return "—"
+        val left = end - now
+        if (left <= 0) return "Expired"
+        val mins = left / 60_000
+        if (mins < 1) return "<1 min left"
+        val h = mins / 60
+        val m = mins % 60
+        return if (h > 0) String.format(Locale.US, "%d h %02d min left", h, m) else "$mins min left"
+    }
+
+    /** Fraction of the TTL left (0..1), from created_at to expires_at; null when unknown. */
+    fun ttlFraction(m: ManagedMachine, now: Long): Float? {
+        val start = parseTime(m.createdAt) ?: return null
+        val end = parseTime(m.expiresAt) ?: return null
+        if (end <= start) return null
+        return ((end - now).toDouble() / (end - start)).coerceIn(0.0, 1.0).toFloat()
+    }
+
+    /** "<$0.01 so far · $0.036/h". */
+    fun costLine(m: ManagedMachine, fetchedAt: Long, now: Long): String =
+        "${usd(liveCost(m, fetchedAt, now))} so far · ${usdPerHour(m.usdPerHour)}"
+
+    /** Final cost line for a destroyed/failed machine. */
+    fun finalCostLine(m: ManagedMachine): String = "${usd(m.costUsd)} total"
+
+    /** Mission chip text: the title (truncated) or the short id. */
+    fun missionChip(missionId: String, title: String?, max: Int = 24): String {
+        val t = title?.trim()?.takeIf { it.isNotEmpty() } ?: return missionId.take(8)
+        return if (t.length > max) t.take(max - 1).trimEnd() + "…" else t
+    }
+
+    /** Title from GET /api/control/missions/:id (bare mission or `{mission: …}`). */
+    fun missionTitle(d: OrbDict): String? =
+        OrbJSON.str(OrbJSON.dict(d["mission"]) ?: d, "title", "name")
+
+    /** Machines destroyed or failed during the last 24 hours, newest first. */
+    fun recentMachines(machines: List<ManagedMachine>, now: Long): List<ManagedMachine> =
+        machines.filter { !isLive(it) }
+            .mapNotNull { m -> (parseTime(m.destroyedAt) ?: parseTime(m.createdAt))?.let { m to it } }
+            .filter { now - it.second <= 86_400_000L }
+            .sortedByDescending { it.second }
+            .map { it.first }
 
     /** Human message for a failed managed-machine request. */
     fun errorMessage(e: Throwable): String {
