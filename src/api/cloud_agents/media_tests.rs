@@ -383,3 +383,27 @@ fn no_hermes_namespace_means_unavailable() {
     // A unit that is missing, or has no PrivateTmp, never falls back to Core's /.
     assert!(hermes_source("no-such-hermes-unit-for-tests").is_none());
 }
+
+#[test]
+fn hermes_unit_aliases_resolve_through_their_canonical_id() {
+    let home = || PathBuf::from("/");
+    let cg = |_| Some("0::/system.slice/hermes-gateway.service\n".to_string());
+    let show = "Id=hermes-gateway.service\nMainPID=626121\nPrivateTmp=yes\n";
+    let s = hermes_source_from_show(show, home(), cg).expect("alias resolves");
+    assert_eq!(s.namespace_root, PathBuf::from("/proc/626121/root"));
+    // A recycled PID in another unit, no PrivateTmp, or no PID: fail closed.
+    let other = |_| Some("0::/system.slice/sshd.service\n".to_string());
+    assert!(hermes_source_from_show(show, home(), other).is_none());
+    assert!(hermes_source_from_show(
+        "Id=hermes-gateway.service\nMainPID=626121\nPrivateTmp=no\n",
+        home(),
+        cg
+    )
+    .is_none());
+    assert!(hermes_source_from_show(
+        "Id=hermes-gateway.service\nMainPID=0\nPrivateTmp=yes\n",
+        home(),
+        cg
+    )
+    .is_none());
+}

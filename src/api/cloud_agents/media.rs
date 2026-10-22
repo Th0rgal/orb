@@ -750,10 +750,32 @@ pub fn hermes_source(runtime: &str) -> Option<MediaSource> {
     let hermes_home = PathBuf::from(format!("/var/lib/{runtime}"));
     let unit = format!("{runtime}.service");
     let out = std::process::Command::new("systemctl")
-        .args(["show", "-p", "MainPID", "-p", "PrivateTmp", &unit])
+        .args([
+            "show",
+            "-p",
+            "Id",
+            "-p",
+            "MainPID",
+            "-p",
+            "PrivateTmp",
+            &unit,
+        ])
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    hermes_source_from_show(&text, hermes_home, |pid| {
+        std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
+    })
+}
+
+/// `systemctl show -p Id -p MainPID -p PrivateTmp` output to a source. The unit
+/// may be an alias (`hermes-assistant` is `hermes-gateway.service` on prod), so
+/// the PID's cgroup is checked against the canonical `Id`.
+fn hermes_source_from_show(
+    text: &str,
+    hermes_home: PathBuf,
+    cgroup_of: impl Fn(u32) -> Option<String>,
+) -> Option<MediaSource> {
     let field = |key: &str| {
         text.lines()
             .find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
@@ -766,8 +788,12 @@ pub fn hermes_source(runtime: &str) -> Option<MediaSource> {
         return None;
     }
     let pid: u32 = field("MainPID").parse().ok().filter(|p| *p > 0)?;
-    let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
-    if !cgroup.lines().any(|l| l.ends_with(&format!("/{unit}"))) {
+    let id = field("Id");
+    if id.is_empty() {
+        return None;
+    }
+    let cgroup = cgroup_of(pid)?;
+    if !cgroup.lines().any(|l| l.ends_with(&format!("/{id}"))) {
         return None;
     }
     let owner = {
