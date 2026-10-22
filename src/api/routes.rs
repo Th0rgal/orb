@@ -608,7 +608,28 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // remote nodes are enabled and configured.
     super::project_files::start_context_observer(config.working_dir.clone());
     // Managed machines (boat.dev): registry, caps, reaper and reconciler.
-    crate::managed::start(&config.working_dir, config.port).await;
+    {
+        let manager = crate::managed::start(&config.working_dir, config.port).await;
+        // Destroy managed VMs as soon as their owning mission has ended.
+        let probe_state = Arc::clone(&state);
+        manager.set_owner_probe(Arc::new(move |id: String| {
+            let st = Arc::clone(&probe_state);
+            Box::pin(async move {
+                let uuid = uuid::Uuid::parse_str(&id).ok()?;
+                let store = st.control.get_mission_store().await;
+                match store.get_mission(uuid).await {
+                    Ok(Some(m)) => Some(crate::managed::owner_state_for_status(
+                        &m.status.to_string(),
+                    )),
+                    // "Deleted" is only conclusive with one tenant store.
+                    Ok(None) if st.control.session_user_ids().await.len() <= 1 => {
+                        Some(crate::managed::OwnerState::Missing)
+                    }
+                    _ => None,
+                }
+            })
+        }));
+    }
     if config.remote_nodes.enabled
         && (!config.remote_nodes.nodes.is_empty()
             || crate::managed::global().is_some_and(|m| m.settings.enabled))

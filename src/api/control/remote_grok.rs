@@ -489,7 +489,13 @@ impl GrokStream {
         if line.trim().is_empty() {
             return;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        // Only JSON objects are harness protocol events. A raw command that
+        // prints a bare number or string (`nproc`, `echo true`) must stay a
+        // plain diagnostic line, or it would masquerade as a stream event.
+        let Some(value) = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .filter(serde_json::Value::is_object)
+        else {
             if let Some(stream) = self.antigravity.as_mut() {
                 stream.observe_stderr(line);
                 if stream.error.is_some() {
@@ -3229,6 +3235,19 @@ mod tests {
         stream.auth_required = false;
         stream.feed("{\"event\":\"init\",\"conversation_id\":\"wrong-session\"}\n");
         assert!(stream.requires_error_cancellation());
+    }
+
+    #[test]
+    fn raw_command_scalar_output_is_not_a_stream_event() {
+        let mut stream = GrokStream {
+            claude: true,
+            ..Default::default()
+        };
+        stream.feed("managed-e2e-ok\n2\ntrue\n\"text\"\nLake version 5.0.0\n");
+        assert_eq!(stream.json_events, 0, "bare JSON scalars are plain output");
+        assert!(stream.diagnostics_text().contains("2"));
+        stream.feed("{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n");
+        assert!(stream.json_events >= 1);
     }
 
     async fn resumed_antigravity_observer(session: &str) -> (NativeGrokObserver, Uuid, Uuid) {

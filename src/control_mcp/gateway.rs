@@ -459,6 +459,12 @@ async fn authorize(
                 .unwrap_or_default()
                 .to_string();
             managed_owner_check(&store, own, &id).await?;
+            // Extending is a takeover: the caller's lifetime now governs the VM.
+            if tool.definition.name == "extend_managed_machine" {
+                if let Some(manager) = crate::managed::global() {
+                    manager.adopt(&id, &own.to_string()).await;
+                }
+            }
         }
         "start_mission" => {
             if let Some(r) = args.get("remote_node_id").and_then(Value::as_str) {
