@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../src/api";
-import { allowedSizes, budgetLine, estimateCost, isManagedNode, liveCost, managedError, minutesLabel, recentMachines, ttlLeft, ttlUrgent, usd, usdPerHour, type ManagedMachine } from "../src/managedMachineModel";
+import { allowedSizes, budgetLine, managedNodeIds, estimateCost, isManagedNode, liveCost, managedError, minutesLabel, recentMachines, ttlLeft, ttlUrgent, usd, usdPerHour, type ManagedMachine } from "../src/managedMachineModel";
 import { ttlChoices } from "../src/ManagedMachines";
 
 const now = Date.parse("2026-10-21T12:00:00Z");
@@ -39,6 +39,15 @@ describe("managed machine formatting", () => {
     const rows = [machine({ id: "live" }), machine({ id: "old", state: "destroyed", destroyed_at: "2026-10-20T10:00:00Z" }),
       machine({ id: "b", state: "destroyed", destroyed_at: "2026-10-21T09:00:00Z" }), machine({ id: "c", state: "failed", destroyed_at: "2026-10-21T10:00:00Z" })];
     expect(recentMachines(rows, now).map(m => m.id)).toEqual(["c", "b"]);
+  });
+  it("counts a machine created and destroyed today as recent, not while live", () => {
+    const created = machine({ id: "ui", created_at: "2026-10-21T11:58:00Z" });
+    expect(recentMachines([created], now)).toEqual([]);
+    expect(recentMachines([{ ...created, state: "destroyed", destroyed_at: "2026-10-21T11:59:00Z" }], now).map(m => m.id)).toEqual(["ui"]);
+  });
+  it("maps a machine to its remote-node ids", () => {
+    expect(managedNodeIds({ id: "a", node_id: "managed-a" })).toEqual(["managed-a"]);
+    expect(managedNodeIds({ id: "a", node_id: "" })).toEqual(["managed-a"]);
   });
   it("caps sizes at the budget maximum", () => {
     const sizes = ["small", "medium", "large", "xl"].map((size, i) => ({ size, cpu: 2 << i, ram_gb: 4 << i, disk_gb: 40, usd_per_hour: i + 0.1 }));

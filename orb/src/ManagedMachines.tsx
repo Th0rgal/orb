@@ -8,7 +8,7 @@ import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
   allowedSizes, budgetLine, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
-  listManagedMachines, liveCost, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent,
+  listManagedMachines, liveCost, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent,
   usd, usdPerHour, type ManagedMachine, type ManagedMachinesResponse,
 } from "./managedMachineModel";
 
@@ -62,7 +62,7 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
     catch (e) { setError(managedError(e)); }
     finally { setBusy(false); }
   };
-  return <Dialog title="New managed machine" description="A boat.dev machine that joins the fleet and is destroyed when its time runs out." busy={busy()} onClose={p.onClose}
+  return <Dialog title="New managed machine" description="A boat.dev machine that joins the fleet and is destroyed when its time runs out." busy={busy()} persistent onClose={p.onClose}
     footer={close => <><DialogButton disabled={busy()} onClick={close}>Cancel</DialogButton><DialogButton variant="primary" disabled={busy() || !chosen()} onClick={submit}>{busy() ? "Creating…" : "Create machine"}</DialogButton></>}>
     <div class="managed-form">
       <div class="field"><label>Size</label>
@@ -86,7 +86,7 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
 
 /** "Managed (boat.dev)" section of the Machines page. Renders nothing when the
  * backend lacks the endpoint or has the feature disabled. */
-export function ManagedMachines() {
+export function ManagedMachines(p: { onDestroyed?: (nodeIds: string[]) => void } = {}) {
   const [data, setData] = createSignal<ManagedMachinesResponse | null>(null);
   const [fetchedAt, setFetchedAt] = createSignal(Date.now());
   const [loadError, setLoadError] = createSignal<string | null>(null);
@@ -146,6 +146,6 @@ export function ManagedMachines() {
     <Show when={confirm()}>{m => <ConfirmDialog title={`Destroy ${m().size} machine?`} destructive action="Destroy"
       description={`The machine and everything on it are deleted now${m().owner_mission_id ? `, and mission ${m().owner_mission_id!.slice(0, 8)} loses it` : ""}. Cost so far: ${usd(liveCost(m(), fetchedAt()))}.`}
       busy={busy() === m().id} error={actionError()} onClose={() => setConfirm(null)}
-      onConfirm={async () => { if (await run(m().id, () => destroyManagedMachine(m().id))) setConfirm(null); }} />}</Show>
+      onConfirm={async () => { const gone = m(); if (await run(gone.id, () => destroyManagedMachine(gone.id))) { setConfirm(null); p.onDestroyed?.(managedNodeIds(gone)); } }} />}</Show>
   </Show>;
 }

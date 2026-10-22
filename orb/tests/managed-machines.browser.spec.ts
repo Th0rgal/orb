@@ -89,6 +89,9 @@ test("extend and destroy go through the contract", async ({ page }) => {
   await expect(dialog).toHaveCount(0);
   expect(calls).toContain("DELETE /api/managed-machines/m1");
   await expect(page.locator(".managed-row[data-state=online]")).toHaveCount(0);
+  // The fleet row goes at once, although the backend still lists it until its heartbeat expires.
+  await expect(page.getByRole("button", { name: /managed-m1/ })).toHaveCount(0, { timeout: 1000 });
+  await expect(page.getByRole("button", { name: /spark online/ })).toBeVisible();
 });
 
 test("new managed machine sheet estimates cost and creates", async ({ page }) => {
@@ -121,4 +124,30 @@ for (const managed of ["404", "disabled"] as const) test(`section hides when the
   await expect.poll(() => calls.length).toBeGreaterThan(0);
   await expect(page.getByRole("heading", { name: "Managed (boat.dev)" })).toHaveCount(0);
   await expect(page.getByText(/Couldn’t refresh managed/)).toHaveCount(0);
+});
+
+test("new machine sheet survives window blur and outside clicks; Escape closes it", async ({ page }) => {
+  await mock(page);
+  await page.getByRole("button", { name: "New managed machine" }).click();
+  const dialog = page.getByRole("dialog", { name: "New managed machine" });
+  await dialog.getByRole("radio", { name: /large/ }).click();
+  await page.evaluate(() => { window.dispatchEvent(new Event("blur")); window.dispatchEvent(new Event("focus")); });
+  await page.mouse.click(20, 450); // window re-activation click lands on the backdrop
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /large/ })).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
+test("recent count includes machines created from the UI once destroyed", async ({ page }) => {
+  await mock(page);
+  const toggle = page.getByRole("button", { name: /Recent · last 24 h/ });
+  await expect(toggle).toHaveText(/\(1\)/);
+  await page.getByRole("button", { name: "New managed machine" }).click();
+  await page.getByRole("dialog", { name: "New managed machine" }).getByRole("button", { name: "Create machine" }).click();
+  const created = page.locator(".managed-row[data-state=provisioning]").first();
+  await expect(toggle).toHaveText(/\(1\)/); // live machines are not "recent"
+  await created.getByRole("button", { name: "Destroy" }).click();
+  await page.getByRole("dialog", { name: "Destroy medium machine?" }).getByRole("button", { name: "Destroy" }).click();
+  await expect(toggle).toHaveText(/\(2\)/);
 });

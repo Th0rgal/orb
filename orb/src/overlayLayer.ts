@@ -46,6 +46,8 @@ function updateBackground() {
 export function mountOverlay(layer: OverlayLayer, options: {
   close: () => void; busy?: () => boolean; trap?: boolean; initialFocus?: () => HTMLElement | undefined;
   returnFocus?: HTMLElement | null; restoreFocus?: boolean; contains?: (target: Node) => boolean; outsideGesture?: boolean;
+  /** Only Escape or explicit controls close it; outside presses are ignored. */
+  persistent?: boolean;
   escape?: () => void;
 }) {
   const previous = options.returnFocus !== undefined ? options.returnFocus : overlayTrigger() ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
@@ -67,7 +69,7 @@ export function mountOverlay(layer: OverlayLayer, options: {
   let pressedOutside = false;
   const down = (event: PointerEvent) => {
     if (!overlayTop(layer)) return;
-    pressedOutside = !owns(event.target as Node);
+    pressedOutside = !options.persistent && !owns(event.target as Node);
     if (pressedOutside && !options.outsideGesture) dismiss();
   };
   const up = (event: PointerEvent) => {
