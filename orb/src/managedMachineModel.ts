@@ -59,6 +59,9 @@ export const extendManagedMachine = (id: string, ttl_minutes: number) => api<Man
 export const isManagedNode = (node: { id?: string; labels?: string[] | null } | null | undefined) =>
   !!node && (!!node.labels?.includes("managed") || !!node.id?.startsWith("managed-"));
 
+/** Remote-node ids a managed machine may appear under in /api/remote-nodes. */
+export const managedNodeIds = (m: Pick<ManagedMachine, "id" | "node_id">) => [...new Set([m.node_id, `managed-${m.id}`].filter(Boolean))];
+
 export const isLive = (m: Pick<ManagedMachine, "state">) => m.state !== "destroyed" && m.state !== "failed";
 
 /** "$0.42", "$12.30", "<$0.01" for tiny non-zero amounts. */

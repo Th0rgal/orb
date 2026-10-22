@@ -22,7 +22,7 @@ export function DialogActions(p: {children: JSX.Element}) {
 export function Dialog(p: {
   title: string; description?: string; hint?: string;
   size?: "compact" | "standard" | "wide" | "fullscreen"; class?: string;
-  busy?: boolean; dirty?: boolean; initialFocus?: () => HTMLElement | undefined;
+  busy?: boolean; dirty?: boolean; persistent?: boolean; initialFocus?: () => HTMLElement | undefined;
   onClose: () => void; onKeyDown?: JSX.EventHandlerUnion<HTMLDivElement, KeyboardEvent>;
   children: JSX.Element; footer?: JSX.Element | ((requestClose: () => void) => JSX.Element);
 }) {
@@ -37,7 +37,7 @@ export function Dialog(p: {
   const registerClose = (guard: () => void) => {closeGuard = guard; return () => {if (closeGuard === guard) closeGuard = undefined;};};
   const requestClose = () => { if (!p.busy) closeGuard ? closeGuard() : p.dirty ? setDiscard(true) : p.onClose(); };
   createEffect(() => {if (p.busy && root && overlayTop(layer) && !root.contains(document.activeElement)) root.focus({preventScroll:true});});
-  onMount(() => { onCleanup(mountOverlay(layer, {close: requestClose, busy: () => !!p.busy, outsideGesture: true,
+  onMount(() => { onCleanup(mountOverlay(layer, {close: requestClose, busy: () => !!p.busy, outsideGesture: true, persistent: p.persistent,
     initialFocus: () => p.initialFocus?.() ?? root.querySelector<HTMLElement>("[autofocus], .dlg-body input:not(:disabled), .dlg-body textarea:not(:disabled)") ?? undefined})); });
   return <DialogFooterContext.Provider value={footerSlot}><DialogCloseContext.Provider value={registerClose}><OverlayContext.Provider value={layer}><Portal>
     <div class="dlg-back" classList={{"dlg-back-dim": overlayFirstModal(layer), "dlg-back-fullscreen": p.size === "fullscreen"}} style={{"z-index": overlayZIndex(layer)}}>

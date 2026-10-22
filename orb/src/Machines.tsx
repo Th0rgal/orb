@@ -87,11 +87,14 @@ function MachinesPage() {
   const [pub, setPub] = createSignal("");
   const [copied, setCopied] = createSignal(false);
   const [nodes, setNodes] = createSignal<RemoteNodeView[] | null>(null);
+  const destroyedNodes = new Set<string>();
+  const dropNodes = (ids: string[]) => { ids.forEach(id => destroyedNodes.add(id)); setNodes(ns => ns && ns.filter(n => !destroyedNodes.has(n.id))); void refresh(); };
 
   const refresh = async () => {
     try {
       const r = await getRemoteNodes();
-      setNodes(r.nodes);
+      // A destroyed managed machine keeps heartbeating "online" until it times out.
+      setNodes(r.nodes.filter(n => !destroyedNodes.has(n.id)));
       recordFleet(r.nodes);
     } catch {
       /* keep last good snapshot */
@@ -181,7 +184,7 @@ function MachinesPage() {
           )}
         </For>
       </div>
-      <ManagedMachines />
+      <ManagedMachines onDestroyed={dropNodes} />
 
       <AgentSoftware external={staticMachines()} />
       <div class="key-bar">
