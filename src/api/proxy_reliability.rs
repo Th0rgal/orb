@@ -134,6 +134,65 @@ pub fn hedge_config_for(requested: &str, rules: &[(String, String)]) -> Option<H
     })
 }
 
+/// Mid-stream idle limit for one provider/model.
+///
+/// Base: `PROXY_STREAM_IDLE_TIMEOUT_SECS_<PROVIDER>` (e.g. `_XAI`, `_GOOGLE`),
+/// else `PROXY_STREAM_IDLE_TIMEOUT_SECS` (60 s). Adaptive: 1.5x the p95 of
+/// the longest upstream silences seen in recent healthy streams of the same
+/// model (a model that routinely pauses 70 s while it reasons or composes a
+/// large tool call is not dead at 60 s). Never above
+/// `PROXY_STREAM_IDLE_CEILING_SECS` (110 s: below the 120 s harness text-idle
+/// limit), never below the base. Idleness is measured on raw upstream bytes,
+/// so keepalive comments and thought chunks count as activity.
+pub fn stream_idle_timeout_for(provider: &str, recent_max_gaps_ms: &[u64]) -> Duration {
+    let key = format!(
+        "PROXY_STREAM_IDLE_TIMEOUT_SECS_{}",
+        provider
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    );
+    let base = std::env::var(&key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(stream_idle_timeout);
+    let ceiling = Duration::from_secs(env_secs("PROXY_STREAM_IDLE_CEILING_SECS", 110)).max(base);
+    adaptive_idle(base, ceiling, recent_max_gaps_ms)
+}
+
+/// Pure part of [`stream_idle_timeout_for`]: needs 20 samples to adapt.
+pub fn adaptive_idle(base: Duration, ceiling: Duration, recent_max_gaps_ms: &[u64]) -> Duration {
+    if recent_max_gaps_ms.len() < 20 {
+        return base;
+    }
+    let p95 = crate::api::proxy_timing::percentile(recent_max_gaps_ms, 0.95).unwrap_or(0);
+    Duration::from_millis(p95.saturating_mul(3) / 2).clamp(base, ceiling)
+}
+
+/// Interval of SSE keepalive comments toward the client during silences
+/// (`PROXY_SSE_KEEPALIVE_SECS`, default 15 s; well under Cloudflare's 100 s
+/// and typical client read timeouts).
+pub fn sse_keepalive_interval() -> Duration {
+    Duration::from_secs(env_secs("PROXY_SSE_KEEPALIVE_SECS", 15))
+}
+
+/// Transparent re-routes of a stream that stalls before any content or tool
+/// call reached the client (`PROXY_MID_STREAM_STALL_RETRIES`, default 2: the
+/// same entry once, then the chain without the stalled entry).
+pub fn mid_stream_stall_retries() -> u32 {
+    std::env::var("PROXY_MID_STREAM_STALL_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(2)
+        .min(4)
+}
+
 /// Same-entry retries before the first content chunk.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -653,5 +712,22 @@ mod tests {
         );
         // Slow provider: ceiling.
         assert_eq!(cfg.delay_for(&[90_000; 8]), Duration::from_secs(45));
+    }
+
+    #[test]
+    fn idle_limit_adapts_to_observed_pauses_within_bounds() {
+        let base = Duration::from_secs(60);
+        let ceiling = Duration::from_secs(110);
+        // Too few samples: the base.
+        assert_eq!(adaptive_idle(base, ceiling, &[90_000; 5]), base);
+        // Short pauses never lower the base.
+        assert_eq!(adaptive_idle(base, ceiling, &[2_000; 40]), base);
+        // 60 s pauses seen: 1.5x = 90 s.
+        assert_eq!(
+            adaptive_idle(base, ceiling, &[60_000; 40]),
+            Duration::from_secs(90)
+        );
+        // Huge pauses: capped at the ceiling.
+        assert_eq!(adaptive_idle(base, ceiling, &[600_000; 40]), ceiling);
     }
 }

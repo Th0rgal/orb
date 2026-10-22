@@ -2512,28 +2512,177 @@ pub(crate) async fn chat_completions_inner(
         None => {
             let cell = super::proxy_timing::TimingCell::new(&model, is_stream);
             cell.set_request(&model, None, None, shape);
+            let retry =
+                is_stream.then(|| stall_retry(state.clone(), headers.clone(), body.clone(), None));
             let resp = super::proxy_timing::scope(
                 cell.clone(),
-                chat_completions_routed(state, headers, body, None),
+                chat_completions_routed(state, headers, body, None, None),
             )
             .await;
-            timed_response(resp, cell)
+            client_stream_response(resp, cell, retry)
         }
     }
+}
+
+/// Re-sends a stalled request, optionally without the stalled account.
+type StallRetry = Arc<
+    dyn Fn(Option<ExcludedEntry>) -> futures::future::BoxFuture<'static, Response> + Send + Sync,
+>;
+
+fn stall_retry(
+    state: Arc<super::routes::AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+    model_override: Option<String>,
+) -> StallRetry {
+    Arc::new(move |exclude| {
+        let (state, headers, body, model_override) = (
+            state.clone(),
+            headers.clone(),
+            body.clone(),
+            model_override.clone(),
+        );
+        Box::pin(chat_completions_routed(
+            state,
+            headers,
+            body,
+            model_override,
+            exclude,
+        ))
+    })
 }
 
 /// Attach `cell` to the response body: it finishes (and logs) when the body
 /// is fully sent, or when the client drops the connection first.
 fn timed_response(resp: Response, cell: Arc<super::proxy_timing::TimingCell>) -> Response {
+    client_stream_response(resp, cell, None)
+}
+
+/// True when an SSE chunk carries visible output: answer text or a tool
+/// call. Role-only, reasoning-only and keepalive chunks do not commit the
+/// response, so a stall after them can still be replayed invisibly.
+fn sse_chunk_commits_output(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    if !text.contains("\"content\"") && !text.contains("\"tool_calls\"") {
+        return false;
+    }
+    text.lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+        .any(|v| {
+            v.get("choices")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+                .any(|choice| {
+                    let delta = choice.get("delta").or_else(|| choice.get("message"));
+                    let content = delta
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| !c.is_empty());
+                    let tools = delta
+                        .and_then(|d| d.get("tool_calls"))
+                        .and_then(|t| t.as_array())
+                        .is_some_and(|t| !t.is_empty());
+                    content || tools
+                })
+        })
+}
+
+/// Client side of a routed response:
+/// * finishes the timing cell when the body ends (or the client leaves);
+/// * on SSE, sends `: keepalive` comments during silences so clients and
+///   intermediaries (Cloudflare, opencode) do not time out while a model
+///   reasons or composes a large tool call — only between complete lines;
+/// * when the upstream stalls before any answer text or tool call reached
+///   the client, replaces the stream with a re-routed request (same entry
+///   first, then the chain without the stalled account) instead of ending
+///   the turn with `upstream_stalled`.
+fn client_stream_response(
+    resp: Response,
+    cell: Arc<super::proxy_timing::TimingCell>,
+    retry: Option<StallRetry>,
+) -> Response {
     let (parts, body) = resp.into_parts();
     cell.set_response_status(parts.status.as_u16());
+    let is_sse = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"));
+    let keepalive = reliability::sse_keepalive_interval();
+    let max_retries = if is_sse {
+        reliability::mid_stream_stall_retries()
+    } else {
+        0
+    };
     let mut data = body.into_data_stream();
     let stream = async_stream::stream! {
-        while let Some(item) = data.next().await {
-            let failed = item.is_err();
-            yield item;
-            if failed {
-                return;
+        let mut committed = false;
+        // Last two bytes sent: a keepalive goes only between whole events.
+        let mut tail: [u8; 2] = *b"\n\n";
+        let mut retries = 0u32;
+        let mut last_item = std::time::Instant::now();
+        loop {
+            let next = if is_sse {
+                tokio::select! {
+                    item = data.next() => Some(item),
+                    _ = tokio::time::sleep(keepalive) => None,
+                }
+            } else {
+                Some(data.next().await)
+            };
+            let item = match next {
+                None => {
+                    if &tail == b"\n\n" {
+                        cell.client_gap(last_item.elapsed(), true);
+                        yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
+                    }
+                    continue;
+                }
+                Some(None) => break,
+                Some(Some(item)) => item,
+            };
+            match item {
+                Ok(bytes) => {
+                    if cell.take_stall() && !committed && retries < max_retries {
+                        if let Some(reroute) = retry.as_ref() {
+                            retries += 1;
+                            // Once on the same entry, then without it.
+                            let exclude = if retries >= 2 { cell.current_entry() } else { None };
+                            tracing::warn!(
+                                retry = retries,
+                                excluding = exclude.is_some(),
+                                "Upstream stalled before any output reached the client; re-routing transparently"
+                            );
+                            cell.note_transparent_retry();
+                            let resp =
+                                super::proxy_timing::scope(cell.clone(), reroute(exclude)).await;
+                            if resp.status().is_success() {
+                                data = resp.into_body().into_data_stream();
+                                last_item = std::time::Instant::now();
+                                continue;
+                            }
+                            cell.mark_upstream_stream_failed("stalled");
+                            // Fall through: surface the original stall event.
+                        }
+                    }
+                    cell.client_gap(last_item.elapsed(), false);
+                    last_item = std::time::Instant::now();
+                    if !committed && sse_chunk_commits_output(&bytes) {
+                        committed = true;
+                    }
+                    match bytes.len() {
+                        0 => {}
+                        1 => tail = [tail[1], bytes[0]],
+                        n => tail = [bytes[n - 2], bytes[n - 1]],
+                    }
+                    yield Ok(bytes);
+                }
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
             }
         }
         cell.body_finished();
@@ -2560,9 +2709,16 @@ async fn hedged_chat_completion(
     primary_cell.set_request(&model, None, None, shape.clone());
     let primary = scope(
         primary_cell.clone(),
-        chat_completions_routed(state.clone(), headers.clone(), body.clone(), None),
+        chat_completions_routed(state.clone(), headers.clone(), body.clone(), None, None),
     );
     let target = cfg.target.clone();
+    let primary_retry = stall_retry(state.clone(), headers.clone(), body.clone(), None);
+    let hedge_retry = stall_retry(
+        state.clone(),
+        headers.clone(),
+        body.clone(),
+        Some(cfg.target.clone()),
+    );
     let delay_cell = primary_cell.clone();
     let delay_cfg = cfg.clone();
     // The adaptive delay is computed once the floor has passed, for the
@@ -2585,9 +2741,17 @@ async fn hedged_chat_completion(
         cell.set_request(&target, None, None, hedge_shape);
         let fut = scope(
             cell.clone(),
-            chat_completions_routed(state, headers, body, Some(target.clone())),
+            chat_completions_routed(state, headers, body, Some(target.clone()), None),
         );
         (fut, cell)
+    };
+    let wrap = move |resp: Response, cell: Arc<TimingCell>, is_hedge: bool| {
+        let retry = if is_hedge {
+            &hedge_retry
+        } else {
+            &primary_retry
+        };
+        client_stream_response(resp, cell, Some(retry.clone()))
     };
     race_hedged(
         &model,
@@ -2596,6 +2760,7 @@ async fn hedged_chat_completion(
         cfg.min,
         adaptive_delay,
         start_hedge,
+        wrap,
     )
     .await
 }
@@ -2611,6 +2776,7 @@ async fn race_hedged<P, H>(
     floor: Duration,
     adaptive_delay: impl FnOnce() -> Duration,
     start_hedge: impl FnOnce() -> (H, Arc<super::proxy_timing::TimingCell>),
+    wrap: impl Fn(Response, Arc<super::proxy_timing::TimingCell>, bool) -> Response,
 ) -> Response
 where
     P: std::future::Future<Output = Response>,
@@ -2621,13 +2787,13 @@ where
     let mut primary = std::pin::pin!(primary);
     let started = tokio::time::Instant::now();
     tokio::select! {
-        resp = &mut primary => return timed_response(resp, primary_cell),
+        resp = &mut primary => return wrap(resp, primary_cell, false),
         _ = tokio::time::sleep(floor) => {}
     }
     let delay = adaptive_delay();
     if let Some(rest) = delay.checked_sub(started.elapsed()) {
         tokio::select! {
-            resp = &mut primary => return timed_response(resp, primary_cell),
+            resp = &mut primary => return wrap(resp, primary_cell, false),
             _ = tokio::time::sleep(rest) => {}
         }
     }
@@ -2647,39 +2813,43 @@ where
             if resp.status().is_success() {
                 tracing::info!(chain = %chain, winner = "hedge", "Hedge race decided");
                 primary_cell.mark_cancelled();
-                return timed_response(resp, hedge_cell.clone());
+                return wrap(resp, hedge_cell.clone(), true);
             }
             // The hedge failed first: the primary is the answer either way.
-            drop(timed_response(resp, hedge_cell.clone()));
+            drop(wrap(resp, hedge_cell.clone(), true));
             None
         }
     };
     match primary_first {
-        None => timed_response(primary.await, primary_cell),
+        None => wrap(primary.await, primary_cell, false),
         Some(resp) if resp.status().is_success() => {
             tracing::info!(chain = %chain, winner = "primary", "Hedge race decided");
             hedge_cell.mark_cancelled();
-            timed_response(resp, primary_cell)
+            wrap(resp, primary_cell, false)
         }
         Some(failed) => {
             let resp = hedge.await;
             if resp.status().is_success() {
                 tracing::info!(chain = %chain, winner = "hedge", "Hedge race decided");
-                drop(timed_response(failed, primary_cell));
-                timed_response(resp, hedge_cell)
+                drop(wrap(failed, primary_cell, false));
+                wrap(resp, hedge_cell, true)
             } else {
-                drop(timed_response(resp, hedge_cell));
-                timed_response(failed, primary_cell)
+                drop(wrap(resp, hedge_cell, true));
+                wrap(failed, primary_cell, false)
             }
         }
     }
 }
+
+/// Account to leave out of a re-routed request: `(provider, model, account)`.
+type ExcludedEntry = (String, String, String);
 
 async fn chat_completions_routed(
     state: Arc<super::routes::AppState>,
     headers: HeaderMap,
     body: bytes::Bytes,
     model_override: Option<String>,
+    exclude: Option<ExcludedEntry>,
 ) -> Response {
     // 1. Parse the request to extract the model name
     let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
@@ -2765,7 +2935,7 @@ async fn chat_completions_routed(
 
     let resolved_chain_id = resolve_stored_chain_id(&state.chain_store, &requested_model).await;
 
-    let (chain_id, chain_entries, entries) = if let Some(id) = resolved_chain_id {
+    let (chain_id, chain_entries, mut entries) = if let Some(id) = resolved_chain_id {
         let chain_entries = state
             .chain_store
             .get(&id)
@@ -2823,6 +2993,18 @@ async fn chat_completions_routed(
         .unwrap_or(false);
     if let Some(cell) = super::proxy_timing::current() {
         cell.set_chain(&chain_id);
+    }
+    // A re-route after a mid-stream stall skips the stalled account, unless
+    // it is the only entry left.
+    if let Some((provider, model, account)) = &exclude {
+        let excluded = |e: &crate::provider_health::ResolvedEntry| {
+            &e.provider_id == provider
+                && &e.model_id == model
+                && &e.account_id.to_string() == account
+        };
+        if entries.iter().any(|e| !excluded(e)) {
+            entries.retain(|e| !excluded(e));
+        }
     }
 
     if entries.is_empty() {
@@ -3467,7 +3649,7 @@ async fn chat_completions_routed(
                 let model_for_stream = entry.model_id.clone();
                 let translate = move |resp: reqwest::Response| {
                     transform_anthropic_sse_to_openai(
-                        resp.bytes_stream(),
+                        tap_upstream(resp.bytes_stream()),
                         format!("chatcmpl-{}", uuid::Uuid::new_v4()),
                         chrono::Utc::now().timestamp(),
                         model_for_stream.clone(),
@@ -3826,7 +4008,7 @@ async fn chat_completions_routed(
         if use_google_oauth_adapter || use_google_api_adapter {
             if is_stream && status.is_success() {
                 let (peeked, retries) = open_sse_with_retry(
-                    upstream_resp.bytes_stream(),
+                    tap_upstream(upstream_resp.bytes_stream()),
                     PeekKind::Google,
                     |failure: &(CooldownReason, String)| {
                         // Thinking used the whole budget: retry with more
@@ -3857,7 +4039,7 @@ async fn chat_completions_routed(
                         async move {
                             resend_stream(builder, first_token_timeout)
                                 .await
-                                .map(|r| r.bytes_stream())
+                                .map(|r| tap_upstream(r.bytes_stream()))
                         }
                     },
                     &retry_policy,
@@ -4555,14 +4737,14 @@ async fn chat_completions_routed(
             // Extract headers before consuming the response with bytes_stream()
             let upstream_headers = upstream_resp.headers().clone();
             let (peeked, retries) = open_sse_with_retry(
-                upstream_resp.bytes_stream(),
+                tap_upstream(upstream_resp.bytes_stream()),
                 PeekKind::OpenAi,
                 |_: &(CooldownReason, String)| {
                     let builder = retry_builder.as_ref().and_then(|b| b.try_clone());
                     async move {
                         resend_stream(builder, first_token_timeout)
                             .await
-                            .map(|r| r.bytes_stream())
+                            .map(|r| tap_upstream(r.bytes_stream()))
                     }
                 },
                 &retry_policy,
@@ -6406,6 +6588,25 @@ fn update_sse_usage(buffer: &mut Vec<u8>, chunk: &[u8], acc: &mut UsageAccumulat
     }
 }
 
+/// Note raw upstream bytes on the request's timing cell, before any SSE
+/// translation: the mid-stream idle check and the gap statistics see every
+/// chunk the provider sent, including keepalive comments and thought-only
+/// events a translator drops. A no-op outside a routed request.
+fn tap_upstream<S, E>(
+    inner: S,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let cell = super::proxy_timing::current();
+    inner.inspect(move |item| {
+        if let (Some(cell), Ok(_)) = (&cell, item) {
+            cell.upstream_activity();
+        }
+    })
+}
+
 /// Wrap a streaming response to defer health tracking until the stream finishes.
 ///
 /// Records `record_success` when the stream ends cleanly, or `record_failure`
@@ -6426,13 +6627,23 @@ fn track_stream_health(
     liveness_mission_id: Option<uuid::Uuid>,
     outcome_sink: Option<StreamEndSink>,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
-    let idle = reliability::stream_idle_timeout();
     // Built once the first content chunk was peeked: that is this attempt's
     // time to first content. The cell rides along until the stream ends.
     let timing = super::proxy_timing::current();
     if let Some(cell) = &timing {
         cell.attempt_first_content();
     }
+    let idle = match timing.as_ref().and_then(|c| c.current_target()) {
+        Some((provider, model)) => reliability::stream_idle_timeout_for(
+            &provider,
+            &super::proxy_timing::recent_max_gaps_ms(
+                &provider,
+                &model,
+                std::time::Duration::from_secs(6 * 3600),
+            ),
+        ),
+        None => reliability::stream_idle_timeout(),
+    };
     async_stream::stream! {
         let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
         let mut stream = std::pin::pin!(inner);
@@ -6441,9 +6652,18 @@ fn track_stream_health(
         let mut idle_timeout = false;
         let mut usage = UsageAccumulator::default();
         let mut sse_buffer = Vec::new();
+        // Wait budget for the next translated item; raw upstream bytes that
+        // the translator swallowed (keepalives, thought-only chunks) extend it.
+        let mut wait = idle;
         loop {
-            match tokio::time::timeout(idle, stream.next()).await {
+            match tokio::time::timeout(wait, stream.next()).await {
                 Err(_) => {
+                    if let Some(upstream_idle) = timing.as_ref().and_then(|c| c.upstream_idle()) {
+                        if upstream_idle < idle {
+                            wait = idle - upstream_idle;
+                            continue;
+                        }
+                    }
                     tracing::warn!(
                         account_id = %account_id,
                         idle_secs = idle.as_secs(),
@@ -6451,6 +6671,11 @@ fn track_stream_health(
                     );
                     errored = true;
                     idle_timeout = true;
+                    if let Some(cell) = &timing {
+                        // Before the error item: the client wrapper must see
+                        // the stall when the error event reaches it.
+                        cell.mark_upstream_stream_failed("stalled");
+                    }
                     yield Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         format!(
@@ -6462,6 +6687,7 @@ fn track_stream_health(
                 }
                 Ok(None) => break,
                 Ok(Some(item)) => {
+                    wait = idle;
                     received_any = true;
                     match &item {
                         Ok(chunk) => {
@@ -6483,10 +6709,11 @@ fn track_stream_health(
         let tokens = usage.tokens();
         if let Some(cell) = &timing {
             cell.set_tokens(usage.input, tokens.output, tokens.cache_read, usage.reasoning);
-            if errored || idle_timeout {
+            if errored && !idle_timeout {
                 // The client still sees a clean SSE end (the error becomes
-                // an SSE event), so record the failure here.
-                cell.mark_upstream_stream_failed(if idle_timeout { "stalled" } else { "stream_error" });
+                // an SSE event), so record the failure here. Stalls were
+                // recorded before their error item.
+                cell.mark_upstream_stream_failed("stream_error");
             }
         }
         if let Some(sink) = outcome_sink {
@@ -12304,6 +12531,7 @@ mod latency_tests {
                     TimingCell::new("xai/grok-4.7", true),
                 )
             },
+            |r, c, _| timed_response(r, c),
         )
         .await;
         assert_eq!(winner(&resp), "primary");
@@ -12343,6 +12571,7 @@ mod latency_tests {
                     hc,
                 )
             },
+            |r, c, _| timed_response(r, c),
         )
         .await;
         assert_eq!(winner(&resp), "hedge");
@@ -12386,6 +12615,7 @@ mod latency_tests {
                     TimingCell::new("t", true),
                 )
             },
+            |r, c, _| timed_response(r, c),
         )
         .await;
         assert_eq!(winner(&resp), "primary");
@@ -12419,6 +12649,7 @@ mod latency_tests {
                     TimingCell::new("t", true),
                 )
             },
+            |r, c, _| timed_response(r, c),
         )
         .await;
         assert_eq!(winner(&resp), "hedge");
@@ -12451,6 +12682,7 @@ mod latency_tests {
                     TimingCell::new("t", true),
                 )
             },
+            |r, c, _| timed_response(r, c),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
@@ -12528,6 +12760,192 @@ mod latency_tests {
         })
         .await;
         assert_eq!(cell.snapshot().reasoning_tokens, 30);
+    }
+
+    fn sse_response(chunks: Vec<(Duration, &'static str)>) -> Response {
+        let stream = async_stream::stream! {
+            for (delay, chunk) in chunks {
+                tokio::time::sleep(delay).await;
+                yield Ok::<_, std::io::Error>(Bytes::from_static(chunk.as_bytes()));
+            }
+        };
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(stream))
+            .unwrap()
+    }
+
+    async fn collect_text(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn output_commit_detection_ignores_role_and_reasoning() {
+        assert!(!sse_chunk_commits_output(
+            br#"data: {"choices":[{"delta":{"role":"assistant","content":""}}]}"#
+        ));
+        assert!(!sse_chunk_commits_output(
+            br#"data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}"#
+        ));
+        assert!(!sse_chunk_commits_output(b": keepalive\n\n"));
+        assert!(sse_chunk_commits_output(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"
+        ));
+        assert!(sse_chunk_commits_output(
+            br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keepalives_fill_long_pauses_between_events_only() {
+        let cell = TimingCell::new("c", true);
+        let resp = sse_response(vec![
+            (Duration::ZERO, "data: {\"a\":1}\n"),
+            // Mid-event pause: no keepalive may split the event.
+            (Duration::from_secs(40), "\n"),
+            // Between events: keepalives every 15 s.
+            (Duration::from_secs(40), "data: [DONE]\n\n"),
+        ]);
+        let text = collect_text(client_stream_response(resp, cell.clone(), None)).await;
+        assert_eq!(
+            text,
+            "data: {\"a\":1}\n\n: keepalive\n\n: keepalive\n\ndata: [DONE]\n\n"
+        );
+        let r = cell.snapshot();
+        assert_eq!(r.keepalives, 2);
+        assert_eq!(r.outcome, "ok");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn swallowed_upstream_activity_is_not_a_stall() {
+        // Raw upstream sends a keepalive comment every 30 s for 3 minutes;
+        // the translator (like the Gemini one) drops them, so the translated
+        // stream is silent until the final chunk.
+        let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+        let cell = TimingCell::new("c", true);
+        let account = uuid::Uuid::new_v4();
+        let items = crate::api::proxy_timing::scope(cell.clone(), async {
+            cell.attempt_start("google", "gemini-4-argon-eap", account);
+            let raw = async_stream::stream! {
+                for _ in 0..6 {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    yield Ok::<_, std::io::Error>(Bytes::from_static(b": ping\n\n"));
+                }
+                yield Ok(Bytes::from_static(b"data: done\n\n"));
+            };
+            let translated = tap_upstream(raw).filter(|item| {
+                let keep = item.as_ref().map_or(true, |b| b.starts_with(b"data:"));
+                async move { keep }
+            });
+            let tracked = track_stream_health(
+                translated,
+                tracker.clone(),
+                account,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            tracked.collect::<Vec<_>>().await
+        })
+        .await;
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_ok(), "no stall: upstream was alive");
+        let a = cell.snapshot().attempts[0].clone();
+        assert_eq!(a.upstream_chunks, 7);
+        assert_eq!(a.max_upstream_gap_ms, 30_000);
+        assert!(a.failures.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_before_output_is_rerouted_transparently() {
+        let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+        let cell = TimingCell::new("builtin/smart", true);
+        let account = uuid::Uuid::new_v4();
+        // First stream: role + reasoning, then silence past the idle limit.
+        let stalled = crate::api::proxy_timing::scope(cell.clone(), async {
+            cell.attempt_start("xai", "grok-4.7", account);
+            let inner = async_stream::stream! {
+                yield Ok::<_, std::io::Error>(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"plan\"}}]}\n\n",
+                ));
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            };
+            let tracked =
+                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(sse_error_terminated(tracked)))
+                .unwrap()
+        })
+        .await;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<Option<ExcludedEntry>>::new()));
+        let seen = calls.clone();
+        let reroute: StallRetry = Arc::new(move |exclude| {
+            seen.lock().unwrap().push(exclude);
+            Box::pin(async {
+                sse_response(vec![(
+                    Duration::from_secs(1),
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n",
+                )])
+            })
+        });
+        let text = collect_text(client_stream_response(stalled, cell.clone(), Some(reroute))).await;
+        assert!(!text.contains("upstream_stalled"), "{text}");
+        assert!(text.contains("\"content\":\"done\""));
+        assert_eq!(calls.lock().unwrap().as_slice(), &[None]); // same entry first
+        let r = cell.snapshot();
+        assert_eq!(r.transparent_retries, 1);
+        assert_eq!(r.outcome, "ok");
+        assert!(r.keepalives >= 3, "keepalives during the 60 s silence");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_after_output_is_surfaced_not_retried() {
+        let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+        let cell = TimingCell::new("builtin/smart", true);
+        let account = uuid::Uuid::new_v4();
+        let stalled = crate::api::proxy_timing::scope(cell.clone(), async {
+            cell.attempt_start("xai", "grok-4.7", account);
+            let inner = async_stream::stream! {
+                yield Ok::<_, std::io::Error>(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+                ));
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            };
+            let tracked = track_stream_health(
+                inner,
+                tracker.clone(),
+                account,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(sse_error_terminated(tracked)))
+                .unwrap()
+        })
+        .await;
+        let called = Arc::new(AtomicBool::new(false));
+        let c2 = called.clone();
+        let reroute: StallRetry = Arc::new(move |_| {
+            c2.store(true, Ordering::SeqCst);
+            Box::pin(async { ok_response("x") })
+        });
+        let text = collect_text(client_stream_response(stalled, cell.clone(), Some(reroute))).await;
+        assert!(text.contains("upstream_stalled"));
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(cell.snapshot().outcome, "stalled");
     }
 
     #[test]

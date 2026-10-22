@@ -72,6 +72,14 @@ pub struct Attempt {
     pub http_version: Option<&'static str>,
     /// Failure reasons in order (cooldown reason names, `timeout`, …).
     pub failures: Vec<String>,
+    /// Upstream byte chunks received and the longest silence between two
+    /// of them after the first (raw transport bytes: keepalive comments and
+    /// thought chunks count, whatever the translator later drops).
+    pub upstream_chunks: u64,
+    pub max_upstream_gap_ms: u64,
+    /// Upstream gaps longer than 10 s / 30 s.
+    pub upstream_gaps_over_10s: u32,
+    pub upstream_gaps_over_30s: u32,
 }
 
 /// Request shape, no content.
@@ -106,6 +114,12 @@ pub struct TimingRecord {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub reasoning_tokens: u64,
+    /// Longest silence between two chunks sent to the client.
+    pub max_client_gap_ms: u64,
+    /// Keepalive comments sent to the client during silences.
+    pub keepalives: u32,
+    /// Mid-stream stalls recovered by re-routing before content was sent.
+    pub transparent_retries: u32,
 }
 
 impl TimingRecord {
@@ -156,6 +170,9 @@ struct CellState {
     body_finished: bool,
     cancelled: bool,
     upstream_failed: Option<&'static str>,
+    /// A stall the client wrapper has not looked at yet.
+    pending_stall: bool,
+    last_upstream: Option<tokio::time::Instant>,
 }
 
 /// Mutable timing state of one request. Emits on drop.
@@ -180,6 +197,8 @@ impl TimingCell {
                 body_finished: false,
                 cancelled: false,
                 upstream_failed: None,
+                pending_stall: false,
+                last_upstream: None,
             }),
         })
     }
@@ -213,6 +232,66 @@ impl TimingCell {
         self.with(|s| {
             s.record.mission_id = mission_id;
             s.record.caller = caller.as_deref().map(log_safe);
+        });
+    }
+
+    /// Raw upstream bytes arrived for the current attempt.
+    pub fn upstream_activity(&self) {
+        let now = tokio::time::Instant::now();
+        self.with(|s| {
+            let gap = s
+                .last_upstream
+                .map(|t| now.duration_since(t).as_millis() as u64);
+            s.last_upstream = Some(now);
+            if let Some(a) = s.current_attempt.and_then(|i| s.record.attempts.get_mut(i)) {
+                a.upstream_chunks += 1;
+                if let Some(gap) = gap {
+                    a.max_upstream_gap_ms = a.max_upstream_gap_ms.max(gap);
+                    if gap > 10_000 {
+                        a.upstream_gaps_over_10s += 1;
+                    }
+                    if gap > 30_000 {
+                        a.upstream_gaps_over_30s += 1;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Time since the current attempt last received upstream bytes.
+    pub fn upstream_idle(&self) -> Option<Duration> {
+        self.with(|s| s.last_upstream.map(|t| t.elapsed()))
+    }
+
+    /// Provider, model and account of the attempt in progress.
+    pub fn current_entry(&self) -> Option<(String, String, String)> {
+        self.with(|s| {
+            s.current_attempt
+                .and_then(|i| s.record.attempts.get(i))
+                .map(|a| (a.provider.clone(), a.model.clone(), a.account_id.clone()))
+        })
+    }
+
+    /// A silence of `gap` toward the client ended (or a keepalive was sent).
+    pub fn client_gap(&self, gap: Duration, keepalive: bool) {
+        self.with(|s| {
+            s.record.max_client_gap_ms = s.record.max_client_gap_ms.max(gap.as_millis() as u64);
+            if keepalive {
+                s.record.keepalives += 1;
+            }
+        });
+    }
+
+    /// Consume a stall signalled by the upstream stream wrapper.
+    pub fn take_stall(&self) -> bool {
+        self.with(|s| std::mem::take(&mut s.pending_stall))
+    }
+
+    /// A stalled stream is being replaced transparently.
+    pub fn note_transparent_retry(&self) {
+        self.with(|s| {
+            s.record.transparent_retries += 1;
+            s.upstream_failed = None;
         });
     }
 
@@ -266,6 +345,7 @@ impl TimingCell {
             // Replacing the guard first releases the previous attempt.
             s.inflight = Some(InflightGuard { keys });
             s.attempt_started = Some(Instant::now());
+            s.last_upstream = None;
             if same {
                 return;
             }
@@ -351,6 +431,9 @@ impl TimingCell {
     /// The upstream stream stalled or errored after content started.
     pub fn mark_upstream_stream_failed(&self, reason: &'static str) {
         self.with(|s| {
+            if reason == "stalled" {
+                s.pending_stall = true;
+            }
             s.upstream_failed = Some(reason);
             if let Some(a) = s.current_attempt.and_then(|i| s.record.attempts.get_mut(i)) {
                 a.failures.push(reason.to_string());
@@ -455,6 +538,12 @@ fn emit(record: &TimingRecord) {
         output_tokens = record.output_tokens,
         cache_read_tokens = record.cache_read_tokens,
         reasoning_tokens = record.reasoning_tokens,
+        max_upstream_gap_ms = deciding.map_or(0, |a| a.max_upstream_gap_ms),
+        upstream_gaps_over_30s = deciding.map_or(0, |a| a.upstream_gaps_over_30s),
+        upstream_chunks = deciding.map_or(0, |a| a.upstream_chunks),
+        max_client_gap_ms = record.max_client_gap_ms,
+        keepalives = record.keepalives,
+        transparent_retries = record.transparent_retries,
         "proxy_timing"
     );
 }
@@ -505,6 +594,20 @@ pub fn recent_first_content_ms(provider: &str, model: &str, window: Duration) ->
         .collect()
 }
 
+/// Longest upstream gaps (ms) of recent streams on `provider/model` that
+/// finished without a stall, newest last, within `window`.
+pub fn recent_max_gaps_ms(provider: &str, model: &str, window: Duration) -> Vec<u64> {
+    let ring = REGISTRY.ring.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    ring.iter()
+        .filter(|(at, r)| now.duration_since(*at) <= window && r.outcome == "ok")
+        .flat_map(|(_, r)| r.attempts.iter())
+        .filter(|a| a.provider == provider && a.model == model && a.upstream_chunks > 1)
+        .filter(|a| !a.failures.iter().any(|f| f == "stalled"))
+        .map(|a| a.max_upstream_gap_ms)
+        .collect()
+}
+
 /// Nearest-rank percentile of an unsorted sample (`q` in 0..=1).
 pub fn percentile(values: &[u64], q: f64) -> Option<u64> {
     if values.is_empty() {
@@ -549,7 +652,11 @@ pub struct GroupSummary {
     pub cache_read_tokens: Stat,
     pub reasoning_tokens: Stat,
     pub inflight_at_start: Stat,
+    pub max_upstream_gap_ms: Stat,
+    pub max_client_gap_ms: Stat,
     pub hedged: usize,
+    pub keepalives: u64,
+    pub transparent_retries: u64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -594,7 +701,11 @@ pub fn summarize_records(records: &[TimingRecord]) -> TimingSummary {
         cache: Vec<u64>,
         reasoning: Vec<u64>,
         inflight: Vec<u64>,
+        up_gap: Vec<u64>,
+        client_gap: Vec<u64>,
         hedged: usize,
+        keepalives: u64,
+        retries: u64,
     }
     let finish = |acc: Acc| GroupSummary {
         requests: acc.requests,
@@ -609,7 +720,11 @@ pub fn summarize_records(records: &[TimingRecord]) -> TimingSummary {
         cache_read_tokens: Stat::of(&acc.cache),
         reasoning_tokens: Stat::of(&acc.reasoning),
         inflight_at_start: Stat::of(&acc.inflight),
+        max_upstream_gap_ms: Stat::of(&acc.up_gap),
+        max_client_gap_ms: Stat::of(&acc.client_gap),
         hedged: acc.hedged,
+        keepalives: acc.keepalives,
+        transparent_retries: acc.retries,
     };
     let mut by_model: HashMap<String, Acc> = HashMap::new();
     let mut attempts: HashMap<String, Acc> = HashMap::new();
@@ -635,6 +750,9 @@ pub fn summarize_records(records: &[TimingRecord]) -> TimingSummary {
             acc.headers.extend(a.headers_ms);
             acc.first.extend(a.first_content_ms);
             acc.inflight.push(a.inflight_provider.max(0) as u64);
+            if a.upstream_chunks > 1 {
+                acc.up_gap.push(a.max_upstream_gap_ms);
+            }
         }
         let key = r
             .deciding_attempt()
@@ -659,6 +777,11 @@ pub fn summarize_records(records: &[TimingRecord]) -> TimingSummary {
         if r.hedge.is_some() {
             acc.hedged += 1;
         }
+        if r.stream && r.max_client_gap_ms > 0 {
+            acc.client_gap.push(r.max_client_gap_ms);
+        }
+        acc.keepalives += u64::from(r.keepalives);
+        acc.retries += u64::from(r.transparent_retries);
     }
     TimingSummary {
         window_secs: 0,
@@ -693,6 +816,10 @@ pub fn spawn_periodic_summary(every: Duration) {
                     input_tokens_p50 = g.input_tokens.p50.unwrap_or(0),
                     inflight_p90 = g.inflight_at_start.p90.unwrap_or(0),
                     hedged = g.hedged,
+                    max_upstream_gap_p90 = g.max_upstream_gap_ms.p90.unwrap_or(0),
+                    max_client_gap_p90 = g.max_client_gap_ms.p90.unwrap_or(0),
+                    keepalives = g.keepalives,
+                    transparent_retries = g.transparent_retries,
                     outcomes = %serde_json::to_string(&g.outcomes).unwrap_or_default(),
                     "proxy_timing_summary"
                 );
