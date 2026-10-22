@@ -21,7 +21,8 @@ struct OrbMachinesSettings: View {
             if let managed {
                 OrbManagedMachinesSection(response: managed, fetchedAt: managedFetchedAt, busy: managedBusy,
                                           onDestroy: { m in Task { await destroy(m) } },
-                                          onExtend: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/extend", method: "POST", body: .object(["ttl_minutes": .number(60)])) } } })
+                                          onExtend: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/extend", method: "POST", body: .object(["ttl_minutes": .number(60)])) } } },
+                                          onOpenMission: { startedMission = $0 })
             }
             Section("Fleet") {
                 if loading && nodes.isEmpty { ProgressView() }

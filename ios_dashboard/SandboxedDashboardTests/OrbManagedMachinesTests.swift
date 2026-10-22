@@ -85,4 +85,34 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(OrbManaged.stateLabel(marked.machines[0].state), "Destroying…")
         XCTAssertEqual(r.machines[0].state, "online")
     }
+
+    func testUnlimitedBudgetLine() {
+        let b = OrbManagedBudget(spent_today_usd: 0.11, committed_usd: nil, daily_cap_usd: nil, active: 1, max_concurrent: nil)
+        XCTAssertEqual(OrbManaged.budgetLine(b), "$0.11 spent today · 1 running")
+        let json = #"{"spent_today_usd":0.11,"daily_cap_usd":null,"active":1,"max_concurrent":null}"#
+        XCTAssertEqual(try JSONDecoder().decode(OrbManagedBudget.self, from: Data(json.utf8)), b)
+    }
+
+    func testRowFormatting() throws {
+        var m = try OrbManaged.decode(Data(payload.utf8)).machines[0]
+        XCTAssertEqual(OrbManaged.sizeLabel("default"), "medium")
+        XCTAssertEqual(OrbManaged.sizeLabel("small"), "small")
+        XCTAssertEqual(OrbManaged.specLine(m), "2 vCPU · 4 GB RAM · 40 GB")
+        XCTAssertEqual(OrbManaged.costLine(0.004, rate: 0.036), "<$0.01 so far · $0.036/h")
+        XCTAssertEqual(OrbManaged.ttlShort(m.expires_at, now: at("2026-10-22T10:44:00Z")), "21 min left")
+        XCTAssertEqual(OrbManaged.ttlShort(m.expires_at, now: at("2026-10-22T10:00:00Z")), "1 h 05 min left")
+        XCTAssertEqual(OrbManaged.ttlShort(m.expires_at, now: at("2026-10-22T11:05:00Z")), "<1 min left")
+        XCTAssertEqual(OrbManaged.ttlShort(m.expires_at, now: at("2026-10-22T12:00:00Z")), "Expired")
+        m.created_at = "2026-10-22T10:00:00Z"; m.expires_at = "2026-10-22T11:00:00Z"
+        XCTAssertEqual(OrbManaged.ttlFraction(m, now: at("2026-10-22T10:45:00Z")), 0.25, accuracy: 1e-9)
+        XCTAssertEqual(OrbManaged.ttlFraction(m, now: at("2026-10-22T12:00:00Z")), 0)
+        XCTAssertEqual(OrbManaged.missionLabel(title: "Fix the flaky test", id: "3a510e9b-31f3"), "Fix the flaky test")
+        XCTAssertEqual(OrbManaged.missionLabel(title: " ", id: "3a510e9b-31f3"), "3a510e9b")
+        XCTAssertEqual(OrbManaged.missionLabel(title: nil, id: "3a510e9b-31f3"), "3a510e9b")
+    }
+
+    func testNanosecondTimestamps() {
+        XCTAssertNotNil(OrbManaged.date("2026-10-22T00:59:37.924408552Z"))
+        XCTAssertEqual(OrbManaged.date("2026-10-22T00:59:37.924408552Z"), OrbManaged.date("2026-10-22T00:59:37.924Z"))
+    }
 }
