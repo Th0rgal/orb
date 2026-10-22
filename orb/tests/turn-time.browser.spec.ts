@@ -10,10 +10,17 @@ for (const theme of ["dark", "light"]) test(`completed turns show when they fini
   await expect(first).toContainText("Refactored the session store");
   const label = first.locator(".response-time");
   await expect(label).toHaveText("6d ago");
+  // Plain muted text like the icons: no pill, vertically centred with the copy button.
+  const look = await label.evaluate(el => { const c = getComputedStyle(el); return { bg: c.backgroundColor, border: c.borderTopWidth, color: c.color }; });
+  expect(look.bg).toBe("rgba(0, 0, 0, 0)");
+  expect(look.border).toBe("0px");
   const done = await page.evaluate(() => (window as any).turnTimeHarness.done as number);
   const absolute = await page.evaluate(ms => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }), done);
   await first.hover();
   await label.hover();
+  const [a, b] = await Promise.all([label.boundingBox(), first.locator(".response-copy").boundingBox()]);
+  expect(Math.abs((a!.y + a!.height / 2) - (b!.y + b!.height / 2))).toBeLessThan(1.5);
+  await expect.poll(() => label.evaluate(el => getComputedStyle(el).color)).not.toBe(look.color);
   const tip = page.getByRole("tooltip");
   await expect(tip).toContainText(absolute);
   await expect(tip).toContainText("Worked for 12h 6m");
