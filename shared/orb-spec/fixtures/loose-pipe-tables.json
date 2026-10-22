@@ -1,0 +1,85 @@
+{
+  "_doc": "Loose pipe tables (bare `a | b | c` lines, no outer pipes, no separator row) are rewritten into GFM tables before Markdown parsing. Implementations: orb/src/pipeTables.ts (normalizeLoosePipeTables), iOS OrbPipeTables.normalize, Android OrbPipeTables.normalize; each test replays every case and compares `output` exactly. Rules are documented at the top of orb/src/pipeTables.ts. An all-empty header row means the block had no header; renderers hide it. Numeric columns get a `---:` separator; renderers use tabular figures.",
+  "cases": [
+    {
+      "name": "prod 55518e2b usage table (truncated)",
+      "input": "Usage Orb, proxy prod, fenêtre glissante 22 sept → 22 oct 2026 UTC. Trié par tokens totaux.\n\nmodèle | input | output | cache read | cache write | USD | appels\ngpt-6.1-sol | 3 915 038 024 | 12 774 567 | 95 442 176 | 0 | 20 004.91 | 33 611\ngemini-4-argon | 1 336 620 353 | 9 159 910 | 3 263 315 | 0 | 2 344.30 | 14 210\nglm-5.3 | 1 073 686 000 | 31 389 466 | 38 289 408 | 0 | 1 647.14 | 28 080\nclaude-opus-5-5 | 496 915 719 | 31 167 840 | 277 773 064 | 33 530 630 | 2 829.75 | 31 949",
+      "output": "Usage Orb, proxy prod, fenêtre glissante 22 sept → 22 oct 2026 UTC. Trié par tokens totaux.\n\n| modèle | input | output | cache read | cache write | USD | appels |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n| gpt-6.1-sol | 3 915 038 024 | 12 774 567 | 95 442 176 | 0 | 20 004.91 | 33 611 |\n| gemini-4-argon | 1 336 620 353 | 9 159 910 | 3 263 315 | 0 | 2 344.30 | 14 210 |\n| glm-5.3 | 1 073 686 000 | 31 389 466 | 38 289 408 | 0 | 1 647.14 | 28 080 |\n| claude-opus-5-5 | 496 915 719 | 31 167 840 | 277 773 064 | 33 530 630 | 2 829.75 | 31 949 |"
+    },
+    {
+      "name": "header row then prose without a blank line",
+      "input": "a | b | c\nx | 1 | 2\nThat is all.",
+      "output": "| a | b | c |\n| --- | ---: | ---: |\n| x | 1 | 2 |\n\nThat is all."
+    },
+    {
+      "name": "headerless numeric rows",
+      "input": "Before:\n2024 | 12 | 3.5%\n2025 | 14 | 4.1%",
+      "output": "Before:\n\n|  |  |  |\n| ---: | ---: | ---: |\n| 2024 | 12 | 3.5% |\n| 2025 | 14 | 4.1% |"
+    },
+    {
+      "name": "mixed column counts are not a table",
+      "input": "a | b | c\nd | e | f | g\nh | i",
+      "output": "a | b | c\nd | e | f | g\nh | i"
+    },
+    {
+      "name": "single line is not a table",
+      "input": "This is a | b | c in a sentence.",
+      "output": "This is a | b | c in a sentence."
+    },
+    {
+      "name": "one separator is not enough",
+      "input": "yes | no\nup | down",
+      "output": "yes | no\nup | down"
+    },
+    {
+      "name": "pipes inside code fences are untouched",
+      "input": "```\na | b | c\nd | e | f\n```",
+      "output": "```\na | b | c\nd | e | f\n```"
+    },
+    {
+      "name": "pipes inside inline code are not separators",
+      "input": "`a | b` | c | d\n`e | f` | g | h",
+      "output": "`a | b` | c | d\n`e | f` | g | h"
+    },
+    {
+      "name": "pipes without surrounding spaces are prose",
+      "input": "a|b|c\nd|e|f",
+      "output": "a|b|c\nd|e|f"
+    },
+    {
+      "name": "GFM table is unchanged",
+      "input": "| a | b |\n|---|---:|\n| x | 1 |",
+      "output": "| a | b |\n|---|---:|\n| x | 1 |"
+    },
+    {
+      "name": "GFM table without outer pipes is unchanged",
+      "input": "a | b | c\n--- | --- | ---\nx | y | z",
+      "output": "a | b | c\n--- | --- | ---\nx | y | z"
+    },
+    {
+      "name": "list items are not rows",
+      "input": "- a | b | c\n- d | e | f",
+      "output": "- a | b | c\n- d | e | f"
+    },
+    {
+      "name": "streaming: header and partial first row stay text",
+      "input": "model | in | out\ngpt | 3",
+      "output": "model | in | out\ngpt | 3"
+    },
+    {
+      "name": "streaming: two complete rows and a partial one",
+      "input": "model | in | out\ngpt | 3 915 | 12\nglm | 1 0",
+      "output": "| model | in | out |\n| --- | ---: | ---: |\n| gpt | 3 915 | 12 |\n| glm | 1 0 |  |"
+    },
+    {
+      "name": "streaming: complete rows awaiting the newline",
+      "input": "model | in | out\ngpt | 3 915 | 12\n",
+      "output": "| model | in | out |\n| --- | ---: | ---: |\n| gpt | 3 915 | 12 |\n"
+    },
+    {
+      "name": "empty cells",
+      "input": "name | note | n\nfoo |  | 1\nbar | x | 2",
+      "output": "| name | note | n |\n| --- | --- | ---: |\n| foo |  | 1 |\n| bar | x | 2 |"
+    }
+  ]
+}

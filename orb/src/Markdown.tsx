@@ -13,6 +13,7 @@ import { timed } from "./diagnostics";
 import { RICH_TAG, expandMediaLines, parseRichTag } from "./richTags";
 import { WorkspaceImage } from "./WorkspaceImage";
 import * as Ic from "./icons";
+import { normalizeLoosePipeTables } from "./pipeTables";
 
 /**
  * Source-vs-preview for Markdown file views, shared by every one of them so ⌘/
@@ -309,7 +310,7 @@ function readList(lines: string[], startIdx: number, baseIndent: number, kind: "
   };
 }
 function parseBlocks(src: string): Block[] {
-  const lines = src.replace(/\r\n/g, "\n").split("\n");
+  const lines = normalizeLoosePipeTables(src.replace(/\r\n/g, "\n")).split("\n");
   const out: Block[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -485,13 +486,16 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
   ) : b.t === "table" ? (
     <div class="md-table-wrap">
       <table>
-        <thead>
-          <tr>
-            {b.heads.map((h, i) => (
-              <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h)}</th>
-            ))}
-          </tr>
-        </thead>
+        {/* A loose pipe table without a header row has an all-empty one. */}
+        {b.heads.some((h) => h !== "") && (
+          <thead>
+            <tr>
+              {b.heads.map((h, i) => (
+                <th style={{ "text-align": b.aligns[i] ?? "left" }}>{inline(h)}</th>
+              ))}
+            </tr>
+          </thead>
+        )}
         <tbody>
           {b.rows.map((row) => (
             <tr>

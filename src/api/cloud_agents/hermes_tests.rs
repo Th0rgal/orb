@@ -321,6 +321,7 @@ async fn observe_forwards_reasoning_effort_and_records_thought_and_tool_steps() 
     observe_with_client(&store, &mut e, 0, &h).await.unwrap();
     let posted = recorded_body.lock().unwrap().clone();
     assert_eq!(posted["model"], "builtin/private");
+    assert_eq!(posted["instructions"], ORB_FORMATTING_INSTRUCTIONS);
     assert_eq!(
         posted["model_options"]["reasoning"],
         json!({"enabled": true, "effort": "high"})
