@@ -66,3 +66,41 @@ describe("managed machine formatting", () => {
     expect(managedError(new ApiError(400, "bad size"))).toBe("bad size");
   });
 });
+
+import { nodeLabel, rememberNodeNames, nodeSize } from "../src/machines/nodes";
+import { availabilityLine } from "../src/AntigravityProvider";
+import { placeholder } from "../src/ManagedMachines";
+import { machineName, stateLabel, isStarting } from "../src/managedMachineModel";
+
+describe("managed machine names and v2 states", () => {
+  it("labels nodes by server display name, falling back to the id", () => {
+    expect(nodeLabel("managed-mmX")).toBe("managed-mmX");
+    rememberNodeNames([{ id: "managed-mmX", display_name: "small-a" }, { id: "spark" }]);
+    expect(nodeLabel("managed-mmX")).toBe("small-a");
+    expect(nodeLabel("spark")).toBe("spark");
+    expect(nodeSize({ id: "x", cpu_total: 4, mem_total_bytes: 8 * 1024 ** 3 })).toBe("4 vCPU · 8 GB");
+  });
+  it("names machines and collapses start-up states", () => {
+    expect(machineName({ id: "mm1", name: "large-b" })).toBe("large-b");
+    expect(machineName({ id: "mm1", name: null })).toBe("mm1");
+    expect(stateLabel("provisioning")).toBe("Starting…");
+    expect(stateLabel("enrolling")).toBe("Starting…");
+    expect(stateLabel("destroying")).toBe("Destroying…");
+    expect(isStarting({ state: "enrolling" })).toBe(true);
+    expect(isStarting({ state: "online" })).toBe(false);
+  });
+  it("builds an optimistic placeholder that never accrues cost", () => {
+    const size = { size: "small", cpu: 2, ram_gb: 4, disk_gb: 40, usd_per_hour: 0.06 };
+    const row = placeholder({ key: "pending-1", request: { size: "small", ttl_minutes: 60 }, size });
+    expect(row).toMatchObject({ name: "New machine", state: "provisioning", cpu: 2, usd_per_hour: 0.06 });
+    expect(liveCost(row, 0, Date.now())).toBe(0);
+    expect(placeholder({ key: "pending-1", request: {}, size, error: "Daily budget reached." })).toMatchObject({ state: "failed", error: "Daily budget reached." });
+  });
+  it("describes Antigravity availability", () => {
+    expect(availabilityLine(["Core", "spark"], true, false)).toBe("Available on Core, spark + managed machines");
+    expect(availabilityLine(["Core"], false, false)).toBe("Available on Core");
+    expect(availabilityLine(["Core"], null, false)).toBe("Available on Core");
+    expect(availabilityLine([], true, false)).toBe("Available on managed machines");
+    expect(availabilityLine([], null, true)).toBe("Checking machines…");
+  });
+});

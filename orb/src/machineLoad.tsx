@@ -1,4 +1,4 @@
-import { missionNode } from "./machines/nodes";
+import { missionNode, rememberNodeNames } from "./machines/nodes";
 import { Show, createMemo, createRoot, createSignal } from "solid-js";
 import type { Mission, RemoteNodeView } from "./api";
 import { Bot } from "./sidebarIcons";
@@ -14,7 +14,7 @@ const [fleet, setFleet] = createSignal<RemoteNodeView[]>([]);
 const [localMemory, setLocalMemory] = createSignal<number>();
 
 export const recordMissions = (rows: Mission[]) => { setMissions(rows); };
-export const recordFleet = (rows: RemoteNodeView[]) => { setFleet(rows); };
+export const recordFleet = (rows: RemoteNodeView[]) => { setFleet(rows); rememberNodeNames(rows); };
 export const recordLocalMemory = (free: number | undefined) => { setLocalMemory(free); };
 
 /** `client`, `core`, or a node id: the keys both machine menus use. */

@@ -3899,3 +3899,13 @@ select.orb-select-native:disabled { cursor: default; }
 .managed-size-spec, .managed-size-rate { font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .managed-estimate { display: flex; justify-content: space-between; font-size: 13px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .managed-estimate strong { color: var(--fg); font-weight: 600; }
+/* Managed machines v2 */
+.managed-name { font-weight: 500; }
+.managed-spinner { color: var(--fg-3); flex: none; margin: 0 -2px; }
+.managed-fading { opacity: .45; transition: opacity .3s ease; }
+.managed-error { color: var(--red); }
+.managed-size { grid-template-columns: 16px minmax(70px, auto) 1fr auto; }
+.managed-size.on { background: color-mix(in srgb, var(--toggle) 10%, var(--overlay-field)); border-color: var(--toggle); box-shadow: 0 0 0 1px var(--toggle) inset; }
+.managed-size-check { display: inline-flex; color: var(--toggle); }
+.fleet-group-label { padding: 10px 14px 4px; border-top: 1px solid var(--stroke-soft); }
+.p-native-managed { display: flex; align-items: center; gap: 12px; padding: 10px 0 2px; border-top: 1px solid var(--stroke-soft); margin-top: 8px; }

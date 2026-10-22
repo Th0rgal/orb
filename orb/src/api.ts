@@ -164,6 +164,8 @@ export interface RemoteNodeView {
   disk_total_bytes?: number | null;
   disk_available_bytes?: number | null;
   id: string;
+  /** Human name for managed machines ("small-a"); `id` stays immutable. */
+  display_name?: string | null;
   base_url: string;
   token_env: string;
   status: "online" | "degraded" | "offline" | "unknown" | string;
