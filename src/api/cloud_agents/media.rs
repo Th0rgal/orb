@@ -166,6 +166,8 @@ pub fn find_media_tags(text: &str) -> Vec<MediaTag> {
         let spans = code_spans(line);
         let b = line.as_bytes();
         let mut search = 0;
+        // End of the previous directive: a glued `MEDIA:/a.pngMEDIA:/b.png` is two.
+        let mut previous_end = usize::MAX;
         while let Some(found) = line[search..].find("MEDIA:") {
             let at = search + found;
             search = at + 6;
@@ -173,7 +175,7 @@ pub fn find_media_tags(text: &str) -> Vec<MediaTag> {
                 continue;
             }
             // A directive is a word of its own (not `XMEDIA:`).
-            if at > 0 && (b[at - 1].is_ascii_alphanumeric()) {
+            if at > 0 && at != previous_end && b[at - 1].is_ascii_alphanumeric() {
                 continue;
             }
             let mut start = at;
@@ -217,6 +219,7 @@ pub fn find_media_tags(text: &str) -> Vec<MediaTag> {
                 wrap += 1;
             }
             search = search.max(end);
+            previous_end = end;
             tags.push(MediaTag {
                 start: base + start,
                 end: base + end,
