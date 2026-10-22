@@ -2563,7 +2563,17 @@ fn timed_response(resp: Response, cell: Arc<super::proxy_timing::TimingCell>) ->
 /// response, so a stall after them can still be replayed invisibly.
 fn sse_chunk_commits_output(bytes: &[u8]) -> bool {
     let text = String::from_utf8_lossy(bytes);
-    if !text.contains("\"content\"") && !text.contains("\"tool_calls\"") {
+    // Every client-visible output form the first-chunk peeker accepts,
+    // except reasoning (replaying reasoning is harmless).
+    if ![
+        "\"content\"",
+        "\"tool_calls\"",
+        "\"function_call\"",
+        "\"audio\"",
+    ]
+    .iter()
+    .any(|key| text.contains(key))
+    {
         return false;
     }
     text.lines()
@@ -2584,7 +2594,12 @@ fn sse_chunk_commits_output(bytes: &[u8]) -> bool {
                         .and_then(|d| d.get("tool_calls"))
                         .and_then(|t| t.as_array())
                         .is_some_and(|t| !t.is_empty());
-                    content || tools
+                    let legacy = ["function_call", "audio"].iter().any(|key| {
+                        delta
+                            .and_then(|d| d.get(*key))
+                            .is_some_and(|v| !v.is_null())
+                    });
+                    content || tools || legacy
                 })
         })
 }
@@ -12812,6 +12827,15 @@ mod latency_tests {
         ));
         assert!(sse_chunk_commits_output(
             br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#
+        ));
+        assert!(sse_chunk_commits_output(
+            br#"data: {"choices":[{"delta":{"function_call":{"name":"f","arguments":"{"}}}]}"#
+        ));
+        assert!(sse_chunk_commits_output(
+            br#"data: {"choices":[{"delta":{"audio":{"id":"a","data":"AAAA"}}}]}"#
+        ));
+        assert!(!sse_chunk_commits_output(
+            br#"data: {"choices":[{"delta":{"function_call":null,"audio":null}}]}"#
         ));
     }
 
