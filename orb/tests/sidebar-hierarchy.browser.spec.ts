@@ -48,11 +48,12 @@ async function record(page: Page, children: string[], watched: string[] = []) {
   await page.addInitScript(({ children, watched }) => {
     const w = window as unknown as { __violations: string[]; __frames: number };
     w.__violations = []; w.__frames = 0;
-    const shown = new Set<string>();
+    const shown = new Set<string>(), kids = new Set(children);
     const check = () => {
       w.__frames++;
-      for (const id of children) {
-        if (document.querySelector(`[data-tree-id="m:${id}"][data-depth="1"]`)) w.__violations.push(`child ${id} at root`);
+      for (const el of document.querySelectorAll('[data-depth="1"][data-tree-id^="m:"]')) {
+        const id = el.getAttribute("data-tree-id")!.slice(2);
+        if (kids.has(id)) w.__violations.push(`child ${id} at root`);
       }
       for (const id of watched) {
         const visible = !!document.querySelector(`[data-tree-id="m:${id}"]`);
@@ -171,10 +172,42 @@ test("Hermes missions stay visible while Core or Hermes restarts (error, then em
 test("old open missions pushed off the recent-history page are still listed", async ({ page }) => {
   // 100 newer archived rows fill the history page; the open Hermes mission is older.
   const archived = Array.from({ length: 100 }, (_, i) => mission(`a${i}`, `Archived ${i}`, 500 - i, { status: "acknowledged" }));
-  const old = mission("old", "Old interrupted Hermes", 1, { status: "interrupted", backend: "cloud_hermes" });
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  const old = mission("old", "Old interrupted Hermes", 1, { status: "interrupted", backend: "cloud_hermes", updated_at: yesterday });
+  const live = mission("live", "Old awaiting Hermes", 0, { status: "awaiting_user", backend: "cloud_hermes", updated_at: "2026-08-01T00:00:00Z" });
   const core = new Core();
-  core.list = (_project, all) => all ? archived : [old];
+  core.list = (_project, all) => all ? archived : [old, live];
   await core.install(page);
   await openProject(page);
   await expect(page.getByRole("button", { name: "Old interrupted Hermes", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Old awaiting Hermes", exact: true })).toBeVisible();
+});
+
+test("long-dead open missions beyond the page stay hidden; live and recent ones show (prod verity-core shapes)", async ({ page }) => {
+  // Real verity-core rows (prod missions DB, 2026-10-22): stale interrupted/failed
+  // children of finished parents from Aug-Sep, plus recent and live ones.
+  const fixture = (await import("./fixtures/verity-core-open-missions.json", { with: { type: "json" } })).default as { open: (Row & { _parent_status: string | null })[] };
+  const shift = Date.now() - Date.parse("2026-10-22T12:00:00Z");
+  const move = (t: unknown) => new Date(Date.parse(String(t)) + shift).toISOString();
+  const open = fixture.open.map(({ _parent_status, ...r }) => ({ ...r, project: "assistant", created_at: move(r.created_at), updated_at: move(r.updated_at) }));
+  const parentStatus = new Map(fixture.open.map(r => [r.id, r._parent_status]));
+  const now = Date.now(), week = 7 * 86_400_000;
+  const live = new Set(["active", "running", "pending", "queued", "awaiting_user", "resuming", "starting", "waiting_background"]);
+  const age = (r: Row) => now - Date.parse(String(r.updated_at));
+  const stale = open.filter(r => !live.has(String(r.status)) && age(r) > week);
+  // Side agents (btw) and superseded attempts are never sidebar rows.
+  const hidden = (r: Row) => (r.tags as string[]).some(t => t.startsWith("btw-parent:") || t.startsWith("superseded"));
+  const shownRoots = open.filter(r => !r.parent_mission_id && !hidden(r) && (live.has(String(r.status)) || age(r) <= week));
+  const children = open.filter(r => r.parent_mission_id);
+  const core = new Core();
+  core.list = (project, all) => project && !all ? open : [];
+  // Parents are finished (completed/acknowledged) rows, as in prod.
+  core.get = id => { const child = open.find(r => r.parent_mission_id === id); return child ? mission(id, `Parent ${id.slice(0, 8)}`, 0, { status: parentStatus.get(child.id) ?? "completed" }) : undefined; };
+  await core.install(page); await record(page, children.map(c => c.id));
+  await openProject(page);
+  for (const r of shownRoots) await expect(page.getByRole("button", { name: String(r.title), exact: true }).first()).toBeVisible();
+  await poll(page); await settle(page);
+  for (const r of stale) expect(await page.locator(`[data-tree-id="m:${r.id}"]`).count(), `${r.title} (${r.status}, ${r.updated_at})`).toBe(0);
+  expect(stale.length).toBeGreaterThan(30);
+  expect(await violations(page)).toEqual([]);
 });

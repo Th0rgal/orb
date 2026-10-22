@@ -10,7 +10,7 @@ import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
 import { applyProjectRoster } from "./projectAppearance";
 import { requestDone } from "./diagnostics";
-import { configureParentResolver, partialList, resetMissionHierarchy, stickHierarchy } from "./missionHierarchy";
+import { configureParentResolver, openBeyondPage, partialList, resetMissionHierarchy, stickHierarchy } from "./missionHierarchy";
 
 const URL_KEY = "orb.apiUrl";
 const JWT_KEY = "orb.jwt";
@@ -863,9 +863,9 @@ async function includeAncestors(rows: Mission[], project?: string): Promise<Miss
   return withAncestors(rows, async id => { const row = await fetchAncestor(id); return row && (project === undefined || row.project === project) ? row : null; });
 }
 
-/** A project's recent history (archived included) plus every mission still
- * open in it, however old: a page of recent history alone drops live missions
- * that many newer (often archived) ones pushed off it. */
+/** A project's recent history (archived included) plus the open missions
+ * older than that page that still matter (`openBeyondPage`): a page of recent
+ * history alone drops live missions that newer (often archived) ones pushed off. */
 async function projectRows(slug: string): Promise<Mission[]> {
   const project = encodeURIComponent(slug);
   const [history, ...live] = await Promise.all([
@@ -875,7 +875,7 @@ async function projectRows(slug: string): Promise<Mission[]> {
   for (let offset = 200; live[live.length - 1].length === 200 && offset < 1000; offset += 200)
     live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=200&offset=${offset}`));
   const byId = new Map<string, Mission>();
-  for (const row of [...history, ...live.flat()]) if (!byId.has(row.id)) byId.set(row.id, row);
+  for (const row of [...history, ...openBeyondPage(history, live.flat())]) if (!byId.has(row.id)) byId.set(row.id, row);
   const at = (m: Mission) => Date.parse(m.updated_at || m.created_at || "") || 0;
   return [...byId.values()].sort((a, b) => at(b) - at(a));
 }
