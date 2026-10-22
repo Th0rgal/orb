@@ -9,7 +9,7 @@ import org.junit.Test
 class OrbManagedMachinesTest {
     private val payload = """
         {"enabled":true,"provider":"boat","machines":[
-          {"id":"m1","node_id":"managed-m1","size":"small","cpu":2,"ram_gb":4,"disk_gb":40,"usd_per_hour":0.06,
+          {"id":"m1","name":"small-a","node_id":"managed-m1","size":"small","cpu":2,"ram_gb":4,"disk_gb":40,"usd_per_hour":0.06,
            "state":"online","created_at":"2026-10-22T10:00:00Z","expires_at":"2026-10-22T11:00:00Z",
            "destroyed_at":null,"cost_usd":0.5,"cost_is_metered":true,"owner_mission_id":"abcdef1234567",
            "reason":"build","error":null,"ledger_closed":false,"destroy_reason":null},
@@ -149,5 +149,29 @@ class OrbManagedMachinesTest {
         assertEquals("no such machine", OrbManagedMachines.errorMessage(other))
         assertEquals("HTTP 500", OrbManagedMachines.errorMessage(OrbError("HTTP 500", 500, "")))
         assertEquals("boom", OrbManagedMachines.errorMessage(RuntimeException("boom")))
+    }
+
+    @Test
+    fun namesAndTitles() {
+        val (named, unnamed) = parsed().machines
+        assertEquals("small-a", named.name)
+        assertEquals("small-a", OrbManagedMachines.title(named))
+        assertNull(unnamed.name)
+        assertEquals("m2", OrbManagedMachines.title(unnamed))
+        val node = OrbRow(mapOf("id" to "managed-mm1", "display_name" to "medium-b"))
+        assertEquals("medium-b", OrbManagedMachines.nodeTitle("managed-mm1", node))
+        assertEquals("ashur", OrbManagedMachines.nodeTitle("ashur", OrbRow(mapOf("id" to "ashur"))))
+    }
+
+    @Test
+    fun optimisticDestroyAndRevert() {
+        val machines = parsed().machines
+        val marked = OrbManagedMachines.markDestroying(machines, "m1")
+        assertEquals("destroying", marked[0].state)
+        assertEquals("Destroying…", OrbManagedMachines.stateLabel(marked[0].state))
+        assertFalse(OrbManagedMachines.canAct(marked[0]))
+        assertTrue(OrbManagedMachines.isLive(marked[0]))
+        assertEquals(machines[1], marked[1])
+        assertEquals(machines, OrbManagedMachines.revert(marked, machines[0]))
     }
 }

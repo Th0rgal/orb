@@ -286,7 +286,7 @@ fun OrbMachinesSettingsPage(
                                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 Text(
-                                                    text = nodeId,
+                                                    text = OrbManagedMachines.nodeTitle(nodeId, node),
                                                     color = Color.White,
                                                     fontSize = 15.sp,
                                                     fontWeight = FontWeight.Medium,
