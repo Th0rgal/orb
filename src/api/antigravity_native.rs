@@ -60,21 +60,37 @@ pub(crate) async fn sync_node(
     let Some(credential) = routing_credential() else {
         return Ok(NodeSync::NoLogin);
     };
-    if crate::managed::is_managed_node(node_id) {
-        return Err(format!(
-            "Node '{node_id}' is a managed machine; account sign-ins are never pushed to it"
-        ));
+    let managed = crate::managed::is_managed_node(node_id);
+    if managed {
+        // Only the owner's own managed VMs, and only while the operator
+        // setting allows it; never baked into the image, wiped on destroy.
+        let allowed = match crate::managed::global() {
+            Some(m) => m.antigravity_allowed(node_id).await,
+            None => false,
+        };
+        if !allowed {
+            return Err(format!(
+                "Node '{node_id}' is a managed machine without Antigravity projection (setting off or not the owner's machine)"
+            ));
+        }
     }
-    let node = state
-        .config
-        .remote_nodes
-        .static_node(node_id)
-        .ok_or_else(|| format!("Unknown node '{node_id}'"))?;
+    let node = if managed {
+        state.config.remote_nodes.node(node_id)
+    } else {
+        state.config.remote_nodes.static_node(node_id)
+    }
+    .ok_or_else(|| format!("Unknown node '{node_id}'"))?;
     let token = crate::remote_node::node_token(&node.token_env)
         .map_err(|_| format!("Node '{node_id}' credential unavailable"))?;
-    crate::remote_node::RemoteNodeClient::default()
+    let pushed = crate::remote_node::RemoteNodeClient::default()
         .push_antigravity_credential(node, &token, &credential)
-        .await
+        .await;
+    if managed && matches!(pushed, Ok(true)) {
+        if let Some(m) = crate::managed::global() {
+            m.mark_antigravity_projected(node_id).await;
+        }
+    }
+    pushed
         .map(|accepted| {
             if accepted {
                 NodeSync::Ready

@@ -471,6 +471,16 @@ async fn authorize(
             }
         }
     }
+    // Managed machines may be targeted by name ("small-a"); resolve to the
+    // immutable node id before any check or persistence.
+    if tool.definition.name == "start_mission" {
+        if let Some(r) = args.get("remote_node_id").and_then(Value::as_str) {
+            let resolved = crate::managed::resolve_node_alias(r);
+            if resolved != r {
+                args["remote_node_id"] = json!(resolved);
+            }
+        }
+    }
     // Managed machines belong to the mission tree that rented them.
     match tool.definition.name.as_str() {
         "spawn_managed_machine" => {

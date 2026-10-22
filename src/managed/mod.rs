@@ -256,6 +256,13 @@ impl MachineState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedMachine {
     pub id: String,
+    /// Short human name, unique among live machines ("small-a", "large-b").
+    /// Display/targeting alias only: `node_id` stays immutable.
+    #[serde(default)]
+    pub name: String,
+    /// Owner's Antigravity sign-in was pushed to this VM (wiped on destroy).
+    #[serde(default)]
+    pub antigravity_projected: bool,
     pub provider: String,
     pub provider_id: Option<String>,
     pub node_id: String,
@@ -400,6 +407,74 @@ pub fn owner_state_for_status(status: &str) -> OwnerState {
     }
 }
 
+static ALIASES: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Map a live machine name ("small-a") to its immutable node id; anything
+/// else is returned unchanged. Resolve at intake so a persisted mission never
+/// refers to a reusable name.
+pub fn resolve_node_alias(id: &str) -> String {
+    ALIASES
+        .read()
+        .ok()
+        .and_then(|m| m.get(id).cloned())
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// Display name for a managed node id, if live.
+pub fn display_name(node_id: &str) -> Option<String> {
+    ALIASES
+        .read()
+        .ok()?
+        .iter()
+        .find(|(_, v)| v.as_str() == node_id)
+        .map(|(k, _)| k.clone())
+}
+
+/// Name prefix for a size: boat's "default" reads as "medium".
+pub fn name_prefix(size: &str) -> &str {
+    if size == "default" {
+        "medium"
+    } else {
+        size
+    }
+}
+
+/// Lowest free `<size>-<letter>` name: a..z, then a1..z1, a2..
+pub fn allocate_name(size: &str, live: &[String]) -> String {
+    let size = name_prefix(size);
+    for round in 0u32.. {
+        for letter in b'a'..=b'z' {
+            let suffix = if round == 0 {
+                (letter as char).to_string()
+            } else {
+                format!("{}{}", letter as char, round)
+            };
+            let name = format!("{size}-{suffix}");
+            if !live.iter().any(|n| n == &name) {
+                return name;
+            }
+        }
+    }
+    unreachable!()
+}
+
+fn register_alias(machine: &ManagedMachine) {
+    if !machine.name.is_empty() {
+        if let Ok(mut map) = ALIASES.write() {
+            map.insert(machine.name.clone(), machine.node_id.clone());
+        }
+    }
+}
+
+fn unregister_alias(machine: &ManagedMachine) {
+    if let Ok(mut map) = ALIASES.write() {
+        if map.get(&machine.name) == Some(&machine.node_id) {
+            map.remove(&machine.name);
+        }
+    }
+}
+
 pub fn node_config(node_id: &str) -> Option<&'static RemoteNodeConfig> {
     NODES.read().ok()?.get(node_id).copied()
 }
@@ -457,6 +532,7 @@ fn register_node(machine: &ManagedMachine, core_port: u16, token: &str) {
 }
 
 fn unregister_node(machine: &ManagedMachine) {
+    unregister_alias(machine);
     if let Ok(mut map) = NODES.write() {
         map.remove(&machine.node_id);
     }
@@ -483,6 +559,47 @@ pub struct ManagedManager {
     admission: Mutex<()>,
     pub relay: relay::RelayHub,
     owner_probe: std::sync::RwLock<Option<OwnerProbe>>,
+    runtime: std::sync::RwLock<RuntimeSettings>,
+}
+
+/// Operator toggles persisted in `managed_settings.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeSettings {
+    /// Project the owner's Antigravity (Google) sign-in onto managed VMs the
+    /// owner rented. Default on (`SANDBOXED_MANAGED_ANTIGRAVITY=0` disables).
+    #[serde(default = "default_true")]
+    pub antigravity_on_managed: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            antigravity_on_managed: !matches!(
+                std::env::var("SANDBOXED_MANAGED_ANTIGRAVITY")
+                    .ok()
+                    .as_deref(),
+                Some("0" | "false" | "no" | "off")
+            ),
+        }
+    }
+}
+
+/// Is `owner_user_id` allowed to receive the Antigravity projection?
+/// `SANDBOXED_MANAGED_ANTIGRAVITY_USERS` (comma list) restricts it; unset
+/// means any authenticated owner (single-tenant Core: every user is Thomas).
+/// A machine without a recorded owner never qualifies.
+pub fn antigravity_owner_allowed(owner_user_id: Option<&str>, allowlist: Option<&str>) -> bool {
+    let Some(owner) = owner_user_id.filter(|o| !o.is_empty()) else {
+        return false;
+    };
+    match allowlist.map(str::trim).filter(|l| !l.is_empty()) {
+        None => true,
+        Some(list) => list.split(',').map(str::trim).any(|u| u == owner),
+    }
 }
 
 fn random_id() -> String {
@@ -559,6 +676,7 @@ impl ManagedManager {
             admission: Mutex::new(()),
             relay: relay::RelayHub::default(),
             owner_probe: std::sync::RwLock::new(None),
+            runtime: std::sync::RwLock::new(RuntimeSettings::default()),
         }
     }
 
@@ -585,6 +703,54 @@ impl ManagedManager {
         Some(m)
     }
 
+    fn runtime_path(&self) -> PathBuf {
+        self.dir.join("managed_settings.json")
+    }
+
+    pub fn runtime_settings(&self) -> RuntimeSettings {
+        self.runtime.read().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    pub fn set_runtime_settings(&self, settings: RuntimeSettings) {
+        let _ = std::fs::create_dir_all(&self.dir);
+        write_atomic(
+            &self.runtime_path(),
+            &serde_json::to_vec_pretty(&settings).unwrap_or_default(),
+            false,
+        );
+        if let Ok(mut r) = self.runtime.write() {
+            *r = settings;
+        }
+    }
+
+    /// May the owner's Antigravity sign-in be projected onto this node?
+    pub async fn antigravity_allowed(&self, node_id: &str) -> bool {
+        if !self.runtime_settings().antigravity_on_managed {
+            return false;
+        }
+        let Some(m) = self.get(node_id).await else {
+            return false;
+        };
+        m.state.is_live()
+            && m.node_id == node_id
+            && antigravity_owner_allowed(
+                m.owner_user_id.as_deref(),
+                std::env::var("SANDBOXED_MANAGED_ANTIGRAVITY_USERS")
+                    .ok()
+                    .as_deref(),
+            )
+    }
+
+    pub async fn mark_antigravity_projected(&self, node_id: &str) {
+        if let Some(m) = self.get(node_id).await {
+            if !m.antigravity_projected {
+                if let Some(m) = self.update(&m.id, |m| m.antigravity_projected = true).await {
+                    self.ledger("antigravity_projected", &m);
+                }
+            }
+        }
+    }
+
     fn machines_path(&self) -> PathBuf {
         self.dir.join("managed_machines.json")
     }
@@ -605,8 +771,23 @@ impl ManagedManager {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        let mut machines = machines;
+        // Rows from before names existed: give live ones a name now.
+        let mut live_names: Vec<String> = machines
+            .machines
+            .iter()
+            .filter(|m| m.state.is_live() && !m.name.is_empty())
+            .map(|m| m.name.clone())
+            .collect();
+        for m in machines.machines.iter_mut() {
+            if m.state.is_live() && m.name.is_empty() {
+                m.name = allocate_name(&m.size, &live_names);
+                live_names.push(m.name.clone());
+            }
+        }
         for m in &machines.machines {
             if m.state.is_live() {
+                register_alias(m);
                 if let Some(token) = secrets.get(&m.id).and_then(|s| s.node_token.as_deref()) {
                     register_node(m, self.core_port, token);
                 }
@@ -614,6 +795,14 @@ impl ManagedManager {
         }
         *self.machines.lock().await = machines.machines;
         *self.secrets.lock().await = secrets;
+        if let Some(rt) = std::fs::read(self.runtime_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<RuntimeSettings>(&b).ok())
+        {
+            if let Ok(mut r) = self.runtime.write() {
+                *r = rt;
+            }
+        }
     }
 
     async fn persist(&self) {
@@ -638,6 +827,7 @@ impl ManagedManager {
             "at": Utc::now(),
             "event": event,
             "machine_id": machine.id,
+            "name": machine.name,
             "provider_id": machine.provider_id,
             "size": machine.size,
             "state": machine.state,
@@ -678,7 +868,11 @@ impl ManagedManager {
             .lock()
             .await
             .iter()
-            .find(|m| m.id == id || m.provider_id.as_deref() == Some(id))
+            .find(|m| {
+                m.id == id
+                    || m.provider_id.as_deref() == Some(id)
+                    || (m.state.is_live() && !m.name.is_empty() && m.name == id)
+            })
             .cloned()
     }
 
@@ -860,7 +1054,18 @@ impl ManagedManager {
             }
             let id = format!("mm{}", random_id());
             let now = Utc::now();
+            let live_names: Vec<String> = self
+                .machines
+                .lock()
+                .await
+                .iter()
+                .filter(|m| m.state.is_live())
+                .map(|m| m.name.clone())
+                .collect();
+            let name = allocate_name(spec.size, &live_names);
             let machine = ManagedMachine {
+                name,
+                antigravity_projected: false,
                 node_id: format!("{NODE_PREFIX}{id}"),
                 id,
                 provider: provider.name().into(),
@@ -888,6 +1093,7 @@ impl ManagedManager {
             };
             self.machines.lock().await.push(machine.clone());
             self.persist().await;
+            register_alias(&machine);
             machine
         };
         self.ledger("spawn_requested", &machine);
@@ -1140,6 +1346,28 @@ impl ManagedManager {
         unregister_node(&m);
         self.relay.close(&m.id).await;
         if let (Some(provider), Some(pid)) = (&self.provider, &m.provider_id) {
+            // Wipe a projected sign-in before the disk is retained by the
+            // provider (boat keeps stopped disks for 14 days).
+            if m.antigravity_projected {
+                let wiped = provider
+                    .exec(
+                        pid,
+                        "sudo rm -rf /var/lib/orb-node/work/managed-auth /var/lib/orb-node/node.cred && sync",
+                        60,
+                    )
+                    .await;
+                if let Err(e) = &wiped {
+                    tracing::warn!(machine = %m.id, error = %e, "could not wipe projected sign-in before destroy");
+                }
+                self.ledger(
+                    if wiped.is_ok() {
+                        "antigravity_wiped"
+                    } else {
+                        "antigravity_wipe_failed"
+                    },
+                    &m,
+                );
+            }
             let mut last = Ok(());
             for _ in 0..3 {
                 last = provider.destroy(pid).await;

@@ -1816,7 +1816,9 @@ pub(in crate::api) async fn create_mission_inner(
         .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .map(str::to_string);
+        // A managed machine may be named ("small-a"); persist its immutable
+        // node id, never the reusable name.
+        .map(crate::managed::resolve_node_alias);
     let remote_command = req
         .remote_command
         .as_deref()

@@ -1461,7 +1461,7 @@ impl AssistantMcp {
         vec![
             ToolDefinition {
                 name: "spawn_managed_machine".to_string(),
-                description: "Rent a fresh, disposable cloud VM (boat.dev, EU) and enroll it as a compute node, so you can run a subagent or heavy job on dedicated CPU/RAM instead of sharing the fleet. Use this whenever a task needs more compute than you have (parallel builds, big test suites, memory-hungry Lean/Rust/ML work, isolation from the shared nodes) or get_compute_fleet shows no free capacity. You choose the size: small = 2 vCPU / 4 GB RAM / 12 GB disk ($0.018/h, default), default = 4 vCPU / 8 GB / 50 GB ($0.036/h), large = 8 vCPU / 16 GB / 125 GB ($0.072/h), xlarge = 16 vCPU / 32 GB / 251 GB ($0.20/h); or pass cpu and/or ram_gb and the smallest fitting size is picked. The VM comes with claude, codex, opencode, gemini, agy, elan/Lean v4.35.0, turbo-lean, lean-native and certified-search, but NO credentials and no private checkouts (it is an untrusted, managed trust class: never send secrets or private-host work there). Result (via get_action) has `node_id`: start a subagent there with start_mission(remote_node_id=node_id, backend=..., prompt=...). Shortcut: start_mission(remote_node_id=\"auto-managed:<size>\") spawns and places in one call. Every machine has a TTL (default 120 min, max 720) and is destroyed after 15 idle minutes; daily budget and concurrency caps are hard refusals (errors budget_exceeded / quota_exceeded). Call destroy_managed_machine as soon as you are done.".to_string(),
+                description: "Rent a fresh, disposable cloud VM (boat.dev, EU) and enroll it as a compute node, so you can run a subagent or heavy job on dedicated CPU/RAM instead of sharing the fleet. Use this whenever a task needs more compute than you have (parallel builds, big test suites, memory-hungry Lean/Rust/ML work, isolation from the shared nodes) or get_compute_fleet shows no free capacity. You choose the size: small = 2 vCPU / 4 GB RAM / 12 GB disk ($0.018/h, default), default = 4 vCPU / 8 GB / 50 GB ($0.036/h), large = 8 vCPU / 16 GB / 125 GB ($0.072/h), xlarge = 16 vCPU / 32 GB / 251 GB ($0.20/h); or pass cpu and/or ram_gb and the smallest fitting size is picked. The VM comes with claude, codex, opencode, gemini, agy, elan/Lean v4.35.0, turbo-lean, lean-native and certified-search, but NO credentials and no private checkouts (it is an untrusted, managed trust class: never send secrets or private-host work there). Result (via get_action) has its short `name` (e.g. small-a, large-b): start a subagent there with start_mission(remote_node_id=name, backend=..., prompt=...). Shortcut: start_mission(remote_node_id=\"auto-managed:<size>\") spawns and places in one call. Every machine has a TTL (default 120 min, max 720) and is destroyed after 15 idle minutes; daily budget and concurrency caps are hard refusals (errors budget_exceeded / quota_exceeded). Call destroy_managed_machine as soon as you are done.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1481,7 +1481,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "destroy_managed_machine".to_string(),
-                description: "Destroy a managed VM you no longer need (stops billing immediately and closes its cost ledger). Idempotent. Pass the machine id (mm…) or its node id (managed-mm…).".to_string(),
+                description: "Destroy a managed VM you no longer need (stops billing immediately and closes its cost ledger). Idempotent. Pass the machine name (e.g. small-a), id (mm…) or node id (managed-mm…).".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["machine_id"],
@@ -3048,10 +3048,11 @@ impl AssistantMcp {
         Ok(json!({
             "machine": machine,
             "node_id": machine["node_id"],
+            "name": machine["name"],
             "next": format!(
-                "start_mission(remote_node_id=\"{}\", backend=..., prompt=...) runs a subagent on it; destroy_managed_machine(machine_id=\"{}\") when done",
-                machine["node_id"].as_str().unwrap_or_default(),
-                machine["id"].as_str().unwrap_or_default()
+                "start_mission(remote_node_id=\"{name}\", backend=..., prompt=...) runs a subagent on it (its node id {node} also works); destroy_managed_machine(machine_id=\"{name}\") when done",
+                name = machine["name"].as_str().unwrap_or_default(),
+                node = machine["node_id"].as_str().unwrap_or_default(),
             ),
         }))
     }

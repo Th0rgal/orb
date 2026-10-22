@@ -45,6 +45,10 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/managed-machines", get(list).post(spawn))
         .route("/api/managed-machines/reconcile", post(reconcile))
+        .route(
+            "/api/managed-machines/settings",
+            get(get_settings).put(put_settings),
+        )
         .route("/api/managed-machines/:id", get(get_one).delete(destroy))
         .route("/api/managed-machines/:id/extend", post(extend))
 }
@@ -134,6 +138,23 @@ async fn destroy(Path(id): Path<String>) -> Response {
     match m.destroy(&id, "requested").await {
         Ok(machine) => Json(machine).into_response(),
         Err(e) => err(e),
+    }
+}
+
+async fn get_settings() -> Response {
+    match manager() {
+        Ok(m) => Json(m.runtime_settings()).into_response(),
+        Err(r) => r,
+    }
+}
+
+async fn put_settings(Json(body): Json<crate::managed::RuntimeSettings>) -> Response {
+    match manager() {
+        Ok(m) => {
+            m.set_runtime_settings(body);
+            Json(m.runtime_settings()).into_response()
+        }
+        Err(r) => r,
     }
 }
 

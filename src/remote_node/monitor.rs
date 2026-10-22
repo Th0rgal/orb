@@ -761,6 +761,9 @@ pub struct RemoteNodeView {
     /// Operator-cordoned: still probed and listed, but excluded from
     /// automatic placement until uncordoned.
     pub cordoned: bool,
+    /// Human name of a managed machine ("small-a"); `id` stays immutable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 impl RemoteNodeView {
@@ -810,6 +813,7 @@ impl RemoteNodeView {
             last_seen: cached.and_then(|c| c.last_seen),
             error: cached.and_then(|c| c.last_error.clone()),
             cordoned: false,
+            display_name: crate::managed::display_name(&config.id),
         }
     }
 }
