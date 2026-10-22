@@ -291,8 +291,29 @@ object OrbMissionTree {
     /** Forks share the conversation's name. */
     fun forkTitle(title: String): String = title.removeSuffix(LEGACY_FORK_SUFFIX)
 
+    /** Parent links are sticky (docs/specs/sidebar-hierarchy.md): a payload that
+     * omits the link (a mutation answer, a list served while Hermes restarts)
+     * never moves a known child to the root. Only [reparent] changes one. */
+    private val knownParents = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Explicit re-parent (null detaches): the only way a remembered parent changes. */
+    fun reparent(id: String, parent: String?) {
+        if (parent.isNullOrEmpty()) knownParents.remove(id) else knownParents[id] = parent
+    }
+
+    /** Forget every remembered link (connection switch, tests). */
+    fun resetHierarchy() = knownParents.clear()
+
     /** The mission that launched this one. A fork is another version, never launched work. */
     fun parentId(mission: OrbRow): String? {
+        val id = mission.str("id")
+        val found = payloadParentId(mission)
+        if (id.isNullOrEmpty()) return found
+        if (found != null) { knownParents[id] = found; return found }
+        return knownParents[id]
+    }
+
+    private fun payloadParentId(mission: OrbRow): String? {
         mission.str("parent_mission_id")?.takeIf { it.isNotEmpty() && it != forkSource(mission) }?.let { return it }
         mission.str(
             "callback_parent_mission_id",

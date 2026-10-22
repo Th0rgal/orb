@@ -174,4 +174,18 @@ final class OrbContractTests: XCTestCase {
         XCTAssertNil(fork.parentMissionID)
         XCTAssertFalse(OrbInboxModel.isSubagent(row: fork))
     }
+
+    func testParentLinkIsStickyAcrossPayloadsThatOmitIt() {
+        OrbHierarchy.reset()
+        let parent = OrbRow(.object(["id": .string("sticky-p"), "title": .string("Boss"), "updated_at": .string("2026-10-14T10:00:00Z")]))
+        let full = OrbRow(.object(["id": .string("sticky-c"), "title": .string("Worker"), "callback_parent_mission_id": .string("sticky-p"), "updated_at": .string("2026-10-14T11:00:00Z")]))
+        XCTAssertEqual(full.parentMissionID, "sticky-p")
+        // A resume answer or a list served while Hermes restarts: no derived link.
+        let partial = OrbRow(.object(["id": .string("sticky-c"), "title": .string("Worker"), "status": .string("running"), "updated_at": .string("2026-10-14T12:00:00Z")]))
+        XCTAssertEqual(partial.parentMissionID, "sticky-p")
+        XCTAssertEqual(OrbMissionTree.nest([parent, partial]).map(\.id), ["sticky-p"])
+        OrbHierarchy.reparent("sticky-c", parent: nil)
+        XCTAssertNil(partial.parentMissionID)
+        OrbHierarchy.reset()
+    }
 }
