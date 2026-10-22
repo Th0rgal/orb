@@ -47,6 +47,7 @@ struct OrbMessageImages: Equatable {
         order.append(key)
         while order.count > 24 { cache[order.removeFirst()] = nil }
     }
+    static func trimCache() { cache.removeAll(); order.removeAll() }
     static let limit = 20 * 1024 * 1024
     static func load(_ path: String, missionID: String?) async -> UIImage? {
         // Legacy desktop messages carry the image inline; never send it to a server.

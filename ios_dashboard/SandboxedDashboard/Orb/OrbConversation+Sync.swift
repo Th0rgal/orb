@@ -11,13 +11,43 @@ extension OrbConversation {
         }
     }
 
+    /// Tool and thinking events only add events: fetch those since the last sequence
+    /// instead of the full refresh (mission with 200 history messages, queue, events).
+    /// Throttled, not debounced, so a busy turn still updates about once a second.
     func scheduleCoalescedRefresh() {
-        eventRefreshTask?.cancel()
+        guard eventRefreshTask == nil else { return }
         eventRefreshTask = Task {
             try? await Task.sleep(for: .milliseconds(450))
+            eventRefreshTask = nil
             guard !Task.isCancelled else { return }
-            await refresh(force: true)
+            await refreshEvents()
         }
+    }
+
+    /// A long turn starts far before the loaded tail (hundreds of tool events), so its
+    /// user message and task list were missing: the Tasks card vanished on reopen. Fetch
+    /// only the turn's start and its task-list calls (small tool-call rows, no results).
+    func hydrateTurnStart(_ id: String) async {
+        guard let first = events.first?.sequence, first > 1, !events.contains(where: { $0.eventType == "user_message" }) else { return }
+        guard let older = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: ["user_message", "tool_call"], limit: 400, beforeSeq: first).events,
+              id == self.id else { return }
+        let start = older.last(where: { $0.eventType == "user_message" })?.sequence ?? 0
+        let keep = older.filter { e in
+            e.sequence >= start && (e.eventType == "user_message" || OrbWorkModel.isTaskListTool(e.toolName))
+        }
+        guard !keep.isEmpty else { return }
+        let unique = Dictionary((keep + events).map { ($0.sequence, $0) }, uniquingKeysWith: { _, new in new })
+        events = unique.values.sorted { $0.sequence < $1.sequence }
+    }
+
+    func refreshEvents() async {
+        guard let id, !refreshing, !isCloud else { return }
+        guard let batch = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: events.last?.sequence),
+              !batch.events.isEmpty, id == self.id else { return }
+        let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
+        events = unique.values.sorted { $0.sequence < $1.sequence }
+        OrbReadCache.saveEvents(id, events: events)
+        rebuildWorkModel()
     }
 
     /// Refreshes are coalesced, never dropped: a forced refresh requested while one
@@ -104,6 +134,7 @@ extension OrbConversation {
                 if let batch = await batchTask, (!batch.events.isEmpty || events.isEmpty) {
                     let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
                     events = unique.values.sorted { $0.sequence < $1.sequence }
+                    await hydrateTurnStart(id)
                     OrbReadCache.saveEvents(id, events: events)
                     rebuildWorkModel()
                 }
@@ -144,14 +175,21 @@ extension OrbConversation {
             if execution != .null { OrbDisk.saveAsync(execution, key: "cloud:\(id)") }
             OrbDisk.saveAsync(value, key: "mission:\(id)")
             lastRefresh = Date()
+            // The connection is back: a refresh error must not outlive it.
+            if error.hasPrefix(Self.connectionErrorPrefix) { error = "" }
+        } catch is CancellationError {
+            // A superseded refresh is not a connection problem; the next one reports.
+        } catch let e as URLError where e.code == .cancelled {
         } catch {
             if mission == .null {
                 mission = OrbDisk.read("mission:\(id)", as: OrbJSON.self) ?? .null
                 rebuildHistory()
             }
-            self.error = "Connection unavailable. Last observed state is preserved. \(error.localizedDescription)"
+            self.error = Self.connectionErrorPrefix + " \(error.localizedDescription)"
         }
     }
+
+    static let connectionErrorPrefix = "Connection unavailable. Last observed state is preserved."
 
     /// True once Core accepted the request, even if the refresh that follows fails.
     var canDeferSend: Bool {

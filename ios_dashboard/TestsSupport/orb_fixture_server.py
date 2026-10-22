@@ -4,6 +4,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 REQUIRE_AUTH = False
+ACCESS_LOG = False
 EXPIRE_SESSION = False
 LIST_DELAY = 0
 HEALTH_DELAY = 0
@@ -59,8 +60,41 @@ SHARED_MESSAGE=('Here are the results.\n\n<image path="./chart.png" alt="Growth 
     '<file path="./dataset.bin" name="Raw dataset" />\n\nAll four files are in the workspace.')
 SHARED_OLD='Earlier draft:\n\n<file path="./old/gone.csv" name="gone.csv" />'
 
+REPLAY = {}
+def load_replay(mid, path):
+    """Serve a stored-events export (a JSON list of Core `mission_events` rows) as an
+    opencode mission that is still running: the long-transcript shape behind crash reports."""
+    events=json.loads(Path(path).read_text())
+    for e in events:
+        if isinstance(e.get('metadata'), str): e['metadata']=json.loads(e['metadata'] or '{}')
+        e['metadata']=e.get('metadata') or {}; e['mission_id']=mid
+    history=[dict(role='user' if e['event_type']=='user_message' else 'assistant',content=e['content']) for e in events if e['event_type'] in ('user_message','assistant_message') and e['content']]
+    REPLAY[mid]=(events, history)
+
+def synthetic_long_running():
+    """The shape of a long opencode mission (042fdafa: ~5k events, 25 MB of tool results):
+    13 turns, 2,400 bash/read calls with large results, todowrite task lists, Mermaid,
+    a table, and an orchestration call. Synthetic text only."""
+    rows=[]; t=time.time()-6*3600
+    def add(kind, content, tool=None, call=None):
+        rows.append(dict(id=len(rows)+1,mission_id='long-running',sequence=len(rows)+1,event_type=kind,timestamp=iso(t+len(rows)),event_id=f'lr-{len(rows)+1}',tool_call_id=call,tool_name=tool,content=content,metadata={}))
+    for turn in range(13):
+        add('user_message', f'Turn {turn}: continue the optimisation campaign and re-measure.')
+        add('tool_call', json.dumps({'todos':[{'content':f'Pass {i}','status':'completed' if i<2 else 'pending'} for i in range(5)]}), 'todowrite', f'todo-{turn}')
+        for i in range(185):
+            call=f'c{turn}-{i}'; tool='bash' if i%3 else 'read'
+            add('tool_call', json.dumps({'command':f'lake build Fractal.Pass{i}'} if tool=='bash' else {'filePath':f'/w/src/Pass{i}.lean'}), tool, call)
+            add('tool_result', ('[%d/%d] Building Fractal.Pass%d\n' % (i, 185, i))*(120 if i%10 else 900), tool, call)
+        if turn==12: add('tool_call', json.dumps({'title':'Subagent','backend':'opencode'}), 'sandboxed_start_mission', 'orch-1')
+        if turn==12: break  # the last turn is still running: no answer yet
+        add('assistant_message', f'Turn {turn} done.\n\n| Pass | Lean | Rust |\n| --- | --- | --- |\n| clang | 1.0 | 1.0 |\n\n```mermaid\ngraph TD; A-->B;\n```')
+    history=[dict(role='user' if e['event_type']=='user_message' else 'assistant',content=e['content']) for e in rows if e['event_type'] in ('user_message','assistant_message')]
+    REPLAY['long-running']=(rows, history)
+
+RESET_AT = 0
 def reset():
-    global CORDONED, HEALTH_DELAY, FAIL_MISSIONS
+    global CORDONED, HEALTH_DELAY, FAIL_MISSIONS, RESET_AT
+    RESET_AT = time.time()
     FAIL_MISSIONS = False
     CORDONED = False; HEALTH_DELAY = 0
     QUEUE.clear(); RECEIVED.clear(); QUEUE_EVENTS.clear(); SCHEDULE.clear(); MISSIONS.clear(); RECEIPTS.clear(); COUNTS.clear(); PROVIDERS.clear(); INBOX_STATE.clear()
@@ -126,6 +160,10 @@ def reset():
     qadd('btw-live','user_message','Current request:\nWhat is running now?',at=now-60)
     later('btw-live',4,'assistant_message_canonical','Looking at the running job…')
     later('btw-live',45,'assistant_message','LIVE_ANSWER_OK: the **build** is running.',status='completed')
+    # Long running opencode transcripts (synthetic, plus any --replay export), listed last.
+    for mid,(events,history) in REPLAY.items():
+        MISSIONS[mid]=dict(id=mid,title='Long running transcript' if mid=='long-running' else 'Replayed long transcript',status='active',project='orb-test',backend='opencode',tags=[],model_override='test-model',history=list(history),created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:01:00Z')
+        QUEUE_EVENTS[mid]=[dict(e) for e in events]
 
 BTW_COMPACTION='## Objective\nAnswer the side question.\n\n## Progress\n- read the logs\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.'
 
@@ -155,6 +193,9 @@ def deliver_queue():
     for item in list(QUEUE):
         if time.time() < item['deliver_at']: continue
         QUEUE.remove(item); m=MISSIONS[item['mission_id']]
+        if m['id'] in REPLAY:
+            m['history'].append({'role':'user','content':item['content']}); qadd(m['id'],'user_message',item['content'],item['id'])
+            later(m['id'],3,'assistant_message','REPLAY_REPLY_OK: still building.'); continue
         m['history'] += [{'role':'assistant','content':'first reply'},{'role':'user','content':item['content']},{'role':'assistant','content':'QUEUED_REPLY_OK'}]
         qadd(m['id'],'assistant_message','first reply'); qadd(m['id'],'user_message',item['content'],item['id']); qadd(m['id'],'assistant_message','QUEUED_REPLY_OK')
         m['status']='completed'
@@ -202,10 +243,12 @@ def agent_events(mid):
         add('tool_result','BUILD SUCCEEDED','Bash','b1'); add('assistant_message','The build is fixed and the PR is open.')
     return rows
 
+synthetic_long_running()
 reset()
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self,*args): pass
+    def log_message(self,*args):
+        if ACCESS_LOG: super().log_message(*args)
     def send(self, value, status=200):
         data=json.dumps(value).encode(); self.send_response(status); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
@@ -222,13 +265,22 @@ class Handler(BaseHTTPRequestHandler):
         deliver_queue(); run_schedule()
         if p=='/api/control/queue': return self.send([{k:v for k,v in q.items() if k!='deliver_at'} for q in QUEUE])
         if p.endswith('/events') and p.split('/')[4] in QUEUE_EVENTS:
-            since=int(parse_qs(u.query).get('since_seq',['0'])[0] or 0)
-            return self.send([e for e in QUEUE_EVENTS[p.split('/')[4]] if e['sequence']>since])
+            q=parse_qs(u.query); rows=QUEUE_EVENTS[p.split('/')[4]]
+            if 'types' in q: kinds=set(q['types'][0].split(',')); rows=[e for e in rows if e['event_type'] in kinds]
+            limit=int(q.get('limit',['0'])[0] or 0)
+            if 'before_seq' in q or ('since_seq' not in q and limit):
+                before=int(q.get('before_seq',[str(1<<62)])[0]); rows=[e for e in rows if e['sequence']<before]
+                rows=rows[-limit:] if limit else rows
+            else:
+                since=int(q.get('since_seq',['0'])[0] or 0); rows=[e for e in rows if e['sequence']>since]
+                rows=rows[:limit] if limit else rows
+            return self.send(rows)
         if p=='/api/fs/download':
             path=parse_qs(u.query).get('path',[''])[0]
             rel=path[len(SHARED_ROOT)+1:] if path.startswith(SHARED_ROOT+'/') else None
             if rel not in SHARED_FILES: return self.send({'error':'File not found'},404)
             data=SHARED_FILES[rel]; self.send_response(200); self.send_header('Content-Type','application/octet-stream'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p=='/api/control/stream' and parse_qs(u.query).get('mission',[''])[0] in REPLAY: return self.stream_replay(u)
         if p=='/api/control/inbox-state': return self.send(INBOX_STATE)
         if p=='/api/mission-access': return self.send({'requests':list(reversed(ACCESS)),'audit':list(reversed(ACCESS_AUDIT))})
         if p=='/api/ai/providers': return self.send(list(PROVIDERS.values()))
@@ -267,6 +319,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(m['cloud_execution'])
             return self.send(m)
         return self.send({'error':'Not found'},404)
+    def stream_replay(self, u):
+        """SSE like Core: events after since_seq, then new ones as they land, with
+        text deltas before each assistant message and heartbeats while idle."""
+        q=parse_qs(u.query); mid=q['mission'][0]; seen=int(q.get('since_seq',['0'])[0] or 0)
+        self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
+        def emit(kind, data):
+            self.wfile.write(f"event: {kind}\ndata: {json.dumps(data)}\n\n".encode()); self.wfile.flush()
+        try:
+            emit('connected', {'type':'connected'})
+            while True:
+                with LOCK: deliver_queue(); run_schedule(); rows=[e for e in QUEUE_EVENTS[mid] if e['sequence']>seen]
+                for e in rows:
+                    seen=e['sequence']; kind=e['event_type']
+                    if kind=='assistant_message':
+                        for i in range(0,len(e['content']),4): emit('text_delta', {'delta':e['content'][i:i+4],'mission_id':mid}); time.sleep(0.03)
+                    emit(kind, {'mission_id':mid,'sequence':e['sequence'],'content':e['content'],'tool_call_id':e['tool_call_id'],'name':e['tool_name'],'result':e['content']})
+                if not rows: self.wfile.write(b': ping\n\n'); self.wfile.flush()
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError): return
     def file_resources(self, body):
         """Core's POST /api/file-resources for the shared-files mission workspace."""
         if body.get('mission_id')!='shared-files': return self.send({'error':'File source unavailable'},404)
@@ -386,6 +457,19 @@ class Handler(BaseHTTPRequestHandler):
         if p=='/api/control/message' and body.get('queue_followup') and MISSIONS[body['mission_id']]['status']=='running':
             QUEUE.append(dict(id=key,mission_id=body['mission_id'],content=body['content'],source='remote-queue',deliver_at=time.time()+4))
             RECEIPTS[key]={'id':key,'queued':True}; return self.send(RECEIPTS[key])
+        if p=='/api/control/message' and body.get('mission_id') in REPLAY:
+            # A long running opencode turn: the message lands, then more tool work streams in.
+            mid=body['mission_id']; m=MISSIONS[mid]; RECEIVED.append(body['content'])
+            m['updated_at']=m['last_activity_at']=iso(time.time())  # Core bumps activity on a message
+            if body.get('queue_followup'):
+                # Core queues a follow-up while the turn runs; it lands as a user message 4 s later.
+                QUEUE.append(dict(id=key,mission_id=mid,content=body['content'],source='remote-queue',deliver_at=time.time()+4))
+                RECEIPTS[key]={'id':key,'queued':True}; return self.send(RECEIPTS[key])
+            m['history'].append({'role':'user','content':body['content']}); qadd(mid,'user_message',body['content'],key)
+            for i in range(3):
+                later(mid,1+i,'tool_call',json.dumps({'command':f'lake build Step{i}'}))
+            later(mid,5,'assistant_message','REPLAY_REPLY_OK: still building.')
+            RECEIPTS[key]={'id':key,'queued':False}; return self.send(RECEIPTS[key])
         if p=='/api/control/message':
             m=MISSIONS[body['mission_id']]; m['history'] += [{'role':'user','content':body['content']},{'role':'assistant','content':'FOLLOWUP_OK'}]
             if 'cloud_execution' in m: m['cloud_execution']['turns'].append({'key':key,'prompt':body['content'],'result':'FOLLOWUP_OK','phase':'response_complete','artifacts':[],'branches':[]})
@@ -398,5 +482,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(m)
         return self.send({'error':'Unknown route'},404)
 if __name__=='__main__':
-    parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=18766); parser.add_argument('--require-auth',action='store_true'); parser.add_argument('--expire-session',action='store_true'); parser.add_argument('--list-delay',type=float,default=0); args=parser.parse_args(); LIST_DELAY=args.list_delay; REQUIRE_AUTH=args.require_auth; EXPIRE_SESSION=args.expire_session
+    parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=18766); parser.add_argument('--require-auth',action='store_true'); parser.add_argument('--expire-session',action='store_true'); parser.add_argument('--list-delay',type=float,default=0); parser.add_argument('--access-log',action='store_true'); parser.add_argument('--replay',action='append',default=[],metavar='MISSION_ID=EVENTS.json'); args=parser.parse_args()
+    ACCESS_LOG = args.access_log
+    for spec in args.replay: load_replay(*spec.split('=',1))
+    def replay_ticker():
+        # The replayed mission keeps working: a bash call and its (large) result every second.
+        n=0
+        while True:
+            time.sleep(1); n+=1
+            # A minute of activity after each reset: enough to test streaming, without
+            # pushing the turn start thousands of events back during a long test run.
+            if time.time()-RESET_AT > 60: continue
+            with LOCK:
+                for mid in REPLAY:
+                    if mid not in QUEUE_EVENTS: continue
+                    qadd(mid,'tool_call',json.dumps({'command':f'lake build Fractal.Step{n}'}),tool_call_id=f'tick-{n}',tool_name='bash')
+                    qadd(mid,'tool_result','build output line\n'*1200,tool_call_id=f'tick-{n}',tool_name='bash')
+    threading.Thread(target=replay_ticker,daemon=True).start()
+    reset(); LIST_DELAY=args.list_delay; REQUIRE_AUTH=args.require_auth; EXPIRE_SESSION=args.expire_session
     ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()

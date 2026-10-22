@@ -78,6 +78,10 @@ struct OrbWorkModel: Equatable {
         return "Worked — " + parts.joined(separator: ", ")
     }
 
+    nonisolated static func isTaskListTool(_ name: String?) -> Bool {
+        ["todowrite", "todo_write", "update_plan"].contains(name?.lowercased() ?? "")
+    }
+
     static func build(from events: [StoredEvent], working: Bool) -> OrbWorkModel {
         var model = OrbWorkModel()
         var toolIndexByCallID: [String: Int] = [:]
@@ -105,8 +109,7 @@ struct OrbWorkModel: Equatable {
                 let rawName = event.toolName ?? "tool"
                 if ["ui_native_request", "AskUserQuestion", "question"].contains(rawName) { continue }
                 let parsed = (try? JSONDecoder().decode(OrbJSON.self, from: Data(event.content.utf8))) ?? .null
-                let lower = rawName.lowercased()
-                if lower == "todowrite" || lower == "todo_write" || lower == "update_plan" {
+                if isTaskListTool(rawName) {
                     let items = extractTodos(from: parsed)
                     if !items.isEmpty { model.todos = items; model.outcomeAfterTodos = .stopped; model.todosFailed = false }
                     continue

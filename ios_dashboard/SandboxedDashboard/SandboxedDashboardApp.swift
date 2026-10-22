@@ -23,6 +23,7 @@ struct SandboxedDashboardApp: App {
         // Drop the legacy Control-tab mission caches (UserDefaults blobs and
         // Caches/missions files); Orb keeps its own account-scoped store.
         OrbLegacyCleanup.purgeLegacyMissionCacheIfNeeded()
+        OrbMemory.observeWarnings()
     }
 
     @Environment(\.scenePhase) private var scenePhase
@@ -34,7 +35,7 @@ struct SandboxedDashboardApp: App {
                 .modifier(OrbTestTypeSize())
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { OrbBackgroundRefresh.schedule() }
+            if phase == .background { OrbBackgroundRefresh.schedule(); OrbMemory.trim() }
         }
         .backgroundTask(.appRefresh(OrbBackgroundRefresh.identifier)) {
             await OrbBackgroundRefresh.run()
@@ -56,5 +57,22 @@ private struct OrbTestTypeSize: ViewModifier {
         #else
         content
         #endif
+    }
+}
+
+/// Releases rebuildable caches. A 4 GB phone (iPhone 13 mini) reclaims the largest
+/// suspended app first; Orb measured 353 MB resident while suspended.
+@MainActor enum OrbMemory {
+    static func trim() {
+        OrbReadCache.trimMemory()
+        OrbNativeMarkdownView.trimCaches()
+        OrbRemoteLog.trimCache()
+        OrbImageLoader.trimCache()
+        OrbWebViewPool.shared.drain()
+    }
+    static func observeWarnings() {
+        NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { trim() }
+        }
     }
 }
