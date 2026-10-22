@@ -11,10 +11,18 @@ struct OrbMachinesSettings: View {
     @State private var computers: [OrbJSON] = []
     @State private var computersReady = false
     @State private var startedMission: String?
+    @State private var managed: OrbManagedMachinesResponse?
+    @State private var managedFetchedAt = Date.now
+    @State private var managedBusy = false
     var body: some View {
         List {
             OrbSettingsError(message: fleetError)
             OrbComputersSection(computers: computers, ready: computersReady) { startedMission = $0 }
+            if let managed {
+                OrbManagedMachinesSection(response: managed, fetchedAt: managedFetchedAt, busy: managedBusy,
+                                          onDestroy: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))", method: "DELETE") } } },
+                                          onExtend: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/extend", method: "POST", body: .object(["ttl_minutes": .number(60)])) } } })
+            }
             Section("Fleet") {
                 if loading && nodes.isEmpty { ProgressView() }
                 if fleetReady && nodes.isEmpty { Text("No remote nodes registered.").foregroundStyle(.secondary) }
@@ -32,7 +40,10 @@ struct OrbMachinesSettings: View {
                             .disabled(busy || !fleetReady)
                     } label: {
                         VStack(alignment: .leading) {
-                            Text(node["id"].text)
+                            HStack(spacing: 6) {
+                                Text(node["id"].text)
+                                if OrbManaged.isManagedNode(node) { OrbManagedBadge() }
+                            }
                             Text(node["status"].text + (node["cordoned"].flag ? " · New jobs paused" : "")).font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -62,11 +73,26 @@ struct OrbMachinesSettings: View {
         if let value = try? await client.call("/api/control/client-computers") {
             computers = value["computers"].items; computersReady = true
         }
+        await loadManaged()
         do {
             let value = try await client.call("/api/remote-nodes")
             nodes = value["nodes"].items; fleetReady = true; fleetError = ""
         } catch is CancellationError { return }
         catch { fleetReady = false; fleetError = "Fleet unavailable. \(error.localizedDescription)" }
+    }
+    /// Older backends (404/405) hide the section; other failures keep the last list.
+    private func loadManaged() async {
+        do {
+            let value = try await client.call("/api/managed-machines")
+            managed = try OrbManaged.decode(value); managedFetchedAt = .now
+        } catch is CancellationError { return }
+        catch where OrbManaged.isUnsupported(error) { managed = nil }
+        catch { if managed != nil { fleetError = "Managed machines unavailable. \(OrbManaged.message(error))" } }
+    }
+    private func managedAction(_ action: () async throws -> Void) async {
+        guard !managedBusy else { return }; managedBusy = true; defer { managedBusy = false }
+        do { try await action(); fleetError = ""; await loadManaged() }
+        catch is CancellationError {} catch { fleetError = OrbManaged.message(error) }
     }
     private func toggle(_ node: OrbJSON) async {
         guard !busy else { return }; busy = true; defer { busy = false }
