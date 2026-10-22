@@ -4,6 +4,87 @@ Read this file before changing the repository. For runtime incidents on a
 deployed instance, read [DEBUGGING.md](DEBUGGING.md) first: debug on the
 server, not locally.
 
+## Principles
+
+These come first. When a change trades one of them away, say so in the PR.
+
+1. **Simplicity and reliability before features.** Prefer the smallest change
+   that is obviously correct. Delete code instead of adding a flag, a second
+   path, or a special case. If a fix needs a workaround, find the cause first.
+2. **One good abstraction over copies.** Before adding a component, store,
+   parser or service, look for the existing one and extend it. A behaviour
+   implemented twice (two parsers for the same markup, two ways to merge a
+   mission, two approval flows) is a bug waiting to happen. Shared logic
+   lives in one place per platform, with the same name and the same tests.
+3. **State has one owner.** Each piece of client state has a single source of
+   truth and a single merge function. A partial, empty or failed response
+   never erases data it does not own; removal comes from an explicit event.
+4. **Specs before tricky fixes.** For behaviour that has regressed before
+   (sidebar hierarchy, streaming, overlays, Inbox), write or update the spec
+   in `docs/` and add a test that replays the failing order of events.
+5. **Security is not a follow-up.** Never log prompts or secrets, sanitize
+   anything rendered from agent output, and keep authorization checks in Core.
+   Fix review findings before merging.
+
+## Clients: desktop, iOS, Android
+
+### Feature parity
+
+- **iOS and Android stay at feature parity.** A user-visible feature or fix on
+  one ships on the other in the same PR, or in a follow-up PR opened at the
+  same time and linked from the first. If a platform genuinely cannot do it,
+  write why in the PR.
+- **Mobile tracks desktop.** Aim for the same features as Orb desktop,
+  adapted to the platform's UX (sheets instead of side panels, long-press
+  instead of hover, share sheet instead of file dialogs), not copied pixel for
+  pixel. When a desktop feature lands without mobile, note the gap in the PR.
+- Platform code mirrors the shared model: when desktop adds a model in
+  `orb/src` (for example a parser or a state derivation), the iOS
+  (`ios_dashboard/SandboxedDashboard/Orb`) and Android
+  (`android_dashboard`) versions use the same names, cases and test fixtures.
+  Shared fixtures live in `shared/orb-spec/`.
+
+### UX and performance
+
+The app must feel instant and calm. Treat these as requirements, not polish:
+
+- **No unnecessary redraws.** Use fine-grained updates; never replace a whole
+  list or transcript when one row changed. Timers, clocks and streaming text
+  update only the nodes that show them. Memoize expensive renders (markdown,
+  diagrams, code highlighting) by content.
+- **Optimistic feedback where it is safe.** Create, move, archive, destroy,
+  send: update the UI immediately, reconcile with the server, and roll back
+  visibly with an inline error and Retry on failure. Do not optimistic-update
+  anything irreversible that the server may refuse for security reasons.
+- **Skeletons, not spinners or blank screens**, for content that is loading,
+  sized like the final content so nothing jumps.
+- **No layout jumps.** Keep scroll position across updates, never scroll the
+  user somewhere they did not ask to go, and reserve space for content that
+  will arrive.
+- **Lazy-load heavy dependencies** (renderers, viewers) and keep startup and
+  transcript open time flat. Measure before and after a performance change
+  (trace, frame timings, or a browser test assertion) and put the numbers in
+  the PR.
+- Check light and dark mode, large text sizes on mobile, and keyboard use on
+  desktop.
+
+### Mobile releases
+
+Every change under `ios_dashboard/` or `android_dashboard/` that users can see
+ships to testers:
+
+- **iOS:** bump `CURRENT_PROJECT_VERSION` (format `YYYYMMDDNN`) in
+  `ios_dashboard/project.yml`, and `MARKETING_VERSION` when the change is a
+  feature. Run `xcodegen generate` so the project stays in sync (the iOS
+  Build job checks it). Merging to `master` triggers Xcode Cloud, which
+  uploads to TestFlight; confirm the build reaches `VALID`.
+  `ios_dashboard/scripts/testflight-local.sh` uploads from a Mac when Xcode
+  Cloud is unavailable.
+- **Android:** bump `orbVersionCode` (and `orbVersionName` for a feature) in
+  `android_dashboard/gradle.properties`. Keep `orbVersionName` aligned with
+  the iOS `MARKETING_VERSION`.
+- One version bump per PR is enough; do not bump in every commit.
+
 ## Repository map
 
 | Path | What it is |
@@ -35,7 +116,12 @@ scripts/check-capability-matrix.sh
 
 CI enforces formatting (`cargo fmt --check`); run it before pushing.
 
-# Execution architecture
+For mobile changes, also run the iOS unit tests (`xcodebuild test` on the
+`SandboxedDashboard` scheme with a simulator) and `./gradlew :app:testDebugUnitTest
+:app:assembleDebug` in `android_dashboard/`. Boot simulators or emulators only
+for the check and shut them down afterwards.
+
+## Execution architecture
 
 This document describes how Sandboxed.sh executes missions after the per-workspace
 harness refactor. The core change: **agent harnesses run inside
