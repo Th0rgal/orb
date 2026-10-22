@@ -213,3 +213,43 @@ export function workSummary(items: StreamItem[]): string {
   }
   return parts.length ? parts.join(" · ") : "Thought";
 }
+
+/** Narration: assistant text written between tool calls of one turn ("Let me
+ * check…", "WAIT! Look at…"). It belongs to the work, not the answer, so the
+ * transcript folds it into the "Worked" fold; text after the turn's last tool
+ * call is the answer and stays visible. Returns the keys of the narration
+ * texts: a text that has a later work tool in the same turn and either joins
+ * a fold that already holds a tool or is followed (through thoughts and more
+ * text) by one. Orchestration tools stand alone and do not count. */
+export function narrationKeys(items: StreamItem[], standalone: (name: string) => boolean = () => false): Set<string> {
+  const keys = new Set<string>();
+  const isWorkTool = (item: StreamItem) => item.kind === "tool" && !standalone(item.name);
+  // toolAhead[i]: a work tool comes after i before the next user message.
+  const toolAhead: boolean[] = new Array(items.length).fill(false);
+  // nextIsTool[i]: the first item after i that is not text or a thought is a work tool.
+  const nextIsTool: boolean[] = new Array(items.length).fill(false);
+  let ahead = false, next = false;
+  for (let i = items.length - 1; i >= 0; i--) {
+    toolAhead[i] = ahead; nextIsTool[i] = next;
+    const item = items[i];
+    if (item.kind === "user") { ahead = false; next = false; }
+    else if (isWorkTool(item)) { ahead = true; next = true; }
+    else if (item.kind !== "text" && item.kind !== "think") next = false;
+  }
+  let foldHasTool = false;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === "text") {
+      if (!item.cumulative && item.text.trim() && toolAhead[i] && (foldHasTool || nextIsTool[i])) keys.add(item.key);
+      else foldHasTool = false;
+    } else if (isWorkTool(item)) foldHasTool = true;
+    else if (item.kind !== "think") foldHasTool = false;
+  }
+  return keys;
+}
+
+/** One line of narration for a fold header: Markdown markers stripped,
+ * whitespace collapsed. CSS clamps it to the width. */
+export function narrationLine(text: string): string {
+  return text.replace(/```[\s\S]*?(```|$)/g, " ").replace(/[*_`#>]+/g, "").replace(/\s+/g, " ").trim();
+}

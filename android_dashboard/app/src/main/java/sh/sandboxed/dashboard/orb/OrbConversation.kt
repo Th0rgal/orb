@@ -180,7 +180,9 @@ sealed class OrbTurn(open val id: String) {
         override val id: String,
         val steps: List<OrbWorkStep>,
         val isLive: Boolean,
-        val startedAt: String?
+        val startedAt: String?,
+        /** Assistant text written between this work's tool calls (see OrbNarration). */
+        val narration: List<String> = emptyList()
     ) : OrbTurn(id)
 
     data class Wake(
@@ -215,10 +217,30 @@ object OrbTimelineBuilder {
         }
 
         val eventUserTexts = mutableListOf<Pair<String, String?>>()
+        val streamItems = mutableListOf<OrbStreamItem>()
+        val assistantTexts = mutableMapOf<String, String>()
         if (events.isNotEmpty()) {
-            events.forEach { ev ->
+            events.forEachIndexed { evIdx, ev ->
                 val type = (ev.str("type", "event_type", "kind") ?: "").lowercase()
                 val data = ev.dict("data") ?: ev.raw
+                val itemKey = "ev-$evIdx-${ev.id}"
+                when {
+                    type == "user_message" || type == "user" -> streamItems.add(OrbStreamItem.User(itemKey))
+                    type.contains("think") || type == "reasoning" -> streamItems.add(OrbStreamItem.Think(itemKey))
+                    type.contains("tool_call") || type == "tool_use" || type == "tool" || type == "action" -> {
+                        val name = OrbJSON.str(data, "name", "tool", "tool_name", "action") ?: ev.str("name", "tool", "tool_name")
+                        if (name != null) streamItems.add(OrbStreamItem.Tool(itemKey, name))
+                    }
+                    type == "assistant_message" -> {
+                        val text = OrbJSON.str(data, "content", "text", "message") ?: ev.str("content", "text", "message") ?: ""
+                        if (OrbJSON.bool(data, "success") != false) {
+                            streamItems.add(OrbStreamItem.Text(itemKey, text))
+                            assistantTexts[itemKey] = text
+                        }
+                    }
+                    type == "tool_result" || type.contains("delta") -> Unit
+                    else -> streamItems.add(OrbStreamItem.Other(itemKey))
+                }
                 when {
                     type == "user_message" || type == "user" -> {
                         val text = OrbJSON.str(data, "content", "text", "message")
@@ -268,6 +290,10 @@ object OrbTimelineBuilder {
             deduplicatedMessages.add(msg)
         }
 
+        // Narration (text between one turn's tool calls) folds into the work, not the transcript.
+        val narrationTexts = OrbNarration.narrationKeys(streamItems)
+            .mapNotNull { assistantTexts[it]?.trim() }.filter { it.isNotEmpty() }
+        val narrationSet = narrationTexts.toSet()
         var lastAssistantTurnIndex = -1
         if (deduplicatedMessages.isNotEmpty()) {
             deduplicatedMessages.forEachIndexed { idx, msg ->
@@ -289,7 +315,7 @@ object OrbTimelineBuilder {
                             parseToolStep(tc, tc.raw)?.let { pendingWork.add(it) }
                         }
                     }
-                    if (text.isNotEmpty()) {
+                    if (text.isNotEmpty() && text.trim() !in narrationSet) {
                         lastAssistantTurnIndex = turns.size
                         turns.add(OrbTurn.Assistant("a-$idx-${msg.id}", text, ts))
                     }
@@ -319,7 +345,8 @@ object OrbTimelineBuilder {
                 id = "work-fold-main",
                 steps = cappedWork,
                 isLive = isLive && streamingText.isEmpty(),
-                startedAt = startedAt
+                startedAt = startedAt,
+                narration = narrationTexts
             )
             // Place completed work fold right before the final assistant response (or at bottom when live)
             if (!isLive && lastAssistantTurnIndex >= 0 && lastAssistantTurnIndex <= turns.size) {
@@ -2676,7 +2703,7 @@ fun OrbWorkFoldView(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        if (expanded && fold.steps.isNotEmpty()) {
+        if (expanded && (fold.steps.isNotEmpty() || fold.narration.isNotEmpty())) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2686,6 +2713,9 @@ fun OrbWorkFoldView(
                     .padding(10.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
+                fold.narration.forEach { note ->
+                    OrbRichText(markdown = note, tone = OrbRichTextTone.Secondary)
+                }
                 fold.steps.forEach { step ->
                     val icon: ImageVector = when (step.kind) {
                         OrbWorkStep.Kind.Thinking -> Icons.Default.Psychology
@@ -2735,7 +2765,7 @@ fun OrbWorkFoldView(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .orbPressClickable(enabled = fold.steps.isNotEmpty()) { expanded = !expanded }
+                .orbPressClickable(enabled = fold.steps.isNotEmpty() || fold.narration.isNotEmpty()) { expanded = !expanded }
                 .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2772,6 +2802,17 @@ fun OrbWorkFoldView(
                     modifier = Modifier.size(14.dp)
                 )
             }
+        }
+        val liveNote = remember(fold.narration) { fold.narration.lastOrNull()?.let(OrbNarration::narrationLine) }
+        if (fold.isLive && !expanded && !liveNote.isNullOrEmpty()) {
+            Text(
+                text = liveNote,
+                color = OrbStyle.textSecondary,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }

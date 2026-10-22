@@ -26,7 +26,7 @@ import { goalDraft, planObjective } from "./goal";
 import { isTaskTool, latestTaskList, parseTaskList, taskCardView, turnOutcomeAfter, type TurnOutcome } from "./taskList";
 
 import { messagePresentation, isAutomaticRecovery, isResumePrompt } from "./messagePresentation";
-import { computeDiffStats, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
+import { computeDiffStats, narrationKeys, narrationLine, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
 import { collectFollowUps, isOrchestrationTool, isSubagentTool } from "./orchestrationModel";
 import { FollowUpsContext, OrchestrationCard } from "./OrchestrationCard";
@@ -460,7 +460,7 @@ export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) 
  * and tool calls, interleaved) folds into one "Worked" line, Cursor-style:
  * the header shows the current tool while running; the body stays closed
  * until the user opens it, so a 150-tool run does not dump the full list. */
-type WorkItem = Extract<StreamItem, { kind: "tool" | "think" }>;
+type WorkItem = Extract<StreamItem, { kind: "tool" | "think" | "text" }>;
 type Grouped = StreamItem | { kind: "work"; key: string; items: WorkItem[] };
 
 function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
@@ -469,13 +469,14 @@ function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
   // Dropping a filler bubble also rejoins the work around it, so one stretch of
   // tool calls reads as one fold instead of being split in two by a stray ".".
   const items = visibleTranscript(input);
+  const narration = narrationKeys(items, isOrchestrationTool);
   for (const it of items) {
     const last = out[out.length - 1];
     // Starting a subagent or a machine is what the run is about, not plumbing:
     // it stands on its own instead of hiding among "N other tools".
     if (it.kind === "tool" && isOrchestrationTool(it.name)) {
       out.push(it);
-    } else if (it.kind === "tool" || it.kind === "think") {
+    } else if (it.kind === "tool" || it.kind === "think" || (it.kind === "text" && narration.has(it.key))) {
       if (last && last.kind === "work") last.items.push(it);
       else out.push({ kind: "work", key: it.key, items: [it] });
     } else {
@@ -490,12 +491,19 @@ function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
 }
 
 function WorkFold(p: { items: WorkItem[] }) {
-  const running = createMemo(() => p.items.some((t) => (t.kind === "tool" ? !t.done : !t.done)));
+  const running = createMemo(() => p.items.some((t) => t.kind !== "text" && !t.done));
+  /** While the fold runs, the newest narration reads as one clamped line under
+   * its header instead of full paragraphs in the transcript. */
+  const note = createMemo(() => {
+    if (!running()) return "";
+    for (let i = p.items.length - 1; i >= 0; i--) { const t = p.items[i]; if (t.kind === "text") return narrationLine(t.text); }
+    return "";
+  });
   const [open, setOpen] = disclosure(`work:${p.items[0]?.key}`,false);
   const anchored=anchoredDisclosure();
   let toggle!:HTMLButtonElement;
   const current = () => {
-    const cur = [...p.items].reverse().find((t) => (t.kind === "tool" ? !t.done : !t.done));
+    const cur = [...p.items].reverse().find((t): t is Exclude<WorkItem, { kind: "text" }> => t.kind !== "text" && !t.done);
     if (!cur) return "Working…";
     if (cur.kind === "think") return "Thinking";
     return `${cur.name} ${toolTarget(cur.name, cur.args) ?? ""}`.trim();
@@ -515,7 +523,9 @@ function WorkFold(p: { items: WorkItem[] }) {
       <Show when={open()}>
         <div class="st-work-body">
           <For each={p.items}>
-            {(t) => (t.kind === "tool" ? <ToolRow item={t} /> : (
+            {(t) => (t.kind === "tool" ? <ToolRow item={t} /> : t.kind === "text" ? (
+              <div class="st-work-note"><MdView text={t.text} compact /></div>
+            ) : (
               <Show when={t.text}><div class="st-think-body">{thinkInline(t.text)}</div></Show>
             ))}
           </For>
@@ -530,6 +540,7 @@ function WorkFold(p: { items: WorkItem[] }) {
           {d => <DiffBadges stats={d()} />}
         </Show>
       </button>
+      <Show when={!open() && note()}><div class="st-work-live-note" title={note()}>{note()}</div></Show>
 
     </div>
   );
@@ -653,7 +664,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   },[]);
   const [turnStore,setTurns]=createStore<Array<{key:string;items:Grouped[]}>>([]);
   createEffect(()=>setTurns(reconcile(turns(),{key:'key'})));
-  const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='work'?item.items.map(t=>t.kind==='think'?t.text:`${t.name} ${resultText(t.args)} ${resultText(t.result)}`).join('\n'):item.kind==='tool'?`${item.name} ${resultText(item.result)}`:item.kind==='text'?markdownText(item.text):item.text).join('\n');
+  const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='work'?item.items.map(t=>t.kind==='think'?t.text:t.kind==='text'?markdownText(t.text):`${t.name} ${resultText(t.args)} ${resultText(t.result)}`).join('\n'):item.kind==='tool'?`${item.name} ${resultText(item.result)}`:item.kind==='text'?markdownText(item.text):item.text).join('\n');
   // Rough height of a turn before it is first measured, from its text: rows
   // paged in above the reader start close to their real size, so the scroll
   // correction when they are measured is small instead of hundreds of px.

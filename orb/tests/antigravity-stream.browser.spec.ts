@@ -17,18 +17,21 @@ test('native response remains visible through a tool-only history resync and rel
   const json=path==='/api/projects'?{projects:[{slug:'test',title:'test'}]}:path==='/api/control/missions'?[mission]:path===`/api/control/missions/${id}`?mission:path.endsWith('/files')?{entries:[]}:path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
   return route.fulfill({json});
  });
+ // The text precedes a running tool, so it is narration: the work fold shows
+ // it as its one-line live note instead of a top-level paragraph.
+ const shown=page.locator('.st-text, .st-work-live-note');
  await page.goto('/');
  await page.getByRole('button',{name:'test',exact:true}).click();
  await page.getByRole('button',{name:/Gemini streaming canary/}).click();
- await expect(page.locator('.st-text')).toContainText('First visible update');
+ await expect(shown).toContainText('First visible update');
  await expect.poll(()=>historyReads).toBeGreaterThan(1);
- await expect(page.locator('.st-text')).toContainText('First visible update');
+ await expect(shown).toContainText('First visible update');
  history=[{id:2,sequence:2,event_type:'assistant_message_canonical',content:'First visible update',timestamp:'',event_id:bubble,metadata:{bubble_id:bubble,revision:1}},history[0]];
  await page.evaluate(()=>window.dispatchEvent(new Event('orb:refresh')));
- await expect(page.locator('.st-text')).toHaveCount(1);
- await expect(page.locator('.st-text')).toContainText('First visible update');
+ await expect(shown).toHaveCount(1);
+ await expect(shown).toContainText('First visible update');
  await page.reload();
  await page.getByRole('button',{name:/Gemini streaming canary/}).click();
- await expect(page.locator('.st-text')).toHaveCount(1);
- await expect(page.locator('.st-text')).toContainText('First visible update');
+ await expect(shown).toHaveCount(1);
+ await expect(shown).toContainText('First visible update');
 });

@@ -30,8 +30,20 @@ struct OrbWorkModel: Equatable {
         let status: String
     }
 
+    /// Narration: assistant text written between tool calls of the turn
+    /// ("Let me check…"). It belongs to the work, so it renders inside the fold.
+    struct NoteItem: Identifiable, Equatable {
+        let id: String
+        let text: String
+        /// How many of `tools` precede this note, to keep the body in order.
+        var afterTools: Int
+    }
+
     var thoughts: [ThoughtItem] = []
     var tools: [ToolItem] = []
+    var notes: [NoteItem] = []
+    /// Trimmed texts of `notes`, so the history list hides the same rows.
+    var narrationTexts: Set<String> { Set(notes.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }) }
     var todos: [TodoItem] = []
     /// How the turn went after the latest task-list update: a final answer
     /// arrived (`.finished`) or the turn failed/stopped without one
@@ -40,7 +52,7 @@ struct OrbWorkModel: Equatable {
     var outcomeAfterTodos: TurnOutcome = .stopped
     private var todosFailed = false
 
-    var isEmpty: Bool { thoughts.isEmpty && tools.isEmpty }
+    var isEmpty: Bool { thoughts.isEmpty && tools.isEmpty && notes.isEmpty }
 
     func liveHeadline(fallback: String) -> (action: String, detail: String) {
         if let activeTool = tools.last(where: { $0.status == .running }) {
@@ -85,6 +97,7 @@ struct OrbWorkModel: Equatable {
     static func build(from events: [StoredEvent], working: Bool) -> OrbWorkModel {
         var model = OrbWorkModel()
         var toolIndexByCallID: [String: Int] = [:]
+        let narration = narrationKeys(narrationItems(events), standalone: { OrbOrchestration.kind($0) != nil })
 
         for (idx, event) in events.enumerated() {
             let isLastEvent = idx == events.count - 1
@@ -163,6 +176,10 @@ struct OrbWorkModel: Equatable {
                 ))
 
             case "assistant_message":
+                if narration.contains("seq-\(event.sequence)") {
+                    model.notes.append(NoteItem(id: "note-\(event.sequence)", text: event.content, afterTools: model.tools.count))
+                    continue
+                }
                 // A failure after an answer still means the turn stopped.
                 let failed = event.metadata["success"]?.value as? Bool == false
                 if failed { model.outcomeAfterTodos = .stopped; model.todosFailed = true }
@@ -177,12 +194,86 @@ struct OrbWorkModel: Equatable {
 
         // Keep the latest 40 tools so the fold stays snappy on long missions.
         if model.tools.count > 40 {
+            let dropped = model.tools.count - 40
             model.tools = Array(model.tools.suffix(40))
+            model.notes = model.notes.map { var n = $0; n.afterTools = max(0, n.afterTools - dropped); return n }
         }
         if model.thoughts.count > 12 {
             model.thoughts = Array(model.thoughts.suffix(12))
         }
         return model
+    }
+
+    /// The transcript as desktop `StreamItem` kinds, for `narrationKeys`.
+    /// Tool results merge into their call, so they are not items.
+    enum NarrationItem: Equatable {
+        case user
+        case text(key: String, text: String, cumulative: Bool)
+        case tool(name: String)
+        case think
+        case other
+    }
+
+    static func narrationItems(_ events: [StoredEvent]) -> [NarrationItem] {
+        events.compactMap { event in
+            switch event.eventType {
+            case "user_message": return .user
+            case "assistant_message":
+                if event.metadata["success"]?.value as? Bool == false { return .other }
+                return .text(key: "seq-\(event.sequence)", text: event.content, cumulative: false)
+            case "thinking": return .think
+            case "tool_call": return .tool(name: event.toolName ?? "tool")
+            case "tool_result": return nil
+            default: return .other
+            }
+        }
+    }
+
+    /// Same rule as desktop `narrationKeys` (orb/src/workModel.ts): a text is
+    /// narration when a later work tool exists in the same turn and it either
+    /// joins a fold that already holds a tool or is followed (through thoughts
+    /// and more text) by one. Text after the last tool is the answer. The
+    /// producer's cumulative bubble is never narration. Orchestration tools
+    /// stand alone and do not count.
+    static func narrationKeys(_ items: [NarrationItem], standalone: (String) -> Bool = { _ in false }) -> Set<String> {
+        func isWorkTool(_ item: NarrationItem) -> Bool {
+            if case .tool(let name) = item { return !standalone(name) }
+            return false
+        }
+        var toolAhead = Array(repeating: false, count: items.count)
+        var nextIsTool = Array(repeating: false, count: items.count)
+        var ahead = false, next = false
+        for i in items.indices.reversed() {
+            toolAhead[i] = ahead; nextIsTool[i] = next
+            switch items[i] {
+            case .user: ahead = false; next = false
+            case .text, .think: break
+            case let item where isWorkTool(item): ahead = true; next = true
+            default: next = false
+            }
+        }
+        var keys = Set<String>()
+        var foldHasTool = false
+        for (i, item) in items.enumerated() {
+            switch item {
+            case let .text(key, text, cumulative):
+                if !cumulative && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && toolAhead[i] && (foldHasTool || nextIsTool[i]) {
+                    keys.insert(key)
+                } else { foldHasTool = false }
+            case .think: break
+            default: foldHasTool = isWorkTool(item)
+            }
+        }
+        return keys
+    }
+
+    /// One line of narration for the fold header: Markdown markers stripped,
+    /// whitespace collapsed (desktop `narrationLine`).
+    static func narrationLine(_ text: String) -> String {
+        text.replacingOccurrences(of: "```[\\s\\S]*?(```|$)", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "[*_`#>]+", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
     }
 
     static func parseThought(_ text: String) -> (title: String, body: String) {
@@ -297,10 +388,16 @@ struct OrbWorkFold: View {
                             toggleItem(thought.id)
                         }
                     }
-                    ForEach(model.tools) { tool in
+                    ForEach(Array(model.tools.enumerated()), id: \.element.id) { index, tool in
+                        ForEach(model.notes.filter { $0.afterTools == index }) { note in
+                            OrbNarrationRow(text: note.text)
+                        }
                         OrbToolRow(tool: tool, isExpanded: expandedItemIDs.contains(tool.id)) {
                             toggleItem(tool.id)
                         }
+                    }
+                    ForEach(model.notes.filter { $0.afterTools >= model.tools.count }) { note in
+                        OrbNarrationRow(text: note.text)
                     }
                 }
                 .padding(.leading, 10)
@@ -356,6 +453,17 @@ struct OrbWorkFold: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(accessibilityStatus)
                 .accessibilityIdentifier(identifier)
+                // While the fold runs, the newest narration reads as one line
+                // under its header instead of paragraphs in the transcript.
+                if !expanded, let note = model.notes.last.map({ OrbWorkModel.narrationLine($0.text) }), !note.isEmpty {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(OrbStyle.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.leading, 20)
+                        .accessibilityIdentifier("work-live-note")
+                }
             } else if !model.isEmpty {
                 Button {
                     withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
@@ -388,6 +496,17 @@ struct OrbWorkFold: View {
             }
         }
         OrbHaptics.selection()
+    }
+}
+
+/// A narration paragraph inside the fold body: compact, secondary markdown.
+private struct OrbNarrationRow: View {
+    let text: String
+    var body: some View {
+        OrbRichText(source: text)
+            .font(.caption)
+            .foregroundStyle(OrbStyle.textSecondary)
+            .padding(.vertical, 2)
     }
 }
 

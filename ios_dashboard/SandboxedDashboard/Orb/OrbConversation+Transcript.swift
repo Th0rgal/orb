@@ -79,6 +79,16 @@ extension OrbConversation {
         .accessibilityIdentifier("plan-review-card")
     }
 
+    /// The current turn's narration renders inside the work fold, so its
+    /// assistant rows after the last user message leave the message list.
+    nonisolated static func withoutNarration(_ rows: [(String, String, String)], narration: Set<String>) -> [(String, String, String)] {
+        guard !narration.isEmpty else { return rows }
+        let lastUser = rows.lastIndex(where: { $0.1 == "user" }) ?? -1
+        return rows.enumerated().filter { index, row in
+            !(index > lastUser && row.1 == "assistant" && narration.contains(row.2.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }.map(\.element)
+    }
+
     @ViewBuilder
     func conversationContent(scroll: ScrollViewProxy) -> some View {
         if loading && missionID != nil && mission == .null {
@@ -112,7 +122,7 @@ extension OrbConversation {
             .overlay(Capsule().stroke(OrbStyle.border))
             .accessibilityIdentifier("load-earlier")
         }
-        ForEach(Array(history.suffix(visibleCount)), id: \.0) { item in
+        ForEach(OrbConversation.withoutNarration(Array(history.suffix(visibleCount)), narration: workModel.narrationTexts), id: \.0) { item in
             messageHistoryRow(item: item)
         }
         ForEach(turns.indices, id: \.self) { index in
