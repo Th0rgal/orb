@@ -64,6 +64,7 @@ pub mod node;
 pub mod nspawn;
 pub mod opencode;
 pub mod opencode_config;
+pub mod orb_spec;
 pub mod pkg_manager;
 pub mod provider_health;
 pub mod remote_node;

@@ -131,27 +131,31 @@ impl SourceBundleRequirement {
     /// heartbeat cannot reveal private overrides; larger payloads require an
     /// explicit advertisement. Updated nodes always advertise their overrides.
     pub fn check(self, heartbeat: &NodeHeartbeat) -> Result<(), String> {
-        let capacity = heartbeat
+        let cap = heartbeat
             .source_bundle_capacity
             .unwrap_or(SourceBundleCapacity {
                 overlay_bytes: 1 << 20,
                 complete_bytes: 16 << 20,
             });
         let limit = if self.complete {
-            capacity.complete_bytes
+            cap.complete_bytes
         } else {
-            capacity.overlay_bytes
+            cap.overlay_bytes
         };
-        if self.bytes > limit {
+        if !crate::orb_spec::bundle_budget_ok(
+            self.complete,
+            self.bytes,
+            cap.overlay_bytes,
+            cap.complete_bytes,
+        ) {
+            let legacy = if heartbeat.source_bundle_capacity.is_none() {
+                " (legacy, unadvertised)"
+            } else {
+                ""
+            };
             return Err(format!(
-                "source bundle requires {} decoded bytes; receiver capacity is {}{}",
-                self.bytes,
-                limit,
-                if heartbeat.source_bundle_capacity.is_none() {
-                    " (legacy, unadvertised)"
-                } else {
-                    ""
-                }
+                "source bundle requires {} decoded bytes; receiver capacity is {limit}{legacy}",
+                self.bytes
             ));
         }
         Ok(())
@@ -489,11 +493,14 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// presented token is accepted when it matches the current token OR the
 /// (optional, non-empty) previous token still being phased out.
 pub fn node_token_matches(presented: &str, current: &str, previous: Option<&str>) -> bool {
-    let matches_current = constant_time_eq(presented.as_bytes(), current.as_bytes());
-    let matches_previous = previous
-        .filter(|prev| !prev.trim().is_empty())
-        .is_some_and(|prev| constant_time_eq(presented.as_bytes(), prev.as_bytes()));
-    matches_current || matches_previous
+    let cur = constant_time_eq(presented.as_bytes(), current.as_bytes());
+    let (pne, prev) = previous.map_or((false, false), |p| {
+        (
+            !p.trim().is_empty(),
+            constant_time_eq(presented.as_bytes(), p.as_bytes()),
+        )
+    });
+    crate::orb_spec::token_rotation_allowed(!presented.is_empty(), cur, pne, prev, true)
 }
 
 /// Parse a comma-separated label list (`SANDBOXED_NODE_LABELS`) into a

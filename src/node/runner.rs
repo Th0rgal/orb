@@ -1994,6 +1994,13 @@ pub async fn read_log_chunk(
         let len = file.metadata().ok()?.len();
         let start = offset.min(len);
         let want = (len - start).min(max_bytes);
+        debug_assert!(crate::orb_spec::log_window_valid(
+            start,
+            want,
+            LOG_CHUNK_MAX_BYTES,
+            len,
+            want
+        ));
         file.seek(SeekFrom::Start(start)).ok()?;
         let mut buf = vec![0u8; want as usize];
         let mut read = 0usize;

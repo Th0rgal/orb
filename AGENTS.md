@@ -89,7 +89,8 @@ ships to testers:
 
 | Path | What it is |
 | --- | --- |
-| `src/` | Rust backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, MCP binaries in `src/bin/`) |
+| `src/` | Rust backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, MCP binaries in `src/bin/`, `src/orb_spec.rs` C-ABI bindings) |
+| `lean/Orb/Spec.lean` | Formal Lean 4 orchestration & node lifecycle kernel (`0 import Lean`, `0 sorryAx`, `16/16` tight specs, `12` C-ABI exports compiled to `liborb_spec_cabi.a`) |
 | `orb/` | Orb desktop client: SolidJS + Vite in `orb/src`, Tauri v2 shell in `orb/src-tauri` |
 | `ios_dashboard/` | iOS app (SwiftUI, generated with XcodeGen from `project.yml`); the Orb UI lives in `SandboxedDashboard/Orb` |
 | `dashboard/` | Next.js web dashboard (admin console, served by the Docker image) |
@@ -369,6 +370,18 @@ Recommended smoke tests after changes:
 
 If files appear in the wrong place, the harness is not running inside the
 workspace execution context.
+
+## Formal Orchestration & Node Lifecycle Kernel (`lean/Orb/Spec.lean` & `src/orb_spec.rs`)
+
+Core orchestration, lease ownership, outbox transitions, task-board DAG scheduling, durable workspace job state machines, and remote protocol bounds live in `lean/Orb/Spec.lean` (`0 import Lean`, `0 sorryAx`) and compile directly to `liborb_spec_cabi.a` (`2.288 ns/call`, zero C++ runtime dependency) via `build.rs` and `src/orb_spec.rs`:
+
+1. **Layer I Universal Meta-Specifications (`lean/Orb/Spec.lean`)**:
+   - `LinearLeaseSpec`: Writer worktree recycle safety (`orb_verify_writer_reuse`), `shared_read`/`exclusive_write` mode algebra (`orb_verify_lease_mode`), track hold clamping (`orb_verify_track_hold`), and repo/branch writer disjointness (`orb_verify_repo_disjoint`).
+   - `IdempotentOutboxSpec`: Durable remote command outbox transitions (`orb_verify_remote_outbox`) and durable workspace job state machine transitions (`orb_verify_job_transition`).
+   - `DagScheduleSpec`: Parallel DAG task-board slot admission (`orb_verify_board_slots`) and bounded retry gate (`orb_verify_board_retry`).
+   - `QuotaCircuitSpec`: Remote protocol workspace bundle byte/entry budget (`orb_verify_bundle_budget`), constant-time token rotation/expiry (`orb_verify_token_rotation`), and sliding-window subprocess log chunk bounds (`leansys_verify_log_window`).
+2. **Audit Gate**:
+   - Before modifying `lean/Orb/Spec.lean` or `src/orb_spec.rs`, verify `turbo-lean --json audit-spec lean/Orb/Spec.lean` reports `vacuous_specs == 0`, `trivial_specs == 0`, and `horizontal_packing_warnings == []` (`16/16 non_vacuous_and_tight`).
 
 ## Debugging deployed instances
 

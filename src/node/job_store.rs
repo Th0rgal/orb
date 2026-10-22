@@ -48,10 +48,12 @@ impl JobState {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Lost
-        )
+        !crate::orb_spec::job_transition_allowed(*self as u8, Self::Running as u8)
+            && *self != Self::Running
+    }
+
+    pub fn can_transition_to(&self, next: Self) -> bool {
+        crate::orb_spec::job_transition_allowed(*self as u8, next as u8)
     }
 }
 
@@ -92,27 +94,11 @@ impl JobStore {
             std::fs::create_dir_all(&work_dir)?;
             let conn = Connection::open(work_dir.join("jobs.db"))?;
             conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY,
-                    mission_id TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    exit_code INTEGER,
-                    created_at TEXT NOT NULL,
-                    started_at TEXT,
-                    finished_at TEXT,
-                    log_path TEXT,
-                    error TEXT,
-                    artifacts_json TEXT
-                );",
+                "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT);",
             )?;
-            // Migration for jobs.db files created before artifacts shipped.
-            // "duplicate column name" on already-migrated DBs is expected.
             let _ = conn.execute("ALTER TABLE jobs ADD COLUMN artifacts_json TEXT", []);
             let _ = conn.execute("ALTER TABLE jobs ADD COLUMN cancellation_json TEXT", []);
-            Ok(Self {
-                conn: Arc::new(Mutex::new(conn)),
-            })
+            Ok(Self { conn: Arc::new(Mutex::new(conn)) })
         })
         .await?
     }
@@ -123,30 +109,22 @@ impl JobStore {
         F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
-        let result = tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
-            f(&guard)
-        })
-        .await?;
-        Ok(result?)
+        Ok(
+            tokio::task::spawn_blocking(move || f(&conn.lock().unwrap_or_else(|e| e.into_inner())))
+                .await??,
+        )
     }
 
-    /// Flip any job left `queued` or `running` by a previous process lifetime
-    /// to `lost`. Returns the number of recovered rows.
     pub async fn recover_on_start(&self) -> anyhow::Result<usize> {
         self.with_conn(|conn| {
             conn.execute(
-                "UPDATE jobs
-                 SET state = 'lost', finished_at = ?1,
-                     error = 'node restarted while the job was in flight'
-                 WHERE state IN ('queued', 'running')",
+                "UPDATE jobs SET state = 'lost', finished_at = ?1, error = 'node restarted while the job was in flight' WHERE state IN ('queued', 'running')",
                 params![now_rfc3339()],
             )
         })
         .await
     }
 
-    /// Insert a new job in `queued` state.
     pub async fn create(
         &self,
         id: Uuid,
@@ -156,15 +134,8 @@ impl JobStore {
     ) -> anyhow::Result<()> {
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO jobs (id, mission_id, payload_json, state, created_at, log_path)
-                 VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
-                params![
-                    id.to_string(),
-                    mission_id.to_string(),
-                    payload_json,
-                    now_rfc3339(),
-                    log_path
-                ],
+                "INSERT INTO jobs (id, mission_id, payload_json, state, created_at, log_path) VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
+                params![id.to_string(), mission_id.to_string(), payload_json, now_rfc3339(), log_path],
             )
             .map(|_| ())
         })
@@ -182,22 +153,13 @@ impl JobStore {
         .await
     }
 
-    /// Atomically claim a queued job for execution. Returns false when a
-    /// concurrent cancellation already made the row terminal.
     pub async fn mark_running_if_queued(&self, id: Uuid) -> anyhow::Result<bool> {
         self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE jobs SET state = 'running', started_at = ?2
-                 WHERE id = ?1 AND state = 'queued'",
-                params![id.to_string(), now_rfc3339()],
-            )
-            .map(|updated| updated == 1)
+            conn.execute("UPDATE jobs SET state = 'running', started_at = ?2 WHERE id = ?1 AND state = 'queued'", params![id.to_string(), now_rfc3339()]).map(|u| u == 1)
         })
         .await
     }
 
-    /// First cause wins; repeated cancellation polls must not replace the
-    /// original actor/reason with the downstream generic "interrupted".
     pub async fn record_cancellation(
         &self,
         id: Uuid,
@@ -215,36 +177,20 @@ impl JobStore {
         ).map(|_| ())).await
     }
 
-    /// Atomically cancel a job only while it is queued. Running jobs are
-    /// stopped by their cancellation token and finish through the runner.
     pub async fn cancel_if_queued(&self, id: Uuid) -> anyhow::Result<bool> {
         self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE jobs SET state = 'cancelled', finished_at = ?2,
-                        error = 'cancelled before start'
-                 WHERE id = ?1 AND state = 'queued'",
-                params![id.to_string(), now_rfc3339()],
-            )
-            .map(|updated| updated == 1)
+            conn.execute("UPDATE jobs SET state = 'cancelled', finished_at = ?2, error = 'cancelled before start' WHERE id = ?1 AND state = 'queued'", params![id.to_string(), now_rfc3339()]).map(|u| u == 1)
         })
         .await
     }
 
-    /// Transition a job marked `lost` after a node restart to `cancelled`
-    /// once its containment scope is confirmed stopped or absent.
     pub async fn cancel_if_lost(&self, id: Uuid) -> anyhow::Result<bool> {
         self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE jobs SET state = 'cancelled', finished_at = ?2
-                 WHERE id = ?1 AND state = 'lost'",
-                params![id.to_string(), now_rfc3339()],
-            )
-            .map(|updated| updated == 1)
+            conn.execute("UPDATE jobs SET state = 'cancelled', finished_at = ?2 WHERE id = ?1 AND state = 'lost'", params![id.to_string(), now_rfc3339()]).map(|u| u == 1)
         })
         .await
     }
 
-    /// Record a terminal state for the job.
     pub async fn finish(
         &self,
         id: Uuid,
@@ -256,8 +202,6 @@ impl JobStore {
             .await
     }
 
-    /// Record a terminal state plus (for successful build jobs) the resolved
-    /// artifact manifest as JSON.
     pub async fn finish_with_artifacts(
         &self,
         id: Uuid,
@@ -268,27 +212,14 @@ impl JobStore {
     ) -> anyhow::Result<()> {
         self.with_conn(move |conn| {
             conn.execute(
-                // First terminal outcome wins: a liveness sweep or a cancel
-                // of a vanished process may already have finalized the row.
-                "UPDATE jobs SET state = ?2, exit_code = ?3, error = ?4, finished_at = ?5,
-                        artifacts_json = ?6
-                 WHERE id = ?1 AND state IN ('queued', 'running')",
-                params![
-                    id.to_string(),
-                    state.as_str(),
-                    exit_code,
-                    error,
-                    now_rfc3339(),
-                    artifacts_json,
-                ],
+                "UPDATE jobs SET state = ?2, exit_code = ?3, error = ?4, finished_at = ?5, artifacts_json = ?6 WHERE id = ?1 AND state IN ('queued', 'running')",
+                params![id.to_string(), state.as_str(), exit_code, error, now_rfc3339(), artifacts_json],
             )
             .map(|_| ())
         })
         .await
     }
 
-    /// Finalize a job only while it is still `running`. Used when the node
-    /// proves its process is gone; returns whether this call made it terminal.
     pub async fn finalize_running(
         &self,
         id: Uuid,
@@ -298,30 +229,19 @@ impl JobStore {
     ) -> anyhow::Result<bool> {
         self.with_conn(move |conn| {
             conn.execute(
-                "UPDATE jobs SET state = ?2, exit_code = ?3, error = ?4, finished_at = ?5
-                 WHERE id = ?1 AND state = 'running'",
-                params![
-                    id.to_string(),
-                    state.as_str(),
-                    exit_code,
-                    error,
-                    now_rfc3339()
-                ],
+                "UPDATE jobs SET state = ?2, exit_code = ?3, error = ?4, finished_at = ?5 WHERE id = ?1 AND state = 'running'",
+                params![id.to_string(), state.as_str(), exit_code, error, now_rfc3339()],
             )
-            .map(|updated| updated == 1)
+            .map(|u| u == 1)
         })
         .await
     }
 
-    /// Ids of every job currently recorded as `running`.
     pub async fn running_ids(&self) -> anyhow::Result<Vec<Uuid>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id FROM jobs WHERE state = 'running'")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            Ok(rows
-                .filter_map(|row| row.ok())
-                .filter_map(|raw| Uuid::parse_str(&raw).ok())
-                .collect())
+            Ok(rows.filter_map(|r| r.ok()?.parse().ok()).collect())
         })
         .await
     }
@@ -329,9 +249,7 @@ impl JobStore {
     pub async fn get(&self, id: Uuid) -> anyhow::Result<Option<JobRecord>> {
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, mission_id, payload_json, state, exit_code, created_at,
-                        started_at, finished_at, log_path, error, artifacts_json, cancellation_json
-                 FROM jobs WHERE id = ?1",
+                "SELECT id, mission_id, payload_json, state, exit_code, created_at, started_at, finished_at, log_path, error, artifacts_json, cancellation_json FROM jobs WHERE id = ?1",
                 params![id.to_string()],
                 row_to_record,
             )
