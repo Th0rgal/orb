@@ -238,6 +238,7 @@ impl TimingCell {
     /// Raw upstream bytes arrived for the current attempt.
     pub fn upstream_activity(&self) {
         let now = tokio::time::Instant::now();
+        self.note_mission_liveness();
         self.with(|s| {
             let gap = s
                 .last_upstream
@@ -258,6 +259,15 @@ impl TimingCell {
         });
     }
 
+    /// The router is still legitimately waiting on this request: keep the
+    /// mission's proxy liveness fresh so harness idle watchdogs agree with
+    /// the router's own idle limit. Authenticated attribution only.
+    pub fn note_mission_liveness(&self) {
+        if let Some(mission) = self.with(|s| s.record.mission_id) {
+            crate::api::proxy_liveness::note_activity(mission);
+        }
+    }
+
     /// Time since the current attempt last received upstream bytes.
     pub fn upstream_idle(&self) -> Option<Duration> {
         self.with(|s| s.last_upstream.map(|t| t.elapsed()))
@@ -274,6 +284,9 @@ impl TimingCell {
 
     /// A silence of `gap` toward the client ended (or a keepalive was sent).
     pub fn client_gap(&self, gap: Duration, keepalive: bool) {
+        if keepalive {
+            self.note_mission_liveness();
+        }
         self.with(|s| {
             s.record.max_client_gap_ms = s.record.max_client_gap_ms.max(gap.as_millis() as u64);
             if keepalive {
@@ -318,6 +331,9 @@ impl TimingCell {
 
     /// A new upstream attempt begins; also counts it as in flight.
     pub fn attempt_start(&self, provider: &str, model: &str, account_id: uuid::Uuid) {
+        // Release the previous attempt first so it is not counted as a
+        // concurrent request of this one.
+        self.with(|s| s.inflight = None);
         let account = account_id.to_string();
         let keys = [
             format!("provider:{provider}"),
@@ -988,6 +1004,35 @@ mod tests {
         );
         let fc = recent_first_content_ms(&provider, "m2", Duration::from_secs(60));
         assert_eq!(fc.len(), 1);
+    }
+
+    #[test]
+    fn keepalives_and_upstream_bytes_keep_mission_liveness_fresh() {
+        let mission = uuid::Uuid::new_v4();
+        let cell = TimingCell::new("c", true);
+        cell.set_attribution(Some(mission), None);
+        assert!(crate::api::proxy_liveness::time_since_activity(mission).is_none());
+        cell.client_gap(Duration::from_secs(15), true);
+        assert!(
+            crate::api::proxy_liveness::time_since_activity(mission).unwrap()
+                < Duration::from_secs(5)
+        );
+        let other = uuid::Uuid::new_v4();
+        let cell = TimingCell::new("c", true);
+        cell.set_attribution(Some(other), None);
+        cell.upstream_activity();
+        assert!(crate::api::proxy_liveness::time_since_activity(other).is_some());
+    }
+
+    #[test]
+    fn next_attempt_does_not_count_its_predecessor_in_flight() {
+        let provider = format!("p-{}", uuid::Uuid::new_v4());
+        let cell = TimingCell::new("c", true);
+        cell.attempt_start(&provider, "m1", uuid::Uuid::new_v4());
+        // A 4xx moved the chain on without a recorded failure.
+        cell.attempt_start(&provider, "m2", uuid::Uuid::new_v4());
+        let r = cell.snapshot();
+        assert_eq!(r.attempts[1].inflight_provider, 0);
     }
 
     #[test]
