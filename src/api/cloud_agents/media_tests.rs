@@ -33,6 +33,7 @@ fn env() -> Env {
     let source = MediaSource {
         namespace_root: ns.clone(),
         hermes_home: PathBuf::from("/var/lib/hermes"),
+        owner: unsafe { libc::getuid() },
     };
     Env {
         _dir: dir,
@@ -327,6 +328,7 @@ fn agent_writable_root_directories_cannot_be_symlinks() {
     let source = MediaSource {
         namespace_root: e.ns.clone(),
         hermes_home: PathBuf::from("/var/lib/linked"),
+        owner: e.source.owner,
     };
     std::os::unix::fs::symlink(&real, e.ns.join("var/lib/linked")).unwrap();
     let n = normalize_text(
@@ -352,4 +354,32 @@ fn decompression_bombs_are_rejected() {
         image_dimensions(b"GIF89a\x80\x02\x40\x01"),
         Some((640, 320))
     );
+}
+
+#[test]
+fn only_files_written_by_the_hermes_user_are_read() {
+    let e = env();
+    fs::write(e.ns.join("tmp/p.png"), PNG).unwrap();
+    fs::create_dir(e.ns.join("tmp/sub")).unwrap();
+    fs::write(e.ns.join("tmp/sub/q.png"), PNG).unwrap();
+    // Seen from a Hermes that runs as another user (root, or anyone else),
+    // these files belong to someone else: refused, file and directory alike.
+    for owner in [0, e.source.owner + 1] {
+        let other = MediaSource {
+            owner,
+            ..e.source.clone()
+        };
+        for path in ["MEDIA:/tmp/p.png", "MEDIA:/tmp/sub/q.png"] {
+            let n = normalize_text(path, Some(&other), &e.work, MISSION);
+            assert!(n.text.contains("unavailable=\"true\""), "{owner} {path}");
+        }
+    }
+    // The right owner, through the root-owned /tmp: accepted.
+    assert_eq!(e.run("MEDIA:/tmp/sub/q.png").shared_files.len(), 1);
+}
+
+#[test]
+fn no_hermes_namespace_means_unavailable() {
+    // A unit that is missing, or has no PrivateTmp, never falls back to Core's /.
+    assert!(hermes_source("no-such-hermes-unit-for-tests").is_none());
 }

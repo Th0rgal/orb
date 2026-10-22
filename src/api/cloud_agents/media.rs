@@ -60,6 +60,10 @@ pub struct MediaSource {
     pub namespace_root: PathBuf,
     /// `$HERMES_HOME` inside that namespace.
     pub hermes_home: PathBuf,
+    /// UID the Hermes service writes as. Every directory below the trusted
+    /// base (except `/tmp` itself) and the file must be owned by it, so Core
+    /// (root) never copies a file Hermes could not have produced.
+    pub owner: u32,
 }
 
 impl MediaSource {
@@ -520,13 +524,27 @@ fn read_media(source: &MediaSource, logical: &str) -> Result<(Vec<u8>, Kind), Re
         open_at(None, &in_ns, libc::O_RDONLY | libc::O_DIRECTORY).map_err(|_| Reject::Missing)?;
     let mut comps: Vec<&std::ffi::OsStr> = Path::new(sub).iter().collect();
     comps.extend(rest.iter());
-    for c in &comps[..comps.len() - 1] {
+    use std::os::unix::fs::MetadataExt;
+    let owned = |fd: &OwnedFd| -> Result<(), Reject> {
+        let m = std::fs::File::from(fd.try_clone().map_err(|_| Reject::Missing)?)
+            .metadata()
+            .map_err(|_| Reject::Missing)?;
+        if m.uid() != source.owner {
+            return Err(Reject::NotAllowed("not written by Hermes"));
+        }
+        Ok(())
+    };
+    for (i, c) in comps[..comps.len() - 1].iter().enumerate() {
         dir = open_at(
             Some(&dir),
             Path::new(c),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
         )
         .map_err(|_| Reject::NotAllowed("path"))?;
+        // `/tmp` itself is root-owned and shared; everything below must be Hermes's.
+        if !(i == 0 && sub == "tmp") {
+            owned(&dir)?;
+        }
     }
     let fd = open_at(
         Some(&dir),
@@ -546,8 +564,10 @@ fn read_media(source: &MediaSource, logical: &str) -> Result<(Vec<u8>, Kind), Re
     if !meta.file_type().is_file() {
         return Err(Reject::NotAllowed("not a regular file"));
     }
+    if meta.uid() != source.owner {
+        return Err(Reject::NotAllowed("not written by Hermes"));
+    }
     {
-        use std::os::unix::fs::MetadataExt;
         // A hard link can alias any file on the same filesystem.
         if meta.nlink() != 1 {
             return Err(Reject::NotAllowed("hard link"));
@@ -738,20 +758,23 @@ pub fn hermes_source(runtime: &str) -> Option<MediaSource> {
             .trim()
             .to_string()
     };
+    // Fail closed: without Hermes's own namespace, Core's (root) /tmp would be read.
     if field("PrivateTmp") != "yes" {
-        return Some(MediaSource {
-            namespace_root: PathBuf::from("/"),
-            hermes_home,
-        });
+        return None;
     }
     let pid: u32 = field("MainPID").parse().ok().filter(|p| *p > 0)?;
     let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
     if !cgroup.lines().any(|l| l.ends_with(&format!("/{unit}"))) {
         return None;
     }
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&hermes_home).ok()?.uid()
+    };
     Some(MediaSource {
         namespace_root: PathBuf::from(format!("/proc/{pid}/root")),
         hermes_home,
+        owner,
     })
 }
 
