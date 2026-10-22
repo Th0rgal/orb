@@ -50,25 +50,15 @@ pub fn lease_mode(
     tags: &[String],
     intent: Option<&str>,
 ) -> &'static str {
-    if writer_flag == Some(false) || tags.iter().any(|tag| tag == "pr-readonly") {
-        return "reader";
-    }
-    if writer_flag == Some(true) || tags.iter().any(|tag| tag == "pr-writer") {
-        return "writer";
-    }
-    let intent = intent
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if READONLY_INTENTS.iter().any(|candidate| {
-        intent == *candidate
-            || intent.starts_with(&format!("{candidate}_"))
-            || intent.starts_with(&format!("{candidate}-"))
-    }) {
-        "reader"
-    } else {
-        "writer"
-    }
+    let has_ro = tags.iter().any(|t| t == "pr-readonly");
+    let has_wr = tags.iter().any(|t| t == "pr-writer");
+    let intent = intent.unwrap_or("").trim().to_ascii_lowercase();
+    let is_ro_intent = READONLY_INTENTS.iter().any(|cand| {
+        intent
+            .strip_prefix(cand)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['_', '-']))
+    });
+    crate::orb_spec::classify_lease_mode(writer_flag, has_ro, has_wr, is_ro_intent)
 }
 
 /// `SANDBOXED_TRACK_REQUIRED=1`: a project-tagged mission without a track is

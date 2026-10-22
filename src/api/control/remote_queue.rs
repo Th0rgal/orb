@@ -111,7 +111,14 @@ pub(super) async fn enqueue(
         .optional()
         .map_err(internal_error)?;
     if let Some((owner, status)) = previous {
-        if owner != mid.to_string() || status == "cancelled" {
+        if !crate::orb_spec::remote_outbox_admit_enqueue(
+            true,
+            owner == mid.to_string(),
+            status == "cancelled",
+            false,
+            true,
+            false,
+        ) {
             return Err((
                 StatusCode::CONFLICT,
                 "This message ID was already used or cancelled".into(),
@@ -141,62 +148,49 @@ pub(super) async fn enqueue(
             "This remote harness cannot continue its session".into(),
         ));
     }
-    if crate::api::mission_horizon::superseded_by(&mission).is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "{}: mission {mid} has been superseded",
-                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
-            ),
-        ));
-    }
-    if !placement.live
-        && mission
+    let is_superseded = crate::api::mission_horizon::superseded_by(&mission).is_some();
+    let session_ready = placement.live
+        || mission
             .session_id
             .as_deref()
-            .is_none_or(|id| id.trim().is_empty())
-        && machine_transfer::committed(&control.mission_store, mid)
+            .is_some_and(|id| !id.trim().is_empty())
+        || machine_transfer::committed(&control.mission_store, mid)
             .await
             .map_err(internal_error)?
-            .is_none()
-        && mission.backend != "opencode"
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "{}: mission {mid} has no recorded native session",
-                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
-            ),
-        ));
-    }
-    // Keep existing continuation admission: a queued message must never turn
-    // into a replacement mission or silently switch writer identity.
-    //
-    // While a node job runs, a writer on its own explicit track (tagged
-    // `pr-writer` or not) still queues: the follow-up waits for that job, and
-    // its delivery goes through `continue_on_node`, which re-admits the
-    // mission's own track lease or withdraws the row. Refusing it here sent
-    // Orb a "turn is still running" error for an ordinary follow-up whenever
-    // an automatic resume or goal continuation was running (verity-core
-    // antigravity mission 52221aaa on babylon). A PR binding still needs
-    // create admission, so it is refused either way.
+            .is_some()
+        || mission.backend == "opencode";
     let writer_identity = mission.project.tags.iter().any(|tag| tag == "pr-writer")
         || mission.project.track.as_ref().is_some_and(|track| {
             track != &crate::api::track_leases::generated_track_key(&mid.to_string())
         });
     let unsupported = mission.project.github_pr.is_some() || (writer_identity && !placement.live);
-    if unsupported {
-        let prefix = if placement.live {
-            remote_grok::REMOTE_JOB_STILL_RUNNING
-        } else {
-            remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
-        };
-        return Err((
-            StatusCode::CONFLICT,
+    if !crate::orb_spec::remote_outbox_admit_enqueue(
+        false,
+        true,
+        false,
+        is_superseded,
+        session_ready,
+        unsupported,
+    ) {
+        let msg = if is_superseded {
             format!(
-                "{prefix}: this mission's writer identity does not support native continuation"
-            ),
-        ));
+                "{}: mission {mid} has been superseded",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
+            )
+        } else if !session_ready {
+            format!(
+                "{}: mission {mid} has no recorded native session",
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
+            )
+        } else {
+            let prefix = if placement.live {
+                remote_grok::REMOTE_JOB_STILL_RUNNING
+            } else {
+                remote_grok::REMOTE_RESUME_REQUIRES_REPLACEMENT
+            };
+            format!("{prefix}: this mission's writer identity does not support native continuation")
+        };
+        return Err((StatusCode::CONFLICT, msg));
     }
     // Validate only new messages: an accepted ID retains its receipt even if
     // the assignment changed after a response was lost. Admission protects
@@ -408,31 +402,17 @@ pub(super) fn promote(store: &ProjectsStore, user: &str, id: Uuid) -> Result<Uui
         .optional()
         .map_err(|e| e.to_string())?
         .ok_or("message not in queue")?;
-    if bound {
+    if !crate::orb_spec::remote_outbox_admit_cancel(bound, false) {
         return Err("This message is already being delivered".into());
     }
-    let others: Vec<i64> = {
-        let mut stmt = tx
-            .prepare("SELECT sequence FROM remote_message_queue WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND message_id!=?3 ORDER BY sequence")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![user, mission, id.to_string()], |row| row.get(0))
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
-    };
-    for sequence in others {
-        tx.execute(
-            "UPDATE remote_message_queue SET sequence=(SELECT MAX(sequence)+1 FROM remote_message_queue) WHERE sequence=?1",
-            params![sequence],
-        )
+    let others: Vec<i64> = tx
+        .prepare("SELECT sequence FROM remote_message_queue WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND message_id!=?3 ORDER BY sequence")
+        .and_then(|mut s| s.query_map(params![user, &mission, id.to_string()], |r| r.get(0))?.collect())
         .map_err(|e| e.to_string())?;
+    for seq in others {
+        tx.execute("UPDATE remote_message_queue SET sequence=(SELECT MAX(sequence)+1 FROM remote_message_queue) WHERE sequence=?1", params![seq]).map_err(|e| e.to_string())?;
     }
-    // Keep AUTOINCREMENT ahead of the moved rows so new follow-ups append.
-    tx.execute(
-        "UPDATE sqlite_sequence SET seq=MAX(seq,(SELECT MAX(sequence) FROM remote_message_queue)) WHERE name='remote_message_queue'",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
+    tx.execute("UPDATE sqlite_sequence SET seq=MAX(seq,(SELECT MAX(sequence) FROM remote_message_queue)) WHERE name='remote_message_queue'", []).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Uuid::parse_str(&mission).map_err(|e| e.to_string())
 }
