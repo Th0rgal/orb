@@ -33,6 +33,12 @@ struct OrbWorkModel: Equatable {
     var thoughts: [ThoughtItem] = []
     var tools: [ToolItem] = []
     var todos: [TodoItem] = []
+    /// How the turn went after the latest task-list update: a final answer
+    /// arrived (`.finished`) or the turn failed/stopped without one
+    /// (`.stopped`). Mirrors desktop `turnOutcomeAfter`.
+    enum TurnOutcome: Equatable { case finished, stopped }
+    var outcomeAfterTodos: TurnOutcome = .stopped
+    private var todosFailed = false
 
     var isEmpty: Bool { thoughts.isEmpty && tools.isEmpty }
 
@@ -102,7 +108,7 @@ struct OrbWorkModel: Equatable {
                 let lower = rawName.lowercased()
                 if lower == "todowrite" || lower == "todo_write" || lower == "update_plan" {
                     let items = extractTodos(from: parsed)
-                    if !items.isEmpty { model.todos = items }
+                    if !items.isEmpty { model.todos = items; model.outcomeAfterTodos = .stopped; model.todosFailed = false }
                     continue
                 }
                 let meta = classifyTool(name: rawName, args: parsed, rawContent: event.content)
@@ -152,6 +158,14 @@ struct OrbWorkModel: Equatable {
                     outputText: text,
                     status: .done
                 ))
+
+            case "assistant_message":
+                // A failure after an answer still means the turn stopped.
+                let failed = event.metadata["success"]?.value as? Bool == false
+                if failed { model.outcomeAfterTodos = .stopped; model.todosFailed = true }
+                else if !model.todosFailed, !event.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    model.outcomeAfterTodos = .finished
+                }
 
             default:
                 break
@@ -532,20 +546,40 @@ struct OrbMissionTasksCard: View {
     /// The turn is no longer running: an unfinished plan shows where it
     /// stopped, with no step in progress (desktop `taskCardView`).
     var ended = false
+    /// How the turn ended after the last task-list update. A normal finish
+    /// with open items only means the list went stale (ccd5a32b), so it is
+    /// never labelled "Stopped".
+    var outcome: OrbWorkModel.TurnOutcome = .stopped
     @State private var expanded = false
 
-    private var stopped: Bool {
-        ended && !todos.allSatisfy { $0.status == "completed" || $0.status == "cancelled" }
+    enum CardState: Equatable { case live, done, stale, stopped }
+    static func state(todos: [OrbWorkModel.TodoItem], ended: Bool, outcome: OrbWorkModel.TurnOutcome) -> CardState {
+        if !ended { return .live }
+        if todos.allSatisfy({ $0.status == "completed" || $0.status == "cancelled" }) { return .done }
+        return outcome == .finished ? .stale : .stopped
     }
-    private func shownStatus(_ status: String) -> String {
-        stopped && status == "in_progress" ? "pending" : status
-    }
-    private var countLabel: String {
-        guard stopped, let index = todos.firstIndex(where: { $0.status == "in_progress" || $0.status == "pending" }) else {
-            return "\(completedCount)/\(todos.count) tasks"
+    static func label(todos: [OrbWorkModel.TodoItem], ended: Bool, outcome: OrbWorkModel.TurnOutcome) -> String {
+        let done = todos.filter { $0.status == "completed" }.count
+        switch state(todos: todos, ended: ended, outcome: outcome) {
+        case .live, .done: return "\(done)/\(todos.count) tasks"
+        case .stale: return "Task list not updated · turn finished (\(done)/\(todos.count))"
+        case .stopped:
+            let index = todos.firstIndex { $0.status == "in_progress" || $0.status == "pending" } ?? 0
+            return "Stopped at step \(index + 1)/\(todos.count)"
         }
-        return "Stopped at step \(index + 1)/\(todos.count)"
     }
+    static func shownStatus(_ status: String, state: CardState) -> String {
+        let open = status == "in_progress" || status == "pending"
+        switch state {
+        case .stale: return open ? "stale" : status
+        case .stopped: return status == "in_progress" ? "pending" : status
+        default: return status
+        }
+    }
+
+    private var state: CardState { Self.state(todos: todos, ended: ended, outcome: outcome) }
+    private func shownStatus(_ status: String) -> String { Self.shownStatus(status, state: state) }
+    private var countLabel: String { Self.label(todos: todos, ended: ended, outcome: outcome) }
 
     private var completedCount: Int {
         todos.filter { $0.status == "completed" }.count
@@ -555,6 +589,7 @@ struct OrbMissionTasksCard: View {
         case "completed": return "checkmark.circle.fill"
         case "in_progress": return "record.circle"
         case "cancelled": return "xmark.circle"
+        case "stale": return "circle.dashed"
         default: return "circle"
         }
     }
@@ -606,7 +641,10 @@ struct OrbMissionTasksCard: View {
                                 .font(.caption)
                                 .foregroundStyle(item.status == "completed" ? OrbStyle.textMuted : .primary.opacity(0.9))
                                 .strikethrough(item.status == "completed" || item.status == "cancelled")
+                                .italic(shownStatus(item.status) == "stale")
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityHint(shownStatus(item.status) == "stale" ? "Final status not reported by the agent" : "")
                     }
                 }
                 .padding(.top, 2)

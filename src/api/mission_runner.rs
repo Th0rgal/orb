@@ -4687,6 +4687,9 @@ pub(crate) async fn run_mission_turn(
         ),
         _ => (user_message.clone(), is_continuation),
     };
+    // Every local harness with a todo tool is reminded to close its task list
+    // before the final answer (Orb otherwise shows a stale list).
+    let turn_message = crate::util::with_task_list_guidance(&turn_message);
 
     let result = match super::runners::runner_for(&backend_id) {
         Some(runner) => {

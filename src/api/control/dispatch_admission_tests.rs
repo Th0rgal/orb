@@ -7335,7 +7335,15 @@ async fn native_grok_auto_track_continuation(
         command.contains(&format!("--resume '{session_id}'")),
         "{command}"
     );
-    assert!(command.ends_with("-p 'keep optimizing'"), "{command}");
+    // Remote turns carry the task-list closing guidance after the prompt.
+    let prompt = crate::util::with_task_list_guidance("keep optimizing");
+    assert!(
+        command.ends_with(&format!(
+            "-p {}",
+            super::remote_plan::shell_single_quote(&prompt)
+        )),
+        "{command}"
+    );
     let claims = h.state.projects.live_leases(Some("lido")).unwrap();
     assert!(claims.iter().any(|lease| lease.attempt_id == id.to_string()
         && lease.track == auto_track
@@ -7444,7 +7452,14 @@ async fn native_grok_auto_track_continuation(
             command.contains(&format!("--resume '{session_id}'")),
             "{command}"
         );
-        assert!(command.ends_with(&format!("-p '{text}'")), "{command}");
+        let prompt = crate::util::with_task_list_guidance(text);
+        assert!(
+            command.ends_with(&format!(
+                "-p {}",
+                super::remote_plan::shell_single_quote(&prompt)
+            )),
+            "{command}"
+        );
     }
     // Simulate process loss after node acceptance, before the queue receipt.
     // The persisted job binding must recover even after the ledger retired.
@@ -12267,7 +12282,10 @@ async fn vibe_control_dispatch_resume_keeps_native_identity_without_in_memory_hi
         true,
     )
     .await;
-    assert_eq!(captured["message"], "Continue the plan");
+    assert_eq!(
+        captured["message"],
+        crate::util::with_task_list_guidance("Continue the plan")
+    );
     assert_eq!(captured["current_message"], "Continue the plan");
     assert_eq!(captured["model"], "mistral/devstral-latest");
     assert_eq!(captured["session_id"], "native-vibe-session");

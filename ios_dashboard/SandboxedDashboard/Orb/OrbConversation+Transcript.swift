@@ -122,7 +122,7 @@ extension OrbConversation {
             OrbOrchestrationCards(refs: transcript.orchestration, project: project)
         }
         if !workModel.todos.isEmpty {
-            OrbMissionTasksCard(todos: workModel.todos, ended: !working)
+            OrbMissionTasksCard(todos: workModel.todos, ended: !working, outcome: workModel.outcomeAfterTodos)
         }
         if working {
             TimelineView(.periodic(from: .now, by: 1)) { context in

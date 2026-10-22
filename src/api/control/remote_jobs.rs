@@ -61,6 +61,7 @@ pub(super) async fn submit_leased_remote_job(
         } else if super::super::context_execution::has_mentions(prompt) {
             return Err("Context references require a project".into());
         }
+        *prompt = crate::util::with_task_list_guidance(prompt);
     }
 
     let plan = &resolved_plan;
