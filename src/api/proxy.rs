@@ -2644,11 +2644,14 @@ fn client_stream_response(
         let mut tail: Vec<u8> = b"\n\n".to_vec();
         let mut retries = 0u32;
         let mut last_item = tokio::time::Instant::now();
+        // Next keepalive is due one interval after the last byte the client
+        // got; mid-event it is pushed back instead of being sent.
+        let mut ka_deadline = last_item + keepalive;
         loop {
             let next = if is_sse {
                 tokio::select! {
                     item = data.next() => Some(item),
-                    _ = tokio::time::sleep(keepalive) => None,
+                    _ = tokio::time::sleep_until(ka_deadline) => None,
                 }
             } else {
                 Some(data.next().await)
@@ -2660,6 +2663,7 @@ fn client_stream_response(
                         last_item = tokio::time::Instant::now();
                         yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
                     }
+                    ka_deadline = tokio::time::Instant::now() + keepalive;
                     continue;
                 }
                 Some(None) => break,
@@ -2687,12 +2691,13 @@ fn client_stream_response(
                             let resp = loop {
                                 tokio::select! {
                                     resp = &mut pending => break resp,
-                                    _ = tokio::time::sleep(keepalive) => {
+                                    _ = tokio::time::sleep_until(ka_deadline) => {
                                         if at_sse_event_boundary(&tail) {
                                             cell.client_gap(last_item.elapsed(), true);
                         last_item = tokio::time::Instant::now();
                                             yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
                                         }
+                                        ka_deadline = tokio::time::Instant::now() + keepalive;
                                     }
                                 }
                             };
@@ -2708,6 +2713,7 @@ fn client_stream_response(
                     }
                     cell.client_gap(last_item.elapsed(), false);
                     last_item = tokio::time::Instant::now();
+                    ka_deadline = last_item + keepalive;
                     if !committed && sse_chunk_commits_output(&bytes) {
                         committed = true;
                     }

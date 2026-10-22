@@ -137,12 +137,12 @@ pub fn hedge_config_for(requested: &str, rules: &[(String, String)]) -> Option<H
 /// Mid-stream idle limit for one provider/model.
 ///
 /// Base: `PROXY_STREAM_IDLE_TIMEOUT_SECS_<PROVIDER>` (e.g. `_XAI`, `_GOOGLE`),
-/// else `PROXY_STREAM_IDLE_TIMEOUT_SECS` (60 s). Adaptive: 1.5x the p95 of
+/// else [`default_stream_idle_for`] (180 s for Gemini/Grok providers, 60 s
+/// otherwise). Adaptive: 1.5x the p95 of
 /// the longest upstream silences seen in recent healthy streams of the same
 /// model (a model that routinely pauses 70 s while it reasons or composes a
 /// large tool call is not dead at 60 s). Never above
-/// `PROXY_STREAM_IDLE_CEILING_SECS` (110 s: below the 120 s harness text-idle
-/// limit), never below the base. Idleness is measured on raw upstream bytes,
+/// `PROXY_STREAM_IDLE_CEILING_SECS` (default 300 s), never below the base. Idleness is measured on raw upstream bytes,
 /// so keepalive comments and thought chunks count as activity.
 pub fn stream_idle_timeout_for(provider: &str, recent_max_gaps_ms: &[u64]) -> Duration {
     let key = format!(
@@ -161,9 +161,23 @@ pub fn stream_idle_timeout_for(provider: &str, recent_max_gaps_ms: &[u64]) -> Du
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
         .map(Duration::from_secs)
-        .unwrap_or_else(stream_idle_timeout);
-    let ceiling = Duration::from_secs(env_secs("PROXY_STREAM_IDLE_CEILING_SECS", 110)).max(base);
+        .unwrap_or_else(|| default_stream_idle_for(provider));
+    let ceiling = Duration::from_secs(env_secs("PROXY_STREAM_IDLE_CEILING_SECS", 300)).max(base);
     adaptive_idle(base, ceiling, recent_max_gaps_ms)
+}
+
+/// Default mid-stream idle limit per provider. Gemini and Grok reasoning
+/// models go silent for minutes while they think or compose a large tool
+/// call (prod: 6 `idle_secs=60` stalls on google/xai in 90 min), so they get
+/// `PROXY_REASONING_STREAM_IDLE_SECS` (default 180 s). Others keep
+/// `PROXY_STREAM_IDLE_TIMEOUT_SECS` (60 s).
+pub fn default_stream_idle_for(provider: &str) -> Duration {
+    if matches!(provider, "google" | "gemini" | "antigravity" | "xai") {
+        Duration::from_secs(env_secs("PROXY_REASONING_STREAM_IDLE_SECS", 180))
+            .max(stream_idle_timeout())
+    } else {
+        stream_idle_timeout()
+    }
 }
 
 /// Pure part of [`stream_idle_timeout_for`]: needs 20 samples to adapt.
@@ -729,5 +743,14 @@ mod tests {
         );
         // Huge pauses: capped at the ceiling.
         assert_eq!(adaptive_idle(base, ceiling, &[600_000; 40]), ceiling);
+    }
+
+    #[test]
+    fn reasoning_providers_get_a_long_idle_floor() {
+        assert!(default_stream_idle_for("google") >= Duration::from_secs(180));
+        assert!(default_stream_idle_for("xai") >= Duration::from_secs(180));
+        assert!(default_stream_idle_for("antigravity") >= Duration::from_secs(180));
+        assert_eq!(default_stream_idle_for("zai"), stream_idle_timeout());
+        assert!(stream_idle_timeout_for("google", &[]) >= Duration::from_secs(180));
     }
 }
