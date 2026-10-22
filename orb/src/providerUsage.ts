@@ -82,3 +82,55 @@ export function hasProviderUsageDetails(u?: ProviderUsage): boolean {
     || (u.provider_type === "kimi" && (u.kimi_plan != null || kimiWindows(u).length > 0))
     || (u.provider_type === "zai" && u.zai_tokens_percentage != null));
 }
+
+export type UsageLimitStatus = { tone: "warning" | "error"; label: string };
+
+const CLAIM_WINDOWS: Record<string, { label: string; key?: "unified_5h_utilization" | "unified_7d_utilization" }> = {
+  five_hour: { label: "5h", key: "unified_5h_utilization" },
+  seven_day: { label: "weekly", key: "unified_7d_utilization" },
+  seven_day_opus: { label: "weekly Opus" },
+  seven_day_sonnet: { label: "weekly Sonnet" },
+};
+
+function resetsIn(seconds: number): string {
+  if (seconds < 3600) return `${Math.max(1, Math.floor(seconds / 60))}m`;
+  if (seconds < 48 * 3600) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
+/**
+ * Anthropic unified rate-limit status as a friendly badge; null means show
+ * nothing. Spec: shared/orb-spec/fixtures/usage-limit-status.json (same
+ * function on iOS and Android). Never returns a raw snake_case status.
+ */
+export function usageLimitStatus(u: Pick<ProviderUsage, "unified_status" | "unified_reset" | "unified_representative_claim" | "unified_5h_utilization" | "unified_7d_utilization">, nowSec = Date.now() / 1000): UsageLimitStatus | null {
+  const status = (u.unified_status ?? "").trim().toLowerCase();
+  if (!status || status === "allowed" || status === "ok") return null;
+  if (status === "allowed_warning") {
+    const claim = CLAIM_WINDOWS[(u.unified_representative_claim ?? "").trim().toLowerCase()];
+    if (!claim) return { tone: "warning", label: "Approaching limit" };
+    const used = claim.key ? u[claim.key] : undefined;
+    const pct = typeof used === "number" && Number.isFinite(used) ? ` ${Math.round(used * 100)}%` : "";
+    return { tone: "warning", label: `Approaching limit · ${claim.label}${pct}` };
+  }
+  if (status === "rejected") {
+    const reset = Number(u.unified_reset);
+    const left = Number.isFinite(reset) && u.unified_reset != null ? reset - nowSec : NaN;
+    return { tone: "error", label: left > 0 ? `Limit reached · resets in ${resetsIn(left)}` : "Limit reached" };
+  }
+  return { tone: "warning", label: "Limit status unknown" };
+}
+
+/**
+ * Organization ids that more than one Anthropic account reports. Accounts in
+ * the same organization share one unified limit, so their identical numbers
+ * are labelled "Shared organization limit" rather than looking duplicated.
+ */
+export function sharedAnthropicOrganizations(usages: Record<string, ProviderUsage | undefined>): Set<string> {
+  const seen = new Map<string, number>();
+  for (const u of Object.values(usages)) {
+    const org = u?.provider_type === "anthropic" ? u.organization_id?.trim() : undefined;
+    if (org) seen.set(org, (seen.get(org) ?? 0) + 1);
+  }
+  return new Set([...seen].filter(([, n]) => n > 1).map(([org]) => org));
+}

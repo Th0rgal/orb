@@ -5,7 +5,7 @@ import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
-import { codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, usageWindows } from "./providerUsage";
+import { codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows } from "./providerUsage";
 import { PopupMenu } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
@@ -193,6 +193,7 @@ const SUBSCRIPTION_META: Record<string, { vendor: string; desc: string }> = {
 
 function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountHealthSnapshot>; onRefresh: () => void; loading?: boolean; loadError?: string | null }) {
   const [usage, setUsage] = createSignal<Record<string, ProviderUsage>>({});
+  const sharedOrgs = createMemo(() => sharedAnthropicOrganizations(usage()));
   const [keyEditor, setKeyEditor] = createSignal<AIProvider | "new" | null>(null);
   const [reauth, setReauth] = createSignal<AIProvider | null>(null);
   const [adding, setAdding] = createSignal(false);
@@ -290,7 +291,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No OAuth providers configured.</div></div>
@@ -766,7 +767,7 @@ function windowGroups<W extends { label: string }>(windows: W[]) {
   return groups;
 }
 
-function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHeader?: boolean }) {
+function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHeader?: boolean; sharedOrg?: boolean }) {
   const u = () => p.usage;
   const type = () => u().provider_type;
   return (
@@ -776,8 +777,9 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
         <Show when={u().account_email && u().account_email !== p.headerEmail}><span>{u().account_email}</span></Show>
         <Show when={u().account_name}><span>{u().account_name}</span></Show>
         <Show when={u().organization}><span>{u().organization}</span></Show>
-        <Show when={u().unified_status}>
-          <span class={u().unified_status === "ok" || u().unified_status === "allowed" ? "c-green" : "c-red"}>status: {u().unified_status}</span>
+        <Show when={p.sharedOrg}><span data-testid="shared-org-limit">Shared organization limit</span></Show>
+        <Show when={usageLimitStatus(u())}>
+          {(s) => <span class={s().tone === "error" ? "c-red" : "c-amber"} data-testid="usage-limit-status">{s().label}</span>}
         </Show>
       </div>
 
@@ -893,7 +895,7 @@ function MistralUsageConnect(p: { a: AIProvider; usage?: ProviderUsage; onUsage?
   </div>;
 }
 
-function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
+function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
   const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted", "out_of_credit", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
@@ -951,7 +953,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; health?: AccountHeal
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
           </Show>
           <Show when={hasProviderUsageDetails(p.usage)}>
-            <UsageDetail usage={p.usage!} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
+            <UsageDetail usage={p.usage!} sharedOrg={!!p.usage?.organization_id && !!p.sharedOrgs?.has(p.usage.organization_id)} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
           </Show>
           <Show when={status() === "out_of_credit" || status() === "auth_failed"}>
             <p class="s-row-desc inline-error">{status() === "out_of_credit"

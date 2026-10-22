@@ -848,12 +848,14 @@ mod oauth_deadletter_tests {
 #[cfg(test)]
 mod grok_oauth_tests {
     use super::{
-        build_response_from_store, collapse_duplicate_xai_oauth_accounts, get_xai_api_key_for_grok,
+        build_response_from_store, cli_proxy_access_token_in_dirs,
+        collapse_duplicate_xai_oauth_accounts, get_xai_api_key_for_grok,
         grok_auth_expires_at_millis, grok_cli_reconcile_due, has_live_cli_proxy_account_in_dirs,
         has_refreshable_cli_proxy_account_in_dirs, is_legacy_grok_build_oauth_label,
         oauth_refresh_clear_dead, oauth_refresh_mark_token_dead, oauth_refresh_token_fingerprint,
         parse_grok_device_auth_line, remove_legacy_grok_oauth_entry, sync_grok_auth_files,
-        ProviderStatusResponse, GROK_CLI_RECONCILE_INTERVAL, GROK_OAUTH_CLIENT_KEY,
+        CliProxyAccountRef, ProviderStatusResponse, GROK_CLI_RECONCILE_INTERVAL,
+        GROK_OAUTH_CLIENT_KEY,
     };
     use crate::ai_providers::{AIProvider, OAuthCredentials, ProviderType};
     use std::time::{Duration as StdDuration, Instant};
@@ -1273,6 +1275,71 @@ mod grok_oauth_tests {
         assert!(!has_live_cli_proxy_account_in_dirs(
             &dirs, "claude-", "codex", now, grace
         ));
+    }
+
+    #[test]
+    fn cli_proxy_usage_token_is_selected_per_account() {
+        // Regression: two Claude subscription accounts showed identical usage
+        // because the probe always used the longest-lived proxy login.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("auth");
+        std::fs::create_dir_all(&dir).expect("auth dir");
+        let now = chrono::Utc::now();
+        let write = |name: &str, email: &str, token: &str, hours: i64, pid: Option<&str>| {
+            let mut v = serde_json::json!({
+                "type": "claude",
+                "email": email,
+                "access_token": token,
+                "refresh_token": "r",
+                "expired": (now + chrono::Duration::hours(hours)).to_rfc3339(),
+            });
+            if let Some(pid) = pid {
+                v["sandboxed_provider_id"] = serde_json::json!(pid);
+            }
+            std::fs::write(dir.join(name), v.to_string()).unwrap();
+        };
+        let a_id = uuid::Uuid::new_v4();
+        write(
+            "claude-a.json",
+            "a@example.com",
+            "tok-a",
+            2,
+            Some(&a_id.to_string()),
+        );
+        // B expires later: the old code picked it for every account.
+        write("claude-b.json", "B@Example.com", "tok-b", 8, None);
+        let dirs = vec![dir.clone()];
+        let pick = |id: Option<uuid::Uuid>, email: Option<&str>| {
+            cli_proxy_access_token_in_dirs(
+                &dirs,
+                "claude-",
+                "claude",
+                CliProxyAccountRef {
+                    provider_id: id,
+                    email,
+                },
+                now,
+            )
+        };
+
+        assert_eq!(
+            pick(Some(a_id), Some("a@example.com")).as_deref(),
+            Some("tok-a")
+        );
+        // Matched by provider id even when the stored email differs.
+        assert_eq!(pick(Some(a_id), None).as_deref(), Some("tok-a"));
+        // Matched by email, case-insensitively.
+        assert_eq!(
+            pick(Some(uuid::Uuid::new_v4()), Some("b@example.com")).as_deref(),
+            Some("tok-b")
+        );
+        // A named account with no proxy login keeps its own credential.
+        assert_eq!(
+            pick(Some(uuid::Uuid::new_v4()), Some("c@example.com")),
+            None
+        );
+        // Only an anonymous lookup falls back to the freshest login.
+        assert_eq!(pick(None, None).as_deref(), Some("tok-b"));
     }
 
     #[test]
@@ -2256,11 +2323,70 @@ pub(crate) fn has_fresh_cli_proxy_codex_account() -> bool {
 /// the given provider (e.g. `claude-*.json`). Under CLI-proxy ownership the
 /// proxy's file is the only credential that stays fresh, so the usage probe
 /// must read it instead of sandboxed.sh's own (deliberately stale) record.
-pub(crate) fn cli_proxy_access_token(file_prefix: &str, type_tag: &str) -> Option<String> {
-    let now = chrono::Utc::now();
+///
+/// The token is the one belonging to `account`: a proxy file matches when its
+/// `sandboxed_provider_id` equals the provider id or its `email` equals the
+/// provider's account email. Each subscription account must be probed with
+/// its own login — picking "the freshest file" made every Anthropic account
+/// report the usage of whichever login expired last. When `account` names an
+/// identity and no file matches, `None` is returned so the caller keeps the
+/// account's own credential. Only an anonymous account (no email, no id)
+/// falls back to the freshest file.
+pub(crate) fn cli_proxy_access_token(
+    file_prefix: &str,
+    type_tag: &str,
+    account: CliProxyAccountRef<'_>,
+) -> Option<String> {
+    cli_proxy_access_token_in_dirs(
+        &cli_proxy_auth_dirs(),
+        file_prefix,
+        type_tag,
+        account,
+        chrono::Utc::now(),
+    )
+}
+
+/// Identity of the sandboxed.sh account whose CLI-proxy login we want.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CliProxyAccountRef<'a> {
+    pub provider_id: Option<uuid::Uuid>,
+    pub email: Option<&'a str>,
+}
+
+impl CliProxyAccountRef<'_> {
+    fn is_anonymous(&self) -> bool {
+        self.provider_id.is_none() && self.email.is_none_or(|e| e.trim().is_empty())
+    }
+
+    fn matches(&self, value: &serde_json::Value) -> bool {
+        if let (Some(id), Some(file_id)) = (
+            self.provider_id,
+            value.get("sandboxed_provider_id").and_then(|v| v.as_str()),
+        ) {
+            if file_id.trim().eq_ignore_ascii_case(&id.to_string()) {
+                return true;
+            }
+        }
+        match (self.email, value.get("email").and_then(|v| v.as_str())) {
+            (Some(want), Some(have)) => {
+                !want.trim().is_empty() && want.trim().eq_ignore_ascii_case(have.trim())
+            }
+            _ => false,
+        }
+    }
+}
+
+pub(crate) fn cli_proxy_access_token_in_dirs(
+    dirs: &[std::path::PathBuf],
+    file_prefix: &str,
+    type_tag: &str,
+    account: CliProxyAccountRef<'_>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let anonymous = account.is_anonymous();
     let mut best: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
-    for dir in cli_proxy_auth_dirs() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -2283,6 +2409,9 @@ pub(crate) fn cli_proxy_access_token(file_prefix: &str, type_tag: &str) -> Optio
                 .unwrap_or(false)
                 || value.get("type").and_then(|v| v.as_str()) != Some(type_tag)
             {
+                continue;
+            }
+            if !anonymous && !account.matches(&value) {
                 continue;
             }
             let Some(access) = value
@@ -8831,7 +8960,14 @@ async fn get_provider_usage(
             // with the proxy's live access token instead so the usage window
             // data (5h / 7d) reflects the credential missions actually use.
             if crate::api::oauth_owner::cli_proxy_owns(ProviderType::Anthropic) {
-                if let Some(token) = cli_proxy_access_token("claude-", "claude") {
+                if let Some(token) = cli_proxy_access_token(
+                    "claude-",
+                    "claude",
+                    CliProxyAccountRef {
+                        provider_id: provider_uuid,
+                        email: account_email.as_deref(),
+                    },
+                ) {
                     auth = token;
                     is_oauth = true;
                 }
