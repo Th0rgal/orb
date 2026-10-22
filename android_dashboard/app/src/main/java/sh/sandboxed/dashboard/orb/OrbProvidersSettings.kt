@@ -80,6 +80,40 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+/** Anthropic unified rate-limit badge. Spec: shared/orb-spec/fixtures/usage-limit-status.json. */
+internal data class UsageLimitStatus(val tone: String, val label: String)
+
+private val usageLimitClaims = mapOf(
+    "five_hour" to ("5h" to "unified_5h_utilization"),
+    "seven_day" to ("weekly" to "unified_7d_utilization"),
+    "seven_day_opus" to ("weekly Opus" to null),
+    "seven_day_sonnet" to ("weekly Sonnet" to null),
+)
+
+/** Same mapping as desktop `usageLimitStatus` and iOS `OrbUsageLimitStatus`; null = show nothing. */
+internal fun usageLimitStatus(detail: OrbDict?, nowSec: Double = System.currentTimeMillis() / 1000.0): UsageLimitStatus? {
+    val status = OrbJSON.str(detail, "unified_status")?.trim()?.lowercase() ?: ""
+    if (status.isEmpty() || status == "allowed" || status == "ok") return null
+    if (status == "allowed_warning") {
+        val claim = usageLimitClaims[OrbJSON.str(detail, "unified_representative_claim")?.trim()?.lowercase() ?: ""]
+            ?: return UsageLimitStatus("warning", "Approaching limit")
+        val used = claim.second?.let { OrbJSON.double(detail, it) }?.takeIf { it.isFinite() }
+        val pct = used?.let { " ${(it * 100).roundToInt()}%" } ?: ""
+        return UsageLimitStatus("warning", "Approaching limit · ${claim.first}$pct")
+    }
+    if (status == "rejected") {
+        val left = OrbJSON.double(detail, "unified_reset")?.minus(nowSec)
+        if (left == null || !left.isFinite() || left <= 0) return UsageLimitStatus("error", "Limit reached")
+        val span = when {
+            left < 3600 -> "${maxOf(1, (left / 60).toInt())}m"
+            left < 48 * 3600 -> "${(left / 3600).toInt()}h"
+            else -> "${(left / 86400).toInt()}d"
+        }
+        return UsageLimitStatus("error", "Limit reached · resets in $span")
+    }
+    return UsageLimitStatus("warning", "Limit status unknown")
+}
+
 internal fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> {
     if (detail == null) return emptyList()
     val result = mutableListOf<Pair<String, Double>>()
@@ -628,6 +662,13 @@ fun OrbProvidersSettingsPage(
                                                 .padding(top = 4.dp),
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
+                                            usageLimitStatus(detail)?.let { limit ->
+                                                Text(
+                                                    text = limit.label,
+                                                    color = if (limit.tone == "error") OrbStyle.error else OrbStyle.warning,
+                                                    fontSize = 12.sp
+                                                )
+                                            }
                                             if (windows.isEmpty()) {
                                                 Text(
                                                     text = "No quota information available.",

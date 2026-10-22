@@ -218,6 +218,34 @@ struct OrbProvidersSettings: View {
     }
 }
 
+/// Anthropic unified rate-limit status as a friendly badge (nil = show nothing).
+/// Spec: shared/orb-spec/fixtures/usage-limit-status.json; same as the desktop
+/// `usageLimitStatus` and Android `usageLimitStatus`. Never shows a raw status.
+struct OrbUsageLimitStatus: Equatable {
+    enum Tone: String { case warning, error }
+    let tone: Tone
+    let label: String
+
+    static func from(_ value: OrbJSON, now: Double = Date().timeIntervalSince1970) -> OrbUsageLimitStatus? {
+        let status = value["unified_status"].text.trimmingCharacters(in: .whitespaces).lowercased()
+        if status.isEmpty || status == "allowed" || status == "ok" { return nil }
+        if status == "allowed_warning" {
+            let claims: [String: (String, String?)] = ["five_hour": ("5h", "unified_5h_utilization"), "seven_day": ("weekly", "unified_7d_utilization"), "seven_day_opus": ("weekly Opus", nil), "seven_day_sonnet": ("weekly Sonnet", nil)]
+            guard let claim = claims[value["unified_representative_claim"].text.trimmingCharacters(in: .whitespaces).lowercased()] else { return .init(tone: .warning, label: "Approaching limit") }
+            var label = "Approaching limit · \(claim.0)"
+            if let key = claim.1, let used = value[key].number, used.isFinite { label += " \(Int((used * 100).rounded()))%" }
+            return .init(tone: .warning, label: label)
+        }
+        if status == "rejected" {
+            guard let reset = value["unified_reset"].number, reset - now > 0 else { return .init(tone: .error, label: "Limit reached") }
+            let left = reset - now
+            let span = left < 3600 ? "\(max(1, Int(left / 60)))m" : left < 48 * 3600 ? "\(Int(left / 3600))h" : "\(Int(left / 86400))d"
+            return .init(tone: .error, label: "Limit reached · resets in \(span)")
+        }
+        return .init(tone: .warning, label: "Limit status unknown")
+    }
+}
+
 struct OrbProviderQuota: View {
     let value: OrbJSON
     static func windows(_ value: OrbJSON) -> [(String, Double)] {
@@ -241,6 +269,10 @@ struct OrbProviderQuota: View {
     }
     var body: some View {
         let windows = Self.windows(value)
+        if let limit = OrbUsageLimitStatus.from(value) {
+            Label(limit.label, systemImage: limit.tone == .error ? "exclamationmark.octagon" : "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(limit.tone == .error ? Color.red : Color.orange)
+        }
         if windows.isEmpty { Text("No quota information available.").font(.caption).foregroundStyle(.secondary) }
         ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
             VStack(alignment: .leading) { LabeledContent(window.0, value: "\(Int((window.1 * 100).rounded()))% used"); ProgressView(value: window.1) }
