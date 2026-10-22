@@ -323,3 +323,35 @@ test('archiving or deleting a parent agent cascades to its spawned subagents and
  expect(deleted).toEqual(['parent-delete']);
 });
 
+
+test('archiving the selected conversation deselects it without revealing the archive or scrolling',async({page})=>{
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ const missions=Array.from({length:80},(_,i)=>({id:`long-${i}`,title:`Long conversation ${i}`,status:'awaiting_user',project:'test',tags:[],history:[],updated_at:new Date(Date.now()-i*60000).toISOString()}));
+ await page.route('**/api/**',async route=>{
+  const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
+  if(req.method()==='POST'&&path.endsWith('/status')){const m=missions.find(x=>x.id===id);if(m)m.status=req.postDataJSON().status;return route.fulfill({json:{}});}
+  const json=path==='/api/projects'?{projects:[{slug:'test',title:'Test project'}]}
+   :path==='/api/control/missions'?missions.filter(m=>!url.searchParams.has('status')||m.status===url.searchParams.get('status'))
+   :path.startsWith('/api/control/missions/')&&path.split('/').length===5?missions.find(m=>m.id===id)??{}
+   :path.endsWith('/files')?{entries:[]}:path.endsWith('/controller')?{job:null,runs:[]}:path.endsWith('/crons')?{jobs:[]}:[];
+  await route.fulfill({json});
+ });
+ await page.goto('/');
+ const archives=page.getByRole('button',{name:'Archived',exact:true});
+ await expect(archives).toHaveAttribute('aria-expanded','false');
+ const projects=page.getByRole('tree',{name:'Projects',exact:true});
+ await projects.getByRole('button',{name:'Test project',exact:true}).click();
+ const row=projects.getByRole('button',{name:/Long conversation 40\b/});
+ await row.scrollIntoViewIfNeeded();await row.click();
+ await expect(row).toHaveAttribute('aria-current','page');
+ const scroller=async()=>row.evaluate(el=>{let n=el.parentElement;while(n&&!(n.scrollHeight>n.clientHeight&&/(auto|scroll)/.test(getComputedStyle(n).overflowY)))n=n.parentElement;return n?n.scrollTop:-1;});
+ const before=await scroller();
+ expect(before).toBeGreaterThan(0);
+ await row.click({button:'right'});await page.getByRole('menuitem',{name:'Archive',exact:true}).click();
+ await expect(row).toHaveCount(0);
+ await page.waitForTimeout(300);
+ await expect(page.locator('[aria-current="page"]')).toHaveCount(0);
+ await expect(archives).toHaveAttribute('aria-expanded','false');
+ const after=await projects.getByRole('button',{name:/Long conversation 41\b/}).evaluate(el=>{let n=el.parentElement;while(n&&!(n.scrollHeight>n.clientHeight&&/(auto|scroll)/.test(getComputedStyle(n).overflowY)))n=n.parentElement;return n?n.scrollTop:-1;});
+ expect(after).toBe(before);
+});
