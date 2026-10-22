@@ -20,7 +20,7 @@ struct OrbMachinesSettings: View {
             OrbComputersSection(computers: computers, ready: computersReady) { startedMission = $0 }
             if let managed {
                 OrbManagedMachinesSection(response: managed, fetchedAt: managedFetchedAt, busy: managedBusy,
-                                          onDestroy: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))", method: "DELETE") } } },
+                                          onDestroy: { m in Task { await destroy(m) } },
                                           onExtend: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/extend", method: "POST", body: .object(["ttl_minutes": .number(60)])) } } })
             }
             Section("Fleet") {
@@ -41,7 +41,7 @@ struct OrbMachinesSettings: View {
                     } label: {
                         VStack(alignment: .leading) {
                             HStack(spacing: 6) {
-                                Text(node["id"].text)
+                                Text(OrbManaged.nodeTitle(node))
                                 if OrbManaged.isManagedNode(node) { OrbManagedBadge() }
                             }
                             Text(node["status"].text + (node["cordoned"].flag ? " · New jobs paused" : "")).font(.caption).foregroundStyle(.secondary)
@@ -88,6 +88,16 @@ struct OrbMachinesSettings: View {
         } catch is CancellationError { return }
         catch where OrbManaged.isUnsupported(error) { managed = nil }
         catch { if managed != nil { fleetError = "Managed machines unavailable. \(OrbManaged.message(error))" } }
+    }
+    /// Optimistic: the row reads "Destroying…" at once; a failure restores it and shows the error.
+    private func destroy(_ m: OrbManagedMachine) async {
+        guard !managedBusy, let before = managed else { return }
+        managedBusy = true; defer { managedBusy = false }
+        managed = OrbManaged.markDestroying(before, id: m.id)
+        do {
+            _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))", method: "DELETE")
+            fleetError = ""; await loadManaged()
+        } catch is CancellationError {} catch { managed = before; fleetError = OrbManaged.message(error) }
     }
     private func managedAction(_ action: () async throws -> Void) async {
         guard !managedBusy else { return }; managedBusy = true; defer { managedBusy = false }
