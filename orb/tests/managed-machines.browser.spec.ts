@@ -12,13 +12,14 @@ const iso = (offsetMin: number) => new Date(Date.now() + offsetMin * 60_000).toI
 const view = (o: Record<string, unknown>) => ({ provider: "boat", provider_id: "bx_7f3k2", image: "sandboxed-node:2026.10", size: "medium", cpu: 4, ram_gb: 8,
   state: "online", created_at: iso(-50), expires_at: iso(70), cost_usd: 0.1, usd_per_hour: 0.12, ledger_closed: false, ...o });
 
-type Opts = { managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light" };
+type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light" };
 async function mock(page: Page, opts: Opts = {}) {
   const machines: Record<string, unknown>[] = [
     view({ id: "mm1", name: "medium-a", node_id: "managed-mm1", owner_mission_id: "4f2a9c1e-0000-4000-8000-000000000001", reason: "Lean build" }),
     view({ id: "mm0", name: "medium-b", node_id: "managed-mm0", state: "destroyed", destroyed_at: iso(-120), cost_usd: 0.37, ledger_closed: true }),
   ];
-  const budget = { spent_today_usd: 1.24, daily_cap_usd: 20, active: 1, max_concurrent: 3, default_ttl_minutes: 60, max_ttl_minutes: 240, default_size: "medium", max_size: "large" };
+  const budget = { spent_today_usd: 1.24, daily_cap_usd: 20, active: 1, max_concurrent: 3, default_ttl_minutes: 60, max_ttl_minutes: 240, default_size: "medium", max_size: "large" } as Record<string, unknown> & { active: number };
+  if (opts.unlimited) Object.assign(budget, { daily_cap_usd: null, max_concurrent: null, spent_today_usd: 0.11 });
   const state = { calls: [] as string[], settings: opts.settings ?? true, releaseCreate: () => {}, releaseDelete: () => {}, advance: (_id: string, _s: Record<string, unknown>) => {} };
   state.advance = (id, patch) => Object.assign(machines.find(m => m.id === id)!, patch);
   let n = 0;
@@ -56,6 +57,7 @@ async function mock(page: Page, opts: Opts = {}) {
       if (path.endsWith("/extend")) m.expires_at = new Date(Date.parse(m.expires_at as string) + 60 * 60_000).toISOString();
       return route.fulfill({ json: m });
     }
+    if (path.startsWith("/api/control/missions/")) return route.fulfill({ json: { id: path.split("/").pop(), title: "LeanSys Wave 1 — formalise the scheduler invariants and port the proofs", status: "active" } });
     if (path === "/api/model-routing/chains") return route.fulfill({ json: [{ id: "builtin/smart", name: "Smart (Default)" }] });
     if (path === "/api/providers/antigravity-models") return route.fulfill({ json: [["flash", "Gemini Flash"]] });
     const live = machines.filter(m => m.state !== "destroyed" && m.state !== "failed");
@@ -82,9 +84,15 @@ for (const theme of ["dark", "light"] as const) test.describe(theme, () => {
     await openMachines(page);
     const online = row(page, "medium-a");
     await expect(online.locator(".managed-name")).toHaveText("medium-a");
-    await expect(online).toContainText("medium · 4 vCPU · 8 GB");
+    await expect(online.locator(".managed-size-label")).toHaveText("medium");
+    await expect(online.locator(".managed-spec")).toHaveText("4 vCPU · 8 GB RAM · 80 GB");
+    await expect(online.locator(".managed-spec")).not.toHaveCSS("font-family", /mono/i);
+    await expect(online.locator(".managed-ttl")).toContainText(/(1 h 1\d|1 h 09) min left/);
+    await expect(online.locator(".managed-cost")).toHaveText("$0.10 so far · $0.12/h");
+    await expect(online).not.toContainText("Lean build"); // reason only in the tooltip
+    await expect(online).toHaveAttribute("title", /Reason: Lean build/);
     await expect(online).toHaveAttribute("title", /bx_7f3k2/);
-    await expect(online.getByRole("button", { name: "Mission 4f2a9c1e" })).toBeVisible();
+    await expect(online.locator(".managed-mission-chip")).toContainText("LeanSys Wave 1");
     // Fleet list: grouped, named, sized.
     await expect(page.locator(".fleet-group-label")).toHaveText("Managed (boat.dev)");
     await expect(page.getByRole("button", { name: /medium-a\s*Managed\s*online · 4 vCPU · 8 GB/ })).toBeVisible();
@@ -165,7 +173,8 @@ test("create is optimistic, polls with wait:false until online", async ({ page }
   await expect(dialog).toHaveCount(0);
   const placeholder = section(page).locator(".managed-row[data-state=provisioning]");
   await expect(placeholder).toContainText("New machine");
-  await expect(placeholder).toContainText("medium · 4 vCPU");
+  await expect(placeholder.locator(".managed-size-label")).toHaveText("medium");
+  await expect(placeholder.locator(".managed-spec")).toHaveText("4 vCPU · 8 GB RAM · 80 GB");
   await expect(placeholder).toContainText("Starting…");
   api.releaseCreate();
   await expect.poll(() => api.calls).toContain('POST /api/managed-machines {"size":"medium","ttl_minutes":60,"wait":false}');
@@ -191,9 +200,9 @@ test("a refused create stays on its row with Retry and Dismiss", async ({ page }
 test("extend goes through the contract", async ({ page }) => {
   const api = await mock(page);
   await openMachines(page);
-  await row(page, "medium-a").getByRole("button", { name: "+1 h" }).click();
+  await row(page, "medium-a").getByRole("button", { name: "Extend +1 h" }).click();
   await expect.poll(() => api.calls).toContain('POST /api/managed-machines/mm1/extend {"ttl_minutes":60}');
-  await expect(row(page, "medium-a")).toContainText(/2h 0\dm left|2h 1\dm left/);
+  await expect(row(page, "medium-a")).toContainText(/2 h (0|1)\d min left/);
 });
 
 test("recent count includes machines created from the UI once destroyed", async ({ page }) => {
@@ -235,4 +244,47 @@ test("section hides when the backend disables it", async ({ page }) => {
   await openMachines(page);
   await expect.poll(() => api.calls.length).toBeGreaterThan(0);
   await expect(page.getByRole("heading", { name: "Managed (boat.dev)" })).toHaveCount(0);
+});
+
+for (const theme of ["dark", "light"] as const) test(`row layout: aligned, unlimited budget, narrow overflow (${theme})`, async ({ page }) => {
+  await mock(page, { theme, unlimited: true });
+  await openMachines(page);
+  await expect(page.locator(".managed-budget")).toHaveText("$0.11 spent today · 1 running");
+  await expect(page.getByRole("button", { name: "New managed machine" })).toBeEnabled();
+  const online = row(page, "medium-a");
+  const dot = await online.locator(".managed-status-icon").boundingBox(), name = await online.locator(".managed-name").boundingBox();
+  expect(Math.abs((dot!.y + dot!.height / 2) - (name!.y + name!.height / 2))).toBeLessThan(2);
+  const actions = await online.locator(".managed-actions").boundingBox(), box = await online.boundingBox();
+  expect(Math.abs((actions!.y + actions!.height / 2) - (box!.y + box!.height / 2))).toBeLessThan(2);
+  await page.getByRole("button", { name: /Recent · last 24 h/ }).click();
+  await expect(section(page).locator(".managed-row.managed-muted")).toHaveCount(0);
+  await expect(page.locator(".managed-recent .managed-row.managed-muted")).toHaveCount(1);
+  await page.locator(".managed-head").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${shots}/row-${theme}.png`, fullPage: true });
+  await page.getByRole("button", { name: "New managed machine" }).click();
+  const dialog = page.getByRole("dialog", { name: "New managed machine" });
+  await dialog.locator("select").selectOption("240", { force: true });
+  await expect(dialog.getByText(/Exceeds today/)).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 560, height: 900 });
+  if (await page.locator(".sidebar-backdrop").isVisible()) await page.locator(".sidebar-backdrop").click();
+  await expect(online.getByRole("button", { name: "Destroy" })).toBeHidden();
+  const before = (await online.boundingBox())!.height;
+  expect(before).toBeLessThan(80);
+  await online.getByRole("button", { name: "Actions for medium-a" }).click();
+  await expect(page.getByRole("menuitem", { name: "Extend +1 h" })).toBeVisible();
+  await page.screenshot({ path: `${shots}/row-narrow-${theme}.png`, fullPage: true });
+  await page.getByRole("menuitem", { name: "Destroy" }).click();
+  await expect(page.getByRole("dialog", { name: "Destroy medium-a?" })).toBeVisible();
+});
+
+test("rows stay mounted across polls (fine-grained updates)", async ({ page }) => {
+  await mock(page);
+  await openMachines(page);
+  const online = row(page, "medium-a");
+  await expect(online).toBeVisible();
+  await online.evaluate(el => { (el as HTMLElement).dataset.marker = "kept"; });
+  await row(page, "medium-a").getByRole("button", { name: "Extend +1 h" }).click();
+  await expect(row(page, "medium-a").locator(".managed-ttl")).toContainText(/2 h/);
+  await expect(row(page, "medium-a")).toHaveAttribute("data-marker", "kept");
 });

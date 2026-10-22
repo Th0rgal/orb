@@ -73,16 +73,17 @@ it('remembers archive, restore and rename as soon as Core accepts them',async()=
 });
 it('keeps the archive when a list requested before it answers afterwards',async()=>{
  setConnection('http://core.test','token');const {confirmed}=journal([done]);
- let releaseList!:(response:Response)=>void;
+ let releaseList!:(response:Response)=>void;const waiting:((response:Response)=>void)[]=[];
  const clock=vi.spyOn(Date,'now');
  clock.mockReturnValue(1000);
  vi.stubGlobal('fetch',vi.fn((input:any,init?:any)=>{
   const url=String(input);
-  if(url.includes('project=test'))return new Promise<Response>(resolve=>{releaseList=resolve;});
+  // The project list reads its history page and its open-missions page; both answer late.
+  if(url.includes('project=test'))return new Promise<Response>(resolve=>{waiting.push(resolve);releaseList=response=>{void response.text().then(body=>{for(const r of waiting.splice(0))r(new Response(body));});};});
   return Promise.resolve(new Response(JSON.stringify(init?.method==='POST'?{}:done)));
  }));
  const stale=listProjectMissions('test');
- await vi.waitFor(()=>expect(releaseList).toBeTypeOf('function'));
+ await vi.waitFor(()=>expect(waiting.length).toBe(2));
  clock.mockReturnValue(2000);
  await archiveMission('done');
  // Core answers the earlier request with the state it had before the archive.

@@ -39,7 +39,7 @@ export function mergeById<T extends { id: string }>(prev: T[], next: T[]): T[] {
   return changed ? out : prev;
 }
 
-function shallowEqual(a: object, b: object): boolean {
+export function shallowEqual(a: object, b: object): boolean {
   const ka = Object.keys(a);
   const kb = Object.keys(b);
   if (ka.length !== kb.length) return false;

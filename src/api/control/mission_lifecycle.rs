@@ -459,6 +459,93 @@ pub async fn resume_mission(
     Extension(user): Extension<AuthUser>,
     Path(mission_id): Path<Uuid>,
     body: Option<Json<ResumeMissionRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let store = control.mission_store.clone();
+    let mission = match resume_cloud(&store, mission_id, body.as_ref().map(|b| &b.0)).await? {
+        Some(mission) => mission,
+        None => {
+            resume_mission_row(State(state), Extension(user), Path(mission_id), body)
+                .await?
+                .0
+        }
+    };
+    // Same shape as GET /missions/:id: the derived callback lineage included.
+    super::callback_parent::with_lineage(&mission, &store)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+/// The text a cloud conversation receives when it is resumed without one.
+pub(crate) const CLOUD_RESUME_PROMPT: &str = "Continue where you left off.";
+
+/// Cloud conversations run on their provider account: resuming one is a
+/// follow-up turn on that conversation, not a local harness restart (which
+/// the machine guard refuses). `None` when the mission is not a cloud one.
+async fn resume_cloud(
+    store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    request: Option<&ResumeMissionRequest>,
+) -> Result<Option<Mission>, (StatusCode, String)> {
+    let Some(mission) = store
+        .get_mission(mission_id)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Ok(None);
+    };
+    if !mission.backend.starts_with("cloud_") {
+        return Ok(None);
+    }
+    if request.is_some_and(|r| {
+        r.clean_workspace
+            || r.github_pr.is_some()
+            || r.track.is_some()
+            || r.title.is_some()
+            || r.continue_identity.is_some()
+    }) {
+        return Err((
+            StatusCode::CONFLICT,
+            "Cloud conversations resume with content only".into(),
+        ));
+    }
+    if request.is_some_and(|r| r.skip_message) {
+        return Err((
+            StatusCode::CONFLICT,
+            "Cloud conversations resume by sending a message; skip_message is not supported".into(),
+        ));
+    }
+    let content = request
+        .and_then(|r| r.content.clone())
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or_else(|| CLOUD_RESUME_PROMPT.to_string());
+    let message: ControlMessageRequest = serde_json::from_value(serde_json::json!({
+        "content": content,
+        "client_message_id": Uuid::new_v4(),
+        "mission_id": mission_id,
+    }))
+    .map_err(internal_error)?;
+    match super::super::cloud_agents::http::follow_up(store.clone(), &message).await? {
+        Some(_) => Ok(Some(
+            store
+                .get_mission(mission_id)
+                .await
+                .map_err(internal_error)?
+                .unwrap_or(mission),
+        )),
+        None => Err((
+            StatusCode::CONFLICT,
+            "This cloud conversation has no provider execution to continue".into(),
+        )),
+    }
+}
+
+async fn resume_mission_row(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(mission_id): Path<Uuid>,
+    body: Option<Json<ResumeMissionRequest>>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let request = body.map(|b| b.0).unwrap_or_default();
     if let Some(content) = request.content.as_deref() {

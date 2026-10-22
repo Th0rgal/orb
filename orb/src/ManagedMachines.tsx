@@ -1,5 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { connectionVersion, isConnected } from "./api";
+import { api, connectionVersion, isConnected } from "./api";
+import { swallow } from "./log";
+import { PopupMenu, type MenuEntry } from "./Menu";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { Select } from "./Select";
@@ -7,7 +9,7 @@ import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
-  allowedSizes, budgetLine, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
+  allowedSizes, budgetFull, budgetLeft, budgetLine, costLine, sizeLabel, specLine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent,
   usd, usdPerHour, type CreateManagedMachine, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
 } from "./managedMachineModel";
@@ -21,37 +23,77 @@ export function ttlChoices(defaultMinutes: number, maxMinutes: number): number[]
 }
 
 export type RowActions = { busy?: boolean; onDestroy?: () => void; onExtend?: () => void; onRetry?: () => void; onDismiss?: () => void };
-function ManagedRow(p: { m: ManagedMachine; fetchedAt: number } & RowActions) {
+
+// Mission titles for owner chips: fetched once per id and shared by every row.
+const [titles, setTitles] = createSignal<ReadonlyMap<string, string>>(new Map());
+const titleRequests = new Set<string>();
+export function missionTitle(id: string): string | undefined {
+  if (!titleRequests.has(id)) {
+    titleRequests.add(id);
+    void api<{ title?: string | null }>(`/api/control/missions/${encodeURIComponent(id)}`)
+      .then(m => { if (m?.title) setTitles(t => new Map(t).set(id, m.title!)); })
+      .catch(swallow("managed.missionTitle", { id }));
+  }
+  return titles().get(id);
+}
+
+/** Small ring that empties as the TTL runs out. */
+function TtlRing(p: { fraction: number; urgent: boolean }) {
+  const r = 5, c = 2 * Math.PI * r;
+  return <svg class="managed-ttl-ring" classList={{ urgent: p.urgent }} width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+    <circle cx="7" cy="7" r={r} class="track" /><circle cx="7" cy="7" r={r} class="fill" stroke-dasharray={`${c * p.fraction} ${c}`} transform="rotate(-90 7 7)" />
+  </svg>;
+}
+
+function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | null; muted?: boolean } & RowActions) {
   const now = useNow(1000);
   const live = () => isLive(p.m);
   const starting = () => isStarting(p.m);
   const failed = () => p.m.state === "failed";
+  const destroying = () => p.m.state === "destroying";
   const dot = () => p.m.state === "online" ? "on" : failed() ? "off" : live() ? "warn" : "";
-  const details = () => [`Size ${p.m.size}`, p.m.id && !p.m.id.startsWith("pending-") ? `Machine ${p.m.id}` : "", p.m.provider_id ? `${p.m.provider} ${p.m.provider_id}` : "", p.m.node_id ? `Node ${p.m.node_id}` : "", p.m.image ? `Image ${p.m.image}` : ""].filter(Boolean).join("\n");
-  return <div class="m-row managed-row" classList={{ "managed-fading": p.m.state === "destroying" }} data-state={p.m.state} title={details()}>
-    <Show when={starting() || p.m.state === "destroying"} fallback={<span class={`m-dot ${dot()}`} />}><Ic.Spinner size={12} class="managed-spinner" /></Show>
-    <div class="m-text">
-      <div class="m-name"><span class="managed-name">{machineName(p.m)}</span><span class="m-tag">{stateLabel(p.m.state)}</span>
-        <Show when={p.m.owner_mission_id}><button class="sb-link managed-owner" title="Open the mission that owns this machine" onClick={() => openMission(p.m.owner_mission_id!)}>Mission {p.m.owner_mission_id!.slice(0, 8)}</button></Show>
+  const details = () => [p.m.reason ? `Reason: ${p.m.reason}` : "", p.m.id && !p.m.id.startsWith("pending-") ? `Machine ${p.m.id}` : "", p.m.provider_id ? `${p.m.provider} ${p.m.provider_id}` : "", p.m.node_id ? `Node ${p.m.node_id}` : "", p.m.image ? `Image ${p.m.image}` : ""].filter(Boolean).join("\n");
+  const owner = () => p.m.owner_mission_id ?? undefined;
+  const ownerTitle = () => owner() ? missionTitle(owner()!) ?? `Mission ${owner()!.slice(0, 8)}` : "";
+  const canAct = () => live() && !destroying() && !!p.onDestroy;
+  const [menu, setMenu] = createSignal<{ x: number; y: number } | null>(null);
+  const menuItems = (): MenuEntry[] => [
+    ...(!starting() ? [{ kind: "item" as const, label: "Extend +1 h", disabled: p.busy, onClick: () => p.onExtend?.() }] : []),
+    { kind: "item", label: "Destroy", danger: true, disabled: p.busy, onClick: () => p.onDestroy?.() },
+  ];
+  return <div class="managed-row" classList={{ "managed-fading": destroying(), "managed-muted": !!p.muted }} data-state={p.m.state} title={details() || undefined}>
+    <div class="managed-main">
+      <div class="managed-line1">
+        <span class="managed-status-icon"><Show when={starting() || destroying()} fallback={<span class={`m-dot ${dot()}`} />}><Ic.Spinner size={12} class="managed-spinner" /></Show></span>
+        <span class="managed-name">{machineName(p.m)}</span>
+        <span class="managed-size-label">{sizeLabel(p.m.size)}</span>
+        <span class="managed-state" classList={{ "managed-error": failed() }}>{stateLabel(p.m.state)}</span>
+        <Show when={owner()}><button class="managed-mission-chip" title={`Open ${ownerTitle()}`} onClick={() => openMission(owner()!)}><span>{ownerTitle()}</span></button></Show>
       </div>
-      <div class="m-meta">
-        <span>{p.m.name ? `${p.m.size} · ` : ""}{sizeSpec(p.m)}</span>
-        <Show when={live()} fallback={<Show when={!failed() || p.m.destroyed_at}><span class="p-dot">·</span><span>Final {usd(p.m.cost_usd)}{p.m.ledger_closed ? " · Ledger closed" : " · Ledger open"}</span></Show>}>
-          <Show when={!starting() || p.m.expires_at}><span class="p-dot">·</span>
-            <span class={ttlUrgent(p.m.expires_at, now()) ? "managed-urgent" : ""} title={`Expires ${new Date(p.m.expires_at).toLocaleString()}`}>{ttlLeft(p.m.expires_at, now())} left</span></Show>
-          <span class="p-dot">·</span><span>{usd(liveCost(p.m, p.fetchedAt, now()))} · {usdPerHour(p.m.usd_per_hour)}</span>
+      <div class="managed-line2">
+        <span class="managed-spec">{specLine({ cpu: p.m.cpu, ram_gb: p.m.ram_gb, disk_gb: p.disk })}</span>
+        <Show when={live()} fallback={<Show when={!failed() || p.m.destroyed_at}><span class="managed-cost">Final {usd(p.m.cost_usd)}{p.m.ledger_closed ? " · ledger closed" : " · ledger open"}</span></Show>}>
+          <Show when={p.m.expires_at}><span class="managed-ttl" classList={{ "managed-urgent": ttlUrgent(p.m.expires_at, now()) }} title={`Expires ${new Date(p.m.expires_at).toLocaleString()}`}>
+            <TtlRing fraction={ttlFraction(p.m.created_at, p.m.expires_at, now())} urgent={ttlUrgent(p.m.expires_at, now())} />{ttlShort(p.m.expires_at, now())}</span></Show>
+          <span class="managed-cost">{costLine(liveCost(p.m, p.fetchedAt, now()), p.m.usd_per_hour)}</span>
         </Show>
       </div>
-      <Show when={p.m.error} fallback={<Show when={p.m.reason}><div class="m-note">{p.m.reason}</div></Show>}><div class="m-note managed-error" role="alert">{p.m.error}</div></Show>
+      <Show when={p.m.error}><div class="managed-line2 managed-error" role="alert">{p.m.error}</div></Show>
     </div>
-    <Show when={failed() && (p.onRetry || p.onDismiss)}>
-      <Show when={p.onRetry}><button class="s-btn sm quiet" disabled={p.busy} onClick={p.onRetry}>Retry</button></Show>
-      <Show when={p.onDismiss}><button class="s-btn sm quiet" onClick={p.onDismiss}>Dismiss</button></Show>
-    </Show>
-    <Show when={live() && p.m.state !== "destroying" && p.onDestroy}>
-      <Show when={!starting()}><button class="s-btn sm quiet" disabled={p.busy} onClick={p.onExtend}>+1 h</button></Show>
-      <button class="s-btn sm quiet danger" disabled={p.busy} onClick={p.onDestroy}>Destroy</button>
-    </Show>
+    <div class="managed-actions">
+      <Show when={failed() && (p.onRetry || p.onDismiss)}>
+        <Show when={p.onRetry}><button class="s-btn sm" disabled={p.busy} onClick={p.onRetry}>Retry</button></Show>
+        <Show when={p.onDismiss}><button class="s-btn sm quiet" onClick={p.onDismiss}>Dismiss</button></Show>
+      </Show>
+      <Show when={canAct()}>
+        <span class="managed-inline-actions">
+          <Show when={!starting()}><button class="s-btn sm" disabled={p.busy} onClick={p.onExtend}>Extend +1 h</button></Show>
+          <button class="s-btn sm quiet danger" disabled={p.busy} onClick={p.onDestroy}>Destroy</button>
+        </span>
+        <button class="icon-btn sm managed-more" aria-label={`Actions for ${machineName(p.m)}`} aria-haspopup="menu" onClick={e => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.right - 160, y: r.bottom + 4 }); }}><Ic.DotsIcon size={16} /></button>
+        <Show when={menu()}>{at => <PopupMenu x={at().x} y={at().y} items={menuItems()} onClose={() => setMenu(null)} />}</Show>
+      </Show>
+    </div>
   </div>;
 }
 
@@ -61,7 +103,7 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
   const [ttl, setTtl] = createSignal(Math.min(p.data.budget.default_ttl_minutes, p.data.budget.max_ttl_minutes));
   const chosen = () => sizes().find(s => s.size === size());
   const estimate = () => chosen() ? estimateCost(chosen()!.usd_per_hour, ttl()) : 0;
-  const remaining = () => p.data.budget.daily_cap_usd - p.data.budget.spent_today_usd;
+  const remaining = () => budgetLeft(p.data.budget);
   // The dialog closes at once; the row shows progress and any refusal.
   const submit = () => { if (chosen()) p.onCreate({ size: size(), ttl_minutes: ttl() }, chosen()!); };
   return <Dialog title="New managed machine" description="A boat.dev machine that joins the fleet and is destroyed when its time runs out." persistent onClose={p.onClose}
@@ -70,7 +112,7 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
       <div class="field"><label>Size</label>
         <div class="managed-sizes" role="radiogroup" aria-label="Size">
           <For each={sizes()}>{s => <button type="button" role="radio" aria-checked={s.size === size()} class={`managed-size ${s.size === size() ? "on" : ""}`} onClick={() => setSize(s.size)}>
-            <span class="managed-size-check" aria-hidden="true"><Show when={s.size === size()}><Ic.CheckIcon size={14} /></Show></span><span class="managed-size-name">{s.size}</span><span class="managed-size-spec">{sizeSpec(s)}</span><span class="managed-size-rate">{usdPerHour(s.usd_per_hour)}</span>
+            <span class="managed-size-check" aria-hidden="true"><Show when={s.size === size()}><Ic.CheckIcon size={14} /></Show></span><span class="managed-size-name">{sizeLabel(s.size)}</span><span class="managed-size-spec">{sizeSpec(s)}</span><span class="managed-size-rate">{usdPerHour(s.usd_per_hour)}</span>
           </button>}</For>
         </div>
       </div>
@@ -79,8 +121,8 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
           <For each={ttlChoices(p.data.budget.default_ttl_minutes, p.data.budget.max_ttl_minutes)}>{m => <option value={m}>{minutesLabel(m)}</option>}</For>
         </Select>
       </Field>
-      <div class="managed-estimate" aria-live="polite"><span>Estimated cost · {chosen()?.size} for {minutesLabel(ttl())}</span><strong>{usd(estimate())}</strong></div>
-      <Show when={estimate() > remaining()}><div class="m-note managed-urgent">Exceeds today’s remaining budget of {usd(Math.max(0, remaining()))}.</div></Show>
+      <div class="managed-estimate" aria-live="polite"><span>Estimated cost · {sizeLabel(chosen()?.size ?? "")} for {minutesLabel(ttl())}</span><strong>{usd(estimate())}</strong></div>
+      <Show when={remaining() != null && estimate() > remaining()!}><div class="m-note managed-urgent">Exceeds today’s remaining budget of {usd(Math.max(0, remaining()!))}.</div></Show>
     </div>
   </Dialog>;
 }
@@ -158,7 +200,8 @@ export function ManagedMachines(p: { onDestroyed?: (nodeIds: string[]) => void }
   const failedHere = createMemo(() => machines().filter(m => m.state === "failed" && watched().has(m.id)));
   const live = createMemo(() => [...pending().map(x => placeholder(x)), ...machines().filter(isLive), ...failedHere()]);
   const recent = createMemo(() => recentMachines(machines()).filter(m => !failedHere().includes(m)));
-  const full = () => { const b = data()?.budget; return !!b && (b.active >= b.max_concurrent || b.spent_today_usd >= b.daily_cap_usd); };
+  const full = () => { const b = data()?.budget; return !!b && budgetFull(b); };
+  const diskOf = (size: string) => data()?.sizes.find(s => s.size === size)?.disk_gb ?? null;
   const actions = (m: ManagedMachine): RowActions => {
     const local = pending().find(x => x.key === m.id);
     if (local) return { onRetry: () => void create(local.request, local.size, local.key), onDismiss: () => setPending(l => l.filter(x => x.key !== local.key)) };
@@ -175,7 +218,8 @@ export function ManagedMachines(p: { onDestroyed?: (nodeIds: string[]) => void }
     <Show when={actionError()}><ErrorNotice error={actionError()!} onDismiss={() => setActionError(null)} /></Show>
     <Show when={loadError()}><ErrorNotice title="Couldn’t refresh managed machines" error={loadError()!} /></Show>
     <div class="m-list s-card managed-list">
-      <For each={live()}>{m => <ManagedRow m={m} fetchedAt={fetchedAt()} {...actions(m)} />}</For>
+      <For each={live().map(m => m.id)}>{id => { const m = () => live().find(x => x.id === id)!; return <Show when={live().some(x => x.id === id)}>
+        <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m().size)} {...actions(m())} /></Show>; }}</For>
       <Show when={live().length === 0}><div class="m-note" style={{ padding: "10px 14px" }}>No managed machines running.</div></Show>
     </div>
     <Show when={recent().length}>
@@ -183,7 +227,7 @@ export function ManagedMachines(p: { onDestroyed?: (nodeIds: string[]) => void }
         <span class={`chev p-acc-chev ${showRecent() ? "open" : ""}`}>›</span>Recent · last 24 h ({recent().length})
       </button>
       <Show when={showRecent()}><div class="m-list s-card managed-list managed-recent">
-        <For each={recent()}>{m => <ManagedRow m={m} fetchedAt={fetchedAt()} />}</For>
+        <For each={recent().map(m => m.id)}>{id => { const m = () => recent().find(x => x.id === id)!; return <Show when={recent().some(x => x.id === id)}><ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m().size)} muted /></Show>; }}</For>
       </div></Show>
     </Show>
     <Show when={creating()}>

@@ -386,7 +386,13 @@ async fn observe(
     user: &str,
 ) -> Result<(), String> {
     let h = Hermes::connect(config, user).await?;
-    observe_with_client(store, e, i, &h).await
+    observe_with_client(store, e, i, &h).await?;
+    // Hermes attaches files with `MEDIA:<path>` inside its private /tmp. Copy
+    // them into the mission store before the answer is first persisted.
+    if e.turns[i].phase == Phase::ResponseComplete {
+        media::normalize_turn(config, e.mission_id, &mut e.turns[i]).await;
+    }
+    Ok(())
 }
 async fn observe_with_client(
     store: &Arc<dyn MissionStore>,

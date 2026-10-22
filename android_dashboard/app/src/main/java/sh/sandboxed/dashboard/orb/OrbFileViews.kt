@@ -14,6 +14,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -91,6 +93,8 @@ import java.io.File
 data class OrbFileContext(
     val scope: OrbFileScope,
     val shared: List<OrbSharedFile> = emptyList(),
+    /** Loads shared images inline; without it images stay chips. */
+    val core: OrbCore? = null,
     val open: (OrbFileRef) -> Unit
 )
 
@@ -122,7 +126,13 @@ fun OrbMarkdownWithFiles(text: String, streaming: Boolean = false) {
                 is OrbFileSegment.Text -> OrbRichText(markdown = segment.text, tone = OrbRichTextTone.Primary)
                 is OrbFileSegment.File -> {
                     val ref = OrbFileRefs.enrich(segment.ref, files?.shared ?: emptyList())
-                    OrbFileChip(ref) { files?.open?.invoke(ref) }
+                    val core = files?.core
+                    when {
+                        ref.unavailable -> OrbUnavailableFileChip(ref)
+                        ref.type == "image" && ref.kind == OrbFileKind.Image && core != null ->
+                            OrbInlineImage(core, ref, files.scope) { files.open(ref) }
+                        else -> OrbFileChip(ref) { files?.open?.invoke(ref) }
+                    }
                 }
             }
         }
@@ -155,6 +165,69 @@ fun OrbFileChip(ref: OrbFileRef, onClick: () -> Unit) {
             Text(subtitle, color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Icon(Icons.Default.ChevronRight, contentDescription = "Open ${ref.label}", tint = OrbStyle.textMuted, modifier = Modifier.size(16.dp))
+    }
+}
+
+/** An image an agent shared, shown in the transcript; tap opens the preview. The chip stands in until it loads. */
+@Composable
+fun OrbInlineImage(core: OrbCore, ref: OrbFileRef, scope: OrbFileScope, onClick: () -> Unit) {
+    val context = LocalContext.current
+    val service = remember { OrbFileService.get(core, context) }
+    var bitmap by remember(ref) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(ref, scope) {
+        bitmap = try {
+            val file = service.fetch(ref, scope)
+            withContext(Dispatchers.Default) { decodeBitmap(file, maxDimension = 1600) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+    }
+    val image = bitmap
+    if (image == null) {
+        OrbFileChip(ref, onClick)
+        return
+    }
+    Image(
+        bitmap = image.asImageBitmap(),
+        contentDescription = ref.label,
+        contentScale = ContentScale.Fit,
+        alignment = Alignment.CenterStart,
+        modifier = Modifier
+            .widthIn(max = 420.dp)
+            .heightIn(max = 320.dp)
+            .aspectRatio((image.width.toFloat() / image.height.coerceAtLeast(1)).coerceIn(0.5f, 4f), matchHeightConstraintsFirst = true)
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+            .orbPressClickable { onClick() }
+            .testTag("file.image.${ref.name}")
+    )
+}
+
+/** A share Core could not copy: named, never fetched. */
+@Composable
+fun OrbUnavailableFileChip(ref: OrbFileRef) {
+    Row(
+        modifier = Modifier
+            .widthIn(max = 420.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(OrbStyle.card)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .testTag("file.unavailable.${ref.name}"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(OrbStyle.elevated),
+            contentAlignment = Alignment.Center
+        ) { Icon(ref.kind.icon(), contentDescription = null, tint = OrbStyle.textMuted, modifier = Modifier.size(17.dp)) }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(ref.label, color = OrbStyle.textSecondary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("File no longer available", color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1)
+        }
     }
 }
 

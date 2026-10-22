@@ -91,6 +91,14 @@ pub async fn operate(
             }
         }
     }
+    if let (Some(_), Some(id)) = (&mission, req.mission_id) {
+        // Files Core copied out of an agent's reach (Hermes `MEDIA:` attachments).
+        roots.push((
+            "media".into(),
+            "Shared files".into(),
+            super::cloud_agents::media::mission_media_dir(&state.config.working_dir, id),
+        ));
+    }
     if req.operation.action == "roots" {
         let mut sources:Vec<Value>=roots.iter().map(|(id,label,path)|json!({"id":id,"label":label,"path":path,"available":path.is_dir()})).collect();
         if let Some(t) = transfer {

@@ -73,7 +73,13 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         return !p.isEmpty && raw["title"].text.hasSuffix(" · fork") ? p : nil
     }
     /// The mission that launched this one. A fork is another version, never launched work.
+    /// Sticky (docs/specs/sidebar-hierarchy.md): a payload without the link never
+    /// moves a known child to the root; only `OrbHierarchy.reparent` changes it.
     var parentMissionID: String? {
+        if let found = payloadParentID { OrbHierarchy.remember(id, parent: found); return found }
+        return OrbHierarchy.parent(of: id)
+    }
+    private var payloadParentID: String? {
         let p = raw["parent_mission_id"].text
         if !p.isEmpty && forkSource != p { return p }
         let cp = raw["callback_parent_mission_id"].text
@@ -81,6 +87,25 @@ struct OrbRow: Identifiable, Hashable, Sendable {
     }
     var mobile: Bool { !raw["tags"].items.contains(where: { $0.text.hasPrefix("btw-parent:") }) }
     var active: Bool { missionState?.isActive ?? false }
+}
+
+/// Parent links remembered across payloads, so a partial answer cannot un-nest a child.
+enum OrbHierarchy {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var parents: [String: String] = [:]
+    static func remember(_ id: String, parent: String) {
+        guard !id.isEmpty else { return }
+        lock.lock(); parents[id] = parent; lock.unlock()
+    }
+    static func parent(of id: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return parents[id]
+    }
+    /// Explicit re-parent (nil detaches): the only way a remembered parent changes.
+    static func reparent(_ id: String, parent: String?) {
+        lock.lock(); parents[id] = parent; lock.unlock()
+    }
+    static func reset() { lock.lock(); parents.removeAll(); lock.unlock() }
 }
 
 struct OrbNestedMission: Identifiable, Hashable {

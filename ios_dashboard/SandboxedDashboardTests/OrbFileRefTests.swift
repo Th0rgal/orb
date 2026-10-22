@@ -20,6 +20,7 @@ final class OrbFileRefTests: XCTestCase {
                 XCTAssertEqual(ref.path, want["path"], name)
                 XCTAssertEqual(ref.label, want["label"], name)
                 XCTAssertEqual(ref.mime, want["mime"], name)
+                XCTAssertEqual(ref.unavailable, want["unavailable"] == "true", name)
             }
             XCTAssertEqual(OrbFileRefs.plainText(input), entry["text"] as? String, name)
             XCTAssertFalse(OrbFileRefs.segments(input).contains { if case .text(let t) = $0 { t.contains("<file path") && !t.contains("```") } else { false } },
@@ -57,6 +58,17 @@ final class OrbFileRefTests: XCTestCase {
         XCTAssertEqual(files.last?.label, "New A", "the newest share of a path wins")
         XCTAssertEqual(files.first?.path, "/w/out.zip")
         XCTAssertEqual(files.first?.size, 10)
+    }
+
+    func testHermesMediaLinesBecomeTags() {
+        XCTAssertEqual(OrbFileRefs.mediaLineTag("MEDIA:/tmp/orb_usage_30d.png"), "<image path=\"/tmp/orb_usage_30d.png\" alt=\"orb_usage_30d.png\" />")
+        XCTAssertEqual(OrbFileRefs.mediaLineTag("**MEDIA:/tmp/r.pdf**"), "<file path=\"/tmp/r.pdf\" name=\"r.pdf\" />")
+        XCTAssertNil(OrbFileRefs.mediaLineTag("See MEDIA:/tmp/r.pdf for details"))
+        XCTAssertNil(OrbFileRefs.mediaLineTag("MEDIA:relative.png"))
+        XCTAssertEqual(OrbFileRefs.segments("Plot:\nMEDIA:/tmp/a.png", streaming: true), [.text("Plot:\nMEDIA:/tmp/a.png")],
+                       "an unfinished streamed line is not fetched yet")
+        let unavailable = OrbFileRefs.Message(content: "<file path=\"/tmp/gone.png\" name=\"gone.png\" unavailable=\"true\" />", shared: [], at: "t", sequence: 1)
+        XCTAssertTrue(OrbFileRefs.collect([unavailable]).isEmpty, "the Files tab never lists what cannot be opened")
     }
 
     func testStreamingHidesUnfinishedTag() {

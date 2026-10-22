@@ -65,7 +65,9 @@ data class OrbFileRef(
     /** Authenticated same-origin download URL from `metadata.shared_files`. */
     val url: String? = null,
     /** When it was shared (event timestamp), for the Files tab. */
-    val sharedAt: String? = null
+    val sharedAt: String? = null,
+    /** Core could not copy the file (`unavailable="true"`): shown, never fetched. */
+    val unavailable: Boolean = false
 ) {
     val id: String get() = OrbFileRefs.normalize(path)
     val name: String get() = OrbFileRefs.fileName(path)
@@ -134,7 +136,40 @@ object OrbFileRefs {
         val kind = type.lowercase()
         fun present(v: String?) = v?.let(::collapse)?.takeIf { it.isNotEmpty() }
         val label = present(if (kind == "image") values["alt"] else values["name"]) ?: present(inner) ?: fileName(path)
-        return OrbFileRef(type = kind, path = path, label = label, mime = values["type"]?.takeIf { '/' in it })
+        return OrbFileRef(type = kind, path = path, label = label, mime = values["type"]?.takeIf { '/' in it },
+            unavailable = values["unavailable"] == "true")
+    }
+
+    /**
+     * Hermes's attachment directive alone on a line (`MEDIA:/tmp/plot.png`, `**MEDIA:/tmp/r.pdf**`,
+     * `MEDIA: "/tmp/a b.csv"`). Same expression as desktop `mediaLineTag`. Core rewrites these at
+     * ingestion; this fallback covers messages stored before it did.
+     */
+    private val mediaLine = Regex("""^[ \t]*[*_]{0,3}MEDIA:[ \t]*(?:"([^"<>\n]+)"|'([^'"<>\n]+)'|((?:~/|/)[^\s"'<>`]+?))[*_]{0,3}[.,;:]?[ \t\r]*$""")
+    val mediaImageExtensions = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
+
+    /** One `MEDIA:` line as the equivalent rich tag, or null. */
+    fun mediaLineTag(line: String): String? {
+        val m = mediaLine.find(line) ?: return null
+        val path = (m.groups[1] ?: m.groups[2] ?: m.groups[3])?.value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val name = fileName(path)
+        return if (fileExtension(name) in mediaImageExtensions) "<image path=\"$path\" alt=\"$name\" />" else "<file path=\"$path\" name=\"$name\" />"
+    }
+
+    /** `MEDIA:` lines outside fenced code rewritten as rich tags. While streaming, the unfinished last line is left alone. */
+    fun expandMedia(text: String, streaming: Boolean = false): String {
+        if (!text.contains("MEDIA:")) return text
+        val lines = text.split("\n").toMutableList()
+        var fence: String? = null
+        for (i in lines.indices) {
+            val trimmed = lines[i].trimStart(' ', '\t')
+            val marker = fence
+            if (marker != null) { if (trimmed.startsWith(marker)) fence = null; continue }
+            if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) { fence = trimmed.take(3); continue }
+            if (streaming && i == lines.lastIndex) continue
+            mediaLineTag(lines[i])?.let { lines[i] = it }
+        }
+        return lines.joinToString("\n")
     }
 
     /** Ranges of fenced code blocks: tags written there are documentation. */
@@ -160,7 +195,8 @@ object OrbFileRefs {
 
     /** Message text split into prose and file tags, in order. Prose keeps its Markdown. */
     fun segments(text: String, streaming: Boolean = false): List<OrbFileSegment> {
-        val source = if (streaming) incompleteTail.find(text)?.let { text.substring(0, it.range.first).trimEnd('\n', '\r') } ?: text else text
+        val expanded = expandMedia(text, streaming)
+        val source = if (streaming) incompleteTail.find(expanded)?.let { expanded.substring(0, it.range.first).trimEnd('\n', '\r') } ?: expanded else expanded
         if (!source.contains("<image", ignoreCase = true) && !source.contains("<file", ignoreCase = true)) {
             return if (source.isEmpty()) emptyList() else listOf(OrbFileSegment.Text(source))
         }
@@ -240,7 +276,7 @@ object OrbFileRefs {
                     ))
                 }
             }
-            for (row in rows) if (seen.add(row.id)) out.add(row.copy(sharedAt = message.at))
+            for (row in rows) if (!row.unavailable && seen.add(row.id)) out.add(row.copy(sharedAt = message.at))
         }
         return out
     }

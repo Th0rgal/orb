@@ -25,12 +25,25 @@ class OrbFileRefsTest {
                 assertEquals(name, want["path"], ref.path)
                 assertEquals(name, want["label"], ref.label)
                 assertEquals(name, want["mime"], ref.mime)
+                assertEquals(name, want["unavailable"] == "true", ref.unavailable)
             }
             assertEquals(name, entry["text"], OrbFileRefs.plainText(input))
             assertFalse("$name: no raw tag reaches the Markdown renderer", OrbFileRefs.segments(input).any {
                 it is OrbFileSegment.Text && it.text.contains("<file path") && !it.text.contains("```")
             })
         }
+    }
+
+    @Test
+    fun hermesMediaLinesBecomeTags() {
+        assertEquals("<image path=\"/tmp/orb_usage_30d.png\" alt=\"orb_usage_30d.png\" />", OrbFileRefs.mediaLineTag("MEDIA:/tmp/orb_usage_30d.png"))
+        assertEquals("<file path=\"/tmp/r.pdf\" name=\"r.pdf\" />", OrbFileRefs.mediaLineTag("**MEDIA:/tmp/r.pdf**"))
+        assertEquals(null, OrbFileRefs.mediaLineTag("See MEDIA:/tmp/r.pdf for details"))
+        assertEquals(null, OrbFileRefs.mediaLineTag("MEDIA:relative.png"))
+        assertEquals("an unfinished streamed line is not fetched yet",
+            listOf(OrbFileSegment.Text("Plot:\nMEDIA:/tmp/a.png")), OrbFileRefs.segments("Plot:\nMEDIA:/tmp/a.png", streaming = true))
+        val unavailable = OrbFileRefs.Message("<file path=\"/tmp/gone.png\" name=\"gone.png\" unavailable=\"true\" />", emptyList(), "t", 1)
+        assertTrue("the Files tab never lists what cannot be opened", OrbFileRefs.collect(listOf(unavailable)).isEmpty())
     }
 
     @Test
