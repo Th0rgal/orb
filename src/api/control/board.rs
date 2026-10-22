@@ -163,7 +163,13 @@ fn persisted_terminal_reason(reason: Option<&str>) -> Option<TerminalReason> {
 
 fn retry_disposition(task: &BoardTask, preflight: &RetryPreflight) -> RetryDisposition {
     let merged = task.attempts > 0 && matches!(preflight, RetryPreflight::Merged { .. });
-    if crate::orb_spec::board_retry_allowed(0, MAX_ATTEMPTS, false, merged, false) {
+    if crate::orb_spec::board_retry_allowed(crate::orb_spec::BoardRetry {
+        attempts: 0,
+        max_attempts: MAX_ATTEMPTS,
+        requires_external_recovery: false,
+        preflight_merged: merged,
+        chatgpt_ui_blocked: false,
+    }) {
         RetryDisposition::Spawn
     } else {
         RetryDisposition::ParkForBossReview
@@ -1450,11 +1456,11 @@ pub async fn scheduler_pass(
     }
     let total_running =
         snapshot.running_count + usize::from(snapshot.main_running) + external_running;
-    let mut available = if crate::orb_spec::board_slots_available(
-        max_parallel as u32,
-        RESERVED_BOSS_SLOTS as u32,
-        total_running as u32,
-    ) {
+    let mut available = if crate::orb_spec::board_slots_available(crate::orb_spec::BoardSlots {
+        max_parallel: max_parallel as u32,
+        reserved_boss_slots: RESERVED_BOSS_SLOTS as u32,
+        total_running: total_running as u32,
+    }) {
         max_parallel
             .saturating_sub(RESERVED_BOSS_SLOTS)
             .saturating_sub(total_running)
@@ -2127,13 +2133,13 @@ fn eligible_for_automatic_retry(
     retry: AutomaticRetry,
 ) -> bool {
     outcome == BoardTaskOutcome::Failed
-        && crate::orb_spec::board_retry_allowed(
-            task.attempts,
-            MAX_ATTEMPTS,
-            task.risk_class.eq_ignore_ascii_case("high"),
-            false,
-            retry == AutomaticRetry::Suppressed,
-        )
+        && crate::orb_spec::board_retry_allowed(crate::orb_spec::BoardRetry {
+            attempts: task.attempts,
+            max_attempts: MAX_ATTEMPTS,
+            requires_external_recovery: task.risk_class.eq_ignore_ascii_case("high"),
+            preflight_merged: false,
+            chatgpt_ui_blocked: retry == AutomaticRetry::Suppressed,
+        })
 }
 
 /// Settle a task: persist outcome + result digest, and retry failures once.

@@ -123,10 +123,12 @@ impl Snapshot {
                 .any(|o| native_goal_holds_ownership(o.status, o.reason.as_deref()))
         });
         Some(crate::orb_spec::track_hold_active(
-            in_unresolved,
-            in_queued,
-            has_live,
-            native_holds,
+            crate::orb_spec::TrackHold {
+                in_unresolved,
+                in_queued,
+                has_live_owner: has_live,
+                native_goal_holds: native_holds,
+            },
         ))
     }
 
@@ -146,7 +148,11 @@ impl Snapshot {
                 .as_deref()
                 .zip(target_repository)
                 .is_some_and(|(r, t)| r == t);
-            !crate::orb_spec::repo_disjoint(parsed.is_some(), target_repository.is_some(), same)
+            !crate::orb_spec::repo_disjoint(crate::orb_spec::RepoDisjoint {
+                handle_repo_known: parsed.is_some(),
+                target_repo_known: target_repository.is_some(),
+                same_repo: same,
+            })
         })
     }
 

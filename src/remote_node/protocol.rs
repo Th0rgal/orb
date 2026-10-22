@@ -142,12 +142,13 @@ impl SourceBundleRequirement {
         } else {
             cap.overlay_bytes
         };
-        if !crate::orb_spec::bundle_budget_ok(
-            self.complete,
-            self.bytes,
-            cap.overlay_bytes,
-            cap.complete_bytes,
-        ) {
+        if !crate::orb_spec::bundle_budget_ok(crate::orb_spec::BundleBudget {
+            is_complete: self.complete,
+            decoded_bytes: self.bytes,
+            overlay_cap: cap.overlay_bytes,
+            complete_cap: cap.complete_bytes,
+            max_bytes: MAX_SOURCE_REQUEST_BODY_BYTES as u64,
+        }) {
             let legacy = if heartbeat.source_bundle_capacity.is_none() {
                 " (legacy, unadvertised)"
             } else {
@@ -500,7 +501,13 @@ pub fn node_token_matches(presented: &str, current: &str, previous: Option<&str>
             constant_time_eq(presented.as_bytes(), p.as_bytes()),
         )
     });
-    crate::orb_spec::token_rotation_allowed(!presented.is_empty(), cur, pne, prev, true)
+    crate::orb_spec::token_rotation_allowed(crate::orb_spec::TokenRotation {
+        presented_nonempty: !presented.is_empty(),
+        match_current: cur,
+        prev_nonempty: pne,
+        match_prev: prev,
+        scope_and_expiry_ok: true,
+    })
 }
 
 /// Parse a comma-separated label list (`SANDBOXED_NODE_LABELS`) into a

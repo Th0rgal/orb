@@ -111,14 +111,14 @@ pub(super) async fn enqueue(
         .optional()
         .map_err(internal_error)?;
     if let Some((owner, status)) = previous {
-        if !crate::orb_spec::remote_outbox_admit_enqueue(
-            true,
-            owner == mid.to_string(),
-            status == "cancelled",
-            false,
-            true,
-            false,
-        ) {
+        if !crate::orb_spec::remote_outbox_admit_enqueue(crate::orb_spec::RemoteOutboxEnqueue {
+            already_exists: true,
+            same_mission: owner == mid.to_string(),
+            is_cancelled: status == "cancelled",
+            is_superseded: false,
+            session_ready: true,
+            pr_unsupported: false,
+        }) {
             return Err((
                 StatusCode::CONFLICT,
                 "This message ID was already used or cancelled".into(),
@@ -164,14 +164,14 @@ pub(super) async fn enqueue(
             track != &crate::api::track_leases::generated_track_key(&mid.to_string())
         });
     let unsupported = mission.project.github_pr.is_some() || (writer_identity && !placement.live);
-    if !crate::orb_spec::remote_outbox_admit_enqueue(
-        false,
-        true,
-        false,
+    if !crate::orb_spec::remote_outbox_admit_enqueue(crate::orb_spec::RemoteOutboxEnqueue {
+        already_exists: false,
+        same_mission: true,
+        is_cancelled: false,
         is_superseded,
         session_ready,
-        unsupported,
-    ) {
+        pr_unsupported: unsupported,
+    }) {
         let msg = if is_superseded {
             format!(
                 "{}: mission {mid} has been superseded",
@@ -402,7 +402,10 @@ pub(super) fn promote(store: &ProjectsStore, user: &str, id: Uuid) -> Result<Uui
         .optional()
         .map_err(|e| e.to_string())?
         .ok_or("message not in queue")?;
-    if !crate::orb_spec::remote_outbox_admit_cancel(bound, false) {
+    if !crate::orb_spec::remote_outbox_admit_cancel(crate::orb_spec::RemoteOutboxCancel {
+        has_job_id: bound,
+        delivery_abandonable: false,
+    }) {
         return Err("This message is already being delivered".into());
     }
     let others: Vec<i64> = tx

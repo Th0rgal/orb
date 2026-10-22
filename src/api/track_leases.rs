@@ -58,7 +58,12 @@ pub fn lease_mode(
             .strip_prefix(cand)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(['_', '-']))
     });
-    crate::orb_spec::classify_lease_mode(writer_flag, has_ro, has_wr, is_ro_intent)
+    crate::orb_spec::classify_lease_mode(crate::orb_spec::LeaseModeInput {
+        writer_flag,
+        has_readonly_tag: has_ro,
+        has_writer_tag: has_wr,
+        is_readonly_intent: is_ro_intent,
+    })
 }
 
 /// `SANDBOXED_TRACK_REQUIRED=1`: a project-tagged mission without a track is

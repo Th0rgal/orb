@@ -18,10 +18,15 @@ WORKDIR /build
 # Everything the crate compiles: build.rs reads catalog/, and the sources
 # include shared/*.rs and some scripts/ via #[path] / include_str!.
 COPY Cargo.toml Cargo.lock build.rs ./
+COPY lean/ lean/
 COPY src/ src/
 COPY shared/ shared/
 COPY catalog/ catalog/
 COPY scripts/ scripts/
+
+RUN curl --retry 5 --retry-all-errors -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+    | sh -s -- -y --default-toolchain "$(cat lean/lean-toolchain | tr -d '[:space:]')"
+ENV PATH="/root/.elan/bin:${PATH}"
 
 ARG BINARIES="sandboxed-sh desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

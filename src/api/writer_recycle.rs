@@ -72,14 +72,14 @@ pub fn apply_writer_reuse(
     let work_changed = !has_continue && dispatch_is_different_work(stored, patch);
     let identity_updated = patch.github_pr.is_some() || patch.track.is_some();
 
-    if !crate::orb_spec::writer_reuse_allowed(
+    if !crate::orb_spec::writer_reuse_allowed(crate::orb_spec::WriterReuse {
         has_continue,
         cont_track_nonempty,
         cont_matches_stored,
         has_any_edit,
         work_changed,
         identity_updated,
-    ) {
+    }) {
         return Err(RecycleRefusal {
             error: "writer_identity_stale",
             message: if has_continue {
