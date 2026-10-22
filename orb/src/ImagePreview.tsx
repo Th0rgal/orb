@@ -1,8 +1,6 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
-export function imageMime(name: string): string | undefined {
-  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", jfif: "image/jpeg", gif: "image/gif", webp: "image/webp", avif: "image/avif", bmp: "image/bmp", ico: "image/x-icon", svg: "image/svg+xml" } as Record<string, string>)[name.split(".").pop()?.toLowerCase() ?? ""];
-}
+import { imageMime } from "./imageTypes";
 
 /** Decode once; only the image's compositor transform changes during gestures. */
 export default function ImagePreview(p: { name: string; load: (signal: AbortSignal) => Promise<Uint8Array>; close: () => void }) {

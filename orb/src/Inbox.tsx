@@ -103,6 +103,7 @@ import { InboxSkeleton } from "./Skeleton";
 import { streamMission, type StreamEvent } from "./stream";
 import { Transcript, type StreamItem } from "./Transcript";
 import { applyStreamEvent } from "./transcriptModel";
+import { imageByteLimit, imageMime } from "./imageTypes";
 import "./Inbox.css";
 
 function InboxInline(p: { text: string }) {
@@ -216,17 +217,9 @@ function MissionFileScope(p: {
       const c = client;
       const preview = c.imagePreview(path);
       if (preview) return preview;
-      const extension = path.split(".").at(-1)?.toLowerCase();
-      const mime = (
-        {
-          png: "image/png",
-          jpg: "image/jpeg",
-          jpeg: "image/jpeg",
-          webp: "image/webp",
-          gif: "image/gif",
-        } as Record<string, string>
-      )[extension ?? ""];
+      const mime = imageMime(path);
       if (!mime) return null;
+      const limit = imageByteLimit(mime);
       cache.delete(path);
       const refs = await resolver.resolve(path);
       if (g !== generation) return null;
@@ -249,12 +242,11 @@ function MissionFileScope(p: {
           offset,
         });
         if (g !== generation) return null;
-        if (!part.bytes?.length || !part.size || part.size > 20 * 1024 * 1024)
-          return null;
+        if (!part.bytes?.length || !part.size || part.size > limit) return null;
         chunks.push(new Uint8Array(part.bytes));
         offset += part.bytes.length;
         if (offset >= part.size) break;
-        if (offset > 20 * 1024 * 1024) return null;
+        if (offset > limit) return null;
       }
       return URL.createObjectURL(new Blob(chunks as BlobPart[], { type: mime }));
     },

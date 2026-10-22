@@ -8,7 +8,6 @@ import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import android.webkit.MimeTypeMap
-import android.webkit.WebView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -129,7 +128,7 @@ fun OrbMarkdownWithFiles(text: String, streaming: Boolean = false) {
                     val core = files?.core
                     when {
                         ref.unavailable -> OrbUnavailableFileChip(ref)
-                        ref.type == "image" && ref.kind == OrbFileKind.Image && core != null ->
+                        ref.type == "image" && (ref.kind == OrbFileKind.Image || ref.kind == OrbFileKind.Svg) && core != null ->
                             OrbInlineImage(core, ref, files.scope) { files.open(ref) }
                         else -> OrbFileChip(ref) { files?.open?.invoke(ref) }
                     }
@@ -174,7 +173,19 @@ fun OrbInlineImage(core: OrbCore, ref: OrbFileRef, scope: OrbFileScope, onClick:
     val context = LocalContext.current
     val service = remember { OrbFileService.get(core, context) }
     var bitmap by remember(ref) { mutableStateOf<Bitmap?>(null) }
+    var svg by remember(ref) { mutableStateOf<Pair<ByteArray, Double>?>(null) }
     LaunchedEffect(ref, scope) {
+        if (ref.kind == OrbFileKind.Svg) {
+            svg = try {
+                val file = service.fetch(ref, scope)
+                withContext(Dispatchers.IO) { OrbSvg.read(file)?.let { it to (OrbSvg.aspectRatio(String(it, Charsets.UTF_8)) ?: (4.0 / 3.0)) } }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
+            return@LaunchedEffect
+        }
         bitmap = try {
             val file = service.fetch(ref, scope)
             withContext(Dispatchers.Default) { decodeBitmap(file, maxDimension = 1600) }
@@ -183,6 +194,22 @@ fun OrbInlineImage(core: OrbCore, ref: OrbFileRef, scope: OrbFileScope, onClick:
         } catch (_: Throwable) {
             null
         }
+    }
+    svg?.let { (bytes, ratio) ->
+        Box(
+            Modifier
+                .widthIn(max = 420.dp)
+                .heightIn(max = 320.dp)
+                .aspectRatio(ratio.toFloat().coerceIn(0.5f, 4f), matchHeightConstraintsFirst = true)
+                .clip(RoundedCornerShape(12.dp))
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+                .testTag("file.image.${ref.name}")
+        ) {
+            AndroidView(factory = { OrbSvg.webView(it, bytes, interactive = false) }, modifier = Modifier.fillMaxSize())
+            // The web view never takes touches; the overlay opens the preview.
+            Box(Modifier.fillMaxSize().orbPressClickable { onClick() })
+        }
+        return
     }
     val image = bitmap
     if (image == null) {
@@ -382,11 +409,10 @@ fun OrbFileContent(ref: OrbFileRef, file: File) {
             } else OrbUnsupported(ref, file, "This image format can’t be shown here.")
         }
         OrbFileKind.Svg -> {
-            val svg = remember(file) { readText(file)?.first }
+            val svg = remember(file) { OrbSvg.read(file) }
             if (svg != null) {
-                AndroidView(factory = { WebView(it).apply { settings.javaScriptEnabled = false; setBackgroundColor(0); loadData(svg, "image/svg+xml", "utf-8") } },
-                    modifier = Modifier.fillMaxSize().testTag("file.viewer.svg"))
-            } else OrbUnsupported(ref, file, null)
+                AndroidView(factory = { OrbSvg.webView(it, svg, interactive = true) }, modifier = Modifier.fillMaxSize().testTag("file.viewer.svg"))
+            } else OrbUnsupported(ref, file, "This SVG is too large or isn’t valid text.")
         }
         OrbFileKind.Pdf -> OrbPdfPages(ref, file)
         OrbFileKind.Markdown, OrbFileKind.Csv, OrbFileKind.Json, OrbFileKind.Code, OrbFileKind.Text -> {

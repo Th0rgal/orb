@@ -44,7 +44,7 @@ struct OrbMessageWithFiles: View {
                         let enriched = OrbFileRefs.enrich(ref, shared: files?.shared ?? [])
                         if enriched.unavailable {
                             OrbUnavailableFileChip(ref: enriched)
-                        } else if enriched.type == "image", enriched.kind == .image, let scope = files?.scope {
+                        } else if enriched.type == "image", enriched.kind == .image || enriched.kind == .svg, let scope = files?.scope {
                             OrbInlineImage(ref: enriched, scope: scope) { files?.open(enriched) }
                         } else {
                             OrbFileChip(ref: enriched) { files?.open(enriched) }
@@ -104,10 +104,24 @@ struct OrbInlineImage: View {
     let scope: OrbFileService.Scope
     let open: () -> Void
     @State private var image: UIImage?
+    @State private var svg: (data: Data, ratio: Double)?
 
     var body: some View {
         Group {
-            if let image {
+            if let svg {
+                Button(action: open) {
+                    OrbSvgView(svg: svg.data, interactive: false)
+                        .aspectRatio(min(max(svg.ratio, 0.5), 4), contentMode: .fit)
+                        .frame(maxWidth: 420, maxHeight: 320, alignment: .leading)
+                        .clipShape(RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+                        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.border))
+                        .contentShape(RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(ref.label)
+                .accessibilityHint("Opens a preview")
+                .accessibilityIdentifier("file.image.\(ref.name)")
+            } else if let image {
                 Button(action: open) {
                     Image(uiImage: image)
                         .resizable()
@@ -126,6 +140,13 @@ struct OrbInlineImage: View {
         }
         .task(id: ref) {
             guard let url = try? await OrbFileService.shared.fetch(ref, scope: scope) else { return }
+            if ref.kind == .svg {
+                svg = await Task.detached(priority: .userInitiated) { () -> (data: Data, ratio: Double)? in
+                    guard let data = OrbSvg.read(url) else { return nil }
+                    return (data, OrbSvg.aspectRatio(String(decoding: data, as: UTF8.self)) ?? 4.0 / 3.0)
+                }.value
+                return
+            }
             image = await Task.detached(priority: .userInitiated) { OrbInlineImage.thumbnail(url) }.value
         }
     }
@@ -266,7 +287,9 @@ struct OrbFileContent: View {
             if let image = UIImage(contentsOfFile: url.path) {
                 OrbZoomImage(image: image, name: ref.label).orbA11yContainer("file.viewer.image")
             } else { unsupported("This image format can’t be shown here.") }
-        case .svg: OrbLocalWebView(url: url).orbA11yContainer("file.viewer.svg")
+        case .svg:
+            if let data = OrbSvg.read(url) { OrbSvgView(svg: data).orbA11yContainer("file.viewer.svg") }
+            else { unsupported("This SVG is too large or isn’t valid text.") }
         case .pdf:
             if let document = PDFDocument(url: url) { OrbPDFView(document: document).orbA11yContainer("file.viewer.pdf") }
             else { unsupported("This PDF can’t be opened.") }
@@ -423,21 +446,6 @@ struct OrbPDFView: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: PDFView, context: Context) {}
-}
-
-/// Local file (SVG) in a non-navigating, script-free web view.
-struct OrbLocalWebView: UIViewRepresentable {
-    let url: URL
-    func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
-        let view = WKWebView(frame: .zero, configuration: config)
-        view.isOpaque = false
-        view.backgroundColor = .clear
-        view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-        return view
-    }
-    func updateUIView(_ view: WKWebView, context: Context) {}
 }
 
 // MARK: - Files tab
