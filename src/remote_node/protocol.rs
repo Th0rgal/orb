@@ -510,6 +510,48 @@ pub fn parse_labels(raw: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The advertised receiver capacity is the only decoded-size ceiling;
+    /// the transport body limit is enforced separately on the JSON request.
+    #[test]
+    fn source_capacity_is_exactly_the_advertised_limit() {
+        let (overlay, complete) = (1u64 << 20, 64u64 << 20);
+        let hb: NodeHeartbeat = serde_json::from_value(serde_json::json!({
+            "node_id": "n", "online": true, "capacity_total": 1,
+            "capacity_available": 1, "active_leases": 0, "version": "v",
+            "protocol_version": 4,
+            "source_bundle_capacity": {"overlay_bytes": overlay, "complete_bytes": complete}
+        }))
+        .unwrap();
+        for (is_complete, limit) in [(false, overlay), (true, complete)] {
+            for bytes in [0, limit - 1, limit, limit + 1] {
+                let requirement = SourceBundleRequirement {
+                    complete: is_complete,
+                    bytes,
+                };
+                assert_eq!(
+                    requirement.check(&hb).is_ok(),
+                    bytes <= limit,
+                    "complete={is_complete} bytes={bytes}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn token_rotation_decision_table() {
+        for presented in ["", "cur", "old", "other"] {
+            for previous in [None, Some(""), Some("  "), Some("old"), Some("cur")] {
+                let expected =
+                    presented == "cur" || (presented == "old" && previous == Some("old"));
+                assert_eq!(
+                    node_token_matches(presented, "cur", previous),
+                    expected,
+                    "presented={presented:?} previous={previous:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn source_capacity_wire_and_actual_payload_size() {
         let legacy = serde_json::json!({"node_id":"old", "online":true,

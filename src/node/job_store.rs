@@ -391,6 +391,21 @@ fn row_to_record(row: &Row<'_>) -> rusqlite::Result<JobRecord> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn terminal_states_are_exactly_the_finished_ones() {
+        use JobState::*;
+        for (state, terminal) in [
+            (Queued, false),
+            (Running, false),
+            (Succeeded, true),
+            (Failed, true),
+            (Cancelled, true),
+            (Lost, true),
+        ] {
+            assert_eq!(state.is_terminal(), terminal, "{state:?}");
+        }
+    }
+
     #[tokio::test]
     async fn cancellation_cause_survives_finish_and_restart() {
         let dir = tempfile::tempdir().unwrap();
