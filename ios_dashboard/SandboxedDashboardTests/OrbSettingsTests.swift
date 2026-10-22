@@ -26,6 +26,14 @@ final class OrbSettingsTests: XCTestCase {
             }
         }
     }
+    func testQuotaExhaustedLabelMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/quota-exhausted.json")
+        let cases = try XCTUnwrap(spec["cases"] as? [[String: Any]])
+        for c in cases {
+            let windows = try XCTUnwrap(c["windows"] as? [[String: Any]]).map { ($0["label"] as? String ?? "", ($0["used"] as? NSNumber)?.doubleValue ?? 0) }
+            XCTAssertEqual(OrbProviderQuota.quotaExhaustedLabel(windows), c["expected"] as? String, c["name"] as? String ?? "?")
+        }
+    }
     func testQuotaUnitsAndRemainingPercent() {
         let values: OrbJSON = .object(["unified_5h_utilization": .number(0.4), "codex_primary_used_percent": .number(20), "minimax_weekly_remaining_percent": .number(70)])
         let windows = OrbProviderQuota.windows(values)

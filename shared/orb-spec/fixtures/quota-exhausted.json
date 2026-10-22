@@ -1,0 +1,12 @@
+{
+  "description": "quotaExhaustedLabel: usage windows ({label, used} with used as a 0..1 ratio) -> status label, or null when nothing is exhausted. A label 'Pool · Window' belongs to that pool; a label without ' · ' belongs to the whole account. A window is exhausted at used >= 1. Any exhausted account-wide window, or every pool exhausted, -> 'Quota exhausted'. Otherwise the exhausted pools in order, joined with ', ', + ' quota exhausted' (e.g. 'Gemini quota exhausted'). The pool used for chip emphasis is the same: a chip is 'exhausted' (amber) only when its pool is at 100%.",
+  "cases": [
+    { "name": "none", "windows": [], "expected": null },
+    { "name": "below limit", "windows": [{ "label": "5h", "used": 0.4 }, { "label": "Weekly", "used": 0.99 }], "expected": null },
+    { "name": "account window exhausted", "windows": [{ "label": "5h", "used": 1 }, { "label": "Weekly", "used": 0.2 }], "expected": "Quota exhausted" },
+    { "name": "antigravity gemini only", "windows": [{ "label": "Gemini · 5h", "used": 1 }, { "label": "Gemini · Weekly", "used": 0.6 }, { "label": "Claude & GPT · 5h", "used": 0 }, { "label": "Claude & GPT · Weekly", "used": 0 }], "expected": "Gemini quota exhausted" },
+    { "name": "antigravity claude only", "windows": [{ "label": "Gemini · 5h", "used": 0.1 }, { "label": "Claude & GPT · Weekly", "used": 1 }], "expected": "Claude & GPT quota exhausted" },
+    { "name": "antigravity every pool", "windows": [{ "label": "Gemini · 5h", "used": 1 }, { "label": "Claude & GPT · Weekly", "used": 1 }], "expected": "Quota exhausted" },
+    { "name": "three pools two exhausted", "windows": [{ "label": "A · 5h", "used": 1 }, { "label": "B · 5h", "used": 0.5 }, { "label": "C · 5h", "used": 1.2 }], "expected": "A, C quota exhausted" }
+  ]
+}

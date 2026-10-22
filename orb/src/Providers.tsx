@@ -5,7 +5,7 @@ import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
-import { codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows } from "./providerUsage";
+import { quotaExhaustedLabel, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows } from "./providerUsage";
 import { PopupMenu } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
@@ -532,30 +532,21 @@ function UsageSummary(p: { usage: ProviderUsage }) {
   // Keep the account summary compact; detailed meters live in the expansion.
   // Grouped windows ("Gemini · 5h", "Gemini · Weekly") collapse to one chip
   // per group showing the tighter limit.
-  const windows = createMemo(() => {
-    const out: { label: string; used: number; detail?: string }[] = [];
-    for (const w of usageWindows(p.usage)) {
-      const [group, window] = w.label.includes(" · ") ? w.label.split(" · ", 2) : [undefined, w.label];
-      const pct = `${window} ${Math.round(w.used * 100)}%`;
-      const existing = group ? out.find(o => o.label === group) : undefined;
-      if (existing) {
-        existing.used = Math.max(existing.used, w.used);
-        existing.detail = `${existing.detail} · ${pct}`;
-      } else out.push({ label: group ?? w.label, used: w.used, detail: group ? `${group}: ${pct}` : undefined });
-    }
-    return out;
-  });
+  const windows = createMemo(() => usageChips(p.usage));
+  // At narrow widths only the most-used chip stays, followed by "+N".
+  const top = createMemo(() => windows().reduce((best, w, i, all) => w.used > all[best].used ? i : best, 0));
   return (
     <Show when={windows().length > 0}>
       <div class="p-usage compact">
         <For each={windows()}>
-          {(w) => (
-            <span class="p-usage-chip" title={w.detail ?? `${w.label} window: ${Math.round(w.used * 100)}% used`}>
+          {(w, i) => (
+            <span class={`p-usage-chip${w.used >= 1 ? " exhausted" : ""}${i() === top() ? " top" : ""}`} title={w.detail ?? `${w.label} window: ${Math.round(w.used * 100)}% used`}>
               <span class="p-usage-label">{w.label === "7d" ? "Weekly" : w.label}</span>
               <span class="p-usage-pct">{Math.round(w.used * 100)}%</span>
             </span>
           )}
         </For>
+        <Show when={windows().length > 1}><span class="p-usage-more" title={windows().map(w => `${w.label} ${Math.round(w.used * 100)}%`).join(" · ")}>+{windows().length - 1}</span></Show>
       </div>
     </Show>
   );
@@ -898,8 +889,8 @@ function MistralUsageConnect(p: { a: AIProvider; usage?: ProviderUsage; onUsage?
 function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
-  const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted", "out_of_credit", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
-  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted", "pool_exhausted", "out_of_credit", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
+  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", pool_exhausted: (p.usage && quotaExhaustedLabel(usageWindows(p.usage))) || "Quota exhausted", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
   const expandable = () => status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
@@ -915,8 +906,8 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<str
         <ProviderLogo type={a.provider_type} name={a.name} />
         <div class="s-row-text">
           <div class="s-row-title">
-            {title()}
-            <Show when={email()}><span class="p-account-email">{email()}</span></Show>
+            <span class="p-account-name">{title()}</span>
+            <Show when={email()}><span class="p-account-email" title={email()}>{email()}</span></Show>
           </div>
           <div class="s-row-desc">
             <span class={`p-st ${stClass()}`}>{stLabel()}</span>

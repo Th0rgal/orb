@@ -67,8 +67,51 @@ export function effectiveProviderStatus(a: AIProvider, usage?: ProviderUsage, he
   if (health?.account_state === "auth_failed") return "auth_failed";
   if (a.status.type === "needs_reauth" || usage?.status === "needs_reauth") return "needs_reauth";
   if (usage?.error) return "error";
-  if (usage && usageWindows(usage).some(window => window.used >= 1)) return "quota_exhausted";
+  const quota = usage ? quotaExhaustedLabel(usageWindows(usage)) : null;
+  if (quota) return quota === "Quota exhausted" ? "quota_exhausted" : "pool_exhausted";
   return a.status.type;
+}
+
+/** "Gemini · 5h" belongs to the Gemini pool; a plain "5h" to the whole account (""). */
+export function quotaPool(label: string): string {
+  const i = label.indexOf(" · ");
+  return i < 0 ? "" : label.slice(0, i);
+}
+
+/**
+ * Status wording for exhausted windows; null when none is exhausted. Only
+ * says "Quota exhausted" when the account cannot serve anything: an
+ * account-wide window is spent, or every pool is. Otherwise names the spent
+ * pools ("Gemini quota exhausted"). Spec: shared/orb-spec/fixtures/quota-exhausted.json.
+ */
+export function quotaExhaustedLabel(windows: { label: string; used: number }[]): string | null {
+  const pools = new Map<string, boolean>();
+  for (const w of windows) {
+    const pool = quotaPool(w.label);
+    pools.set(pool, (pools.get(pool) ?? false) || w.used >= 1);
+  }
+  const spent = [...pools].filter(([, out]) => out).map(([pool]) => pool);
+  if (!spent.length) return null;
+  if (spent.includes("") || spent.length === pools.size) return "Quota exhausted";
+  return `${spent.join(", ")} quota exhausted`;
+}
+
+export type UsageChip = { label: string; used: number; detail?: string };
+
+/** One compact chip per pool (the tighter of its windows) or per ungrouped window. */
+export function usageChips(u: ProviderUsage): UsageChip[] {
+  const out: UsageChip[] = [];
+  for (const w of usageWindows(u)) {
+    const group = quotaPool(w.label) || undefined;
+    const window = group ? w.label.slice(group.length + 3) : w.label;
+    const pct = `${window} ${Math.round(w.used * 100)}%`;
+    const existing = group ? out.find(o => o.label === group) : undefined;
+    if (existing) {
+      existing.used = Math.max(existing.used, w.used);
+      existing.detail = `${existing.detail} · ${pct}`;
+    } else out.push({ label: group ?? w.label, used: w.used, detail: group ? `${group}: ${pct}` : undefined });
+  }
+  return out;
 }
 
 /** Match the data actually rendered in UsageDetail, not an empty cache object. */
