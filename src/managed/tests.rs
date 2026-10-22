@@ -616,3 +616,10 @@ async fn store_miss_in_unknown_tenant_never_destroys() {
         MachineState::Destroyed
     );
 }
+
+#[test]
+fn managed_jobs_may_use_most_of_the_vm_memory() {
+    // xlarge (32 GB) must fit a 20 GB job; small keeps headroom for the OS.
+    assert!(managed_job_memory_bytes(32) > 20 * 1024 * 1024 * 1024);
+    assert_eq!(managed_job_memory_bytes(4), 4 * 1024 * 1024 * 1024 * 9 / 10);
+}

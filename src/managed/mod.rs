@@ -968,8 +968,11 @@ impl ManagedManager {
         }
         self.update(id, |m| m.state = MachineState::Enrolling).await;
         let capacity = (m.cpu / 2).max(1);
+        // The VM is rented for its memory: let any one job use ~90% of it
+        // instead of the static-node default (RAM split across every slot).
+        let job_memory = managed_job_memory_bytes(m.ram_gb);
         let env = format!(
-            "SANDBOXED_NODE_DIAL_CORE_URL={core_url}\nSANDBOXED_NODE_MANAGED_ID={id}\nSANDBOXED_NODE_ENROLL_TOKEN={enroll_token}\nSANDBOXED_NODE_ID={node}\nSANDBOXED_NODE_CAPACITY={capacity}\nSANDBOXED_NODE_LABELS=managed,trust=managed,size={size},image={image},lean\n",
+            "SANDBOXED_NODE_DIAL_CORE_URL={core_url}\nSANDBOXED_NODE_MANAGED_ID={id}\nSANDBOXED_NODE_ENROLL_TOKEN={enroll_token}\nSANDBOXED_NODE_ID={node}\nSANDBOXED_NODE_CAPACITY={capacity}\nSANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}\nSANDBOXED_NODE_LABELS=managed,trust=managed,size={size},image={image},lean\n",
             node = m.node_id,
             size = m.size,
             image = m.image,
@@ -1318,6 +1321,11 @@ impl ManagedManager {
             "closed_rows": closed,
         }))
     }
+}
+
+/// Per-job memory ceiling on a managed VM: 90% of its RAM (GiB).
+pub fn managed_job_memory_bytes(ram_gb: u32) -> u64 {
+    u64::from(ram_gb) * 1024 * 1024 * 1024 * 9 / 10
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8], private: bool) {
