@@ -1491,6 +1491,15 @@ export function LiveProjectsSection(p: {
         return [...rest, ...nextArchived];
       });
     });
+    // Archiving the open conversation deselects it: following it into the
+    // Archived folder would expand the archive and scroll the sidebar away.
+    if (!restore) batch(() => {
+      const sel = p.selected();
+      if (sel?.startsWith("m:") && targetIds.has(sel.slice(2))) p.open(null);
+      setSelectedTreeIds(current => current.some(x => x.startsWith("m:") && targetIds.has(x.slice(2))) ? current.filter(x => !x.startsWith("m:") || !targetIds.has(x.slice(2))) : current);
+      const anchor = selectionAnchor();
+      if (anchor?.startsWith("m:") && targetIds.has(anchor.slice(2))) setSelectionAnchor(null);
+    });
     updateStatus(() => status);
     try {
       await Promise.all(targets.map(t => restore ? reopenMission(t.id) : archiveMission(t.id)));
