@@ -4,6 +4,7 @@ import SwiftUI
 /// mirroring `orb/src/managedMachineModel.ts`.
 struct OrbManagedMachine: Codable, Equatable, Identifiable, Sendable {
     var id: String
+    var name: String?
     var node_id: String?
     var size: String
     var cpu: Double
@@ -64,6 +65,22 @@ enum OrbManaged {
     static func isManagedNode(_ node: OrbJSON) -> Bool {
         node["labels"].items.contains { $0.text == "managed" } || node["id"].text.hasPrefix("managed-")
     }
+    /// Row title: the friendly `name` ("small-a"), falling back to the id.
+    static func title(_ m: OrbManagedMachine) -> String {
+        if let name = m.name, !name.isEmpty { return name }
+        return m.id
+    }
+    /// Fleet label: managed nodes carry a `display_name`; others keep their id.
+    static func nodeTitle(_ node: OrbJSON) -> String {
+        let display = node["display_name"].text
+        return display.isEmpty ? node["id"].text : display
+    }
+    /// Optimistic Destroy: the row flips to "destroying" before the call returns.
+    static func markDestroying(_ response: OrbManagedMachinesResponse, id: String) -> OrbManagedMachinesResponse {
+        var copy = response
+        if let i = copy.machines.firstIndex(where: { $0.id == id }) { copy.machines[i].state = "destroying" }
+        return copy
+    }
     static func isLive(_ m: OrbManagedMachine) -> Bool { m.state != "destroyed" && m.state != "failed" }
 
     static func date(_ value: String?) -> Date? {
@@ -103,7 +120,7 @@ enum OrbManaged {
         return m.cost_usd + max(0, until.timeIntervalSince(fetchedAt)) / 3600 * m.usd_per_hour
     }
     static func stateLabel(_ s: String) -> String {
-        ["provisioning": "Provisioning", "enrolling": "Enrolling", "online": "Online", "destroying": "Destroying", "destroyed": "Destroyed", "failed": "Failed"][s] ?? s
+        ["provisioning": "Provisioning", "enrolling": "Enrolling", "online": "Online", "destroying": "Destroying…", "destroyed": "Destroyed", "failed": "Failed"][s] ?? s
     }
     static func number(_ v: Double) -> String { v == v.rounded() ? String(Int(v)) : String(v) }
     static func sizeSpec(cpu: Double, ramGB: Double, diskGB: Double? = nil) -> String {
@@ -172,7 +189,7 @@ struct OrbManagedMachinesSection: View {
             }
             ForEach(recent) { machine in
                 VStack(alignment: .leading) {
-                    Text(machine.size)
+                    Text(OrbManaged.title(machine))
                     Text(Self.recentSummary(machine))
                         .font(.caption).foregroundStyle(OrbStyle.textMuted)
                 }
@@ -183,7 +200,7 @@ struct OrbManagedMachinesSection: View {
         .alert("Destroy machine?", isPresented: Binding(get: { destroying != nil }, set: { if !$0 { destroying = nil } }), presenting: destroying) { machine in
             Button("Destroy", role: .destructive) { onDestroy(machine) }
             Button("Cancel", role: .cancel) {}
-        } message: { Text("Destroy \($0.size) (\($0.id))? Running jobs on it stop and its disk is deleted.") }
+        } message: { Text("Destroy \(OrbManaged.title($0)) (\($0.size))? Running jobs on it stop and its disk is deleted.") }
     }
 
     static func recentSummary(_ m: OrbManagedMachine) -> String {
@@ -207,7 +224,9 @@ struct OrbManagedMachinesSection: View {
                 .accessibilityIdentifier("managed.destroy")
         } label: {
             VStack(alignment: .leading) {
+                Text(OrbManaged.title(m))
                 Text("\(m.size) · \(OrbManaged.sizeSpec(cpu: m.cpu, ramGB: m.ram_gb))")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 0) {
                     Text(OrbManaged.stateLabel(m.state) + " · ")
                     Text(OrbManaged.ttlLeft(m.expires_at, now: now))
