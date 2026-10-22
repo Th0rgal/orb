@@ -40,7 +40,7 @@ import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
 import { MACHINES, Machines } from "./Machines";
-import { isManagedNode } from "./managedMachineModel";
+import { isManagedNode, nodeSize } from "./machines/nodes";
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { mdSource, toggleMdSource } from "./Markdown";
@@ -1162,7 +1162,7 @@ export default function App() {
                           </button>
                           <div class="menu-sep" />
                           <div class="machine-section-label machine-nodes-label">Compute nodes</div>
-                          <For each={sortedNodes()}>
+                          <For each={sortedNodes().filter(n => !isManagedNode(n))}>
                             {(n) => (
                               <button
                                 class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
@@ -1177,13 +1177,39 @@ export default function App() {
                                   <Ic.ComputeNodeIcon />
                                 </span>
                                 <span class="menu-col">
-                                  <span class="menu-title">{isAdministrationNode(n) ? "DGX Spark · Admin" : n.id}<Show when={isManagedNode(n)}><span class="m-tag">Managed</span></Show></span>
+                                  <span class="menu-title" title={n.display_name ? n.id : undefined}>{isAdministrationNode(n) ? "DGX Spark · Admin" : n.display_name || n.id}</span><Show when={isManagedNode(n) && nodeSize(n)}><span class="machine-inline-note">{nodeSize(n)}</span></Show>
                                 </span>
                                 <MachineLoadBadge machine={n.id} />
                                 <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && (!n.cordoned || isAdministrationNode(n)) ? "online" : ""}`} />{isAdministrationNode(n) && n.status === "online" ? "Manual" : n.cordoned ? "Cordoned" : n.status}</span>
                               </button>
                             )}
                           </For>
+                          <Show when={sortedNodes().some(isManagedNode)}>
+                            <div class="menu-sep" />
+                            <div class="machine-section-label machine-managed-label">Managed (boat.dev)</div>
+                            <For each={sortedNodes().filter(isManagedNode)}>
+                            {(n) => (
+                              <button
+                                class={`menu-item machine-node-option ${n.id === newMachine() ? "on" : ""}`}
+                                    aria-pressed={n.id === newMachine()}
+                                title={isAdministrationNode(n) ? `Administration · Full sudo · Manual selection only. ${nodeLaunchNote() ?? ""}` : nodeLaunchNote()}
+                                onClick={() => {
+                                  chooseMachine(n.id);
+                                  setEnvOpen(null);
+                                }}
+                              >
+                                <span class="menu-ico">
+                                  <Ic.ComputeNodeIcon />
+                                </span>
+                                <span class="menu-col">
+                                  <span class="menu-title" title={n.display_name ? n.id : undefined}>{isAdministrationNode(n) ? "DGX Spark · Admin" : n.display_name || n.id}</span><Show when={isManagedNode(n) && nodeSize(n)}><span class="machine-inline-note">{nodeSize(n)}</span></Show>
+                                </span>
+                                <MachineLoadBadge machine={n.id} />
+                                <span class="machine-node-state"><span class={`machine-state-dot ${n.status === "online" && (!n.cordoned || isAdministrationNode(n)) ? "online" : ""}`} />{isAdministrationNode(n) && n.status === "online" ? "Manual" : n.cordoned ? "Cordoned" : n.status}</span>
+                              </button>
+                            )}
+                          </For>
+                          </Show>
                         </Show>
                         </div>
                         <div class="na-menu-foot">

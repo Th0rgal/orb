@@ -1,4 +1,4 @@
-import { isManagedNode } from "./managedMachineModel";
+import { isManagedNode } from "./machines/nodes";
 import { swallow } from "./log";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
@@ -38,7 +38,7 @@ export function loadMachineDestinations(missionId: string, force = false): Promi
     if (view.version !== 1) throw new Error("Update the connected backend to enable machine transfer.");
     const rows = preferSparkAdministration([computer, ...view.destinations], row => row.machine.kind === "node" ? row.machine.id : undefined)
       .map(row => row.machine.kind === "node" && row.machine.id === "dgx-spark-admin" ? { ...row, label: nodeLabel(row.machine.id) }
-        : row.machine.kind === "node" && isManagedNode({ id: row.machine.id }) && !/managed/i.test(row.label) ? { ...row, label: `${row.label} · Managed` } : row);
+        : row.machine.kind === "node" && isManagedNode({ id: row.machine.id }) && nodeLabel(row.machine.id) !== row.machine.id ? { ...row, label: nodeLabel(row.machine.id) } : row);
     if (version === connectionVersion()) cacheMachineDestinations(rows);
     return { view, rows, client: computer.machine.kind === "client" ? computer.machine.id : undefined };
   })();
@@ -81,11 +81,14 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   const compatible = () => harnessCompatible() && (backend() !== "antigravity" || models().some(option => option.value === model()));
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
   const loadKey = (d: Destination) => d.machine.kind === "node" ? d.machine.id : d.machine.kind;
-  // This computer and Core keep their place; usable nodes go least busy first.
+  const managed = (d: Destination) => d.machine.kind === "node" && isManagedNode({ id: d.machine.id });
+  // This computer and Core keep their place; usable nodes go least busy first; managed machines last.
   const ordered = createMemo(() => {
     const rows = destinations(), node = (d: Destination) => d.machine.kind === "node";
-    return [...rows.filter(d => !node(d)), ...byLeastLoaded(rows.filter(d => node(d) && d.available), loadKey), ...rows.filter(d => node(d) && !d.available)];
+    const sorted = [...rows.filter(d => !node(d)), ...byLeastLoaded(rows.filter(d => node(d) && d.available), loadKey), ...rows.filter(d => node(d) && !d.available)];
+    return [...sorted.filter(d => !managed(d)), ...sorted.filter(managed)];
   });
+  const firstManaged = () => ordered().find(managed);
   let features: string[] | undefined;
   const load = async (force = false) => {
     setLoading(true); setReady(false); setError("");
@@ -190,9 +193,9 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     <Show when={!selected()}>
       <div class="menu-group">Change machine…</div>
       <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
-      <For each={ordered()}>{d => <button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
+      <For each={ordered()}>{d => <><Show when={d === firstManaged()}><div class="menu-sep" /><div class="machine-section-label">Managed (boat.dev)</div></Show><button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
         <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span><span class="machine-transfer-end"><MachineLoadBadge machine={loadKey(d)} /><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span></span>
-      </button>}</For>
+      </button></>}</For>
     </Show>
     <Show when={selected()}>
       <header class="transfer-head">

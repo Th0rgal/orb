@@ -5,6 +5,8 @@ export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying
 
 export interface ManagedMachine {
   id: string;
+  /** "small-a": unique among live machines. Absent on older backends. */
+  name?: string | null;
   provider: string;
   provider_id: string;
   node_id: string;
@@ -39,7 +41,7 @@ export interface ManagedBudget {
 
 export interface ManagedMachinesResponse { machines: ManagedMachine[]; budget: ManagedBudget; sizes: ManagedSize[]; enabled: boolean }
 
-export interface CreateManagedMachine { size?: string; cpu?: number; ram_gb?: number; ttl_minutes?: number; image?: string; reason?: string }
+export interface CreateManagedMachine { wait?: boolean; size?: string; cpu?: number; ram_gb?: number; ttl_minutes?: number; image?: string; reason?: string }
 
 /** `null` when the backend predates managed machines (404). */
 export async function listManagedMachines(): Promise<ManagedMachinesResponse | null> {
@@ -55,12 +57,22 @@ export const createManagedMachine = (body: CreateManagedMachine) => api<ManagedM
 export const destroyManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}`, { method: "DELETE" });
 export const extendManagedMachine = (id: string, ttl_minutes: number) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/extend`, json({ ttl_minutes }));
 
-/** Remote nodes provisioned by the managed-machine service. */
-export const isManagedNode = (node: { id?: string; labels?: string[] | null } | null | undefined) =>
-  !!node && (!!node.labels?.includes("managed") || !!node.id?.startsWith("managed-"));
+export { isManagedNode } from "./machines/nodes";
 
 /** Remote-node ids a managed machine may appear under in /api/remote-nodes. */
 export const managedNodeIds = (m: Pick<ManagedMachine, "id" | "node_id">) => [...new Set([m.node_id, `managed-${m.id}`].filter(Boolean))];
+
+export const machineName = (m: Pick<ManagedMachine, "name" | "id">) => m.name || m.id;
+export const isStarting = (m: Pick<ManagedMachine, "state">) => m.state === "provisioning" || m.state === "enrolling";
+
+export interface ManagedSettings { antigravity_on_managed: boolean }
+/** `null` when the backend has no settings endpoint. */
+export async function getManagedSettings(): Promise<ManagedSettings | null> {
+  try { return await api<ManagedSettings>("/api/managed-machines/settings", { method: "GET" }); }
+  catch (error) { if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null; throw error; }
+}
+export const putManagedSettings = (body: ManagedSettings) =>
+  api<ManagedSettings>("/api/managed-machines/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 export const isLive = (m: Pick<ManagedMachine, "state">) => m.state !== "destroyed" && m.state !== "failed";
 
@@ -101,15 +113,17 @@ export function minutesLabel(minutes: number): string {
 /** Cost so far, extrapolated between polls so it ticks with the countdown. */
 export function liveCost(m: Pick<ManagedMachine, "cost_usd" | "usd_per_hour" | "state" | "expires_at">, fetchedAt: number, now = Date.now()): number {
   if (m.state !== "online" && m.state !== "enrolling" && m.state !== "provisioning") return m.cost_usd;
-  const until = Math.min(now, Date.parse(m.expires_at) || now);
+  const expires = Date.parse(m.expires_at);
+  if (!Number.isFinite(expires)) return m.cost_usd;
+  const until = Math.min(now, expires);
   return m.cost_usd + Math.max(0, until - fetchedAt) / 3_600_000 * m.usd_per_hour;
 }
 
 export const estimateCost = (usdPerHourRate: number, ttlMinutes: number) => usdPerHourRate * ttlMinutes / 60;
 
 export const stateLabel = (s: string) =>
-  s === "provisioning" ? "Provisioning" : s === "enrolling" ? "Enrolling" : s === "online" ? "Online"
-  : s === "destroying" ? "Destroying" : s === "destroyed" ? "Destroyed" : s === "failed" ? "Failed" : s;
+  s === "provisioning" || s === "enrolling" ? "Starting…" : s === "online" ? "Online"
+  : s === "destroying" ? "Destroying…" : s === "destroyed" ? "Destroyed" : s === "failed" ? "Failed" : s;
 
 export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: number }) =>
   `${s.cpu} vCPU · ${s.ram_gb} GB${s.disk_gb != null ? ` · ${s.disk_gb} GB disk` : ""}`;

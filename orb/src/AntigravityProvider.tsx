@@ -1,5 +1,15 @@
 import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
 import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
+import { isManagedNode } from "./machines/nodes";
+import { getManagedSettings, managedError, putManagedSettings } from "./managedMachineModel";
+
+/** "Available on Core, spark + managed machines". */
+export function availabilityLine(ready: string[], managed: boolean | null, checking: boolean): string {
+  const extra = managed ? " + managed machines" : "";
+  if (ready.length) return `Available on ${ready.join(", ")}${extra}`;
+  if (checking) return "Checking machines…";
+  return managed ? "Available on managed machines" : "Not available on any machine";
+}
 
 type Machine = { id: string; label: string; phase: "loading" | "ready" | "error" };
 
@@ -30,9 +40,10 @@ export function AntigravityProvider() {
     try {
       const result = await getRemoteNodes();
       if (disposed || request !== generation || version !== connectionVersion()) return;
-      const nodes = (result.nodes ?? []).filter(node => !node.cordoned && node.status !== "offline").map(node => node.id);
-      setMachines(list => [...list, ...nodes.map(id => ({ id, label: id, phase: "loading" as const }))]);
-      nodes.forEach(id => void check(request, version, id));
+      // Managed machines come and go; the setting below covers them as a group.
+      const nodes = (result.nodes ?? []).filter(node => !node.cordoned && node.status !== "offline" && !isManagedNode(node));
+      setMachines(list => [...list, ...nodes.map(node => ({ id: node.id, label: node.display_name || node.id, phase: "loading" as const }))]);
+      nodes.forEach(node => void check(request, version, node.id));
     } catch { /* Core alone still answers; Refresh retries the inventory. */ }
   };
   createEffect(on(connectionVersion, () => void refresh()));
@@ -42,16 +53,35 @@ export function AntigravityProvider() {
     onCleanup(() => window.removeEventListener("orb:providers-refresh", reload));
   });
   onCleanup(() => { disposed = true; generation++; });
+  // null: the backend has no managed-machine settings (toggle hidden).
+  const [managed, setManaged] = createSignal<boolean | null>(null);
+  const [saving, setSaving] = createSignal(false);
+  const [settingError, setSettingError] = createSignal("");
+  createEffect(on(connectionVersion, () => { setManaged(null); void getManagedSettings().then(r => setManaged(r ? r.antigravity_on_managed : null)).catch(() => setManaged(null)); }));
+  const toggleManaged = async () => {
+    const next = !managed();
+    setSaving(true); setSettingError(""); setManaged(next);
+    try { const r = await putManagedSettings({ antigravity_on_managed: next }); setManaged(r?.antigravity_on_managed ?? next); }
+    catch (e) { setManaged(!next); setSettingError(managedError(e)); }
+    finally { setSaving(false); }
+  };
   const ready = () => machines().filter(m => m.phase === "ready");
   const failed = () => machines().filter(m => m.phase === "error");
   const checking = () => machines().some(m => m.phase === "loading");
   return <section class="p-native" aria-label="Antigravity execution">
       <p class="s-row-desc">Native runs use this Google sign-in on every machine.</p>
       <div class="p-native-controls">
-        <span class="s-row-desc" role="status">{ready().length ? `Available on ${ready().map(m => m.label).join(", ")}` : checking() ? "Checking machines…" : "Not available on any machine"}</span>
+        <span class="s-row-desc" role="status">{availabilityLine(ready().map(m => m.label), managed(), checking())}</span>
         <Show when={checking() && ready().length}><span class="s-row-desc">Checking…</span></Show>
         <button class="s-btn" disabled={checking()} onClick={() => void refresh()}>Refresh</button>
       </div>
+      <Show when={managed() !== null}>
+        <div class="p-native-managed">
+          <div class="s-row-text"><div class="s-row-title">Managed machines</div><div class="s-row-desc">Install Antigravity and hand it this sign-in on new boat.dev machines.</div></div>
+          <button class={`toggle ${managed() ? "on" : ""}`} role="switch" aria-checked={!!managed()} aria-label="Antigravity on managed machines" disabled={saving()} onClick={() => void toggleManaged()} />
+        </div>
+        <Show when={settingError()}><p class="s-row-desc managed-error" role="alert">{settingError()}</p></Show>
+      </Show>
       <Show when={failed().length}>
         <ul class="p-native-failed" aria-label="Unavailable machines">
           <For each={failed()}>{m => <li><span>{m.label} unavailable</span> <button class="p-native-retry" onClick={() => void refresh(m.id)}>Retry</button></li>}</For>
