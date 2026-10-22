@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' file:; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'">
+<script src="mermaid.min.js"></script></head><body style="margin:0;font:13px -apple-system,system-ui,sans-serif">
+<script>
+// Renders Mermaid source to sanitised SVG for OrbMermaidRenderer. Generated
+// theme: Orb desktop's dark design tokens (orb/src/mermaidRenderer.ts).
+const theme = {"darkMode": "true", "background": "#161616", "fontFamily": "-apple-system, system-ui, sans-serif", "fontSize": "13px", "pieTitleTextSize": "15px", "pieSectionTextSize": "13px", "pieLegendTextSize": "13px", "textColor": "#d8d8d7", "primaryColor": "#2d333c", "primaryTextColor": "#d8d8d7", "primaryBorderColor": "#516580", "secondaryColor": "#312e3b", "secondaryTextColor": "#d8d8d7", "secondaryBorderColor": "#5e547e", "tertiaryColor": "#2a312c", "tertiaryTextColor": "#d8d8d7", "tertiaryBorderColor": "#4e6755", "lineColor": "#8a8a8a", "mainBkg": "#2d333c", "nodeBorder": "#516580", "nodeTextColor": "#d8d8d7", "clusterBkg": "#242423", "clusterBorder": "#3a3a3a", "titleColor": "#d8d8d7", "edgeLabelBackground": "#161616", "labelTextColor": "#d8d8d7", "noteBkgColor": "#38311e", "noteTextColor": "#d8d8d7", "noteBorderColor": "#735f22", "actorBkg": "#2d333c", "actorBorder": "#516580", "actorTextColor": "#d8d8d7", "actorLineColor": "#8a8a8a", "signalColor": "#b1b1b1", "signalTextColor": "#d8d8d7", "labelBoxBkgColor": "#212121", "labelBoxBorderColor": "#3a3a3a", "loopTextColor": "#b1b1b1", "activationBkgColor": "#212121", "activationBorderColor": "#516580", "sequenceNumberColor": "#1c1c1c", "classText": "#d8d8d7", "attributeBackgroundColorOdd": "#1c1c1c", "attributeBackgroundColorEven": "#212121", "labelColor": "#d8d8d7", "altBackground": "#212121", "stateBkg": "#2d333c", "stateLabelColor": "#d8d8d7", "compositeBackground": "#242423", "compositeTitleBackground": "#212121", "specialStateColor": "#8a8a8a", "innerEndBackground": "#8a8a8a", "sectionBkgColor": "#272b30", "altSectionBkgColor": "#1c1c1c", "sectionBkgColor2": "#292730", "taskBkgColor": "#4c5e76", "taskBorderColor": "#516580", "taskTextColor": "#1c1c1c", "taskTextLightColor": "#d8d8d7", "taskTextDarkColor": "#d8d8d7", "taskTextOutsideColor": "#d8d8d7", "taskTextClickableColor": "#86aee4", "activeTaskBkgColor": "#49604f", "activeTaskBorderColor": "#62856b", "doneTaskBkgColor": "#434343", "doneTaskBorderColor": "#8a8a8a", "critBkgColor": "#7e464d", "critBorderColor": "#e0707d", "gridColor": "#3a3a3a", "todayLineColor": "#e0707d", "pieTitleTextColor": "#d8d8d7", "pieSectionTextColor": "#1c1c1c", "pieLegendTextColor": "#d8d8d7", "pieStrokeColor": "#1c1c1c", "pieStrokeWidth": "1.5px", "pieOuterStrokeColor": "#3a3a3a", "pieOuterStrokeWidth": "1px", "pieOpacity": "1", "relationColor": "#8a8a8a", "relationLabelColor": "#d8d8d7", "relationLabelBackground": "#1c1c1c", "git0": "#46566c", "gitBranchLabel0": "#d8d8d7", "git1": "#445849", "gitBranchLabel1": "#d8d8d7", "git2": "#51496a", "gitBranchLabel2": "#d8d8d7", "git3": "#615220", "gitBranchLabel3": "#d8d8d7", "git4": "#6a3e43", "gitBranchLabel4": "#d8d8d7", "git5": "#484848", "gitBranchLabel5": "#d8d8d7", "pie1": "#6682a8", "pie2": "#62856b", "pie3": "#786aa5", "pie4": "#957a24", "pie5": "#a55760", "pie6": "#696969", "pie7": "#445368", "pie8": "#425547", "pie9": "#4e4766", "pie10": "#5e4f20", "pie11": "#663c41", "pie12": "#464646", "cScale0": "#384250", "cScaleLabel0": "#d8d8d7", "cScale1": "#364339", "cScaleLabel1": "#d8d8d7", "cScale2": "#3e394f", "cScaleLabel2": "#d8d8d7", "cScale3": "#493f1f", "cScaleLabel3": "#d8d8d7", "cScale4": "#4f3235", "cScaleLabel4": "#d8d8d7", "cScale5": "#393939", "cScaleLabel5": "#d8d8d7", "cScale6": "#384250", "cScaleLabel6": "#d8d8d7", "cScale7": "#364339", "cScaleLabel7": "#d8d8d7", "cScale8": "#3e394f", "cScaleLabel8": "#d8d8d7", "cScale9": "#493f1f", "cScaleLabel9": "#d8d8d7", "cScale10": "#4f3235", "cScaleLabel10": "#d8d8d7", "cScale11": "#393939", "cScaleLabel11": "#d8d8d7"};
+mermaid.initialize({
+  startOnLoad: false, securityLevel: "strict", theme: "base", themeVariables: theme, fontFamily: theme.fontFamily,
+  maxTextSize: 50000, maxEdges: 800, suppressErrorRendering: true,
+  flowchart: { useMaxWidth: false, padding: 12, nodeSpacing: 36, rankSpacing: 44, curve: "basis" },
+  sequence: { useMaxWidth: false, actorMargin: 44, boxMargin: 8, noteMargin: 10, messageMargin: 32, mirrorActors: false },
+  class: { useMaxWidth: false }, state: { useMaxWidth: false }, er: { useMaxWidth: false },
+  gantt: { useMaxWidth: false, useWidth: 760, axisFormat: "%b %-d", barHeight: 22, barGap: 6, fontSize: 12, sectionFontSize: 12, leftPadding: 90 },
+  pie: { useMaxWidth: false, textPosition: 0.72 }, mindmap: { useMaxWidth: false, padding: 12 },
+  journey: { useMaxWidth: false }, timeline: { useMaxWidth: false }, gitGraph: { useMaxWidth: false },
+});
+const message = (e) => String((e && (e.message || e.str)) || e || "Unknown syntax error").trim().split("\n").slice(0, 6).join("\n").slice(0, 600);
+let seq = 0;
+window.orbRender = async (source) => {
+  try { await mermaid.parse(source); } catch (e) { return { error: message(e) }; }
+  const id = "orb-mermaid-" + (++seq);
+  try {
+    const { svg } = await mermaid.render(id, source);
+    const vb = /viewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(svg);
+    return { svg, width: vb ? Number(vb[1]) : 0, height: vb ? Number(vb[2]) : 0 };
+  } catch (e) {
+    return { error: message(e) };
+  } finally {
+    document.getElementById(id)?.remove();
+    document.getElementById("d" + id)?.remove();
+  }
+};
+</script></body></html>

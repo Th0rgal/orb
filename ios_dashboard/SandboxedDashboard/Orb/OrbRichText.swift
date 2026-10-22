@@ -118,6 +118,8 @@ struct OrbNativeMarkdownView: View {
         case heading(level: Int, text: String)
         case paragraph(String)
         case code(language: String, code: String)
+        /// A ```mermaid fence; `complete` is false while its closing fence has not streamed in.
+        case mermaid(code: String, complete: Bool)
         case list(ordered: Bool, items: [String])
         case quote(String)
         case table(headers: [String], rows: [[String]])
@@ -189,8 +191,13 @@ struct OrbNativeMarkdownView: View {
                     codeLines.append(lines[idx])
                     idx += 1
                 }
-                if idx < lines.count { idx += 1 }
-                blocks.append(.code(language: lang, code: codeLines.joined(separator: "\n")))
+                let closed = idx < lines.count
+                if closed { idx += 1 }
+                if lang.lowercased() == "mermaid" {
+                    blocks.append(.mermaid(code: codeLines.joined(separator: "\n"), complete: closed))
+                } else {
+                    blocks.append(.code(language: lang, code: codeLines.joined(separator: "\n")))
+                }
                 continue
             }
             if trimmed == "---" || trimmed == "***" {
@@ -429,6 +436,8 @@ struct OrbNativeMarkdownView: View {
                     }
                     .background(Color(white: 0.086), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.09)))
+                case .mermaid(let code, let complete):
+                    OrbMermaidBlock(code: code, complete: complete)
                 case .divider:
                     Divider().overlay(Color.white.opacity(0.1))
                 }

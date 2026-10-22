@@ -294,4 +294,29 @@ final class OrbRichTextTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Double(web.frame.height), contentHeight - 2, "WKWebView frame height must expand to fit the full table and trailing sections")
     }
 
+    func testMermaidFencesRenderWithBundledMermaidAndFallBackOnErrors() async throws {
+        let streaming = OrbNativeMarkdownView.parseBlocks("Intro\n\n```mermaid\nflowchart LR\n  A --> B")
+        XCTAssertEqual(streaming.last, .mermaid(code: "flowchart LR\n  A --> B", complete: false))
+        let done = OrbNativeMarkdownView.parseBlocks("```mermaid\nflowchart LR\n  A --> B\n```")
+        XCTAssertEqual(done, [.mermaid(code: "flowchart LR\n  A --> B", complete: true)])
+
+        let renderer = OrbMermaidRenderer.shared
+        let ok = await renderer.render("flowchart LR\n  A[Prompt] --> B{Tools?}\n  B --> C([Answer])")
+        guard case .svg(let svg, let width, let height) = ok else { return XCTFail("expected an SVG, got \(ok)") }
+        XCTAssertTrue(svg.contains("Prompt"))
+        XCTAssertFalse(svg.contains("<script"))
+        XCTAssertGreaterThan(width, 0)
+        XCTAssertGreaterThan(height, 0)
+        XCTAssertEqual(renderer.cached("flowchart LR\n  A[Prompt] --> B{Tools?}\n  B --> C([Answer])"), ok)
+
+        let bad = await renderer.render("flowchart LR\n  A --> \n  ((( broken")
+        guard case .failure(let message) = bad else { return XCTFail("expected a parse failure") }
+        XCTAssertFalse(message.isEmpty)
+
+        for source in ["sequenceDiagram\n  A->>B: hi", "classDiagram\n  class A", "stateDiagram-v2\n  [*] --> A", "erDiagram\n  A ||--o{ B : has",
+                       "gantt\n  dateFormat YYYY-MM-DD\n  section S\n  T :a, 2026-10-01, 2d", "pie\n  \"A\" : 1\n  \"B\" : 2", "mindmap\n  root((Orb))\n    A\n    B"] {
+            let result = await renderer.render(source)
+            guard case .svg = result else { return XCTFail("\(source) did not render: \(result)") }
+        }
+    }
 }
