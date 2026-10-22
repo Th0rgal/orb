@@ -162,10 +162,17 @@ fn persisted_terminal_reason(reason: Option<&str>) -> Option<TerminalReason> {
 }
 
 fn retry_disposition(task: &BoardTask, preflight: &RetryPreflight) -> RetryDisposition {
-    if task.attempts > 0 && matches!(preflight, RetryPreflight::Merged { .. }) {
-        RetryDisposition::ParkForBossReview
-    } else {
+    let merged = task.attempts > 0 && matches!(preflight, RetryPreflight::Merged { .. });
+    if crate::orb_spec::board_retry_allowed(crate::orb_spec::BoardRetry {
+        attempts: 0,
+        max_attempts: MAX_ATTEMPTS,
+        requires_external_recovery: false,
+        preflight_merged: merged,
+        chatgpt_ui_blocked: false,
+    }) {
         RetryDisposition::Spawn
+    } else {
+        RetryDisposition::ParkForBossReview
     }
 }
 
@@ -199,26 +206,20 @@ const RETRY_PROMPT_BINDING_GUIDANCE: &str = "[Retry guidance] The prior attempt 
 fn has_outcome_contract(task: &BoardTask) -> bool {
     task.acceptance_criteria
         .iter()
-        .any(|criterion| !criterion.trim().is_empty())
+        .any(|c| !c.trim().is_empty())
         || task
             .verification_command
             .as_deref()
-            .map(str::trim)
-            .is_some_and(|command| !command.is_empty())
+            .is_some_and(|c| !c.trim().is_empty())
 }
 
 fn retry_prompt(task: &BoardTask, preflight: &RetryPreflight) -> String {
     let mut sections: Vec<String> = Vec::new();
-
     let branch_guard = match preflight {
         RetryPreflight::Surviving {
             branch_state,
             pr_number,
         } => Some((branch_state.as_str(), *pr_number)),
-        // A spawn message can be dropped after the live preflight result was
-        // computed. The zombie re-kick only has persisted task metadata, so
-        // retain the same conservative branch guard for every declared retry
-        // rather than falling back to the original unguarded prompt.
         RetryPreflight::NothingFound
             if task.attempts > 1
                 && task.prior_worker_mission_id.is_some()
@@ -229,44 +230,34 @@ fn retry_prompt(task: &BoardTask, preflight: &RetryPreflight) -> String {
         _ => None,
     };
     if let Some((branch_state, pr_number)) = branch_guard {
-        let pr = pr_number
-            .map(|number| format!("#{number}"))
-            .unwrap_or_else(|| "none".to_string());
+        let pr = pr_number.map_or_else(|| "none".to_string(), |n| format!("#{n}"));
         sections.push(format!(
             "[Prior-attempt digest]\nPrior worker: {}\nPrior outcome: {}\nPrior result: {}\nBranch: {} ({branch_state})\nPR: {pr}\n\
              Continue the prior attempt: checkout the existing branch, never recreate from master, never force-push.",
-            task.prior_worker_mission_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-            task.prior_outcome
-                .map(|outcome| outcome.to_string())
-                .unwrap_or_else(|| "unknown".into()),
+            task.prior_worker_mission_id.map_or_else(|| "unknown".into(), |id| id.to_string()),
+            task.prior_outcome.map_or_else(|| "unknown".into(), |o| o.to_string()),
             task.prior_result_digest.as_deref().unwrap_or("unavailable"),
             task.branch.as_deref().unwrap_or("unknown"),
         ));
     } else if task.attempts > 1 {
-        // No branch to guard, but this is still an automatic retry: surface
-        // what the prior attempt produced so the retry reacts to the failure
-        // instead of rediscovering it.
         if let Some(digest) = task.prior_result_digest.as_deref() {
             sections.push(format!(
                 "[Prior-attempt digest]\nPrior outcome: {}\nPrior result: {digest}",
                 task.prior_outcome
-                    .map(|outcome| outcome.to_string())
-                    .unwrap_or_else(|| "unknown".into()),
+                    .map_or_else(|| "unknown".into(), |o| o.to_string()),
             ));
         }
     }
-
     if task.attempts > 1 {
-        let guidance = if has_outcome_contract(task) {
-            RETRY_RELAXATION_GUIDANCE
-        } else {
-            RETRY_PROMPT_BINDING_GUIDANCE
-        };
-        sections.push(guidance.to_string());
+        sections.push(
+            if has_outcome_contract(task) {
+                RETRY_RELAXATION_GUIDANCE
+            } else {
+                RETRY_PROMPT_BINDING_GUIDANCE
+            }
+            .to_string(),
+        );
     }
-
     sections.push(task.prompt.clone());
     sections.join("\n\n")
 }
@@ -275,17 +266,19 @@ fn repository_identity(repository: &str) -> Option<String> {
     if !Path::new(repository).exists() {
         return repository.contains('/').then(|| repository.to_string());
     }
-    let output = Command::new("git")
+    let out = Command::new("git")
         .current_dir(repository)
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let trimmed = url.trim_end_matches(".git");
+    let trimmed = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .trim_end_matches(".git")
+        .to_string();
     let slug = trimmed
         .split("github.com/")
         .nth(1)
-        .or_else(|| trimmed.rsplit_once(':').map(|(_, tail)| tail))?;
+        .or_else(|| trimmed.rsplit_once(':').map(|(_, t)| t))?;
     Some(slug.trim_start_matches('/').to_string())
 }
 
@@ -336,39 +329,31 @@ async fn retry_preflight(task: &BoardTask) -> RetryPreflight {
                 .filter(|path| Path::new(path).exists())
         };
         let local_sha = local_repo.and_then(|repo| {
-            let output = Command::new("git")
+            let out = Command::new("git")
                 .current_dir(repo)
                 .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
                 .output()
                 .ok()?;
-            output
-                .status
+            out.status
                 .success()
-                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
         });
-        let remote_sha = local_repo.and_then(|repo| {
-            match Command::new("git")
-                .current_dir(repo)
-                .args(["ls-remote", "--exit-code", "origin", &format!("refs/heads/{branch}")])
-                .output()
-            {
-                Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-                    .split_whitespace()
-                    .next()
-                    .map(str::to_string),
-                Ok(_) => None,
-                Err(error) => {
-                    tracing::warn!(task = %task_key, "board: retry remote branch lookup failed: {error}");
-                    None
-                }
+        let remote_sha = local_repo.and_then(|repo| match Command::new("git")
+            .current_dir(repo)
+            .args(["ls-remote", "--exit-code", "origin", &format!("refs/heads/{branch}")])
+            .output()
+        {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).split_whitespace().next().map(str::to_string),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(task = %task_key, "board: retry remote branch lookup failed: {error}");
+                None
             }
         });
-        let local_exists = local_sha.is_some();
-        let remote_exists = remote_sha.is_some();
+        let (local_exists, remote_exists) = (local_sha.is_some(), remote_sha.is_some());
         let current_branch_sha = remote_sha.as_deref().or(local_sha.as_deref());
 
-        let mut open_pr = None;
-        let mut merged_pr = None;
+        let (mut open_pr, mut merged_pr) = (None, None);
         if let Some(identity) = repository_identity(&repository) {
             match Command::new("gh")
                 .args([
@@ -387,17 +372,18 @@ async fn retry_preflight(task: &BoardTask) -> RetryPreflight {
                 ])
                 .output()
             {
-                Ok(output) if output.status.success() => {
-                    if let Ok(rows) =
-                        serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+                Ok(out) if out.status.success() => {
+                    if let Ok(rows) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
                     {
                         (open_pr, merged_pr) = retry_pr_state(&rows, current_branch_sha);
                     }
                 }
-                Ok(output) => tracing::warn!(task = %task_key, status = %output.status,
-                    "board: retry PR lookup failed; continuing best-effort"),
-                Err(error) => tracing::warn!(task = %task_key,
-                    "board: retry PR lookup unavailable; continuing best-effort: {error}"),
+                Ok(out) => {
+                    tracing::warn!(task = %task_key, status = %out.status, "board: retry PR lookup failed; continuing best-effort")
+                }
+                Err(error) => {
+                    tracing::warn!(task = %task_key, "board: retry PR lookup unavailable; continuing best-effort: {error}")
+                }
             }
         }
         // An open PR always represents the current continuation. A historical
@@ -540,74 +526,51 @@ fn has_delivery_evidence(output: &str) -> bool {
     let explicit_delivery = output
         .lines()
         .rev()
-        .find(|line| !line.trim().is_empty())
-        .is_some_and(|line| {
-            line.trim_start()
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| {
+            l.trim_start()
                 .trim_start_matches("**")
                 .to_ascii_uppercase()
                 .starts_with("DELIVERED:")
         });
 
-    // Normalize common typography produced by rich-text clients before
-    // matching progress-only replies. Without this, `I’ll` and an em dash
-    // after an acknowledgement bypass the ASCII-oriented intent checks.
     let normalized = output
         .trim()
         .to_lowercase()
         .replace(['\u{2018}', '\u{2019}'], "'")
         .replace(['\u{2013}', '\u{2014}'], "-");
     let mut progress = normalized.as_str();
-    // Longest phrases first so `sure thing` is removed as one acknowledgement
-    // rather than leaving `thing, ...` in front of a future-only reply.
-    loop {
-        let mut stripped = false;
-        for prefix in [
-            "acknowledged",
-            "sounds good",
-            "sure thing",
-            "of course",
-            "absolutely",
-            "certainly",
-            "understood",
-            "got it",
-            "okay",
-            "sure",
-            "ok",
-        ] {
-            if let Some(rest) = progress.strip_prefix(prefix) {
-                let boundary = match rest.chars().next() {
-                    Some(c) => c.is_ascii_punctuation() || c.is_whitespace(),
-                    None => true,
-                };
-                if boundary {
-                    progress = rest.trim_start_matches(|c: char| {
-                        c.is_ascii_punctuation() || c.is_whitespace()
-                    });
-                    stripped = true;
-                    break;
-                }
-            }
-        }
-        if !stripped {
-            break;
-        }
+    const ACKS: &[&str] = &[
+        "acknowledged",
+        "sounds good",
+        "sure thing",
+        "of course",
+        "absolutely",
+        "certainly",
+        "understood",
+        "got it",
+        "okay",
+        "sure",
+        "ok",
+    ];
+    while let Some(rest) = ACKS.iter().find_map(|p| {
+        progress.strip_prefix(p).filter(|r| {
+            r.chars()
+                .next()
+                .is_none_or(|c| c.is_ascii_punctuation() || c.is_whitespace())
+        })
+    }) {
+        progress = rest.trim_start_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
     }
     if progress.is_empty() {
         return false;
     }
-
-    // Check this after stripping an acknowledgement so replies such as
-    // `OK, I will mark this complete: ...` retain the documented legacy
-    // completion shape.
     if let Some(summary) = progress.strip_prefix("i will mark this complete:") {
         progress = summary.trim_start();
         if progress.is_empty() {
             return false;
         }
     }
-
-    // First-person remaining-work statements are future intent even when an
-    // investigative update precedes them (`Found the cause; I'll fix it`).
     let explicit_future_intent = [
         "i'll",
         "i will",
@@ -621,8 +584,6 @@ fn has_delivery_evidence(output: &str) -> bool {
     let action_only_prefix = ["start on", "inspect it", "look into", "take a look"]
         .iter()
         .any(|phrase| progress.starts_with(phrase));
-    // `Get Started` is often a UI label. Only the standalone/action forms are
-    // intent; `Get Started button fixed` remains a valid legacy summary.
     let get_started_intent = progress == "get started"
         || progress.starts_with("get started on ")
         || progress.starts_with("get started with ");
@@ -638,7 +599,7 @@ fn has_delivery_evidence(output: &str) -> bool {
 
     // Never let a positive keyword inside a negated/unfinished statement act
     // as delivery evidence (`not fixed`, `not complete yet`, `unfinished`).
-    const NON_COMPLETION_MARKERS: [&str; 13] = [
+    if [
         " not complete",
         " not completed",
         " not done",
@@ -652,10 +613,9 @@ fn has_delivery_evidence(output: &str) -> bool {
         " needs to ",
         " continue ",
         " remaining work",
-    ];
-    if NON_COMPLETION_MARKERS
-        .iter()
-        .any(|marker| progress.contains(marker))
+    ]
+    .iter()
+    .any(|m| progress.contains(m))
     {
         return false;
     }
@@ -664,11 +624,7 @@ fn has_delivery_evidence(output: &str) -> bool {
         return true;
     }
 
-    // Legacy workers did not yet emit `DELIVERED:`, but still need positive
-    // completion evidence. A blacklist-only fallback turns arbitrary chatter
-    // (thanks, acknowledgements, partial observations) into Success and can
-    // unblock dependent tasks without any delivered work.
-    const COMPLETION_PREFIXES: [&str; 22] = [
+    [
         "added",
         "analyzed",
         "changed",
@@ -691,33 +647,31 @@ fn has_delivery_evidence(output: &str) -> bool {
         "reviewed",
         "updated",
         "verified",
-    ];
-    const COMPLETION_MARKERS: [&str; 18] = [
-        " is complete",
-        " are complete",
-        " was completed",
-        " were completed",
-        " has been completed",
-        " have been completed",
-        " test passes",
-        " tests pass",
-        " build passes",
-        " build succeeded",
-        " pr merged",
-        " commit pushed",
-        " fixed",
-        " implemented",
-        " resolved",
-        " updated",
-        " verified with",
-        " verified by",
-    ];
-    COMPLETION_PREFIXES
+    ]
+    .iter()
+    .any(|p| progress.starts_with(p))
+        || [
+            " is complete",
+            " are complete",
+            " was completed",
+            " were completed",
+            " has been completed",
+            " have been completed",
+            " test passes",
+            " tests pass",
+            " build passes",
+            " build succeeded",
+            " pr merged",
+            " commit pushed",
+            " fixed",
+            " implemented",
+            " resolved",
+            " updated",
+            " verified with",
+            " verified by",
+        ]
         .iter()
-        .any(|prefix| progress.starts_with(prefix))
-        || COMPLETION_MARKERS
-            .iter()
-            .any(|marker| progress.contains(marker))
+        .any(|m| progress.contains(m))
 }
 
 fn contains_bounded_phrase(text: &str, phrase: &str) -> bool {
@@ -726,13 +680,13 @@ fn contains_bounded_phrase(text: &str, phrase: &str) -> bool {
             || text[..start]
                 .chars()
                 .next_back()
-                .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
         let end = start + matched.len();
         let after_ok = end == text.len()
             || text[end..]
                 .chars()
                 .next()
-                .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
         before_ok && after_ok
     })
 }
@@ -1502,8 +1456,17 @@ pub async fn scheduler_pass(
     }
     let total_running =
         snapshot.running_count + usize::from(snapshot.main_running) + external_running;
-    let spawnable_cap = max_parallel.saturating_sub(RESERVED_BOSS_SLOTS);
-    let mut available = spawnable_cap.saturating_sub(total_running);
+    let mut available = if crate::orb_spec::board_slots_available(crate::orb_spec::BoardSlots {
+        max_parallel: max_parallel as u32,
+        reserved_boss_slots: RESERVED_BOSS_SLOTS as u32,
+        total_running: total_running as u32,
+    }) {
+        max_parallel
+            .saturating_sub(RESERVED_BOSS_SLOTS)
+            .saturating_sub(total_running)
+    } else {
+        0
+    };
 
     for (boss_id, tasks) in board_tasks {
         // --- Dead-boss teardown: `list_active_board_missions` keys only on task
@@ -2170,9 +2133,13 @@ fn eligible_for_automatic_retry(
     retry: AutomaticRetry,
 ) -> bool {
     outcome == BoardTaskOutcome::Failed
-        && task.attempts < MAX_ATTEMPTS
-        && retry != AutomaticRetry::Suppressed
-        && !task.risk_class.eq_ignore_ascii_case("high")
+        && crate::orb_spec::board_retry_allowed(crate::orb_spec::BoardRetry {
+            attempts: task.attempts,
+            max_attempts: MAX_ATTEMPTS,
+            requires_external_recovery: task.risk_class.eq_ignore_ascii_case("high"),
+            preflight_merged: false,
+            chatgpt_ui_blocked: retry == AutomaticRetry::Suppressed,
+        })
 }
 
 /// Settle a task: persist outcome + result digest, and retry failures once.

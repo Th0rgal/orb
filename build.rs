@@ -1,4 +1,211 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command};
+
+fn find_elan_tool(tool_name: &str) -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("ORB_LEAN") {
+        let path = PathBuf::from(explicit);
+        if path.is_file() && path.file_name().and_then(|s| s.to_str()) == Some(tool_name) {
+            return Some(path);
+        }
+    }
+    if let Ok(path_var) = env::var("PATH") {
+        for dir in env::split_paths(&path_var) {
+            let cand = dir.join(tool_name);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    let mut roots = Vec::new();
+    if let Ok(elan_home) = env::var("ELAN_HOME") {
+        roots.push(PathBuf::from(elan_home));
+    }
+    if let Ok(home) = env::var("HOME") {
+        roots.push(PathBuf::from(home).join(".elan"));
+    }
+    roots.push(PathBuf::from("/var/lib/sandboxed-node/caches/elan"));
+    for root in roots {
+        let bin_cand = root.join("bin").join(tool_name);
+        if bin_cand.is_file() {
+            return Some(bin_cand);
+        }
+        let tc_dir = root.join("toolchains");
+        if let Ok(entries) = fs::read_dir(&tc_dir) {
+            for entry in entries.flatten() {
+                let cand = entry.path().join("bin").join(tool_name);
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    None
+}
+
+const ORB_EXPORTS: &[&str] = &[
+    "orb_verify_writer_reuse",
+    "orb_verify_lease_mode",
+    "orb_verify_track_hold",
+    "orb_verify_repo_disjoint",
+    "orb_verify_remote_outbox",
+    "orb_verify_board_slots",
+    "orb_verify_board_retry",
+    "orb_verify_job_transition",
+    "orb_verify_bundle_budget",
+    "orb_verify_token_rotation",
+    "leansys_verify_log_window",
+    "leansys_mix64_word",
+];
+
+fn build_orb_spec_cabi(root: &PathBuf, out_dir: &PathBuf) {
+    println!("cargo:rerun-if-changed=lean/Orb/Kernel.lean");
+    println!("cargo:rerun-if-changed=lean/Orb/Spec.lean");
+    println!("cargo:rerun-if-changed=lean/lakefile.lean");
+    println!("cargo:rerun-if-changed=lean/lean-toolchain");
+    let lean_dir = root.join("lean");
+    let kernel_lean = lean_dir.join("Orb/Kernel.lean");
+    let spec_lean = lean_dir.join("Orb/Spec.lean");
+    let out_orb_dir = out_dir.join("Orb");
+    fs::create_dir_all(&out_orb_dir)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", out_orb_dir.display()));
+    let kernel_olean = out_orb_dir.join("Kernel.olean");
+    let spec_olean = out_orb_dir.join("Spec.olean");
+    let spec_c_path = out_dir.join("Orb_Kernel.c");
+    let obj_path = out_dir.join("Orb_Kernel.o");
+    let gc_obj_path = out_dir.join("Orb_Kernel_gc.o");
+    let lib_path = out_dir.join("liborb_spec_cabi.a");
+
+    let lean_bin = find_elan_tool("lean").unwrap_or_else(|| {
+        panic!("lean not found; set ORB_LEAN or install elan (leanprover/lean4:v4.31.0)")
+    });
+
+    let kernel_status = Command::new(&lean_bin)
+        .current_dir(&lean_dir)
+        .arg("Orb/Kernel.lean")
+        .arg("-o")
+        .arg(&kernel_olean)
+        .arg("-c")
+        .arg(&spec_c_path)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run lean on Orb/Kernel.lean: {e}"));
+    assert!(
+        kernel_status.success() && spec_c_path.is_file(),
+        "lean failed to compile Orb/Kernel.lean to C"
+    );
+
+    let spec_status = Command::new(&lean_bin)
+        .current_dir(&lean_dir)
+        .env("LEAN_PATH", out_dir)
+        .arg("Orb/Spec.lean")
+        .arg("-o")
+        .arg(&spec_olean)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run lean on Orb/Spec.lean: {e}"));
+    assert!(
+        spec_status.success() && spec_olean.is_file(),
+        "lean failed to typecheck Orb/Spec.lean (0 sorryAx required)"
+    );
+
+    let lean_prefix = Command::new(&lean_bin)
+        .arg("--print-prefix")
+        .output()
+        .unwrap_or_else(|e| panic!("lean --print-prefix failed: {e}"));
+    assert!(lean_prefix.status.success(), "lean --print-prefix failed");
+    let prefix = String::from_utf8_lossy(&lean_prefix.stdout)
+        .trim()
+        .to_string();
+    let include = PathBuf::from(&prefix).join("include");
+
+    let mut compiled = false;
+    for compiler in ["cc", "clang", "gcc"] {
+        if let Ok(st) = Command::new(compiler)
+            .args([
+                "-O3",
+                "-fPIC",
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-c",
+            ])
+            .arg(format!("-I{}", include.display()))
+            .arg(&spec_c_path)
+            .arg("-o")
+            .arg(&obj_path)
+            .status()
+        {
+            if st.success() && obj_path.is_file() {
+                compiled = true;
+                break;
+            }
+        }
+    }
+    assert!(compiled, "failed to compile Orb/Kernel.c");
+
+    let mut ld_args = vec!["-r".to_string(), "--gc-sections".to_string()];
+    for sym in ORB_EXPORTS {
+        ld_args.push("-u".to_string());
+        ld_args.push((*sym).to_string());
+    }
+    ld_args.push(obj_path.display().to_string());
+    ld_args.push("-o".to_string());
+    ld_args.push(gc_obj_path.display().to_string());
+    let ld_status = Command::new("ld")
+        .args(&ld_args)
+        .status()
+        .unwrap_or_else(|e| panic!("ld --gc-sections failed: {e}"));
+    assert!(
+        ld_status.success() && gc_obj_path.is_file(),
+        "ld --gc-sections failed"
+    );
+    let _ = Command::new("strip")
+        .args(["--strip-unneeded"])
+        .arg(&gc_obj_path)
+        .status();
+
+    let nm_out = Command::new("nm")
+        .args(["-P", "-u"])
+        .arg(&gc_obj_path)
+        .output()
+        .unwrap_or_else(|e| panic!("nm failed: {e}"));
+    let undefined = String::from_utf8_lossy(&nm_out.stdout);
+    assert!(
+        undefined.trim().is_empty(),
+        "Orb C-ABI object has undefined symbols:\n{undefined}"
+    );
+    let defined = Command::new("nm")
+        .args(["-P"])
+        .arg(&gc_obj_path)
+        .output()
+        .unwrap_or_else(|e| panic!("nm failed: {e}"));
+    let defined_text = String::from_utf8_lossy(&defined.stdout);
+    for sym in ORB_EXPORTS {
+        assert!(
+            defined_text.lines().any(|line| {
+                let mut parts = line.split_whitespace();
+                parts.next() == Some(*sym) && parts.next() == Some("T")
+            }),
+            "missing defined export {sym}"
+        );
+    }
+
+    let mut archived = false;
+    for ar_tool in ["llvm-ar", "ar"] {
+        if let Ok(st) = Command::new(ar_tool)
+            .arg("rcs")
+            .arg(&lib_path)
+            .arg(&gc_obj_path)
+            .status()
+        {
+            if st.success() && lib_path.is_file() {
+                archived = true;
+                break;
+            }
+        }
+    }
+    assert!(archived, "failed to archive liborb_spec_cabi.a");
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=orb_spec_cabi");
+    let _ = (kernel_lean, spec_lean);
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=shared");
@@ -12,6 +219,8 @@ fn main() {
     );
     println!("cargo:rerun-if-changed=catalog");
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    build_orb_spec_cabi(&root, &out_dir);
     let mut files: Vec<_> = fs::read_dir(root.join("catalog/snapshots"))
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -23,9 +232,5 @@ fn main() {
         generated.push_str(&format!("include_str!({:?}),\n", file));
     }
     generated.push_str("];\n");
-    fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("model_snapshots.rs"),
-        generated,
-    )
-    .unwrap();
+    fs::write(out_dir.join("model_snapshots.rs"), generated).unwrap();
 }

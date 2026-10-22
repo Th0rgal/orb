@@ -49,16 +49,15 @@ pub(crate) fn canonical_github_repository(raw: &str) -> Option<String> {
             break;
         }
     }
-    if value.contains("://") || value.contains('@') || value.contains(':') {
+    if value.contains("://") || value.contains(['@', ':']) {
         return None;
     }
     let value = value.strip_suffix(".git").unwrap_or(&value);
     let mut segments = value.split('/');
     let (owner, repo, rest) = (segments.next()?, segments.next()?, segments.next());
-    let valid = |segment: &str| {
-        !segment.is_empty()
-            && segment
-                .chars()
+    let valid = |s: &str| {
+        !s.is_empty()
+            && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
     (rest.is_none() && valid(owner) && valid(repo)).then(|| format!("{owner}/{repo}"))
@@ -109,15 +108,28 @@ impl Snapshot {
     /// None proves that no enumerated store knows this owner. Some(false)
     /// proves all known presentations terminal and no unresolved execution.
     pub(crate) fn holds_track(&self, id: Uuid) -> Option<bool> {
-        if self.unresolved.contains(&id) || self.queued_assignments.contains(&id) {
-            return Some(true);
+        let in_unresolved = self.unresolved.contains(&id);
+        let in_queued = self.queued_assignments.contains(&id);
+        let owners = self.owners.get(&id);
+        if !in_unresolved && !in_queued && owners.is_none() {
+            return None;
         }
-        self.owners.get(&id).map(|owners| {
-            owners.iter().any(|owner| {
-                !(owner.status.is_terminal() || owner.status == MissionStatus::Acknowledged)
-                    || native_goal_holds_ownership(owner.status, owner.reason.as_deref())
-            })
-        })
+        let has_live = owners.is_some_and(|list| {
+            list.iter()
+                .any(|o| !(o.status.is_terminal() || o.status == MissionStatus::Acknowledged))
+        });
+        let native_holds = owners.is_some_and(|list| {
+            list.iter()
+                .any(|o| native_goal_holds_ownership(o.status, o.reason.as_deref()))
+        });
+        Some(crate::orb_spec::track_hold_active(
+            crate::orb_spec::TrackHold {
+                in_unresolved,
+                in_queued,
+                has_live_owner: has_live,
+                native_goal_holds: native_holds,
+            },
+        ))
     }
 
     /// Whether this mission's accepted remote work can touch `target`'s
@@ -131,13 +143,16 @@ impl Snapshot {
             return false;
         };
         repositories.iter().any(|repository| {
-            match (
-                repository.as_deref().and_then(canonical_github_repository),
-                target_repository,
-            ) {
-                (Some(repository), Some(target)) => repository == target,
-                _ => true,
-            }
+            let parsed = repository.as_deref().and_then(canonical_github_repository);
+            let same = parsed
+                .as_deref()
+                .zip(target_repository)
+                .is_some_and(|(r, t)| r == t);
+            !crate::orb_spec::repo_disjoint(crate::orb_spec::RepoDisjoint {
+                handle_repo_known: parsed.is_some(),
+                target_repo_known: target_repository.is_some(),
+                same_repo: same,
+            })
         })
     }
 
@@ -210,14 +225,14 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
     );
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([], |r| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -227,7 +242,7 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
         let status =
             serde_json::from_value(serde_json::Value::String(status)).map_err(|e| e.to_string())?;
         let tags: Vec<String> = tags
-            .map(|tags| serde_json::from_str(&tags))
+            .map(|t| serde_json::from_str(&t))
             .transpose()
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
@@ -245,10 +260,10 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
         let mut stmt = conn
             .prepare("SELECT mission_id FROM mission_runs WHERE execution_state <> 'terminal'")
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
+        for row in stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+        {
             snapshot.unresolved.insert(
                 Uuid::parse_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?,
             );
@@ -258,10 +273,10 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
         let mut stmt = conn
             .prepare("SELECT payload FROM control_queue")
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
+        for row in stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+        {
             snapshot.queue(&row.map_err(|e| e.to_string())?)?;
         }
     }

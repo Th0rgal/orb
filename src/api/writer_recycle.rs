@@ -58,39 +58,45 @@ pub fn apply_writer_reuse(
     stored: &WriterIdentity,
     patch: &WriterIdentityPatch,
 ) -> Result<WriterIdentity, RecycleRefusal> {
-    if let Some(expected) = &patch.continue_identity {
-        if expected.track.trim().is_empty()
-            || stored.track.as_deref() != Some(expected.track.as_str())
-            || stored.project != expected.project
-            || stored.github_pr != expected.github_pr
-            || patch.title.is_some()
-            || patch.github_pr.is_some()
-            || patch.track.is_some()
-        {
-            return Err(RecycleRefusal {
-                error: "writer_identity_stale",
-                message: "continuation must match the stored project, nonempty track and github_pr exactly and cannot include identity updates; reread the mission, or explicitly retag different work".into(),
-            });
-        }
-        // The caller has named the work structurally. PRs/campaigns in prose
-        // can now be exclusions or collaborators; never infer ownership from
-        // those references. The normal writer capability/lease checks remain.
-        return Ok(stored.clone());
-    }
-    let work_changed = dispatch_is_different_work(stored, patch);
+    let has_continue = patch.continue_identity.is_some();
+    let (cont_track_nonempty, cont_matches_stored) = match &patch.continue_identity {
+        Some(expected) => (
+            !expected.track.trim().is_empty(),
+            stored.track.as_deref() == Some(expected.track.as_str())
+                && stored.project == expected.project
+                && stored.github_pr == expected.github_pr,
+        ),
+        None => (false, false),
+    };
+    let has_any_edit = patch.title.is_some() || patch.github_pr.is_some() || patch.track.is_some();
+    let work_changed = !has_continue && dispatch_is_different_work(stored, patch);
     let identity_updated = patch.github_pr.is_some() || patch.track.is_some();
-    if work_changed && !identity_updated {
+
+    if !crate::orb_spec::writer_reuse_allowed(crate::orb_spec::WriterReuse {
+        has_continue,
+        cont_track_nonempty,
+        cont_matches_stored,
+        has_any_edit,
+        work_changed,
+        identity_updated,
+    }) {
         return Err(RecycleRefusal {
             error: "writer_identity_stale",
-            message: format!(
-                "refusing silent recycle of writer tagged github_pr={} track={}; \
-                 retag github_pr/track (or clear them) before dispatching different work",
-                stored.github_pr.as_deref().unwrap_or("-"),
-                stored.track.as_deref().unwrap_or("-"),
-            ),
+            message: if has_continue {
+                "continuation must match the stored project, nonempty track and github_pr exactly and cannot include identity updates; reread the mission, or explicitly retag different work".into()
+            } else {
+                format!(
+                    "refusing silent recycle of writer tagged github_pr={} track={}; \
+                     retag github_pr/track (or clear them) before dispatching different work",
+                    stored.github_pr.as_deref().unwrap_or("-"),
+                    stored.track.as_deref().unwrap_or("-"),
+                )
+            },
         });
     }
-
+    if has_continue {
+        return Ok(stored.clone());
+    }
     Ok(WriterIdentity {
         project: stored.project.clone(),
         title: merge_field(&stored.title, &patch.title),
@@ -102,15 +108,11 @@ pub fn apply_writer_reuse(
 fn merge_field(stored: &Option<String>, patch: &Option<Option<String>>) -> Option<String> {
     match patch {
         None => stored.clone(),
-        Some(None) => None,
-        Some(Some(value)) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }
+        Some(inner) => inner
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -121,39 +123,21 @@ fn dispatch_is_different_work(stored: &WriterIdentity, patch: &WriterIdentityPat
         .or(patch.title.as_ref().and_then(|inner| inner.as_deref()))
         .unwrap_or("")
         .to_ascii_lowercase();
-    if hint.is_empty() {
+    if hint.is_empty() || !stored_has_writer_identity(stored) {
         return false;
     }
-
-    // An untagged mission has no previous identity to protect. The first
-    // prompt on a new writer routinely names a PR (`#105`) or campaign
-    // (`P-TOPUP-2`); treating that as a silent recycle 409s the operator's
-    // opening message (mission 374fac82, 2026-08-19).
-    if !stored_has_writer_identity(stored) {
-        return false;
-    }
-
     let stored_pr = stored.github_pr.as_deref().map(canonical_github_pr);
-    let stored_pr_number = stored_pr
-        .as_ref()
-        .and_then(|canonical| canonical.rsplit('#').next())
-        .map(str::to_string);
-    // A follow-up that never names work ("fix the failing test") is the same
-    // writer continuing. Only a *named* different PR / campaign is a retask.
-    for number in pr_numbers_in(&hint) {
-        if stored_pr_number.as_deref() != Some(number.as_str()) {
-            return true;
-        }
+    let stored_pr_number = stored_pr.as_deref().and_then(|c| c.rsplit('#').next());
+    if pr_numbers_in(&hint)
+        .iter()
+        .any(|n| stored_pr_number != Some(n.as_str()))
+    {
+        return true;
     }
-
     let stored_track = stored.track.as_deref().unwrap_or("").to_ascii_lowercase();
-    for token in campaign_tokens_in(&hint) {
-        if !stored_identity_covers(&stored_track, stored_pr.as_deref(), &token) {
-            return true;
-        }
-    }
-
-    false
+    campaign_tokens_in(&hint)
+        .iter()
+        .any(|t| !stored_identity_covers(&stored_track, stored_pr.as_deref(), t))
 }
 
 fn pr_numbers_in(hint: &str) -> Vec<String> {
@@ -161,38 +145,27 @@ fn pr_numbers_in(hint: &str) -> Vec<String> {
     let mut numbers = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
-            let (number, next) = take_digits(hint, i + 1);
+        let digits_start = if bytes[i] == b'#' {
+            Some(i + 1)
+        } else if word_at(bytes, i, b"pr")
+            && bytes
+                .get(i + 2)
+                .is_some_and(|b| matches!(b, b'-' | b' ' | b'#'))
+        {
+            Some(i + 3)
+        } else if word_at(bytes, i, b"pull") && bytes.get(i + 4) == Some(&b'/') {
+            Some(i + 5)
+        } else {
+            None
+        };
+        if let Some(start) = digits_start.filter(|&s| bytes.get(s).is_some_and(u8::is_ascii_digit))
+        {
+            let (number, next) = take_digits(hint, start);
             numbers.push(number);
             i = next;
-            continue;
+        } else {
+            i += 1;
         }
-        if word_at(bytes, i, b"pr") {
-            let after = i + 2;
-            if after < bytes.len() && matches!(bytes[after], b'-' | b' ' | b'#') {
-                let digits_at = after + 1;
-                if digits_at < bytes.len() && bytes[digits_at].is_ascii_digit() {
-                    let (number, next) = take_digits(hint, digits_at);
-                    numbers.push(number);
-                    i = next;
-                    continue;
-                }
-            }
-        }
-        if word_at(bytes, i, b"pull") {
-            let after = i + 4;
-            if after < bytes.len()
-                && bytes[after] == b'/'
-                && after + 1 < bytes.len()
-                && bytes[after + 1].is_ascii_digit()
-            {
-                let (number, next) = take_digits(hint, after + 1);
-                numbers.push(number);
-                i = next;
-                continue;
-            }
-        }
-        i += 1;
     }
     numbers
 }
@@ -204,69 +177,50 @@ fn campaign_tokens_in(hint: &str) -> Vec<String> {
     while i < bytes.len() {
         let at_boundary = i == 0 || !bytes[i.saturating_sub(1)].is_ascii_alphanumeric();
         if at_boundary
-            && bytes[i] == b'p'
-            && i + 2 < bytes.len()
-            && bytes[i + 1] == b'-'
-            && bytes[i + 2].is_ascii_alphabetic()
+            && bytes
+                .get(i..i + 3)
+                .is_some_and(|w| w[0] == b'p' && w[1] == b'-' && w[2].is_ascii_alphabetic())
         {
             let mut end = i + 2;
             while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-') {
                 end += 1;
             }
-            let mut trimmed = end;
-            while trimmed > i + 2 && bytes[trimmed - 1] == b'-' {
-                trimmed -= 1;
-            }
-            tokens.push(hint[i..trimmed].to_string());
+            let trimmed = hint[i..end].trim_end_matches('-');
+            tokens.push(trimmed.to_string());
             i = end;
-            continue;
+        } else {
+            i += 1;
         }
-        i += 1;
     }
     tokens
 }
 
 fn stored_has_writer_identity(stored: &WriterIdentity) -> bool {
-    field_nonempty(&stored.github_pr) || field_nonempty(&stored.track)
-}
-
-fn field_nonempty(value: &Option<String>) -> bool {
-    value.as_deref().is_some_and(|s| !s.trim().is_empty())
+    [&stored.github_pr, &stored.track]
+        .into_iter()
+        .any(|v| v.as_deref().is_some_and(|s| !s.trim().is_empty()))
 }
 
 fn stored_identity_covers(track: &str, github_pr: Option<&str>, token: &str) -> bool {
-    if !track.is_empty() {
-        let track_norm = track.replace('_', "-");
-        if track == token
-            || track_norm == token
-            || track.contains(token)
+    let norm = track.replace('_', "-");
+    (!track.is_empty()
+        && (track.contains(token)
             || token.contains(track)
-            || track_norm.starts_with(token)
-            || token.starts_with(track_norm.as_str())
-        {
-            return true;
-        }
-    }
-    github_pr.is_some_and(|pr| pr.to_ascii_lowercase().contains(token))
+            || norm.starts_with(token)
+            || token.starts_with(&norm)))
+        || github_pr.is_some_and(|pr| pr.to_ascii_lowercase().contains(token))
 }
 
 fn word_at(bytes: &[u8], i: usize, word: &[u8]) -> bool {
-    if i + word.len() > bytes.len() {
-        return false;
-    }
-    if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
-        return false;
-    }
-    bytes[i..i + word.len()].eq_ignore_ascii_case(word)
+    (i == 0 || !bytes[i - 1].is_ascii_alphanumeric())
+        && bytes
+            .get(i..i + word.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(word))
 }
 
 fn take_digits(hint: &str, start: usize) -> (String, usize) {
-    let bytes = hint.as_bytes();
-    let mut end = start;
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    (hint[start..end].to_string(), end)
+    let len = hint[start..].bytes().take_while(u8::is_ascii_digit).count();
+    (hint[start..start + len].to_string(), start + len)
 }
 
 #[cfg(test)]
