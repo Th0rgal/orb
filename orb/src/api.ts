@@ -463,7 +463,10 @@ export interface ProviderUsage {
   account_email?: string | null;
   account_name?: string | null;
   organization?: string | null;
+  organization_id?: string | null;
   unified_status?: string;
+  unified_reset?: number | string;
+  unified_representative_claim?: string;
   unified_5h_utilization?: number;
   unified_5h_reset?: string;
   unified_5h_status?: string;
