@@ -24,6 +24,7 @@ struct FakeProvider {
     created: AtomicUsize,
     destroyed: std::sync::Mutex<Vec<String>>,
     listed: std::sync::Mutex<Vec<ProviderMachine>>,
+    execs: std::sync::Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -59,7 +60,8 @@ impl ManagedProvider for FakeProvider {
     async fn write_file(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
         Ok(())
     }
-    async fn exec(&self, _: &str, _: &str, _: u64) -> Result<Value, String> {
+    async fn exec(&self, _: &str, command: &str, _: u64) -> Result<Value, String> {
+        self.execs.lock().unwrap().push(command.to_string());
         Ok(Value::Null)
     }
     async fn usage(&self, _: &str) -> Result<ProviderUsage, String> {
@@ -434,6 +436,8 @@ async fn spawn_rejects_unlisted_image() {
 #[test]
 fn managed_nodes_are_excluded_from_static_lookup() {
     let machine = ManagedMachine {
+        name: "small-z".into(),
+        antigravity_projected: false,
         id: "mmtrust01".into(),
         provider: "fake".into(),
         provider_id: None,
@@ -491,8 +495,17 @@ fn probe_from(map: std::collections::HashMap<String, OwnerState>) -> OwnerProbe 
 }
 
 async fn online_machine(m: &Arc<ManagedManager>, owner: &str) -> ManagedMachine {
+    online_machine_sized(m, owner, None).await
+}
+
+async fn online_machine_sized(
+    m: &Arc<ManagedManager>,
+    owner: &str,
+    size: Option<&str>,
+) -> ManagedMachine {
     let machine = m
         .spawn(SpawnRequest {
+            size: size.map(str::to_string),
             wait: Some(false),
             ttl_minutes: Some(60),
             owner_mission_id: Some(owner.to_string()),
@@ -622,4 +635,109 @@ fn managed_jobs_may_use_most_of_the_vm_memory() {
     // xlarge (32 GB) must fit a 20 GB job; small keeps headroom for the OS.
     assert!(managed_job_memory_bytes(32) > 20 * 1024 * 1024 * 1024);
     assert_eq!(managed_job_memory_bytes(4), 4 * 1024 * 1024 * 1024 * 9 / 10);
+}
+
+#[test]
+fn names_reuse_the_lowest_free_letter_and_roll_over_after_z() {
+    assert_eq!(allocate_name("small", &[]), "small-a");
+    let live = vec!["small-a".to_string(), "small-b".to_string()];
+    assert_eq!(allocate_name("small", &live), "small-c");
+    // small-a destroyed -> reused.
+    assert_eq!(allocate_name("small", &["small-b".to_string()]), "small-a");
+    // Sizes are independent.
+    assert_eq!(allocate_name("large", &live), "large-a");
+    assert_eq!(allocate_name("default", &[]), "medium-a");
+    let mut all: Vec<String> = (b'a'..=b'z')
+        .map(|c| format!("small-{}", c as char))
+        .collect();
+    assert_eq!(allocate_name("small", &all), "small-a1");
+    all.push("small-a1".into());
+    assert_eq!(allocate_name("small", &all), "small-b1");
+}
+
+#[tokio::test]
+async fn machines_get_unique_names_targetable_until_destroyed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = 4;
+    s.daily_cap_usd = 100.0;
+    let (m, _) = manager(dir.path(), s);
+    let a = online_machine_sized(&m, "o1", Some("large")).await;
+    let b = online_machine_sized(&m, "o1", Some("large")).await;
+    assert_eq!((a.name.as_str(), b.name.as_str()), ("large-a", "large-b"));
+    // Targetable by name; the name resolves to the immutable node id.
+    assert_eq!(m.get("large-b").await.unwrap().id, b.id);
+    assert_eq!(resolve_node_alias("large-a"), a.node_id);
+    assert_eq!(resolve_node_alias("ashur"), "ashur");
+    assert_eq!(display_name(&a.node_id).as_deref(), Some("large-a"));
+    m.destroy(&a.id, "test").await.unwrap();
+    // Destroyed name no longer resolves; next machine reuses it.
+    assert_eq!(resolve_node_alias("large-a"), "large-a");
+    let c = online_machine_sized(&m, "o1", Some("large")).await;
+    assert_eq!(c.name, "large-a");
+    assert_ne!(c.node_id, a.node_id, "node ids are never reused");
+    assert_eq!(m.get("large-a").await.unwrap().id, c.id);
+}
+
+#[test]
+fn antigravity_projection_requires_a_recorded_allowed_owner() {
+    assert!(!antigravity_owner_allowed(None, None));
+    assert!(!antigravity_owner_allowed(Some(""), None));
+    assert!(antigravity_owner_allowed(Some("prod"), None));
+    assert!(antigravity_owner_allowed(
+        Some("prod"),
+        Some("prod, thomas")
+    ));
+    assert!(!antigravity_owner_allowed(
+        Some("guest"),
+        Some("prod,thomas")
+    ));
+}
+
+#[tokio::test]
+async fn antigravity_setting_owner_and_wipe_on_destroy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let mine = online_machine(&m, "o1").await; // owner_user_id t1
+    let anon = online_machine(&m, "o2").await;
+    m.update(&anon.id, |x| x.owner_user_id = None).await;
+    assert!(m.antigravity_allowed(&mine.node_id).await);
+    assert!(
+        !m.antigravity_allowed(&anon.node_id).await,
+        "no recorded owner"
+    );
+    assert!(!m.antigravity_allowed("ashur").await);
+    m.set_runtime_settings(RuntimeSettings {
+        antigravity_on_managed: false,
+    });
+    assert!(!m.antigravity_allowed(&mine.node_id).await, "setting off");
+    // Persisted across restarts.
+    let reloaded = ManagedManager::new(settings(), None, dir.path(), 3999);
+    reloaded.load().await;
+    assert!(!reloaded.runtime_settings().antigravity_on_managed);
+    m.set_runtime_settings(RuntimeSettings {
+        antigravity_on_managed: true,
+    });
+    m.mark_antigravity_projected(&mine.node_id).await;
+    m.destroy(&mine.id, "test").await.unwrap();
+    let execs = fake.execs.lock().unwrap().clone();
+    assert!(
+        execs
+            .iter()
+            .any(|c| c.contains("rm -rf /var/lib/orb-node/work/managed-auth")),
+        "{execs:?}"
+    );
+    // A machine without a projection is not wiped needlessly.
+    let n = execs.len();
+    m.destroy(&anon.id, "test").await.unwrap();
+    assert_eq!(
+        fake.execs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.contains("rm -rf"))
+            .count(),
+        1
+    );
+    let _ = n;
 }
