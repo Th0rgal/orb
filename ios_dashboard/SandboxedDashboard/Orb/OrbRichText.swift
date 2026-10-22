@@ -93,7 +93,7 @@ final class OrbWebViewPool {
     static func htmlTemplate(fontSize size: CGFloat) -> String {
         """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' file:; style-src 'unsafe-inline' file:; font-src file:; img-src https:; connect-src 'none'; frame-src 'none'"><link rel="stylesheet" href="katex.min.css"><script src="markdown-it.min.js"></script><script src="katex.min.js"></script><script src="orb-renderer.js"></script><style>
-        :root{color-scheme:dark}#content{display:flow-root}body{margin:0;color:#e3e3e3;font: \(size)px/1.52 -apple-system,BlinkMacSystemFont,sans-serif;overflow-wrap:anywhere}p{margin:0 0 12px}p:last-child,ul:last-child,ol:last-child,blockquote:last-child,pre:last-child,table:last-child,.code-block:last-child{margin-bottom:0}h1,h2,h3,h4{line-height:1.25;margin:18px 0 8px;color:#f2f2f2}h1:first-child,h2:first-child,h3:first-child,h4:first-child{margin-top:0}h1{font-size:1.35em}h2{font-size:1.18em}h3{font-size:1.05em}h4{font-size:0.98em}a{color:#b8d5ef;text-decoration:underline}a.file-link{display:inline-flex;align-items:center;gap:4px;font:0.86em ui-monospace,SFMono-Regular,monospace;color:#d8e6f5;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);padding:1px 7px;border-radius:6px;text-decoration:none}pre{overflow-x:auto;white-space:pre;padding:12px 14px;margin:0}code{font:0.85em ui-monospace,SFMono-Regular,monospace;background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px}pre code{background:none;padding:0}blockquote{border-left:2px solid rgba(255,255,255,0.22);margin:10px 0;padding-left:12px;color:#a8a8a8}ul,ol{padding-left:22px;margin:0 0 12px}li>p{margin-bottom:4px}table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border-collapse:collapse;margin:12px 0;font-size:0.92em}th,td{border:1px solid rgba(255,255,255,0.12);padding:7px 10px;white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:96px;vertical-align:top;text-align:left}th{background:rgba(255,255,255,0.05)}img{max-width:100%;height:auto;border-radius:10px}.math-block{overflow-x:auto;margin:10px 0}.code-block{background:#161616;border:1px solid rgba(255,255,255,0.09);border-radius:10px;margin:10px 0;overflow:hidden}.copy-code,.artifact{color:#a0a0a0;background:none;border:0;padding:7px 12px;font:inherit}.copy-code{font-size:11.5px;border-bottom:1px solid rgba(255,255,255,0.06);width:100%;text-align:right;display:block}.copy-code.copied{color:#73c991}hr{border:0;border-top:1px solid rgba(255,255,255,0.1);margin:16px 0}.katex{font-size:1.05em}.katex-error{color:#d6a16a!important;white-space:pre-wrap}
+        :root{color-scheme:dark}#content{display:flow-root}body{margin:0;color:#e3e3e3;font: \(size)px/1.52 -apple-system,BlinkMacSystemFont,sans-serif;overflow-wrap:anywhere}p{margin:0 0 12px}p:last-child,ul:last-child,ol:last-child,blockquote:last-child,pre:last-child,table:last-child,.code-block:last-child{margin-bottom:0}h1,h2,h3,h4{line-height:1.25;margin:18px 0 8px;color:#f2f2f2}h1:first-child,h2:first-child,h3:first-child,h4:first-child{margin-top:0}h1{font-size:1.35em}h2{font-size:1.18em}h3{font-size:1.05em}h4{font-size:0.98em}a{color:#b8d5ef;text-decoration:underline}a.file-link{display:inline-flex;align-items:center;gap:4px;font:0.86em ui-monospace,SFMono-Regular,monospace;color:#d8e6f5;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);padding:1px 7px;border-radius:6px;text-decoration:none}pre{overflow-x:auto;white-space:pre;padding:12px 14px;margin:0}code{font:0.85em ui-monospace,SFMono-Regular,monospace;background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px}pre code{background:none;padding:0}blockquote{border-left:2px solid rgba(255,255,255,0.22);margin:10px 0;padding-left:12px;color:#a8a8a8}ul,ol{padding-left:22px;margin:0 0 12px}li>p{margin-bottom:4px}table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border-collapse:collapse;margin:12px 0;font-size:0.92em}th,td{border:1px solid rgba(255,255,255,0.12);padding:7px 10px;white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:96px;vertical-align:top;text-align:left}th{background:rgba(255,255,255,0.05)}td{font-variant-numeric:tabular-nums}thead:not(:has(th:not(:empty))){display:none}img{max-width:100%;height:auto;border-radius:10px}.math-block{overflow-x:auto;margin:10px 0}.code-block{background:#161616;border:1px solid rgba(255,255,255,0.09);border-radius:10px;margin:10px 0;overflow:hidden}.copy-code,.artifact{color:#a0a0a0;background:none;border:0;padding:7px 12px;font:inherit}.copy-code{font-size:11.5px;border-bottom:1px solid rgba(255,255,255,0.06);width:100%;text-align:right;display:block}.copy-code.copied{color:#73c991}hr{border:0;border-top:1px solid rgba(255,255,255,0.1);margin:16px 0}.katex{font-size:1.05em}.katex-error{color:#d6a16a!important;white-space:pre-wrap}
         </style></head><body><main id="content"></main><script>
         const main=document.getElementById('content');
         const report=()=>{if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.orb){const rectH=main.getBoundingClientRect().height;const h=Math.ceil(Math.max(rectH,main.scrollHeight||0,main.offsetHeight||0));if(h>0)window.webkit.messageHandlers.orb.postMessage({height:h+2});}};
@@ -122,7 +122,8 @@ struct OrbNativeMarkdownView: View {
         case mermaid(code: String, complete: Bool)
         case list(ordered: Bool, items: [String])
         case quote(String)
-        case table(headers: [String], rows: [[String]])
+        /// `headers` all empty: a loose pipe table without a header row (hidden).
+        case table(headers: [String], rows: [[String]], rightAligned: [Bool] = [])
         case divider
     }
 
@@ -174,7 +175,7 @@ struct OrbNativeMarkdownView: View {
 
     static func parseBlocks(_ source: String) -> [Block] {
         var blocks: [Block] = []
-        let lines = source.components(separatedBy: "\n")
+        let lines = OrbPipeTables.normalize(source).components(separatedBy: "\n")
         var idx = 0
         while idx < lines.count {
             let line = lines[idx]
@@ -225,7 +226,8 @@ struct OrbNativeMarkdownView: View {
                 if rawRows.count >= 2 && isTableSeparator(rawRows[1]) {
                     let headers = rawRows[0]
                     let bodyRows = Array(rawRows.dropFirst(2))
-                    blocks.append(.table(headers: headers, rows: bodyRows))
+                    let right = rawRows[1].map { $0.trimmingCharacters(in: .whitespaces).hasSuffix(":") && !$0.trimmingCharacters(in: .whitespaces).hasPrefix(":") }
+                    blocks.append(.table(headers: headers, rows: bodyRows, rightAligned: right))
                     continue
                 } else if !rawRows.isEmpty {
                     let headers = rawRows[0]
@@ -362,29 +364,34 @@ struct OrbNativeMarkdownView: View {
                             }
                         }
                     }
-                case .table(let headers, let rows):
+                case .table(let headers, let rows, let rightAligned):
+                    let align: (Int) -> Alignment = { rightAligned.indices.contains($0) && rightAligned[$0] ? .trailing : .leading }
                     ScrollView(.horizontal, showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 0) {
+                            if headers.contains(where: { !$0.isEmpty }) {
                             HStack(spacing: 0) {
-                                ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
+                                ForEach(Array(headers.enumerated()), id: \.offset) { hIdx, h in
                                     inlineMarkdownText(h)
                                         .font(.system(.footnote, weight: .semibold))
                                         .foregroundStyle(Color.white)
-                                        .frame(minWidth: 100, maxWidth: 240, alignment: .leading)
+                                        .frame(minWidth: 100, maxWidth: 240, alignment: align(hIdx))
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 8)
                                 }
                             }
                             .background(Color.white.opacity(0.05))
-                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+                            }
+                            ForEach(Array(rows.enumerated()), id: \.offset) { rIdx, row in
+                                if rIdx > 0 || headers.contains(where: { !$0.isEmpty }) {
+                                    Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+                                }
                                 HStack(alignment: .top, spacing: 0) {
                                     ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
                                         let cell = cIdx < row.count ? row[cIdx] : ""
                                         inlineMarkdownText(cell)
-                                            .font(.system(.footnote))
+                                            .font(.system(.footnote).monospacedDigit())
                                             .foregroundStyle(Color(white: 0.88))
-                                            .frame(minWidth: 100, maxWidth: 240, alignment: .leading)
+                                            .frame(minWidth: 100, maxWidth: 240, alignment: align(cIdx))
                                             .padding(.horizontal, 10)
                                             .padding(.vertical, 7)
                                     }
@@ -524,7 +531,7 @@ struct OrbRichText: View {
             }
             context.coordinator.source = source; context.coordinator.textSize = textSize
             guard let root = Bundle.main.url(forResource: "MathAssets", withExtension: nil),
-                  let encoded = try? JSONEncoder().encode(source), let json = String(data: encoded, encoding: .utf8) else { return }
+                  let encoded = try? JSONEncoder().encode(OrbPipeTables.normalize(source)), let json = String(data: encoded, encoding: .utf8) else { return }
             let safe = json.replacingOccurrences(of: "<", with: "\\u003c")
             let category: UIContentSizeCategory = switch textSize {
             case .xSmall: .extraSmall

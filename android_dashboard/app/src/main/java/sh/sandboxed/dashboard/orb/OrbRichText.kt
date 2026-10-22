@@ -295,6 +295,8 @@ class OrbRichWebViewHolder(context: Context) {
     border-collapse: collapse;
     font-size: 13px;
   }
+  td { font-variant-numeric: tabular-nums; }
+  thead:not(:has(th:not(:empty))) { display: none; }
   th, td {
     padding: 7px 10px;
     border-bottom: 1px solid rgba(255,255,255,0.07);
@@ -473,13 +475,14 @@ fun OrbRichText(
     }
 }
 
-private sealed class OrbMdBlock {
+internal sealed class OrbMdBlock {
     data class Heading(val level: Int, val text: String) : OrbMdBlock()
     data class Paragraph(val text: String) : OrbMdBlock()
     data class CodeBlock(val language: String, val code: String) : OrbMdBlock()
     data class ListBlock(val ordered: Boolean, val items: List<String>) : OrbMdBlock()
     data class Quote(val text: String) : OrbMdBlock()
-    data class Table(val headers: List<String>, val rows: List<List<String>>) : OrbMdBlock()
+    /** All-empty `headers`: a loose pipe table without a header row (hidden). */
+    data class Table(val headers: List<String>, val rows: List<List<String>>, val rightAligned: List<Boolean> = emptyList()) : OrbMdBlock()
     data object Divider : OrbMdBlock()
 }
 
@@ -578,23 +581,26 @@ private fun OrbNativeMarkdown(
                             .border(1.dp, Color.White.copy(alpha = 0.09f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
                             .horizontalScroll(hScroll)
                     ) {
-                        androidx.compose.foundation.layout.Row(
+                        val alignOf = { i: Int -> if (block.rightAligned.getOrElse(i) { false }) androidx.compose.ui.text.style.TextAlign.End else androidx.compose.ui.text.style.TextAlign.Start }
+                        val showHeader = block.headers.any { it.isNotEmpty() }
+                        if (showHeader) androidx.compose.foundation.layout.Row(
                             modifier = Modifier.background(Color.White.copy(alpha = 0.04f))
                         ) {
-                            block.headers.forEach { h ->
+                            block.headers.forEachIndexed { hIdx, h ->
                                 Text(
                                     text = remember(h) { parseInlineAnnotated(h) },
                                     color = Color.White,
                                     fontSize = 13.sp,
                                     fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                    textAlign = alignOf(hIdx),
                                     modifier = Modifier
                                         .widthIn(min = 96.dp, max = 230.dp)
                                         .padding(horizontal = 10.dp, vertical = 7.dp)
                                 )
                             }
                         }
-                        block.rows.forEach { row ->
-                            androidx.compose.material3.HorizontalDivider(
+                        block.rows.forEachIndexed { rIdx, row ->
+                            if (rIdx > 0 || showHeader) androidx.compose.material3.HorizontalDivider(
                                 color = Color.White.copy(alpha = 0.07f),
                                 thickness = 0.5.dp
                             )
@@ -607,6 +613,8 @@ private fun OrbNativeMarkdown(
                                         color = Color(0xFFE0E0E0),
                                         fontSize = 13.sp,
                                         lineHeight = 18.sp,
+                                        textAlign = alignOf(cIdx),
+                                        style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"),
                                         modifier = Modifier
                                             .widthIn(min = 96.dp, max = 230.dp)
                                             .padding(horizontal = 10.dp, vertical = 7.dp)
@@ -755,7 +763,7 @@ private fun isMdTableSeparator(cells: List<String>): Boolean =
         stripped.isEmpty() && cell.contains("-")
     }
 
-private fun parseMdBlocks(source: String): List<OrbMdBlock> {
+internal fun parseMdBlocks(source: String): List<OrbMdBlock> {
     val blocks = mutableListOf<OrbMdBlock>()
     val lines = source.split("\n")
     var idx = 0
@@ -800,7 +808,7 @@ private fun parseMdBlocks(source: String): List<OrbMdBlock> {
                 idx++
             }
             if (rawRows.size >= 2 && isMdTableSeparator(rawRows[1])) {
-                blocks.add(OrbMdBlock.Table(rawRows[0], rawRows.drop(2)))
+                blocks.add(OrbMdBlock.Table(rawRows[0], rawRows.drop(2), rawRows[1].map { val c = it.trim(); c.endsWith(":") && !c.startsWith(":") }))
                 continue
             } else if (rawRows.isNotEmpty()) {
                 blocks.add(OrbMdBlock.Table(rawRows[0], rawRows.drop(1)))
@@ -872,7 +880,7 @@ private fun cleanText(raw: String): String {
         val t = line.trim()
         t.startsWith("[STATE_SIGNATURE:") || t.startsWith("STATE_SIGNATURE:")
     }
-    return lines.joinToString("\n").trim()
+    return OrbPipeTables.normalize(lines.joinToString("\n").trim())
 }
 
 private fun needsWebRenderer(text: String): Boolean {

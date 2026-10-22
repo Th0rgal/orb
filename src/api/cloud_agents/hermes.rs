@@ -268,6 +268,11 @@ fn effort_to_hermes_reasoning(effort: Option<&str>) -> Option<Value> {
 fn bad(error: String) -> Error {
     (StatusCode::BAD_GATEWAY, error)
 }
+/// Ephemeral system prompt for every Orb run. Hermes' generic `api_server`
+/// hint assumes plain text, but Orb renders GitHub-flavoured Markdown, and
+/// loose `a | b | c` lines collapse into one paragraph in a Markdown renderer.
+pub(crate) const ORB_FORMATTING_INSTRUCTIONS: &str = "You are answering in Orb, which renders GitHub-flavoured Markdown (headings, lists, code fences, tables). Markdown is welcome. When output is tabular, write a GFM table: a header row, a separator row such as `| --- | ---: |`, and leading and trailing pipes on every row. Never write bare `a | b | c` lines without the separator row.";
+
 fn run_path(run: &str, suffix: &str) -> Result<String, String> {
     if run.is_empty()
         || !run
@@ -434,7 +439,7 @@ async fn observe_with_client(
             .as_ref()
             .or(e.selection.model.as_ref())
             .filter(|s| !s.is_empty());
-        let mut body = json!({"input":e.turns[i].prompt,"session_id":session,"model":model});
+        let mut body = json!({"input":e.turns[i].prompt,"session_id":session,"model":model,"instructions":ORB_FORMATTING_INSTRUCTIONS});
         let effort = turn_effort(&e.turns[i], &e.selection);
         if let Some(reasoning) = effort_to_hermes_reasoning(effort.as_deref()) {
             body["model_options"] = json!({"reasoning": reasoning});
