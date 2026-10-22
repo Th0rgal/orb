@@ -119,11 +119,14 @@ def main():
             if cstatus and cstatus not in ("active", "pending"):
                 break
         st, cevs = api.call("GET", f"/api/control/missions/{child_id}/events?limit=40")
-        ctext = json.dumps(cevs)
+        cev_list = cevs.get("events", cevs) if isinstance(cevs, dict) else (cevs or [])
+        ctext = json.dumps(cev_list)
+        # Only assistant output counts: the marker also appears in the prompt.
+        answer = " ".join(str(x.get("content")) for x in cev_list if x.get("event_type") == "assistant_message")
         ev["child_status"] = cstatus
-        ev["child_output_has_marker"] = "managed-child-ok" in ctext
+        ev["child_output_has_marker"] = "managed-child-ok" in answer
         ev["child_refused_context"] = "not delivered to managed" in ctext
-        ok = ok and ev["child_output_has_marker"] and not ev["child_refused_context"]
+        ok = ok and cstatus == "completed" and ev["child_output_has_marker"] and not ev["child_refused_context"]
     finally:
         if not args.keep:
             st, d = api.call("DELETE", f"/api/managed-machines/{mid}", timeout=120)
