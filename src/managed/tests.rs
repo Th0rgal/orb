@@ -743,23 +743,27 @@ async fn antigravity_setting_owner_and_wipe_on_destroy() {
 }
 
 #[test]
-fn caps_are_optional_and_unlimited_by_default() {
+fn caps_keep_safe_defaults_unless_explicitly_unlimited() {
+    // Unset / empty / zero / negative / typo keep the safe default.
     for raw in [
         None,
         Some(""),
         Some("  "),
-        Some("none"),
-        Some("Unlimited"),
-        Some("off"),
         Some("0"),
         Some("-3"),
         Some("abc"),
+        Some("nonee"),
     ] {
-        assert_eq!(optional_limit::<f64>(raw), None, "{raw:?}");
-        assert_eq!(optional_limit::<usize>(raw), None, "{raw:?}");
+        assert_eq!(optional_limit::<f64>(raw, 20.0), Some(20.0), "{raw:?}");
+        assert_eq!(optional_limit::<usize>(raw, 6), Some(6), "{raw:?}");
     }
-    assert_eq!(optional_limit::<f64>(Some("20")), Some(20.0));
-    assert_eq!(optional_limit::<usize>(Some(" 6 ")), Some(6));
+    // Only an explicit operator choice lifts the limit.
+    for raw in ["none", "Unlimited", "OFF", " none "] {
+        assert_eq!(optional_limit::<f64>(Some(raw), 20.0), None, "{raw:?}");
+        assert_eq!(optional_limit::<usize>(Some(raw), 6), None, "{raw:?}");
+    }
+    assert_eq!(optional_limit::<f64>(Some("50"), 20.0), Some(50.0));
+    assert_eq!(optional_limit::<usize>(Some(" 10 "), 6), Some(10));
 }
 
 #[tokio::test]

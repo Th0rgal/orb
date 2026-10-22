@@ -14,8 +14,8 @@
 //!
 //! Configuration (all optional, env):
 //! `BOAT_API_KEY` (enables the feature), `SANDBOXED_MANAGED_ENABLED`,
-//! `SANDBOXED_MANAGED_DAILY_CAP_USD` (20), `SANDBOXED_MANAGED_MAX_CONCURRENT`
-//! (6), `SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` (120),
+//! `SANDBOXED_MANAGED_DAILY_CAP_USD` (20; `none` = unlimited),
+//! `SANDBOXED_MANAGED_MAX_CONCURRENT` (6; `none` = unlimited), `SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` (120),
 //! `SANDBOXED_MANAGED_MAX_TTL_MINUTES` (720), `SANDBOXED_MANAGED_DEFAULT_SIZE`
 //! (small), `SANDBOXED_MANAGED_MAX_SIZE` (xlarge), `SANDBOXED_MANAGED_IMAGE`
 //! (orb-node-base), `SANDBOXED_MANAGED_CORE_URL` (defaults to
@@ -157,9 +157,9 @@ pub fn size_for(cpu: Option<u32>, ram_gb: Option<u32>) -> Option<SizeSpec> {
 pub struct ManagedSettings {
     pub enabled: bool,
     pub provider: String,
-    /// `None` = no daily dollar cap (default).
+    /// `None` = no daily dollar cap (explicit `none` only; default $20).
     pub daily_cap_usd: Option<f64>,
-    /// `None` = no concurrency cap (default).
+    /// `None` = no concurrency cap (explicit `none` only; default 6).
     pub max_concurrent: Option<usize>,
     pub default_ttl_minutes: u64,
     pub max_ttl_minutes: u64,
@@ -179,16 +179,25 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
 }
 
-/// Parse an optional limit: unset, empty, `none`, `unlimited` or `off`
-/// mean no limit; anything else must parse as a positive number.
-pub fn optional_limit<T: std::str::FromStr + PartialOrd + Default>(raw: Option<&str>) -> Option<T> {
-    let raw = raw?.trim();
-    if raw.is_empty()
-        || ["none", "unlimited", "off", "no"].contains(&raw.to_ascii_lowercase().as_str())
-    {
+/// Parse an operator limit. Only an explicit `none`, `unlimited` or `off`
+/// removes it. Unset, empty, zero, negative or malformed values keep the
+/// built-in safe default, so a typo can never lift a cost guard.
+pub fn optional_limit<T: std::str::FromStr + PartialOrd + Default>(
+    raw: Option<&str>,
+    default: T,
+) -> Option<T> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Some(default);
+    };
+    if ["none", "unlimited", "off"].contains(&raw.to_ascii_lowercase().as_str()) {
         return None;
     }
-    raw.parse::<T>().ok().filter(|v| *v > T::default())
+    Some(
+        raw.parse::<T>()
+            .ok()
+            .filter(|v| *v > T::default())
+            .unwrap_or(default),
+    )
 }
 
 impl ManagedSettings {
@@ -228,11 +237,13 @@ impl ManagedSettings {
                 std::env::var("SANDBOXED_MANAGED_DAILY_CAP_USD")
                     .ok()
                     .as_deref(),
+                20.0,
             ),
             max_concurrent: optional_limit(
                 std::env::var("SANDBOXED_MANAGED_MAX_CONCURRENT")
                     .ok()
                     .as_deref(),
+                6,
             ),
             default_ttl_minutes: env_parse::<u64>("SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES")
                 .unwrap_or(120)
