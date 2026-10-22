@@ -848,12 +848,14 @@ mod oauth_deadletter_tests {
 #[cfg(test)]
 mod grok_oauth_tests {
     use super::{
-        build_response_from_store, collapse_duplicate_xai_oauth_accounts, get_xai_api_key_for_grok,
+        build_response_from_store, cli_proxy_access_token_in_dirs,
+        collapse_duplicate_xai_oauth_accounts, get_xai_api_key_for_grok,
         grok_auth_expires_at_millis, grok_cli_reconcile_due, has_live_cli_proxy_account_in_dirs,
         has_refreshable_cli_proxy_account_in_dirs, is_legacy_grok_build_oauth_label,
         oauth_refresh_clear_dead, oauth_refresh_mark_token_dead, oauth_refresh_token_fingerprint,
         parse_grok_device_auth_line, remove_legacy_grok_oauth_entry, sync_grok_auth_files,
-        ProviderStatusResponse, GROK_CLI_RECONCILE_INTERVAL, GROK_OAUTH_CLIENT_KEY,
+        CliProxyAccountRef, ProviderStatusResponse, GROK_CLI_RECONCILE_INTERVAL,
+        GROK_OAUTH_CLIENT_KEY,
     };
     use crate::ai_providers::{AIProvider, OAuthCredentials, ProviderType};
     use std::time::{Duration as StdDuration, Instant};
