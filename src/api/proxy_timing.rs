@@ -155,6 +155,7 @@ struct CellState {
     inflight: Option<InflightGuard>,
     body_finished: bool,
     cancelled: bool,
+    upstream_failed: Option<&'static str>,
 }
 
 /// Mutable timing state of one request. Emits on drop.
@@ -178,6 +179,7 @@ impl TimingCell {
                 inflight: None,
                 body_finished: false,
                 cancelled: false,
+                upstream_failed: None,
             }),
         })
     }
@@ -346,6 +348,16 @@ impl TimingCell {
         self.with(|s| s.body_finished = true);
     }
 
+    /// The upstream stream stalled or errored after content started.
+    pub fn mark_upstream_stream_failed(&self, reason: &'static str) {
+        self.with(|s| {
+            s.upstream_failed = Some(reason);
+            if let Some(a) = s.current_attempt.and_then(|i| s.record.attempts.get_mut(i)) {
+                a.failures.push(reason.to_string());
+            }
+        });
+    }
+
     /// This request lost a hedge race and was dropped on purpose.
     pub fn mark_cancelled(&self) {
         self.with(|s| s.cancelled = true);
@@ -368,6 +380,8 @@ impl TimingCell {
                 "hedge_cancelled"
             } else if !success {
                 "error"
+            } else if let Some(reason) = s.upstream_failed {
+                reason
             } else if s.body_finished {
                 "ok"
             } else {
@@ -838,6 +852,8 @@ mod tests {
         assert_eq!(record.outcome, "client_disconnect");
         cell.body_finished();
         assert_eq!(cell.finish().outcome, "ok");
+        cell.mark_upstream_stream_failed("stalled");
+        assert_eq!(cell.finish().outcome, "stalled");
         drop(cell);
         assert_eq!(
             inflight_snapshot().get(&format!("provider:{provider}")),

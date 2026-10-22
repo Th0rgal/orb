@@ -1550,6 +1550,16 @@ impl UsageAccumulator {
 
 /// Cache counts from a raw (untranslated) provider response body, applied to
 /// input/output counts a translator already extracted.
+/// Non-streaming bodies: hand reasoning tokens to the request's timing cell
+/// (the usage ledger has no column for them).
+fn note_reasoning_tokens(acc: &UsageAccumulator) {
+    if acc.reasoning > 0 {
+        if let Some(cell) = super::proxy_timing::current() {
+            cell.set_tokens(0, 0, 0, acc.reasoning);
+        }
+    }
+}
+
 fn tokens_with_body_cache(input: u64, output: u64, body: &[u8]) -> ProxyTokens {
     let mut acc = UsageAccumulator::default();
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
@@ -1566,6 +1576,7 @@ fn tokens_with_body_cache(input: u64, output: u64, body: &[u8]) -> ProxyTokens {
     }
     acc.input = input;
     acc.output = output;
+    note_reasoning_tokens(&acc);
     acc.tokens()
 }
 
@@ -1668,6 +1679,7 @@ fn native_response_usage(body: &[u8]) -> Option<ProxyTokens> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let mut acc = UsageAccumulator::default();
     acc.observe(value.get("usage")?);
+    note_reasoning_tokens(&acc);
     (acc.input > 0 || acc.output > 0).then(|| acc.tokens())
 }
 
@@ -3401,6 +3413,9 @@ async fn chat_completions_routed(
                     upstream_resp = r;
                     status = upstream_resp.status();
                     outcome.attempt_http.insert(entry_idx, status.as_u16());
+                    if let Some(cell) = super::proxy_timing::current() {
+                        cell.attempt_headers(status.as_u16(), upstream_resp.version());
+                    }
                     // A retry must not resend the stale-thinking body.
                     retry_builder = None;
                 }
@@ -4396,6 +4411,12 @@ async fn chat_completions_routed(
                                     upstream_resp = resp;
                                     status = upstream_resp.status();
                                     outcome.attempt_http.insert(entry_idx, status.as_u16());
+                                    if let Some(cell) = super::proxy_timing::current() {
+                                        cell.attempt_headers(
+                                            status.as_u16(),
+                                            upstream_resp.version(),
+                                        );
+                                    }
                                     // The saved builder carries the stale token.
                                     retry_builder = None;
                                 }
@@ -6462,6 +6483,11 @@ fn track_stream_health(
         let tokens = usage.tokens();
         if let Some(cell) = &timing {
             cell.set_tokens(usage.input, tokens.output, tokens.cache_read, usage.reasoning);
+            if errored || idle_timeout {
+                // The client still sees a clean SSE end (the error becomes
+                // an SSE event), so record the failure here.
+                cell.mark_upstream_stream_failed(if idle_timeout { "stalled" } else { "stream_error" });
+            }
         }
         if let Some(sink) = outcome_sink {
             sink(if idle_timeout {
@@ -12461,6 +12487,47 @@ mod latency_tests {
         let _ = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(cell.snapshot().outcome, "error");
         assert_eq!(cell.snapshot().http_status, Some(502));
+    }
+
+    #[tokio::test]
+    async fn timing_records_first_content_tokens_and_mid_stream_failure() {
+        let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+        let cell = TimingCell::new("builtin/smart", true);
+        let account = uuid::Uuid::new_v4();
+        crate::api::proxy_timing::scope(cell.clone(), async {
+            cell.attempt_start("google", "gemini-4-argon-eap", account);
+            let inner = futures::stream::iter(vec![
+                Ok::<_, std::io::Error>(Bytes::from(
+                    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":500,\"completion_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":400},\"completion_tokens_details\":{\"reasoning_tokens\":7}}}\n\n",
+                )),
+                Err(std::io::Error::other("upstream reset")),
+            ]);
+            let tracked =
+                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None);
+            let _ = tracked.collect::<Vec<_>>().await;
+        })
+        .await;
+        cell.set_response_status(200);
+        cell.body_finished();
+        let r = cell.snapshot();
+        let a = &r.attempts[0];
+        assert!(a.first_content_ms.is_some());
+        assert_eq!(a.failures, vec!["stream_error"]);
+        assert_eq!(r.outcome, "stream_error");
+        assert_eq!(r.input_tokens, 500);
+        assert_eq!(r.cache_read_tokens, 400);
+        assert_eq!(r.reasoning_tokens, 7);
+    }
+
+    #[tokio::test]
+    async fn non_stream_reasoning_tokens_reach_timing() {
+        let cell = TimingCell::new("c", false);
+        crate::api::proxy_timing::scope(cell.clone(), async {
+            let body = br#"{"usage":{"prompt_tokens":10,"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":30}}}"#;
+            assert!(native_response_usage(body).is_some());
+        })
+        .await;
+        assert_eq!(cell.snapshot().reasoning_tokens, 30);
     }
 
     #[test]
