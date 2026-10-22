@@ -102,6 +102,32 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
         }
     }
 
+    // Optimistic: the row reads "Destroying…" at once; a failure restores it and shows the error.
+    fun destroy(m: ManagedMachine) {
+        if (busyId != null) return
+        busyId = m.id
+        actionError = null
+        confirm = null
+        data = data?.let { it.copy(machines = OrbManagedMachines.markDestroying(it.machines, m.id)) }
+        scope.launch {
+            try {
+                val updated = OrbJSON.dict(
+                    core.request("${OrbManagedMachines.PATH}/${core.encodeComponent(m.id)}", method = "DELETE")
+                )?.let { OrbManagedMachines.parseMachine(it) }
+                if (updated != null) {
+                    data = data?.let { d -> d.copy(machines = listOf(updated) + d.machines.filter { it.id != updated.id }) }
+                    fetchedAt = System.currentTimeMillis()
+                }
+                refresh()
+            } catch (e: Throwable) {
+                data = data?.let { it.copy(machines = OrbManagedMachines.revert(it.machines, m)) }
+                actionError = "Couldn’t destroy ${OrbManagedMachines.title(m)}. ${OrbManagedMachines.errorMessage(e)}"
+            } finally {
+                busyId = null
+            }
+        }
+    }
+
     val d = data ?: return
     if (!d.enabled) return
     val live = d.machines.filter { OrbManagedMachines.isLive(it) }
@@ -166,7 +192,7 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
         val owner = m.ownerMissionId?.let { ", and mission ${it.take(8)} loses it" } ?: ""
         AlertDialog(
             onDismissRequest = { if (!busy) { confirm = null; actionError = null } },
-            title = { Text("Destroy ${m.size} machine?") },
+            title = { Text("Destroy ${OrbManagedMachines.title(m)}?") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -180,14 +206,7 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
                 if (busy) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                 } else {
-                    TextButton(onClick = {
-                        run(m, {
-                            core.request(
-                                "${OrbManagedMachines.PATH}/${core.encodeComponent(m.id)}",
-                                method = "DELETE"
-                            )
-                        }, onDone = { confirm = null })
-                    }) { Text("Destroy", color = OrbStyle.error) }
+                    TextButton(onClick = { destroy(m) }) { Text("Destroy", color = OrbStyle.error) }
                 }
             },
             dismissButton = {
@@ -219,11 +238,11 @@ private fun ManagedMachineRow(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dot))
-            Text(m.size, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Text(OrbManagedMachines.title(m), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
             Text(OrbManagedMachines.stateLabel(m.state), color = OrbStyle.textSecondary, fontSize = 12.sp)
         }
         Text(
-            text = OrbManagedMachines.sizeSpec(m),
+            text = "${m.size} · ${OrbManagedMachines.sizeSpec(m)}",
             color = OrbStyle.textSecondary,
             fontSize = 12.sp
         )

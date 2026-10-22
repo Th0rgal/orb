@@ -11,6 +11,8 @@ import java.util.Locale
  */
 data class ManagedMachine(
     val id: String,
+    /** Human name from the backend ("small-a"); null on older backends. */
+    val name: String?,
     val nodeId: String,
     val size: String,
     val cpu: Int,
@@ -55,6 +57,7 @@ object OrbManagedMachines {
         val id = OrbJSON.str(d, "id") ?: return null
         return ManagedMachine(
             id = id,
+            name = OrbJSON.str(d, "name"),
             nodeId = OrbJSON.str(d, "node_id") ?: "managed-$id",
             size = OrbJSON.str(d, "size") ?: "custom",
             cpu = OrbJSON.int(d, "cpu") ?: 0,
@@ -102,6 +105,20 @@ object OrbManagedMachines {
 
     fun nodeLabels(node: OrbRow): List<String> =
         (node.raw["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+
+    /** Row title: the machine's name, falling back to its id. */
+    fun title(m: ManagedMachine): String = m.name ?: m.id
+
+    /** Fleet row title: `display_name` for nodes that have one, else the id. */
+    fun nodeTitle(nodeId: String, node: OrbRow): String = node.str("display_name") ?: nodeId
+
+    /** Optimistic Destroy: the row flips to "destroying" before the call returns. */
+    fun markDestroying(machines: List<ManagedMachine>, id: String): List<ManagedMachine> =
+        machines.map { if (it.id == id) it.copy(state = "destroying") else it }
+
+    /** Undo `markDestroying` for one machine after a failed call. */
+    fun revert(machines: List<ManagedMachine>, original: ManagedMachine): List<ManagedMachine> =
+        machines.map { if (it.id == original.id) original else it }
 
     fun isLive(m: ManagedMachine): Boolean = m.state != "destroyed" && m.state != "failed"
 
@@ -163,7 +180,7 @@ object OrbManagedMachines {
         "provisioning" -> "Provisioning"
         "enrolling" -> "Enrolling"
         "online" -> "Online"
-        "destroying" -> "Destroying"
+        "destroying" -> "Destroying…"
         "destroyed" -> "Destroyed"
         "failed" -> "Failed"
         else -> s
