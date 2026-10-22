@@ -281,6 +281,10 @@ struct ManagedIdParams {
 struct StartMissionParams {
     #[serde(default)]
     parent_mission_id: Option<Uuid>,
+    /// Set only by the mission gateway (`"mission"`) when a mission's agent
+    /// starts a child through MCP; never part of the public tool schema.
+    #[serde(default)]
+    caller: Option<String>,
     #[serde(default)]
     cloud: Option<serde_json::Value>,
     title: String,
@@ -411,6 +415,7 @@ fn native_backend_from_agent(agent: Option<&str>) -> Option<String> {
 }
 
 fn mission_start_tags(
+    origin_tag: &str,
     tags: Option<Vec<String>>,
     request_merge_authority: bool,
     writer: bool,
@@ -425,13 +430,14 @@ fn mission_start_tags(
         .collect();
     tags.retain(|tag| {
         tag != "origin:hermes-assistant"
+            && tag != "origin:mission"
             && tag != "merge-authority:granted"
             && !tag.starts_with("merge-authority-source:")
             && !tag.starts_with("merge-authority-target:")
             && !tag.starts_with("origin-session:")
             && !tag.starts_with("origin-platform:")
     });
-    tags.push("origin:hermes-assistant".to_string());
+    tags.push(origin_tag.to_string());
 
     if !request_merge_authority {
         return Ok(tags);
@@ -2484,7 +2490,17 @@ impl AssistantMcp {
         if backend.as_deref() == Some("codex") {
             crate::backend::codex::validate_goal_message(&prompt)?;
         }
+        // A mission's agent starting a subagent through the gateway is not the
+        // Hermes assistant: attributing it to Hermes made the child look like
+        // an assistant dispatch (origin=hermes, origin:hermes-assistant).
+        let started_by_mission =
+            params.caller.as_deref() == Some("mission") && params.parent_mission_id.is_some();
         let tags = mission_start_tags(
+            if started_by_mission {
+                "origin:mission"
+            } else {
+                "origin:hermes-assistant"
+            },
             params.tags,
             params.request_merge_authority.unwrap_or(false),
             writer,
@@ -2564,7 +2580,7 @@ impl AssistantMcp {
             // model-controlled); the session id ties the mission to the Hermes
             // conversation that spawned it, and the mission-status webhook
             // carries it back so the result reaches that conversation.
-            "origin": "hermes",
+            "origin": if started_by_mission { "mission" } else { "hermes" },
             "origin_session_id": origin_session_id,
             "attachments": params.attachments,
         });
@@ -6800,12 +6816,36 @@ mod tests {
     }
 
     #[test]
+    fn mission_started_children_are_not_attributed_to_hermes() {
+        // Real case 26e6bbcd: an OpenCode mission started a subagent on a
+        // managed machine and the child was stamped origin:hermes-assistant.
+        let tags = mission_start_tags(
+            "origin:mission",
+            Some(vec!["origin:hermes-assistant".into(), "pr-readonly".into()]),
+            false,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(tags, vec!["pr-readonly", "origin:mission"]);
+        let params: StartMissionParams = serde_json::from_value(json!({
+            "title": "t", "prompt": "p", "caller": "mission",
+            "parent_mission_id": "3a510e9b-31f3-4331-b334-d0fb6fbc8e67"
+        }))
+        .unwrap();
+        assert_eq!(params.caller.as_deref(), Some("mission"));
+        assert!(params.parent_mission_id.is_some());
+    }
+
+    #[test]
     fn mission_start_tags_record_hermes_merge_authority() {
         let grant = MergeGrantConfig {
             authority_source: "owner-standing-grant-2026-07-29".to_string(),
             repositories: vec!["lfglabs-dev/*".to_string()],
         };
         let tags = mission_start_tags(
+            "origin:hermes-assistant",
             Some(vec![
                 "verity".to_string(),
                 " origin:hermes-assistant ".to_string(),
@@ -6835,11 +6875,44 @@ mod tests {
             authority_source: "owner-grant".to_string(),
             repositories: vec!["owner/repo".to_string()],
         };
-        assert!(mission_start_tags(None, true, true, Some("owner/repo#1"), None).is_err());
-        assert!(mission_start_tags(None, true, true, Some("owner/repo"), Some(&grant)).is_err());
-        assert!(mission_start_tags(None, true, true, Some("other/repo#1"), Some(&grant)).is_err());
-        assert!(mission_start_tags(None, true, false, Some("owner/repo#1"), Some(&grant)).is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            true,
+            Some("owner/repo#1"),
+            None
+        )
+        .is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            true,
+            Some("owner/repo"),
+            Some(&grant)
+        )
+        .is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            true,
+            Some("other/repo#1"),
+            Some(&grant)
+        )
+        .is_err());
+        assert!(mission_start_tags(
+            "origin:hermes-assistant",
+            None,
+            true,
+            false,
+            Some("owner/repo#1"),
+            Some(&grant)
+        )
+        .is_err());
         let tags = mission_start_tags(
+            "origin:hermes-assistant",
             Some(vec![
                 "merge-authority:granted".to_string(),
                 "merge-authority-source:spoofed".to_string(),

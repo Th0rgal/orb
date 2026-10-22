@@ -260,7 +260,7 @@ async fn authorize(
     if !args.is_object() {
         return Err(ToolError::invalid("Arguments must be an object"));
     }
-    if args.get("parent_mission_id").is_some() {
+    if args.get("parent_mission_id").is_some() || args.get("caller").is_some() {
         return Err(ToolError::invalid("Parent identity is provided by Core"));
     }
     if tool.definition.name == "plan_tasks" {
@@ -585,6 +585,9 @@ async fn authorize(
             return Err(ToolError::denied("Delegation cannot grant merge authority"));
         }
         args["parent_mission_id"] = json!(own);
+        // The child was started by this mission's agent, not by the Hermes
+        // assistant: record that provenance instead of `origin=hermes`.
+        args["caller"] = json!("mission");
     }
     Ok(())
 }
@@ -1006,6 +1009,7 @@ async fn run_accepted(
     // Parent identity was inserted at acceptance, never supplied by the client.
     if let Some(map) = arguments.as_object_mut() {
         map.remove("parent_mission_id");
+        map.remove("caller");
     }
     authorize(state, p, &tool, &mut arguments).await?;
     if tool.handler == super::Handler::Workspace {

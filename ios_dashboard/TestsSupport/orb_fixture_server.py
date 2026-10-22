@@ -91,6 +91,8 @@ def reset():
     # A running turn: a follow-up sent now is queued, then Core delivers it.
     MISSIONS['queue-run']=dict(id='queue-run',title='Queue while running',status='running',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='first message')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:05:00Z')
     QUEUE_EVENTS['queue-run']=[]
+    # Real events of mission 3a510e9b: an OpenCode mission spawned a boat machine and ran a subagent on it.
+    MISSIONS['boat-parent']=dict(id='boat-parent',title='Boat check: matrix on a managed machine',status='completed',project='orb-test',backend='opencode',tags=[],model_override='builtin/smart',history=[dict(role='user',content='Spawn a VM with enough RAM, run the matrix job in a subagent on it, then destroy the VM.'),dict(role='assistant',content='Diagonal sum 24953.1478, peak RSS 9.35 GiB on xlarge mm4b8tgs9y; the machine is destroyed ($0.0106).')],created_at='2026-10-22T01:01:56Z',updated_at='2026-10-22T04:47:20Z')
     qadd('queue-run','user_message','first message','first-id')
     # Idle, its last turn started ~36 min ago; a send takes 2.5 s to be acknowledged.
     MISSIONS['idle-send']=dict(id='idle-send',title='Idle send',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='old turn'),dict(role='assistant',content='old reply')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:06:00Z')
@@ -174,6 +176,8 @@ def idle_turn(content, key):
     step(3, start); step(2, finish)
 
 def iso(t): return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))
+def boat_events():
+    return json.loads(Path(__file__).parent.parent.joinpath('SandboxedDashboardTests','Fixtures','boat-subagent-3a510e9b-events.json').read_text())
 def agent_events(mid):
     """Events of the agent-work/agent-done fixtures; the current turn started 95 s ago."""
     started=time.time()-95; rows=[]
@@ -235,6 +239,7 @@ class Handler(BaseHTTPRequestHandler):
         if p=='/api/control/missions':
             time.sleep(LIST_DELAY)
             return self.send(list(MISSIONS.values()))
+        if p.endswith('/events') and p.split('/')[4]=='boat-parent': return self.send(boat_events())
         if p.endswith('/events') and p.split('/')[4] in ('agent-work','agent-done'): return self.send(agent_events(p.split('/')[4]))
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
         if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'},{'id':'chatgpt_ui','name':'ChatGPT UI'}])

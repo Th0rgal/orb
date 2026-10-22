@@ -8,6 +8,8 @@ final class OrbTranscriptModel {
     var events: [StoredEvent] = []
     private(set) var workModel = OrbWorkModel()
     private(set) var changedFiles: [OrbTurnSummary.FileChange] = []
+    /// Subagents and machines this mission started, lifted out of the work fold.
+    private(set) var orchestration: [OrbOrchestration.Ref] = []
     private(set) var openQuestions: [OrbPendingQuestion] = []
     private(set) var history: [(String, String, String)] = []
     /// Completion time of each stored assistant row, by row id.
@@ -19,6 +21,8 @@ final class OrbTranscriptModel {
     func rebuildDerived(working: Bool) {
         let next = OrbWorkModel.build(from: events, working: working)
         if workModel != next { workModel = next }
+        let refs = OrbOrchestration.build(from: events)
+        if orchestration != refs { orchestration = refs }
         let files = OrbTurnSummary.changedFiles(events)
         if changedFiles != files { changedFiles = files }
         let questions = OrbPendingQuestion.extract(events)
