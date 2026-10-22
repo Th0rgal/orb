@@ -954,6 +954,9 @@ impl ProviderHealthTracker {
         reason: CooldownReason,
         retry_after: Option<std::time::Duration>,
     ) -> std::time::Duration {
+        if let Some(cell) = crate::api::proxy_timing::current() {
+            cell.attempt_failure(&reason.to_string());
+        }
         self.record_failure_with_subscription(
             entry.account_id,
             entry.subscription_key.as_ref(),

@@ -683,6 +683,9 @@ pub(crate) fn sustained_recovery_progress(
             .is_some_and(|at| now.signed_duration_since(at) >= Duration::minutes(10))
 }
 
+/// First auto-resume delay after a proxy mid-stream stall.
+const STREAM_STALL_RESUME_SECS: i64 = 10;
+
 fn is_transient_wait(limit: &str) -> bool {
     limit == "Inference connection interrupted"
         || limit == STARTUP_STALL_WAIT
@@ -817,8 +820,24 @@ pub(crate) async fn plan_remote(
                 .is_some_and(|id| !id.trim().is_empty())
             && replays < MAX_REMOTE_REPLAYS
         {
-            let delay = recovery_delay_secs(replays, mission_id)
-                .max(classified.retry_after_seconds.unwrap_or(0));
+            // A proxy stream stall is one dead stream, not an outage: the
+            // first resume goes out in seconds, later ones back off as usual.
+            let stall = super::remote_failure::is_proxy_stream_interruption(failure);
+            let delay = if stall && replays == 0 {
+                STREAM_STALL_RESUME_SECS
+            } else {
+                recovery_delay_secs(replays, mission_id)
+            }
+            .max(classified.retry_after_seconds.unwrap_or(0));
+            if stall {
+                tracing::info!(
+                    target: "sandboxed_sh::proxy_timing",
+                    %mission_id,
+                    replays,
+                    delay_secs = delay,
+                    "transport_auto_resume_planned reason=upstream_stalled"
+                );
+            }
             // Do not shorten a provider's delay or leave a mission parked for
             // years because a proxy emitted milliseconds or a Unix timestamp.
             if delay > 7 * 24 * 60 * 60 {

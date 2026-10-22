@@ -197,3 +197,52 @@ Ordered evaluation roadmap:
 Each lane requires an actual-shape preflight, native tool-call probe,
 verifier-backed Lean canary, separate provenance, and infrastructure-invalid
 retry exclusion before a full cohort is launched.
+
+## Mid-stream contract (`/v1/chat/completions`, streaming)
+
+This is the canonical contract for what the router does after a stream's
+headers were sent. Regression tests: `src/api/proxy.rs` `latency_tests`,
+`src/api/proxy_timing.rs`, `src/api/control/remote_failure.rs`.
+
+1. **First content.** A stream response is returned only after the first
+   upstream content chunk (text, reasoning, tool call, function call or
+   audio). Failures before that fall through the chain (`first_token_timeout_for`,
+   90 s for Gemini thinking models, 45 s otherwise).
+2. **Idleness is measured on raw upstream bytes**, before SSE translation:
+   keepalive comments, thought-only events and partial lines count as
+   activity even when the translator emits nothing for them.
+3. **Idle limit** per provider: `PROXY_STREAM_IDLE_TIMEOUT_SECS_<PROVIDER>`,
+   else 180 s for `google`/`gemini`/`antigravity`/`xai`
+   (`PROXY_REASONING_STREAM_IDLE_SECS`) and 60 s for others
+   (`PROXY_STREAM_IDLE_TIMEOUT_SECS`). It adapts up to 1.5x the p95 of the
+   longest pauses seen in recent healthy streams of the same model, never above
+   `PROXY_STREAM_IDLE_CEILING_SECS` (300 s).
+4. **Keepalives.** During any silence toward the client the router sends
+   `: keepalive\n\n` SSE comments every `PROXY_SSE_KEEPALIVE_SECS` (15 s),
+   timed from the last byte the client received, and only between complete
+   events (`\n\n` or `\r\n\r\n`), never inside one. Each keepalive and each
+   upstream chunk also refreshes the mission's proxy liveness, so harness
+   output-idle watchdogs (OpenCode: `PROXY_STREAM_RECENT`) do not kill a
+   turn the router is still legitimately waiting on.
+5. **Commitment.** A stream is committed once the client received answer
+   text (`delta.content` non-empty), a tool call, a legacy `function_call`
+   or `audio`. Role-only, reasoning-only and keepalive chunks do not commit.
+6. **Stall before commitment: transparent replay.** The stalled upstream
+   is dropped and the same request is re-routed, at most
+   `PROXY_MID_STREAM_STALL_RETRIES` (2) times: first through the chain as
+   usual (normally the same entry), then without the stalled account when
+   another entry exists. The replacement stream is appended after what the
+   client already has (it may repeat a role chunk or reasoning, never
+   answer text or a tool call). Keepalives continue while the replay waits.
+7. **Stall after commitment: surfaced.** The stream ends with
+   `data: {"error":{"code":"upstream_stalled",...}}` then `data: [DONE]`.
+   Mid-stream non-timeout failures end with `upstream_stream_error`.
+8. **Core recovery.** A remote turn that failed with `upstream_stalled` or
+   `upstream_stream_error` is a Transport failure: the first auto-resume is
+   sent after 10 s, later ones back off as for other transport failures.
+9. **Hedging** (opt-in, `PROXY_HEDGE_CHAINS=chain=target`): a stream that
+   has not produced first content after an adaptive delay (p75 of recent
+   first-content times, clamped to `PROXY_HEDGE_MIN_SECS`..`PROXY_HEDGE_MAX_SECS`)
+   is also sent to `target`; the first successful response wins and the
+   other request is dropped. Hedging can change which model answers, so it is
+   never on by default.

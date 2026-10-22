@@ -54,6 +54,159 @@ pub fn stream_idle_timeout() -> Duration {
     Duration::from_secs(env_secs("PROXY_STREAM_IDLE_TIMEOUT_SECS", 60))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Hedged streams
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Hedging for one chain: after an adaptive delay without a first content
+/// chunk, the same request also starts on `target` and the first successful
+/// answer wins. Configured only through `PROXY_HEDGE_CHAINS`, because the
+/// hedge target may be a different model than the chain's first entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HedgeConfig {
+    /// Chain or `provider/model` id the hedge is routed to.
+    pub target: String,
+    /// Never hedge earlier than this (`PROXY_HEDGE_MIN_SECS`, default 20).
+    pub min: Duration,
+    /// Always hedge by this point (`PROXY_HEDGE_MAX_SECS`, default 45).
+    pub max: Duration,
+    /// Latency quantile of the primary's recent first-content times that
+    /// sets the delay between `min` and `max` (`PROXY_HEDGE_QUANTILE`, 0.75).
+    pub quantile: f64,
+    /// How far back latency samples count.
+    pub window: Duration,
+    /// Below this many samples the delay is `max`.
+    pub min_samples: usize,
+}
+
+impl HedgeConfig {
+    /// Delay before hedging, from recent first-content latencies (ms).
+    pub fn delay_for(&self, samples_ms: &[u64]) -> Duration {
+        if samples_ms.len() < self.min_samples {
+            return self.max;
+        }
+        crate::api::proxy_timing::percentile(samples_ms, self.quantile)
+            .map(Duration::from_millis)
+            .unwrap_or(self.max)
+            .clamp(self.min, self.max)
+    }
+}
+
+/// `PROXY_HEDGE_CHAINS`: `chain=target` pairs separated by `;` or `,`,
+/// e.g. `builtin/smart=xai/grok-4.7`. Empty or unset: no hedging.
+pub fn parse_hedge_rules(raw: &str) -> Vec<(String, String)> {
+    raw.split([';', ','])
+        .filter_map(|pair| {
+            let (chain, target) = pair.split_once('=')?;
+            let (chain, target) = (chain.trim(), target.trim());
+            (!chain.is_empty() && !target.is_empty() && chain != target)
+                .then(|| (chain.to_string(), target.to_string()))
+        })
+        .collect()
+}
+
+pub fn hedge_rules_from_env() -> Vec<(String, String)> {
+    std::env::var("PROXY_HEDGE_CHAINS")
+        .map(|raw| parse_hedge_rules(&raw))
+        .unwrap_or_default()
+}
+
+/// Hedge settings for a requested model id. `smart` matches `builtin/smart`
+/// the same way the router resolves the alias.
+pub fn hedge_config_for(requested: &str, rules: &[(String, String)]) -> Option<HedgeConfig> {
+    let (_, target) = rules.iter().find(|(chain, _)| {
+        chain == requested || chain.strip_prefix("builtin/") == Some(requested)
+    })?;
+    let min = Duration::from_secs(env_secs("PROXY_HEDGE_MIN_SECS", 20));
+    let max = Duration::from_secs(env_secs("PROXY_HEDGE_MAX_SECS", 45)).max(min);
+    let quantile = std::env::var("PROXY_HEDGE_QUANTILE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|q| (0.0..=1.0).contains(q))
+        .unwrap_or(0.75);
+    Some(HedgeConfig {
+        target: target.clone(),
+        min,
+        max,
+        quantile,
+        window: Duration::from_secs(30 * 60),
+        min_samples: 20,
+    })
+}
+
+/// Mid-stream idle limit for one provider/model.
+///
+/// Base: `PROXY_STREAM_IDLE_TIMEOUT_SECS_<PROVIDER>` (e.g. `_XAI`, `_GOOGLE`),
+/// else [`default_stream_idle_for`] (180 s for Gemini/Grok providers, 60 s
+/// otherwise). Adaptive: 1.5x the p95 of
+/// the longest upstream silences seen in recent healthy streams of the same
+/// model (a model that routinely pauses 70 s while it reasons or composes a
+/// large tool call is not dead at 60 s). Never above
+/// `PROXY_STREAM_IDLE_CEILING_SECS` (default 300 s), never below the base. Idleness is measured on raw upstream bytes,
+/// so keepalive comments and thought chunks count as activity.
+pub fn stream_idle_timeout_for(provider: &str, recent_max_gaps_ms: &[u64]) -> Duration {
+    let key = format!(
+        "PROXY_STREAM_IDLE_TIMEOUT_SECS_{}",
+        provider
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    );
+    let base = std::env::var(&key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| default_stream_idle_for(provider));
+    let ceiling = Duration::from_secs(env_secs("PROXY_STREAM_IDLE_CEILING_SECS", 300)).max(base);
+    adaptive_idle(base, ceiling, recent_max_gaps_ms)
+}
+
+/// Default mid-stream idle limit per provider. Gemini and Grok reasoning
+/// models go silent for minutes while they think or compose a large tool
+/// call (prod: 6 `idle_secs=60` stalls on google/xai in 90 min), so they get
+/// `PROXY_REASONING_STREAM_IDLE_SECS` (default 180 s). Others keep
+/// `PROXY_STREAM_IDLE_TIMEOUT_SECS` (60 s).
+pub fn default_stream_idle_for(provider: &str) -> Duration {
+    if matches!(provider, "google" | "gemini" | "antigravity" | "xai") {
+        Duration::from_secs(env_secs("PROXY_REASONING_STREAM_IDLE_SECS", 180))
+            .max(stream_idle_timeout())
+    } else {
+        stream_idle_timeout()
+    }
+}
+
+/// Pure part of [`stream_idle_timeout_for`]: needs 20 samples to adapt.
+pub fn adaptive_idle(base: Duration, ceiling: Duration, recent_max_gaps_ms: &[u64]) -> Duration {
+    if recent_max_gaps_ms.len() < 20 {
+        return base;
+    }
+    let p95 = crate::api::proxy_timing::percentile(recent_max_gaps_ms, 0.95).unwrap_or(0);
+    Duration::from_millis(p95.saturating_mul(3) / 2).clamp(base, ceiling)
+}
+
+/// Interval of SSE keepalive comments toward the client during silences
+/// (`PROXY_SSE_KEEPALIVE_SECS`, default 15 s; well under Cloudflare's 100 s
+/// and typical client read timeouts).
+pub fn sse_keepalive_interval() -> Duration {
+    Duration::from_secs(env_secs("PROXY_SSE_KEEPALIVE_SECS", 15))
+}
+
+/// Transparent re-routes of a stream that stalls before any content or tool
+/// call reached the client (`PROXY_MID_STREAM_STALL_RETRIES`, default 2: the
+/// same entry once, then the chain without the stalled entry).
+pub fn mid_stream_stall_retries() -> u32 {
+    std::env::var("PROXY_MID_STREAM_STALL_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(2)
+        .min(4)
+}
+
 /// Same-entry retries before the first content chunk.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -528,5 +681,76 @@ mod tests {
         assert!(google.flags.contains(&"stalls"));
         assert!(google.flags.contains(&"slow_first_token"));
         assert_eq!(health.chains[0].chain_id, "builtin/smart");
+    }
+
+    #[test]
+    fn hedge_rules_parse_and_match_alias() {
+        let rules = parse_hedge_rules(" builtin/smart = xai/grok-4.7 ; bad ; x=x ; a=b");
+        assert_eq!(
+            rules,
+            vec![
+                ("builtin/smart".to_string(), "xai/grok-4.7".to_string()),
+                ("a".to_string(), "b".to_string())
+            ]
+        );
+        assert_eq!(
+            hedge_config_for("smart", &rules).map(|c| c.target),
+            Some("xai/grok-4.7".to_string())
+        );
+        assert!(hedge_config_for("builtin/smart", &rules).is_some());
+        assert!(hedge_config_for("builtin/fast", &rules).is_none());
+        assert!(hedge_config_for("smart", &[]).is_none());
+    }
+
+    #[test]
+    fn hedge_delay_is_adaptive_and_clamped() {
+        let cfg = HedgeConfig {
+            target: "t".into(),
+            min: Duration::from_secs(20),
+            max: Duration::from_secs(45),
+            quantile: 0.75,
+            window: Duration::from_secs(60),
+            min_samples: 4,
+        };
+        // Too few samples: wait the maximum.
+        assert_eq!(cfg.delay_for(&[1_000]), Duration::from_secs(45));
+        // Fast provider: floor.
+        assert_eq!(
+            cfg.delay_for(&[1_000, 2_000, 3_000, 4_000]),
+            Duration::from_secs(20)
+        );
+        // p75 inside the band.
+        assert_eq!(
+            cfg.delay_for(&[10_000, 20_000, 30_000, 40_000]),
+            Duration::from_secs(30)
+        );
+        // Slow provider: ceiling.
+        assert_eq!(cfg.delay_for(&[90_000; 8]), Duration::from_secs(45));
+    }
+
+    #[test]
+    fn idle_limit_adapts_to_observed_pauses_within_bounds() {
+        let base = Duration::from_secs(60);
+        let ceiling = Duration::from_secs(110);
+        // Too few samples: the base.
+        assert_eq!(adaptive_idle(base, ceiling, &[90_000; 5]), base);
+        // Short pauses never lower the base.
+        assert_eq!(adaptive_idle(base, ceiling, &[2_000; 40]), base);
+        // 60 s pauses seen: 1.5x = 90 s.
+        assert_eq!(
+            adaptive_idle(base, ceiling, &[60_000; 40]),
+            Duration::from_secs(90)
+        );
+        // Huge pauses: capped at the ceiling.
+        assert_eq!(adaptive_idle(base, ceiling, &[600_000; 40]), ceiling);
+    }
+
+    #[test]
+    fn reasoning_providers_get_a_long_idle_floor() {
+        assert!(default_stream_idle_for("google") >= Duration::from_secs(180));
+        assert!(default_stream_idle_for("xai") >= Duration::from_secs(180));
+        assert!(default_stream_idle_for("antigravity") >= Duration::from_secs(180));
+        assert_eq!(default_stream_idle_for("zai"), stream_idle_timeout());
+        assert!(stream_idle_timeout_for("google", &[]) >= Duration::from_secs(180));
     }
 }

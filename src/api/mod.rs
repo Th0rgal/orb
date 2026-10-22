@@ -81,6 +81,7 @@ pub(crate) mod proxy;
 mod proxy_keys;
 pub(crate) mod proxy_liveness;
 pub(crate) mod proxy_reliability;
+pub(crate) mod proxy_timing;
 pub(crate) mod reconcile;
 pub(crate) mod remote_build;
 pub(crate) mod routes;

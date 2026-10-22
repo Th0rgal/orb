@@ -44,6 +44,16 @@ fn retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) -> Optio
     )
 }
 
+/// SSE error code the `/v1` proxy ends a stalled stream with.
+pub(crate) const PROXY_STREAM_STALL_CODE: &str = "upstream_stalled";
+
+/// The turn ended on a proxy stream stall or stream error: transient, and
+/// worth resuming quickly rather than after the generic transport backoff.
+pub(crate) fn is_proxy_stream_interruption(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains(PROXY_STREAM_STALL_CODE) || lower.contains("upstream_stream_error")
+}
+
 pub(crate) fn classify(raw: &str) -> Failure {
     let lower = raw.to_ascii_lowercase();
     let kind = if lower.contains("startup watchdog") || lower.contains("startup_watchdog") {
@@ -145,6 +155,9 @@ pub(crate) fn classify(raw: &str) -> Failure {
                 "http 524",
                 "code 503",
                 "code 529",
+                // The /v1 proxy's mid-stream stall / stream error events.
+                PROXY_STREAM_STALL_CODE,
+                "upstream_stream_error",
                 crate::antigravity::IDLE_WAIT_INTERRUPTED_MARKER,
             ]
             .iter()
@@ -234,5 +247,14 @@ mod tests {
             classify(r#"{"statusCode":502,"isRetryable":false,"message":"HTTP 502"}"#).kind,
             FailureKind::Unknown
         );
+    }
+
+    #[test]
+    fn proxy_stream_stall_is_transport() {
+        // The exact shape a remote opencode job reported (mission c22d3f33).
+        let raw = r#"command exited with Some(1). CLI error: {"data":{"message":"{\"message\":\"upstream stream stalled\",\"type\":\"server_error\",\"code\":\"upstream_stalled\"}"}}"#;
+        assert_eq!(classify(raw).kind, FailureKind::Transport);
+        assert!(is_proxy_stream_interruption(raw));
+        assert!(!is_proxy_stream_interruption("http 503"));
     }
 }
