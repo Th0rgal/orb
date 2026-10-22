@@ -3611,6 +3611,9 @@ select.orb-select-native:disabled { cursor: default; }
 .md-workspace-image-missing > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .md-workspace-image-missing small { color:var(--fg-3); white-space:nowrap; }
 .md-workspace-image-missing:not(:disabled):hover { border-color:var(--fg-3); }
+.md-file-unavailable { display:inline-flex; align-items:center; gap:8px; max-width:100%; padding:6px 10px; border:1px dashed var(--stroke); border-radius: var(--radius-md); background:var(--bg-elev); color:var(--fg-2); vertical-align:middle; }
+.md-file-unavailable > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.md-file-unavailable small { color:var(--fg-3); white-space:nowrap; }
 
 /* Bitwarden Secrets Manager settings page */
 .bitwarden-inner { max-width: 900px !important; }

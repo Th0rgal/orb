@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { render, waitFor } from "@solidjs/testing-library";
 import { MdView, markdownText } from "../src/Markdown";
 import { FileReferenceContext, type ReferenceResolver } from "../src/fileReferenceContext";
-import { parseRichTag } from "../src/richTags";
+import { RICH_TAG, expandMediaLines, parseRichTag } from "../src/richTags";
+import spec from "../../shared/orb-spec/file-references.json";
 
 const resolver = (loadImage: ReferenceResolver["loadImage"]): ReferenceResolver =>
   ({ loadImage, resolve: async () => [], open: () => {}, search: () => {} });
@@ -40,5 +41,32 @@ describe("rich image tags", () => {
 
   it("uses labels in plain text", () => {
     expect(markdownText('See <image path="./a.png" alt="Chart" /> and <file path="./r.pdf">Report</file>')).toBe("See Chart and Report");
+  });
+
+  it("reads every shared fixture case like iOS and Android", () => {
+    for (const c of spec.cases as { name: string; input: string; refs: Record<string, string>[] }[]) {
+      const text = expandMediaLines(c.input).replace(/```[\s\S]*?(```|$)/g, "");
+      const refs = [...text.matchAll(RICH_TAG)].map(m => parseRichTag(m[1], m[2], m[3])).filter(Boolean);
+      expect(refs.map(r => ({ type: r!.type, path: r!.path, label: r!.label, unavailable: r!.unavailable ? "true" : undefined })), c.name)
+        .toEqual(c.refs.map(r => ({ type: r.type, path: r.path, label: r.label, unavailable: r.unavailable })));
+    }
+  });
+
+  it("renders a Hermes MEDIA line as an inline image and never shows the directive", async () => {
+    const loadImage = vi.fn(async (path: string) => `data:image/png;base64,${btoa(path)}`);
+    const text = "Voici le graphique.\n\nMEDIA:/tmp/orb_usage_30d.png\n\n```\nMEDIA:/tmp/doc.png\n```";
+    const { container } = render(() => <FileReferenceContext.Provider value={resolver(loadImage)}><MdView text={text} /></FileReferenceContext.Provider>);
+    await waitFor(() => expect(container.querySelectorAll(".md-workspace-image img")).toHaveLength(1));
+    expect(loadImage.mock.calls.map(c => c[0])).toEqual(["/tmp/orb_usage_30d.png"]);
+    expect(container.querySelector("p")?.textContent).not.toContain("MEDIA:");
+    expect(markdownText("MEDIA:/tmp/r.pdf")).toBe("r.pdf");
+  });
+
+  it("shows a file Core could not copy as an unavailable chip", () => {
+    const { container } = render(() => <MdView text={'Chart:\n<file path="/tmp/gone.png" name="gone.png" unavailable="true" />'} />);
+    const chip = container.querySelector(".md-file-unavailable");
+    expect(chip?.textContent).toContain("gone.png");
+    expect(chip?.textContent).toContain("File no longer available");
+    expect(container.textContent).not.toContain("<file");
   });
 });

@@ -6,7 +6,7 @@
  */
 export const RICH_TAG = /<(image|file)\s+([^>]*?)(?:\/\s*>|>([^<]*?)<\/\1\s*>)/gi;
 
-export type RichTag = { type: "image" | "file"; path: string; label: string };
+export type RichTag = { type: "image" | "file"; path: string; label: string; unavailable?: true };
 
 const present = (value: string | undefined) => value?.trim().replace(/\s+/g, " ") || undefined;
 
@@ -17,5 +17,33 @@ export function parseRichTag(type: string, attrs: string, inner?: string): RichT
   if (!path) return null;
   const kind = type.toLowerCase() as RichTag["type"];
   const label = present(kind === "image" ? values.alt : values.name) ?? present(inner) ?? path.split("/").pop() ?? path;
-  return { type: kind, path, label };
+  return values.unavailable === "true" ? { type: kind, path, label, unavailable: true } : { type: kind, path, label };
+}
+
+/** Hermes's attachment directive alone on a line: `MEDIA:/tmp/plot.png`,
+ * `**MEDIA:/tmp/r.pdf**`, `MEDIA: "/tmp/a b.csv"`. Core rewrites these at
+ * ingestion; this fallback covers messages stored before it did. */
+const MEDIA_LINE = /^[ \t]*[*_]{0,3}MEDIA:[ \t]*(?:"([^"<>\n]+)"|'([^'"<>\n]+)'|((?:~\/|\/)[^\s"'<>`]+?))[*_]{0,3}[.,;:]?[ \t\r]*$/;
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
+
+/** One `MEDIA:` line as the equivalent rich tag, or null. */
+export function mediaLineTag(line: string): string | null {
+  const m = MEDIA_LINE.exec(line);
+  const path = (m?.[1] ?? m?.[2] ?? m?.[3])?.trim();
+  if (!path) return null;
+  const name = path.split("/").pop() || path;
+  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+  return IMAGE_EXTENSIONS.has(ext) ? `<image path="${path}" alt="${name}" />` : `<file path="${path}" name="${name}" />`;
+}
+
+/** Rewrite `MEDIA:` lines outside fenced code into rich tags. */
+export function expandMediaLines(text: string): string {
+  if (!text.includes("MEDIA:")) return text;
+  let fence: string | null = null;
+  return text.split("\n").map(line => {
+    const t = line.trimStart();
+    if (fence) { if (t.startsWith(fence)) fence = null; return line; }
+    if (t.startsWith("```") || t.startsWith("~~~")) { fence = t.slice(0, 3); return line; }
+    return mediaLineTag(line) ?? line;
+  }).join("\n");
 }

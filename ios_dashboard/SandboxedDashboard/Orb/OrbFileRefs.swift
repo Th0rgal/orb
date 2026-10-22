@@ -78,6 +78,8 @@ struct OrbFileRef: Identifiable, Hashable, Sendable {
     var url: String?
     /// When it was shared (event timestamp), for the Files tab.
     var sharedAt: String?
+    /// Core could not copy the file (`unavailable="true"`): shown, never fetched.
+    var unavailable = false
     var id: String { OrbFileRefs.normalize(path) }
     var name: String { OrbFileRefs.fileName(path) }
     var kind: OrbFileKind {
@@ -155,7 +157,41 @@ enum OrbFileRefs {
         let present: (String?) -> String? = { v in v.map(collapse).flatMap { $0.isEmpty ? nil : $0 } }
         let label = present(kind == "image" ? values["alt"] : values["name"]) ?? present(inner) ?? fileName(path)
         let mime = values["type"].flatMap { $0.contains("/") ? $0 : nil }
-        return OrbFileRef(type: kind, path: path, label: label, mime: mime)
+        return OrbFileRef(type: kind, path: path, label: label, mime: mime, unavailable: values["unavailable"] == "true")
+    }
+
+    /// Hermes's attachment directive alone on a line (`MEDIA:/tmp/plot.png`, `**MEDIA:/tmp/r.pdf**`,
+    /// `MEDIA: "/tmp/a b.csv"`). Same expression as desktop `mediaLineTag`. Core rewrites these at
+    /// ingestion; this fallback covers messages stored before it did.
+    private static let mediaLine = try! NSRegularExpression(
+        pattern: #"^[ \t]*[*_]{0,3}MEDIA:[ \t]*(?:"([^"<>\n]+)"|'([^'"<>\n]+)'|((?:~/|/)[^\s"'<>`]+?))[*_]{0,3}[.,;:]?[ \t\r]*$"#)
+    static let mediaImageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+
+    /// One `MEDIA:` line as the equivalent rich tag, or nil.
+    static func mediaLineTag(_ line: String) -> String? {
+        let ns = line as NSString
+        guard let m = mediaLine.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        guard let group = (1...3).first(where: { m.range(at: $0).location != NSNotFound }) else { return nil }
+        let path = ns.substring(with: m.range(at: group)).trimmingCharacters(in: .whitespaces)
+        guard !path.isEmpty else { return nil }
+        let name = fileName(path)
+        return mediaImageExtensions.contains(fileExtension(name)) ? "<image path=\"\(path)\" alt=\"\(name)\" />" : "<file path=\"\(path)\" name=\"\(name)\" />"
+    }
+
+    /// `MEDIA:` lines outside fenced code rewritten as rich tags. While streaming, the
+    /// unfinished last line is left alone.
+    static func expandMedia(_ text: String, streaming: Bool = false) -> String {
+        guard text.contains("MEDIA:") else { return text }
+        var lines = text.components(separatedBy: "\n")
+        var fence: String?
+        for i in lines.indices {
+            let trimmed = lines[i].drop { $0 == " " || $0 == "\t" }
+            if let marker = fence { if trimmed.hasPrefix(marker) { fence = nil }; continue }
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { fence = String(trimmed.prefix(3)); continue }
+            if streaming && i == lines.count - 1 { continue }
+            if let tag = mediaLineTag(lines[i]) { lines[i] = tag }
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Ranges of fenced code blocks: tags written there are documentation.
@@ -180,7 +216,7 @@ enum OrbFileRefs {
 
     /// Message text split into prose and file tags, in order. Prose keeps its Markdown.
     static func segments(_ text: String, streaming: Bool = false) -> [OrbFileSegment] {
-        var source = text
+        var source = expandMedia(text, streaming: streaming)
         if streaming, let m = incompleteTail.firstMatch(in: source, range: NSRange(location: 0, length: (source as NSString).length)) {
             source = (source as NSString).substring(to: m.range.location)
             while source.last?.isNewline == true { source.removeLast() }
@@ -257,7 +293,7 @@ enum OrbFileRefs {
                 rows.append(OrbFileRef(type: OrbFileKind.of(file.name) == .image ? "image" : "file", path: file.sourcePath ?? file.name,
                                        label: file.name, mime: file.contentType, size: file.size, url: file.url))
             }
-            for var row in rows where seen.insert(row.id).inserted {
+            for var row in rows where !row.unavailable && seen.insert(row.id).inserted {
                 row.sharedAt = message.at
                 out.append(row)
             }
