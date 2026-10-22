@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod grok;
 pub mod hermes;
 pub mod http;
+pub mod media;
 pub mod usage;
 pub mod worker;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +108,10 @@ pub struct Turn {
     pub artifacts: Vec<Value>,
     pub branches: Vec<Value>,
     pub usage: Option<Value>,
+    /// Files the answer shares (`SharedFile` JSON), published as
+    /// `metadata.shared_files` on its assistant message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_files: Vec<Value>,
 }
 impl Turn {
     pub fn new(key: String, prompt: String) -> Self {
@@ -125,6 +130,7 @@ impl Turn {
             artifacts: vec![],
             branches: vec![],
             usage: None,
+            shared_files: vec![],
         }
     }
 }

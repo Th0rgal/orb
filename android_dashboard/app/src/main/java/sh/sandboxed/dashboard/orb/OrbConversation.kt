@@ -1596,7 +1596,7 @@ fun OrbConversationPage(
                     }
                     is OrbTurn.Assistant -> {
                         androidx.compose.runtime.CompositionLocalProvider(
-                            LocalOrbFiles provides OrbFileContext(fileScope, sharedFiles) { fileRef = it }
+                            LocalOrbFiles provides OrbFileContext(fileScope, sharedFiles, core) { fileRef = it }
                         ) {
                             OrbAssistantTurnView(
                                 turn = turn,

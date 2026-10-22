@@ -65,7 +65,7 @@ pub(super) async fn save(
             let mid = execution.mission_id.to_string();
             let logged: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND event_id=?2 AND event_type='assistant_message')", params![mid, turn.key], |r| r.get(0)).map_err(err)?;
             if !logged {
-                tx.execute("INSERT INTO mission_events(mission_id,sequence,event_type,timestamp,event_id,content) VALUES(?1,(SELECT COALESCE(MAX(sequence),0)+1 FROM mission_events WHERE mission_id=?1),'assistant_message',?2,?3,?4)", params![mid, now_string(), turn.key, result]).map_err(err)?;
+                tx.execute("INSERT INTO mission_events(mission_id,sequence,event_type,timestamp,event_id,content,metadata) VALUES(?1,(SELECT COALESCE(MAX(sequence),0)+1 FROM mission_events WHERE mission_id=?1),'assistant_message',?2,?3,?4,?5)", params![mid, now_string(), turn.key, result, crate::api::cloud_agents::media::metadata(&turn.shared_files)]).map_err(err)?;
             }
         }
         if let Some(turn) = execution.turns.iter().find(|t| !t.phase.terminal()).or_else(|| execution.turns.last()) {

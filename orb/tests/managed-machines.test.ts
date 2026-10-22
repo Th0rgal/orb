@@ -104,3 +104,37 @@ describe("managed machine names and v2 states", () => {
     expect(availabilityLine([], null, true)).toBe("Checking machines…");
   });
 });
+
+import { budgetFull, budgetLeft, costLine, sizeLabel, specLine, ttlFraction, ttlShort } from "../src/managedMachineModel";
+
+describe("managed row v3 and unlimited budgets", () => {
+  const b = { spent_today_usd: 0.11, daily_cap_usd: null, active: 1, max_concurrent: null, default_ttl_minutes: 60, max_ttl_minutes: 240, default_size: "default", max_size: "large" };
+  it("drops the 'of …' parts when caps are unlimited", () => {
+    expect(budgetLine(b)).toBe("$0.11 spent today · 1 running");
+    expect(budgetLine({ ...b, daily_cap_usd: 5 })).toBe("$0.11 spent today of $5.00 · 1 running");
+    expect(budgetLine({ ...b, max_concurrent: 2 })).toBe("$0.11 spent today · 1 of 2 running");
+  });
+  it("never blocks or warns on null caps", () => {
+    expect(budgetFull({ ...b, active: 99, spent_today_usd: 999 })).toBe(false);
+    expect(budgetLeft(b)).toBeNull();
+    expect(budgetFull({ ...b, max_concurrent: 1 })).toBe(true);
+    expect(budgetFull({ ...b, daily_cap_usd: 0.1 })).toBe(true);
+    expect(budgetLeft({ ...b, daily_cap_usd: 1 })).toBeCloseTo(0.89);
+  });
+  it("formats the row's secondary line", () => {
+    expect(sizeLabel("default")).toBe("medium");
+    expect(sizeLabel("large")).toBe("large");
+    expect(specLine({ cpu: 4, ram_gb: 8, disk_gb: 50 })).toBe("4 vCPU · 8 GB RAM · 50 GB");
+    expect(specLine({ cpu: 4, ram_gb: 8, disk_gb: null })).toBe("4 vCPU · 8 GB RAM");
+    expect(costLine(0.004, 0.036)).toBe("<$0.01 so far · $0.036/h");
+  });
+  it("shows TTL left and the remaining share", () => {
+    expect(ttlShort("2026-10-21T12:21:00Z", now)).toBe("21 min left");
+    expect(ttlShort("2026-10-21T13:05:00Z", now)).toBe("1 h 05 min left");
+    expect(ttlShort("2026-10-21T11:00:00Z", now)).toBe("Expired");
+    expect(ttlShort("", now)).toBe("");
+    expect(ttlFraction("2026-10-21T11:00:00Z", "2026-10-21T13:00:00Z", now)).toBeCloseTo(0.5);
+    expect(ttlFraction("2026-10-21T11:00:00Z", "2026-10-21T11:30:00Z", now)).toBe(0);
+    expect(ttlFraction("x", "y", now)).toBe(0);
+  });
+});

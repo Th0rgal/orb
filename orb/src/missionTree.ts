@@ -52,12 +52,15 @@ export function forkLeaders<M extends Linked & Dated>(missions: readonly M[]): M
 }
 
 /** Roots keep the order of the list, and so do the children of each mission.
- * A mission whose parent is not in the list stays a root. */
-export function nestMissions<M extends Linked & Dated>(missions: M[]): NestedMission<M>[] {
+ * A mission whose parent is not in the list is held under `opts.placeholder`
+ * (one stand-in per missing parent, placed where its first child would be);
+ * without one, or when it returns undefined (parent confirmed gone), it is a root. */
+export function nestMissions<M extends Linked & Dated>(missions: M[], opts: { placeholder?: (parentId: string, child: M) => M | undefined } = {}): NestedMission<M>[] {
   const leaders = forkLeaders(missions);
   const nodes = new Map(missions.map(mission => [mission.id, { mission, children: [] as NestedMission<M>[] }]));
   const roots: NestedMission<M>[] = [];
   const versions = new Map<string, NestedMission<M>[]>();
+  const placeholders = new Map<string, NestedMission<M>>();
   for (const mission of missions) {
     const node = nodes.get(mission.id)!;
     const leader = leaders.get(mission.id);
@@ -70,6 +73,15 @@ export function nestMissions<M extends Linked & Dated>(missions: M[]): NestedMis
     const parentId = missionParent(placeOf);
     const parent = parentId ? nodes.get(parentId) : undefined;
     if (parent && parent !== node && !reaches(nodes, parent.mission, mission.id)) parent.children.push(node);
+    else if (parentId && !parent && opts.placeholder) {
+      // Its parent is not loaded (yet): hold it under a stand-in, never at the root.
+      let held = placeholders.get(parentId);
+      if (!held) {
+        const stand = opts.placeholder(parentId, placeOf);
+        if (stand) { held = { mission: stand, children: [] }; placeholders.set(parentId, held); roots.push(held); }
+      }
+      (held ? held.children : roots).push(node);
+    }
     else roots.push(node);
   }
   for (const [leaderId, earlier] of versions) {

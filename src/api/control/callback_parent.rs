@@ -60,6 +60,38 @@ fn parent(connection: &Connection, session: &str) -> Option<Uuid> {
     found
 }
 
+/// A single mission as the read model serves it: with the derived callback
+/// lineage the list and read handlers attach, so a mutation answer (resume,
+/// …) never places a callback child at the root of a client's tree.
+pub(super) async fn with_lineage(
+    mission: &Mission,
+    store: &std::sync::Arc<dyn crate::api::mission_store::MissionStore>,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(mission)?;
+    attach(
+        &mut value,
+        links(std::slice::from_ref(mission), store)
+            .await
+            .get(&mission.id),
+    );
+    Ok(value)
+}
+
+/// Put a derived callback parent on a serialized mission; never overwrite one.
+pub(super) fn attach(value: &mut serde_json::Value, parent: Option<&Uuid>) {
+    if let (Some(parent), Some(object)) = (parent, value.as_object_mut()) {
+        if object
+            .get("callback_parent_mission_id")
+            .is_none_or(|v| v.is_null())
+        {
+            object.insert(
+                "callback_parent_mission_id".into(),
+                serde_json::json!(parent),
+            );
+        }
+    }
+}
+
 pub(super) async fn links(
     missions: &[Mission],
     store: &std::sync::Arc<dyn crate::api::mission_store::MissionStore>,
@@ -107,6 +139,25 @@ pub(super) async fn links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_adds_a_derived_parent_and_keeps_an_existing_one() {
+        let parent = Uuid::new_v4();
+        let mut bare = serde_json::json!({"id": "x", "status": "pending"});
+        attach(&mut bare, Some(&parent));
+        assert_eq!(
+            bare["callback_parent_mission_id"],
+            serde_json::json!(parent)
+        );
+        let other = Uuid::new_v4();
+        let mut set = serde_json::json!({"id": "x", "callback_parent_mission_id": other});
+        attach(&mut set, Some(&parent));
+        assert_eq!(set["callback_parent_mission_id"], serde_json::json!(other));
+        let mut none = serde_json::json!({"id": "x"});
+        attach(&mut none, None);
+        assert!(none.get("callback_parent_mission_id").is_none());
+    }
+
     #[test]
     fn only_unambiguous_isolated_callback_sessions_have_parents() {
         let c = Connection::open_in_memory().unwrap();

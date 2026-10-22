@@ -1243,13 +1243,60 @@ pub async fn validate(
 
 pub async fn download(
     State(state): State<Arc<AppState>>,
+    user: Option<axum::Extension<super::auth::AuthUser>>,
     Query(q): Query<PathQuery>,
 ) -> Result<Response, (StatusCode, String)> {
+    // Mission media (Hermes attachments) is readable only by name, through the
+    // mission it belongs to, by a user who can read that mission.
+    if let Some(parsed) =
+        super::cloud_agents::media::parse_store_path(&state.config.working_dir, &q.path)
+    {
+        let denied = || (StatusCode::NOT_FOUND, "File not found".to_string());
+        let (mission, path, mime) = parsed.map_err(|_| denied())?;
+        if q.mission_id != Some(mission) {
+            return Err(denied());
+        }
+        let axum::Extension(user) = user.ok_or_else(denied)?;
+        super::control::get_mission(
+            State(state.clone()),
+            axum::Extension(user),
+            axum::extract::Path(mission),
+        )
+        .await
+        .map_err(|_| denied())?;
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .await
+            .map_err(|_| denied())?;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        return Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response());
+    }
     let resolved_path = if let Some(workspace_id) = q.workspace_id {
         resolve_path_for_workspace(&state, workspace_id, &q.path, q.mission_id).await?
     } else {
         resolve_legacy_fs_path_for_read(&state, &q.path)?
     };
+    // Any other spelling of a media path (`..`, symlinks, workspace roots) is refused.
+    let media_root = super::cloud_agents::media::media_root(&state.config.working_dir);
+    let canonical_media = media_root.canonicalize().unwrap_or(media_root);
+    if resolved_path
+        .canonicalize()
+        .unwrap_or_else(|_| resolved_path.clone())
+        .starts_with(&canonical_media)
+    {
+        return Err((StatusCode::NOT_FOUND, "File not found".to_string()));
+    }
     let filename = q
         .path
         .split('/')

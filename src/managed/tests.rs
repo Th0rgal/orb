@@ -5,8 +5,8 @@ fn settings() -> ManagedSettings {
     ManagedSettings {
         enabled: true,
         provider: "boat".into(),
-        daily_cap_usd: 1.0,
-        max_concurrent: 2,
+        daily_cap_usd: Some(1.0),
+        max_concurrent: Some(2),
         default_ttl_minutes: 120,
         max_ttl_minutes: 720,
         default_size: "small".into(),
@@ -604,7 +604,7 @@ async fn unknown_owner_status_keeps_machine() {
 async fn store_miss_in_unknown_tenant_never_destroys() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = settings();
-    s.max_concurrent = 4;
+    s.max_concurrent = Some(4);
     let (m, _) = manager(dir.path(), s);
     // Owner mission lives in another tenant whose store is not loaded.
     let foreign = online_machine(&m, "foreign-mission").await;
@@ -659,8 +659,8 @@ fn names_reuse_the_lowest_free_letter_and_roll_over_after_z() {
 async fn machines_get_unique_names_targetable_until_destroyed() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = settings();
-    s.max_concurrent = 4;
-    s.daily_cap_usd = 100.0;
+    s.max_concurrent = Some(4);
+    s.daily_cap_usd = Some(100.0);
     let (m, _) = manager(dir.path(), s);
     let a = online_machine_sized(&m, "o1", Some("large")).await;
     let b = online_machine_sized(&m, "o1", Some("large")).await;
@@ -740,4 +740,60 @@ async fn antigravity_setting_owner_and_wipe_on_destroy() {
         1
     );
     let _ = n;
+}
+
+#[test]
+fn caps_keep_safe_defaults_unless_explicitly_unlimited() {
+    // Unset / empty / zero / negative / typo keep the safe default.
+    for raw in [
+        None,
+        Some(""),
+        Some("  "),
+        Some("0"),
+        Some("-3"),
+        Some("abc"),
+        Some("nonee"),
+    ] {
+        assert_eq!(optional_limit::<f64>(raw, 20.0), Some(20.0), "{raw:?}");
+        assert_eq!(optional_limit::<usize>(raw, 6), Some(6), "{raw:?}");
+    }
+    // Only an explicit operator choice lifts the limit.
+    for raw in ["none", "Unlimited", "OFF", " none "] {
+        assert_eq!(optional_limit::<f64>(Some(raw), 20.0), None, "{raw:?}");
+        assert_eq!(optional_limit::<usize>(Some(raw), 6), None, "{raw:?}");
+    }
+    assert_eq!(optional_limit::<f64>(Some("50"), 20.0), Some(50.0));
+    assert_eq!(optional_limit::<usize>(Some(" 10 "), 6), Some(10));
+}
+
+#[tokio::test]
+async fn unlimited_caps_never_refuse_and_report_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.daily_cap_usd = None;
+    s.max_concurrent = None;
+    let (m, _) = manager(dir.path(), s);
+    // Well past the old defaults: 8 machines, and an xlarge for 12 h ($2.40).
+    for _ in 0..7 {
+        m.spawn(SpawnRequest {
+            wait: Some(false),
+            ttl_minutes: Some(30),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    m.spawn(SpawnRequest {
+        size: Some("xlarge".into()),
+        ttl_minutes: Some(720),
+        wait: Some(false),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let view = m.list(24).await;
+    assert_eq!(view.budget.active, 8);
+    let json = serde_json::to_value(&view.budget).unwrap();
+    assert!(json["daily_cap_usd"].is_null());
+    assert!(json["max_concurrent"].is_null());
 }

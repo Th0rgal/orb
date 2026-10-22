@@ -1,5 +1,5 @@
 {
-  "_doc": "Agent file-share markup, consumed by the iOS (OrbFileRefTests) and Android (OrbFileRefsTest) parsers. Desktop parity: orb/src/richTags.ts. Samples are real assistant_message markup from prod mission_events (tag syntax kept verbatim; labels of client engagements neutralised because this repository is public). Each case: input text, expected refs (type, path, label, mime?) and the prose left once tags are removed (`text`, whitespace-collapsed).",
+  "_doc": "Agent file-share markup, consumed by the iOS (OrbFileRefTests) and Android (OrbFileRefsTest) parsers. Desktop parity: orb/src/richTags.ts. Samples are real assistant_message markup from prod mission_events (tag syntax kept verbatim; labels of client engagements neutralised because this repository is public). Each case: input text, expected refs (type, path, label, mime?) and the prose left once tags are removed (`text`, whitespace-collapsed). Hermes `MEDIA:<path>` lines (its chat-attachment directive) read as the equivalent tag: an image extension gives an image ref, anything else a file ref. Core rewrites them at ingestion (src/api/cloud_agents/media.rs runs these cases too); the client fallback covers older messages and accepts a directive only alone on its line, outside code. `unavailable` marks a share Core could not copy, shown as a \"file no longer available\" chip.",
   "cases": [
     {
       "name": "self-closing file with name (prod 4676019)",
@@ -94,6 +94,30 @@
       "input": "Write:\n\n```html\n<file path=\"./r.pdf\" name=\"Report\" />\n```",
       "refs": [],
       "text": "Write: ```html <file path=\"./r.pdf\" name=\"Report\" /> ```"
+    },
+    {
+      "name": "Hermes MEDIA line (prod 4697674)",
+      "input": "Un détail de routage : le modèle enregistré gemini-4-argon est en réalité servi par l’upstream gemini-4-argon-eap. Les deux lignes du tableau sont le même modèle côté Google.\n\nMEDIA:/tmp/orb_usage_30d.png\n",
+      "refs": [{"type": "image", "path": "/tmp/orb_usage_30d.png", "label": "orb_usage_30d.png"}],
+      "text": "Un détail de routage : le modèle enregistré gemini-4-argon est en réalité servi par l’upstream gemini-4-argon-eap. Les deux lignes du tableau sont le même modèle côté Google."
+    },
+    {
+      "name": "Hermes MEDIA lines with emphasis, quotes and a document",
+      "input": "Both files:\n\n**MEDIA:/tmp/report.pdf**\nMEDIA: \"/var/lib/hermes-assistant/cache/images/plot 2.webp\"\n",
+      "refs": [{"type": "file", "path": "/tmp/report.pdf", "label": "report.pdf"}, {"type": "image", "path": "/var/lib/hermes-assistant/cache/images/plot 2.webp", "label": "plot 2.webp"}],
+      "text": "Both files:"
+    },
+    {
+      "name": "MEDIA in code is documentation",
+      "input": "Attach with `MEDIA:/tmp/x.png`:\n\n```\nMEDIA:/tmp/y.png\n```",
+      "refs": [],
+      "text": "Attach with `MEDIA:/tmp/x.png`: ``` MEDIA:/tmp/y.png ```"
+    },
+    {
+      "name": "Core marks a file it could not copy",
+      "input": "Chart:\n<file path=\"/tmp/gone.png\" name=\"gone.png\" unavailable=\"true\" />",
+      "refs": [{"type": "file", "path": "/tmp/gone.png", "label": "gone.png", "unavailable": "true"}],
+      "text": "Chart:"
     }
   ],
   "sharedFiles": {

@@ -81,6 +81,7 @@ import { createMissionMoves } from "./tree/moves";
 import { createProjectTree, missionFolder, type Node, type RowData } from "./tree/TreeView";
 import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
+import { isPartialList, mergeMission, reconcileMissionList, type Misses, resolvedParents, withHierarchy } from "./missionHierarchy";
 import { missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "./missionTree";
 
 export { isMissionDeleting } from "./tree/selection";
@@ -150,18 +151,21 @@ export function LiveProjectsSection(p: {
     // Pending moves: rows leave their old project and appear in the new one at once.
     const own = (missions[slug] ?? []).filter(m => !movingOutOf(m.id, slug));
     const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !own.some(o => o.id === m.id)) : [];
-    const rows = withMovedMissions([...arriving, ...own]);
+    const rows = withMovedMissions([...arriving, ...own]).map(withHierarchy);
     const current = currentMission();
     // A paginated project list may not contain an older open conversation, and
     // the open conversation's live status updates ahead of the project poll.
     const withCurrent = current?.project === slug && !isArchived(current)
       ? (rows.some(m => m.id === current.id)
-        ? rows.map(m => m.id === current.id ? { ...m, ...current, status: archiving.get(m.id) ?? current.status } : m)
-        : [current, ...rows])
+        ? rows.map(m => m.id === current.id ? { ...mergeMission(m, current, "partial"), status: archiving.get(m.id) ?? current.status } : m)
+        : [withHierarchy(current), ...rows])
       : rows;
     const shown = new Set(withCurrent.map(r => r.id));
     const extraArchived = archivedMissions().filter(m => (m.project ?? "") === slug && !shown.has(m.id));
-    const allRows = [...withCurrent, ...extraArchived];
+    // Parents the resolver fetched by id (paged out of this project's list) are listed as context.
+    for (const m of [...withCurrent, ...extraArchived]) shown.add(m.id);
+    const fetchedParents = resolvedParents<Mission>().filter(m => (m.project ?? "") === slug && !shown.has(m.id));
+    const allRows = [...withCurrent, ...extraArchived, ...fetchedParents];
     const byId = new Map(allRows.map(m => [m.id, m]));
     const selectedId = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : undefined;
     return missionTreeRows(allRows, m => !isArchived(m) && (m.id === selectedId || !isSupersededInTree(m, byId)));
@@ -809,6 +813,7 @@ export function LiveProjectsSection(p: {
     });
   });
 
+  const listMisses = new Map<string, Misses>();
   const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
@@ -817,8 +822,12 @@ export function LiveProjectsSection(p: {
       .then((list) => {
         if (!currentConnection(version)) return;
         if (revision !== missionRevision) return;
+        const partial = isPartialList(list);
         const visibleList = list.filter(m => !deletedInSession.has(m.id) && !archivedInSession.has(m.id));
-        const merged = mergeById((missions[slug] ?? []).filter(m => !deletedInSession.has(m.id)), visibleList.map(m => archiving.has(m.id) ? {...m, status: archiving.get(m.id)!} : m));
+        // Reconcile, never replace: a short answer during a Core/Hermes restart keeps what is on screen.
+        const misses = listMisses.get(slug) ?? new Map() as Misses; listMisses.set(slug, misses);
+        const reconciled = reconcileMissionList((missions[slug] ?? []).filter(m => !deletedInSession.has(m.id) && !archivedInSession.has(m.id)), visibleList.map(m => archiving.has(m.id) ? {...m, status: archiving.get(m.id)!} : m), misses, partial);
+        const merged = mergeById(missions[slug] ?? [], reconciled);
         if (merged !== missions[slug]) setMissions(slug, merged);
         p.onProjectMissions?.(slug, merged);
         if (opts?.transcripts === false) return;

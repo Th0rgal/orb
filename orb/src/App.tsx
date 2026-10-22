@@ -9,6 +9,7 @@ import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./cl
 import {requireSpeedSupport} from './CodexSpeedPicker';
 import { Menu } from "./Menu";
 import { missionParent } from "./missionTree";
+import { isPartialList, mergeMission, reconcileMissionList, type Misses, resetMissionHierarchy } from "./missionHierarchy";
 import { draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
 import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
@@ -233,6 +234,7 @@ export default function App() {
     return rl.state === "error" ? `${summary} (last known)` : summary;
   };
   const [completedMissions, setCompletedMissions] = createSignal<Mission[]>([]);
+  const listMisses: Misses = new Map();
   const refreshMissions = async () => {
     try {
       const prev = missions().filter(m => !isMissionDeleting(m.id));
@@ -240,12 +242,14 @@ export default function App() {
         listMissions(200),
         listCompletedMissions(100),
       ]);
+      const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       const completed = rawCompleted.filter(m => !isMissionDeleting(m.id));
       setCompletedMissions(completed);
       const freshIds = new Set(fresh.map(m => m.id));
       const vanished = prev.filter(m => !freshIds.has(m.id));
-      setMissions((current) => applyPendingMoves(mergeById(current.filter(m => !isMissionDeleting(m.id)), fresh)));
+      // Reconcile, never replace: a short answer during a restart keeps what is on screen.
+      setMissions((current) => applyPendingMoves(mergeById(current, reconcileMissionList(current.filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial))));
       recordMissions(fresh);
       if (vanished.length) {
         const slugs = [...new Set(vanished.map(m => m.project?.trim()).filter((s): s is string => !!s))];
@@ -314,6 +318,7 @@ export default function App() {
   createEffect(on(connectionVersion, () => {
     setProjectMissions({});
     setCompletedMissions([]);
+    resetMissionHierarchy();
   }, { defer: true }));
   let prevInboxMissions: Mission[] = [];
   const inboxMissions = createMemo(() => {
@@ -749,7 +754,7 @@ export default function App() {
     window.addEventListener("orb:open-page", onOpenPage);
     const onMoved = (e: Event) => {
       const { id, project, tags } = (e as CustomEvent<{ id: string; project: string | null; tags: string[] }>).detail;
-      setMissions(prev => prev.map(m => m.id === id ? { ...m, project, tags } : m));
+      setMissions(prev => prev.map(m => m.id === id ? mergeMission(m, { id, project, tags }, "partial") : m));
     };
     window.addEventListener("orb:mission-moved", onMoved);
     onCleanup(() => window.removeEventListener("orb:mission-moved", onMoved));
