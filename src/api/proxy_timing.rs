@@ -119,6 +119,17 @@ impl TimingRecord {
     }
 }
 
+/// Client-supplied identifiers (the requested model id) go into a
+/// key=value log line: keep a conservative charset and length so a caller
+/// cannot forge fields or lines.
+pub fn log_safe(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | ':' | '-' | '@'))
+        .take(96)
+        .collect()
+}
+
 struct InflightGuard {
     keys: [String; 2],
 }
@@ -158,7 +169,7 @@ impl TimingCell {
             started: Instant::now(),
             state: Mutex::new(CellState {
                 record: TimingRecord {
-                    chain: chain.to_string(),
+                    chain: log_safe(chain),
                     stream,
                     ..Default::default()
                 },
@@ -188,9 +199,9 @@ impl TimingCell {
         shape: RequestShape,
     ) {
         self.with(|s| {
-            s.record.chain = chain.to_string();
+            s.record.chain = log_safe(chain);
             s.record.mission_id = mission_id;
-            s.record.caller = caller;
+            s.record.caller = caller.as_deref().map(log_safe);
             s.record.shape = shape;
         });
     }
@@ -199,7 +210,7 @@ impl TimingCell {
     pub fn set_attribution(&self, mission_id: Option<uuid::Uuid>, caller: Option<String>) {
         self.with(|s| {
             s.record.mission_id = mission_id;
-            s.record.caller = caller;
+            s.record.caller = caller.as_deref().map(log_safe);
         });
     }
 
@@ -213,7 +224,7 @@ impl TimingCell {
     }
 
     pub fn set_chain(&self, chain: &str) {
-        self.with(|s| s.record.chain = chain.to_string());
+        self.with(|s| s.record.chain = log_safe(chain));
     }
 
     pub fn set_hedge_role(&self, role: HedgeRole) {
@@ -765,6 +776,22 @@ mod tests {
         let body3 = br#"{"model":"m","messages":[{"role":"system","content":"changed"}]}"#;
         let v3: serde_json::Value = serde_json::from_slice(body3).unwrap();
         assert_ne!(request_shape(body3, Some(&v3)).prefix_fp, shape.prefix_fp);
+    }
+
+    #[test]
+    fn client_model_ids_cannot_forge_log_fields() {
+        let cell = TimingCell::new("smart\nINFO fake=1 outcome=ok", true);
+        let chain = cell.snapshot().chain;
+        assert_eq!(chain, "smartINFOfake1outcomeok");
+        cell.set_request(
+            "x".repeat(500).as_str(),
+            None,
+            Some("key name\r".into()),
+            Default::default(),
+        );
+        let r = cell.snapshot();
+        assert_eq!(r.chain.len(), 96);
+        assert_eq!(r.caller.as_deref(), Some("keyname"));
     }
 
     #[test]
