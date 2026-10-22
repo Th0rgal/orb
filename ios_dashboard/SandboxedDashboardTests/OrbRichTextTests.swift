@@ -313,6 +313,11 @@ final class OrbRichTextTests: XCTestCase {
         guard case .failure(let message) = bad else { return XCTFail("expected a parse failure") }
         XCTAssertFalse(message.isEmpty)
 
+        let hostile = await renderer.render("%%{init: {\"themeCSS\": \".node rect{fill:url(https://evil.example/x.png)} @import url(https://evil.example/a.css);\", \"themeVariables\": {\"primaryColor\": \"#ff0000\"}}}%%\nflowchart LR\n  A[\"<a href=javascript:alert(1)>x</a>\"] --> B\n  click A \"https://evil.example\" _blank")
+        guard case .svg(let neutral, _, _) = hostile else { return XCTFail("hostile diagram should still render: \(hostile)") }
+        XCTAssertNil(neutral.range(of: #"evil\.example|javascript:|@import|<a[\s>]|href="#, options: [.regularExpression, .caseInsensitive]))
+        XCTAssertFalse(neutral.contains("#ff0000"))
+
         for source in ["sequenceDiagram\n  A->>B: hi", "classDiagram\n  class A", "stateDiagram-v2\n  [*] --> A", "erDiagram\n  A ||--o{ B : has",
                        "gantt\n  dateFormat YYYY-MM-DD\n  section S\n  T :a, 2026-10-01, 2d", "pie\n  \"A\" : 1\n  \"B\" : 2", "mindmap\n  root((Orb))\n    A\n    B"] {
             let result = await renderer.render(source)

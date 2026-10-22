@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@solidjs/testing-library";
 import DOMPurify from "dompurify";
 import { MdView, parseMarkdown } from "../src/Markdown";
-import { cachedMermaid, clearMermaidCache, hashSource, mermaidCacheSize, renderMermaid, sanitizeSvg, setMermaidLoader } from "../src/mermaidRenderer";
+import { neutralizeCss, stripDirectives, cachedMermaid, clearMermaidCache, hashSource, mermaidCacheSize, renderMermaid, sanitizeSvg, setMermaidLoader } from "../src/mermaidRenderer";
 
 const theme = { primaryColor: "#123456" };
 let parse: ReturnType<typeof vi.fn>, renderFn: ReturnType<typeof vi.fn>;
@@ -59,4 +59,14 @@ it("does not render while the fence is open", async () => {
   await new Promise((r) => setTimeout(r, 300));
   expect(parse).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Diagram" }).hasAttribute("disabled")).toBe(true);
+});
+
+it("neutralises directives, external CSS and links", async () => {
+  expect(stripDirectives('%%{init: {"themeCSS": "x"}}%%\nflowchart LR\nA-->B')).toBe("\nflowchart LR\nA-->B");
+  expect(neutralizeCss('@import "https://e.x/a.css"; .n{background:url(https://e.x/p.png)} .m{marker-end:url(#arrow)}')).toBe(' .n{background:none} .m{marker-end:url(#arrow)}');
+  const out = sanitizeSvg(DOMPurify, '<svg><style>@import url(https://e.x/a.css); .a{fill:url("https://e.x/t")}</style><rect style="fill:url(https://e.x/q)" filter="url(https://e.x/f)" marker-end="url(#m)"/><a xlink:href="https://e.x"><text>t</text></a></svg>');
+  expect(out).not.toMatch(/e\.x|@import|href/);
+  expect(out).toContain('marker-end="url(#m)"');
+  await renderMermaid('%%{init: {"theme":"dark"}}%%\ngraph TD\nA-->B', theme);
+  expect(parse).toHaveBeenCalledWith("\ngraph TD\nA-->B");
 });

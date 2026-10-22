@@ -49,6 +49,7 @@ final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
         if web == nil {
             let config = WKWebViewConfiguration()
             config.websiteDataStore = .nonPersistent()
+            config.preferences.javaScriptCanOpenWindowsAutomatically = false
             let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
             view.navigationDelegate = self
             web = view
@@ -60,6 +61,13 @@ final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
             }
         }
         await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// Only the bundled renderer page itself may load.
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        let allowed = action.navigationType == .other && action.targetFrame?.isMainFrame == true
+            && action.request.url?.isFileURL == true && action.request.url?.lastPathComponent == "renderer.html"
+        decisionHandler(allowed ? .allow : .cancel)
     }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -240,7 +248,9 @@ struct OrbSVGView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
         let view = WKWebView(frame: .zero, configuration: config)
+        view.navigationDelegate = context.coordinator
         view.isOpaque = false
         view.backgroundColor = .clear
         view.scrollView.backgroundColor = .clear
@@ -268,5 +278,13 @@ struct OrbSVGView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var svg: String? }
+
+    /// Allows only the initial `loadHTMLString` (about:blank); links, redirects and any other navigation are cancelled.
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var svg: String?
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let allowed = action.navigationType == .other && action.targetFrame?.isMainFrame == true && action.request.url?.absoluteString == "about:blank"
+            decisionHandler(allowed ? .allow : .cancel)
+        }
+    }
 }

@@ -91,3 +91,18 @@ for (const theme of ["dark", "light"] as const) {
     await page.screenshot({ path: path.join(shots, `transcript-${theme}.png`), fullPage: true });
   });
 }
+
+test("a hostile diagram renders neutralised", async ({ page }) => {
+  const requests: string[] = [];
+  page.on("request", (r) => { if (!r.url().startsWith("http://127.0.0.1")) requests.push(r.url()); });
+  await page.goto("/tests/mermaid.html?stream");
+  const src = '%%{init: {"theme":"forest","themeCSS":".node rect{fill:url(https://evil.example/x.png)} @import url(https://evil.example/a.css);","themeVariables":{"primaryColor":"#ff0000"}}}%%\nflowchart LR\n  A["<a href=javascript:alert(1)>x</a> <img src=https://evil.example/i.png onerror=alert(1)>"] --> B\n  click A "https://evil.example" _blank';
+  await page.evaluate((t) => (window as any).setText(t), "```mermaid\n" + src + "\n```");
+  const block = page.locator(".mermaid-block");
+  await expect(block).toHaveAttribute("data-state", "ready");
+  const html = await block.locator(".mermaid-svg").innerHTML();
+  expect(html).not.toMatch(/evil\.example|javascript:|onerror|@import|<a[\s>]|href=/i);
+  expect(html).not.toContain("#ff0000");
+  await page.waitForTimeout(300);
+  expect(requests).toEqual([]);
+});

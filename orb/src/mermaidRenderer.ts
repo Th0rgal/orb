@@ -130,7 +130,31 @@ function size(svg: string): { width: number; height: number } {
 }
 
 /** Sanitise mermaid's output: no scripts, event handlers, external references or foreign HTML beyond plain labels. */
+/** Directives (`%%{init: …}%%`) are removed before parsing: they could restyle the diagram. */
+export function stripDirectives(source: string): string {
+  return source.replace(/%%\{[\s\S]*?\}%%/g, "");
+}
+
+/** CSS may only reference fragments in the same SVG (markers, gradients): no url() to anything else, no @import. */
+export function neutralizeCss(css: string): string {
+  return css.replace(/@import[^;]*;?/gi, "").replace(/url\(\s*(['"]?)(?!#)[^)]*\)/gi, "none");
+}
+
+let hooked = false;
+function installHooks(purify: Purify) {
+  if (hooked) return;
+  hooked = true;
+  purify.addHook("uponSanitizeElement", (node, data) => {
+    if (data.tagName === "style" && node.textContent) node.textContent = neutralizeCss(node.textContent);
+  });
+  purify.addHook("uponSanitizeAttribute", (_node, data) => {
+    if (data.attrName === "style") data.attrValue = neutralizeCss(data.attrValue);
+    else if (/url\(/i.test(data.attrValue) && !/^\s*url\(\s*#[^)]*\)\s*$/i.test(data.attrValue)) data.keepAttr = false;
+  });
+}
+
 export function sanitizeSvg(purify: Purify, svg: string): string {
+  installHooks(purify);
   return purify.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true, html: true },
     // Mermaid draws labels as HTML inside <foreignObject>; DOMPurify checks lower-cased names.
@@ -142,11 +166,16 @@ export function sanitizeSvg(purify: Purify, svg: string): string {
   });
 }
 
-async function run(source: string, theme: MermaidTheme): Promise<MermaidResult> {
+async function run(raw: string, theme: MermaidTheme): Promise<MermaidResult> {
   const { mermaid, purify } = await load();
+  const source = stripDirectives(raw);
   const config = JSON.stringify(theme);
   if (configured !== config) {
     mermaid.initialize({
+      // Diagram source can carry %%{init}%% directives or front-matter config; these keys stay Orb's.
+      secure: ["secure", "securityLevel", "startOnLoad", "maxTextSize", "maxEdges", "suppressErrorRendering", "theme", "themeVariables", "themeCSS", "fontFamily", "darkMode", "htmlLabels", "dompurifyConfig"],
+      // Labels are measured in the live document before our own pass: keep resources out of them too.
+      dompurifyConfig: { FORBID_TAGS: ["img", "image", "a", "video", "audio", "source", "picture", "iframe", "object", "embed", "link", "style"], FORBID_ATTR: ["href", "xlink:href", "src", "srcset", "style", "background"] },
       startOnLoad: false, securityLevel: "strict", theme: "base", themeVariables: theme, fontFamily: theme.fontFamily,
       maxTextSize: MAX_SOURCE, maxEdges: 800, suppressErrorRendering: true, htmlLabels: true,
       flowchart: { useMaxWidth: false, padding: 12, nodeSpacing: 36, rankSpacing: 44, curve: "basis" },
