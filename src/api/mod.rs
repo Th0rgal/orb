@@ -18,6 +18,7 @@
 pub mod ai_providers;
 pub(crate) mod antigravity_native;
 pub(crate) mod antigravity_usage;
+pub mod approval_flow;
 pub mod approvals;
 pub mod ask;
 pub(crate) mod auth;
@@ -53,6 +54,7 @@ pub mod managed_machines;
 pub mod mcp;
 pub mod metadata_llm;
 pub(crate) mod minimax_usage;
+pub mod mission_access;
 pub mod mission_horizon;
 pub mod mission_payload;
 pub mod mission_runner;

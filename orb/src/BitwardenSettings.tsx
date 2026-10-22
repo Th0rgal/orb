@@ -28,6 +28,7 @@ import {
   type BitwardenStatus,
 } from "./bitwardenApi";
 import { SecretAccessPanel } from "./SecretAccessPanel";
+import { MissionAccessPanel } from "./MissionAccessPanel";
 import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
 import { enrolledDeviceId } from "./deviceApproval";
 import { copyText } from "./clipboard";
@@ -623,6 +624,8 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
             />
             <ApprovalDevicesPanel onError={(m) => setToastError(m)} />
           </Show>
+
+          <MissionAccessPanel onError={(m) => setToastError(m)} />
 
           {/* Secrets Table Section */}
           <Show when={status()?.configured}>

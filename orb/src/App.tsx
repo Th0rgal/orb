@@ -51,6 +51,8 @@ import { loadTranscript, peekReadyTranscript, prefetchTranscript, transcriptVers
 import { mergeById, pollWhileVisible } from "./poll";
 import { getSecretBroker } from "./bitwardenApi";
 import { syncSecretRequestNotices } from "./secretRequestNotices";
+import { syncMissionAccessNotices } from "./missionAccessNotices";
+import { getMissionAccess } from "./missionAccessApi";
 import { listApprovalDevices, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
@@ -107,6 +109,7 @@ const PAGES = new Set(["inbox", "cloud-agent", "settings", "inbox-settings", "bt
 
 export default function App() {
   const [secretRequests, setSecretRequests] = createSignal(0);
+  const [accessRequests, setAccessRequests] = createSignal(0);
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
@@ -783,6 +786,22 @@ export default function App() {
               .catch(swallow("app.secretRequests"))
           : undefined;
     const stopSecretRequests = pollWhileVisible(loadSecretRequests, 10000, "app.secretRequests");
+    const loadAccessRequests = () =>
+        isConnected()
+          ? getMissionAccess()
+              .then((snap) => {
+                const pending = snap.requests.filter((r) => r.state === "pending");
+                setAccessRequests(pending.length);
+                syncMissionAccessNotices(pending, () => open("bitwarden-settings"));
+              })
+              .catch(swallow("app.accessRequests"))
+          : undefined;
+    const stopAccessRequests = pollWhileVisible(loadAccessRequests, 10000, "app.accessRequests");
+    const onAccessAnswered = () => { setAccessRequests((n) => Math.max(0, n - 1)); void loadAccessRequests(); };
+    const onAccessFocus = () => void loadAccessRequests();
+    window.addEventListener("orb:mission-access-answered", onAccessAnswered);
+    window.addEventListener("focus", onAccessFocus);
+    onCleanup(() => { stopAccessRequests(); window.removeEventListener("orb:mission-access-answered", onAccessAnswered); window.removeEventListener("focus", onAccessFocus); });
     // Answering from a notification or the Secrets page updates the badge at once, then confirms.
     const onSecretAnswered = () => { setSecretRequests((n) => Math.max(0, n - 1)); void loadSecretRequests(); };
     const onFocus = () => void loadSecretRequests();
@@ -933,7 +952,7 @@ export default function App() {
             <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Side Questions</span></button>
             <div class="settings-nav-group-gap" />
             <button class={`row ${selected() === "skills-settings" ? "active" : ""}`} onClick={() => open("skills-settings")}><span class="row-ico"><Ic.SkillsIcon /></span><span class="row-label">Skills</span></button>
-            <button class={`row ${selected() === "bitwarden-settings" ? "active" : ""}`} onClick={() => open("bitwarden-settings")}><span class="row-ico"><Ic.KeyIcon /></span><span class="row-label">Secrets</span><Show when={secretRequests() > 0}><span class="row-badge">{secretRequests()}</span></Show></button>
+            <button class={`row ${selected() === "bitwarden-settings" ? "active" : ""}`} onClick={() => open("bitwarden-settings")}><span class="row-ico"><Ic.KeyIcon /></span><span class="row-label">Secrets</span><Show when={secretRequests() + accessRequests() > 0}><span class="row-badge">{secretRequests() + accessRequests()}</span></Show></button>
             <div class="settings-nav-group-gap" />
             <button class={`row ${selected() === "inbox-settings" ? "active" : ""}`} onClick={() => open("inbox-settings")}><span class="row-ico"><Ic.BellIcon /></span><span class="row-label">Notifications</span></button>
           </Show>
@@ -947,8 +966,8 @@ export default function App() {
           >
             <Ic.GearIcon />
             <span>Settings</span>
-            <Show when={secretRequests() > 0}>
-              <span class="gear-count" title={`${secretRequests()} secret request(s) waiting`}>{secretRequests()}</span>
+            <Show when={secretRequests() + accessRequests() > 0}>
+              <span class="gear-count" title={`${secretRequests() + accessRequests()} request(s) waiting`}>{secretRequests() + accessRequests()}</span>
             </Show>
           </button>
         </div>

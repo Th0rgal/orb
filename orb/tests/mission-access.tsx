@@ -1,0 +1,20 @@
+import '../src/styles.css';
+import {render} from 'solid-js/web';
+import {syncMissionAccessNotices} from '../src/missionAccessNotices';
+import {MissionAccessPanel} from '../src/MissionAccessPanel';
+const now=Date.now();
+const iso=(ms:number)=>new Date(now+ms).toISOString();
+const base={scope:'read',ttl_hours:24,created_at:iso(-60_000)};
+const one={...base,id:'a1',state:'pending',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000001',requester_title:'Benchmark report',target_mission_id:'9a8b7c6d-0000-4000-8000-000000000002',target_title:'Lean eval run #42',reason:'Compare its pass rate with mine before writing the report.'};
+const two={...base,id:'a2',state:'pending',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000003',requester_title:'Release notes',target_mission_id:'9a8b7c6d-0000-4000-8000-000000000004',target_title:'Oraxen PR review',reason:'Read the review findings.'};
+const grant={...base,id:'g1',state:'approved',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000005',requester_title:'Supervisor',target_mission_id:'9a8b7c6d-0000-4000-8000-000000000006',target_title:'DGX Spark setup',reason:'Check progress',decided_at:iso(-3_600_000),expires_at:iso(23*3_600_000)};
+const w=window as any;
+w.opened=false;
+w.calls=[];
+// Record what the card would send instead of reaching Core.
+const realFetch=window.fetch;
+window.fetch=(async(input:any,init?:any)=>{const url=String(input);if(url.includes('/api/')){w.calls.push({url,method:init?.method,body:init?.body});return new Response(JSON.stringify({...one,state:'approved'}),{status:200,headers:{'Content-Type':'application/json'}});}return realFetch(input,init);}) as any;
+w.showOne=()=>syncMissionAccessNotices([one] as any,()=>{w.opened=true;});
+w.showMany=()=>syncMissionAccessNotices([one,two] as any,()=>{w.opened=true;});
+w.showOne();
+render(()=><div style="max-width:760px;padding:16px"><MissionAccessPanel onError={(m)=>{w.error=m;}} initial={{requests:[one,grant,{...two,state:'denied',decided_at:iso(-120_000)}] as any,audit:[{at:iso(-30_000),request_id:'g1',requester_mission_id:grant.requester_mission_id,target_mission_id:grant.target_mission_id,action:'read',detail:'get_mission_events'},{at:iso(-3_600_000),request_id:'g1',requester_mission_id:grant.requester_mission_id,target_mission_id:grant.target_mission_id,action:'approved',detail:'24h'}]}} /></div>,document.getElementById('root')!);

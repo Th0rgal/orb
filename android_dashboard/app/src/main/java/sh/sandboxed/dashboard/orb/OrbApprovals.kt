@@ -213,6 +213,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     val baseURL = core.baseURLFlow.collectAsState().value
     var requests by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var grants by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var access by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var mode by remember { mutableStateOf("") }
     var projects by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -222,6 +223,11 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
 
     suspend fun load() {
+        // Mission access requests do not depend on Bitwarden being configured.
+        try {
+            access = OrbJSON.dictList(dictOf(core.request("/api/mission-access"))["requests"])
+        } catch (_: Throwable) {
+        }
         try {
             val broker = dictOf(core.request("/api/bitwarden/broker"))
             requests = OrbJSON.dictList(broker["requests"]).filter { it["status"] == "pending" }
@@ -343,6 +349,70 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 }
                             }) { Text("Decline", color = Color(0xFFFF6B6B)) }
                         }
+                    }
+                }
+            }
+
+            Card("Mission access") {
+                fun mission(title: Any?, id: Any?) =
+                    (title as? String)?.takeIf { it.isNotBlank() } ?: "Mission ${(id as? String)?.take(8) ?: ""}"
+                val pendingAccess = access.filter { it["state"] == "pending" }
+                val liveAccess = access.filter {
+                    it["state"] == "approved" && runCatching {
+                        java.time.Instant.parse(it["expires_at"] as String).isAfter(java.time.Instant.now())
+                    }.getOrDefault(false)
+                }
+                Text(
+                    "Read-only grants between missions (events, messages, shared files). Never allows messages, cancel or resume. Approving needs your fingerprint or face.",
+                    color = OrbStyle.textMuted, fontSize = 12.sp
+                )
+                if (pendingAccess.isEmpty() && liveAccess.isEmpty()) Text("No requests or grants.", color = OrbStyle.textMuted, fontSize = 13.sp)
+                pendingAccess.forEach { r ->
+                    val id = r["id"] as String
+                    val who = mission(r["requester_title"], r["requester_mission_id"])
+                    val target = mission(r["target_title"], r["target_mission_id"])
+                    val hours = (r["ttl_hours"] as? Number)?.toInt() ?: 24
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text("Read $target", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("asked by $who · $hours h", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
+                            Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST",
+                                        "/api/mission-access/${core.encodeComponent(id)}/approve",
+                                        mapOf("ttl_hours" to hours),
+                                        "Let $who read $target for $hours h"
+                                    )
+                                }
+                            }) { Text("Allow read") }
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST",
+                                        "/api/mission-access/${core.encodeComponent(id)}/deny",
+                                        null, "Decline: $who wants to read $target"
+                                    )
+                                }
+                            }) { Text("Deny", color = Color(0xFFFF6B6B)) }
+                        }
+                    }
+                }
+                liveAccess.forEach { g ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "${mission(g["requester_title"], g["requester_mission_id"])} → ${mission(g["target_title"], g["target_mission_id"])}",
+                                color = Color.White, fontSize = 14.sp
+                            )
+                            Text("Read only · until ${g["expires_at"]}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
+                        TextButton(enabled = !busy, onClick = {
+                            act { core.request("/api/mission-access/${core.encodeComponent(g["id"] as String)}", "DELETE") }
+                        }) { Text("Revoke") }
                     }
                 }
             }
