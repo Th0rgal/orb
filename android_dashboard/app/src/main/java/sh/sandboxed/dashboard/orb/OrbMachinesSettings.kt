@@ -95,8 +95,10 @@ fun OrbMachinesSettingsPage(
     var busy by remember { mutableStateOf(false) }
     var computers by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var computersReady by remember { mutableStateOf(false) }
+    var managedReloadKey by remember { mutableIntStateOf(0) }
 
     suspend fun loadMachines() {
+        managedReloadKey += 1
         // Computers are independent of the fleet: one failing never hides the other.
         try {
             computers = loadClientComputers(core)
@@ -279,12 +281,23 @@ fun OrbMachinesSettingsPage(
                                             modifier = Modifier.weight(1f),
                                             verticalArrangement = Arrangement.spacedBy(2.dp)
                                         ) {
-                                            Text(
-                                                text = nodeId,
-                                                color = Color.White,
-                                                fontSize = 15.sp,
-                                                fontWeight = FontWeight.Medium
-                                            )
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Text(
+                                                    text = nodeId,
+                                                    color = Color.White,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (OrbManagedMachines.isManagedNode(nodeId, OrbManagedMachines.nodeLabels(node))) {
+                                                    OrbManagedBadge()
+                                                }
+                                            }
                                             Text(
                                                 text = subtitle,
                                                 color = OrbStyle.textSecondary,
@@ -361,6 +374,8 @@ fun OrbMachinesSettingsPage(
                         }
                     }
                 }
+
+                item { OrbManagedMachinesBlock(core = core, reloadKey = managedReloadKey) }
             }
         }
     }
