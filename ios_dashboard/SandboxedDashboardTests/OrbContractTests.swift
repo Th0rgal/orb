@@ -93,6 +93,29 @@ final class OrbContractTests: XCTestCase {
         _ = try await OrbReadCache.load(key, fetch: fetch)
         XCTAssertEqual(requests, 2)
     }
+    /// A send invalidates the conversation while a streamed event's refresh is loading it.
+    /// Both the owner and a joined waiter get the answer (no CancellationError, which showed
+    /// "Connection unavailable … cancelled" after every send), it is not cached, and the
+    /// next load fetches again.
+    @MainActor func testReadCacheInvalidateDuringLoadDoesNotFailWaiters() async throws {
+        let key = "test-cache:" + UUID().uuidString
+        defer { OrbDisk.remove(key) }
+        var requests = 0
+        let fetch: @MainActor () async throws -> OrbJSON = {
+            requests += 1
+            try await Task.sleep(for: .milliseconds(80))
+            return .string("v\(requests)")
+        }
+        async let owner = OrbReadCache.load(key, force: true, fetch: fetch)
+        async let waiter = OrbReadCache.load(key, force: true, fetch: fetch)
+        try await Task.sleep(for: .milliseconds(20))
+        OrbReadCache.invalidate(key)
+        let results = try await [owner, waiter]
+        XCTAssertEqual(results, [.string("v1"), .string("v1")])
+        XCTAssertNil(OrbReadCache.read(key), "a superseded answer is not cached")
+        let fresh = try await OrbReadCache.load(key, fetch: fetch)
+        XCTAssertEqual(fresh, .string("v2"))
+    }
     func testClientMissionsAreVisibleAndSideMissionsAreExcluded() throws {
         let client = OrbRow(.object(["id": .string("local"), "tags": .array([.string("placement:client")])]))
         XCTAssertTrue(client.mobile)

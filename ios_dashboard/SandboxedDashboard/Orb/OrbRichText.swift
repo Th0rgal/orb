@@ -57,6 +57,9 @@ final class OrbWebViewPool {
         }
     }
 
+    /// Idle pooled views each keep a WebContent process alive.
+    func drain() { idle.removeAll() }
+
     func acquire() -> WKWebView {
         if let view = idle.popLast() {
             return view
@@ -299,6 +302,8 @@ struct OrbNativeMarkdownView: View {
 
     @MainActor private static var blockCache: [Int: [Block]] = [:]
     @MainActor private static var inlineCache: [Int: AttributedString] = [:]
+
+    @MainActor static func trimCaches() { blockCache.removeAll(); inlineCache.removeAll() }
 
     @MainActor static func cachedBlocks(_ source: String) -> [Block] {
         let key = source.hashValue
@@ -703,6 +708,8 @@ enum OrbRemoteLog {
     private static let succeededReceiptRegex = try! NSRegularExpression(pattern: #"^Remote node '[^']+' job [0-9a-f-]{36} finished with state 'succeeded' \(exit Some\(0\)\)$"#)
     private static let trailingJobTrailerRegex = try! NSRegularExpression(pattern: #"(?:^|\n\n)(Remote (?:node '[^']+'|[a-z0-9_-]+) job [0-9a-f-]{36}(?: on node '[^']+')? (?:finished with|reached) state '[\s\S]*)$"#)
     private static let uuidRegex = try! NSRegularExpression(pattern: #"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"#, options: .caseInsensitive)
+
+    static func trimCache() { cacheLock.lock(); parseCache.removeAll(); cacheLock.unlock() }
 
     static func parse(_ raw: String) -> Parsed {
         let key = raw.hashValue

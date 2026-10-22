@@ -32,6 +32,35 @@ final class OrbTurnStatusUITests: XCTestCase {
         capture(app, "turn-working-status")
     }
 
+    /// Sending in a very long running conversation (the 042fdafa shape: ~5k events, MBs of
+    /// tool results, tool events streaming every second) keeps the user in the conversation,
+    /// shows the follow-up and its reply, and never reports the send's own cache
+    /// invalidation as "Connection unavailable … cancelled".
+    @MainActor func testSendInLongRunningConversationStaysCalm() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-api_base_url", "http://127.0.0.1:18766", "-orb_test_reset", "YES"]
+        app.launch()
+        XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
+        app.buttons["project.orb-test"].tap()
+        let row = app.buttons["mission.long-running"]
+        for _ in 0..<6 where !row.isHittable { app.swipeUp() }
+        row.tap()
+        let composer = app.textFields["composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["2/5 tasks"].waitForExistence(timeout: 10), "the current turn's task list shows")
+        composer.tap()
+        composer.typeText("status?")
+        app.buttons["composer.send"].tap()
+        XCTAssertTrue(app.staticTexts["REPLAY_REPLY_OK: still building."].waitForExistence(timeout: 20), "the queued follow-up is delivered and answered")
+        let connectionError = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Connection unavailable'")).firstMatch
+        XCTAssertFalse(connectionError.exists, "a send must not surface its own cancelled refresh")
+        sleep(4)
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertTrue(composer.exists, "still in the conversation after the send")
+        XCTAssertFalse(connectionError.exists)
+        capture(app, "long-running-after-send")
+    }
+
     /// The finished turn counts only its own work and shows what changed and where it ships.
     @MainActor func testFinishedTurnShowsChangesAndPullRequest() throws {
         let app = open("agent-done")

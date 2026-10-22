@@ -456,7 +456,7 @@ enum OrbReadCache {
         if !force, let entry = values[scope], Date().timeIntervalSince(entry.date) < ttl { return entry.value }
         if let item = pending[scope] {
             let value = try await item.task.value
-            guard scope == key(name), !item.task.isCancelled else { throw CancellationError() }
+            guard scope == key(name) else { throw CancellationError() }
             return value
         }
         let task = Task { try await fetch() }
@@ -464,7 +464,12 @@ enum OrbReadCache {
         pending[scope] = item
         defer { if pending[scope]?.id == item.id { pending[scope] = nil } }
         let value = try await task.value
-        guard scope == key(name), pending[scope]?.id == item.id else { throw CancellationError() }
+        // The account changed while this was in flight: the answer belongs to nobody.
+        guard scope == key(name) else { throw CancellationError() }
+        // Invalidated while in flight (a send): its waiters still get this answer, but it
+        // is not cached, so the next load fetches fresh data. Throwing here surfaced as a
+        // "Connection unavailable … cancelled" error after every send.
+        guard pending[scope]?.id == item.id else { return value }
         if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
         values[scope] = Entry(value: value, date: Date())
         OrbDisk.saveAsync(value, key: name)
@@ -486,9 +491,14 @@ enum OrbReadCache {
         }
         Log.cache.notice("cleared \(files.count) cache files")
     }
+    /// Drops memory copies (disk copies stay) so a suspended app is a small jetsam target.
+    static func trimMemory() {
+        values.removeAll()
+        eventValues.removeAll()
+        eventFetchedAt.removeAll()
+    }
     static func invalidate(_ name: String) {
         let scope = key(name)
-        pending[scope]?.task.cancel()
         pending[scope] = nil
         if let old = values[scope] { values[scope] = Entry(value: old.value, date: .distantPast) }
     }
