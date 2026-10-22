@@ -27,7 +27,11 @@ targets:
         excludes:
           - "**/.DS_Store"
           - "Orb/MathAssets"
+          - "Orb/MermaidAssets"
       - path: SandboxedDashboard/Orb/MathAssets
+        type: folder
+        buildPhase: resources
+      - path: SandboxedDashboard/Orb/MermaidAssets
         type: folder
         buildPhase: resources
       - path: OrbLiveActivity/Shared

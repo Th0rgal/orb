@@ -5,6 +5,7 @@ import "katex/dist/katex.min.css";
 import "katex/contrib/copy-tex";
 import {requestHighlight} from "./codeHighlightClient";
 import { CodeBlock } from "./CodeBlock";
+import { isMermaidLang, MermaidBlock } from "./MermaidBlock";
 import { FileReference, FileReferenceText } from "./fileReferenceContext";
 import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
@@ -163,7 +164,7 @@ type Block =
   | { t: "p"; text: string }
   | { t: "ul"; items: (string | ListItem)[] }
   | { t: "ol"; items: (string | ListItem)[]; start: number }
-  | { t: "pre"; lang: string; text: string }
+  | { t: "pre"; lang: string; text: string; open?: true }
   | { t: "quote"; text: string }
   | { t: "table"; heads: string[]; rows: string[][]; aligns: Align[] };
 
@@ -329,8 +330,10 @@ function parseBlocks(src: string): Block[] {
         const raw = lines[i++];
         buf.push(fenceIndent > 0 && raw.startsWith(" ".repeat(fenceIndent)) ? raw.slice(fenceIndent) : raw);
       }
-      if (i < lines.length) i++;
-      out.push({ t: "pre", lang, text: buf.join("\n") });
+      // An unterminated fence is a block still streaming in.
+      const closed = i < lines.length;
+      if (closed) i++;
+      out.push(closed ? { t: "pre", lang, text: buf.join("\n") } : { t: "pre", lang, text: buf.join("\n"), open: true });
       continue;
     }
     if (isHrLine(line)) {
@@ -466,7 +469,7 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
   ) : b.t === "ul" ? (
     <ul>{b.items.map((it) => renderListItem(it, compact))}</ul>
   ) : b.t === "pre" ? (
-    <CodeBlock text={b.text} lang={b.lang} />
+    isMermaidLang(b.lang) ? <MermaidBlock text={b.text} complete={!b.open} /> : <CodeBlock text={b.text} lang={b.lang} />
   ) : b.t === "quote" ? (
     <blockquote>
       <MdView text={b.text} compact={compact} />

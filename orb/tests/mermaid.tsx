@@ -1,0 +1,13 @@
+import { createSignal } from "solid-js";
+import { render } from "solid-js/web";
+import { Transcript } from "../src/Transcript";
+import "../src/styles.css";
+import { mermaidSamples } from "./mermaidSamples";
+const params = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
+const only = params.get("only");
+const names = only ? only.split(",") : Object.keys(mermaidSamples);
+const initial = params.get("stream") !== null ? "" : names.map((n) => `### ${n}\n\n\`\`\`mermaid\n${mermaidSamples[n]}\n\`\`\`\n`).join("\n") + (params.get("invalid") !== null ? "\n```mermaid\nflowchart LR\n  A --> \n  ((( broken\n```\n\nAfter the broken diagram." : "");
+const [text, setText] = createSignal(initial);
+(window as any).setText = setText;
+render(() => <main style={{ padding: "32px 40px", "max-width": "820px" }}><Transcript items={[{ kind: "text", key: "answer", text: text() }]} /></main>, document.getElementById("root")!);

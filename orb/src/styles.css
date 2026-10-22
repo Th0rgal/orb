@@ -1911,6 +1911,40 @@ button.fork-trigger:hover { color: var(--fg); }
 .md-code-block { position: relative; min-width: 0; margin: 0 0 14px; border: 1px solid var(--stroke); border-radius: var(--radius-md); background: var(--bg-inset); }
 .md .md-code-block pre { margin: 0; padding: 12px 44px 12px 14px; background: transparent; }
 .md.md-compact .md-code-block pre { margin: 0; padding: 8px 40px 8px 10px; }
+/* Mermaid diagrams: one frame for both views, header with view toggle, copy and expand. */
+.mermaid-block { overflow: hidden; }
+.mermaid-head { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--stroke-soft); font: 12px var(--sans); color: var(--fg-3); }
+.mermaid-label { font-weight: 500; letter-spacing: .01em; }
+.mermaid-spacer { flex: 1; }
+.mermaid-toggle { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--radius-sm); background: var(--bg-code); }
+.mermaid-toggle button { height: 20px; padding: 0 9px; border-radius: var(--radius-xs); font: 500 11.5px var(--sans); color: var(--fg-3); background: transparent; }
+.mermaid-toggle button:hover:not(:disabled) { color: var(--fg); }
+.mermaid-toggle button[aria-pressed="true"] { background: var(--bg-btn); color: var(--fg-strong); box-shadow: 0 0 0 1px var(--stroke), 0 1px 2px rgb(0 0 0 / 12%); }
+.mermaid-toggle button:disabled { opacity: .45; cursor: default; }
+.mermaid-action { width: 26px; height: 26px; }
+.mermaid-feedback { color: var(--fg-2); font: 11px var(--sans); }
+.md .mermaid-block pre { padding: 12px 14px; }
+.mermaid-canvas { overflow-x: auto; overflow-y: hidden; padding: 18px 16px; overscroll-behavior-x: contain; cursor: zoom-in; }
+.mermaid-canvas:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -2px; }
+.mermaid-svg { display: block; margin: 0 auto; height: auto; user-select: none; }
+
+.mermaid-skeleton { display: grid; gap: 10px; padding: 22px 18px; }
+.mermaid-skeleton span { height: 12px; border-radius: var(--radius-xs); background: linear-gradient(90deg, var(--bg-code), var(--bg-active), var(--bg-code)); background-size: 200% 100%; animation: mermaid-shimmer 1.4s ease-in-out infinite; }
+.mermaid-skeleton span:nth-child(1) { width: 46%; } .mermaid-skeleton span:nth-child(2) { width: 72%; } .mermaid-skeleton span:nth-child(3) { width: 58%; }
+@keyframes mermaid-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .mermaid-skeleton span { animation: none; } }
+.mermaid-error { display: flex; flex-direction: column; gap: 3px; margin: 10px 12px 0; padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--red) 9%, transparent); border: 1px solid color-mix(in srgb, var(--red) 28%, transparent); font: 12px var(--sans); color: var(--fg-2); }
+.mermaid-error strong { color: var(--red); font-weight: 500; }
+.mermaid-error span { font: 11.5px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-3); }
+.dlg-mermaid .dlg-body { flex: 1; overflow: hidden; padding: 0; display: flex; }
+.mermaid-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; background: var(--bg-inset); }
+.mermaid-stage:active { cursor: grabbing; }
+.mermaid-zoom { max-width: none; user-select: none; pointer-events: none; position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.mermaid-zoom-controls { position: absolute; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--bg-btn); border: 1px solid var(--stroke); box-shadow: var(--composer-shadow); font: 12px var(--sans); color: var(--fg-2); cursor: default; }
+.mermaid-zoom-controls .icon-btn { font-size: 15px; }
+.mermaid-zoom-level { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+.mermaid-fit { height: 24px; padding: 0 8px; border-radius: var(--radius-sm); color: var(--fg-2); font: 12px var(--sans); }
+.mermaid-fit:hover { background: var(--bg-active); color: var(--fg); }
 .code-copy { position: absolute; right: 6px; bottom: 6px; color: var(--fg-3); opacity: .55; background: var(--bg-inset); }
 .md-code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
 .code-copy-feedback { position: absolute; bottom: 7px; right: 36px; max-width: calc(100% - 48px); padding: 3px 6px; border-radius: var(--radius-xs); background: var(--bg-inset); color: var(--fg-2); font: 11px var(--sans); }

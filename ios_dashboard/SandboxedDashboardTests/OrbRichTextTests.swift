@@ -294,4 +294,36 @@ final class OrbRichTextTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Double(web.frame.height), contentHeight - 2, "WKWebView frame height must expand to fit the full table and trailing sections")
     }
 
+    func testMermaidFencesRenderWithBundledMermaidAndFallBackOnErrors() async throws {
+        let streaming = OrbNativeMarkdownView.parseBlocks("Intro\n\n```mermaid\nflowchart LR\n  A --> B")
+        XCTAssertEqual(streaming.last, .mermaid(code: "flowchart LR\n  A --> B", complete: false))
+        let done = OrbNativeMarkdownView.parseBlocks("```mermaid\nflowchart LR\n  A --> B\n```")
+        XCTAssertEqual(done, [.mermaid(code: "flowchart LR\n  A --> B", complete: true)])
+
+        let renderer = OrbMermaidRenderer.shared
+        let ok = await renderer.render("flowchart LR\n  A[Prompt] --> B{Tools?}\n  B --> C([Answer])")
+        guard case .svg(let svg, let width, let height) = ok else { return XCTFail("expected an SVG, got \(ok)") }
+        XCTAssertTrue(svg.contains("Prompt"))
+        XCTAssertFalse(svg.contains("<script"))
+        XCTAssertGreaterThan(width, 0)
+        XCTAssertGreaterThan(height, 0)
+        XCTAssertEqual(renderer.cached("flowchart LR\n  A[Prompt] --> B{Tools?}\n  B --> C([Answer])"), ok)
+
+        let bad = await renderer.render("flowchart LR\n  A --> \n  ((( broken")
+        guard case .failure(let message) = bad else { return XCTFail("expected a parse failure") }
+        XCTAssertFalse(message.isEmpty)
+
+        let hostile = await renderer.render("%%{init: {\"themeCSS\": \".node rect{fill:url(https://evil.example/x.png)} @import url(https://evil.example/a.css);\", \"themeVariables\": {\"primaryColor\": \"#ff0000\"}}}%%\nflowchart LR\n  A[\"<a href=javascript:alert(1)>x</a>\"] --> B\n  click A \"https://evil.example\" _blank")
+        guard case .svg(let neutral, _, _) = hostile else { return XCTFail("hostile diagram should still render: \(hostile)") }
+        XCTAssertNil(neutral.range(of: #"evil\.example|javascript:|@import|<a[\s>]|href="#, options: [.regularExpression, .caseInsensitive]))
+        XCTAssertFalse(neutral.contains("#ff0000"))
+        let escaped = await renderer.render("flowchart LR\n  A --> B\n  classDef x fill:#123,stroke:u\\72l(https://evil.example/e)\n  class A x")
+        if case .svg(let svg, _, _) = escaped { XCTAssertFalse(svg.contains("evil.example")) }
+
+        for source in ["sequenceDiagram\n  A->>B: hi", "classDiagram\n  class A", "stateDiagram-v2\n  [*] --> A", "erDiagram\n  A ||--o{ B : has",
+                       "gantt\n  dateFormat YYYY-MM-DD\n  section S\n  T :a, 2026-10-01, 2d", "pie\n  \"A\" : 1\n  \"B\" : 2", "mindmap\n  root((Orb))\n    A\n    B"] {
+            let result = await renderer.render(source)
+            guard case .svg = result else { return XCTFail("\(source) did not render: \(result)") }
+        }
+    }
 }

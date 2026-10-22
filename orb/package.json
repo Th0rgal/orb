@@ -11,7 +11,9 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
+    "dompurify": "3.4.17",
     "katex": "^0.18.9",
+    "mermaid": "11.17.2",
     "pdfjs-dist": "^6.3.289",
     "prismjs": "^1.30.0",
     "solid-js": "^1.9.5"
