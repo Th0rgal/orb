@@ -1,0 +1,110 @@
+{
+  "_doc": "Agent file-share markup, consumed by the iOS (OrbFileRefTests) and Android (OrbFileRefsTest) parsers. Desktop parity: orb/src/richTags.ts. Samples are real assistant_message markup from prod mission_events (tag syntax kept verbatim; labels of client engagements neutralised because this repository is public). Each case: input text, expected refs (type, path, label, mime?) and the prose left once tags are removed (`text`, whitespace-collapsed).",
+  "cases": [
+    {
+      "name": "self-closing file with name (prod 4676019)",
+      "input": "Technical descriptions and code snippets.\n\n<file path=\"./SYNTHESIS.md\" name=\"SYNTHESIS.md\" />",
+      "refs": [{"type": "file", "path": "./SYNTHESIS.md", "label": "SYNTHESIS.md"}],
+      "text": "Technical descriptions and code snippets."
+    },
+    {
+      "name": "paired file with type attribute and inner label (prod 1666366)",
+      "input": "Done. Committed and pushed to `main`, final PDF below.\n\n<file path=\"./report.pdf\" type=\"application/pdf\">Scope audit (final, table-layout fixes)</file>\n\n**Commit `facec00`** on `main`.",
+      "refs": [{"type": "file", "path": "./report.pdf", "label": "Scope audit (final, table-layout fixes)", "mime": "application/pdf"}],
+      "text": "Done. Committed and pushed to `main`, final PDF below. **Commit `facec00`** on `main`."
+    },
+    {
+      "name": "two paired files without name (prod 1667709)",
+      "input": "Both deliverables are ready.\n\n<file path=\"./report.pdf\">Updated audit report PDF (77 pages)</file>\n\n<file path=\"./audit-sources-7617b3e-7fb0874.zip\">Audit source and evidence package</file>\n\nDone.",
+      "refs": [
+        {"type": "file", "path": "./report.pdf", "label": "Updated audit report PDF (77 pages)"},
+        {"type": "file", "path": "./audit-sources-7617b3e-7fb0874.zip", "label": "Audit source and evidence package"}
+      ],
+      "text": "Both deliverables are ready. Done."
+    },
+    {
+      "name": "absolute workspace path (prod 2183885)",
+      "input": "Here is the rebuilt PDF with the updated cover:\n\n<file path=\"/workspaces/mission-5aede562/report-es2-B/build/report.pdf\">Contract and Circuit Review (v1.0), updated cover</file>",
+      "refs": [{"type": "file", "path": "/workspaces/mission-5aede562/report-es2-B/build/report.pdf", "label": "Contract and Circuit Review (v1.0), updated cover"}],
+      "text": "Here is the rebuilt PDF with the updated cover:"
+    },
+    {
+      "name": "ChatGPT UI downloads, relative without ./ (prod 3054114)",
+      "input": "<file path=\"chatgpt-ui-downloads/br_s3_v29_sieve_audit.py\" name=\"br_s3_v29_sieve_audit.py\" />\n\n<file path=\"chatgpt-ui-downloads/br_s3_v29_sieve_audit.json\" name=\"br_s3_v29_sieve_audit.json\" />",
+      "refs": [
+        {"type": "file", "path": "chatgpt-ui-downloads/br_s3_v29_sieve_audit.py", "label": "br_s3_v29_sieve_audit.py"},
+        {"type": "file", "path": "chatgpt-ui-downloads/br_s3_v29_sieve_audit.json", "label": "br_s3_v29_sieve_audit.json"}
+      ],
+      "text": ""
+    },
+    {
+      "name": "descriptive names in a nested tmp dir (prod 3075285)",
+      "input": "- No repository files or GitHub state were changed.\n\n<file path=\"./tmp/ethvb-diversity-audit/AUDIT.md\" name=\"Full diversity audit\" />\n\n<file path=\"./tmp/ethvb-diversity-audit/subsets.json\" name=\"FAST-12 and CORE-24\" />",
+      "refs": [
+        {"type": "file", "path": "./tmp/ethvb-diversity-audit/AUDIT.md", "label": "Full diversity audit"},
+        {"type": "file", "path": "./tmp/ethvb-diversity-audit/subsets.json", "label": "FAST-12 and CORE-24"}
+      ],
+      "text": "- No repository files or GitHub state were changed."
+    },
+    {
+      "name": "Core context upload path with unicode label (prod 3790227)",
+      "input": "Verified.\n\n<file path=\"/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/orb-remote-accepted.png\" name=\"Remote acceptance — mocked browser test.png\" />",
+      "refs": [{"type": "file", "path": "/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/orb-remote-accepted.png", "label": "Remote acceptance — mocked browser test.png"}],
+      "text": "Verified."
+    },
+    {
+      "name": "images with alt on adjacent lines (prod 3788260)",
+      "input": "<file path=\"/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/orb-review.zip\" name=\"Orb screenshots and verification.zip\" />\n<image path=\"/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/cron-create-light.png\" alt=\"Orb schedule popover — light\" />\n<image path=\"/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/cron-create-dark.png\" alt=\"Orb schedule popover — dark\" />",
+      "refs": [
+        {"type": "file", "path": "/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/orb-review.zip", "label": "Orb screenshots and verification.zip"},
+        {"type": "image", "path": "/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/cron-create-light.png", "label": "Orb schedule popover — light"},
+        {"type": "image", "path": "/root/context/b1d8f13c-0893-464d-9c39-1a65fb8ef1ca/orb-review/cron-create-dark.png", "label": "Orb schedule popover — dark"}
+      ],
+      "text": ""
+    },
+    {
+      "name": "SVG image followed by a Markdown link (prod 2653711)",
+      "input": "The last three events on the same `96%` plateau:\n\n<image path=\"./verity-benchmark-pr95/analysis/budget_scaling_minimax_50/cascade_solve_events.svg\" alt=\"Solve-event curve with final plateau\" />\n\nUpdated files:",
+      "refs": [{"type": "image", "path": "./verity-benchmark-pr95/analysis/budget_scaling_minimax_50/cascade_solve_events.svg", "label": "Solve-event curve with final plateau"}],
+      "text": "The last three events on the same `96%` plateau: Updated files:"
+    },
+    {
+      "name": "French prose with two images (prod 4590226)",
+      "input": "Voici le rendu des deux graphiques simplifiés :\n\n<image path=\"./p2p_severity/01_severity_by_cause_clean.png\" alt=\"Resources and decoding dominate severe P2P findings (simplified)\" />\n\n<image path=\"./p2p_severity/02_methods_by_severity_clean.png\" alt=\"A targeted proof programme, not a whole-stack guarantee (simplified)\" />",
+      "refs": [
+        {"type": "image", "path": "./p2p_severity/01_severity_by_cause_clean.png", "label": "Resources and decoding dominate severe P2P findings (simplified)"},
+        {"type": "image", "path": "./p2p_severity/02_methods_by_severity_clean.png", "label": "A targeted proof programme, not a whole-stack guarantee (simplified)"}
+      ],
+      "text": "Voici le rendu des deux graphiques simplifiés :"
+    },
+    {
+      "name": "single quotes, uppercase tag, no label falls back to file name",
+      "input": "<FILE path='out/build.log'/>",
+      "refs": [{"type": "file", "path": "out/build.log", "label": "build.log"}],
+      "text": ""
+    },
+    {
+      "name": "tag without path stays text",
+      "input": "Use <file name=\"x\" /> to share.",
+      "refs": [],
+      "text": "Use <file name=\"x\" /> to share."
+    },
+    {
+      "name": "tags inside a fenced code block are documentation, not shares",
+      "input": "Write:\n\n```html\n<file path=\"./r.pdf\" name=\"Report\" />\n```",
+      "refs": [],
+      "text": "Write: ```html <file path=\"./r.pdf\" name=\"Report\" /> ```"
+    }
+  ],
+  "sharedFiles": {
+    "_doc": "metadata.shared_files of an assistant_message (prod 3087931 shape). Matched to a tag by file name or by the url's path suffix.",
+    "metadata": [{"content_type": "application/octet-stream", "kind": "other", "name": "pr31-receipt-refresh2.patch", "size_bytes": 972, "url": "/api/fs/download?path=%2Fsrv%2Fsandboxed-storage%2Fstaging%2Fagent-core%2Fsandboxed%2Fcontainers%2Fassistant%2Fworkspaces%2Fmission-abf62858%2Fpr31-receipt-refresh2.patch&workspace_id=ee5140d0-ef8c-45d0-8f6e-be508ca3f629&mission_id=abf62858-ca50-4ad2-8e09-c719364a5d76"}],
+    "content": "<file path=\"./pr31-receipt-refresh2.patch\" name=\"pr31-receipt-refresh2.patch\" />",
+    "expect": {"path": "./pr31-receipt-refresh2.patch", "size": 972, "hasURL": true}
+  },
+  "kinds": {
+    "report.pdf": "pdf", "chart.PNG": "image", "photo.jpeg": "image", "curve.svg": "svg", "README.md": "markdown",
+    "data.csv": "csv", "rows.tsv": "csv", "subsets.json": "json", "main.py": "code", "App.swift": "code",
+    "build.log": "text", "notes.txt": "text", "change.patch": "code", "bundle.zip": "other", "blob.bin": "other", "Makefile": "other"
+  }
+}

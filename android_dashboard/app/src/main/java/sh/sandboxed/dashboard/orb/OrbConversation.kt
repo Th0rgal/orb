@@ -36,6 +36,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.platform.testTag
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -515,6 +516,10 @@ fun OrbConversationPage(
     var isStopping by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var previewFilePath by remember { mutableStateOf<String?>(null) }
+    // Shared files: chip previews, the Files tab, and shared_files metadata (size, url).
+    var fileRef by remember { mutableStateOf<OrbFileRef?>(null) }
+    var showFiles by remember { mutableStateOf(false) }
+    var sharedFiles by remember(missionId) { mutableStateOf<List<OrbSharedFile>>(emptyList()) }
     var showAgentPicker by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     var sideAgentSession by remember(initialMission?.id) { mutableStateOf<OrbSideAgentSession?>(null) }
@@ -538,6 +543,7 @@ fun OrbConversationPage(
                 ?: ""
         )
     }
+    val fileScope = remember(missionId, selectedWorkspaceId) { OrbFileScope(missionId, selectedWorkspaceId.takeIf { it.isNotEmpty() }) }
     var selectedAccount by remember(currentMission?.id) {
         mutableStateOf(currentMission?.str("account_id", "account", "provider_account") ?: "")
     }
@@ -1082,6 +1088,17 @@ fun OrbConversationPage(
 
     val changedFiles = remember(allTurns) { OrbTurnRecap.changedFiles(allTurns) }
 
+    // shared_files metadata for chips: refreshed when a message with a file tag lands.
+    val fileTagTurns = remember(allTurns) {
+        allTurns.count { it is OrbTurn.Assistant && !it.isStreaming && (it.text.contains("<file", true) || it.text.contains("<image", true)) }
+    }
+    val fileContext = LocalContext.current
+    LaunchedEffect(missionId, fileTagTurns) {
+        if (missionId == null || fileTagTurns == 0) return@LaunchedEffect
+        runCatching { OrbFileService.get(core, fileContext).messages(fileScope) }
+            .onSuccess { messages -> sharedFiles = messages.flatMap { it.shared } }
+    }
+
     val todos = remember(events, liveRow) {
         OrbTimelineBuilder.extractTodos(events, liveRow)
     }
@@ -1414,6 +1431,26 @@ fun OrbConversationPage(
                 }
             }
 
+            if (missionId != null) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, CircleShape)
+                        .orbPressClickable { showFiles = true }
+                        .testTag("conversation.files"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = "Files",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
             if (!prUrl.isNullOrEmpty()) {
                 Row(
                     modifier = Modifier
@@ -1558,13 +1595,17 @@ fun OrbConversationPage(
                         )
                     }
                     is OrbTurn.Assistant -> {
-                        OrbAssistantTurnView(
-                            turn = turn,
-                            core = core,
-                            missionId = missionId,
-                            workspaceId = selectedWorkspaceId.takeIf { it.isNotEmpty() },
-                            onSendAnswer = { ans -> sendTurn(ans) }
-                        )
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalOrbFiles provides OrbFileContext(fileScope, sharedFiles) { fileRef = it }
+                        ) {
+                            OrbAssistantTurnView(
+                                turn = turn,
+                                core = core,
+                                missionId = missionId,
+                                workspaceId = selectedWorkspaceId.takeIf { it.isNotEmpty() },
+                                onSendAnswer = { ans -> sendTurn(ans) }
+                            )
+                        }
                     }
                     is OrbTurn.WorkFold -> {
                         androidx.compose.runtime.CompositionLocalProvider(
@@ -2377,6 +2418,13 @@ fun OrbConversationPage(
         }
     }
 
+    fileRef?.let { ref ->
+        OrbFileViewerSheet(core = core, ref = ref, scope = fileScope, onDismiss = { fileRef = null })
+    }
+    if (showFiles) {
+        OrbFilesSheet(core = core, scope = fileScope, onDismiss = { showFiles = false })
+    }
+
     previewFilePath?.let { path ->
         OrbPreviewSheet(
             core = core,
@@ -2518,7 +2566,7 @@ private fun OrbAssistantTurnView(
         segments.forEach { seg ->
             when (seg) {
                 is OrbSegment.Markdown -> {
-                    OrbRichText(markdown = seg.text, tone = OrbRichTextTone.Primary)
+                    OrbMarkdownWithFiles(seg.text, streaming = turn.isStreaming)
                 }
                 is OrbSegment.Quiz -> {
                     OrbQuizCard(

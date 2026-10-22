@@ -26,6 +26,39 @@ DOC = {"content": "# Project context\n\nA **shared** document.\n", "revision": 1
 PROMPT = "Please test the new interface"
 ACCESS=[]
 ACCESS_AUDIT=[]
+
+def fixture_pdf():
+    """A one-page PDF with real text (PDFKit renders it)."""
+    objs=[b'<< /Type /Catalog /Pages 2 0 R >>', b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+          None, b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
+    text=b'BT /F1 28 Tf 72 700 Td (Orb fixture report) Tj 0 -40 Td /F1 16 Tf (PDF_FIXTURE_OK page 1) Tj ET'
+    objs[3]=b'<< /Length %d >>\nstream\n' % len(text) + text + b'\nendstream'
+    out=b'%PDF-1.4\n'; offsets=[]
+    for i,o in enumerate(objs,1): offsets.append(len(out)); out+=b'%d 0 obj\n' % i + o + b'\nendobj\n'
+    xref=len(out); out+=b'xref\n0 %d\n0000000000 65535 f \n' % (len(objs)+1)
+    for off in offsets: out+=b'%010d 00000 n \n' % off
+    return out+b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(objs)+1, xref)
+
+# shared-files: an agent shared an image, a PDF (also published in metadata.shared_files),
+# a Python file, an unknown 3 MB binary (chunked, with progress) and a file since deleted.
+SHARED_ROOT='/workspaces/mission-shared'
+def shared_workspace():
+    return {
+        'chart.png': Path(__file__).with_name('fixtures').joinpath('chart.png').read_bytes(),
+        'report.pdf': fixture_pdf(),
+        'src/analyse.py': b'import csv\n\n# Sum the values column\ndef total(path: str) -> int:\n    with open(path) as f:\n        return sum(int(r["value"]) for r in csv.DictReader(f))\n\nprint("TEXT_FIXTURE_OK", total("data.csv"))\n',
+        'data.csv': b'year,value,note\n1999,243,"first, release"\n2026,3767,current\n',
+        'dataset.bin': bytes((i*7+3) % 256 for i in range(3*1024*1024+512)),
+        'notes/todo.md': b'# Todo\n\n- [x] Share files\n- [ ] Ship\n',
+    }
+SHARED_FILES = shared_workspace()
+SHARED_MESSAGE=('Here are the results.\n\n<image path="./chart.png" alt="Growth chart" />\n\n'
+    '<file path="./report.pdf" type="application/pdf">Quarterly report</file>\n\n'
+    '<file path="./src/analyse.py" name="analyse.py" />\n\n'
+    '<file path="./dataset.bin" name="Raw dataset" />\n\nAll four files are in the workspace.')
+SHARED_OLD='Earlier draft:\n\n<file path="./old/gone.csv" name="gone.csv" />'
+
 def reset():
     global CORDONED, HEALTH_DELAY, FAIL_MISSIONS
     FAIL_MISSIONS = False
@@ -74,6 +107,13 @@ def reset():
     # opencode compaction block, Markdown answer) and one live that answers ~8 s
     # after a reset. Side questions sent to a thread stream, then complete.
     MISSIONS['btw-chat']=dict(id='btw-chat',title='Side questions',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',history=[dict(role='user',content='Build the app'),dict(role='assistant',content='The app is built.')],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:01:00Z')
+
+    # Files shared by an agent (chips, Files tab, previews, download progress, missing file).
+    MISSIONS['shared-files']=dict(id='shared-files',title='Shared files',status='awaiting_user',project='orb-test',backend='claudecode',tags=[],model_override='test-model',workspace_id='ws-fixture',history=[dict(role='user',content='Make the report'),dict(role='assistant',content=SHARED_OLD),dict(role='user',content='Now the final files'),dict(role='assistant',content=SHARED_MESSAGE)],created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:03:00Z')
+    QUEUE_EVENTS['shared-files']=[]
+    qadd('shared-files','user_message','Make the report',at=time.time()-600); qadd('shared-files','assistant_message',SHARED_OLD,at=time.time()-590)
+    qadd('shared-files','user_message','Now the final files',at=time.time()-120); qadd('shared-files','assistant_message',SHARED_MESSAGE,at=time.time()-110)
+    QUEUE_EVENTS['shared-files'][-1]['metadata']={'shared_files':[{'name':'report.pdf','content_type':'application/pdf','kind':'other','size_bytes':len(SHARED_FILES['report.pdf']),'url':'/api/fs/download?path=%2Fworkspaces%2Fmission-shared%2Freport.pdf&mission_id=shared-files'}]}
     now=time.time()
     side('btw-done','completed',now-3600)
     qadd('btw-done','user_message','<main_conversation_update>ctx</main_conversation_update>\n\nCurrent request:\nSummarise the build',at=now-3600)
@@ -180,6 +220,11 @@ class Handler(BaseHTTPRequestHandler):
         if p.endswith('/events') and p.split('/')[4] in QUEUE_EVENTS:
             since=int(parse_qs(u.query).get('since_seq',['0'])[0] or 0)
             return self.send([e for e in QUEUE_EVENTS[p.split('/')[4]] if e['sequence']>since])
+        if p=='/api/fs/download':
+            path=parse_qs(u.query).get('path',[''])[0]
+            rel=path[len(SHARED_ROOT)+1:] if path.startswith(SHARED_ROOT+'/') else None
+            if rel not in SHARED_FILES: return self.send({'error':'File not found'},404)
+            data=SHARED_FILES[rel]; self.send_response(200); self.send_header('Content-Type','application/octet-stream'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p=='/api/control/inbox-state': return self.send(INBOX_STATE)
         if p=='/api/mission-access': return self.send({'requests':list(reversed(ACCESS)),'audit':list(reversed(ACCESS_AUDIT))})
         if p=='/api/ai/providers': return self.send(list(PROVIDERS.values()))
@@ -217,6 +262,34 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(m['cloud_execution'])
             return self.send(m)
         return self.send({'error':'Not found'},404)
+    def file_resources(self, body):
+        """Core's POST /api/file-resources for the shared-files mission workspace."""
+        if body.get('mission_id')!='shared-files': return self.send({'error':'File source unavailable'},404)
+        action=body.get('action')
+        if action=='roots': return self.send({'sources':[{'id':'workspace','label':'Workspace','path':SHARED_ROOT,'available':True}]})
+        if body.get('source')!='workspace': return self.send({'error':'File source unavailable'},404)
+        def rel(path):
+            path=path[len(SHARED_ROOT)+1:] if path.startswith(SHARED_ROOT+'/') else path
+            while path.startswith('./'): path=path[2:]
+            return path
+        def entry(path): return {'name':path.split('/')[-1],'path':path,'kind':'file','size':len(SHARED_FILES[path]),'modified':1760000000}
+        if action=='resolve':
+            return self.send({'results':[{'reference':ref,'matches':[entry(rel(ref))] if rel(ref) in SHARED_FILES else []} for ref in body.get('paths',[])]})
+        if action=='list':
+            base=rel(body.get('path','')).strip('/'); prefix=base+'/' if base else ''
+            names={}
+            for path in SHARED_FILES:
+                if not path.startswith(prefix): continue
+                head=path[len(prefix):].split('/')[0]
+                names[head]={'name':head,'path':prefix+head,'kind':'dir'} if '/' in path[len(prefix):] else entry(prefix+head)
+            return self.send({'entries':sorted(names.values(),key=lambda e:(e['kind']!='dir',e['name'].lower())),'truncated':False})
+        if action in ('download','read'):
+            path=rel(body.get('path',''))
+            if path not in SHARED_FILES: return self.send({'error':'File is unavailable'},400)
+            data=SHARED_FILES[path]; offset=int(body.get('offset',0)); part=data[offset:offset+1024*1024]
+            if len(data)>1024*1024: time.sleep(0.7)  # large files: progress is visible
+            return self.send({'bytes':list(part),'next':offset+len(part),'size':len(data)})
+        return self.send({'error':'Unknown file operation'},400)
     def do_PUT(self): self.do_POST()
     def do_DELETE(self): self.do_POST()
     def do_POST(self):
@@ -252,6 +325,7 @@ class Handler(BaseHTTPRequestHandler):
             ACCESS_AUDIT.append(dict(at=iso(time.time()),request_id=r['id'],requester_mission_id=r['requester_mission_id'],target_mission_id=r['target_mission_id'],action=r['state'],detail=None,signed=bool(self.headers.get('X-Paloma-Approval'))))
             RECEIVED.append(f"{self.command} {p}")
             return self.send(r)
+        if p=='/api/file-resources': return self.file_resources(body)
         if p=='/__fail_missions': FAIL_MISSIONS = True; return self.send({})
         if p=='/__health_delay': HEALTH_DELAY=float(body.get('seconds',0)); return self.send({})
         if p=='/api/control/inbox-state/preferences':
