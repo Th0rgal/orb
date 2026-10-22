@@ -5,11 +5,52 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const MARKER: &str = "A sandboxed.sh mission changed status. Mission: ";
+/// The Hermes `mission-complete` prompt opening, before and after the
+/// 2026-10-19 template change (`. Mission: {title}` became `: {title}`).
+const MARKERS: [&str; 2] = [
+    "A sandboxed.sh mission changed status. Mission: ",
+    "A sandboxed.sh mission changed status: ",
+];
+#[cfg(test)]
+const MARKER: &str = MARKERS[0];
+/// The Hermes webhook route whose isolated sessions are mission callbacks.
+const CALLBACK_ROUTE: &str = "mission-complete";
+
+/// Whether a Hermes webhook session chat id names the mission callback route:
+/// legacy `webhook:mission-complete:<delivery>`, or (since 2026-10-20)
+/// `webhook:v2:<base64 JSON ["<profile>","<route>","<delivery>"]>`. The
+/// delivery id is not a mission id; the source comes from the message.
+fn is_callback_chat(chat_id: &str) -> bool {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
+    if let Some(rest) = chat_id.strip_prefix("webhook:v2:") {
+        let Some(bytes) = [URL_SAFE_NO_PAD, URL_SAFE, STANDARD, STANDARD_NO_PAD]
+            .iter()
+            .find_map(|engine| engine.decode(rest).ok())
+        else {
+            return false;
+        };
+        return matches!(
+            serde_json::from_slice::<Vec<String>>(&bytes).as_deref(),
+            Ok([profile, route, delivery])
+                if !profile.is_empty() && route == CALLBACK_ROUTE && !delivery.is_empty()
+        );
+    }
+    chat_id
+        .strip_prefix("webhook:")
+        .and_then(|rest| rest.strip_prefix(CALLBACK_ROUTE))
+        .is_some_and(|rest| rest.starts_with(':'))
+}
+
 fn source_mission(content: &str) -> Option<Uuid> {
     let mut found = None;
-    for (start, _) in content.match_indices(MARKER) {
-        let callback = content[start + MARKER.len()..].lines().next()?;
+    let starts = MARKERS.iter().flat_map(|marker| {
+        content
+            .match_indices(marker)
+            .map(move |(start, _)| start + marker.len())
+    });
+    for start in starts {
+        let callback = content[start..].lines().next()?;
         for (start, _) in callback.match_indices(" (id: ") {
             let tail = &callback[start + " (id: ".len()..];
             let Some(text) = tail.get(..36) else {
@@ -35,11 +76,14 @@ fn source_mission(content: &str) -> Option<Uuid> {
 
 fn parent(connection: &Connection, session: &str) -> Option<Uuid> {
     // Ordinary conversations may discuss many missions; they are not parents.
-    let isolated: bool = connection.query_row(
-        "SELECT source = 'webhook' AND json_extract(origin_json, '$.chat_id') LIKE 'webhook:mission-complete:%' FROM sessions WHERE id = ?1",
-        [session], |row| row.get(0),
-    ).ok()?;
-    if !isolated {
+    let (source, chat_id): (Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT source, json_extract(origin_json, '$.chat_id') FROM sessions WHERE id = ?1",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    if source.as_deref() != Some("webhook") || !chat_id.as_deref().is_some_and(is_callback_chat) {
         return None;
     }
     let mut statement = connection
@@ -195,5 +239,64 @@ mod tests {
             )),
             Some(id)
         );
+    }
+
+    const REAL_V2: &str = "webhook:v2:WyJkZWZhdWx0IiwibWlzc2lvbi1jb21wbGV0ZSIsImQ3MTViM2E0LTE2NzctNGJlZC1iZDk5LTVhNWRmODQ1YjVmYyJd";
+
+    fn v2(engine: base64::engine::GeneralPurpose, json: &str) -> String {
+        use base64::Engine;
+        format!("webhook:v2:{}", engine.encode(json))
+    }
+
+    #[test]
+    fn callback_chat_ids_accept_legacy_and_v2_routes_only() {
+        use base64::engine::general_purpose::{
+            STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+        };
+        assert!(is_callback_chat(REAL_V2));
+        assert!(is_callback_chat("webhook:mission-complete:abc"));
+        // `?>` encodes to `/` or `_` depending on the alphabet; padding varies.
+        let tricky = r#"["default","mission-complete","?>?>x"]"#;
+        for engine in [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD] {
+            assert!(is_callback_chat(&v2(engine, tricky)));
+        }
+        for bad in [
+            "webhook:mission-completed:x",
+            "webhook:mission-complete",
+            "webhook:github:x",
+            "webhook:v2:",
+            "webhook:v2:!!!not base64",
+            "api:mission-complete:x",
+        ] {
+            assert!(!is_callback_chat(bad), "{bad}");
+        }
+        for json in [
+            r#"["default","github","d715b3a4-1677-4bed-bd99-5a5df845b5fc"]"#,
+            r#"["default","mission-complete"]"#,
+            r#"["default","mission-complete","x","extra"]"#,
+            r#"["default","mission-complete",""]"#,
+            r#"["default","mission-complete",7]"#,
+            r#"{"route":"mission-complete"}"#,
+            "not json",
+        ] {
+            assert!(!is_callback_chat(&v2(URL_SAFE_NO_PAD, json)), "{json}");
+        }
+    }
+
+    #[test]
+    fn v2_sessions_with_the_current_prompt_have_parents() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE sessions(id TEXT, source TEXT, origin_json TEXT); CREATE TABLE messages(session_id TEXT, role TEXT, content TEXT);").unwrap();
+        c.execute(
+            "INSERT INTO sessions VALUES('s','webhook',?1)",
+            [serde_json::json!({"chat_id": REAL_V2}).to_string()],
+        )
+        .unwrap();
+        let id = Uuid::parse_str("280b1339-df83-475e-974e-7d9367ff4287").unwrap();
+        let content = format!("A sandboxed.sh mission changed status: review what he did wrong: (id: {id}, status: completed, awaiting_kind: None, project: verity-core, workspace: host). Short description: x.\n\n1. Call get_mission(mission_id=\"{id}\") first.");
+        c.execute("INSERT INTO messages VALUES('s','user',?1)", [&content])
+            .unwrap();
+        assert_eq!(parent(&c, "s"), Some(id));
+        assert_eq!(source_mission(&content), Some(id));
     }
 }
