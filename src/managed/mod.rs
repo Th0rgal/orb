@@ -157,8 +157,10 @@ pub fn size_for(cpu: Option<u32>, ram_gb: Option<u32>) -> Option<SizeSpec> {
 pub struct ManagedSettings {
     pub enabled: bool,
     pub provider: String,
-    pub daily_cap_usd: f64,
-    pub max_concurrent: usize,
+    /// `None` = no daily dollar cap (default).
+    pub daily_cap_usd: Option<f64>,
+    /// `None` = no concurrency cap (default).
+    pub max_concurrent: Option<usize>,
     pub default_ttl_minutes: u64,
     pub max_ttl_minutes: u64,
     pub default_size: String,
@@ -175,6 +177,18 @@ pub struct ManagedSettings {
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
+}
+
+/// Parse an optional limit: unset, empty, `none`, `unlimited` or `off`
+/// mean no limit; anything else must parse as a positive number.
+pub fn optional_limit<T: std::str::FromStr + PartialOrd + Default>(raw: Option<&str>) -> Option<T> {
+    let raw = raw?.trim();
+    if raw.is_empty()
+        || ["none", "unlimited", "off", "no"].contains(&raw.to_ascii_lowercase().as_str())
+    {
+        return None;
+    }
+    raw.parse::<T>().ok().filter(|v| *v > T::default())
 }
 
 impl ManagedSettings {
@@ -210,8 +224,16 @@ impl ManagedSettings {
         Self {
             enabled,
             provider: "boat".into(),
-            daily_cap_usd: env_parse("SANDBOXED_MANAGED_DAILY_CAP_USD").unwrap_or(20.0),
-            max_concurrent: env_parse("SANDBOXED_MANAGED_MAX_CONCURRENT").unwrap_or(6),
+            daily_cap_usd: optional_limit(
+                std::env::var("SANDBOXED_MANAGED_DAILY_CAP_USD")
+                    .ok()
+                    .as_deref(),
+            ),
+            max_concurrent: optional_limit(
+                std::env::var("SANDBOXED_MANAGED_MAX_CONCURRENT")
+                    .ok()
+                    .as_deref(),
+            ),
             default_ttl_minutes: env_parse::<u64>("SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES")
                 .unwrap_or(120)
                 .min(max_ttl),
@@ -639,9 +661,11 @@ fn start_of_today() -> DateTime<Utc> {
 pub struct BudgetView {
     pub spent_today_usd: f64,
     pub committed_usd: f64,
-    pub daily_cap_usd: f64,
+    /// `null` = unlimited.
+    pub daily_cap_usd: Option<f64>,
     pub active: usize,
-    pub max_concurrent: usize,
+    /// `null` = unlimited.
+    pub max_concurrent: Option<usize>,
     pub default_ttl_minutes: u64,
     pub max_ttl_minutes: u64,
     pub default_size: String,
@@ -1026,26 +1050,30 @@ impl ManagedManager {
         let machine = {
             let _guard = self.admission.lock().await;
             let budget = self.budget().await;
-            if budget.active >= self.settings.max_concurrent {
-                return Err(ManagedError::new(
-                    "quota_exceeded",
-                    429,
-                    format!(
-                        "{} managed machines are running (max {}); destroy one first",
-                        budget.active, self.settings.max_concurrent
-                    ),
-                ));
+            if let Some(max) = self.settings.max_concurrent {
+                if budget.active >= max {
+                    return Err(ManagedError::new(
+                        "quota_exceeded",
+                        429,
+                        format!(
+                            "{} managed machines are running (max {max}); destroy one first",
+                            budget.active
+                        ),
+                    ));
+                }
             }
             let new_cost = ttl_minutes as f64 / 60.0 * spec.usd_per_hour;
-            if budget.spent_today_usd + budget.committed_usd + new_cost
-                > self.settings.daily_cap_usd
+            if let Some(cap) = self
+                .settings
+                .daily_cap_usd
+                .filter(|cap| budget.spent_today_usd + budget.committed_usd + new_cost > *cap)
             {
                 return Err(ManagedError::new(
                     "budget_exceeded",
                     402,
                     format!(
                         "Daily managed-machine budget ${:.2} would be exceeded (spent ${:.2}, committed ${:.2}, this machine up to ${:.2}); pick a smaller size or shorter TTL",
-                        self.settings.daily_cap_usd,
+                        cap,
                         budget.spent_today_usd,
                         budget.committed_usd,
                         new_cost
@@ -1583,8 +1611,8 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
     let _ = MANAGER.set(Arc::clone(&manager));
     if manager.settings.enabled && manager.provider.is_some() {
         tracing::info!(
-            daily_cap = manager.settings.daily_cap_usd,
-            max_concurrent = manager.settings.max_concurrent,
+            daily_cap = ?manager.settings.daily_cap_usd,
+            max_concurrent = ?manager.settings.max_concurrent,
             "Managed machines enabled (boat)"
         );
         let reaper = Arc::clone(&manager);
