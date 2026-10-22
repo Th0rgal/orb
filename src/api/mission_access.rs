@@ -480,17 +480,21 @@ impl MissionAccess {
     }
 }
 
+/// What the requesting agent sees. Nothing from the target mission (title,
+/// project, status, even whether it exists) until a live grant exists; only
+/// Thomas's approval card shows the target title.
 fn agent_view(r: &AccessRequest) -> Value {
+    let live = r.live_grant(Utc::now());
     json!({
         "request_id": r.id,
         "target_mission_id": r.target_mission_id,
-        "target_title": r.target_title,
+        "target_title": if live { json!(r.target_title) } else { Value::Null },
         "scope": r.scope,
         "status": r.state,
         "reason": r.reason,
         "created_at": r.created_at,
         "expires_at": r.expires_at,
-        "allowed_tools": if r.state == ApprovalState::Approved { json!(READ_TOOLS) } else { json!([]) },
+        "allowed_tools": if live { json!(READ_TOOLS) } else { json!([]) },
     })
 }
 
@@ -574,19 +578,21 @@ pub async fn handle_tool(
             };
             // The mission store is per user: another tenant's mission is not found.
             let missions = state.control.get_or_spawn(&user).await.mission_store;
-            let target_mission = missions
-                .get_mission(target)
-                .await
-                .ok()
-                .flatten()
-                .ok_or("Mission not found")?;
+            // A missing target gets the same pending reply as an existing one,
+            // so the tool cannot probe which missions exist. Such a request can
+            // never be approved (the approver must own the target) and times out.
+            let target_mission = missions.get_mission(target).await.ok().flatten();
             let requester = missions
                 .get_mission(own)
                 .await
                 .ok()
                 .flatten()
                 .ok_or("Mission no longer exists")?;
-            if target == own || target_mission.parent_mission_id == Some(own) {
+            if target == own
+                || target_mission
+                    .as_ref()
+                    .is_some_and(|m| m.parent_mission_id == Some(own))
+            {
                 return Ok(
                     json!({"status":"already_in_scope","message":"This mission is already in your scope; read it directly."}),
                 );
@@ -598,7 +604,7 @@ pub async fn handle_tool(
                     requester: own,
                     requester_title: requester.title,
                     target,
-                    target_title: target_mission.title,
+                    target_title: target_mission.and_then(|m| m.title),
                     reason,
                     ttl_hours: args.get("ttl_hours").and_then(Value::as_i64),
                 })
@@ -1022,6 +1028,37 @@ mod tests {
         };
         let s = MissionAccess::open(path);
         assert_eq!(s.read_grant("thomas", a, b).await, Some(id));
+    }
+
+    #[tokio::test]
+    async fn agent_sees_nothing_of_the_target_before_a_live_grant() {
+        let s = temp();
+        let (a, b, ghost) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let real = s.request(new("thomas", a, b)).await.unwrap();
+        // A request for a mission that does not exist (no title known).
+        let mut missing = new("thomas", a, ghost);
+        missing.target_title = None;
+        let missing = s.request(missing).await.unwrap();
+        let (v1, v2) = (agent_view(&real), agent_view(&missing));
+        assert!(v1["target_title"].is_null(), "pending view leaks the title");
+        assert!(
+            !v1.to_string().contains("target\""),
+            "title text leaked: {v1}"
+        );
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&v1), keys(&v2));
+        assert_eq!(v1["status"], v2["status"]);
+        assert_eq!(v1["allowed_tools"], json!([]));
+        // Denied: still nothing.
+        let denied = s.deny("thomas", real.id).await.unwrap();
+        assert!(agent_view(&denied)["target_title"].is_null());
+        // Live grant: the title is visible.
+        let r2 = s.request(new("thomas", a, Uuid::new_v4())).await.unwrap();
+        let ok = s.approve("thomas", r2.id, None).await.unwrap();
+        assert_eq!(agent_view(&ok)["target_title"], "target");
+        // Revoked: hidden again.
+        let gone = s.revoke("thomas", r2.id).await.unwrap();
+        assert!(agent_view(&gone)["target_title"].is_null());
     }
 
     #[test]
