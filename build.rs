@@ -120,6 +120,38 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
         .to_string();
     let include = PathBuf::from(&prefix).join("include");
 
+    let macos = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    // ld64 has no `-r` + dead stripping, so on macOS demote every
+    // LEAN_EXPORT that is not an ORB export to `static`: the compiler then
+    // drops the unused `___boxed` wrappers and `initialize_*` (the only code
+    // that references the Lean runtime) and no link-time gc is needed.
+    let compile_c_path = if macos {
+        let src = fs::read_to_string(&spec_c_path).expect("read Orb_Kernel.c");
+        let mut c = String::with_capacity(src.len());
+        for line in src.lines() {
+            let name = line
+                .strip_prefix("LEAN_EXPORT ")
+                .and_then(|rest| rest.split('(').next())
+                .and_then(|head| {
+                    head.rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                        .next()
+                });
+            match name {
+                Some(n) if !ORB_EXPORTS.contains(&n) => {
+                    c.push_str("static ");
+                    c.push_str(&line["LEAN_EXPORT ".len()..]);
+                }
+                _ => c.push_str(line),
+            }
+            c.push('\n');
+        }
+        let path = out_dir.join("Orb_Kernel_macos.c");
+        fs::write(&path, c).expect("write Orb_Kernel_macos.c");
+        path
+    } else {
+        spec_c_path.clone()
+    };
+
     let mut compiled = false;
     for compiler in ["cc", "clang", "gcc"] {
         if let Ok(st) = Command::new(compiler)
@@ -131,7 +163,7 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
                 "-c",
             ])
             .arg(format!("-I{}", include.display()))
-            .arg(&spec_c_path)
+            .arg(&compile_c_path)
             .arg("-o")
             .arg(&obj_path)
             .status()
@@ -144,26 +176,31 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
     }
     assert!(compiled, "failed to compile Orb/Kernel.c");
 
-    let mut ld_args = vec!["-r".to_string(), "--gc-sections".to_string()];
-    for sym in ORB_EXPORTS {
-        ld_args.push("-u".to_string());
-        ld_args.push((*sym).to_string());
+    if macos {
+        fs::copy(&obj_path, &gc_obj_path).expect("copy Orb_Kernel.o");
+        let _ = Command::new("strip").arg("-x").arg(&gc_obj_path).status();
+    } else {
+        let mut ld_args = vec!["-r".to_string(), "--gc-sections".to_string()];
+        for sym in ORB_EXPORTS {
+            ld_args.push("-u".to_string());
+            ld_args.push((*sym).to_string());
+        }
+        ld_args.push(obj_path.display().to_string());
+        ld_args.push("-o".to_string());
+        ld_args.push(gc_obj_path.display().to_string());
+        let ld_status = Command::new("ld")
+            .args(&ld_args)
+            .status()
+            .unwrap_or_else(|e| panic!("ld --gc-sections failed: {e}"));
+        assert!(
+            ld_status.success() && gc_obj_path.is_file(),
+            "ld --gc-sections failed"
+        );
+        let _ = Command::new("strip")
+            .args(["--strip-unneeded"])
+            .arg(&gc_obj_path)
+            .status();
     }
-    ld_args.push(obj_path.display().to_string());
-    ld_args.push("-o".to_string());
-    ld_args.push(gc_obj_path.display().to_string());
-    let ld_status = Command::new("ld")
-        .args(&ld_args)
-        .status()
-        .unwrap_or_else(|e| panic!("ld --gc-sections failed: {e}"));
-    assert!(
-        ld_status.success() && gc_obj_path.is_file(),
-        "ld --gc-sections failed"
-    );
-    let _ = Command::new("strip")
-        .args(["--strip-unneeded"])
-        .arg(&gc_obj_path)
-        .status();
 
     let nm_out = Command::new("nm")
         .args(["-P", "-u"])
@@ -185,7 +222,14 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
         assert!(
             defined_text.lines().any(|line| {
                 let mut parts = line.split_whitespace();
-                parts.next() == Some(*sym) && parts.next() == Some("T")
+                let name = parts.next().map(|n| {
+                    if macos {
+                        n.strip_prefix('_').unwrap_or(n)
+                    } else {
+                        n
+                    }
+                });
+                name == Some(*sym) && parts.next() == Some("T")
             }),
             "missing defined export {sym}"
         );
