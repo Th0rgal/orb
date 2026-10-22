@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 import PDFKit
 import WebKit
 
@@ -41,7 +42,13 @@ struct OrbMessageWithFiles: View {
                     case .text(let prose): OrbRichText(source: prose, onArtifact: onArtifact)
                     case .file(let ref):
                         let enriched = OrbFileRefs.enrich(ref, shared: files?.shared ?? [])
-                        OrbFileChip(ref: enriched) { files?.open(enriched) }
+                        if enriched.unavailable {
+                            OrbUnavailableFileChip(ref: enriched)
+                        } else if enriched.type == "image", enriched.kind == .image, let scope = files?.scope {
+                            OrbInlineImage(ref: enriched, scope: scope) { files?.open(enriched) }
+                        } else {
+                            OrbFileChip(ref: enriched) { files?.open(enriched) }
+                        }
                     }
                 }
             }
@@ -89,6 +96,77 @@ struct OrbFileChip: View {
 }
 
 private extension String { var nonEmpty: String? { isEmpty ? nil : self } }
+
+/// An image an agent shared, shown in the transcript; tap opens the preview.
+/// Until it loads (or if it cannot), the regular chip stands in.
+struct OrbInlineImage: View {
+    let ref: OrbFileRef
+    let scope: OrbFileService.Scope
+    let open: () -> Void
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Button(action: open) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 420, maxHeight: 320, alignment: .leading)
+                        .clipShape(RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+                        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.border))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(ref.label)
+                .accessibilityHint("Opens a preview")
+                .accessibilityIdentifier("file.image.\(ref.name)")
+            } else {
+                OrbFileChip(ref: ref, action: open)
+            }
+        }
+        .task(id: ref) {
+            guard let url = try? await OrbFileService.shared.fetch(ref, scope: scope) else { return }
+            image = await Task.detached(priority: .userInitiated) { OrbInlineImage.thumbnail(url) }.value
+        }
+    }
+
+    /// Downsampled off the main thread: a 25 MB PNG never decodes at full size.
+    nonisolated static func thumbnail(_ url: URL) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1600
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
+    }
+}
+
+/// A share Core could not copy: named, never fetched.
+struct OrbUnavailableFileChip: View {
+    let ref: OrbFileRef
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: ref.kind.symbol)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(OrbStyle.textMuted)
+                .frame(width: 32, height: 32)
+                .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: 7))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(ref.label).font(.subheadline.weight(.medium)).foregroundStyle(OrbStyle.textSecondary).lineLimit(1).truncationMode(.middle)
+                Text("File no longer available").font(.caption).foregroundStyle(OrbStyle.textMuted).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(maxWidth: 420, alignment: .leading)
+        .background(OrbStyle.card, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("file.unavailable.\(ref.name)")
+    }
+}
 
 // MARK: - Preview
 

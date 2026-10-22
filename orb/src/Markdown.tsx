@@ -10,8 +10,9 @@ import { FileReference, FileReferenceText } from "./fileReferenceContext";
 import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
 import { timed } from "./diagnostics";
-import { RICH_TAG, parseRichTag } from "./richTags";
+import { RICH_TAG, expandMediaLines, parseRichTag } from "./richTags";
 import { WorkspaceImage } from "./WorkspaceImage";
+import * as Ic from "./icons";
 
 /**
  * Source-vs-preview for Markdown file views, shared by every one of them so ⌘/
@@ -78,6 +79,12 @@ function MathFormula(p: {text: string; display?: boolean}) {
   const html = createMemo(() => renderFormula(p.text, !!p.display));
   return <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={html()} />;
 }
+/** A share Core could not copy (the agent's file was gone or refused). */
+function UnavailableFile(p: { label: string; path: string }) {
+  return <span class="md-file-unavailable" title={p.path} role="note">
+    <Ic.FileIcon size={14} /><span>{p.label}</span><small>File no longer available</small>
+  </span>;
+}
 /** `<image>`/`<file>` tags are taken before any other inline syntax so their
  * quoted paths are never read as emphasis, code or links. */
 function inline(text: string, links = true): JSX.Element[] {
@@ -88,7 +95,8 @@ function inline(text: string, links = true): JSX.Element[] {
     const tag = parseRichTag(m[1], m[2], m[3]);
     if (!tag) continue;
     if (m.index! > last) out.push(...inlineMarkdown(text.slice(last, m.index), links));
-    out.push(tag.type === "image" ? <WorkspaceImage path={tag.path} alt={tag.label} /> : <FileReference raw={tag.path}>{tag.label}</FileReference>);
+    out.push(tag.unavailable ? <UnavailableFile label={tag.label} path={tag.path} />
+      : tag.type === "image" ? <WorkspaceImage path={tag.path} alt={tag.label} /> : <FileReference raw={tag.path}>{tag.label}</FileReference>);
     last = m.index! + m[0].length;
   }
   if (last < text.length) out.push(...inlineMarkdown(text.slice(last), links));
@@ -209,7 +217,7 @@ function readTable(lines: string[], start: number): { block: Extract<Block, { t:
 }
 
 export function parseMarkdown(src: string): Block[] {
-  return timed("markdown", () => parseBlocks(src));
+  return timed("markdown", () => parseBlocks(expandMediaLines(src)));
 }
 function isHrLine(line: string): boolean {
   const t = line.trim();
