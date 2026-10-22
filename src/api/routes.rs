@@ -279,6 +279,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Initialize global settings store
     let settings = Arc::new(crate::settings::SettingsStore::new(&config.working_dir).await);
     settings.init_cached_values();
+    // Per-model `/v1` latency summary in the journal every 5 minutes.
+    super::proxy_timing::spawn_periodic_summary(std::time::Duration::from_secs(300));
 
     // Sweep orphaned command-task nspawn containers from a previous process lifetime.
     // Containers are named task-{uuid} via --machine=, so machinectl can find them.
@@ -561,13 +563,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         model_catalog: Arc::new(RwLock::new(HashMap::new())),
         health_tracker,
         chain_store,
-        http_client: reqwest::Client::builder()
-            // No global timeout — it applies to the full response body including
-            // streaming chunks, which would kill long-running LLM generations.
-            // Per-request timeouts are set in the proxy where needed.
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default(),
+        http_client: build_upstream_http_client(),
         proxy_secret: std::env::var("SANDBOXED_PROXY_SECRET")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -879,6 +875,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/nodes/:name/uncordon", post(uncordon_remote_node))
         .route("/api/ai/usage/summary", get(get_ai_usage_summary))
         .route("/api/ai/proxy/health", get(get_ai_proxy_health))
+        .route("/api/ai/proxy/timing", get(get_ai_proxy_timing))
         .route("/api/task", post(create_task))
         .route("/api/task/:id", get(get_task))
         .route("/api/task/:id/stop", post(stop_task))
@@ -2105,6 +2102,50 @@ async fn get_ai_usage_summary(
 pub struct ProxyHealthQuery {
     /// N followed by h, d or w (default "24h"), or "all".
     window: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProxyTimingQuery {
+    /// Minutes of history (default 60, at most 24 h of the in-memory ring).
+    minutes: Option<u64>,
+}
+
+/// GET /api/ai/proxy/timing — in-memory per-request timing of the `/v1`
+/// router since the last restart: p50/p90 time to headers / first content /
+/// total, queue wait, prompt tokens, cache reads, in-flight counts, failure
+/// reasons and hedges, per provider/model. No prompt content.
+async fn get_ai_proxy_timing(
+    Extension(_user): Extension<AuthUser>,
+    Query(params): Query<ProxyTimingQuery>,
+) -> Json<super::proxy_timing::TimingSummary> {
+    let minutes = params.minutes.unwrap_or(60).clamp(1, 24 * 60);
+    Json(super::proxy_timing::summary(
+        std::time::Duration::from_secs(minutes * 60),
+    ))
+}
+
+/// Shared client for every upstream LLM call.
+///
+/// * No global timeout: it applies to the full response body, which would
+///   kill long-running streamed generations. Per-request limits live in the
+///   proxy.
+/// * TLS offers ALPN (`native-tls-alpn`), so HTTPS providers that speak
+///   HTTP/2 (Google, OpenAI, xAI, …) multiplex concurrent streams over warm
+///   connections instead of one HTTP/1.1 connection per in-flight stream.
+///   Plain-HTTP local adapters (CLI proxy) stay on HTTP/1.1.
+/// * Keepalives keep idle pooled connections from being silently dropped by
+///   NATs/LBs between bursts of turns.
+pub(crate) fn build_upstream_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(20))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+        .http2_keep_alive_while_idle(true)
+        .http2_adaptive_window(true)
+        .build()
+        .unwrap_or_default()
 }
 
 /// GET /api/ai/proxy/health — router reliability per provider/model/account:

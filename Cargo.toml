@@ -24,7 +24,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart", "native-tls-alpn"] }
 reqwest-eventsource = "0.6"
 
 # Logging

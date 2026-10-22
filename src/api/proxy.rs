@@ -1495,6 +1495,8 @@ struct UsageAccumulator {
     cache_read: u64,
     /// OpenAI/Google style cached tokens, which are part of `input`.
     cached_in_input: u64,
+    /// Reasoning/thought tokens, which are part of `output`.
+    reasoning: u64,
 }
 
 impl UsageAccumulator {
@@ -1525,6 +1527,13 @@ impl UsageAccumulator {
             "/cachedContentTokenCount",
         ]) {
             self.cached_in_input = self.cached_in_input.max(v);
+        }
+        if let Some(v) = get(&[
+            "/completion_tokens_details/reasoning_tokens",
+            "/output_tokens_details/reasoning_tokens",
+            "/thoughtsTokenCount",
+        ]) {
+            self.reasoning = self.reasoning.max(v);
         }
         input.is_some() || output.is_some()
     }
@@ -1616,6 +1625,14 @@ async fn record_proxy_usage(
     target: &ProxyUsageTarget,
     tokens: ProxyTokens,
 ) {
+    if let Some(cell) = super::proxy_timing::current() {
+        cell.set_tokens(
+            tokens.input + tokens.cache_read,
+            tokens.output,
+            tokens.cache_read,
+            0,
+        );
+    }
     let record = proxy_usage_record(target, tokens);
     let user = super::auth::implicit_single_tenant_user(&state.config);
     let control_state = state.control.get_or_spawn(&user).await;
@@ -2450,10 +2467,207 @@ async fn chat_completions(
 
 /// Chain-routed chat completion without proxy auth.  Callers must enforce
 /// their own authentication (e.g. the JWT-protected chain test endpoint).
+///
+/// Times the request (`proxy_timing`) and, for streaming requests on a chain
+/// listed in `PROXY_HEDGE_CHAINS`, hedges a slow first answer to the
+/// configured target (see [`hedged_chat_completion`]).
 pub(crate) async fn chat_completions_inner(
     state: Arc<super::routes::AppState>,
     headers: HeaderMap,
     body: bytes::Bytes,
+) -> Response {
+    let peek: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
+    let model = peek
+        .as_ref()
+        .and_then(|v| v.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let is_stream = peek
+        .as_ref()
+        .and_then(|v| v.get("stream"))
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+    let shape = super::proxy_timing::request_shape(&body, peek.as_ref());
+    drop(peek);
+    let hedge = if is_stream {
+        reliability::hedge_config_for(&model, &reliability::hedge_rules_from_env())
+    } else {
+        None
+    };
+    match hedge {
+        Some(cfg) => hedged_chat_completion(state, headers, body, model, shape, cfg).await,
+        None => {
+            let cell = super::proxy_timing::TimingCell::new(&model, is_stream);
+            cell.set_request(&model, None, None, shape);
+            let resp = super::proxy_timing::scope(
+                cell.clone(),
+                chat_completions_routed(state, headers, body, None),
+            )
+            .await;
+            timed_response(resp, cell)
+        }
+    }
+}
+
+/// Attach `cell` to the response body: it finishes (and logs) when the body
+/// is fully sent, or when the client drops the connection first.
+fn timed_response(resp: Response, cell: Arc<super::proxy_timing::TimingCell>) -> Response {
+    let (parts, body) = resp.into_parts();
+    cell.set_response_status(parts.status.as_u16());
+    let mut data = body.into_data_stream();
+    let stream = async_stream::stream! {
+        while let Some(item) = data.next().await {
+            let failed = item.is_err();
+            yield item;
+            if failed {
+                return;
+            }
+        }
+        cell.body_finished();
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+/// Race a slow streaming request against an explicitly configured hedge
+/// target. The primary starts alone; once it has waited the adaptive hedge
+/// delay without a first content chunk (the router only returns a stream
+/// response after its first chunk), the hedge starts on `cfg.target`. The
+/// first successful response wins and the other request is dropped, which
+/// cancels its upstream call. A failed response waits for the other one.
+async fn hedged_chat_completion(
+    state: Arc<super::routes::AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+    model: String,
+    shape: super::proxy_timing::RequestShape,
+    cfg: reliability::HedgeConfig,
+) -> Response {
+    use super::proxy_timing::{scope, TimingCell};
+    let primary_cell = TimingCell::new(&model, true);
+    primary_cell.set_request(&model, None, None, shape.clone());
+    let primary = scope(
+        primary_cell.clone(),
+        chat_completions_routed(state.clone(), headers.clone(), body.clone(), None),
+    );
+    let target = cfg.target.clone();
+    let delay_cell = primary_cell.clone();
+    let delay_cfg = cfg.clone();
+    // The adaptive delay is computed once the floor has passed, for the
+    // entry the primary is actually waiting on by then.
+    let adaptive_delay = move || {
+        delay_cell
+            .current_target()
+            .map(|(provider, m)| {
+                delay_cfg.delay_for(&super::proxy_timing::recent_first_content_ms(
+                    &provider,
+                    &m,
+                    delay_cfg.window,
+                ))
+            })
+            .unwrap_or(delay_cfg.max)
+    };
+    let hedge_shape = shape;
+    let start_hedge = move || {
+        let cell = TimingCell::new(&target, true);
+        cell.set_request(&target, None, None, hedge_shape);
+        let fut = scope(
+            cell.clone(),
+            chat_completions_routed(state, headers, body, Some(target.clone())),
+        );
+        (fut, cell)
+    };
+    race_hedged(
+        &model,
+        &cfg.target,
+        (primary, primary_cell),
+        cfg.min,
+        adaptive_delay,
+        start_hedge,
+    )
+    .await
+}
+
+/// Core of [`hedged_chat_completion`], generic over the two requests so the
+/// race is testable without a router. Returns the winning response with its
+/// timing cell attached; the loser is dropped (cancelling its upstream call)
+/// and its cell is marked `hedge_cancelled`.
+async fn race_hedged<P, H>(
+    chain: &str,
+    target: &str,
+    primary: (P, Arc<super::proxy_timing::TimingCell>),
+    floor: Duration,
+    adaptive_delay: impl FnOnce() -> Duration,
+    start_hedge: impl FnOnce() -> (H, Arc<super::proxy_timing::TimingCell>),
+) -> Response
+where
+    P: std::future::Future<Output = Response>,
+    H: std::future::Future<Output = Response>,
+{
+    use super::proxy_timing::HedgeRole;
+    let (primary, primary_cell) = primary;
+    let mut primary = std::pin::pin!(primary);
+    let started = tokio::time::Instant::now();
+    tokio::select! {
+        resp = &mut primary => return timed_response(resp, primary_cell),
+        _ = tokio::time::sleep(floor) => {}
+    }
+    let delay = adaptive_delay();
+    if let Some(rest) = delay.checked_sub(started.elapsed()) {
+        tokio::select! {
+            resp = &mut primary => return timed_response(resp, primary_cell),
+            _ = tokio::time::sleep(rest) => {}
+        }
+    }
+    tracing::info!(
+        chain = %chain,
+        hedge_target = %target,
+        after_ms = started.elapsed().as_millis() as u64,
+        "Hedging slow stream to the configured target"
+    );
+    primary_cell.set_hedge_role(HedgeRole::Primary);
+    let (hedge, hedge_cell) = start_hedge();
+    hedge_cell.set_hedge_role(HedgeRole::Hedge);
+    let mut hedge = std::pin::pin!(hedge);
+    let primary_first = tokio::select! {
+        resp = &mut primary => Some(resp),
+        resp = &mut hedge => {
+            if resp.status().is_success() {
+                tracing::info!(chain = %chain, winner = "hedge", "Hedge race decided");
+                primary_cell.mark_cancelled();
+                return timed_response(resp, hedge_cell.clone());
+            }
+            // The hedge failed first: the primary is the answer either way.
+            drop(timed_response(resp, hedge_cell.clone()));
+            None
+        }
+    };
+    match primary_first {
+        None => timed_response(primary.await, primary_cell),
+        Some(resp) if resp.status().is_success() => {
+            tracing::info!(chain = %chain, winner = "primary", "Hedge race decided");
+            hedge_cell.mark_cancelled();
+            timed_response(resp, primary_cell)
+        }
+        Some(failed) => {
+            let resp = hedge.await;
+            if resp.status().is_success() {
+                tracing::info!(chain = %chain, winner = "hedge", "Hedge race decided");
+                drop(timed_response(failed, primary_cell));
+                timed_response(resp, hedge_cell)
+            } else {
+                drop(timed_response(resp, hedge_cell));
+                timed_response(failed, primary_cell)
+            }
+        }
+    }
+}
+
+async fn chat_completions_routed(
+    state: Arc<super::routes::AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+    model_override: Option<String>,
 ) -> Response {
     // 1. Parse the request to extract the model name
     let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
@@ -2479,7 +2693,7 @@ pub(crate) async fn chat_completions_inner(
             "invalid_request_error",
         );
     }
-    let requested_model = req.model.clone();
+    let requested_model = model_override.unwrap_or_else(|| req.model.clone());
 
     // Mission attribution for runner watchdogs: the per-workspace builtin
     // provider sends this header so the proxy can report "this mission's LLM
@@ -2492,6 +2706,9 @@ pub(crate) async fn chat_completions_inner(
     // must not keep another mission's job alive past the watchdog.
     let liveness_mission_id = liveness_mission(&attribution);
     let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
+    if let Some(cell) = super::proxy_timing::current() {
+        cell.set_attribution(attribution.mission_id, attribution.api_key_name.clone());
+    }
 
     let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
 
@@ -2592,6 +2809,9 @@ pub(crate) async fn chat_completions_inner(
         .await
         .map(|c| c.strip_thinking)
         .unwrap_or(false);
+    if let Some(cell) = super::proxy_timing::current() {
+        cell.set_chain(&chain_id);
+    }
 
     if entries.is_empty() {
         if defer_on_rate_limit {
@@ -2673,7 +2893,12 @@ pub(crate) async fn chat_completions_inner(
         // The guard is dropped at the end of the iteration (on `continue` or
         // when the response is returned). `None` for every other provider.
         let _kimi_permit = if provider_type == ProviderType::Kimi {
-            KIMI_CONCURRENCY.acquire().await.ok()
+            let wait_start = std::time::Instant::now();
+            let permit = KIMI_CONCURRENCY.acquire().await.ok();
+            if let Some(cell) = super::proxy_timing::current() {
+                cell.add_queue_wait(wait_start.elapsed());
+            }
+            permit
         } else {
             None
         };
@@ -3032,6 +3257,9 @@ pub(crate) async fn chat_completions_inner(
         );
 
         let request_start = std::time::Instant::now();
+        if let Some(cell) = super::proxy_timing::current() {
+            cell.attempt_start(&entry.provider_id, &entry.model_id, entry.account_id);
+        }
         outcome.entries_tried += 1;
         // Kept for a before-first-byte retry of a stream (byte bodies clone).
         let mut retry_builder = if is_stream {
@@ -3099,6 +3327,9 @@ pub(crate) async fn chat_completions_inner(
         let mut status = upstream_resp.status();
         outcome.attempt_http.insert(entry_idx, status.as_u16());
         let upstream_headers_ms = request_start.elapsed().as_millis() as u64;
+        if let Some(cell) = super::proxy_timing::current() {
+            cell.attempt_headers(status.as_u16(), upstream_resp.version());
+        }
 
         // Reactive recovery for stale extended-thinking blocks. Anthropic
         // rejects a replayed thinking/redacted_thinking block that no longer
@@ -6175,6 +6406,12 @@ fn track_stream_health(
     outcome_sink: Option<StreamEndSink>,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     let idle = reliability::stream_idle_timeout();
+    // Built once the first content chunk was peeked: that is this attempt's
+    // time to first content. The cell rides along until the stream ends.
+    let timing = super::proxy_timing::current();
+    if let Some(cell) = &timing {
+        cell.attempt_first_content();
+    }
     async_stream::stream! {
         let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
         let mut stream = std::pin::pin!(inner);
@@ -6223,6 +6460,9 @@ fn track_stream_health(
             observe_sse_event(&sse_buffer, &mut usage);
         }
         let tokens = usage.tokens();
+        if let Some(cell) = &timing {
+            cell.set_tokens(usage.input, tokens.output, tokens.cache_read, usage.reasoning);
+        }
         if let Some(sink) = outcome_sink {
             sink(if idle_timeout {
                 StreamEnd::Stalled
@@ -7827,6 +8067,12 @@ fn translate_google_json_to_openai(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "prompt_tokens_details": {
+                "cached_tokens": response
+                    .pointer("/usageMetadata/cachedContentTokenCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            },
         }
     });
     let bytes = serde_json::to_vec(&openai)
@@ -8497,6 +8743,31 @@ fn classify_account_client_error(status: StatusCode, body: &[u8]) -> Option<Cool
     None
 }
 
+/// Last `usageMetadata` of a Gemini stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GeminiUsage {
+    prompt: u64,
+    /// Candidates + thoughts (thoughts bill as output).
+    completion: u64,
+    /// `cachedContentTokenCount`: implicit/explicit cache hits, part of `prompt`.
+    cached: u64,
+    thoughts: u64,
+}
+
+impl GeminiUsage {
+    /// OpenAI-style usage, keeping cache hits and thought tokens visible so
+    /// the usage ledger and timing records see Gemini cache reads.
+    fn to_openai(self) -> serde_json::Value {
+        serde_json::json!({
+            "prompt_tokens": self.prompt,
+            "completion_tokens": self.completion,
+            "total_tokens": self.prompt + self.completion,
+            "prompt_tokens_details": { "cached_tokens": self.cached },
+            "completion_tokens_details": { "reasoning_tokens": self.thoughts },
+        })
+    }
+}
+
 fn transform_google_sse_to_openai(
     inner: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     stream_id: String,
@@ -8514,7 +8785,7 @@ fn transform_google_sse_to_openai(
             stream_id,
             model_id,
             created,
-            None::<(u64, u64)>, // last seen usageMetadata (prompt, completion)
+            None::<GeminiUsage>, // last seen usageMetadata
         ),
         |(
             mut stream,
@@ -8613,7 +8884,15 @@ fn transform_google_sse_to_openai(
                             .unwrap_or(0);
                         if prompt > 0 || candidates > 0 || thoughts > 0 {
                             // Thinking tokens bill as output.
-                            usage_seen = Some((prompt, candidates + thoughts));
+                            usage_seen = Some(GeminiUsage {
+                                prompt,
+                                completion: candidates + thoughts,
+                                cached: meta
+                                    .get("cachedContentTokenCount")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0),
+                                thoughts,
+                            });
                         }
                     }
                     let candidate = resp
@@ -8721,12 +9000,8 @@ fn transform_google_sse_to_openai(
                                 "type": "upstream_empty_response"
                             });
                         }
-                        if let Some((prompt, completion)) = usage_seen {
-                            finish_chunk["usage"] = serde_json::json!({
-                                "prompt_tokens": prompt,
-                                "completion_tokens": completion,
-                                "total_tokens": prompt + completion,
-                            });
+                        if let Some(usage) = usage_seen {
+                            finish_chunk["usage"] = usage.to_openai();
                         }
                         chunks.push(format!("data: {}\n\n", finish_chunk));
                         if !emitted_done {
@@ -11923,5 +12198,340 @@ mod cyber_admission_tests {
         assert!(!cyber_entry_supported(&entry, "builtin/smart", false));
         entry.provider_id = "xai".into();
         assert!(!cyber_entry_supported(&entry, "gpt-6.1-sol", false));
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::*;
+    use crate::api::proxy_timing::{HedgeRole, TimingCell};
+    use bytes::Bytes;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn ok_response(tag: &'static str) -> Response {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("x-test-winner", tag)
+            .body(Body::from(tag))
+            .unwrap()
+    }
+
+    fn failed_response(tag: &'static str) -> Response {
+        Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .header("x-test-winner", tag)
+            .body(Body::from(tag))
+            .unwrap()
+    }
+
+    fn winner(resp: &Response) -> &str {
+        resp.headers()
+            .get("x-test-winner")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    }
+
+    /// Sets the flag when dropped before completing: an upstream call that
+    /// was cancelled.
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn delayed(
+        after: Duration,
+        resp: fn(&'static str) -> Response,
+        tag: &'static str,
+        dropped: Arc<AtomicBool>,
+    ) -> Response {
+        let flag = DropFlag(dropped);
+        tokio::time::sleep(after).await;
+        std::mem::forget(flag);
+        resp(tag)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_primary_never_starts_the_hedge() {
+        let hedge_started = Arc::new(AtomicBool::new(false));
+        let started = hedge_started.clone();
+        let primary_cell = TimingCell::new("builtin/smart", true);
+        let resp = race_hedged(
+            "builtin/smart",
+            "xai/grok-4.7",
+            (
+                delayed(
+                    Duration::from_secs(3),
+                    ok_response,
+                    "primary",
+                    Default::default(),
+                ),
+                primary_cell.clone(),
+            ),
+            Duration::from_secs(20),
+            || Duration::from_secs(30),
+            move || {
+                started.store(true, Ordering::SeqCst);
+                (
+                    delayed(Duration::ZERO, ok_response, "hedge", Default::default()),
+                    TimingCell::new("xai/grok-4.7", true),
+                )
+            },
+        )
+        .await;
+        assert_eq!(winner(&resp), "primary");
+        assert!(!hedge_started.load(Ordering::SeqCst));
+        assert_eq!(primary_cell.snapshot().hedge, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_primary_loses_to_hedge_and_is_cancelled() {
+        let primary_dropped = Arc::new(AtomicBool::new(false));
+        let primary_cell = TimingCell::new("builtin/smart", true);
+        let hedge_cell = TimingCell::new("xai/grok-4.7", true);
+        let hc = hedge_cell.clone();
+        let t0 = tokio::time::Instant::now();
+        let resp = race_hedged(
+            "builtin/smart",
+            "xai/grok-4.7",
+            (
+                delayed(
+                    Duration::from_secs(90),
+                    ok_response,
+                    "primary",
+                    primary_dropped.clone(),
+                ),
+                primary_cell.clone(),
+            ),
+            Duration::from_secs(20),
+            || Duration::from_secs(30),
+            move || {
+                (
+                    delayed(
+                        Duration::from_secs(2),
+                        ok_response,
+                        "hedge",
+                        Default::default(),
+                    ),
+                    hc,
+                )
+            },
+        )
+        .await;
+        assert_eq!(winner(&resp), "hedge");
+        // Hedge started at the adaptive 30 s, answered 2 s later.
+        assert_eq!(t0.elapsed(), Duration::from_secs(32));
+        assert!(
+            primary_dropped.load(Ordering::SeqCst),
+            "loser must be cancelled"
+        );
+        let p = primary_cell.snapshot();
+        assert_eq!(p.hedge, Some(HedgeRole::Primary));
+        assert_eq!(p.outcome, "hedge_cancelled");
+        assert_eq!(hedge_cell.snapshot().hedge, Some(HedgeRole::Hedge));
+        assert_eq!(hedge_cell.snapshot().http_status, Some(200));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_hedge_waits_for_the_primary() {
+        let resp = race_hedged(
+            "c",
+            "t",
+            (
+                delayed(
+                    Duration::from_secs(50),
+                    ok_response,
+                    "primary",
+                    Default::default(),
+                ),
+                TimingCell::new("c", true),
+            ),
+            Duration::from_secs(20),
+            || Duration::from_secs(20),
+            || {
+                (
+                    delayed(
+                        Duration::from_secs(1),
+                        failed_response,
+                        "hedge",
+                        Default::default(),
+                    ),
+                    TimingCell::new("t", true),
+                )
+            },
+        )
+        .await;
+        assert_eq!(winner(&resp), "primary");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_primary_after_hedge_start_waits_for_hedge() {
+        let resp = race_hedged(
+            "c",
+            "t",
+            (
+                delayed(
+                    Duration::from_secs(25),
+                    failed_response,
+                    "primary",
+                    Default::default(),
+                ),
+                TimingCell::new("c", true),
+            ),
+            Duration::from_secs(20),
+            || Duration::from_secs(20),
+            || {
+                (
+                    delayed(
+                        Duration::from_secs(10),
+                        ok_response,
+                        "hedge",
+                        Default::default(),
+                    ),
+                    TimingCell::new("t", true),
+                )
+            },
+        )
+        .await;
+        assert_eq!(winner(&resp), "hedge");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn both_failing_returns_a_failure() {
+        let resp = race_hedged(
+            "c",
+            "t",
+            (
+                delayed(
+                    Duration::from_secs(25),
+                    failed_response,
+                    "primary",
+                    Default::default(),
+                ),
+                TimingCell::new("c", true),
+            ),
+            Duration::from_secs(20),
+            || Duration::from_secs(20),
+            || {
+                (
+                    delayed(
+                        Duration::from_secs(10),
+                        failed_response,
+                        "hedge",
+                        Default::default(),
+                    ),
+                    TimingCell::new("t", true),
+                )
+            },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn timed_body_reports_completion_and_client_disconnect() {
+        let cell = TimingCell::new("c", true);
+        let resp = timed_response(ok_response("x"), cell.clone());
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], b"x");
+        assert_eq!(cell.snapshot().outcome, "ok");
+
+        let cell = TimingCell::new("c", true);
+        let chunks = futures::stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(b"a")),
+            Ok(Bytes::from_static(b"b")),
+        ]);
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from_stream(chunks))
+            .unwrap();
+        let resp = timed_response(resp, cell.clone());
+        let mut data = resp.into_body().into_data_stream();
+        assert_eq!(
+            data.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"a")
+        );
+        drop(data); // client went away mid-stream
+        assert_eq!(cell.snapshot().outcome, "client_disconnect");
+
+        let cell = TimingCell::new("c", false);
+        let resp = timed_response(failed_response("x"), cell.clone());
+        let _ = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(cell.snapshot().outcome, "error");
+        assert_eq!(cell.snapshot().http_status, Some(502));
+    }
+
+    #[test]
+    fn google_stream_usage_keeps_cache_hits_and_thoughts() {
+        let payload = serde_json::json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "OK"}]},
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 60_051,
+                "cachedContentTokenCount": 57_344,
+                "candidatesTokenCount": 2,
+                "thoughtsTokenCount": 8
+            }
+        });
+        let input = futures::stream::iter(vec![Ok(Bytes::from(format!("data: {payload}\n\n")))]);
+        let out = futures::executor::block_on(async move {
+            transform_google_sse_to_openai(input, "id".into(), 1, "gemini-4-argon-eap".into())
+                .collect::<Vec<_>>()
+                .await
+        });
+        let text: String = out
+            .into_iter()
+            .map(|i| String::from_utf8(i.unwrap().to_vec()).unwrap())
+            .collect();
+        let usage_line = text
+            .split("\n\n")
+            .filter_map(|e| e.strip_prefix("data: "))
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+            .find_map(|v| v.get("usage").cloned())
+            .expect("finish chunk carries usage");
+        assert_eq!(usage_line["prompt_tokens"], 60_051);
+        assert_eq!(usage_line["completion_tokens"], 10);
+        assert_eq!(usage_line["prompt_tokens_details"]["cached_tokens"], 57_344);
+        assert_eq!(
+            usage_line["completion_tokens_details"]["reasoning_tokens"],
+            8
+        );
+
+        // The usage ledger reads the cache hit back out of that chunk.
+        let mut acc = UsageAccumulator::default();
+        acc.observe(&usage_line);
+        let tokens = acc.tokens();
+        assert_eq!(tokens.cache_read, 57_344);
+        assert_eq!(tokens.input, 60_051 - 57_344);
+        assert_eq!(acc.reasoning, 8);
+    }
+
+    #[test]
+    fn google_json_usage_reports_cached_tokens() {
+        let body = serde_json::json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 900, "candidatesTokenCount": 1}
+        });
+        let (translated, _) = translate_google_json_to_openai(
+            &serde_json::to_vec(&body).unwrap(),
+            "gemini-4-argon-eap",
+            0,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&translated).unwrap();
+        assert_eq!(v["usage"]["prompt_tokens_details"]["cached_tokens"], 900);
+    }
+
+    #[test]
+    fn upstream_client_builds_with_alpn() {
+        // native-tls-alpn + HTTP/2 keepalive settings must build a client
+        // (an invalid combination falls back to a default client silently).
+        let client = crate::api::routes::build_upstream_http_client();
+        let req = client.get("https://example.invalid/").build().unwrap();
+        assert_eq!(req.version(), reqwest::Version::HTTP_11); // negotiated per connection
     }
 }
