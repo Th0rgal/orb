@@ -173,7 +173,7 @@ struct OrbManagedMachinesSection: View {
             ForEach(recent) { machine in
                 VStack(alignment: .leading) {
                     Text(machine.size)
-                    Text("\(OrbManaged.stateLabel(machine.state)) · \(OrbManaged.usd(machine.cost_usd))" + (machine.error.map { " · \($0)" } ?? ""))
+                    Text(Self.recentSummary(machine))
                         .font(.caption).foregroundStyle(OrbStyle.textMuted)
                 }
             }
@@ -184,6 +184,14 @@ struct OrbManagedMachinesSection: View {
             Button("Destroy", role: .destructive) { onDestroy(machine) }
             Button("Cancel", role: .cancel) {}
         } message: { Text("Destroy \($0.size) (\($0.id))? Running jobs on it stop and its disk is deleted.") }
+    }
+
+    static func recentSummary(_ m: OrbManagedMachine) -> String {
+        let state: String = OrbManaged.stateLabel(m.state)
+        let cost: String = OrbManaged.usd(m.cost_usd)
+        var parts: [String] = [state, cost]
+        if let error = m.error, !error.isEmpty { parts.append(error) }
+        return parts.joined(separator: " · ")
     }
 
     private func row(_ m: OrbManagedMachine, now: Date) -> some View {
