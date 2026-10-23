@@ -62,12 +62,12 @@ test("streaming shows the source and renders once when the fence closes", async 
   expect(await page.locator(".mermaid-block .mermaid-svg").evaluate((el) => (el as any).__orbMark)).toBe(1);
 });
 
-test("wide diagrams scroll inside the block and expand supports zoom", async ({ page }) => {
+test("wide diagrams fit the block and expand supports zoom", async ({ page }) => {
   await page.goto("/tests/mermaid.html?only=wide");
   const block = page.locator(".mermaid-block");
   await expect(block).toHaveAttribute("data-state", "ready");
   const canvas = block.locator(".mermaid-canvas");
-  expect(await canvas.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(await canvas.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await block.getByRole("button", { name: "Expand diagram" }).click();
   const dialog = page.getByRole("dialog", { name: "Diagram", exact: true });
@@ -109,3 +109,54 @@ test("a hostile diagram renders neutralised", async ({ page }) => {
   await page.waitForTimeout(300);
   expect(requests).toEqual([]);
 });
+
+test("the diagrams of a real message all render as loaded images", async ({ page }) => {
+  await page.goto("/tests/mermaid.html?mission");
+  const blocks = page.locator(".mermaid-block");
+  await expect(blocks).toHaveCount(16);
+  for (let i = 0; i < 16; i++) {
+    const block = blocks.nth(i);
+    // Diagram 1 has an unquoted `(…)` edge label that mermaid rejects; Orb quotes it and renders.
+    await expect(block, `diagram ${i + 1}`).toHaveAttribute("data-state", "ready", { timeout: 15_000 });
+    const img = block.locator("img.mermaid-svg");
+    await img.scrollIntoViewIfNeeded();
+    await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0), { message: `diagram ${i + 1} decodes` }).toBe(true);
+    const box = (await img.boundingBox())!;
+    expect(box.height, `diagram ${i + 1} height`).toBeGreaterThan(40);
+    await block.screenshot({ path: path.join(shots, `mission-${i + 1}.png`) });
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+for (const width of [1100, 390]) {
+  test(`diagrams fit the card at ${width}px: wide scales down, tall is capped, small is not upscaled`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/tests/mermaid.html?only=wide,tall,flowchart");
+    const blocks = page.locator(".mermaid-block");
+    await expect(blocks).toHaveCount(3);
+    const vh = 844;
+    for (let i = 0; i < 3; i++) {
+      const block = blocks.nth(i);
+      await expect(block).toHaveAttribute("data-state", "ready", { timeout: 15_000 });
+      const img = block.locator("img.mermaid-svg");
+      await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+      const m = await img.evaluate((el: HTMLImageElement) => {
+        const r = el.getBoundingClientRect(), c = el.parentElement!.getBoundingClientRect();
+        return { w: r.width, h: r.height, natW: el.width ? Number(el.getAttribute("width")) : 0, natH: Number(el.getAttribute("height")), canvasW: c.width, scroll: el.parentElement!.scrollWidth - el.parentElement!.clientWidth };
+      });
+      expect(m.scroll).toBeLessThanOrEqual(0);
+      expect(m.w).toBeLessThanOrEqual(m.canvasW);
+      expect(m.w).toBeLessThanOrEqual(m.natW + 1);
+      expect(m.h).toBeLessThanOrEqual(vh * 0.6 + 1);
+      expect(Math.abs(m.w / m.h - m.natW / m.natH)).toBeLessThan(0.02 * (m.natW / m.natH) + 0.01);
+      await block.screenshot({ path: path.join(shots, `fit-${width}-${i}.png`) });
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    // Expanded view opens fitted to the screen.
+    await blocks.nth(0).getByRole("button", { name: "Expand diagram" }).click();
+    const zoom = page.getByRole("dialog", { name: "Diagram", exact: true }).locator(".mermaid-zoom");
+    await expect(zoom).toBeVisible();
+    await expect.poll(async () => (await zoom.boundingBox())!.width).toBeLessThanOrEqual(width);
+    await page.keyboard.press("Escape");
+  });
+}
