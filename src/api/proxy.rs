@@ -5284,18 +5284,19 @@ fn canonical_upstream_model(provider: ProviderType, model: &str) -> &str {
     }
 }
 
-/// Normalize Gemini 4 Argon aliases (`gemini-4-argon`, `agy-demo`) to the
-/// canonical Google API model identifier (`gemini-4-argon-eap`).
+/// Normalize Gemini 4 Argon aliases (`gemini-4-argon-eap`, `agy-demo`) to the
+/// canonical Google API model identifier. Google retired the early-access id
+/// `gemini-4-argon-eap` (404 since 2026-10-23) in favour of `gemini-4-argon`.
 fn canonical_google_model_id(model_id: &str) -> &str {
     match model_id.trim() {
-        "gemini-4-argon" | "agy-demo" => "gemini-4-argon-eap",
+        "gemini-4-argon-eap" | "agy-demo" => "gemini-4-argon",
         other => other,
     }
 }
 
 /// Bare model ids the `@ai-sdk/openai-compatible` adapter sends after it
-/// strips the `google/` provider prefix (`google/gemini-4-argon-eap` arrives as
-/// `gemini-4-argon-eap`).
+/// strips the `google/` provider prefix (`google/gemini-4-argon` arrives as
+/// `gemini-4-argon`).
 fn parse_google_bare_model_entry(model: &str) -> Option<crate::provider_health::ChainEntry> {
     let model = model.trim();
     if model.is_empty() || model.contains('/') {
@@ -12215,19 +12216,19 @@ mod tests {
     fn google_bare_and_direct_model_entries_canonicalize_argon_aliases() {
         let entry = parse_google_bare_model_entry("gemini-4-argon").unwrap();
         assert_eq!(entry.provider_id, "google");
-        assert_eq!(entry.model_id, "gemini-4-argon-eap");
+        assert_eq!(entry.model_id, "gemini-4-argon");
 
         let entry2 = parse_google_bare_model_entry("agy-demo").unwrap();
         assert_eq!(entry2.provider_id, "google");
-        assert_eq!(entry2.model_id, "gemini-4-argon-eap");
+        assert_eq!(entry2.model_id, "gemini-4-argon");
 
         let direct = parse_direct_model_entry("google/gemini-4-argon").unwrap();
         assert_eq!(direct.provider_id, "google");
-        assert_eq!(direct.model_id, "gemini-4-argon-eap");
+        assert_eq!(direct.model_id, "gemini-4-argon");
 
         let direct_gemini = parse_direct_model_entry("gemini/gemini-4-argon-eap").unwrap();
         assert_eq!(direct_gemini.provider_id, "google");
-        assert_eq!(direct_gemini.model_id, "gemini-4-argon-eap");
+        assert_eq!(direct_gemini.model_id, "gemini-4-argon");
     }
 
     #[test]
@@ -12338,7 +12339,7 @@ mod tests {
 
         assert_eq!(
             url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon-eap:generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent"
         );
         let payload: serde_json::Value = serde_json::from_slice(payload_bytes.as_ref()).unwrap();
         assert_eq!(
