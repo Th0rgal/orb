@@ -56,7 +56,7 @@ uint8_t leansys_verify_jsonrpc_frame(uint8_t, uint8_t, uint32_t, uint64_t);
 uint8_t leansys_gate_admit(uint8_t, uint8_t, uint8_t);
 uint8_t leansys_verify_mmap_seqlock(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_proc_stat_fields(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint8_t leansys_sse_frame_scan(uint64_t, uint64_t, uint64_t, uint8_t, uint8_t);
+uint8_t leansys_sse_frame_scan(uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, uint8_t);
 uint8_t leansys_gfm_pipe_scan(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint8_t);
 uint8_t leansys_tag_scan(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 uint64_t leansys_transcript_index(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

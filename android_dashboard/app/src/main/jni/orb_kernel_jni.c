@@ -2,6 +2,10 @@
 #include <stdint.h>
 #include "../../../shared/orb-spec/cabi/orb_kernel.h"
 
+static uint8_t sat_u8(jint v) {
+    return v < 0 ? 0 : (v > 255 ? 255 : (uint8_t)v);
+}
+
 JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWorkfoldStep(JNIEnv *env, jclass clazz, jint itemKind, jint isCumulative, jint isNonEmpty, jint toolAhead, jint nextIsTool, jint foldHasTool) {
     return (jlong)orb_workfold_step((uint8_t)itemKind, (uint8_t)isCumulative, (uint8_t)isNonEmpty, (uint8_t)toolAhead, (uint8_t)nextIsTool, (uint8_t)foldHasTool);
@@ -19,7 +23,7 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbTurnSummaryStep(JNIEnv *env, jclass
 
 JNIEXPORT jlong JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_orbUsageLimitStatus(JNIEnv *env, jclass clazz, jint statusKind, jint claimKind, jint hasUtilization, jint utilizationPct, jint hasReset, jlong resetRemSecs) {
-    return (jlong)orb_usage_limit_status((uint8_t)statusKind, (uint8_t)claimKind, (uint8_t)hasUtilization, (uint8_t)utilizationPct, (uint8_t)hasReset, (uint64_t)resetRemSecs);
+    return (jlong)orb_usage_limit_status((uint8_t)statusKind, (uint8_t)claimKind, (uint8_t)hasUtilization, sat_u8(utilizationPct), (uint8_t)hasReset, (uint64_t)resetRemSecs);
 }
 
 JNIEXPORT jlong JNICALL
@@ -33,8 +37,8 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbTranscriptPatchStep(JNIEnv *env, jc
 }
 
 JNIEXPORT jbyte JNICALL
-Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSseFrameScan(JNIEnv *env, jclass clazz, jlong frameOff, jlong frameLen, jlong chunkLen, jint fieldKind, jint nextByte) {
-    return (jbyte)leansys_sse_frame_scan((uint64_t)frameOff, (uint64_t)frameLen, (uint64_t)chunkLen, (uint8_t)fieldKind, (uint8_t)nextByte);
+Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSseFrameScan(JNIEnv *env, jclass clazz, jlong frameOff, jlong frameLen, jlong chunkLen, jint fieldKind, jint nextByte, jint lastByte) {
+    return (jbyte)leansys_sse_frame_scan((uint64_t)frameOff, (uint64_t)frameLen, (uint64_t)chunkLen, (uint8_t)fieldKind, (uint8_t)nextByte, (uint8_t)lastByte);
 }
 
 JNIEXPORT jbyte JNICALL
