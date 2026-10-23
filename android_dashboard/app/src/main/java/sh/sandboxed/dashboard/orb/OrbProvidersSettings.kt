@@ -93,25 +93,19 @@ private val usageLimitClaims = mapOf(
 /** Same mapping as desktop `usageLimitStatus` and iOS `OrbUsageLimitStatus`; null = show nothing. */
 internal fun usageLimitStatus(detail: OrbDict?, nowSec: Double = System.currentTimeMillis() / 1000.0): UsageLimitStatus? {
     val status = OrbJSON.str(detail, "unified_status")?.trim()?.lowercase() ?: ""
-    if (status.isEmpty() || status == "allowed" || status == "ok") return null
-    if (status == "allowed_warning") {
-        val claim = usageLimitClaims[OrbJSON.str(detail, "unified_representative_claim")?.trim()?.lowercase() ?: ""]
-            ?: return UsageLimitStatus("warning", "Approaching limit")
-        val used = claim.second?.let { OrbJSON.double(detail, it) }?.takeIf { it.isFinite() }
-        val pct = used?.let { " ${(it * 100).roundToInt()}%" } ?: ""
-        return UsageLimitStatus("warning", "Approaching limit · ${claim.first}$pct")
-    }
-    if (status == "rejected") {
-        val left = OrbJSON.double(detail, "unified_reset")?.minus(nowSec)
-        if (left == null || !left.isFinite() || left <= 0) return UsageLimitStatus("error", "Limit reached")
-        val span = when {
-            left < 3600 -> "${maxOf(1, (left / 60).toInt())}m"
-            left < 48 * 3600 -> "${(left / 3600).toInt()}h"
-            else -> "${(left / 86400).toInt()}d"
-        }
-        return UsageLimitStatus("error", "Limit reached · resets in $span")
-    }
-    return UsageLimitStatus("warning", "Limit status unknown")
+    val claimKey = OrbJSON.str(detail, "unified_representative_claim")?.trim()?.lowercase() ?: ""
+    val usedKey = usageLimitClaims[claimKey]?.second
+    val used = usedKey?.let { OrbJSON.double(detail, it) }?.takeIf { it.isFinite() }
+    val left = OrbJSON.double(detail, "unified_reset")?.minus(nowSec)
+    val hasReset = left != null && left.isFinite() && left > 0.0
+    return OrbKernel.usageLimitBadge(
+        status = status,
+        claim = claimKey,
+        hasUtilization = used != null,
+        utilizationPct = used?.let { (it * 100.0).roundToInt() } ?: 0,
+        hasReset = hasReset,
+        resetRemSecs = if (hasReset) left!!.toLong() else 0L
+    )
 }
 
 internal fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> {

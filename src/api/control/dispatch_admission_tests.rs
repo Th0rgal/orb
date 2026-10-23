@@ -12789,6 +12789,67 @@ async fn replacement_keeps_the_superseded_missions_parent() {
 }
 
 #[tokio::test]
+async fn start_mission_from_a_missions_hermes_session_is_its_child() {
+    // Incident 2026-10-23: a Hermes cloud-agent mission (session
+    // `orb_<id>`) called start_mission through the assistant connector; the
+    // child was created top-level and its auto-managed VM had no owner.
+    let h = Harness::new().await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let caller = h.writer(MissionStatus::Active, None).await;
+    let create = |session: String| {
+        let state = h.state.clone();
+        let user = h.user.clone();
+        async move {
+            let request: CreateMissionRequest = serde_json::from_value(json!({
+                "title": "Op3 finite-K",
+                "backend": "claudecode",
+                "placement": "client",
+                "origin": "hermes",
+                "origin_session_id": session,
+            }))
+            .unwrap();
+            let created = super::create_mission_inner(
+                State(state),
+                Extension(user),
+                Some(Json(request)),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            Uuid::parse_str(created.1 .0["id"].as_str().unwrap()).unwrap()
+        }
+    };
+    let child = create(format!("orb_{}", caller.id.simple())).await;
+    let child = h
+        .control
+        .mission_store
+        .get_mission(child)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.parent_mission_id, Some(caller.id));
+    // A session naming no mission of this user, or a shared chat session,
+    // creates no lineage.
+    for session in [
+        format!("orb_{}", Uuid::new_v4().simple()),
+        "20261023_chat".to_string(),
+    ] {
+        let id = create(session).await;
+        let m = h
+            .control
+            .mission_store
+            .get_mission(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.parent_mission_id, None);
+    }
+}
+
+#[tokio::test]
 async fn replacement_attaches_to_the_live_successor_of_a_superseded_coordinator() {
     let h = Harness::new().await;
     h.state.backend_registry.write().await.register(Arc::new(

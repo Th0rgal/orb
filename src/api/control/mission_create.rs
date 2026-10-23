@@ -113,6 +113,11 @@ pub struct CreateMissionRequest {
     /// The backend records the mission and does not start a harness.
     #[serde(default)]
     pub placement: Option<String>,
+    /// Managed machine rented for this mission (`start_mission` with
+    /// `auto-managed`): once the mission exists it becomes the machine's
+    /// owner, and the parent its requester.
+    #[serde(default)]
+    pub claim_managed_machine_id: Option<String>,
     /// Catch-all for unrecognized request fields. Serde ignores unknown fields
     /// by default, which has repeatedly hidden client bugs (a `prompt` sent
     /// before the field existed, a mistyped `target_mission_id`). Captured
@@ -966,6 +971,7 @@ pub(in crate::api) async fn create_mission_inner(
         origin_session_id: None,
         attachments: None,
         placement: None,
+        claim_managed_machine_id: None,
         extra: Default::default(),
     });
 
@@ -987,6 +993,26 @@ pub(in crate::api) async fn create_mission_inner(
             {
                 req.parent_mission_id =
                     live_successor(&parent_control.mission_store, prior.parent_mission_id).await;
+            }
+        }
+    }
+
+    // A mission started from the Hermes session of a mission (`orb_<id>`,
+    // a Hermes cloud agent calling start_mission) is that mission's child.
+    // Unlike shared chat sessions, an `orb_<id>` session belongs to exactly
+    // one mission, so it is real lineage. Without this the child (and the
+    // managed VM rented for it) was top-level and ownerless.
+    if req.parent_mission_id.is_none() {
+        if let Some(caller) = req
+            .origin_session_id
+            .as_deref()
+            .and_then(crate::managed::lifecycle::mission_of_orb_session)
+        {
+            if matches!(
+                parent_control.mission_store.get_mission(caller).await,
+                Ok(Some(_))
+            ) {
+                req.parent_mission_id = Some(caller);
             }
         }
     }
@@ -2027,6 +2053,38 @@ pub(in crate::api) async fn create_mission_inner(
             return Err(recv_failed(error));
         }
     };
+
+    // The machine rented for this mission now serves it: its lifetime, not
+    // the caller's, governs the VM (docs/specs/managed-vm-lifecycle.md).
+    if let (Some(machine), Some(manager)) = (
+        req.claim_managed_machine_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty()),
+        crate::managed::global(),
+    ) {
+        // The requester is the server-resolved parent (gateway-attributed or
+        // derived from the caller's `orb_<id>` session), and only when it
+        // exists in this user's own store; claim_for_mission enforces that
+        // the machine is this user's.
+        let parent = match req.parent_mission_id {
+            Some(p) if matches!(control.mission_store.get_mission(p).await, Ok(Some(_))) => {
+                Some(p.to_string())
+            }
+            _ => None,
+        };
+        if let Err(error) = manager
+            .claim_for_mission(
+                machine,
+                &mission.id.to_string(),
+                parent.as_deref(),
+                Some(&user.id),
+            )
+            .await
+        {
+            tracing::warn!(mission_id = %mission.id, %machine, %error, "could not record the managed machine's owner");
+        }
+    }
 
     if let Some(requirements) = auto_placement.as_deref() {
         // Only auto-placed missions may later be moved off a full node.

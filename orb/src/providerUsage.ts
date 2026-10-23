@@ -126,6 +126,8 @@ export function hasProviderUsageDetails(u?: ProviderUsage): boolean {
     || (u.provider_type === "zai" && u.zai_tokens_percentage != null));
 }
 
+import { orbUsageLimitBadge } from "./orbKernel";
+
 export type UsageLimitStatus = { tone: "warning" | "error"; label: string };
 
 const CLAIM_WINDOWS: Record<string, { label: string; key?: "unified_5h_utilization" | "unified_7d_utilization" }> = {
@@ -135,12 +137,6 @@ const CLAIM_WINDOWS: Record<string, { label: string; key?: "unified_5h_utilizati
   seven_day_sonnet: { label: "weekly Sonnet" },
 };
 
-function resetsIn(seconds: number): string {
-  if (seconds < 3600) return `${Math.max(1, Math.floor(seconds / 60))}m`;
-  if (seconds < 48 * 3600) return `${Math.floor(seconds / 3600)}h`;
-  return `${Math.floor(seconds / 86400)}d`;
-}
-
 /**
  * Anthropic unified rate-limit status as a friendly badge; null means show
  * nothing. Spec: shared/orb-spec/fixtures/usage-limit-status.json (same
@@ -148,20 +144,14 @@ function resetsIn(seconds: number): string {
  */
 export function usageLimitStatus(u: Pick<ProviderUsage, "unified_status" | "unified_reset" | "unified_representative_claim" | "unified_5h_utilization" | "unified_7d_utilization">, nowSec = Date.now() / 1000): UsageLimitStatus | null {
   const status = (u.unified_status ?? "").trim().toLowerCase();
-  if (!status || status === "allowed" || status === "ok") return null;
-  if (status === "allowed_warning") {
-    const claim = CLAIM_WINDOWS[(u.unified_representative_claim ?? "").trim().toLowerCase()];
-    if (!claim) return { tone: "warning", label: "Approaching limit" };
-    const used = claim.key ? u[claim.key] : undefined;
-    const pct = typeof used === "number" && Number.isFinite(used) ? ` ${Math.round(used * 100)}%` : "";
-    return { tone: "warning", label: `Approaching limit · ${claim.label}${pct}` };
-  }
-  if (status === "rejected") {
-    const reset = Number(u.unified_reset);
-    const left = Number.isFinite(reset) && u.unified_reset != null ? reset - nowSec : NaN;
-    return { tone: "error", label: left > 0 ? `Limit reached · resets in ${resetsIn(left)}` : "Limit reached" };
-  }
-  return { tone: "warning", label: "Limit status unknown" };
+  const claimKey = (u.unified_representative_claim ?? "").trim().toLowerCase();
+  const claim = CLAIM_WINDOWS[claimKey];
+  const used = claim?.key ? u[claim.key] : undefined;
+  const hasUsed = typeof used === "number" && Number.isFinite(used);
+  const reset = Number(u.unified_reset);
+  const left = Number.isFinite(reset) && u.unified_reset != null ? reset - nowSec : NaN;
+  const hasReset = Number.isFinite(left) && left > 0;
+  return orbUsageLimitBadge(status, claimKey, hasUsed, hasUsed ? Math.round(used * 100) : 0, hasReset, hasReset ? left : 0);
 }
 
 /**

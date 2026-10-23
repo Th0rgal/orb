@@ -74,15 +74,17 @@ Every change under `ios_dashboard/` or `android_dashboard/` that users can see
 ships to testers:
 
 - **iOS:** bump `CURRENT_PROJECT_VERSION` (format `YYYYMMDDNN`) in
-  `ios_dashboard/project.yml`, and `MARKETING_VERSION` when the change is a
-  feature. Run `xcodegen generate` so the project stays in sync (the iOS
-  Build job checks it). Merging to `master` triggers Xcode Cloud, which
-  uploads to TestFlight; confirm the build reaches `VALID`.
-  `ios_dashboard/scripts/testflight-local.sh` uploads from a Mac when Xcode
-  Cloud is unavailable.
-- **Android:** bump `orbVersionCode` (and `orbVersionName` for a feature) in
-  `android_dashboard/gradle.properties`. Keep `orbVersionName` aligned with
-  the iOS `MARKETING_VERSION`.
+  `ios_dashboard/project.yml`, and **always bump `MARKETING_VERSION` (e.g.
+  `1.7.0` -> `1.8.0`) when releasing a feature or big change** so it visibly
+  surfaces as a new version train in TestFlight instead of staying under the
+  old version number. Run `xcodegen generate` (or update `project.pbxproj` in
+  lockstep) so the project stays in sync (the iOS Build job checks it). Merging
+  to `master` triggers Xcode Cloud, which uploads to TestFlight; confirm the
+  build reaches `VALID`. `ios_dashboard/scripts/testflight-local.sh` uploads
+  from a Mac when Xcode Cloud is unavailable.
+- **Android:** bump `orbVersionCode` (and always bump `orbVersionName` for a
+  feature or big change) in `android_dashboard/gradle.properties`. Keep
+  `orbVersionName` aligned with the iOS `MARKETING_VERSION`.
 - One version bump per PR is enough; do not bump in every commit.
 
 ## Repository map
@@ -90,7 +92,7 @@ ships to testers:
 | Path | What it is |
 | --- | --- |
 | `src/`, `crates/orb-spec/` | Rust backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, MCP binaries in `src/bin/`, `crates/orb-spec` standalone leaf crate & `src/orb_spec.rs` typed C-ABI bindings) |
-| `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` | Formal Lean 4 orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, <!-- inventory:orb_spec_summary -->42/42 tight specs, 30 C-ABI exports<!-- /inventory:orb_spec_summary --> compiled to `liborb_spec_cabi.a` with zero hand-written C fallback) |
+| `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` | Formal Lean 4 orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, <!-- inventory:orb_spec_summary -->46/46 tight specs, 34 C-ABI exports<!-- /inventory:orb_spec_summary --> compiled to `liborb_spec_cabi.a` with zero hand-written C fallback) |
 | `orb/` | Orb desktop client: SolidJS + Vite in `orb/src`, Tauri v2 shell in `orb/src-tauri` |
 | `ios_dashboard/` | iOS app (SwiftUI, generated with XcodeGen from `project.yml`); the Orb UI lives in `SandboxedDashboard/Orb` |
 | `dashboard/` | Next.js web dashboard (admin console, served by the Docker image) |
@@ -382,14 +384,14 @@ Orb follows the **"Lean Decides, Rust Does"** boundary across the control plane,
      2. **`ClockDiscipline` (Independent Monotone Timers & Boot Epochs)**: Heartbeat frames reset only the idle timer and never extend the semantic progress deadline (`orb_stream_deadlines`), provider cooldowns partition transient network faults from account/subscription poison with exponential backoff (`orb_breaker_step`, `orb_account_cooldown_secs`), wake-up arming precedes no-progress stops (`orb_mission_step`), boot-scoped reconciliation fences stale sweeps (`orb_reconcile_step`), and `/proc/<pid>/stat` start-tick verification prevents PID-reuse kills (`orb_proc_liveness_step`).
      3. **`ScopedAuthority` (Capability & Lease Isolation)**: Exclusive writer leases (`orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`), constant-time token rotation (`orb_verify_token_rotation`), and zero-oracle cross-mission access control (`orb_access_step`).
      4. **`ConservedResource` (Bounded Capacity & TTL)**: Parallel DAG task-board slot admission (`orb_verify_board_slots`, `orb_verify_board_retry`), workspace bundle and log sliding-window budgets (`orb_verify_bundle_budget`, `orb_verify_log_window` + `lean_sys_cabi::leansys_verify_log_window`), managed VM admission/reaper bounds (`orb_vm_step`), half-up nanodollar token cost rounding (`orb_cost_cents_step`), and bounded stream repetition detection (`orb_stream_loop_step`).
-     5. **`ProjectionStability` (Cross-Client UI Determinism)**: Pure steppers for transcript narration folding (`orb_workfold_step`), task card turn-end state (`orb_taskcard_step`), sidebar hierarchy/archive visibility (`orb_sidebar_visibility`), and deterministic PR merge-readiness priority (`orb_pr_gate_step`), backed by shared cross-client fixtures in `shared/orb-spec/fixtures/projection-invariants.json`.
+     5. **`ProjectionStability` (Cross-Client UI Determinism)**: Pure steppers for transcript narration folding (`orb_workfold_step`), task card turn-end state (`orb_taskcard_step`), turn summary & task status settling (`orb_turn_summary_step`), sidebar hierarchy/archive visibility (`orb_sidebar_visibility`), Anthropic unified rate-limit status (`orb_usage_limit_status`), compact relative time (`orb_relative_time_bucket`), incremental SSE transcript patching (`orb_transcript_patch_step`, theorem `stream_apply_eq_batch`), and deterministic PR merge-readiness priority (`orb_pr_gate_step`), backed by shared cross-client fixtures in `shared/orb-spec/fixtures/projection-invariants.json`.
    - **Layer II (Mathlib4-Style Corollaries)**: Every concrete theorem in `lean/Orb/Spec.lean` is a 1–3 line corollary (`decide`, `omega`, `split <;> simp_all`, `simpa`) of a Layer-I Meta-Spec — never a copy-pasted boolean formula.
-2. **30 Unboxed Scalar C-ABI Exports (`lean/Orb/Kernel.lean`, `crates/orb-spec` & `src/orb_spec.rs`)**:
-   - **Orchestration, Leases & Bounds (12)**: `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`, `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`, `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word` (linked alongside the 17 `leansys_*` C-ABI gates from `lean-sys-cabi`).
-   - **Proxy, Mission Lifecycle, VM, Admission, Cost, Liveness & Cross-Client Projections (18)**: `orb_proxy_step` (`src/api/proxy.rs`), `orb_stream_deadlines` (`src/api/proxy.rs`), `orb_breaker_step` (`src/provider_health.rs`), `orb_mission_step` (`src/api/control/host_goal.rs`), `orb_reconcile_step` (`src/api/reconcile.rs`), `orb_queue_step` (`src/api/control/control_queue.rs`), `orb_vm_step` (`src/managed/mod.rs`), `orb_access_step` (`src/api/mission_access.rs`), `orb_workfold_step`, `orb_taskcard_step`, `orb_sidebar_visibility`, `orb_admission_step` (`src/api/control/dispatch_admission.rs`, `src/api/control/disk_admission.rs`), `orb_account_cooldown_secs` (`src/provider_health.rs`), `orb_cost_cents_step` (`src/cost.rs`), `orb_stream_loop_step` (`src/api/runners/stream_guard.rs`), `orb_job_ledger_step` (`src/remote_node/job_ledger.rs`), `orb_proc_liveness_step` (`src/node/runner.rs`), `orb_pr_gate_step` (`src/bin/palomactl.rs`).
+2. **34 Unboxed Scalar C-ABI Exports (`lean/Orb/Kernel.lean`, `crates/orb-spec` & `src/orb_spec.rs`)**:
+   - **Orchestration, Leases & Bounds (12)**: `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`, `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`, `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word` (linked alongside the 21 `leansys_*` C-ABI gates and scanners from `lean-sys-cabi`).
+   - **Proxy, Mission Lifecycle, VM, Admission, Cost, Liveness & Cross-Client Projections (22)**: `orb_proxy_step` (`src/api/proxy.rs`), `orb_stream_deadlines` (`src/api/proxy.rs`), `orb_breaker_step` (`src/provider_health.rs`), `orb_mission_step` (`src/api/control/host_goal.rs`), `orb_reconcile_step` (`src/api/reconcile.rs`), `orb_queue_step` (`src/api/control/control_queue.rs`), `orb_vm_step` (`src/managed/mod.rs`), `orb_access_step` (`src/api/mission_access.rs`), `orb_workfold_step`, `orb_taskcard_step`, `orb_sidebar_visibility`, `orb_admission_step` (`src/api/control/dispatch_admission.rs`, `src/api/control/disk_admission.rs`), `orb_account_cooldown_secs` (`src/provider_health.rs`), `orb_cost_cents_step` (`src/cost.rs`), `orb_stream_loop_step` (`src/api/runners/stream_guard.rs`), `orb_job_ledger_step` (`src/remote_node/job_ledger.rs`), `orb_proc_liveness_step` (`src/node/runner.rs`), `orb_pr_gate_step` (`src/bin/palomactl.rs`), `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`.
 3. **Fail-Closed Build & Zero-Trust Audit Gate (`crates/orb-spec/build.rs` & `turbo-lean`)**:
-   - `crates/orb-spec/build.rs` compiles `Orb/Kernel.lean` to C, typechecks `Orb/Spec.lean` against `Orb/Kernel.olean`, runs `ld -r --gc-sections` + `strip --strip-unneeded` to eliminate boxed wrappers/initializers, and verifies via `nm` that all <!-- inventory:orb_cabi_exports -->30<!-- /inventory:orb_cabi_exports --> exports are defined (`T`) with `0` undefined symbols.
-   - Before modifying `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean`, or `crates/orb-spec/src/lib.rs`, verify `turbo-lean --json audit-spec lean/Orb/Spec.lean` reports `vacuous_specs == 0`, `trivial_specs == 0`, and `horizontal_packing_warnings == []` (<!-- inventory:orb_tight_specs -->42/42 tight specs<!-- /inventory:orb_tight_specs -->).
+   - `crates/orb-spec/build.rs` compiles `Orb/Kernel.lean` to C, typechecks `Orb/Spec.lean` against `Orb/Kernel.olean`, runs `ld -r --gc-sections` + `strip --strip-unneeded` to eliminate boxed wrappers/initializers, and verifies via `nm` that all <!-- inventory:orb_cabi_exports -->34<!-- /inventory:orb_cabi_exports --> exports are defined (`T`) with `0` undefined symbols.
+   - Before modifying `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean`, or `crates/orb-spec/src/lib.rs`, verify `turbo-lean --json audit-spec lean/Orb/Spec.lean` reports `vacuous_specs == 0`, `trivial_specs == 0`, and `horizontal_packing_warnings == []` (<!-- inventory:orb_tight_specs -->46/46 tight specs<!-- /inventory:orb_tight_specs -->).
 
 ## Debugging deployed instances
 

@@ -31,7 +31,7 @@ enum OrbPipeTables {
             }
         }
         out.append(String(chars[start...]).trimmingCharacters(in: .whitespaces))
-        return out.count >= 3 ? out : nil
+        return out.count >= 3 && OrbKernel.gfmPipeRowAdmitted(rowLen: t.count, colCount: out.count, sepCols: out.count, unterminatedEscape: inCode) ? out : nil
     }
 
     private static func row(_ cells: [String]) -> String { "| " + cells.joined(separator: " | ") + " |" }

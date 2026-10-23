@@ -134,6 +134,8 @@ object OrbFileRefs {
         }
         val path = values["path"]?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val kind = type.lowercase()
+        val tagKind = if (kind == "image") 2 else 1
+        if (!OrbKernel.richTagAdmitted(0, attributes.length + 7, 1, maxOf(1, attributes.length), attributes.length + 7, tagKind)) return null
         fun present(v: String?) = v?.let(::collapse)?.takeIf { it.isNotEmpty() }
         val label = present(if (kind == "image") values["alt"] else values["name"]) ?: present(inner) ?: fileName(path)
         return OrbFileRef(type = kind, path = path, label = label, mime = values["type"]?.takeIf { '/' in it },

@@ -1,5 +1,6 @@
 /** Relative times, durations and one shared clock per resolution. */
 import { createSignal, getOwner, onCleanup, type Accessor } from "solid-js";
+import { orbRelativeTimeString } from "./orbKernel";
 
 /**
  * "just now", "12 min ago", "3 h ago" for a timestamp in milliseconds.
@@ -21,12 +22,7 @@ export function ago(timestampMs: number, now = Date.now(), opts: { round?: boole
  * weeks from 7 days. A future timestamp counts as 0 s.
  */
 export function compactAgo(timestampMs: number, now = Date.now()): string {
-  const seconds = Math.max(0, Math.floor((now - timestampMs) / 1000));
-  if (seconds < 45) return "now";
-  if (seconds < 3600) return `${Math.max(1, Math.floor(seconds / 60))}m`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
-  if (seconds < 604_800) return `${Math.floor(seconds / 86_400)}d`;
-  return `${Math.floor(seconds / 604_800)}w`;
+  return orbRelativeTimeString((now - timestampMs) / 1000);
 }
 
 /** "42 s", "3 min 05 s", "2 h 07". */

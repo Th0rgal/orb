@@ -228,21 +228,21 @@ struct OrbUsageLimitStatus: Equatable {
 
     static func from(_ value: OrbJSON, now: Double = Date().timeIntervalSince1970) -> OrbUsageLimitStatus? {
         let status = value["unified_status"].text.trimmingCharacters(in: .whitespaces).lowercased()
-        if status.isEmpty || status == "allowed" || status == "ok" { return nil }
-        if status == "allowed_warning" {
-            let claims: [String: (String, String?)] = ["five_hour": ("5h", "unified_5h_utilization"), "seven_day": ("weekly", "unified_7d_utilization"), "seven_day_opus": ("weekly Opus", nil), "seven_day_sonnet": ("weekly Sonnet", nil)]
-            guard let claim = claims[value["unified_representative_claim"].text.trimmingCharacters(in: .whitespaces).lowercased()] else { return .init(tone: .warning, label: "Approaching limit") }
-            var label = "Approaching limit · \(claim.0)"
-            if let key = claim.1, let used = value[key].number, used.isFinite { label += " \(Int((used * 100).rounded()))%" }
-            return .init(tone: .warning, label: label)
-        }
-        if status == "rejected" {
-            guard let reset = value["unified_reset"].number, reset - now > 0 else { return .init(tone: .error, label: "Limit reached") }
-            let left = reset - now
-            let span = left < 3600 ? "\(max(1, Int(left / 60)))m" : left < 48 * 3600 ? "\(Int(left / 3600))h" : "\(Int(left / 86400))d"
-            return .init(tone: .error, label: "Limit reached · resets in \(span)")
-        }
-        return .init(tone: .warning, label: "Limit status unknown")
+        let claimKey = value["unified_representative_claim"].text.trimmingCharacters(in: .whitespaces).lowercased()
+        let usedKey: String? = claimKey == "five_hour" ? "unified_5h_utilization" : (claimKey == "seven_day" ? "unified_7d_utilization" : nil)
+        let used = usedKey.flatMap { value[$0].number }.flatMap { $0.isFinite ? $0 : nil }
+        let reset = value["unified_reset"].number
+        let left = reset.map { $0 - now }
+        let hasReset = left != nil && left!.isFinite && left! > 0
+        guard let badge = OrbKernel.usageLimitBadge(
+            status: status,
+            claim: claimKey,
+            hasUtilization: used != nil,
+            utilizationPct: used.map { Int(($0 * 100).rounded()) } ?? 0,
+            hasReset: hasReset,
+            resetRemSecs: hasReset ? Int(left!) : 0
+        ) else { return nil }
+        return .init(tone: badge.tone == "error" ? .error : .warning, label: badge.label)
     }
 }
 

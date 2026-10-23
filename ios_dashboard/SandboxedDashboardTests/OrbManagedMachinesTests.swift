@@ -148,4 +148,23 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertTrue(OrbManaged.spendDayDetail(OrbDailySpend(day: "2026-10-22", usd: 0, missions: [], sizes: []), titles: [:]).hasSuffix(" · no spend"))
         XCTAssertEqual(OrbManaged.runningLine(r.budget), "1 of 3 running")
     }
+
+    func testOwnerAndReapLine() throws {
+        var m = try OrbManaged.decode(Data(payload.utf8)).machines[0]
+        m.state = "online"
+        m.owner_mission_id = nil; m.owner_kind = nil
+        XCTAssertEqual(OrbManaged.owner(m), .none)
+        m.owner_kind = "user"
+        XCTAssertEqual(OrbManaged.owner(m), .user)
+        m.owner_mission_id = "m1"
+        XCTAssertEqual(OrbManaged.owner(m), .mission("m1"))
+        m.reap_at = "2026-10-23T12:04:10Z"; m.reap_reason = "owner_completed"
+        XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Reaps in 5 min (owner completed)")
+        m.reap_at = "2026-10-23T11:59:00Z"; m.reap_reason = "owner_interrupted_idle"
+        XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Reap due (owner interrupted, idle)")
+        m.reap_at = "2026-10-23T13:30:00Z"; m.reap_reason = "idle_no_owner"
+        XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Reaps in 1 h 30 min (idle, no owner)")
+        m.state = "destroyed"
+        XCTAssertNil(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")))
+    }
 }

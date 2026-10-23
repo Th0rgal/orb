@@ -12,7 +12,7 @@ import {
   allowedSizes, budgetFull, budgetLeft, budgetLine, costLine, sizeLabel, specLine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
-  usd, usdPerHour, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
+  machineOwner, reapLine, usd, usdPerHour, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
 } from "./managedMachineModel";
 
 const openMission = (id: string) => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: `m:${id}` }));
@@ -97,6 +97,7 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
   const dot = () => p.m.state === "online" ? "on" : failed() ? "off" : live() ? "warn" : "";
   const details = () => [p.m.reason ? `Reason: ${p.m.reason}` : "", p.m.id && !p.m.id.startsWith("pending-") ? `Machine ${p.m.id}` : "", p.m.provider_id ? `${p.m.provider} ${p.m.provider_id}` : "", p.m.node_id ? `Node ${p.m.node_id}` : "", p.m.image ? `Image ${p.m.image}` : ""].filter(Boolean).join("\n");
   const owner = () => p.m.owner_mission_id ?? undefined;
+  const ownerKind = () => machineOwner(p.m).kind;
   const ownerTitle = () => owner() ? missionTitle(owner()!) ?? `Mission ${owner()!.slice(0, 8)}` : "";
   const canAct = () => live() && !destroying() && !!p.onDestroy;
   const [menu, setMenu] = createSignal<{ x: number; y: number } | null>(null);
@@ -112,7 +113,11 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
         <span class="managed-size-label">{sizeLabel(p.m.size)}</span>
         <span class="managed-state" classList={{ "managed-error": failed() }}>{stateLabel(p.m.state)}</span>
         <Show when={owner()}><button class="managed-mission-chip" title={`Open ${ownerTitle()}`} onClick={() => openMission(owner()!)}><span>{ownerTitle()}</span></button></Show>
+        <Show when={live() && ownerKind() === "user"}><span class="managed-owner-chip">You</span></Show>
+        <Show when={live() && ownerKind() === "none"}><span class="managed-owner-chip managed-no-owner" title={p.m.reason ? `Reason: ${p.m.reason}` : "No owner recorded"}>No owner</span></Show>
       </div>
+      <Show when={live() && ownerKind() === "none" && p.m.reason}><div class="managed-line2 managed-no-owner-reason">{p.m.reason}</div></Show>
+      <Show when={reapLine(p.m, now())}>{line => <div class="managed-line2 managed-reap">{line()}</div>}</Show>
       <div class="managed-line2">
         <span class="managed-spec">{specLine({ cpu: p.m.cpu, ram_gb: p.m.ram_gb, disk_gb: p.disk })}</span>
         <Show when={live()} fallback={<Show when={!failed() || p.m.destroyed_at}><span class="managed-cost">Final {usd(p.m.cost_usd)}{p.m.ledger_closed ? " · ledger closed" : " · ledger open"}</span></Show>}>

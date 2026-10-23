@@ -26,5 +26,12 @@ mod tests {
             )),
             "ready_for_review_or_merge"
         );
+        assert_eq!(turn_summary_step(1, true, false, true).normalized_status, 0);
+        assert_eq!(usage_limit_status_step(1, 2, true, 88, false, 0).pct, 88);
+        assert_eq!(format_relative_time_secs(45), "1m");
+        assert_eq!(
+            transcript_patch_step(TranscriptPatchState { len: 10, seq: 1 }, 0, 5),
+            TranscriptPatchState { len: 15, seq: 2 }
+        );
     }
 }

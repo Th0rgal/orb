@@ -505,4 +505,109 @@ def prGateStep
   else if checksGreen == 1 && workflowsGreen == 1 then 8
   else 9
 
+/--
+  Unboxed C-ABI Cross-Client Turn Summary & Task Status Stepper (`orb_turn_summary_step`):
+  `rawStatus`: `0 = pending`, `1 = in_progress`, `2 = completed`, `3 = cancelled`.
+  Packs `(normalizedStatus : UInt8, isDone : UInt8, isActive : UInt8, cardState : UInt8)` into a 32-bit word:
+  `bits 0..7 = normalizedStatus`, `bit 8 = isDone`, `bit 16 = isActive`,
+  `bits 24..31 = cardState (0 = live, 1 = done, 2 = stale, 3 = stopped)`.
+  - While the turn is running (`turnEnded == 0`), `normalizedStatus = rawStatus`.
+  - Once ended (`turnEnded == 1`), `in_progress (1)` settles to `pending (0)` (`clear_in_progress`),
+    and `cardState` follows `taskcardStep turnEnded allClosed turnOutcomeFinished`.
+-/
+@[inline, export orb_turn_summary_step]
+def turnSummaryStep (rawStatus turnEnded allClosed turnOutcomeFinished : UInt8) : UInt32 :=
+  let norm : UInt8 :=
+    if rawStatus == 2 then 2
+    else if rawStatus == 3 then 3
+    else if rawStatus == 1 && turnEnded == 0 then 1
+    else 0
+  let done : UInt32 := if norm == 2 then 256 else 0
+  let active : UInt32 := if norm == 1 then 65536 else 0
+  let card : UInt32 := (taskcardStep turnEnded allClosed turnOutcomeFinished).toUInt32 <<< 24
+  norm.toUInt32 ||| done ||| active ||| card
+
+/--
+  Unboxed C-ABI Anthropic Unified Rate-Limit Status Stepper (`orb_usage_limit_status`):
+  `statusKind`: `0 = allowed/ok/missing`, `1 = allowed_warning`, `2 = rejected`, `3 = other`.
+  `claimKind`: `0 = none/other`, `1 = five_hour`, `2 = seven_day`, `3 = seven_day_opus`, `4 = seven_day_sonnet`.
+  Packs `(tone : UInt8, windowKind : UInt8, showPct : UInt8, pct : UInt8, resetUnit : UInt8, resetValue : UInt32)` into a 64-bit word:
+  - `bits 0..7`: `tone` (`0 = hidden/null`, `1 = warning`, `2 = error`, `3 = unknown_warning`)
+  - `bits 8..15`: `windowKind` (`0..4` for `allowed_warning`, `0` otherwise)
+  - `bits 16..23`: `showPct` (`1` iff `allowed_warning`, `claimKind ∈ {1, 2}`, `hasUtilization == 1`, and `utilizationPct ≤ 100`)
+  - `bits 24..31`: `pct` (`0..100`)
+  - `bits 32..39`: `resetUnit` (`0 = none`, `1 = minutes ("m")`, `2 = hours ("h")`, `3 = days ("d")`)
+  - `bits 40..63`: `resetValue` (`max(1, rem/60)` for `< 3600s`, `rem/3600` for `< 172800s (48h)`, `rem/86400` for `≥ 172800s`).
+-/
+@[inline, export orb_usage_limit_status]
+def usageLimitStatus
+    (statusKind claimKind hasUtilization utilizationPct hasReset : UInt8)
+    (resetRemSecs : UInt64) : UInt64 :=
+  if statusKind == 0 then 0
+  else if statusKind == 1 then
+    let win : UInt64 := if claimKind ≥ 1 && claimKind ≤ 4 then claimKind.toUInt64 <<< 8 else 0
+    let showPct : UInt64 :=
+      if (claimKind == 1 || claimKind == 2) && hasUtilization == 1 && utilizationPct ≤ 100 then 65536 else 0
+    let pct : UInt64 := if showPct != 0 then utilizationPct.toUInt64 <<< 24 else 0
+    (1 : UInt64) ||| win ||| showPct ||| pct
+  else if statusKind == 2 then
+    if hasReset == 1 && resetRemSecs > 0 then
+      let mins := resetRemSecs / 60
+      let hrs := resetRemSecs / 3600
+      let days := resetRemSecs / 86400
+      let unit : UInt64 := if mins < 60 then 1 else if hrs < 48 then 2 else 3
+      let val : UInt64 :=
+        if mins < 60 then (if mins ≥ 1 then mins else 1)
+        else if hrs < 48 then hrs
+        else days
+      let clampedVal : UInt64 := if val > 0xFFFFFF then 0xFFFFFF else val
+      (2 : UInt64) ||| (unit <<< 32) ||| (clampedVal <<< 40)
+    else 2
+  else 3
+
+/--
+  Unboxed C-ABI Cross-Client Compact Relative-Time Classifier (`orb_relative_time_bucket`):
+  Matches `shared/orb-spec/fixtures/relative-time.json`:
+  Packs `(unit : UInt8, value : UInt32)` into a 64-bit word (`bits 0..7 = unit`, `bits 8..39 = value`):
+  - `elapsedSecs < 45` -> `unit = 0 ("now"), value = 0`
+  - `elapsedSecs < 3600` -> `unit = 1 ("m"), value = max(1, elapsedSecs / 60)` (never `"0m"` at 45..59s)
+  - `elapsedSecs < 86400` -> `unit = 2 ("h"), value = elapsedSecs / 3600`
+  - `elapsedSecs < 604800` -> `unit = 3 ("d"), value = elapsedSecs / 86400`
+  - `elapsedSecs ≥ 604800` -> `unit = 4 ("w"), value = elapsedSecs / 604800`.
+-/
+@[inline, export orb_relative_time_bucket]
+def relativeTimeBucket (elapsedSecs : UInt64) : UInt64 :=
+  if elapsedSecs < 45 then 0
+  else if elapsedSecs < 3600 then
+    let mins := elapsedSecs / 60
+    let v := if mins ≥ 1 then mins else 1
+    (1 : UInt64) ||| (v <<< 8)
+  else if elapsedSecs < 86400 then
+    (2 : UInt64) ||| ((elapsedSecs / 3600) <<< 8)
+  else if elapsedSecs < 604800 then
+    (3 : UInt64) ||| ((elapsedSecs / 86400) <<< 8)
+  else
+    let wks := elapsedSecs / 604800
+    let clamped := if wks > 0xFFFFFFFF then 0xFFFFFFFF else wks
+    (4 : UInt64) ||| (clamped <<< 8)
+
+/--
+  Unboxed C-ABI Incremental SSE Transcript Patch Stepper (`orb_transcript_patch_step`):
+  `eventKind`:
+  `0 = message_delta` (append `deltaLen` to live buffer),
+  `1 = assistant_snapshot` (replace live buffer with `deltaLen` when `deltaLen > 0`, else keep `stateLen`),
+  `2 = turn_boundary` (reset live buffer to `0` on user message or turn boundary).
+  Packs `(nextLen : UInt32, nextSeq : UInt32)` into a 64-bit word (`bits 0..31 = nextLen`, `bits 32..63 = nextSeq`),
+  satisfying `stream_apply_eq_batch`: incremental SSE chunk folding produces the exact same transcript projection
+  as batch evaluation over the accumulated event log.
+-/
+@[inline, export orb_transcript_patch_step]
+def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaLen : UInt32) : UInt64 :=
+  let nextLen : UInt32 :=
+    if eventKind == 2 then 0
+    else if eventKind == 1 then (if deltaLen > 0 then deltaLen else stateLen)
+    else stateLen + deltaLen
+  let nextSeq : UInt32 := stateSeq + 1
+  nextLen.toUInt64 ||| (nextSeq.toUInt64 <<< 32)
+
 end Orb.Kernel

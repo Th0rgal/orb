@@ -1,5 +1,6 @@
 import type { StreamItem } from "./transcriptModel";
 import type { LocalActivity } from "./localAgents";
+import { orbWorkfoldStep } from "./orbKernel";
 
 type Tool = Extract<StreamItem, { kind: "tool" }>;
 export type TaskStatus = "pending" | "in_progress" | "completed" | "cancelled";
@@ -239,11 +240,12 @@ export function narrationKeys(items: StreamItem[], standalone: (name: string) =>
   let foldHasTool = false;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (item.kind === "text") {
-      if (!item.cumulative && item.text.trim() && toolAhead[i] && (foldHasTool || nextIsTool[i])) keys.add(item.key);
-      else foldHasTool = false;
-    } else if (isWorkTool(item)) foldHasTool = true;
-    else if (item.kind !== "think") foldHasTool = false;
+    const itemKind = item.kind === "user" ? 0 : item.kind === "think" ? 1 : item.kind === "text" ? 2 : isWorkTool(item) ? 3 : item.kind === "tool" ? 4 : 5;
+    const isCumulative = item.kind === "text" && !!item.cumulative;
+    const isNonEmpty = item.kind === "text" && !!item.text.trim();
+    const verdict = orbWorkfoldStep(itemKind, isCumulative, isNonEmpty, toolAhead[i], nextIsTool[i], foldHasTool);
+    if (item.kind === "text" && verdict.foldItem) keys.add(item.key);
+    foldHasTool = verdict.foldHasToolNext;
   }
   return keys;
 }

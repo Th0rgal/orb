@@ -154,6 +154,8 @@ enum OrbFileRefs {
         }
         guard let path = values["path"]?.trimmingCharacters(in: .whitespaces), !path.isEmpty else { return nil }
         let kind = type.lowercased()
+        let tagKind = kind == "image" ? 2 : 1
+        guard OrbKernel.richTagAdmitted(tagLen: ns.length + 7, attrLen: max(1, ns.length), tagKind: tagKind) else { return nil }
         let present: (String?) -> String? = { v in v.map(collapse).flatMap { $0.isEmpty ? nil : $0 } }
         let label = present(kind == "image" ? values["alt"] : values["name"]) ?? present(inner) ?? fileName(path)
         let mime = values["type"].flatMap { $0.contains("/") ? $0 : nil }

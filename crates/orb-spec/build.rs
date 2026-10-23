@@ -76,6 +76,10 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_job_ledger_step",
     "orb_proc_liveness_step",
     "orb_pr_gate_step",
+    "orb_turn_summary_step",
+    "orb_usage_limit_status",
+    "orb_relative_time_bucket",
+    "orb_transcript_patch_step",
 ];
 
 fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
