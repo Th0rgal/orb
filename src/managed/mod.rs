@@ -1032,8 +1032,8 @@ impl ManagedManager {
             .unwrap_or(settings.default_ttl_minutes)
             .clamp(5, settings.max_ttl_minutes.max(5));
         if !crate::orb_spec::vm_spawn_admit(crate::orb_spec::VmSpawnInput {
-            size_rank: size_rank(spec.size),
-            max_size_rank: size_rank(&settings.max_size),
+            size_rank: size_rank(spec.size) as u8,
+            max_size_rank: size_rank(&settings.max_size) as u8,
             secret_projected: false,
             active_count: 0,
             max_concurrent: 1,
