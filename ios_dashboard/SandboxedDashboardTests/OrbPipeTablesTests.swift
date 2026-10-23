@@ -50,4 +50,42 @@ final class OrbPipeTablesTests: XCTestCase {
         }
         XCTAssertTrue(seen)
     }
+
+    func testNegativeRowOffsetIsRejected() {
+        XCTAssertTrue(OrbKernel.gfmPipeRowAdmitted(rowOff: 0, rowLen: 12, bufLen: 12, colCount: 3, sepCols: 3))
+        XCTAssertFalse(OrbKernel.gfmPipeRowAdmitted(rowOff: -1, rowLen: 12, bufLen: 12, colCount: 3, sepCols: 3))
+        XCTAssertFalse(OrbKernel.gfmPipeRowAdmitted(rowOff: 4, rowLen: 12, bufLen: 12, colCount: 3, sepCols: 3))
+    }
+
+    func testTablesAreCappedAt64Columns() {
+        XCTAssertFalse(OrbKernel.gfmPipeRowAdmitted(rowOff: 0, rowLen: 200, bufLen: 200, colCount: 65, sepCols: 65))
+        let wide = { (n: Int) in (0..<n).map { "c\($0)" }.joined(separator: " | ") }
+        let src65 = "\(wide(65))\n\(wide(65))"
+        XCTAssertEqual(OrbPipeTables.normalize(src65), src65)
+        XCTAssertTrue(OrbPipeTables.normalize("\(wide(64))\n\(wide(64))").contains("| --- |"))
+    }
+
+    func testTagKind4IsRejected() {
+        XCTAssertTrue(OrbKernel.richTagAdmitted(tagOff: 0, tagLen: 24, attrOff: 5, attrLen: 14, bufLen: 24, tagKind: 3))
+        XCTAssertFalse(OrbKernel.richTagAdmitted(tagOff: 0, tagLen: 24, attrOff: 5, attrLen: 14, bufLen: 24, tagKind: 4))
+    }
+
+    func testUtilizationOver100HidesThePercentage() {
+        let over = OrbKernel.usageLimitBadge(status: "allowed_warning", claim: "five_hour", hasUtilization: true, utilizationPct: 150, hasReset: false, resetRemSecs: 0)
+        XCTAssertEqual(over?.label, "Approaching limit · 5h")
+        let full = OrbKernel.usageLimitBadge(status: "allowed_warning", claim: "five_hour", hasUtilization: true, utilizationPct: 100, hasReset: false, resetRemSecs: 0)
+        XCTAssertEqual(full?.label, "Approaching limit · 5h 100%")
+    }
+
+    func testWrappingDeltaSaturates() {
+        let next = OrbKernel.transcriptPatchStep(stateLen: 0xFFFF_FFF0, stateSeq: 7, eventKind: 0, deltaLen: 0x20)
+        XCTAssertEqual(next.len, UInt32.max)
+        XCTAssertEqual(next.seq, 8)
+    }
+
+    func testUnknownEventKindLeavesStateUnchanged() {
+        let next = OrbKernel.transcriptPatchStep(stateLen: 42, stateSeq: 9, eventKind: 3, deltaLen: 100)
+        XCTAssertEqual(next.len, 42)
+        XCTAssertEqual(next.seq, 9)
+    }
 }

@@ -75,7 +75,8 @@ object OrbKernel {
         frameLen: Long,
         chunkLen: Long,
         fieldKind: Int,
-        nextByte: Int
+        nextByte: Int,
+        lastByte: Int
     ): Byte
 
     @JvmStatic
@@ -187,14 +188,14 @@ object OrbKernel {
             "seven_day_sonnet" -> 4
             else -> 0
         }
-        val clampedPct = utilizationPct.coerceIn(0, 100)
+        val pct8 = utilizationPct.coerceIn(0, 255)
         val rem = maxOf(0L, resetRemSecs)
         val raw = if (nativeLoaded) {
             orbUsageLimitStatus(
                 statusKind,
                 claimKind,
                 if (hasUtilization) 1 else 0,
-                clampedPct,
+                utilizationPct,
                 if (hasReset) 1 else 0,
                 rem
             )
@@ -203,8 +204,8 @@ object OrbKernel {
                 0 -> 0L
                 1 -> {
                     val win = if (claimKind in 1..4) (claimKind.toLong() shl 8) else 0L
-                    val show = if ((claimKind == 1 || claimKind == 2) && hasUtilization) 65536L else 0L
-                    val pctBits = if (show != 0L) (clampedPct.toLong() shl 24) else 0L
+                    val show = if ((claimKind == 1 || claimKind == 2) && hasUtilization && pct8 <= 100) 65536L else 0L
+                    val pctBits = if (show != 0L) (pct8.toLong() shl 24) else 0L
                     1L or win or show or pctBits
                 }
                 2 -> if (hasReset && rem > 0L) {
@@ -265,7 +266,8 @@ object OrbKernel {
             if (unterminatedEscape) 1 else 0
         ).toInt() != 0
     } else {
-        colCount >= 1 && sepCols == colCount && !unterminatedEscape && rowLen >= 1 && rowOff + rowLen <= bufLen
+        rowLen > 0 && subsliceOk(rowOff.toLong(), rowLen.toLong(), bufLen.toLong()) &&
+            colCount in 1..64 && sepCols == colCount && !unterminatedEscape
     }
 
     fun richTagAdmitted(
@@ -285,6 +287,10 @@ object OrbKernel {
             tagKind
         ).toInt() != 0
     } else {
-        tagKind in 1..4 && tagLen >= 3 && attrLen >= 1 && tagOff <= attrOff && attrOff + attrLen <= tagOff + tagLen && tagOff + tagLen <= bufLen
+        tagLen > 0 && subsliceOk(tagOff.toLong(), tagLen.toLong(), bufLen.toLong()) && tagOff <= attrOff &&
+            subsliceOk((attrOff - tagOff).toLong(), attrLen.toLong(), tagLen.toLong()) && tagKind in 1..3
     }
+
+    private fun subsliceOk(off: Long, len: Long, cap: Long): Boolean =
+        off >= 0 && len >= 0 && off <= cap && len <= cap - off
 }

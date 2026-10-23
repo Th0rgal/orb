@@ -31,7 +31,7 @@ enum OrbPipeTables {
             }
         }
         out.append(String(chars[start...]).trimmingCharacters(in: .whitespaces))
-        return out.count >= 3 && OrbKernel.gfmPipeRowAdmitted(rowLen: t.count, colCount: out.count, sepCols: out.count, unterminatedEscape: inCode) ? out : nil
+        return out.count >= 3 && !inCode ? out : nil
     }
 
     private static func row(_ cells: [String]) -> String { "| " + cells.joined(separator: " | ") + " |" }
@@ -58,6 +58,14 @@ enum OrbPipeTables {
     static func normalize(_ src: String) -> String {
         guard src.contains(" | ") else { return src }
         let lines = src.components(separatedBy: "\n")
+        var starts = [Int](repeating: 0, count: lines.count)
+        for k in lines.indices.dropFirst() { starts[k] = starts[k - 1] + lines[k - 1].utf16.count + 1 }
+        let bufLen = src.utf16.count
+        func admitted(_ k: Int, _ cells: [String], sepCols: Int) -> Bool {
+            let lead = lines[k].prefix(while: { $0 == " " || $0 == "\t" }).utf16.count
+            let rowLen = lines[k].trimmingCharacters(in: .whitespaces).utf16.count
+            return OrbKernel.gfmPipeRowAdmitted(rowOff: starts[k] + lead, rowLen: rowLen, bufLen: bufLen, colCount: cells.count, sepCols: sepCols)
+        }
         var out: [String] = []
         var fence: String?
         var i = 0
@@ -69,10 +77,10 @@ enum OrbPipeTables {
                 out.append(line); i += 1; continue
             }
             if marker != nil { fence = marker; out.append(line); i += 1; continue }
-            guard let first = cells(line) else { out.append(line); i += 1; continue }
+            guard let first = cells(line), admitted(i, first, sepCols: first.count) else { out.append(line); i += 1; continue }
             var rows = [first]
             var j = i + 1
-            while j < lines.count, let c = cells(lines[j]), c.count == first.count { rows.append(c); j += 1 }
+            while j < lines.count, let c = cells(lines[j]), c.count == first.count, admitted(j, c, sepCols: first.count) { rows.append(c); j += 1 }
             let isGfm = rows.count >= 2 && rows[1].allSatisfy {
                 $0.filter { !$0.isWhitespace }.range(of: "^:?-+:?$", options: .regularExpression) != nil
             }

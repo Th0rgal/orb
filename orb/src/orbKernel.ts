@@ -88,10 +88,39 @@ export function orbUsageLimitBadge(
   return { tone: "warning", label: "Limit status unknown" };
 }
 
-export function leansysGfmPipeRowAdmitted(rowLen: number, colCount: number, sepCols: number, unterminatedEscape: boolean): boolean {
-  return colCount >= 1 && sepCols === colCount && !unterminatedEscape && rowLen >= 1;
+const U32_MAX = 0xffff_ffff;
+const satAdd32 = (a: number, b: number) => Math.min(U32_MAX, a + b);
+
+export type TranscriptPatchState = { len: number; seq: number };
+
+export function orbTranscriptPatchStep(state: TranscriptPatchState, eventKind: number, deltaLen: number): TranscriptPatchState {
+  if (eventKind < 0 || eventKind > 2) return state;
+  const len = eventKind === 2 ? 0 : eventKind === 1 ? (deltaLen > 0 ? deltaLen : state.len) : satAdd32(state.len, deltaLen);
+  return { len, seq: satAdd32(state.seq, 1) };
 }
 
-export function leansysRichTagAdmitted(tagLen: number, attrLen: number, tagKind: number): boolean {
-  return tagKind >= 1 && tagKind <= 4 && tagLen >= 3 && attrLen >= 1 && attrLen <= tagLen;
+const subsliceOk = (off: number, len: number, cap: number) =>
+  Number.isInteger(off) && Number.isInteger(len) && Number.isInteger(cap) && off >= 0 && len >= 0 && off <= cap && len <= cap - off;
+
+export function leansysGfmPipeRowAdmitted(
+  rowOff: number,
+  rowLen: number,
+  bufLen: number,
+  colCount: number,
+  sepCols: number,
+  unterminatedEscape: boolean,
+): boolean {
+  return rowLen > 0 && subsliceOk(rowOff, rowLen, bufLen) && colCount >= 1 && colCount <= 64 && sepCols === colCount && !unterminatedEscape;
+}
+
+export function leansysRichTagAdmitted(
+  tagOff: number,
+  tagLen: number,
+  attrOff: number,
+  attrLen: number,
+  bufLen: number,
+  tagKind: number,
+): boolean {
+  return tagLen > 0 && subsliceOk(tagOff, tagLen, bufLen) && tagOff <= attrOff && subsliceOk(attrOff - tagOff, attrLen, tagLen)
+    && tagKind >= 1 && tagKind <= 3;
 }

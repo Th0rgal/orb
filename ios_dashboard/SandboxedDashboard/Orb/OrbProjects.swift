@@ -82,7 +82,7 @@ enum OrbKernel {
         case "seven_day_sonnet": claimKind = 4
         default: claimKind = 0
         }
-        let clampedPct = min(100, max(0, utilizationPct))
+        let pct8 = min(255, max(0, utilizationPct))
         let rem = max(0, resetRemSecs)
         let raw: Int
         switch statusKind {
@@ -90,8 +90,8 @@ enum OrbKernel {
             raw = 0
         case 1:
             let win = (claimKind >= 1 && claimKind <= 4) ? (claimKind << 8) : 0
-            let show = ((claimKind == 1 || claimKind == 2) && hasUtilization) ? 65536 : 0
-            let pctBits = show != 0 ? (clampedPct << 24) : 0
+            let show = ((claimKind == 1 || claimKind == 2) && hasUtilization && pct8 <= 100) ? 65536 : 0
+            let pctBits = show != 0 ? (pct8 << 24) : 0
             raw = 1 | win | show | pctBits
         case 2:
             if hasReset && rem > 0 {
@@ -134,12 +134,24 @@ enum OrbKernel {
         return ("warning", "Limit status unknown")
     }
 
-    static func gfmPipeRowAdmitted(rowLen: Int, colCount: Int, sepCols: Int, unterminatedEscape: Bool) -> Bool {
-        colCount >= 1 && sepCols == colCount && !unterminatedEscape && rowLen >= 1
+    private static func subsliceOk(_ off: Int, _ len: Int, _ cap: Int) -> Bool {
+        off >= 0 && len >= 0 && off <= cap && len <= cap - off
     }
 
-    static func richTagAdmitted(tagLen: Int, attrLen: Int, tagKind: Int) -> Bool {
-        (tagKind >= 1 && tagKind <= 4) && tagLen >= 3 && attrLen >= 1 && attrLen <= tagLen
+    static func gfmPipeRowAdmitted(rowOff: Int, rowLen: Int, bufLen: Int, colCount: Int, sepCols: Int, unterminatedEscape: Bool = false) -> Bool {
+        rowLen > 0 && subsliceOk(rowOff, rowLen, bufLen) && (1...64).contains(colCount) && sepCols == colCount && !unterminatedEscape
+    }
+
+    static func richTagAdmitted(tagOff: Int, tagLen: Int, attrOff: Int, attrLen: Int, bufLen: Int, tagKind: Int) -> Bool {
+        tagLen > 0 && subsliceOk(tagOff, tagLen, bufLen) && tagOff <= attrOff
+            && subsliceOk(attrOff - tagOff, attrLen, tagLen) && (1...3).contains(tagKind)
+    }
+
+    static func transcriptPatchStep(stateLen: UInt32, stateSeq: UInt32, eventKind: Int, deltaLen: UInt32) -> (len: UInt32, seq: UInt32) {
+        guard (0...2).contains(eventKind) else { return (stateLen, stateSeq) }
+        let len: UInt32 = eventKind == 2 ? 0 : eventKind == 1 ? (deltaLen > 0 ? deltaLen : stateLen)
+            : (stateLen <= UInt32.max - deltaLen ? stateLen + deltaLen : UInt32.max)
+        return (len, stateSeq == UInt32.max ? UInt32.max : stateSeq + 1)
     }
 }
 

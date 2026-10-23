@@ -144,7 +144,7 @@ enum OrbFileRefs {
     }
 
     /// Parses one tag's attributes the way desktop `parseRichTag` does.
-    static func parseTag(type: String, attributes: String, inner: String?) -> OrbFileRef? {
+    static func parseTag(type: String, attributes: String, inner: String?, tagRange: NSRange? = nil, attrOffset: Int = 0, bufLen: Int? = nil) -> OrbFileRef? {
         var values: [String: String] = [:]
         let ns = attributes as NSString
         for m in attribute.matches(in: attributes, range: NSRange(location: 0, length: ns.length)) {
@@ -155,7 +155,9 @@ enum OrbFileRefs {
         guard let path = values["path"]?.trimmingCharacters(in: .whitespaces), !path.isEmpty else { return nil }
         let kind = type.lowercased()
         let tagKind = kind == "image" ? 2 : 1
-        guard OrbKernel.richTagAdmitted(tagLen: ns.length + 7, attrLen: max(1, ns.length), tagKind: tagKind) else { return nil }
+        let span = tagRange ?? NSRange(location: 0, length: ns.length)
+        guard OrbKernel.richTagAdmitted(tagOff: span.location, tagLen: span.length, attrOff: attrOffset, attrLen: ns.length,
+                                        bufLen: bufLen ?? ns.length, tagKind: tagKind) else { return nil }
         let present: (String?) -> String? = { v in v.map(collapse).flatMap { $0.isEmpty ? nil : $0 } }
         let label = present(kind == "image" ? values["alt"] : values["name"]) ?? present(inner) ?? fileName(path)
         let mime = values["type"].flatMap { $0.contains("/") ? $0 : nil }
@@ -238,7 +240,8 @@ enum OrbFileRefs {
         for m in tag.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
             if fences.contains(where: { NSLocationInRange(m.range.location, $0) }) { continue }
             let inner = m.range(at: 3).location != NSNotFound ? ns.substring(with: m.range(at: 3)) : nil
-            guard let ref = parseTag(type: ns.substring(with: m.range(at: 1)), attributes: ns.substring(with: m.range(at: 2)), inner: inner) else { continue }
+            guard let ref = parseTag(type: ns.substring(with: m.range(at: 1)), attributes: ns.substring(with: m.range(at: 2)), inner: inner,
+                                     tagRange: m.range, attrOffset: m.range(at: 2).location, bufLen: ns.length) else { continue }
             flush(m.range.location)
             out.append(.file(ref))
             last = NSMaxRange(m.range)

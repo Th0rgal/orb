@@ -53,7 +53,7 @@ export function loosePipeCells(line: string): string[] | null {
     }
   }
   cells.push(t.slice(start).trim());
-  return cells.length >= 3 && leansysGfmPipeRowAdmitted(t.length, cells.length, cells.length, inCode) ? cells : null;
+  return cells.length >= 3 && !inCode ? cells : null;
 }
 
 const row = (cells: string[]) => `| ${cells.join(" | ")} |`;
@@ -73,6 +73,12 @@ function gfmTable(rows: string[][]): string[] {
 export function normalizeLoosePipeTables(src: string): string {
   if (!src.includes(" | ")) return src;
   const lines = src.split("\n");
+  const starts: number[] = [];
+  for (let k = 0, off = 0; k < lines.length; off += lines[k].length + 1, k++) starts.push(off);
+  const admitted = (k: number, cells: string[], sepCols: number) => {
+    const lead = lines[k].length - lines[k].trimStart().length;
+    return leansysGfmPipeRowAdmitted(starts[k] + lead, lines[k].trim().length, src.length, cells.length, sepCols, false);
+  };
   const out: string[] = [];
   let fence: string | null = null;
   let i = 0;
@@ -92,7 +98,7 @@ export function normalizeLoosePipeTables(src: string): string {
       continue;
     }
     const first = loosePipeCells(line);
-    if (!first) {
+    if (!first || !admitted(i, first, first.length)) {
       out.push(line);
       i++;
       continue;
@@ -101,7 +107,7 @@ export function normalizeLoosePipeTables(src: string): string {
     let j = i + 1;
     while (j < lines.length) {
       const cells = loosePipeCells(lines[j]);
-      if (!cells || cells.length !== first.length) break;
+      if (!cells || cells.length !== first.length || !admitted(j, cells, first.length)) break;
       rows.push(cells);
       j++;
     }

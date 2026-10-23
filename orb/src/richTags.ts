@@ -12,14 +12,26 @@ export type RichTag = { type: "image" | "file"; path: string; label: string; una
 
 const present = (value: string | undefined) => value?.trim().replace(/\s+/g, " ") || undefined;
 
-export function parseRichTag(type: string, attrs: string, inner?: string): RichTag | null {
+/** Where one `RICH_TAG` match sits in its source text. */
+export type RichTagSpan = { tagOff: number; tagLen: number; attrOff: number; bufLen: number };
+
+export function richTagSpan(match: string, type: string, attrs: string, index: number, bufLen: number): RichTagSpan {
+  return { tagOff: index, tagLen: match.length, attrOff: index + match.indexOf(attrs, 1 + type.length), bufLen };
+}
+
+export function parseRichTag(
+  type: string,
+  attrs: string,
+  inner?: string,
+  span: RichTagSpan = { tagOff: 0, tagLen: attrs.length, attrOff: 0, bufLen: attrs.length },
+): RichTag | null {
   const values: Record<string, string> = {};
   for (const m of attrs.matchAll(/(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) values[m[1].toLowerCase()] = m[2] ?? m[3] ?? "";
   const path = values.path?.trim();
   if (!path) return null;
   const kind = type.toLowerCase() as RichTag["type"];
   const tagKind = kind === "image" ? 2 : 1;
-  if (!leansysRichTagAdmitted(attrs.length + 7, Math.max(1, attrs.length), tagKind)) return null;
+  if (!leansysRichTagAdmitted(span.tagOff, span.tagLen, span.attrOff, attrs.length, span.bufLen, tagKind)) return null;
   const label = present(kind === "image" ? values.alt : values.name) ?? present(inner) ?? path.split("/").pop() ?? path;
   return values.unavailable === "true" ? { type: kind, path, label, unavailable: true } : { type: kind, path, label };
 }

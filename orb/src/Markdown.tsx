@@ -10,7 +10,7 @@ import { FileReference, FileReferenceText } from "./fileReferenceContext";
 import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
 import { timed } from "./diagnostics";
-import { RICH_TAG, expandMediaLines, parseRichTag } from "./richTags";
+import { RICH_TAG, expandMediaLines, parseRichTag, richTagSpan } from "./richTags";
 import { WorkspaceImage } from "./WorkspaceImage";
 import * as Ic from "./icons";
 import { normalizeLoosePipeTables } from "./pipeTables";
@@ -93,7 +93,7 @@ function inline(text: string, links = true): JSX.Element[] {
   const out: JSX.Element[] = [];
   let last = 0;
   for (const m of text.matchAll(RICH_TAG)) {
-    const tag = parseRichTag(m[1], m[2], m[3]);
+    const tag = parseRichTag(m[1], m[2], m[3], richTagSpan(m[0], m[1], m[2], m.index!, text.length));
     if (!tag) continue;
     if (m.index! > last) out.push(...inlineMarkdown(text.slice(last, m.index), links));
     out.push(tag.unavailable ? <UnavailableFile label={tag.label} path={tag.path} />
@@ -404,7 +404,7 @@ function parseBlocks(src: string): Block[] {
 /** Freeze only completed blocks; fences keep blank lines inside the active tail. */
 /** Search the same block content without mounting historical Markdown. */
 export function markdownText(source:string):string{
- const plain=(text:string):string=>text.replace(RICH_TAG,(tag,type:string,attrs:string,inner?:string)=>parseRichTag(type,attrs,inner)?.label??tag).replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
+ const plain=(text:string):string=>text.replace(RICH_TAG,(tag,type:string,attrs:string,inner:string|undefined,off:number)=>parseRichTag(type,attrs,inner,richTagSpan(tag,type,attrs,off,text.length))?.label??tag).replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
  const blockText=(block:Block):string=>block.t==='hr'?'':block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(it=>typeof it==='string'?plain(it):[plain(it.text),...(it.sub?.map(blockText)??[])].filter(Boolean).join('\n')).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text);
  return parseMarkdown(source).map(blockText).filter(Boolean).join('\n');
 }

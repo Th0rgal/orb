@@ -33,7 +33,7 @@ object OrbPipeTables {
             }
         }
         out.add(t.substring(start).trim())
-        return if (out.size >= 3 && OrbKernel.gfmPipeRowAdmitted(0, t.length, t.length, out.size, out.size, inCode)) out else null
+        return if (out.size >= 3 && !inCode) out else null
     }
 
     private fun row(cells: List<String>) = "| " + cells.joinToString(" | ") + " |"
@@ -61,6 +61,12 @@ object OrbPipeTables {
     fun normalize(src: String): String {
         if (!src.contains(" | ")) return src
         val lines = src.split("\n")
+        val starts = IntArray(lines.size)
+        for (k in 1 until lines.size) starts[k] = starts[k - 1] + lines[k - 1].length + 1
+        fun admitted(k: Int, cells: List<String>, sepCols: Int): Boolean {
+            val lead = lines[k].length - lines[k].trimStart().length
+            return OrbKernel.gfmPipeRowAdmitted(starts[k] + lead, lines[k].trim().length, src.length, cells.size, sepCols)
+        }
         val out = mutableListOf<String>()
         var fence: String? = null
         var i = 0
@@ -74,12 +80,12 @@ object OrbPipeTables {
             }
             if (marker != null) { fence = marker; out.add(line); i++; continue }
             val first = cells(line)
-            if (first == null) { out.add(line); i++; continue }
+            if (first == null || !admitted(i, first, first.size)) { out.add(line); i++; continue }
             val rows = mutableListOf(first)
             var j = i + 1
             while (j < lines.size) {
                 val c = cells(lines[j])
-                if (c == null || c.size != first.size) break
+                if (c == null || c.size != first.size || !admitted(j, c, first.size)) break
                 rows.add(c); j++
             }
             val isGfm = rows.size >= 2 && rows[1].all { separator.matches(it.filterNot(Char::isWhitespace)) }

@@ -128,14 +128,22 @@ object OrbFileRefs {
     private fun collapse(s: String) = s.trim().replace(whitespace, " ")
 
     /** Parses one tag's attributes the way desktop `parseRichTag` does. */
-    fun parseTag(type: String, attributes: String, inner: String?): OrbFileRef? {
+    fun parseTag(
+        type: String,
+        attributes: String,
+        inner: String?,
+        tagOff: Int = 0,
+        tagLen: Int = attributes.length,
+        attrOff: Int = 0,
+        bufLen: Int = attributes.length
+    ): OrbFileRef? {
         val values = attribute.findAll(attributes).associate { m ->
             m.groupValues[1].lowercase() to (m.groups[2]?.value ?: m.groups[3]?.value ?: "")
         }
         val path = values["path"]?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val kind = type.lowercase()
         val tagKind = if (kind == "image") 2 else 1
-        if (!OrbKernel.richTagAdmitted(0, attributes.length + 7, 1, maxOf(1, attributes.length), attributes.length + 7, tagKind)) return null
+        if (!OrbKernel.richTagAdmitted(tagOff, tagLen, attrOff, attributes.length, bufLen, tagKind)) return null
         fun present(v: String?) = v?.let(::collapse)?.takeIf { it.isNotEmpty() }
         val label = present(if (kind == "image") values["alt"] else values["name"]) ?: present(inner) ?: fileName(path)
         return OrbFileRef(type = kind, path = path, label = label, mime = values["type"]?.takeIf { '/' in it },
@@ -212,7 +220,11 @@ object OrbFileRefs {
         }
         for (m in tag.findAll(source)) {
             if (fences.any { m.range.first in it }) continue
-            val ref = parseTag(m.groupValues[1], m.groupValues[2], m.groups[3]?.value) ?: continue
+            val attrs = m.groups[2]!!
+            val ref = parseTag(
+                m.groupValues[1], attrs.value, m.groups[3]?.value,
+                tagOff = m.range.first, tagLen = m.value.length, attrOff = attrs.range.first, bufLen = source.length
+            ) ?: continue
             flush(m.range.first)
             out.add(OrbFileSegment.File(ref))
             last = m.range.last + 1
