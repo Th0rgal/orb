@@ -25,8 +25,17 @@ const ExpandIcon = (p: { size?: number }) => (
 
 /** Debounce for a block that just closed: the message may still be settling. */
 const RENDER_DELAY = 140;
-/** Diagrams wider than the column shrink to fit, but never below this scale (text stays legible); past it they scroll. */
-const MIN_FIT_SCALE = 0.72;
+/** Inline diagrams are never taller than this; the expanded view shows them at any size. */
+const MAX_INLINE_HEIGHT = "60vh";
+/**
+ * Fit inside the card: as wide as the column allows, never past natural size,
+ * and never taller than MAX_INLINE_HEIGHT, keeping the aspect ratio. The width
+ * is known before the image decodes, so the frame never jumps.
+ */
+export function fitStyle(width: number, height: number) {
+  const ratio = width / (height || 1);
+  return { width: `min(${width}px, 100%, calc(${MAX_INLINE_HEIGHT} * ${ratio.toFixed(4)}))`, "aspect-ratio": `${width} / ${height || 1}`, height: "auto" };
+}
 
 export function MermaidBlock(p: { text: string; complete: boolean }) {
   watchTheme();
@@ -84,7 +93,7 @@ export function MermaidBlock(p: { text: string; complete: boolean }) {
         <Show when={svg()} fallback={<div class="mermaid-skeleton" aria-label="Rendering diagram" role="status"><span /><span /><span /></div>}>
           {(r) => (
             <div class="mermaid-canvas" tabIndex={0} aria-label="Diagram" onDblClick={() => setExpanded(true)}>
-              <img class="mermaid-svg" alt="Diagram" draggable={false} src={svgDataUrl(r().svg)} style={{ width: `${r().width}px`, "max-width": "100%", "min-width": `${Math.round(r().width * MIN_FIT_SCALE)}px` }} />
+              <img class="mermaid-svg" alt="Diagram" draggable={false} src={svgDataUrl(r().svg)} width={Math.round(r().width)} height={Math.round(r().height)} style={fitStyle(r().width, r().height)} />
             </div>
           )}
         </Show>
@@ -101,12 +110,12 @@ function MermaidViewer(p: { svg: string; width: number; height: number; onClose:
   const [pos, setPos] = createSignal({ x: 0, y: 0 });
   const fit = () => {
     const w = stage.clientWidth - 48, h = stage.clientHeight - 48;
-    const s = Math.max(0.1, Math.min(2, w / (p.width || 1), h / (p.height || 1)));
+    const s = Math.max(0.02, Math.min(2, w / (p.width || 1), h / (p.height || 1)));
     setScale(s);
     setPos({ x: (stage.clientWidth - p.width * s) / 2, y: (stage.clientHeight - p.height * s) / 2 });
   };
   const zoomAt = (factor: number, cx = stage.clientWidth / 2, cy = stage.clientHeight / 2) => {
-    const s = scale(), next = Math.max(0.1, Math.min(8, s * factor)), k = next / s, o = pos();
+    const s = scale(), next = Math.max(0.02, Math.min(8, s * factor)), k = next / s, o = pos();
     setScale(next);
     setPos({ x: cx - (cx - o.x) * k, y: cy - (cy - o.y) * k });
   };
