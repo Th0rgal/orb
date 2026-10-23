@@ -103,7 +103,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
       if (intent()) {
         if (top < lastTop - 0.5) setPinned(false);
         else if (gap < NEAR) { setPinned(true); if (held) { reserve(0); toBottom(el); } }
-      } else if (pinned() && gap >= NEAR && Math.abs(top - lastTop) > 1) {
+      } else if (pinned() && gap >= NEAR) {
         // Moved away by the app itself (a chapter, a search hit). Layout never
         // does this: growth fires no scroll event, and a shrink clamps to the bottom.
         setPinned(false);
