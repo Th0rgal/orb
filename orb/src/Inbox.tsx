@@ -1,4 +1,4 @@
-import { pollWhileVisible } from "./poll";
+import { pollWhileVisible, shallowEqual } from "./poll";
 import { followProjectFolder, seedDelivered, seededPrompt } from "./localFolder";
 import { invokeNative } from "./native";
 import { useNow } from "./time";
@@ -443,7 +443,8 @@ export function InboxPage(p: {
       else counts.set(item.projectSlug, { slug: item.projectSlug, title: item.projectTitle, count: 1 });
     }
     return Array.from(counts.values()).sort((a, b) => b.count - a.count);
-  });
+  // Recomputed from every inbox refresh: equal chips must not be rebuilt.
+  }, [], { equals: (a, b) => a.length === b.length && a.every((x, i) => x.slug === b[i].slug && x.title === b[i].title && x.count === b[i].count) });
 
   createEffect(() => {
     const current = projectFilter();
@@ -1113,7 +1114,9 @@ export function InboxPage(p: {
   });
 
   const renderRowById = (id: string) => {
-    const item = createMemo(() => itemById().get(id));
+    // Sections are rebuilt on each refresh; an unchanged row keeps its item so
+    // its badge, pills and titles are not rewritten every poll.
+    const item = createMemo(() => itemById().get(id), undefined, { equals: (a, b) => a === b || (!!a && !!b && shallowEqual(a, b)) });
     return (
       <Show when={item()}>
         {(currentItem) => {

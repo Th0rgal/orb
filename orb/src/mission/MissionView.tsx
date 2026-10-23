@@ -25,6 +25,7 @@ import { imagePrompt, stageLocalImages, stageRemoteImages, type DraftImage } fro
 import { ErrorToast } from "../toast";
 import { MissionFailure, LaunchStatus, MissionPending, missionPhase, rememberLaunch, recalledLaunch, missionDestination, withInitialPrompt, launchError, missionGoal, dockModelLabel, type LaunchReceipt } from "../missionLaunch";
 import { chipToAttachment, loadAttachItems, mentionedChips, type AttachChip } from "../attach";
+import { shallowEqual } from "../poll";
 import { Show, batch, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
@@ -39,7 +40,7 @@ import { cacheRemember } from "../pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, normalizeEffort, supportedEfforts } from "../effort";
 import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscriptHeight, putTranscript, putTranscriptHeight, putTranscriptItems } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton } from "../Skeleton";
-import { visibleTranscript, removeUsers, mapUsers } from "../transcriptModel";
+import { visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
 import { pollWhileVisible } from "../poll";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "../missionContext";
 import {
@@ -102,13 +103,15 @@ function MissionDock(p: {
   const choice = () => harnessChoices(catalogMachine()).find((c) => c.backend.id === p.mission?.backend);
   const harnessName = () => choice()?.backend.name ?? p.mission?.backend ?? "";
   const modelId = () => (p.mission?.backend === "antigravity" ? antigravityBaseModel(p.mission?.model_override) : p.mission?.model_override) || "";
-  const modelLabel = () => {
+  const modelLabel = createMemo(() => {
     const id = modelId();
     const m = choice()?.models.find((x) => x.value === id);
     if (m) return dockModelLabel(harnessName(), shortModelLabel(m.label));
     return id ? dockModelLabel(harnessName(), shortModelLabel(id)) : "Default";
-  };
-  const idle = () => isSettingsIdle(p.mission?.status);
+  });
+  // Memos: a running mission is replaced on each poll; unchanged labels must
+  // not rewrite the dock's attributes.
+  const idle = createMemo(() => isSettingsIdle(p.mission?.status));
   const models = () => choice()?.models ?? [];
   const canChangeModel = () => idle() && models().length > 1 && !saving();
   // The mission's own stored effort, normalized against its harness: a mission
@@ -143,7 +146,10 @@ function MissionDock(p: {
     } finally { setSaving(false); }
   };
   // Warm the machine list once the conversation is idle so the menu opens filled.
-  createEffect(on(() => p.mission?.id, id => {
+  // A memo, not a bare accessor: `on` re-runs whenever its source re-runs, and
+  // `p.mission` is replaced by every refresh even when the id is unchanged.
+  const missionId = createMemo(() => p.mission?.id);
+  createEffect(on(missionId, id => {
     if (!id) return;
     if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine());
     const timer = setTimeout(() => preloadMachineDestinations(id), 1500);
@@ -249,8 +255,14 @@ function MissionDock(p: {
   );
 }
 
+/** `p.initial` re-runs on every sidebar poll (any mission changing replaces the
+ * list) and each merge builds a new object; an unchanged mission must not
+ * notify the whole conversation view, which rewrote dock/badge attributes and
+ * re-ran catalog loads several times a minute. */
+const sameMission = (a: Mission | null, b: Mission | null) => a === b || (!!a && !!b && shallowEqual(a, b));
+
 export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
-  const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null);
+  const [resolved, setResolved] = createSignal<Mission | null>(p.initial ?? null, { equals: sameMission });
   const [error, setError] = createSignal("");
   createEffect(() => {
     const init = p.initial;
@@ -271,7 +283,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   onCleanup(()=>{disposed=true;});
   createEffect(()=>{if(p.id)onCleanup(retainTranscript(p.id));});
   const cached = p.id ? peekReadyTranscript(p.id) : undefined;
-  const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null);
+  const [mission, setMission] = createSignal<Mission | null>(p.initial ?? null, { equals: sameMission });
   createEffect(()=>{
     const init = p.initial;
     if (init) setMission(prev => prev && prev.id === init.id ? { ...prev, ...init, history: init.history?.length ? init.history : prev.history } : init);
@@ -425,6 +437,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       for (const item of items()) if (item.kind === "user" && item.queued && item.messageId) {
         next = applyStreamEvent(next, { type: "user_message", data: { id: item.messageId, content: item.text, queued: true, receipt: item.receipt, attached: item.attached } });
       }
+      next = reuseUnchanged(items(), next);
       setItems(next);
       putTranscript(p.id, { ...snap, items: next });
       setQueueError(snap.queueError ?? null);

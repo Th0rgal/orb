@@ -329,9 +329,14 @@ export function Composer(p: {
   const backend = () => p.backend ?? pick()?.backend ?? null;
   // Restored local conversations can open before New Agent or Settings has
   // scanned installed harnesses. Load capabilities for their composer too.
+  // Keyed by value: the parent rebuilds these props from each mission refresh,
+  // and re-running on identical values refetched catalogs every few seconds.
+  const harnessTarget = createMemo(() => p.uploadTarget);
+  const projectSlug = createMemo(() => p.projectSlug);
   createEffect(() => {
-    if (p.uploadTarget === "local") void refreshLocalAgents(false);
-    else if (p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
+    const target = harnessTarget();
+    if (target === "local") void refreshLocalAgents(false);
+    else if (target) void refreshNodeAntigravityModels(target);
   });
   const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : !!p.uploadTarget && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
@@ -376,7 +381,7 @@ export function Composer(p: {
   });
   let attachmentLoad: Promise<void> = Promise.resolve();
   createEffect(() => {
-    const slug = p.projectSlug;
+    const slug = projectSlug();
     if (!slug || !isConnected()) {
       setAtItems([]);
       return;

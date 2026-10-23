@@ -108,7 +108,8 @@ const n = (v: unknown) => typeof v === "number" && Number.isFinite(v) ? v : unde
 function missionStatus(m: Record<string, unknown>): SubagentStatus | undefined {
   const raw = (s(m.status) ?? s(toolArgs(m.execution)?.state) ?? "").toLowerCase();
   if (!raw) return undefined;
-  if (/^(completed|complete|done|succeeded|finished)$/.test(raw)) return "done";
+  // Acknowledged/archived missions are finished work the user filed away.
+  if (/^(completed|complete|done|succeeded|finished|acknowledged|archived)$/.test(raw)) return "done";
   if (/fail|error|blocked|not_feasible|interrupted/.test(raw)) return "failed";
   if (/cancel/.test(raw)) return "cancelled";
   if (/queued|pending|admission|dispatching/.test(raw)) return "queued";
@@ -129,6 +130,7 @@ export interface FollowUps {
   machines: Map<string, Record<string, unknown>>;
 }
 
+const FOLLOW_UP_OPS = new Set(["get_action", "get_mission", "get_mission_health", "get_mission_status", "list_managed_machines"]);
 export function collectFollowUps(items: readonly StreamItem[]): FollowUps {
   const out: FollowUps = { actions: new Map(), missions: new Map(), machines: new Map() };
   const noteMachine = (m: Record<string, unknown> | null) => {
@@ -147,6 +149,10 @@ export function collectFollowUps(items: readonly StreamItem[]): FollowUps {
   for (const item of items) {
     if (item.kind !== "tool" || !item.done) continue;
     const op = orchestrationOp(item.name);
+    // Decide by name before parsing: this runs on every transcript update, and
+    // parsing every finished tool's result (shell output, file reads) cost
+    // ~5% of a core while idle on long conversations.
+    if (!FOLLOW_UP_OPS.has(op)) continue;
     const { value, error } = toolPayload(item.result);
     if (op === "get_action") {
       const id = s(toolArgs(item.args)?.action_id) ?? s(value?.action_id);

@@ -1,3 +1,4 @@
+import { shallowEqual } from "./poll";
 import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
@@ -502,4 +503,25 @@ export function applyStreamEvents(items: StreamItem[], events: StreamEvent[]): S
   if(reducer.items.length===items.length&&reducer.items.every((item,index)=>item===items[index])){reducer.items=items;states.set(items,reducer);return items;}
   states.set(reducer.items,reducer);
   return reducer.items;
+}
+
+/** Keep the previous object for every row a re-read left unchanged (same key,
+ * same fields), and the previous array when nothing changed at all. Positions
+ * follow `next` and its reducer state is kept, so later live events apply as
+ * usual. A running conversation is re-read every 10s; without this each read
+ * replaced every row and re-diffed the whole transcript. */
+export function reuseUnchanged(prev: StreamItem[], next: StreamItem[]): StreamItem[] {
+  if (prev === next || !prev.length) return next;
+  const old = new Map(prev.map(item => [item.key, item]));
+  let reused = 0;
+  let out = next.map(item => {
+    const was = old.get(item.key);
+    if (was && was !== item && was.kind === item.kind && shallowEqual(was, item)) { reused++; return was; }
+    return item;
+  });
+  if (!reused) return next;
+  if (out.length === prev.length && out.every((item, index) => item === prev[index])) out = prev;
+  const reducer = states.get(next);
+  if (reducer) { reducer.items = out; states.set(out, reducer); }
+  return out;
 }
