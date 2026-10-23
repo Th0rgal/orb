@@ -524,7 +524,7 @@ fn agent_view(r: &AccessRequest) -> Value {
         is_read_tool: true,
         grant_approved: r.state == ApprovalState::Approved && r.revoked_at.is_none(),
         grant_unexpired: live,
-        target_exists: !r.target_title.is_empty(),
+        target_exists: r.target_title.is_some(),
     });
     json!({
         "request_id": r.id,
