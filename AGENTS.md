@@ -74,15 +74,17 @@ Every change under `ios_dashboard/` or `android_dashboard/` that users can see
 ships to testers:
 
 - **iOS:** bump `CURRENT_PROJECT_VERSION` (format `YYYYMMDDNN`) in
-  `ios_dashboard/project.yml`, and `MARKETING_VERSION` when the change is a
-  feature. Run `xcodegen generate` so the project stays in sync (the iOS
-  Build job checks it). Merging to `master` triggers Xcode Cloud, which
-  uploads to TestFlight; confirm the build reaches `VALID`.
-  `ios_dashboard/scripts/testflight-local.sh` uploads from a Mac when Xcode
-  Cloud is unavailable.
-- **Android:** bump `orbVersionCode` (and `orbVersionName` for a feature) in
-  `android_dashboard/gradle.properties`. Keep `orbVersionName` aligned with
-  the iOS `MARKETING_VERSION`.
+  `ios_dashboard/project.yml`, and **always bump `MARKETING_VERSION` (e.g.
+  `1.7.0` -> `1.8.0`) when releasing a feature or big change** so it visibly
+  surfaces as a new version train in TestFlight instead of staying under the
+  old version number. Run `xcodegen generate` (or update `project.pbxproj` in
+  lockstep) so the project stays in sync (the iOS Build job checks it). Merging
+  to `master` triggers Xcode Cloud, which uploads to TestFlight; confirm the
+  build reaches `VALID`. `ios_dashboard/scripts/testflight-local.sh` uploads
+  from a Mac when Xcode Cloud is unavailable.
+- **Android:** bump `orbVersionCode` (and always bump `orbVersionName` for a
+  feature or big change) in `android_dashboard/gradle.properties`. Keep
+  `orbVersionName` aligned with the iOS `MARKETING_VERSION`.
 - One version bump per PR is enough; do not bump in every commit.
 
 ## Repository map
