@@ -846,10 +846,16 @@ export function isBtwMission(mission: Pick<Mission, "tags">): boolean {
 
 /** Last known copy of each parent fetched by id, so a transient failure never
  * drops an existing parent and turns its workers into roots. */
-const ancestorCache = new Map<string, Mission>();
+const ancestorCache = new Map<string, {row: Mission; at: number}>();
+/** Parents that fell off the activity-ordered page are, by construction, not
+ * recently active: reuse a fetched copy for a while instead of re-reading
+ * every missing parent on each sidebar poll (12 parents meant ~2 req/s). */
+export const ANCESTOR_TTL_MS = 60_000;
 async function fetchAncestor(id: string): Promise<Mission | null> {
-  try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`, {signal:AbortSignal.timeout(5000)}); ancestorCache.set(id, row); return row; }
-  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return ancestorCache.get(id) ?? null; }
+  const cached = ancestorCache.get(id);
+  if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return cached.row;
+  try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`, {signal:AbortSignal.timeout(5000)}); ancestorCache.set(id, {row, at: Date.now()}); return row; }
+  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached?.row ?? null; }
 }
 // The sidebar's parent resolver: null only when Core says the parent is gone.
 configureParentResolver(async id => {
