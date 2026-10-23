@@ -616,9 +616,21 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 // not loaded the state is unknown and nothing is destroyed.
                 let store = st.control.loaded_mission_store(&tenant).await?;
                 match store.get_mission(uuid).await {
-                    Ok(Some(m)) => Some(crate::managed::owner_state_for_status(
-                        &m.status.to_string(),
-                    )),
+                    Ok(Some(m)) => {
+                        let since = m
+                            .activity
+                            .last_status_change_at
+                            .as_deref()
+                            .or(m.interrupted_at.as_deref())
+                            .unwrap_or(&m.updated_at);
+                        let since = chrono::DateTime::parse_from_rfc3339(since)
+                            .map(|t| t.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now());
+                        Some(crate::managed::owner_state_for_status(
+                            &m.status.to_string(),
+                            since,
+                        ))
+                    }
                     Ok(None) => Some(crate::managed::OwnerState::Missing),
                     Err(_) => None,
                 }

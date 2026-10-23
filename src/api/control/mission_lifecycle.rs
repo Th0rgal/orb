@@ -392,6 +392,7 @@ pub async fn clone_mission(
         origin_session_id: source.origin_session_id.clone(),
         attachments: None,
         placement: None,
+        claim_managed_machine_id: None,
         extra: Default::default(),
     };
 

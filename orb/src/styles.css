@@ -4002,6 +4002,10 @@ select.orb-select-native:disabled { cursor: default; }
   border-radius: 999px; border: 1px solid var(--stroke); background: transparent; color: var(--fg-2); font: 12px var(--sans);
 }
 .managed-mission-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.managed-owner-chip { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: var(--hover-2); color: var(--fg-3); white-space: nowrap; }
+.managed-owner-chip.managed-no-owner { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+.managed-no-owner-reason { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.managed-reap { color: var(--amber); }
 .managed-mission-chip:hover { background: var(--bg-active); color: var(--fg); }
 .managed-line2 { display: flex; align-items: center; flex-wrap: wrap; column-gap: 14px; row-gap: 2px; padding-left: 20px; font: 12px/16px var(--sans); color: var(--fg-3); font-variant-numeric: tabular-nums; min-width: 0; }
 .managed-line2.managed-error { color: var(--red); }

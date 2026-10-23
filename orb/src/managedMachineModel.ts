@@ -21,7 +21,14 @@ export interface ManagedMachine {
   cost_usd: number;
   usd_per_hour: number;
   owner_mission_id?: string | null;
+  /** Mission that rented it for the owner (e.g. a start_mission caller). */
+  requested_by_mission_id?: string | null;
+  /** "mission" | "user"; absent on legacy rows (shown as "No owner"). */
+  owner_kind?: string | null;
   reason?: string | null;
+  /** When the lifecycle reaper will destroy it, and the reason it will record. */
+  reap_at?: string | null;
+  reap_reason?: string | null;
   error?: string | null;
   ledger_closed: boolean;
 }
@@ -215,4 +222,28 @@ export function spendDayDetail(d: DailySpend, title: (missionId: string) => stri
   const parts = d.missions.slice(0, top).map(m => `${name(m.mission_id)} ${usd(m.usd)}`);
   const { more } = topMissions(d, top);
   return `${spendDayLabel(d.day)} · ${usd(d.usd)}${parts.length ? ` · ${parts.join(", ")}` : ""}${more > 0 ? ` +${more} more` : ""}`;
+}
+
+/** Who owns a machine, for the owner chip (spec: docs/specs/managed-vm-lifecycle.md). */
+export type MachineOwner = { kind: "mission"; missionId: string } | { kind: "user" } | { kind: "none" };
+export function machineOwner(m: Pick<ManagedMachine, "owner_mission_id" | "owner_kind">): MachineOwner {
+  if (m.owner_mission_id) return { kind: "mission", missionId: m.owner_mission_id };
+  return m.owner_kind === "user" ? { kind: "user" } : { kind: "none" };
+}
+
+/** Human text for a reap reason: "owner_completed" -> "owner completed". */
+export const reapReasonLabel = (reason: string) => ({
+  ttl_expired: "TTL", idle_no_owner: "idle, no owner", idle_user_owned: "idle",
+  owner_missing: "owner deleted",
+}[reason] ?? reason.replace(/^owner_/, "owner ").replace(/_idle$/, ", idle").replace(/_/g, " "));
+
+/** "Reaps in 4 min (owner completed)", "Reap due (owner failed)"; null when nothing is scheduled. */
+export function reapLine(m: Pick<ManagedMachine, "reap_at" | "reap_reason" | "state">, now = Date.now()): string | null {
+  if (!m.reap_at || !isLive(m)) return null;
+  const at = Date.parse(m.reap_at);
+  if (!Number.isFinite(at)) return null;
+  const why = m.reap_reason ? ` (${reapReasonLabel(m.reap_reason)})` : "";
+  const min = Math.ceil((at - now) / 60_000);
+  if (min <= 0) return `Reap due${why}`;
+  return min < 60 ? `Reaps in ${min} min${why}` : `Reaps in ${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")} min${why}`;
 }

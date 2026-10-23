@@ -234,4 +234,17 @@ class OrbManagedMachinesTest {
         val failed = ms[0].copy(id = "m3", state = "failed", destroyedAt = "2026-10-22T10:00:00Z")
         assertEquals(listOf("m3", "m2"), OrbManagedMachines.recentMachines(ms + failed, destroyedAt + 3_600_000L).map { it.id })
     }
+
+    @Test
+    fun ownerAndReapLine() {
+        val base = parsed().machines.first().copy(state = "online", ownerMissionId = null, ownerKind = null)
+        assertEquals(OrbManagedMachines.Owner.None, OrbManagedMachines.owner(base))
+        assertEquals(OrbManagedMachines.Owner.User, OrbManagedMachines.owner(base.copy(ownerKind = "user")))
+        assertEquals(OrbManagedMachines.Owner.Mission("m1"), OrbManagedMachines.owner(base.copy(ownerMissionId = "m1")))
+        val now = OrbManagedMachines.parseTime("2026-10-23T12:00:00Z")!!
+        assertEquals("Reaps in 5 min (owner completed)", OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-23T12:04:10Z", reapReason = "owner_completed"), now))
+        assertEquals("Reap due (owner interrupted, idle)", OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-23T11:59:00Z", reapReason = "owner_interrupted_idle"), now))
+        assertEquals("Reaps in 1 h 30 min (idle, no owner)", OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-23T13:30:00Z", reapReason = "idle_no_owner"), now))
+        assertNull(OrbManagedMachines.reapLine(base.copy(state = "destroyed", reapAt = "2026-10-23T12:04:00Z"), now))
+    }
 }

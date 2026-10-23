@@ -19,11 +19,19 @@
 //! `SANDBOXED_MANAGED_MAX_TTL_MINUTES` (720), `SANDBOXED_MANAGED_DEFAULT_SIZE`
 //! (small), `SANDBOXED_MANAGED_MAX_SIZE` (xlarge), `SANDBOXED_MANAGED_IMAGE`
 //! (orb-node-base), `SANDBOXED_MANAGED_CORE_URL` (defaults to
-//! `SANDBOXED_PUBLIC_URL`), `SANDBOXED_MANAGED_IDLE_MINUTES` (15),
-//! `SANDBOXED_MANAGED_RECONCILE_SECS` (300).
+//! `SANDBOXED_PUBLIC_URL`), `SANDBOXED_MANAGED_IDLE_MINUTES` (30),
+//! `SANDBOXED_MANAGED_OWNER_GRACE_MINUTES` (5),
+//! `SANDBOXED_MANAGED_WAITING_GRACE_MINUTES` (60),
+//! `SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES` (10),
+//! `SANDBOXED_MANAGED_RECONCILE_SECS` (120).
+//!
+//! Lifecycle (ownership, reaping, reconciliation): `docs/specs/managed-vm-lifecycle.md`.
 
 pub mod boat;
+pub mod lifecycle;
 pub mod relay;
+
+pub use lifecycle::{owner_state_for_status, LifecyclePolicy, Owner, OwnerState, ReapDecision};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -172,7 +180,23 @@ pub struct ManagedSettings {
     #[serde(skip)]
     pub core_url: Option<String>,
     pub idle_minutes: u64,
+    /// Grace after the owner mission ended or vanished.
+    pub owner_grace_minutes: u64,
+    /// How long an owner may be interrupted/awaiting before its idle VM goes.
+    pub waiting_grace_minutes: u64,
+    /// Grace before a provider VM unknown to the registry is stopped.
+    pub orphan_grace_minutes: u64,
     pub reconcile_secs: u64,
+}
+
+impl ManagedSettings {
+    pub fn policy(&self) -> LifecyclePolicy {
+        LifecyclePolicy {
+            idle_minutes: self.idle_minutes as i64,
+            ended_grace_minutes: self.owner_grace_minutes as i64,
+            waiting_grace_minutes: self.waiting_grace_minutes as i64,
+        }
+    }
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
@@ -258,8 +282,12 @@ impl ManagedSettings {
                 .or_else(|| std::env::var("SANDBOXED_PUBLIC_URL").ok())
                 .map(|u| u.trim().trim_end_matches('/').to_string())
                 .filter(|u| !u.is_empty()),
-            idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(15),
-            reconcile_secs: env_parse("SANDBOXED_MANAGED_RECONCILE_SECS").unwrap_or(300),
+            idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(30),
+            owner_grace_minutes: env_parse("SANDBOXED_MANAGED_OWNER_GRACE_MINUTES").unwrap_or(5),
+            waiting_grace_minutes: env_parse("SANDBOXED_MANAGED_WAITING_GRACE_MINUTES")
+                .unwrap_or(60),
+            orphan_grace_minutes: env_parse("SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES").unwrap_or(10),
+            reconcile_secs: env_parse("SANDBOXED_MANAGED_RECONCILE_SECS").unwrap_or(120),
         }
     }
 }
@@ -317,13 +345,29 @@ pub struct ManagedMachine {
     pub cost_usd: f64,
     #[serde(default)]
     pub cost_is_metered: bool,
+    /// The mission this machine serves: its lifetime governs the machine.
     #[serde(default)]
     pub owner_mission_id: Option<String>,
+    /// The mission that asked for it (e.g. the caller of `start_mission`
+    /// with `auto-managed`), when different from the owner. Informational:
+    /// it does not keep the machine alive.
+    #[serde(default)]
+    pub requested_by_mission_id: Option<String>,
+    /// `mission` or `user` (created from Orb/API without a mission). Absent on
+    /// legacy rows: shown as "No owner".
+    #[serde(default)]
+    pub owner_kind: Option<String>,
     /// Tenant (user id) whose mission store holds `owner_mission_id`.
     #[serde(default)]
     pub owner_user_id: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// When the reaper will destroy this machine, if a rule applies.
+    #[serde(default)]
+    pub reap_at: Option<DateTime<Utc>>,
+    /// The `destroy_reason` the scheduled reap will record.
+    #[serde(default)]
+    pub reap_reason: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
     pub ledger_closed: bool,
@@ -364,6 +408,8 @@ pub struct SpawnRequest {
     pub image: Option<String>,
     pub reason: Option<String>,
     pub owner_mission_id: Option<String>,
+    #[serde(default)]
+    pub requested_by_mission_id: Option<String>,
     /// Set by the API from the authenticated caller; never from the body.
     #[serde(skip)]
     pub owner_user_id: Option<String>,
@@ -407,17 +453,6 @@ static TOKENS: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static MANAGER: OnceLock<Arc<ManagedManager>> = OnceLock::new();
 
-/// Lifecycle of a machine's owning mission, as seen by the reaper.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnerState {
-    /// Running, queued, awaiting the user, interrupted (resumable), paused...
-    Live,
-    /// Completed, failed, not feasible or acknowledged: it will not run again.
-    Terminal,
-    /// The mission no longer exists (deleted).
-    Missing,
-}
-
 pub type OwnerProbe = Arc<
     dyn Fn(
             String,
@@ -427,18 +462,6 @@ pub type OwnerProbe = Arc<
         + Send
         + Sync,
 >;
-
-/// Map a mission status (its Display string) to an [`OwnerState`].
-/// `interrupted` and `blocked` stay live: deploy restarts interrupt missions
-/// that are then resumed, and blocked missions await resolution.
-pub fn owner_state_for_status(status: &str) -> OwnerState {
-    match status {
-        "completed" | "failed" | "not_feasible" | "acknowledged" | "cancelled" => {
-            OwnerState::Terminal
-        }
-        _ => OwnerState::Live,
-    }
-}
 
 static ALIASES: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -593,6 +616,31 @@ pub struct ManagedManager {
     pub relay: relay::RelayHub,
     owner_probe: std::sync::RwLock<Option<OwnerProbe>>,
     runtime: std::sync::RwLock<RuntimeSettings>,
+    /// Reconciler memory (not persisted; a restart restarts the graces).
+    reconcile_state: Mutex<ReconcileState>,
+}
+
+#[derive(Default)]
+struct ReconcileState {
+    /// Provider VM id -> first pass that saw it unknown to the registry.
+    orphans_seen: HashMap<String, DateTime<Utc>>,
+    /// Registry id -> consecutive passes whose provider list lacked its VM.
+    vanished_passes: HashMap<String, u32>,
+    /// "machine:reason" already reported as `would_reap` (dry-run).
+    would_reap_logged: std::collections::HashSet<String>,
+}
+
+/// One row of the reap plan (`GET /api/managed-machines/reap-plan`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ReapPlanEntry {
+    pub machine_id: String,
+    pub name: String,
+    pub owner_mission_id: Option<String>,
+    pub owner_kind: Option<String>,
+    pub busy: bool,
+    pub owner_state: Option<String>,
+    #[serde(flatten)]
+    pub decision: ReapDecision,
 }
 
 /// Operator toggles persisted in `managed_settings.json`.
@@ -602,6 +650,12 @@ pub struct RuntimeSettings {
     /// owner rented. Default on (`SANDBOXED_MANAGED_ANTIGRAVITY=0` disables).
     #[serde(default = "default_true")]
     pub antigravity_on_managed: bool,
+    /// Lifecycle reaper in dry-run: owner/idle/orphan decisions are recorded
+    /// (`would_reap` in the ledger, `reap_at` on the row) but nothing is
+    /// destroyed. TTL expiry always destroys. Default on until an operator
+    /// has reviewed `GET /api/managed-machines/reap-plan`.
+    #[serde(default = "default_true")]
+    pub reaper_dry_run: bool,
 }
 
 fn default_true() -> bool {
@@ -613,6 +667,12 @@ impl Default for RuntimeSettings {
         Self {
             antigravity_on_managed: !matches!(
                 std::env::var("SANDBOXED_MANAGED_ANTIGRAVITY")
+                    .ok()
+                    .as_deref(),
+                Some("0" | "false" | "no" | "off")
+            ),
+            reaper_dry_run: !matches!(
+                std::env::var("SANDBOXED_MANAGED_REAPER_DRY_RUN")
                     .ok()
                     .as_deref(),
                 Some("0" | "false" | "no" | "off")
@@ -820,6 +880,7 @@ impl ManagedManager {
             relay: relay::RelayHub::default(),
             owner_probe: std::sync::RwLock::new(None),
             runtime: std::sync::RwLock::new(RuntimeSettings::default()),
+            reconcile_state: Mutex::new(ReconcileState::default()),
         }
     }
 
@@ -840,10 +901,84 @@ impl ManagedManager {
             return Some(m);
         }
         let m = self
-            .update(&m.id, |m| m.owner_mission_id = Some(mission_id.to_string()))
+            .update(&m.id, |m| {
+                m.owner_mission_id = Some(mission_id.to_string());
+                m.owner_kind = Some("mission".into());
+            })
             .await?;
         self.ledger("adopted", &m);
         Some(m)
+    }
+
+    /// Give a machine to the mission it was rented for. Only an unowned
+    /// machine, or one owned by `requested_by` (the caller that rented it
+    /// for this mission), can be claimed: a mission never takes over another
+    /// tree's machine this way.
+    pub async fn claim_for_mission(
+        &self,
+        id: &str,
+        mission_id: &str,
+        requested_by: Option<&str>,
+        tenant: Option<&str>,
+    ) -> Result<ManagedMachine, ManagedError> {
+        let m = self
+            .get(id)
+            .await
+            .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        if !m.state.is_live() {
+            return Err(ManagedError::new("not_live", 409, "Machine is not running"));
+        }
+        // Tenant boundary: only the machine's own user may claim it. A row
+        // without a recorded tenant (legacy) belongs to the single owner.
+        if let (Some(owner), Some(caller)) = (m.owner_user_id.as_deref(), tenant) {
+            if owner != caller {
+                return Err(ManagedError::new(
+                    "forbidden",
+                    403,
+                    "Managed machine belongs to another user",
+                ));
+            }
+        } else if m.owner_user_id.is_some() && tenant.is_none() {
+            return Err(ManagedError::new(
+                "forbidden",
+                403,
+                "Managed machine belongs to another user",
+            ));
+        }
+        if m.owner_mission_id.as_deref() == Some(mission_id) {
+            return Ok(m);
+        }
+        let claimable = match m.owner_mission_id.as_deref() {
+            None => true,
+            Some(current) => requested_by == Some(current),
+        };
+        if !claimable {
+            return Err(ManagedError::new(
+                "owned",
+                409,
+                "Managed machine already belongs to another mission",
+            ));
+        }
+        let m = self
+            .update(&m.id, |m| {
+                let previous = m.owner_mission_id.take();
+                m.requested_by_mission_id = requested_by
+                    .map(str::to_string)
+                    .or(previous)
+                    .or(m.requested_by_mission_id.take())
+                    .filter(|r| r != mission_id);
+                m.owner_mission_id = Some(mission_id.to_string());
+                m.owner_kind = Some("mission".into());
+                if m.owner_user_id.is_none() {
+                    m.owner_user_id = tenant.map(str::to_string);
+                }
+                m.reap_at = None;
+                m.reap_reason = None;
+            })
+            .await
+            .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        self.ledger("owner_set", &m);
+        Ok(m)
     }
 
     fn runtime_path(&self) -> PathBuf {
@@ -1258,9 +1393,23 @@ impl ManagedManager {
                 destroy_reason: None,
                 cost_usd: 0.0,
                 cost_is_metered: false,
+                owner_kind: Some(
+                    if req.owner_mission_id.is_some() {
+                        "mission"
+                    } else {
+                        "user"
+                    }
+                    .into(),
+                ),
+                requested_by_mission_id: req
+                    .requested_by_mission_id
+                    .clone()
+                    .filter(|r| req.owner_mission_id.as_ref() != Some(r)),
                 owner_mission_id: req.owner_mission_id.clone(),
                 owner_user_id: req.owner_user_id.clone(),
                 reason: req.reason.clone(),
+                reap_at: None,
+                reap_reason: None,
                 error: None,
                 ledger_closed: false,
                 last_busy_at: None,
@@ -1607,76 +1756,141 @@ impl ManagedManager {
         }
     }
 
-    /// One reaper pass: TTL, idle and cost refresh. Reconcile runs separately.
+    fn dry_run(&self) -> bool {
+        self.runtime_settings().reaper_dry_run
+    }
+
+    fn node_busy(node_id: &str) -> bool {
+        crate::remote_node::global_fleet()
+            .as_ref()
+            .and_then(|f| f.get(node_id))
+            .and_then(|c| c.last_heartbeat)
+            .is_some_and(|hb| hb.active_jobs > 0 || hb.active_leases > 0 || hb.queued_jobs > 0)
+    }
+
+    async fn owner_of(&self, m: &ManagedMachine) -> Owner {
+        let Some(owner) = m.owner_mission_id.clone() else {
+            return if m.owner_kind.as_deref() == Some("user") {
+                Owner::User
+            } else {
+                Owner::None
+            };
+        };
+        // Without a recorded tenant the owner's store is unknown: never
+        // destroy on the owner rule.
+        let Some(tenant) = m.owner_user_id.clone() else {
+            return Owner::Mission(None);
+        };
+        let probe = self.owner_probe.read().ok().and_then(|p| p.clone());
+        match probe {
+            Some(probe) => Owner::Mission(probe(tenant, owner).await),
+            None => Owner::Mission(None),
+        }
+    }
+
+    /// The decision for one live, online machine this pass.
+    async fn decide_for(&self, m: &ManagedMachine, now: DateTime<Utc>) -> (ReapDecision, Owner) {
+        let busy = Self::node_busy(&m.node_id);
+        let owner = self.owner_of(m).await;
+        let facts = lifecycle::ReapFacts {
+            now,
+            expires_at: m.expires_at,
+            busy,
+            idle_since: if busy {
+                now
+            } else {
+                m.last_busy_at.unwrap_or(m.created_at)
+            },
+            owner,
+            scheduled: m.reap_reason.clone().zip(m.reap_at),
+        };
+        (lifecycle::decide(&facts, &self.settings.policy()), owner)
+    }
+
+    /// What the reaper would do for every live machine, without acting.
+    pub async fn reap_plan(&self) -> Vec<ReapPlanEntry> {
+        let now = Utc::now();
+        let machines = self.machines.lock().await.clone();
+        let mut out = Vec::new();
+        for m in machines.iter().filter(|m| m.state == MachineState::Online) {
+            let (decision, owner) = self.decide_for(m, now).await;
+            out.push(ReapPlanEntry {
+                machine_id: m.id.clone(),
+                name: m.name.clone(),
+                owner_mission_id: m.owner_mission_id.clone(),
+                owner_kind: m.owner_kind.clone(),
+                busy: Self::node_busy(&m.node_id),
+                owner_state: Some(format!("{owner:?}")),
+                decision,
+            });
+        }
+        out
+    }
+
+    /// One reaper pass: lifecycle rules (spec), TTL and cost refresh.
+    /// Reconcile runs separately.
     pub async fn reap_once(&self) {
         let now = Utc::now();
         let machines = self.machines.lock().await.clone();
-        let fleet = crate::remote_node::global_fleet();
+        let dry_run = self.dry_run();
         for m in machines {
             match m.state {
                 MachineState::Online | MachineState::Enrolling | MachineState::Provisioning => {
-                    let ttl_expired = now >= m.expires_at;
-                    if crate::orb_spec::vm_should_reap(crate::orb_spec::VmReapInput {
-                        ttl_expired,
-                        busy: true,
-                        owner_ended: false,
-                        idle_expired: false,
-                    }) {
-                        let _ = self
-                            .destroy_inner(&m.id, Some("ttl_expired".into()), false)
-                            .await;
-                        continue;
-                    }
-                    if m.state == MachineState::Online {
-                        let busy = fleet
-                            .as_ref()
-                            .and_then(|f| f.get(&m.node_id))
-                            .and_then(|c| c.last_heartbeat)
-                            .is_some_and(|hb| {
-                                hb.active_jobs > 0 || hb.active_leases > 0 || hb.queued_jobs > 0
-                            });
-                        // The owning mission ended: destroy now unless a job
-                        // (e.g. a child still running there) keeps it busy.
-                        if !busy {
-                            if let (Some(owner), Some(tenant)) =
-                                (m.owner_mission_id.clone(), m.owner_user_id.clone())
-                            {
-                                let probe = self.owner_probe.read().ok().and_then(|p| p.clone());
-                                if let Some(probe) = probe {
-                                    let owner_ended = matches!(
-                                        probe(tenant, owner).await,
-                                        Some(OwnerState::Terminal | OwnerState::Missing)
-                                    );
-                                    if crate::orb_spec::vm_should_reap(
-                                        crate::orb_spec::VmReapInput {
-                                            ttl_expired: false,
-                                            busy,
-                                            owner_ended,
-                                            idle_expired: false,
-                                        },
-                                    ) {
-                                        let _ = self
-                                            .destroy_inner(&m.id, Some("owner_ended".into()), false)
-                                            .await;
-                                        continue;
-                                    }
-                                }
-                            }
+                    if m.state != MachineState::Online {
+                        // Not yet serving: only the TTL applies.
+                        if now >= m.expires_at {
+                            let _ = self
+                                .destroy_inner(&m.id, Some("ttl_expired".into()), false)
+                                .await;
+                            continue;
                         }
+                    } else {
+                        let busy = Self::node_busy(&m.node_id);
                         if busy {
                             self.update(&m.id, |m| m.last_busy_at = Some(now)).await;
-                        } else if self.settings.idle_minutes > 0 {
-                            let since = m.last_busy_at.unwrap_or(m.created_at);
-                            let idle_expired =
-                                (now - since).num_minutes() >= self.settings.idle_minutes as i64;
-                            if crate::orb_spec::vm_should_reap(crate::orb_spec::VmReapInput {
-                                ttl_expired: false,
-                                busy,
-                                owner_ended: false,
-                                idle_expired,
-                            }) {
-                                let _ = self.destroy_inner(&m.id, Some("idle".into()), false).await;
-                                continue;
+                        }
+                        let (decision, _) = self.decide_for(&m, now).await;
+                        match &decision {
+                            ReapDecision::Destroy { reason } => {
+                                let ttl = reason == "ttl_expired";
+                                // Lean gate (`orb_vm_step`, reap_check).
+                                let admitted =
+                                    crate::orb_spec::vm_should_reap(crate::orb_spec::VmReapInput {
+                                        ttl_expired: ttl,
+                                        busy,
+                                        owner_ended: !ttl && decision.is_owner_rule(),
+                                        idle_expired: !ttl && !decision.is_owner_rule(),
+                                    });
+                                if admitted && (ttl || !dry_run) {
+                                    let _ = self
+                                        .destroy_inner(&m.id, Some(reason.clone()), false)
+                                        .await;
+                                    continue;
+                                }
+                                if admitted {
+                                    self.note_would_reap(&m, reason, now).await;
+                                }
+                            }
+                            ReapDecision::Schedule { reason, at } => {
+                                if m.reap_reason.as_deref() != Some(reason)
+                                    || m.reap_at != Some(*at)
+                                {
+                                    let (reason, at) = (reason.clone(), *at);
+                                    self.update(&m.id, |m| {
+                                        m.reap_reason = Some(reason);
+                                        m.reap_at = Some(at);
+                                    })
+                                    .await;
+                                }
+                            }
+                            ReapDecision::Keep => {
+                                if m.reap_at.is_some() || m.reap_reason.is_some() {
+                                    self.update(&m.id, |m| {
+                                        m.reap_at = None;
+                                        m.reap_reason = None;
+                                    })
+                                    .await;
+                                }
                             }
                         }
                     }
@@ -1702,47 +1916,174 @@ impl ManagedManager {
         }
     }
 
-    /// Compare provider state with the registry: stop orphans (our tagged
-    /// sandboxes with no live registry row) and close rows whose machine
-    /// the provider already stopped.
+    /// Dry-run: keep the due reap visible on the row and log it once.
+    async fn note_would_reap(&self, m: &ManagedMachine, reason: &str, now: DateTime<Utc>) {
+        if m.reap_reason.as_deref() != Some(reason) || m.reap_at.is_none() {
+            let r = reason.to_string();
+            self.update(&m.id, |m| {
+                m.reap_reason = Some(r);
+                m.reap_at = Some(now);
+            })
+            .await;
+        }
+        let key = format!("{}:{reason}", m.id);
+        if self
+            .reconcile_state
+            .lock()
+            .await
+            .would_reap_logged
+            .insert(key)
+        {
+            tracing::warn!(machine = %m.id, name = %m.name, %reason, "managed reaper (dry-run) would destroy");
+            let mut row = m.clone();
+            row.destroy_reason = Some(reason.to_string());
+            self.ledger("would_reap", &row);
+        }
+    }
+
+    /// Compare provider state with the registry. Provider VMs carrying our
+    /// name prefix with no live registry row are stopped after
+    /// `orphan_grace_minutes` (dry-run: reported only). Live rows whose VM
+    /// the provider stopped, or no longer lists for two passes, are closed.
     pub async fn reconcile_once(&self) -> Result<Value, String> {
         let Some(provider) = &self.provider else {
             return Ok(serde_json::json!({"skipped": "no provider"}));
         };
         let remote = provider.list().await?;
         let machines = self.machines.lock().await.clone();
+        let now = Utc::now();
+        let dry_run = self.dry_run();
+        let grace = chrono::Duration::minutes(self.settings.orphan_grace_minutes as i64);
         let mut orphans_stopped = Vec::new();
+        let mut orphans_pending = Vec::new();
+        let mut orphan_ids = std::collections::HashSet::new();
         for pm in &remote {
             if !pm.name.starts_with(SANDBOX_NAME_PREFIX) || boat::is_stopped_state(&pm.state) {
                 continue;
             }
             let live = machines
                 .iter()
-                .any(|m| m.provider_id.as_deref() == Some(&pm.provider_id) && m.state.is_live());
-            if !live {
-                tracing::warn!(sandbox = %pm.provider_id, "stopping orphan managed sandbox");
-                if provider.destroy(&pm.provider_id).await.is_ok() {
-                    orphans_stopped.push(pm.provider_id.clone());
+                .any(|m| m.provider_id.as_deref() == Some(&pm.provider_id) && m.state.is_live())
+                // A spawn in flight has a row but no provider id yet.
+                || machines.iter().any(|m| {
+                    m.provider_id.is_none()
+                        && m.state.is_live()
+                        && pm.name == format!("{SANDBOX_NAME_PREFIX}{}", m.id)
+                });
+            if live {
+                continue;
+            }
+            orphan_ids.insert(pm.provider_id.clone());
+            let first = *self
+                .reconcile_state
+                .lock()
+                .await
+                .orphans_seen
+                .entry(pm.provider_id.clone())
+                .or_insert(now);
+            if now - first < grace || dry_run {
+                if now - first >= grace {
+                    tracing::warn!(sandbox = %pm.provider_id, "managed reconcile (dry-run) would stop orphan sandbox");
                 }
+                orphans_pending.push(serde_json::json!({
+                    "provider_id": pm.provider_id,
+                    "name": pm.name,
+                    "first_seen": first,
+                    "stop_at": first + grace,
+                }));
+                continue;
+            }
+            tracing::warn!(sandbox = %pm.provider_id, "stopping orphan managed sandbox");
+            if provider.destroy(&pm.provider_id).await.is_ok() {
+                orphans_stopped.push(pm.provider_id.clone());
             }
         }
+        self.reconcile_state
+            .lock()
+            .await
+            .orphans_seen
+            .retain(|id, _| orphan_ids.contains(id));
+
         let mut closed = Vec::new();
+        let mut vanished = Vec::new();
         for m in machines.iter().filter(|m| m.state.is_live()) {
             let Some(pid) = &m.provider_id else { continue };
-            if let Some(pm) = remote.iter().find(|p| &p.provider_id == pid) {
-                if boat::is_stopped_state(&pm.state) && m.state == MachineState::Online {
-                    let _ = self
-                        .destroy_inner(&m.id, Some("stopped_by_provider".into()), false)
-                        .await;
-                    closed.push(m.id.clone());
+            match remote.iter().find(|p| &p.provider_id == pid) {
+                Some(pm) => {
+                    self.reconcile_state
+                        .lock()
+                        .await
+                        .vanished_passes
+                        .remove(&m.id);
+                    if boat::is_stopped_state(&pm.state) && m.state == MachineState::Online {
+                        let _ = self
+                            .destroy_inner(&m.id, Some("stopped_by_provider".into()), false)
+                            .await;
+                        closed.push(m.id.clone());
+                    }
                 }
+                // An empty list while we know live VMs is more likely a
+                // provider glitch than every VM vanishing: wait for proof.
+                None if !remote.is_empty() && m.state == MachineState::Online => {
+                    let passes = {
+                        let mut st = self.reconcile_state.lock().await;
+                        let n = st.vanished_passes.entry(m.id.clone()).or_insert(0);
+                        *n += 1;
+                        *n
+                    };
+                    if passes >= 2 {
+                        self.mark_vanished(&m.id).await;
+                        self.reconcile_state
+                            .lock()
+                            .await
+                            .vanished_passes
+                            .remove(&m.id);
+                        vanished.push(m.id.clone());
+                    }
+                }
+                None => {}
             }
         }
         Ok(serde_json::json!({
             "provider_machines": remote.len(),
+            "dry_run": dry_run,
             "orphans_stopped": orphans_stopped,
+            "orphans_pending": orphans_pending,
             "closed_rows": closed,
+            "vanished_rows": vanished,
         }))
+    }
+
+    /// The provider no longer has this VM: close the row without a provider
+    /// call (nothing is left to stop) and settle the ledger.
+    async fn mark_vanished(&self, id: &str) {
+        let Some(m) = self
+            .update(id, |m| {
+                m.state = MachineState::Destroyed;
+                m.destroyed_at = Some(Utc::now());
+                if m.destroy_reason.is_none() {
+                    m.destroy_reason = Some("provider_vanished".into());
+                }
+                if !m.cost_is_metered {
+                    m.cost_usd = m.estimated_cost(Utc::now());
+                }
+            })
+            .await
+        else {
+            return;
+        };
+        unregister_node(&m);
+        self.relay.close(&m.id).await;
+        self.ledger("destroyed", &m);
+        self.refresh_usage(id).await;
+        // The provider may not meter a VM it no longer knows: close anyway.
+        if let Some(m) = self.get(id).await {
+            if !m.ledger_closed {
+                if let Some(m) = self.update(id, |m| m.ledger_closed = true).await {
+                    self.ledger("ledger_closed", &m);
+                }
+            }
+        }
     }
 }
 

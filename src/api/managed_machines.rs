@@ -46,12 +46,14 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
         .route("/api/managed-machines", get(list).post(spawn))
         .route("/api/managed-machines/reconcile", post(reconcile))
         .route("/api/managed-machines/spend", get(spend))
+        .route("/api/managed-machines/reap-plan", get(reap_plan))
         .route(
             "/api/managed-machines/settings",
             get(get_settings).put(put_settings),
         )
         .route("/api/managed-machines/:id", get(get_one).delete(destroy))
         .route("/api/managed-machines/:id/extend", post(extend))
+        .route("/api/managed-machines/:id/owner", post(set_owner))
 }
 
 pub fn public_routes() -> Router<Arc<AppState>> {
@@ -132,6 +134,65 @@ async fn spawn(
     }
 }
 
+/// What the lifecycle reaper would do now for each live machine, and
+/// whether it is in dry-run. Read-only.
+async fn reap_plan() -> Response {
+    match manager() {
+        Ok(m) => Json(json!({
+            "dry_run": m.runtime_settings().reaper_dry_run,
+            "policy": m.settings.policy(),
+            "machines": m.reap_plan().await,
+        }))
+        .into_response(),
+        Err(r) => r,
+    }
+}
+
+#[derive(Deserialize)]
+struct OwnerBody {
+    owner_mission_id: uuid::Uuid,
+}
+
+/// Record the mission a machine serves (backfill of ownerless machines).
+/// The mission must exist in the caller's own store and the machine must be
+/// the caller's. No requester is accepted from the body: this REST call has
+/// no mission attribution, so only an unowned machine can be claimed here
+/// (a previous owner, if any, becomes the requester server-side).
+async fn set_owner(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Json(body): Json<OwnerBody>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let exists = match state.control.loaded_mission_store(&user.id).await {
+        Some(store) => matches!(store.get_mission(body.owner_mission_id).await, Ok(Some(_))),
+        None => false,
+    };
+    if !exists {
+        return err(ManagedError {
+            error: "unknown_mission",
+            message: "Owner mission not found".into(),
+            status: 404,
+        });
+    }
+    match m
+        .claim_for_mission(
+            &id,
+            &body.owner_mission_id.to_string(),
+            None,
+            Some(&user.id),
+        )
+        .await
+    {
+        Ok(machine) => Json(machine).into_response(),
+        Err(e) => err(e),
+    }
+}
+
 #[derive(Deserialize)]
 struct ExtendBody {
     ttl_minutes: u64,
@@ -166,11 +227,29 @@ async fn get_settings() -> Response {
     }
 }
 
-async fn put_settings(Json(body): Json<crate::managed::RuntimeSettings>) -> Response {
+/// Partial update: fields absent from the body keep their current value
+/// (a client that only knows `antigravity_on_managed` must not reset
+/// `reaper_dry_run`).
+async fn put_settings(Json(body): Json<serde_json::Value>) -> Response {
     match manager() {
         Ok(m) => {
-            m.set_runtime_settings(body);
-            Json(m.runtime_settings()).into_response()
+            let mut merged = serde_json::to_value(m.runtime_settings()).unwrap_or_default();
+            if let (Some(base), Some(patch)) = (merged.as_object_mut(), body.as_object()) {
+                for (k, v) in patch {
+                    base.insert(k.clone(), v.clone());
+                }
+            }
+            match serde_json::from_value::<crate::managed::RuntimeSettings>(merged) {
+                Ok(settings) => {
+                    m.set_runtime_settings(settings);
+                    Json(m.runtime_settings()).into_response()
+                }
+                Err(e) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"invalid_settings","message":e.to_string()})),
+                )
+                    .into_response(),
+            }
         }
         Err(r) => r,
     }

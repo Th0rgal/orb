@@ -15,8 +15,18 @@ fn settings() -> ManagedSettings {
         allowed_images: vec!["orb-node-base".into()],
         core_url: Some("https://core.example".into()),
         idle_minutes: 30,
+        owner_grace_minutes: 0,
+        waiting_grace_minutes: 60,
+        orphan_grace_minutes: 0,
         reconcile_secs: 300,
     }
+}
+
+fn live_reaper(m: &ManagedManager) {
+    m.set_runtime_settings(RuntimeSettings {
+        antigravity_on_managed: true,
+        reaper_dry_run: false,
+    });
 }
 
 #[derive(Default)]
@@ -135,6 +145,7 @@ fn manager(dir: &std::path::Path, s: ManagedSettings) -> (Arc<ManagedManager>, A
         dir,
         3999,
     ));
+    live_reaper(&m);
     (m, fake)
 }
 
@@ -458,6 +469,10 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         cost_is_metered: false,
         owner_mission_id: None,
         owner_user_id: None,
+        owner_kind: None,
+        requested_by_mission_id: None,
+        reap_at: None,
+        reap_reason: None,
         reason: None,
         error: None,
         ledger_closed: false,
@@ -529,25 +544,6 @@ async fn online_machine_sized(
     .unwrap()
 }
 
-#[test]
-fn owner_status_mapping() {
-    for s in ["completed", "failed", "not_feasible", "acknowledged"] {
-        assert_eq!(owner_state_for_status(s), OwnerState::Terminal, "{s}");
-    }
-    // Deploy restarts interrupt missions that are then resumed; keep their VMs.
-    for s in [
-        "active",
-        "pending",
-        "awaiting_user",
-        "interrupted",
-        "blocked",
-        "paused",
-        "waiting_background",
-    ] {
-        assert_eq!(owner_state_for_status(s), OwnerState::Live, "{s}");
-    }
-}
-
 #[tokio::test]
 async fn machine_is_destroyed_when_owner_ends_and_kept_while_owner_lives() {
     let dir = tempfile::tempdir().unwrap();
@@ -560,14 +556,19 @@ async fn machine_is_destroyed_when_owner_ends_and_kept_while_owner_lives() {
         done.clone()
     };
     let mut map = std::collections::HashMap::new();
-    map.insert("owner-live".to_string(), OwnerState::Live);
-    map.insert("owner-done".to_string(), OwnerState::Terminal);
+    map.insert("owner-live".to_string(), OwnerState::Working);
+    map.insert(
+        "owner-done".to_string(),
+        OwnerState::Terminal {
+            status: "completed",
+        },
+    );
     m.set_owner_probe(probe_from(map));
     m.reap_once().await;
     assert_eq!(m.get(&live.id).await.unwrap().state, MachineState::Online);
     let after = m.get(&gone_m.id).await.unwrap();
     assert_eq!(after.state, MachineState::Destroyed);
-    assert_eq!(after.destroy_reason.as_deref(), Some("owner_ended"));
+    assert_eq!(after.destroy_reason.as_deref(), Some("owner_completed"));
     assert!(after.ledger_closed);
 }
 
@@ -580,8 +581,13 @@ async fn deleted_owner_destroys_and_adoption_keeps_machine() {
     // A live child took b over (e.g. via extend_managed_machine).
     m.adopt(&b.id, "live-child").await.unwrap();
     let mut map = std::collections::HashMap::new();
-    map.insert("finished-parent".to_string(), OwnerState::Terminal);
-    map.insert("live-child".to_string(), OwnerState::Live);
+    map.insert(
+        "finished-parent".to_string(),
+        OwnerState::Terminal {
+            status: "completed",
+        },
+    );
+    map.insert("live-child".to_string(), OwnerState::Working);
     m.set_owner_probe(probe_from(map)); // deleted-parent -> Missing
     m.reap_once().await;
     assert_eq!(m.get(&a.id).await.unwrap().state, MachineState::Destroyed);
@@ -616,7 +622,12 @@ async fn store_miss_in_unknown_tenant_never_destroys() {
     // Terminal owner in the known tenant.
     let ended = online_machine(&m, "ended-mission").await;
     let mut map = std::collections::HashMap::new();
-    map.insert("ended-mission".to_string(), OwnerState::Terminal);
+    map.insert(
+        "ended-mission".to_string(),
+        OwnerState::Terminal {
+            status: "completed",
+        },
+    );
     m.set_owner_probe(probe_from(map)); // foreign/legacy would be "Missing" in t1
     m.reap_once().await;
     assert_eq!(
@@ -709,6 +720,7 @@ async fn antigravity_setting_owner_and_wipe_on_destroy() {
     assert!(!m.antigravity_allowed("ashur").await);
     m.set_runtime_settings(RuntimeSettings {
         antigravity_on_managed: false,
+        reaper_dry_run: false,
     });
     assert!(!m.antigravity_allowed(&mine.node_id).await, "setting off");
     // Persisted across restarts.
@@ -717,6 +729,7 @@ async fn antigravity_setting_owner_and_wipe_on_destroy() {
     assert!(!reloaded.runtime_settings().antigravity_on_managed);
     m.set_runtime_settings(RuntimeSettings {
         antigravity_on_managed: true,
+        reaper_dry_run: false,
     });
     m.mark_antigravity_projected(&mine.node_id).await;
     m.destroy(&mine.id, "test").await.unwrap();
@@ -834,6 +847,10 @@ fn spend_machine(
         cost_is_metered: true,
         owner_mission_id: mission.map(Into::into),
         owner_user_id: None,
+        owner_kind: None,
+        requested_by_mission_id: None,
+        reap_at: None,
+        reap_reason: None,
         reason: None,
         error: None,
         ledger_closed: destroyed.is_some(),
@@ -930,4 +947,260 @@ fn daily_spend_empty_registry_is_all_zero_days() {
         ["2026-10-21", "2026-10-22", "2026-10-23"]
     );
     assert!(days.iter().all(|d| d.usd == 0.0));
+}
+
+// ------------------------------------------------- lifecycle (spec tests)
+
+#[tokio::test]
+async fn dry_run_records_but_never_destroys_except_ttl() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = Some(4);
+    let (m, fake) = manager(dir.path(), s);
+    m.set_runtime_settings(RuntimeSettings {
+        antigravity_on_managed: true,
+        reaper_dry_run: true,
+    });
+    let done = online_machine(&m, "owner-done").await;
+    let expired = online_machine(&m, "owner-live").await;
+    m.update(&expired.id, |x| {
+        x.expires_at = Utc::now() - chrono::Duration::seconds(1)
+    })
+    .await;
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "owner-done".to_string(),
+        OwnerState::Terminal { status: "failed" },
+    );
+    map.insert("owner-live".to_string(), OwnerState::Working);
+    m.set_owner_probe(probe_from(map));
+    let plan = m.reap_plan().await;
+    let row = plan.iter().find(|p| p.machine_id == done.id).unwrap();
+    assert_eq!(row.decision.reason(), Some("owner_failed"));
+    m.reap_once().await;
+    let kept = m.get(&done.id).await.unwrap();
+    assert_eq!(kept.state, MachineState::Online);
+    assert_eq!(kept.reap_reason.as_deref(), Some("owner_failed"));
+    assert!(kept.reap_at.is_some());
+    let ledger =
+        std::fs::read_to_string(dir.path().join(".sandboxed-sh/managed_ledger.jsonl")).unwrap();
+    assert_eq!(ledger.matches("would_reap").count(), 1);
+    m.reap_once().await; // logged once only
+    let ledger =
+        std::fs::read_to_string(dir.path().join(".sandboxed-sh/managed_ledger.jsonl")).unwrap();
+    assert_eq!(ledger.matches("would_reap").count(), 1);
+    // TTL is the backstop even in dry-run.
+    let gone = m.get(&expired.id).await.unwrap();
+    assert_eq!(gone.destroy_reason.as_deref(), Some("ttl_expired"));
+    assert_eq!(fake.destroyed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn owner_grace_schedules_then_destroys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.owner_grace_minutes = 5;
+    let (m, _) = manager(dir.path(), s);
+    let a = online_machine(&m, "owner-done").await;
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "owner-done".to_string(),
+        OwnerState::Terminal {
+            status: "completed",
+        },
+    );
+    m.set_owner_probe(probe_from(map));
+    m.reap_once().await;
+    let row = m.get(&a.id).await.unwrap();
+    assert_eq!(row.state, MachineState::Online);
+    assert_eq!(row.reap_reason.as_deref(), Some("owner_completed"));
+    // Grace elapsed (as recorded on the row).
+    m.update(&a.id, |x| {
+        x.reap_at = Some(Utc::now() - chrono::Duration::seconds(1))
+    })
+    .await;
+    m.reap_once().await;
+    let row = m.get(&a.id).await.unwrap();
+    assert_eq!(row.state, MachineState::Destroyed);
+    assert_eq!(row.destroy_reason.as_deref(), Some("owner_completed"));
+}
+
+#[tokio::test]
+async fn ownerless_idle_machine_is_reaped_with_precise_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let a = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(a.owner_kind.as_deref(), Some("user"));
+    // Legacy row: no owner kind either.
+    m.update(&a.id, |x| {
+        x.state = MachineState::Online;
+        x.owner_kind = None;
+        x.last_busy_at = Some(Utc::now() - chrono::Duration::minutes(31));
+    })
+    .await;
+    m.reap_once().await;
+    let row = m.get(&a.id).await.unwrap();
+    assert_eq!(row.destroy_reason.as_deref(), Some("idle_no_owner"));
+}
+
+#[tokio::test]
+async fn claim_moves_ownership_to_the_served_mission_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = Some(4);
+    let (m, _) = manager(dir.path(), s);
+    // start_mission from a mission: rented by the caller, claimed by the child.
+    let a = online_machine(&m, "caller").await;
+    let claimed = m
+        .claim_for_mission(&a.id, "child", Some("caller"), Some("t1"))
+        .await
+        .unwrap();
+    assert_eq!(claimed.owner_mission_id.as_deref(), Some("child"));
+    assert_eq!(claimed.requested_by_mission_id.as_deref(), Some("caller"));
+    assert_eq!(claimed.owner_kind.as_deref(), Some("mission"));
+    // Another tree cannot take it.
+    let err = m
+        .claim_for_mission(&a.id, "intruder", Some("someone"), Some("t1"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "owned");
+    // An ownerless (Hermes-rented / legacy) machine is claimable.
+    let b = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let b = m
+        .claim_for_mission(&b.id, "child2", Some("caller"), Some("t1"))
+        .await
+        .unwrap();
+    assert_eq!(b.owner_mission_id.as_deref(), Some("child2"));
+    assert_eq!(b.requested_by_mission_id.as_deref(), Some("caller"));
+    // The served child's end reaps it; the requester's liveness does not keep it.
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "child".to_string(),
+        OwnerState::Terminal {
+            status: "completed",
+        },
+    );
+    map.insert("caller".to_string(), OwnerState::Working);
+    m.set_owner_probe(probe_from(map));
+    m.reap_once().await;
+    assert_eq!(
+        m.get(&a.id).await.unwrap().destroy_reason.as_deref(),
+        Some("owner_completed")
+    );
+}
+
+#[tokio::test]
+async fn reconcile_orphan_grace_and_vanished_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.orphan_grace_minutes = 10;
+    let (m, fake) = manager(dir.path(), s);
+    let live = online_machine(&m, "owner").await;
+    let live_pid = live.provider_id.clone().unwrap();
+    let other = ProviderMachine {
+        provider_id: "bx_unrelated".into(),
+        state: "ready".into(),
+        name: "not ours".into(),
+    };
+    *fake.listed.lock().unwrap() = vec![
+        ProviderMachine {
+            provider_id: "bx_orphan".into(),
+            state: "ready".into(),
+            name: "orb-managed-mmzz".into(),
+        },
+        other.clone(),
+    ];
+    // Orphan within grace: reported, not stopped. Live row missing once: kept.
+    let r = m.reconcile_once().await.unwrap();
+    assert_eq!(r["orphans_stopped"], serde_json::json!([]));
+    assert_eq!(r["orphans_pending"].as_array().unwrap().len(), 1);
+    assert_eq!(m.get(&live.id).await.unwrap().state, MachineState::Online);
+    // Grace passed (age the first sighting).
+    m.reconcile_state.lock().await.orphans_seen.insert(
+        "bx_orphan".into(),
+        Utc::now() - chrono::Duration::minutes(11),
+    );
+    let r = m.reconcile_once().await.unwrap();
+    assert_eq!(r["orphans_stopped"], serde_json::json!(["bx_orphan"]));
+    // Second pass without the live VM: the row is closed as vanished.
+    assert_eq!(r["vanished_rows"], serde_json::json!([live.id.clone()]));
+    let row = m.get(&live.id).await.unwrap();
+    assert_eq!(row.state, MachineState::Destroyed);
+    assert_eq!(row.destroy_reason.as_deref(), Some("provider_vanished"));
+    assert!(row.ledger_closed);
+    assert!(!fake.destroyed.lock().unwrap().contains(&live_pid));
+}
+
+#[tokio::test]
+async fn empty_provider_list_never_closes_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let live = online_machine(&m, "owner").await;
+    for _ in 0..3 {
+        m.reconcile_once().await.unwrap();
+    }
+    assert_eq!(m.get(&live.id).await.unwrap().state, MachineState::Online);
+}
+
+#[tokio::test]
+async fn reconcile_dry_run_keeps_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    m.set_runtime_settings(RuntimeSettings {
+        antigravity_on_managed: true,
+        reaper_dry_run: true,
+    });
+    *fake.listed.lock().unwrap() = vec![ProviderMachine {
+        provider_id: "bx_orphan".into(),
+        state: "ready".into(),
+        name: "orb-managed-mmzz".into(),
+    }];
+    let r = m.reconcile_once().await.unwrap();
+    assert_eq!(r["dry_run"], serde_json::json!(true));
+    assert!(fake.destroyed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn claim_rejects_cross_user_and_forged_requester() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let a = online_machine(&m, "caller").await; // tenant t1
+    let err = m
+        .claim_for_mission(&a.id, "x", Some("caller"), Some("t2"))
+        .await
+        .unwrap_err();
+    assert_eq!((err.error, err.status), ("forbidden", 403));
+    let err = m
+        .claim_for_mission(&a.id, "x", Some("caller"), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, 403);
+    // Same tenant but a requester that is not the current owner: refused.
+    let err = m
+        .claim_for_mission(&a.id, "x", Some("forged"), Some("t1"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "owned");
+    // No requester (REST backfill path) cannot take an owned machine.
+    assert!(m
+        .claim_for_mission(&a.id, "x", None, Some("t1"))
+        .await
+        .is_err());
+    assert_eq!(
+        m.get(&a.id).await.unwrap().owner_mission_id.as_deref(),
+        Some("caller")
+    );
 }
