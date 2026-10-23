@@ -591,23 +591,27 @@ def relativeTimeBucket (elapsedSecs : UInt64) : UInt64 :=
     let clamped := if wks > 0xFFFFFFFF then 0xFFFFFFFF else wks
     (4 : UInt64) ||| (clamped <<< 8)
 
+/-- Saturating `UInt32` addition: `a + b` when it fits, `0xFFFFFFFF` otherwise (never wraps). -/
+@[inline] def satAdd32 (a b : UInt32) : UInt32 := if a ≤ 0xFFFFFFFF - b then a + b else 0xFFFFFFFF
+
 /--
   Unboxed C-ABI Incremental SSE Transcript Patch Stepper (`orb_transcript_patch_step`):
   `eventKind`:
-  `0 = message_delta` (append `deltaLen` to live buffer),
+  `0 = message_delta` (append `deltaLen` to live buffer, saturating at `0xFFFFFFFF`),
   `1 = assistant_snapshot` (replace live buffer with `deltaLen` when `deltaLen > 0`, else keep `stateLen`),
   `2 = turn_boundary` (reset live buffer to `0` on user message or turn boundary).
-  Packs `(nextLen : UInt32, nextSeq : UInt32)` into a 64-bit word (`bits 0..31 = nextLen`, `bits 32..63 = nextSeq`),
-  satisfying `stream_apply_eq_batch`: incremental SSE chunk folding produces the exact same transcript projection
-  as batch evaluation over the accumulated event log.
+  Any other `eventKind` returns the packed input state unchanged.
+  Packs `(nextLen : UInt32, nextSeq : UInt32)` into a 64-bit word (`bits 0..31 = nextLen`, `bits 32..63 = nextSeq`);
+  `nextSeq` saturates at `0xFFFFFFFF` (theorem `transcript_patch_step_monotone_absorbing`).
 -/
 @[inline, export orb_transcript_patch_step]
 def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaLen : UInt32) : UInt64 :=
-  let nextLen : UInt32 :=
-    if eventKind == 2 then 0
-    else if eventKind == 1 then (if deltaLen > 0 then deltaLen else stateLen)
-    else stateLen + deltaLen
-  let nextSeq : UInt32 := stateSeq + 1
-  nextLen.toUInt64 ||| (nextSeq.toUInt64 <<< 32)
+  if eventKind ≤ 2 then
+    let nextLen : UInt32 :=
+      if eventKind == 2 then 0
+      else if eventKind == 1 then (if deltaLen > 0 then deltaLen else stateLen)
+      else satAdd32 stateLen deltaLen
+    nextLen.toUInt64 ||| ((satAdd32 stateSeq 1).toUInt64 <<< 32)
+  else stateLen.toUInt64 ||| (stateSeq.toUInt64 <<< 32)
 
 end Orb.Kernel

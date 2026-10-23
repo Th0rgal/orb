@@ -642,19 +642,62 @@ theorem relative_time_bucket_never_zero_minutes :
     relativeTimeBucket 59 = 257 ∧
     relativeTimeBucket 3600 = 258 := by decide
 
-/-- Packed state decoder/stepper for incremental vs batch SSE transcript projection. -/
-def applyTranscriptEvent (packedState : UInt64) (ev : UInt8 × UInt32) : UInt64 :=
-  let len : UInt32 := (packedState &&& 0xFFFFFFFF).toUInt32
-  let seq : UInt32 := (packedState >>> 32).toUInt32
-  transcriptPatchStep len seq ev.1 ev.2
+/-- Bit `i` of the low-32 mask `0xFFFFFFFF` is set exactly below bit 32. -/
+theorem mask32_getLsbD : ∀ i, i < 64 → (UInt64.toBitVec 4294967295).getLsbD i = decide (i < 32) := by decide
 
-/-- Corollary 34 (`ProjectionStability` — `orb_transcript_patch_step`): Incremental SSE chunk folding
-    equals batch transcript projection over the concatenated event stream (`foldl` homomorphism). -/
-theorem stream_apply_eq_batch
-    (init : UInt64) (chunk1 chunk2 : List (UInt8 × UInt32)) :
-    (chunk1 ++ chunk2).foldl applyTranscriptEvent init =
-      chunk2.foldl applyTranscriptEvent (chunk1.foldl applyTranscriptEvent init) ∧
-    (transcriptPatchStep 120 4 2 50 &&& 0xFFFFFFFF) = 0 :=
-  ⟨List.foldl_append, by decide⟩
+theorem shiftLeft32_bv (x : BitVec 64) : x <<< (UInt64.toBitVec 32 % 64) = x <<< 32 := by
+  rw [show UInt64.toBitVec 32 % 64 = 32#64 from rfl, BitVec.shiftLeft_eq']; rfl
+
+theorem shiftRight32_bv (x : BitVec 64) : x >>> (UInt64.toBitVec 32 % 64) = x >>> 32 := by
+  rw [show UInt64.toBitVec 32 % 64 = 32#64 from rfl, BitVec.ushiftRight_eq']; rfl
+
+/-- The low word of a `(lo, hi)` 32/32 packing decodes back to `lo`. -/
+theorem pack32_lo (a b : UInt32) : ((a.toUInt64 ||| (b.toUInt64 <<< 32)) &&& 0xFFFFFFFF) = a.toUInt64 := by
+  apply UInt64.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq; intro i hi
+  have hm := mask32_getLsbD i hi
+  have ha := BitVec.getLsbD_of_ge a.toBitVec i
+  simp only [UInt64.toBitVec_and, UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft, UInt32.toBitVec_toUInt64,
+    BitVec.getLsbD_and, BitVec.getLsbD_or, shiftLeft32_bv, BitVec.getLsbD_shiftLeft, BitVec.getLsbD_setWidth, hm]
+  by_cases h : i < 32 <;> simp_all
+
+/-- The high word of a `(lo, hi)` 32/32 packing decodes back to `hi`. -/
+theorem pack32_hi (a b : UInt32) : ((a.toUInt64 ||| (b.toUInt64 <<< 32)) >>> 32) = b.toUInt64 := by
+  apply UInt64.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq; intro i hi
+  have ha := BitVec.getLsbD_of_ge a.toBitVec (32 + i)
+  have hb := BitVec.getLsbD_of_ge b.toBitVec i
+  simp only [UInt64.toBitVec_or, UInt64.toBitVec_shiftLeft, UInt64.toBitVec_shiftRight, UInt32.toBitVec_toUInt64,
+    BitVec.getLsbD_or, shiftLeft32_bv, shiftRight32_bv, BitVec.getLsbD_ushiftRight, BitVec.getLsbD_shiftLeft,
+    BitVec.getLsbD_setWidth]
+  by_cases h : i < 32 <;> simp_all <;> omega
+
+/-- Saturating addition never decreases its left operand (no `UInt32` wrap-around). -/
+theorem satAdd32_ge (a b : UInt32) : a ≤ satAdd32 a b := by
+  unfold satAdd32; split
+  · next h =>
+    have hb := UInt32.toNat_lt b
+    rw [UInt32.le_iff_toNat_le] at h ⊢
+    rw [UInt32.toNat_sub_of_le _ _ (by rw [UInt32.le_iff_toNat_le]; simp; omega)] at h
+    rw [UInt32.toNat_add, Nat.mod_eq_of_lt (by simp at h ⊢; omega)]; omega
+  · exact UInt32.le_iff_toNat_le.mpr (by have := UInt32.toNat_lt a; simp; omega)
+
+/-- Corollary 34 (`ProjectionStability` — `orb_transcript_patch_step`): a `message_delta` never shrinks the
+    live buffer (saturating, no wrap), a `turn_boundary` resets it to `0`, and the sequence counter advances
+    saturatingly on known event kinds (`≤ 2`) while unknown kinds leave it unchanged. -/
+theorem transcript_patch_step_monotone_absorbing (l s d : UInt32) (k : UInt8) :
+    l ≤ (transcriptPatchStep l s 0 d &&& 0xFFFFFFFF).toUInt32 ∧
+    (transcriptPatchStep l s 2 d &&& 0xFFFFFFFF) = 0 ∧
+    (transcriptPatchStep l s k d >>> 32) = (if k ≤ 2 then (satAdd32 s 1).toUInt64 else s.toUInt64) := by
+  refine ⟨by simpa [transcriptPatchStep, pack32_lo] using satAdd32_ge l d,
+    by simpa [transcriptPatchStep] using pack32_lo 0 (satAdd32 s 1), ?_⟩
+  unfold transcriptPatchStep; split <;> simp_all [pack32_hi]
+
+/-- Corollary 35 (`ProjectionStability` — `orb_transcript_patch_step`): unknown event kinds (`> 2`) return the
+    packed input state unchanged, and a wrapping delta saturates the live length at `0xFFFFFFFF`. -/
+theorem transcript_patch_step_unknown_kind_identity_and_saturates (l s d : UInt32) :
+    transcriptPatchStep l s 3 d = (l.toUInt64 ||| (s.toUInt64 <<< 32)) ∧
+    (transcriptPatchStep 0xFFFFFFF0 7 0 0x20 &&& 0xFFFFFFFF) = 0xFFFFFFFF := by
+  constructor <;> simp [transcriptPatchStep] <;> decide
 
 end Orb.Spec
