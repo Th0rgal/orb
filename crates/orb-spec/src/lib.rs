@@ -1732,7 +1732,23 @@ mod tests {
         assert_eq!(inc, batch);
         assert_eq!(inc, TranscriptPatchState { len: 14, seq: 5 });
 
-        assert!(lean_sys_cabi::sse_frame_scan(0, 12, 64, 1, b'\n'));
+        let near_max = TranscriptPatchState {
+            len: 0xFFFF_FFF0,
+            seq: u32::MAX,
+        };
+        assert_eq!(
+            transcript_patch_step(near_max, 0, 0x20),
+            TranscriptPatchState {
+                len: u32::MAX,
+                seq: u32::MAX
+            }
+        );
+        let s = TranscriptPatchState { len: 142, seq: 10 };
+        assert_eq!(transcript_patch_step(s, 3, 99), s);
+        assert_eq!(transcript_patch_step(s, 255, 99), s);
+
+        assert!(lean_sys_cabi::sse_frame_scan(0, 12, 64, 1, b'\n', b'}'));
+        assert!(!lean_sys_cabi::sse_frame_scan(0, 12, 64, 1, b'\n', 0xC3));
         assert!(lean_sys_cabi::gfm_pipe_scan(0, 24, 64, 3, 3, false));
         assert!(lean_sys_cabi::tag_scan(0, 32, 4, 8, 64, 1));
         assert_ne!(lean_sys_cabi::transcript_index(0, 40, 128, 1, 9), 0);
