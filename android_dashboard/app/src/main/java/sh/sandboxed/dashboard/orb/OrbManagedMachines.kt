@@ -481,6 +481,19 @@ private fun ManagedMachineRow(
                 } else {
                     Text(OrbManagedMachines.finalCostLine(m), color = secondary, fontSize = 12.sp, maxLines = 1)
                 }
+                OrbManagedMachines.reapLine(m, now)?.let {
+                    Text(it, color = OrbStyle.warning, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (OrbManagedMachines.isLive(m)) when (OrbManagedMachines.owner(m)) {
+                    is OrbManagedMachines.Owner.User -> Text("You", color = secondary, fontSize = 11.sp, maxLines = 1)
+                    is OrbManagedMachines.Owner.None -> {
+                        Text("No owner", color = OrbStyle.warning, fontSize = 11.sp, maxLines = 1)
+                        m.reason?.takeIf { it.isNotBlank() }?.let {
+                            Text(it, color = secondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    is OrbManagedMachines.Owner.Mission -> {}
+                }
                 m.ownerMissionId?.let { id ->
                     Box(
                         modifier = Modifier

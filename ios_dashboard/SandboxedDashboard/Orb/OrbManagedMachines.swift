@@ -19,7 +19,14 @@ struct OrbManagedMachine: Codable, Equatable, Identifiable, Sendable {
     var cost_usd: Double
     var cost_is_metered: Bool?
     var owner_mission_id: String?
+    /// Mission that rented it for the owner (e.g. a start_mission caller).
+    var requested_by_mission_id: String?
+    /// "mission" | "user"; absent on legacy rows ("No owner").
+    var owner_kind: String?
     var reason: String?
+    /// When the lifecycle reaper will destroy it, and the reason it will record.
+    var reap_at: String?
+    var reap_reason: String?
     var error: String?
     var ledger_closed: Bool?
     var destroy_reason: String?
@@ -200,6 +207,34 @@ enum OrbManaged {
         let minutes = s / 60
         if minutes < 60 { return "\(minutes) min left" }
         return "\(minutes / 60) h " + String(format: "%02d", minutes % 60) + " min left"
+    }
+    /// Owner chip kind, mirroring `machineOwner` in managedMachineModel.ts.
+    enum Owner: Equatable { case mission(String), user, none }
+    static func owner(_ m: OrbManagedMachine) -> Owner {
+        if let id = m.owner_mission_id, !id.isEmpty { return .mission(id) }
+        return m.owner_kind == "user" ? .user : .none
+    }
+    static func reapReasonLabel(_ reason: String) -> String {
+        switch reason {
+        case "ttl_expired": return "TTL"
+        case "idle_no_owner": return "idle, no owner"
+        case "idle_user_owned": return "idle"
+        case "owner_missing": return "owner deleted"
+        default:
+            var r = reason
+            if r.hasPrefix("owner_") { r = "owner " + String(r.dropFirst(6)) }
+            if r.hasSuffix("_idle") { r = String(r.dropLast(5)) + ", idle" }
+            return r.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+    /// "Reaps in 5 min (owner completed)", "Reap due (…)"; nil when nothing is scheduled.
+    static func reapLine(_ m: OrbManagedMachine, now: Date = .now) -> String? {
+        guard isLive(m), let raw = m.reap_at, let at = date(raw) else { return nil }
+        let why = m.reap_reason.map { " (\(reapReasonLabel($0)))" } ?? ""
+        let minutes = Int(ceil(at.timeIntervalSince(now) / 60))
+        if minutes <= 0 { return "Reap due\(why)" }
+        if minutes < 60 { return "Reaps in \(minutes) min\(why)" }
+        return "Reaps in \(minutes / 60) h " + String(format: "%02d", minutes % 60) + " min\(why)"
     }
     /// Remaining share of the machine's lifetime (created → expires), 0…1.
     static func ttlFraction(_ m: OrbManagedMachine, now: Date = .now) -> Double {
@@ -434,7 +469,10 @@ struct OrbManagedMachineRow: View {
         VStack(alignment: .leading, spacing: 4) {
             titleLine
             detailLine
-            if let mission = machine.owner_mission_id, !mission.isEmpty { missionChip(mission) }
+            ownerLine
+            if let reap = OrbManaged.reapLine(machine, now: now) {
+                Text(reap).font(.footnote).foregroundStyle(OrbStyle.warning).lineLimit(1)
+            }
         }
         .padding(.vertical, 2)
         .opacity(muted ? 0.6 : 1)
@@ -485,6 +523,29 @@ struct OrbManagedMachineRow: View {
                     .foregroundStyle(urgent ? OrbStyle.warning : .secondary)
             }
         }
+    }
+
+    @ViewBuilder private var ownerLine: some View {
+        switch OrbManaged.owner(machine) {
+        case .mission(let id): missionChip(id)
+        case .user: if !muted { ownerTag("You", color: OrbStyle.textSecondary) }
+        case .none:
+            if !muted {
+                VStack(alignment: .leading, spacing: 2) {
+                    ownerTag("No owner", color: OrbStyle.warning)
+                    if let reason = machine.reason, !reason.isEmpty {
+                        Text(reason).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+                .accessibilityIdentifier("managed.noOwner")
+            }
+        }
+    }
+
+    private func ownerTag(_ text: String, color: Color) -> some View {
+        Text(text).font(.caption.weight(.medium)).foregroundStyle(color)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .overlay(Capsule().stroke(OrbStyle.border))
     }
 
     private func missionChip(_ id: String) -> some View {

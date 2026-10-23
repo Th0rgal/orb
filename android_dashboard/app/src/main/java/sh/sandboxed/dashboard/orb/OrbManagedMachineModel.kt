@@ -29,7 +29,14 @@ data class ManagedMachine(
     val reason: String?,
     val error: String?,
     val ledgerClosed: Boolean,
-    val destroyReason: String?
+    val destroyReason: String?,
+    /** Mission that rented it for the owner (e.g. a start_mission caller). */
+    val requestedByMissionId: String? = null,
+    /** "mission" | "user"; null on legacy rows ("No owner"). */
+    val ownerKind: String? = null,
+    /** When the lifecycle reaper will destroy it, and the reason it will record. */
+    val reapAt: String? = null,
+    val reapReason: String? = null
 )
 
 data class ManagedBudget(
@@ -89,7 +96,11 @@ object OrbManagedMachines {
             reason = OrbJSON.str(d, "reason"),
             error = OrbJSON.str(d, "error"),
             ledgerClosed = OrbJSON.bool(d, "ledger_closed") ?: false,
-            destroyReason = OrbJSON.str(d, "destroy_reason")
+            destroyReason = OrbJSON.str(d, "destroy_reason"),
+            requestedByMissionId = OrbJSON.str(d, "requested_by_mission_id"),
+            ownerKind = OrbJSON.str(d, "owner_kind"),
+            reapAt = OrbJSON.str(d, "reap_at"),
+            reapReason = OrbJSON.str(d, "reap_reason")
         )
     }
 
@@ -277,6 +288,38 @@ object OrbManagedMachines {
     /** "4 vCPU · 8 GB RAM · 50 GB" (disk dropped when unknown). */
     fun specLine(m: ManagedMachine): String =
         "${m.cpu} vCPU · ${num(m.ramGb)} GB RAM" + (m.diskGb?.let { " · ${num(it)} GB" } ?: "")
+
+    /** Owner chip kind, mirroring `machineOwner` in managedMachineModel.ts. */
+    sealed interface Owner {
+        data class Mission(val id: String) : Owner
+        data object User : Owner
+        data object None : Owner
+    }
+
+    fun owner(m: ManagedMachine): Owner = when {
+        !m.ownerMissionId.isNullOrEmpty() -> Owner.Mission(m.ownerMissionId)
+        m.ownerKind == "user" -> Owner.User
+        else -> Owner.None
+    }
+
+    fun reapReasonLabel(reason: String): String = when (reason) {
+        "ttl_expired" -> "TTL"
+        "idle_no_owner" -> "idle, no owner"
+        "idle_user_owned" -> "idle"
+        "owner_missing" -> "owner deleted"
+        else -> reason.replaceFirst(Regex("^owner_"), "owner ").replace(Regex("_idle$"), ", idle").replace('_', ' ')
+    }
+
+    /** "Reaps in 5 min (owner completed)", "Reap due (…)"; null when nothing is scheduled. */
+    fun reapLine(m: ManagedMachine, now: Long): String? {
+        if (!isLive(m)) return null
+        val at = parseTime(m.reapAt) ?: return null
+        val why = m.reapReason?.let { " (${reapReasonLabel(it)})" } ?: ""
+        val mins = Math.ceil((at - now) / 60_000.0).toLong()
+        if (mins <= 0) return "Reap due$why"
+        if (mins < 60) return "Reaps in $mins min$why"
+        return String.format(Locale.US, "Reaps in %d h %02d min", mins / 60, mins % 60) + why
+    }
 
     /** Short TTL: "21 min left", "1 h 05 min left", "<1 min left", "Expired". */
     fun ttlShort(expiresAt: String, now: Long): String {

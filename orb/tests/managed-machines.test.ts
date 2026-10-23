@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../src/api";
-import { allowedSizes, budgetLine, managedNodeIds, estimateCost, isManagedNode, liveCost, managedError, minutesLabel, recentMachines, ttlLeft, ttlUrgent, usd, usdPerHour, type ManagedMachine } from "../src/managedMachineModel";
+import { machineOwner, reapLine, allowedSizes, budgetLine, managedNodeIds, estimateCost, isManagedNode, liveCost, managedError, minutesLabel, recentMachines, ttlLeft, ttlUrgent, usd, usdPerHour, type ManagedMachine } from "../src/managedMachineModel";
 import { ttlChoices } from "../src/ManagedMachines";
 
 const now = Date.parse("2026-10-21T12:00:00Z");
@@ -136,5 +136,21 @@ describe("managed row v3 and unlimited budgets", () => {
     expect(ttlFraction("2026-10-21T11:00:00Z", "2026-10-21T13:00:00Z", now)).toBeCloseTo(0.5);
     expect(ttlFraction("2026-10-21T11:00:00Z", "2026-10-21T11:30:00Z", now)).toBe(0);
     expect(ttlFraction("x", "y", now)).toBe(0);
+  });
+});
+
+describe("ownership and reaping", () => {
+  it("classifies the owner", () => {
+    expect(machineOwner({ owner_mission_id: "m1", owner_kind: "mission" })).toEqual({ kind: "mission", missionId: "m1" });
+    expect(machineOwner({ owner_mission_id: null, owner_kind: "user" })).toEqual({ kind: "user" });
+    expect(machineOwner({ owner_mission_id: null })).toEqual({ kind: "none" });
+  });
+  it("formats the scheduled reap", () => {
+    const now = Date.parse("2026-10-23T12:00:00Z");
+    expect(reapLine({ state: "online", reap_at: "2026-10-23T12:04:10Z", reap_reason: "owner_completed" }, now)).toBe("Reaps in 5 min (owner completed)");
+    expect(reapLine({ state: "online", reap_at: "2026-10-23T11:59:00Z", reap_reason: "owner_interrupted_idle" }, now)).toBe("Reap due (owner interrupted, idle)");
+    expect(reapLine({ state: "online", reap_at: "2026-10-23T13:30:00Z", reap_reason: "idle_no_owner" }, now)).toBe("Reaps in 1 h 30 min (idle, no owner)");
+    expect(reapLine({ state: "destroyed", reap_at: "2026-10-23T12:04:00Z" }, now)).toBeNull();
+    expect(reapLine({ state: "online", reap_at: null }, now)).toBeNull();
   });
 });
