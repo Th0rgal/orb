@@ -491,6 +491,8 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focu
    painted a stale layout for a frame when the turn started — the whole
    transcript jumped by several lines under the new message. */
 .scroll .col > .st-working, .scroll .col > [data-virtual-transcript] { content-visibility: visible; contain-intrinsic-size: none; }
+/* Held by pinnedScroll while the reader is scrolled up and content below them folds away. */
+.scroll > .col { min-height: var(--scroll-reserve, auto); }
 .scroll .col { padding: 16px 0 24px; user-select: text; -webkit-user-select: text; cursor: auto; font-size: 13px; line-height: 21px; }
 
 .sk-transcript { margin-top: 8px; }
@@ -663,6 +665,10 @@ code {
 /* Keep separation around the rounded input, not a dark strip across the transcript. */
 .dock { flex: none; padding: 10px 34px 16px; position: relative; background: transparent; isolation: isolate; margin-top: calc(-1 * var(--dock-height, 0px)); z-index: 2; pointer-events: none; container-type: inline-size; }
 .dock > .col { pointer-events: auto; }
+/* Absolutely placed above the composer: showing it never changes the dock height. */
+.jump-latest { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 3; pointer-events: auto; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--overlay-border); background: var(--overlay-field); color: var(--fg-2, var(--fg)); box-shadow: 0 2px 10px rgb(0 0 0 / 10%); cursor: pointer; }
+.jump-latest:hover { color: var(--fg); }
+.jump-latest:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; }
 .dock .composer { position: relative; z-index: 1; box-shadow: 0 4px 18px rgb(0 0 0 / 8%); }
 .dock .error-notice { position: relative; z-index: 1; }
 /* Fade the transcript out beneath the controls with a mask rather than a painted

@@ -96,7 +96,10 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    if(rect.bottom<=scrollerTop+1||(first&&rect.top<scrollerTop))delta+=height-prevHeight;
   }
   fromGap.clear();
-  if(delta&&scroller)scroller.scrollTop+=delta;
+  // At the bottom the pinned scroll owns the position. A row above that shrank
+ // has already been absorbed by the browser clamping scrollTop; subtracting
+ // the delta again moved a pinned reader up by that amount (and unpinned it).
+ if(delta&&scroller&&!atBottom)scroller.scrollTop+=delta;
   if(changed){setRevision(n=>n+1);settle();}
  });
  const queueMeasure=(key:string,node:HTMLElement)=>{measureQueue.set(key,node);if(!measureQueued){measureQueued=true;queueMicrotask(flushMeasure);}};

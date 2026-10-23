@@ -74,6 +74,7 @@ import {
 import { harnessChoices, refreshNodeAntigravityModels } from "../harnessPick";
 import { Composer, floatingDock } from "../composer/Composer";
 import { createPinnedScroll } from "./pinnedScroll";
+import { JumpToLatest } from "./JumpToLatest";
 import { deliverInOrder } from "./sendQueue";
 import { missionActivity, beginHandoff, endHandoff, missionHandoff } from "../missionStatus";
 import { createHandoffTracker } from "./handoff";
@@ -1034,6 +1035,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
         </div>
       </div>
       <div class="dock" ref={floatingDock}>
+        <JumpToLatest pinned={pin.pinned} onJump={pin.pin} />
         <div class="col">
           <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})} onOpenSession={p.onFork?async id=>p.onFork?.(await getMission(id)):undefined}/></Show>
           <RemoteQueue mission={p.id}
