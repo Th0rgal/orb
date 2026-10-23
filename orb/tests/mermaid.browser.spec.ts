@@ -109,3 +109,21 @@ test("a hostile diagram renders neutralised", async ({ page }) => {
   await page.waitForTimeout(300);
   expect(requests).toEqual([]);
 });
+
+test("the diagrams of a real message all render as loaded images", async ({ page }) => {
+  await page.goto("/tests/mermaid.html?mission");
+  const blocks = page.locator(".mermaid-block");
+  await expect(blocks).toHaveCount(16);
+  for (let i = 0; i < 16; i++) {
+    const block = blocks.nth(i);
+    // Diagram 1 has an unquoted `(…)` edge label that mermaid rejects; Orb quotes it and renders.
+    await expect(block, `diagram ${i + 1}`).toHaveAttribute("data-state", "ready", { timeout: 15_000 });
+    const img = block.locator("img.mermaid-svg");
+    await img.scrollIntoViewIfNeeded();
+    await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0), { message: `diagram ${i + 1} decodes` }).toBe(true);
+    const box = (await img.boundingBox())!;
+    expect(box.height, `diagram ${i + 1} height`).toBeGreaterThan(40);
+    await block.screenshot({ path: path.join(shots, `mission-${i + 1}.png`) });
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

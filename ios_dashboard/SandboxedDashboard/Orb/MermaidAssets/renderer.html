@@ -49,9 +49,16 @@ function sanitize(svg) {
   return new XMLSerializer().serializeToString(root);
 }
 let seq = 0;
+// Same repair as desktop (quoteEdgeLabels): flowchart edge labels with unquoted
+// brackets are quoted, only when the original source fails to parse.
+const quoteEdgeLabels = (src) => /^\s*(flowchart|graph)\b/.test(src) ? src.replace(/\|([^|"\n]*[()[\]{}][^|"\n]*)\|/g, '|"$1"|') : src;
 window.orbRender = async (raw) => {
-  const source = stripDirectives(raw);
-  try { await mermaid.parse(source); } catch (e) { return { error: message(e) }; }
+  let source = stripDirectives(raw);
+  try { await mermaid.parse(source); } catch (e) {
+    const repaired = quoteEdgeLabels(source);
+    if (repaired === source || !(await mermaid.parse(repaired, { suppressErrors: true }))) return { error: message(e) };
+    source = repaired;
+  }
   const id = "orb-mermaid-" + (++seq);
   try {
     const svg = sanitize((await mermaid.render(id, source)).svg);

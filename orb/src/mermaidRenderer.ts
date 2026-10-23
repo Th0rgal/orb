@@ -167,7 +167,8 @@ function installHooks(purify: Purify) {
 
 export function sanitizeSvg(purify: Purify, svg: string): string {
   installHooks(purify);
-  return purify.sanitize(svg, {
+  const fragment = purify.sanitize(svg, {
+    RETURN_DOM_FRAGMENT: true,
     USE_PROFILES: { svg: true, svgFilters: true, html: true },
     // Mermaid draws labels as HTML inside <foreignObject>; DOMPurify checks lower-cased names.
     ADD_TAGS: ["foreignobject"],
@@ -176,11 +177,30 @@ export function sanitizeSvg(purify: Purify, svg: string): string {
     FORBID_ATTR: ["href", "xlink:href", "action", "formaction", "srcset", "src"],
     ALLOW_DATA_ATTR: false,
   });
+  // The SVG is shown as an image, which browsers parse as XML: DOMPurify's string
+  // output is HTML (`<br>`, unescaped `&nbsp;`) and makes the image fail to decode,
+  // leaving only its alt text. Serialise the sanitised tree as XML instead.
+  const root = [...fragment.childNodes].find((n): n is Element => n.nodeType === 1 && (n as Element).localName === "svg");
+  if (!root) return "";
+  // Elements keep their real namespaces, which the serialiser declares itself; a
+  // copied `xmlns` attribute would be written a second time by some engines.
+  for (const el of [root, ...root.querySelectorAll("*")]) if (el.hasAttribute("xmlns")) el.removeAttribute("xmlns");
+  return new XMLSerializer().serializeToString(root);
+}
+
+/**
+ * Models often write flowchart edge labels with parentheses or quotes left
+ * unquoted (`-->|SOLVED (ok) or REJECTED|`), which mermaid rejects. Quote such
+ * labels; used only when the original source fails to parse.
+ */
+export function quoteEdgeLabels(source: string): string {
+  if (!/^\s*(flowchart|graph)\b/.test(source)) return source;
+  return source.replace(/\|([^|"\n]*[()[\]{}][^|"\n]*)\|/g, '|"$1"|');
 }
 
 async function run(raw: string, theme: MermaidTheme): Promise<MermaidResult> {
   const { mermaid, purify } = await load();
-  const source = stripDirectives(raw);
+  let source = stripDirectives(raw);
   const config = JSON.stringify(theme);
   if (configured !== config) {
     mermaid.initialize({
@@ -204,13 +224,17 @@ async function run(raw: string, theme: MermaidTheme): Promise<MermaidResult> {
   try {
     await mermaid.parse(source);
   } catch (e) {
-    return { ok: false, error: errorMessage(e) };
+    const repaired = quoteEdgeLabels(source);
+    if (repaired === source || !(await mermaid.parse(repaired, { suppressErrors: true }))) return { ok: false, error: errorMessage(e) };
+    source = repaired;
   }
   const id = `orb-mermaid-${++seq}`;
   try {
     const { svg } = await mermaid.render(id, source);
     const clean = sanitizeSvg(purify, svg);
-    return { ok: true, svg: clean, ...size(clean) };
+    const dims = size(clean);
+    if (!clean || !dims.width || !dims.height) return { ok: false, error: "Mermaid produced an empty diagram" };
+    return { ok: true, svg: clean, ...dims };
   } catch (e) {
     return { ok: false, error: errorMessage(e) };
   } finally {

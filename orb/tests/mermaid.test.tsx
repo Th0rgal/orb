@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@solidjs/testing-library";
 import DOMPurify from "dompurify";
 import { MdView, parseMarkdown } from "../src/Markdown";
-import { safeCss, stripDirectives, cachedMermaid, clearMermaidCache, hashSource, mermaidCacheSize, renderMermaid, sanitizeSvg, setMermaidLoader } from "../src/mermaidRenderer";
+import { safeCss, stripDirectives, cachedMermaid, clearMermaidCache, hashSource, mermaidCacheSize, renderMermaid, sanitizeSvg, setMermaidLoader, quoteEdgeLabels } from "../src/mermaidRenderer";
 
 const theme = { primaryColor: "#123456" };
 let parse: ReturnType<typeof vi.fn>, renderFn: ReturnType<typeof vi.fn>;
@@ -44,6 +44,19 @@ it("strips scripts, handlers and links from rendered SVG", () => {
   const out = sanitizeSvg(DOMPurify, '<svg><g onclick="x()"><a href="javascript:alert(1)"><text>t</text></a></g><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><span>label</span><img src=x onerror=alert(1)></div></foreignObject><script>1</script></svg>');
   expect(out).not.toMatch(/onclick|onerror|javascript:|<script|href/);
   expect(out).toContain("label");
+});
+
+it("serialises sanitised SVG as XML so it decodes as an image", () => {
+  const out = sanitizeSvg(DOMPurify, '<svg viewBox="0 0 10 10"><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><p>Théorème&nbsp;racine<br>ligne 2</p></div></foreignObject></svg>');
+  expect(out).toMatch(/^<svg[^>]*xmlns="http:\/\/www.w3.org\/2000\/svg"/);
+  expect(out).toMatch(/<br\s*\/>/);
+  expect(new DOMParser().parseFromString(out, "image/svg+xml").querySelector("parsererror")).toBeNull();
+});
+
+it("quotes flowchart edge labels with brackets only for flowcharts", () => {
+  expect(quoteEdgeLabels("flowchart LR\n  A -->|SOLVED (ok) ou REJECTED| B\n  B -->|plain| C")).toBe('flowchart LR\n  A -->|"SOLVED (ok) ou REJECTED"| B\n  B -->|plain| C');
+  expect(quoteEdgeLabels('flowchart LR\n  A -->|"already (quoted)"| B')).toBe('flowchart LR\n  A -->|"already (quoted)"| B');
+  expect(quoteEdgeLabels("sequenceDiagram\n  A->>B: x|(y)|")).toBe("sequenceDiagram\n  A->>B: x|(y)|");
 });
 
 it("falls back to the source with a note when a diagram is invalid", async () => {
