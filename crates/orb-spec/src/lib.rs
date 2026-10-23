@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! Typed bindings to `lean/Orb/Kernel.lean` (`liborb_spec_cabi.a`) and `lean-sys-cabi`.
 
 pub use lean_sys_cabi;
