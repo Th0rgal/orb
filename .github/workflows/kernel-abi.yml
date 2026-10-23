@@ -1,0 +1,56 @@
+name: Kernel ABI
+
+on:
+  push:
+    branches: [master, main, "release/*"]
+  pull_request:
+    branches: [master, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  kernel-abi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Generated bindings are up to date
+        run: python3 scripts/gen_kernel_bindings.py --check
+      - name: Kernel call-site lint
+        run: python3 scripts/lint_kernel_calls.py
+      - name: Manifest / generator / lint regression tests
+        run: python3 -m unittest -v scripts/test_kernel_abi.py
+      - name: C-ABI and JNI compile
+        run: |
+          set -euo pipefail
+          JNI_INC="$JAVA_HOME/include"
+          gcc -std=c11 -Wall -Werror -fsyntax-only -x c shared/orb-spec/cabi/orb_kernel.h
+          gcc -O2 -fPIC -c shared/orb-spec/cabi/orb_kernel_unboxed.c -o /tmp/orb_kernel.o
+          gcc -O2 -fPIC -Wall -Werror -Wno-unused-parameter -I"$JNI_INC" -I"$JNI_INC/linux" -Iandroid_dashboard/app/src \
+            -c android_dashboard/app/src/main/jni/orb_kernel_jni.c -o /tmp/orb_kernel_jni.o
+          gcc -shared /tmp/orb_kernel.o /tmp/orb_kernel_jni.o -o /tmp/liborb_kernel.so
+          python3 - <<'PY'
+          import json, subprocess
+          m = json.load(open("shared/orb-spec/kernel_abi.json"))
+          syms = set(subprocess.run(["nm", "-D", "--defined-only", "/tmp/liborb_kernel.so"],
+                                    capture_output=True, text=True, check=True).stdout.split())
+          want = {f["name"] for f in m["functions"]}
+          want |= {"Java_" + m["jni"]["class"].replace(".", "_") + "_" + f["jni"]["method"]
+                   for f in m["functions"] if "jni" in f}
+          missing = sorted(want - syms)
+          assert not missing, f"missing exports: {missing}"
+          print(f"{len(want)} manifest symbols exported")
+          PY
