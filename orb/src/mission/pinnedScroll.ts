@@ -31,14 +31,14 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
   let scroller: HTMLDivElement | undefined;
   const [pinned, setPinned] = createSignal(true);
   let landedFor = "";
-  let intentAt = -Infinity, dragging = false, lastTop = 0, lastHeight = 0, lastColHeight = 0;
+  let intentAt = -Infinity, dragging = false, lastTop = 0, lastColHeight = 0;
   let anchor: { el: Element; top: number; row: Element | null; rowTop: number } | undefined;
   let content: HTMLElement | undefined, held = 0;
   const reserve = (px: number) => { held = px; scroller?.style.setProperty("--scroll-reserve", px ? `${px}px` : ""); };
   const intent = () => dragging || performance.now() - intentAt < INTENT_MS;
   const remember = () => {
     const el = scroller;
-    lastTop = el?.scrollTop ?? 0; lastHeight = el?.scrollHeight ?? 0; lastColHeight = content?.offsetHeight ?? 0;
+    lastTop = el?.scrollTop ?? 0; lastColHeight = content?.offsetHeight ?? 0;
     // Hit-testing forces layout: only a reader who is not following needs an anchor.
     if (!el || pinned() || typeof document.elementFromPoint !== "function") { anchor = undefined; return; }
     const box = el.getBoundingClientRect();
@@ -103,8 +103,9 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
       if (intent()) {
         if (top < lastTop - 0.5) setPinned(false);
         else if (gap < NEAR) { setPinned(true); if (held) { reserve(0); toBottom(el); } }
-      } else if (pinned() && gap >= NEAR && el.scrollHeight === lastHeight && Math.abs(top - lastTop) > 1) {
-        // Moved away by the app itself (a chapter, a search hit), not by layout.
+      } else if (pinned() && gap >= NEAR && Math.abs(top - lastTop) > 1) {
+        // Moved away by the app itself (a chapter, a search hit). Layout never
+        // does this: growth fires no scroll event, and a shrink clamps to the bottom.
         setPinned(false);
       }
       remember();
