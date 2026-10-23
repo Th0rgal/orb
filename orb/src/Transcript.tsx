@@ -23,7 +23,7 @@ import * as Ic from "./icons";
 import { markdownText, MdView } from "./Markdown";
 import { createStore, reconcile } from "solid-js/store";
 import { goalDraft, planObjective } from "./goal";
-import { isTaskTool, latestTaskList, parseTaskList, taskCardView, turnOutcomeAfter, type TurnOutcome } from "./taskList";
+import { isTaskTool, latestTaskList, parseTaskList, sameChecklist, sameTaskCardView, taskCardView, turnOutcomeAfter, type TurnOutcome } from "./taskList";
 
 import { messagePresentation, isAutomaticRecovery, isResumePrompt } from "./messagePresentation";
 import { computeDiffStats, narrationKeys, narrationLine, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
@@ -588,7 +588,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   createEffect(() => {
     setDismissed(dismissedChecklists.has(p.key));
   });
-  const view = () => taskCardView(p.tasks, p.ended === true, p.outcome);
+  const view = createMemo(() => taskCardView(p.tasks, p.ended === true, p.outcome), undefined, { equals: sameTaskCardView });
   const completedCount = () => p.tasks.filter(task => task.status === "completed").length;
   const allDone = () => p.tasks.length > 0 && p.tasks.every(task => task.status === "completed" || task.status === "cancelled");
   const activeTask = () =>
@@ -640,7 +640,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
   const reminders = createMemo(() => reminderMessages(p.items));
-  const checklist = createMemo(() => latestTaskList(p.items));
+  const checklist = createMemo(() => latestTaskList(p.items), null, { equals: sameChecklist });
   const followUps = createMemo(() => collectFollowUps(p.items));
   const groups = createMemo<Grouped[]>((previous) => groupWork(p.items.filter(item => item.kind !== "user" || !item.queued), previous), []);
   /** Key of the last user turn, when nothing follows it yet. Compared by key

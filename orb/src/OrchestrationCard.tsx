@@ -1,5 +1,6 @@
 import { Show, createContext, createMemo, useContext } from "solid-js";
 import * as Ic from "./icons";
+import { shallowEqual } from "./poll";
 import type { StreamItem } from "./transcriptModel";
 import {
   MissionLookupContext, collectFollowUps, machineLabel, machineRef, orchestrationKind, subagentRef, subagentStatusLabel,
@@ -12,16 +13,20 @@ type Tool = Extract<StreamItem, { kind: "tool" }>;
 export const FollowUpsContext = createContext<() => FollowUps>(() => collectFollowUps([]));
 
 const openMission = (id: string) => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: `m:${id}` }));
+/** Refs are rebuilt from the whole transcript on every items update; keep the
+ * previous object when nothing it shows changed so the card does not rewrite
+ * its title/cost/machine attributes on each streamed token. */
+const sameRef = <T extends object>(a: T | null | undefined, b: T | null | undefined) => a === b || (!!a && !!b && shallowEqual(a, b));
 const usd = (v: number) => `$${v < 1 ? v.toFixed(4).replace(/0+$/, "").replace(/\.$/, ".00") : v.toFixed(2)}`;
 
 export function SubagentCard(p: { item: Tool }) {
   const follow = useContext(FollowUpsContext);
   const lookup = useContext(MissionLookupContext);
-  const ref = createMemo(() => subagentRef(p.item, follow(), lookup));
+  const ref = createMemo(() => subagentRef(p.item, follow(), lookup), undefined, { equals: sameRef });
   return (
     <Show when={ref()}>
       {r => {
-        const machine = () => machineLabel(r().nodeId, follow());
+        const machine = createMemo(() => machineLabel(r().nodeId, follow()));
         const meta = () => [r().backend, r().model].filter(Boolean).join(" · ");
         const live = () => r().status === "starting" || r().status === "queued" || r().status === "running";
         return (
@@ -54,7 +59,7 @@ const machineStateLabel = { requested: "Requested", provisioning: "Provisioning"
 
 export function MachineCard(p: { item: Tool }) {
   const follow = useContext(FollowUpsContext);
-  const ref = createMemo(() => machineRef(p.item, follow()));
+  const ref = createMemo(() => machineRef(p.item, follow()), undefined, { equals: sameRef });
   return (
     <Show when={ref()}>
       {r => {

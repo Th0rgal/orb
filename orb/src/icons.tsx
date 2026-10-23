@@ -1,4 +1,5 @@
 import type { JSX } from "solid-js";
+import { createMemo } from "solid-js";
 
 type P = { size?: number; class?: string };
 
@@ -232,10 +233,11 @@ export const Spinner = (p: P) => (
 );
 export const ContextRing = (p: { pct: number }) => {
   const c = 2 * Math.PI * 5;
+  const dash = createMemo(() => `${(c * p.pct) / 100} ${c}`);
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke-width="2">
       <circle cx="7" cy="7" r="5" stroke="currentColor" opacity="0.25" />
-      <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-dasharray={`${(c * p.pct) / 100} ${c}`} transform="rotate(-90 7 7)" />
+      <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-dasharray={dash()} transform="rotate(-90 7 7)" />
     </svg>
   );
 };

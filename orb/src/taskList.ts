@@ -147,3 +147,13 @@ export function taskCardView(tasks: TaskItem[], ended: boolean, outcome: TurnOut
     state: "stopped",
   };
 }
+
+const sameRows = (a: readonly ShownTask[], b: readonly ShownTask[]) =>
+  a.length === b.length && a.every((t, i) => t.text === b[i].text && t.status === b[i].status);
+/** Structural equality for memos: the transcript re-parses its task list on
+ * every items update (each refresh, each token), and a fresh array of equal
+ * rows would make the keyed card list recreate every row. */
+export const sameChecklist = (a: Checklist | null, b: Checklist | null) =>
+  a === b || (!!a && !!b && a.key === b.key && sameRows(a.tasks, b.tasks));
+export const sameTaskCardView = (a: TaskCardView, b: TaskCardView) =>
+  a.state === b.state && a.label === b.label && sameRows(a.tasks, b.tasks);
