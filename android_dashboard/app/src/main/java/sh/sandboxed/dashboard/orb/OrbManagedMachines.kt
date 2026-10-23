@@ -1,5 +1,14 @@
 package sh.sandboxed.dashboard.orb
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -151,7 +160,7 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
     val recent = OrbManagedMachines.recentMachines(d.machines, now)
 
     // Mission titles for owner chips, fetched once per id.
-    val missionIds = d.machines.mapNotNull { it.ownerMissionId }.toSet()
+    val missionIds = (d.machines.mapNotNull { it.ownerMissionId } + d.dailySpend.orEmpty().flatMap { day -> day.missions.mapNotNull { it.first } }).toSet()
     LaunchedEffect(missionIds) {
         for (id in missionIds) {
             if (ManagedMissionTitles.cache.containsKey(id)) continue
@@ -180,7 +189,9 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.7.sp
         )
-        Text(
+        val spend = d.dailySpend
+        if (spend != null) ManagedSpendChart(spend, d.budget, ManagedMissionTitles.cache)
+        else Text(
             text = OrbManagedMachines.budgetLine(d.budget),
             color = OrbStyle.textSecondary,
             fontSize = 12.sp
@@ -293,6 +304,81 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
                 TextButton(enabled = !busy, onClick = { confirm = null; actionError = null }) { Text("Cancel") }
             }
         )
+    }
+}
+
+/**
+ * Spend over the last days: one Canvas bar per UTC day, the window total,
+ * today and the running count. Tap a bar to read its total and top missions in
+ * the caption (tap again to clear); the caption has a fixed height so nothing
+ * moves. `days == null` draws a same-size skeleton.
+ */
+@Composable
+internal fun ManagedSpendChart(days: List<DailySpend>?, budget: ManagedBudget, titles: Map<String, String?>) {
+    var picked by remember { mutableStateOf<Int?>(null) }
+    val list = days.orEmpty()
+    val sum = OrbManagedMachines.spendSummary(list)
+    val count = if (days == null) 7 else list.size
+    val bar = OrbStyle.inboxBlue
+    val skeleton = OrbStyle.elevated
+    ManagedCard {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth().height(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (days == null) {
+                    Box(Modifier.size(110.dp, 10.dp).clip(RoundedCornerShape(4.dp)).background(skeleton).orbShimmer())
+                    Spacer(Modifier.weight(1f))
+                    Box(Modifier.size(70.dp, 10.dp).clip(RoundedCornerShape(4.dp)).background(skeleton).orbShimmer())
+                } else {
+                    Text(OrbManagedMachines.usd(sum.total), color = OrbStyle.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("  last $count days", color = OrbStyle.textSecondary, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text(OrbManagedMachines.runningLine(budget), color = OrbStyle.textSecondary, fontSize = 12.sp)
+                }
+            }
+            Canvas(
+                Modifier.fillMaxWidth().height(44.dp).testTag("managed.spend.bars").pointerInput(list) {
+                    detectTapGestures { o ->
+                        if (list.isEmpty()) return@detectTapGestures
+                        val i = (o.x / (size.width / list.size)).toInt().coerceIn(0, list.size - 1)
+                        picked = if (picked == i) null else i
+                    }
+                }
+            ) {
+                val slot = size.width / count
+                val gap = 6.dp.toPx()
+                for (i in 0 until count) {
+                    val frac = if (days == null) (if (i % 2 == 0) 0.4 else 0.65) else OrbManagedMachines.spendFraction(list[i].usd, sum.max)
+                    val h = (size.height * frac).toFloat()
+                    if (h > 0f) {
+                        val color = when {
+                            days == null -> skeleton
+                            picked == i -> bar
+                            i == count - 1 -> bar.copy(alpha = 0.9f)
+                            else -> bar.copy(alpha = 0.5f)
+                        }
+                        drawRoundRect(color, topLeft = Offset(i * slot + gap / 2, size.height - h), size = Size(slot - gap, h), cornerRadius = CornerRadius(3.dp.toPx()))
+                    }
+                }
+                drawLine(Color.White.copy(alpha = 0.14f), Offset(0f, size.height - 0.5f), Offset(size.width, size.height - 0.5f), strokeWidth = 1.dp.toPx())
+            }
+            Row(Modifier.fillMaxWidth()) {
+                for (i in 0 until count) {
+                    Text(
+                        if (days == null) "" else OrbManagedMachines.spendWeekday(list[i].day),
+                        modifier = Modifier.weight(1f).height(14.dp),
+                        color = if (picked == i || i == count - 1) OrbStyle.textSecondary else OrbStyle.textMuted,
+                        fontSize = 10.sp, textAlign = TextAlign.Center, maxLines = 1
+                    )
+                }
+            }
+            val caption = when {
+                days == null -> ""
+                picked != null && picked!! < list.size -> OrbManagedMachines.spendDayDetail(list[picked!!], titles)
+                else -> OrbManagedMachines.spendTodayLine(sum.today, budget)
+            }
+            Text(caption, modifier = Modifier.fillMaxWidth().height(16.dp).testTag("managed.spend.caption"),
+                color = OrbStyle.textSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 

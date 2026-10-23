@@ -12,7 +12,7 @@ const iso = (offsetMin: number) => new Date(Date.now() + offsetMin * 60_000).toI
 const view = (o: Record<string, unknown>) => ({ provider: "boat", provider_id: "bx_7f3k2", image: "sandboxed-node:2026.10", size: "medium", cpu: 4, ram_gb: 8,
   state: "online", created_at: iso(-50), expires_at: iso(70), cost_usd: 0.1, usd_per_hour: 0.12, ledger_closed: false, ...o });
 
-type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light" };
+type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light"; spend?: unknown[] };
 async function mock(page: Page, opts: Opts = {}) {
   const machines: Record<string, unknown>[] = [
     view({ id: "mm1", name: "medium-a", node_id: "managed-mm1", owner_mission_id: "4f2a9c1e-0000-4000-8000-000000000001", reason: "Lean build" }),
@@ -39,7 +39,7 @@ async function mock(page: Page, opts: Opts = {}) {
     if (path.startsWith("/api/managed-machines")) {
       state.calls.push(`${method} ${path}${req.postData() ? ` ${req.postData()}` : ""}`);
       if (opts.managed === "404") return route.fulfill({ status: 404, body: "" });
-      if (method === "GET") return route.fulfill({ json: { machines, budget, sizes, enabled: opts.managed !== "disabled" } });
+      if (method === "GET") return route.fulfill({ json: { machines, budget, sizes, enabled: opts.managed !== "disabled", ...(opts.spend ? { daily_spend: opts.spend } : {}) } });
       if (method === "POST" && path === "/api/managed-machines") {
         if (opts.holdCreate) await new Promise<void>(r => { state.releaseCreate = r; });
         if (opts.createError) return route.fulfill({ status: 402, json: opts.createError });
@@ -287,4 +287,58 @@ test("rows stay mounted across polls (fine-grained updates)", async ({ page }) =
   await row(page, "medium-a").getByRole("button", { name: "Extend +1 h" }).click();
   await expect(row(page, "medium-a").locator(".managed-ttl")).toContainText(/2 h/);
   await expect(row(page, "medium-a")).toHaveAttribute("data-marker", "kept");
+});
+
+const dayIso = (back: number) => new Date(Date.now() - back * 86_400_000).toISOString().slice(0, 10);
+const spendWeek = (usd: number[], missions: (string | null)[][] = []) => usd.map((v, i) => ({ day: dayIso(usd.length - 1 - i), usd: v,
+  missions: (missions[i] ?? (v > 0 ? ["4f2a9c1e-0000-4000-8000-000000000001"] : [])).map((id, j, all) => ({ mission_id: id, usd: v / all.length })), sizes: [] }));
+
+const open390 = async (page: Page, theme: "dark" | "light", spend: unknown[]) => {
+  await mock(page, { theme, spend });
+  await openMachines(page);
+  await page.getByRole("button", { name: "Toggle sidebar", exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  return { chart: page.getByTestId("spend-chart"), caption: page.getByTestId("spend-caption") };
+};
+const idle = "$0.25 today of $20.00 daily cap";
+let weekHeight = 0;
+
+for (const theme of ["dark", "light"] as const) test.describe(`spend chart (${theme})`, () => {
+  test("week: totals, hover shows the day's top missions, tap pins a day", async ({ page }) => {
+    const { chart, caption } = await open390(page, theme, spendWeek([0, 1.0, 2.0, 0.01, 0, 0.5, 0.25], [[], ["4f2a9c1e-0000-4000-8000-000000000001", null, "aaaaaaaa-0000-4000-8000-000000000002"]]));
+    await expect(chart).toContainText("$3.76 last 7 days");
+    await expect(caption).toHaveText(idle);
+    await expect(page.locator(".managed-budget")).toHaveCount(0);
+    await expect(chart.locator(".spend-col.zero")).toHaveCount(2);
+    const box = (await chart.boundingBox())!;
+    weekHeight = box.height;
+    const bars = chart.locator(".spend-col");
+    await bars.nth(1).hover();
+    await expect(caption).toContainText(/\$1\.00 · LeanSys Wave 1.* \$0\.33, No mission \$0\.33 \+1 more/);
+    expect((await chart.boundingBox())!.height).toBeCloseTo(box.height, 0);
+    await chart.screenshot({ path: `${shots}/spend-week-hover-${theme}.png` });
+    await page.mouse.move(0, 0);
+    await expect(caption).toHaveText(idle);
+    await bars.nth(5).click(); await page.mouse.move(0, 0);
+    await expect(caption).toContainText("$0.50");
+    await bars.nth(5).click(); await page.mouse.move(0, 0);
+    await expect(caption).toHaveText(idle);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await page.screenshot({ path: `${shots}/spend-section-390-${theme}.png` });
+  });
+  test("single day", async ({ page }) => {
+    const { chart } = await open390(page, theme, spendWeek([0, 0, 0, 0, 0, 0, 0.04]));
+    await expect(chart).toContainText("$0.04 last 7 days");
+    await expect(chart.locator(".spend-col.zero")).toHaveCount(6);
+    await expect(chart.locator(".spend-col.today .spend-bar")).toHaveAttribute("style", /height: 100%/);
+  });
+  test("empty week: baselines only, same height", async ({ page }) => {
+    const { chart, caption } = await open390(page, theme, spendWeek([0, 0, 0, 0, 0, 0, 0]));
+    await expect(chart).toContainText("$0.00 last 7 days");
+    await expect(caption).toHaveText("$0.00 today of $20.00 daily cap");
+    await expect(page.getByTestId("spend-running")).toHaveText("1 of 3 running");
+    await expect(chart.locator(".spend-col.zero")).toHaveCount(7);
+    if (weekHeight) expect((await chart.boundingBox())!.height).toBeCloseTo(weekHeight, 0);
+    await chart.screenshot({ path: `${shots}/spend-empty-${theme}.png` });
+  });
 });

@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { api, connectionVersion, isConnected } from "./api";
 import { swallow } from "./log";
 import { PopupMenu, type MenuEntry } from "./Menu";
@@ -11,7 +11,8 @@ import * as Ic from "./icons";
 import {
   allowedSizes, budgetFull, budgetLeft, budgetLine, costLine, sizeLabel, specLine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent,
-  usd, usdPerHour, type CreateManagedMachine, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
+  spendDayDetail, spendFraction, spendSummary, spendWeekday,
+  usd, usdPerHour, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
 } from "./managedMachineModel";
 
 const openMission = (id: string) => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: `m:${id}` }));
@@ -35,6 +36,48 @@ export function missionTitle(id: string): string | undefined {
       .catch(swallow("managed.missionTitle", { id }));
   }
   return titles().get(id);
+}
+
+/**
+ * Managed spend over the last days: one bar per UTC day, the window total,
+ * today and the running count. Hover, focus or tap a bar to read that day's
+ * total and top missions in the caption (fixed height: nothing moves).
+ * `days` undefined renders a same-size skeleton.
+ */
+export function SpendChart(p: { days?: readonly DailySpend[]; budget?: ManagedBudget; title?: (missionId: string) => string | undefined }) {
+  const [hover, setHover] = createSignal<number | null>(null);
+  const [picked, setPicked] = createSignal<number | null>(null);
+  const active = () => hover() ?? picked();
+  const sum = createMemo(() => spendSummary(p.days ?? []));
+  const running = () => { const b = p.budget; return b ? `${b.active}${b.max_concurrent != null ? ` of ${b.max_concurrent}` : ""} running` : ""; };
+  const caption = () => {
+    const i = active(), d = i != null ? p.days?.[i] : undefined;
+    if (d) return spendDayDetail(d, p.title ?? missionTitle);
+    const cap = p.budget?.daily_cap_usd;
+    return `${usd(sum().today)} today${cap != null ? ` of ${usd(cap)} daily cap` : ""}`;
+  };
+  return <div class="spend-chart" classList={{ loading: !p.days }} data-testid="spend-chart" aria-busy={!p.days} onMouseLeave={() => setHover(null)}>
+    <Show when={p.days} fallback={<>
+      <div class="spend-head"><span class="spend-skel w1" /><span class="spend-skel w2" /></div>
+      <div class="spend-bars" aria-hidden="true"><Index each={Array.from({ length: 7 })}>{() => <div class="spend-col"><span class="spend-track"><span class="spend-bar skel" /></span><span class="spend-day"><span class="spend-skel w3" /></span></div>}</Index></div>
+      <div class="spend-caption"><span class="spend-skel w4" /></div>
+    </>}>{days => <>
+      <div class="spend-head">
+        <span class="spend-total"><b>{usd(sum().total)}</b> last {days().length} days</span>
+        <span class="spend-running" data-testid="spend-running">{running()}</span>
+      </div>
+      <div class="spend-bars" role="group" aria-label={`Daily spend, last ${days().length} days`}>
+        <Index each={days()}>{(d, i) => <button type="button" class="spend-col" classList={{ today: i === days().length - 1, active: active() === i, zero: d().usd <= 0 }}
+          aria-label={spendDayDetail(d(), p.title ?? missionTitle)} aria-pressed={picked() === i}
+          onMouseEnter={() => setHover(i)} onFocus={() => setHover(i)} onBlur={() => setHover(null)}
+          onClick={() => setPicked(v => v === i ? null : i)}>
+          <span class="spend-track"><span class="spend-bar" style={{ height: `${spendFraction(d().usd, sum().max) * 100}%` }} /></span>
+          <span class="spend-day">{spendWeekday(d().day)}</span>
+        </button>}</Index>
+      </div>
+      <div class="spend-caption" data-testid="spend-caption" aria-live="polite">{caption()}</div>
+    </>}</Show>
+  </div>;
 }
 
 /** Small ring that empties as the TTL runs out. */
@@ -214,7 +257,9 @@ export function ManagedMachines(p: { onDestroyed?: (nodeIds: string[]) => void }
       <h3 class="s-section-title">Managed (boat.dev)</h3>
       <button class="s-btn sm quiet" disabled={full()} title={full() ? "Daily budget or machine limit reached" : undefined} onClick={() => setCreating(true)}><Ic.PlusIcon size={14} />New managed machine</button>
     </div>
-    <div class="m-note managed-budget">{budgetLine(data()!.budget)}</div>
+    <Show when={data()!.daily_spend} fallback={<div class="m-note managed-budget">{budgetLine(data()!.budget)}</div>}>
+      {days => <SpendChart days={days()} budget={data()!.budget} />}
+    </Show>
     <Show when={actionError()}><ErrorNotice error={actionError()!} onDismiss={() => setActionError(null)} /></Show>
     <Show when={loadError()}><ErrorNotice title="Couldn’t refresh managed machines" error={loadError()!} /></Show>
     <div class="m-list s-card managed-list">

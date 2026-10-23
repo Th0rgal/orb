@@ -691,6 +691,114 @@ pub struct ListView {
     pub machines: Vec<ManagedMachine>,
     pub budget: BudgetView,
     pub sizes: Vec<SizeSpec>,
+    /// Last `SPEND_DAYS` UTC days, oldest first.
+    pub daily_spend: Vec<DailySpend>,
+}
+
+/// Days of history `list` returns in `daily_spend`.
+pub const SPEND_DAYS: u32 = 7;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SpendPart {
+    /// Owner mission id, or `null` for machines without one.
+    pub mission_id: Option<String>,
+    pub usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SizeSpend {
+    pub size: String,
+    pub usd: f64,
+}
+
+/// One UTC day of managed-machine spend.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DailySpend {
+    /// `YYYY-MM-DD` (UTC).
+    pub day: String,
+    pub usd: f64,
+    /// Highest spend first.
+    pub missions: Vec<SpendPart>,
+    /// Highest spend first.
+    pub sizes: Vec<SizeSpend>,
+}
+
+fn round4(v: f64) -> f64 {
+    (v * 10000.0).round() / 10000.0
+}
+
+/// Spend per UTC day over the last `days` days (oldest first, today last).
+/// Each machine's cost (metered, or estimated so far while live and
+/// unmetered) is spread evenly over the time it ran, so a machine that runs
+/// past midnight counts on both days. One pass over the registry.
+pub fn daily_spend(machines: &[ManagedMachine], days: u32, now: DateTime<Utc>) -> Vec<DailySpend> {
+    let days = days.clamp(1, 90) as i64;
+    let today = now.date_naive();
+    let first = today - chrono::Duration::days(days - 1);
+    let mut totals = vec![0.0f64; days as usize];
+    let mut missions: Vec<HashMap<Option<String>, f64>> = vec![HashMap::new(); days as usize];
+    let mut sizes: Vec<HashMap<String, f64>> = vec![HashMap::new(); days as usize];
+    for m in machines {
+        let cost = if m.state.is_live() && !m.cost_is_metered {
+            m.cost_usd.max(m.estimated_cost(now))
+        } else {
+            m.cost_usd
+        };
+        if cost <= 0.0 {
+            continue;
+        }
+        let start = m.created_at;
+        let end = m.destroyed_at.unwrap_or(now).max(start);
+        if end.date_naive() < first {
+            continue;
+        }
+        let span = (end - start).num_milliseconds() as f64;
+        let mut day = start.date_naive().max(first);
+        while day <= end.date_naive() && day <= today {
+            let d0 = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let d1 = d0 + chrono::Duration::days(1);
+            let share = if span <= 0.0 {
+                1.0
+            } else {
+                ((end.min(d1) - start.max(d0)).num_milliseconds().max(0) as f64) / span
+            };
+            let usd = cost * share;
+            if usd > 0.0 {
+                let i = (day - first).num_days() as usize;
+                totals[i] += usd;
+                *missions[i].entry(m.owner_mission_id.clone()).or_default() += usd;
+                *sizes[i].entry(m.size.clone()).or_default() += usd;
+            }
+            day += chrono::Duration::days(1);
+        }
+    }
+    let by_usd = |a: &f64, b: &f64| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal);
+    (0..days as usize)
+        .map(|i| {
+            let mut ms: Vec<SpendPart> = missions[i]
+                .drain()
+                .map(|(mission_id, usd)| SpendPart {
+                    mission_id,
+                    usd: round4(usd),
+                })
+                .collect();
+            ms.sort_by(|a, b| by_usd(&a.usd, &b.usd).then_with(|| a.mission_id.cmp(&b.mission_id)));
+            let mut ss: Vec<SizeSpend> = sizes[i]
+                .drain()
+                .map(|(size, usd)| SizeSpend {
+                    size,
+                    usd: round4(usd),
+                })
+                .collect();
+            ss.sort_by(|a, b| by_usd(&a.usd, &b.usd).then_with(|| a.size.cmp(&b.size)));
+            DailySpend {
+                day: (first + chrono::Duration::days(i as i64)).to_string(),
+                usd: round4(totals[i]),
+                missions: ms,
+                sizes: ss,
+            }
+        })
+        .collect()
 }
 
 impl ManagedManager {
@@ -948,13 +1056,19 @@ impl ManagedManager {
             .cloned()
             .collect();
         machines.sort_by_key(|m| std::cmp::Reverse(m.created_at));
+        let daily_spend = self.daily_spend(SPEND_DAYS).await;
         ListView {
             enabled: self.settings.enabled && self.provider.is_some(),
             provider: self.settings.provider.clone(),
             machines,
             budget: self.budget().await,
             sizes: SIZES.to_vec(),
+            daily_spend,
         }
+    }
+
+    pub async fn daily_spend(&self, days: u32) -> Vec<DailySpend> {
+        daily_spend(&self.machines.lock().await, days, Utc::now())
     }
 
     /// Only operator-allowlisted images may be started.

@@ -118,4 +118,34 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertNotNil(OrbManaged.date("2026-10-22T00:59:37.924408552Z"))
         XCTAssertEqual(OrbManaged.date("2026-10-22T00:59:37.924408552Z"), OrbManaged.date("2026-10-22T00:59:37.924Z"))
     }
+
+    func testSpendMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/managed-spend.json")
+        let raw = try JSONSerialization.data(withJSONObject: spec["cases"] as Any)
+        struct Top: Decodable { var ids: [String?]; var more: Int }
+        struct Case: Decodable { var name: String; var days: [OrbDailySpend]; var total: Double; var today: Double; var max: Double; var fractions: [Double]; var top: [Top] }
+        let cases = try JSONDecoder().decode([Case].self, from: raw)
+        XCTAssertEqual(cases.count, 4)
+        for c in cases {
+            let s = OrbManaged.spendSummary(c.days)
+            XCTAssertEqual(s.total, c.total, accuracy: 1e-9, c.name)
+            XCTAssertEqual(s.today, c.today, accuracy: 1e-9, c.name)
+            XCTAssertEqual(s.max, c.max, accuracy: 1e-9, c.name)
+            for (i, d) in c.days.enumerated() {
+                XCTAssertEqual(OrbManaged.spendFraction(d.usd, max: s.max), c.fractions[i], accuracy: 1e-9, "\(c.name) \(d.day)")
+                let top = OrbManaged.topMissions(d)
+                XCTAssertEqual(top.ids, c.top[i].ids, c.name); XCTAssertEqual(top.more, c.top[i].more, c.name)
+            }
+        }
+    }
+
+    func testSpendDetailAndDecode() throws {
+        let json = payload.replacingOccurrences(of: "\"sizes\":[{", with: "\"daily_spend\":[{\"day\":\"2026-10-22\",\"usd\":1.0,\"missions\":[{\"mission_id\":\"abc\",\"usd\":0.6},{\"mission_id\":null,\"usd\":0.3},{\"mission_id\":\"zzzzzzzz9\",\"usd\":0.1}],\"sizes\":[]}],\"sizes\":[{")
+        let r = try OrbManaged.decode(Data(json.utf8))
+        let day = try XCTUnwrap(r.daily_spend?.first)
+        XCTAssertTrue(OrbManaged.spendDayDetail(day, titles: ["abc": "Fix login"]).hasSuffix(" · $1.00 · Fix login $0.60, No mission $0.30 +1 more"))
+        XCTAssertNil(try OrbManaged.decode(Data(payload.utf8)).daily_spend)
+        XCTAssertTrue(OrbManaged.spendDayDetail(OrbDailySpend(day: "2026-10-22", usd: 0, missions: [], sizes: []), titles: [:]).hasSuffix(" · no spend"))
+        XCTAssertEqual(OrbManaged.runningLine(r.budget), "1 of 3 running")
+    }
 }

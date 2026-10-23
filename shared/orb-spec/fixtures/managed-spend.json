@@ -1,0 +1,24 @@
+{
+  "description": "Managed spend chart: Core's daily_spend (UTC days oldest first, missions highest first) -> spendSummary {total, today (last day), max} and spendFraction(usd, max) per day: 0 for zero days (drawn as a baseline), else usd/max with a 0.04 floor so tiny days stay visible. topMissions lists the first 2 mission ids (null = no mission) and how many more there are.",
+  "cases": [
+    { "name": "empty", "days": [], "total": 0, "today": 0, "max": 0, "fractions": [], "top": [] },
+    { "name": "all zero", "days": [
+      { "day": "2026-10-22", "usd": 0, "missions": [], "sizes": [] },
+      { "day": "2026-10-23", "usd": 0, "missions": [], "sizes": [] }
+    ], "total": 0, "today": 0, "max": 0, "fractions": [0, 0], "top": [{ "ids": [], "more": 0 }, { "ids": [], "more": 0 }] },
+    { "name": "single day", "days": [
+      { "day": "2026-10-22", "usd": 0, "missions": [], "sizes": [] },
+      { "day": "2026-10-23", "usd": 0.04, "missions": [{ "mission_id": "m1", "usd": 0.04 }], "sizes": [{ "size": "small", "usd": 0.04 }] }
+    ], "total": 0.04, "today": 0.04, "max": 0.04, "fractions": [0, 1], "top": [{ "ids": [], "more": 0 }, { "ids": ["m1"], "more": 0 }] },
+    { "name": "week", "days": [
+      { "day": "2026-10-17", "usd": 0, "missions": [], "sizes": [] },
+      { "day": "2026-10-18", "usd": 1.0, "missions": [{ "mission_id": "m2", "usd": 0.6 }, { "mission_id": null, "usd": 0.3 }, { "mission_id": "m1", "usd": 0.1 }], "sizes": [{ "size": "large", "usd": 1.0 }] },
+      { "day": "2026-10-19", "usd": 2.0, "missions": [{ "mission_id": "m2", "usd": 2.0 }], "sizes": [{ "size": "large", "usd": 2.0 }] },
+      { "day": "2026-10-20", "usd": 0.01, "missions": [{ "mission_id": "m1", "usd": 0.01 }], "sizes": [{ "size": "small", "usd": 0.01 }] },
+      { "day": "2026-10-21", "usd": 0, "missions": [], "sizes": [] },
+      { "day": "2026-10-22", "usd": 0.5, "missions": [{ "mission_id": "m3", "usd": 0.5 }], "sizes": [{ "size": "small", "usd": 0.5 }] },
+      { "day": "2026-10-23", "usd": 0.25, "missions": [{ "mission_id": "m3", "usd": 0.25 }], "sizes": [{ "size": "small", "usd": 0.25 }] }
+    ], "total": 3.76, "today": 0.25, "max": 2.0, "fractions": [0, 0.5, 1, 0.04, 0, 0.25, 0.125],
+      "top": [{ "ids": [], "more": 0 }, { "ids": ["m2", null], "more": 1 }, { "ids": ["m2"], "more": 0 }, { "ids": ["m1"], "more": 0 }, { "ids": [], "more": 0 }, { "ids": ["m3"], "more": 0 }, { "ids": ["m3"], "more": 0 }] }
+  ]
+}

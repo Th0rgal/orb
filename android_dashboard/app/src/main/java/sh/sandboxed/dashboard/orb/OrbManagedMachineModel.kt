@@ -44,11 +44,24 @@ data class ManagedBudget(
     val maxTtlMinutes: Int
 )
 
+/** One UTC day of managed spend from Core; missions/sizes highest first. */
+data class DailySpend(
+    val day: String,
+    val usd: Double,
+    /** (mission id or null for no mission, usd). */
+    val missions: List<Pair<String?, Double>>,
+    val sizes: List<Pair<String, Double>>
+)
+
+data class SpendSummary(val total: Double, val today: Double, val max: Double)
+
 data class ManagedMachinesResponse(
     val enabled: Boolean,
     val provider: String?,
     val machines: List<ManagedMachine>,
-    val budget: ManagedBudget
+    val budget: ManagedBudget,
+    /** Last 7 UTC days, oldest first; null on Cores that predate the spend chart. */
+    val dailySpend: List<DailySpend>? = null
 )
 
 object OrbManagedMachines {
@@ -80,6 +93,54 @@ object OrbManagedMachines {
         )
     }
 
+    fun parseDailySpend(raw: Any?): List<DailySpend>? = (raw as? List<*>)?.let {
+        OrbJSON.dictList(raw).map { day ->
+            DailySpend(
+                day = OrbJSON.str(day, "day") ?: "",
+                usd = OrbJSON.double(day, "usd") ?: 0.0,
+                missions = OrbJSON.dictList(day["missions"]).map { OrbJSON.str(it, "mission_id") to (OrbJSON.double(it, "usd") ?: 0.0) },
+                sizes = OrbJSON.dictList(day["sizes"]).map { (OrbJSON.str(it, "size") ?: "") to (OrbJSON.double(it, "usd") ?: 0.0) }
+            )
+        }
+    }
+
+    /** Spend chart header: the window's sum, today (the last day) and the tallest bar. */
+    fun spendSummary(days: List<DailySpend>): SpendSummary =
+        SpendSummary(days.sumOf { it.usd }, days.lastOrNull()?.usd ?: 0.0, days.maxOfOrNull { it.usd } ?: 0.0)
+
+    /** Bar height as a 0…1 fraction of the tallest day; zero days stay 0 (a baseline). */
+    fun spendFraction(usd: Double, max: Double): Double = if (max > 0 && usd > 0) maxOf(usd / max, 0.04) else 0.0
+
+    /** First [top] mission ids of a day (null = no mission) and how many more there are. */
+    fun topMissions(d: DailySpend, top: Int = 2): Pair<List<String?>, Int> =
+        d.missions.take(top).map { it.first } to maxOf(0, d.missions.size - top)
+
+    private fun spendDate(day: String): java.time.LocalDate? = runCatching { java.time.LocalDate.parse(day) }.getOrNull()
+    /** "Mon" for a UTC `YYYY-MM-DD` day. */
+    fun spendWeekday(day: String): String =
+        spendDate(day)?.format(java.time.format.DateTimeFormatter.ofPattern("EEE", Locale.getDefault())) ?: day
+    /** "Mon 20 Oct". */
+    fun spendDayLabel(day: String): String =
+        spendDate(day)?.format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault())) ?: day
+
+    /** "Mon 20 Oct · $0.53 · Fix login $0.50, No mission $0.03 +1 more". */
+    fun spendDayDetail(d: DailySpend, titles: Map<String, String?>, top: Int = 2): String {
+        if (d.usd <= 0) return "${spendDayLabel(d.day)} · no spend"
+        val parts = d.missions.take(top).map { (id, v) ->
+            val name = id?.let { titles[it] ?: "Mission ${it.take(8)}" } ?: "No mission"
+            "$name ${usd(v)}"
+        }
+        val more = topMissions(d, top).second
+        return "${spendDayLabel(d.day)} · ${usd(d.usd)}" + (if (parts.isEmpty()) "" else " · " + parts.joinToString(", ")) + (if (more > 0) " +$more more" else "")
+    }
+
+    /** "$0.25 today of $20.00 daily cap" / "$0.25 today". */
+    fun spendTodayLine(today: Double, b: ManagedBudget): String =
+        "${usd(today)} today" + (b.dailyCapUsd?.let { " of ${usd(it)} daily cap" } ?: "")
+
+    /** "1 of 3 running" / "1 running". */
+    fun runningLine(b: ManagedBudget): String = "${b.active}" + (b.maxConcurrent?.let { " of $it" } ?: "") + " running"
+
     fun parse(d: OrbDict): ManagedMachinesResponse {
         val b = OrbJSON.dict(d["budget"])
         return ManagedMachinesResponse(
@@ -94,7 +155,8 @@ object OrbManagedMachines {
                 maxConcurrent = OrbJSON.int(b, "max_concurrent"),
                 defaultTtlMinutes = OrbJSON.int(b, "default_ttl_minutes") ?: 60,
                 maxTtlMinutes = OrbJSON.int(b, "max_ttl_minutes") ?: 0
-            )
+            ),
+            dailySpend = parseDailySpend(d["daily_spend"])
         )
     }
 
