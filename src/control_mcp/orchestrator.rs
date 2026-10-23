@@ -632,7 +632,7 @@ impl OrchestratorMcp {
                         },
                         "model_override": {
                             "type": "string",
-                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-5.6-terra', recommended with medium effort) for codex, Google models for antigravity, Grok models for grok, 'provider/model' format for opencode and 'mistral/model' for vibe. Never invent variants such as 'gpt-5.5-sol'."
+                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-5.6-terra', recommended with medium effort) for codex, Google models for antigravity, Grok models for grok, 'provider/model' format for opencode and 'mistral/model' for vibe. Never invent variants such as 'gpt-5.5-sol'. Codex on a remote node (remote_node_id, e.g. auto-managed:default / auto-managed:large) runs through the core proxy: pass model_override explicitly (e.g. gpt-6.1-sol); if omitted, the configured Codex default is used and recorded on the mission."
                         },
                         "model_effort": {
                             "type": "string",
