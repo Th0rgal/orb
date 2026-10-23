@@ -45,6 +45,7 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/managed-machines", get(list).post(spawn))
         .route("/api/managed-machines/reconcile", post(reconcile))
+        .route("/api/managed-machines/spend", get(spend))
         .route(
             "/api/managed-machines/settings",
             get(get_settings).put(put_settings),
@@ -78,6 +79,23 @@ async fn list(Query(q): Query<ListQuery>) -> Response {
             m.list(q.history_hours.unwrap_or(24).clamp(0, 24 * 30))
                 .await,
         )
+        .into_response(),
+        Err(r) => r,
+    }
+}
+
+#[derive(Deserialize)]
+struct SpendQuery {
+    days: Option<u32>,
+}
+
+/// Daily spend aggregates (UTC days, oldest first) with per-mission and
+/// per-size breakdowns.
+async fn spend(Query(q): Query<SpendQuery>) -> Response {
+    match manager() {
+        Ok(m) => Json(json!({
+            "days": m.daily_spend(q.days.unwrap_or(crate::managed::SPEND_DAYS)).await
+        }))
         .into_response(),
         Err(r) => r,
     }

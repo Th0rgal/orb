@@ -4022,3 +4022,27 @@ select.orb-select-native:disabled { cursor: default; }
   .managed-more { display: inline-flex; }
   .managed-mission-chip { max-width: 140px; }
 }
+
+/* Managed spend chart: fixed height in every state (skeleton, empty, week). */
+.spend-chart { margin: 0 0 10px; padding: 10px 12px 8px; border: 1px solid var(--stroke-soft); border-radius: var(--radius-lg); background: var(--bg-inset); font-variant-numeric: tabular-nums; }
+.spend-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; height: 18px; min-width: 0; font-size: 12px; color: var(--fg-3); }
+.spend-total, .spend-running { white-space: nowrap; }
+.spend-total b { color: var(--fg-strong); font-weight: 600; font-size: 13px; }
+.spend-caption { height: 16px; margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spend-bars { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-top: 8px; }
+.spend-col { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; border-radius: var(--radius-xs); }
+.spend-col:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 2px; }
+.spend-track { position: relative; display: flex; align-items: flex-end; height: 44px; border-bottom: 1px solid var(--stroke); }
+.spend-bar { display: block; width: 100%; min-height: 0; border-radius: 3px 3px 0 0; background: color-mix(in srgb, var(--blue) 55%, transparent); transition: height .2s ease, background-color .12s; }
+.spend-col.today .spend-bar { background: var(--blue); }
+.spend-col.active .spend-bar, .spend-col:hover .spend-bar { background: color-mix(in srgb, var(--blue) 85%, var(--fg-strong)); }
+.spend-col.active .spend-track, .spend-col:hover .spend-track { border-bottom-color: var(--fg-3); }
+.spend-day { height: 14px; font-size: 10.5px; line-height: 14px; text-align: center; color: var(--fg-4); }
+.spend-col.today .spend-day, .spend-col.active .spend-day { color: var(--fg-2); }
+.spend-bar.skel { height: 40%; }
+.spend-col:nth-child(2n) .spend-bar.skel { height: 65%; }
+.spend-skel, .spend-bar.skel { display: inline-block; border-radius: var(--radius-xs); background: linear-gradient(90deg, var(--bg-code), var(--bg-active), var(--bg-code)); background-size: 200% 100%; animation: mermaid-shimmer 1.4s ease-in-out infinite; }
+.spend-skel { height: 10px; vertical-align: middle; }
+.spend-skel.w1 { width: 110px; } .spend-skel.w2 { width: 70px; } .spend-skel.w4 { width: 150px; } .spend-skel.w3 { width: 22px; height: 8px; }
+.spend-chart.loading .spend-col { cursor: default; }
+@media (prefers-reduced-motion: reduce) { .spend-skel, .spend-bar.skel { animation: none; } .spend-bar { transition: none; } }

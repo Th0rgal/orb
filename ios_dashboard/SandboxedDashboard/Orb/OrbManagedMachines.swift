@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 
 /// Managed (boat.dev) machines: payload model and presentation logic,
@@ -47,12 +48,25 @@ struct OrbManagedSize: Codable, Equatable, Sendable {
     var usd_per_hour: Double
 }
 
+/// One UTC day of managed spend from Core; missions/sizes highest first.
+struct OrbDailySpend: Codable, Equatable, Identifiable, Sendable {
+    struct Mission: Codable, Equatable, Sendable { var mission_id: String?; var usd: Double }
+    struct Size: Codable, Equatable, Sendable { var size: String; var usd: Double }
+    var day: String
+    var usd: Double
+    var missions: [Mission]
+    var sizes: [Size]
+    var id: String { day }
+}
+
 struct OrbManagedMachinesResponse: Codable, Equatable, Sendable {
     var enabled: Bool
     var provider: String?
     var machines: [OrbManagedMachine]
     var budget: OrbManagedBudget
     var sizes: [OrbManagedSize]
+    /// Last 7 UTC days, oldest first; `nil` on Cores that predate the spend chart.
+    var daily_spend: [OrbDailySpend]?
 }
 
 enum OrbManaged {
@@ -137,6 +151,38 @@ enum OrbManaged {
         let running = "\(b.active)" + (b.max_concurrent.map { " of \($0)" } ?? "") + " running"
         return spent + " · " + running
     }
+    /// Spend chart header: the window's sum, today (the last day) and the tallest bar.
+    static func spendSummary(_ days: [OrbDailySpend]) -> (total: Double, today: Double, max: Double) {
+        (days.reduce(0) { $0 + $1.usd }, days.last?.usd ?? 0, days.map(\.usd).max() ?? 0)
+    }
+    /// Bar height as a 0…1 fraction of the tallest day; zero days stay 0 (a baseline).
+    static func spendFraction(_ usd: Double, max: Double) -> Double {
+        max > 0 && usd > 0 ? Swift.max(usd / max, 0.04) : 0
+    }
+    /// First `top` mission ids of a day (nil = no mission) and how many more there are.
+    static func topMissions(_ d: OrbDailySpend, top: Int = 2) -> (ids: [String?], more: Int) {
+        (d.missions.prefix(top).map(\.mission_id), Swift.max(0, d.missions.count - top))
+    }
+    static func spendDate(_ day: String) -> Date? { date(day + "T00:00:00Z") }
+    /// "Mon" / "Mon 20 Oct" for a UTC `YYYY-MM-DD` day.
+    static func spendWeekday(_ day: String) -> String { spendFormat(day, "EEE") }
+    static func spendDayLabel(_ day: String) -> String { spendFormat(day, "EEE d MMM") }
+    private static func spendFormat(_ day: String, _ template: String) -> String {
+        guard let d = spendDate(day) else { return day }
+        let f = DateFormatter(); f.timeZone = TimeZone(identifier: "UTC"); f.setLocalizedDateFormatFromTemplate(template)
+        return f.string(from: d)
+    }
+    /// "Mon 20 Oct · $0.53 · Fix login $0.50, No mission $0.03 +1 more".
+    static func spendDayDetail(_ d: OrbDailySpend, titles: [String: String], top: Int = 2) -> String {
+        if d.usd <= 0 { return spendDayLabel(d.day) + " · no spend" }
+        let name = { (id: String?) in id.map { titles[$0] ?? "Mission \($0.prefix(8))" } ?? "No mission" }
+        let parts = d.missions.prefix(top).map { "\(name($0.mission_id)) \(usd($0.usd))" }
+        let more = topMissions(d, top: top).more
+        return spendDayLabel(d.day) + " · " + usd(d.usd) + (parts.isEmpty ? "" : " · " + parts.joined(separator: ", ")) + (more > 0 ? " +\(more) more" : "")
+    }
+    /// "1 of 3 running" / "1 running".
+    static func runningLine(_ b: OrbManagedBudget) -> String { "\(b.active)" + (b.max_concurrent.map { " of \($0)" } ?? "") + " running" }
+
     /// Size label for display: the backend's "default" size is the medium one.
     static func sizeLabel(_ size: String) -> String { size == "default" ? "medium" : size }
     /// "4 vCPU · 8 GB RAM · 50 GB".
@@ -238,6 +284,10 @@ struct OrbManagedMachinesSection: View {
         let live: [OrbManagedMachine] = response.machines.filter(OrbManaged.isLive)
         let recent: [OrbManagedMachine] = OrbManaged.recent(response.machines)
         Section {
+            if response.enabled, let days = response.daily_spend {
+                OrbManagedSpendChart(days: days, budget: response.budget, titles: titles)
+                    .accessibilityIdentifier("managed.spend")
+            }
             if !response.enabled { Text("Managed machines are disabled on this backend.").foregroundStyle(.secondary) }
             else if live.isEmpty { Text("No managed machines running.").foregroundStyle(.secondary) }
             ForEach(live) { machine in
@@ -258,9 +308,9 @@ struct OrbManagedMachinesSection: View {
                     .contextMenu { menu(machine, live: false) }
             }
         } header: { Text("Managed machines") } footer: {
-            Text(OrbManaged.budgetLine(response.budget)).accessibilityIdentifier("managed.budget")
+            if response.daily_spend == nil { Text(OrbManaged.budgetLine(response.budget)).accessibilityIdentifier("managed.budget") }
         }
-        .task(id: response.machines.compactMap(\.owner_mission_id)) { await loadTitles() }
+        .task(id: missionIds) { await loadTitles() }
         .alert("Destroy machine?", isPresented: Binding(get: { destroying != nil }, set: { if !$0 { destroying = nil } }), presenting: destroying) { machine in
             Button("Destroy", role: .destructive) { onDestroy(machine) }
             Button("Cancel", role: .cancel) {}
@@ -287,10 +337,77 @@ struct OrbManagedMachinesSection: View {
         }
     }
 
+    private var missionIds: Set<String> {
+        Set(response.machines.compactMap(\.owner_mission_id) + (response.daily_spend ?? []).flatMap { $0.missions.compactMap(\.mission_id) })
+    }
+
     private func loadTitles() async {
-        for id in Set(response.machines.compactMap(\.owner_mission_id)) where titles[id] == nil {
+        for id in missionIds where titles[id] == nil {
             if let title = await OrbMissionTitles.load(id) { titles[id] = title }
         }
+    }
+}
+
+/// Spend over the last days: one bar per UTC day, the window total, today and
+/// the running count. Tap or drag across the bars to read a day's total and top
+/// missions in the caption (fixed height: nothing moves). `days == nil` is a
+/// same-size skeleton.
+struct OrbManagedSpendChart: View {
+    let days: [OrbDailySpend]?
+    let budget: OrbManagedBudget
+    var titles: [String: String] = [:]
+    @State private var selected: String?
+
+    var body: some View {
+        let list = days ?? []
+        let sum = OrbManaged.spendSummary(list)
+        let picked = list.first { $0.day == selected }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(OrbManaged.usd(sum.total)).font(.subheadline.weight(.semibold).monospacedDigit())
+                Text("last \(list.isEmpty ? 7 : list.count) days").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Text(OrbManaged.runningLine(budget)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Chart {
+                ForEach(days == nil ? Self.skeleton : list) { d in
+                    BarMark(x: .value("Day", OrbManaged.spendWeekday(d.day)),
+                            y: .value("Spend", days == nil ? d.usd : OrbManaged.spendFraction(d.usd, max: sum.max)), width: .ratio(0.7))
+                        .foregroundStyle(barColor(d, last: d.day == list.last?.day))
+                        .cornerRadius(3)
+                }
+                RuleMark(y: .value("Zero", 0)).foregroundStyle(.separator).lineStyle(StrokeStyle(lineWidth: 1))
+            }
+            .chartYScale(domain: 0...1)
+            .chartYAxis(.hidden)
+            .chartXAxis { AxisMarks { _ in AxisValueLabel().font(.caption2) } }
+            .chartXSelection(value: Binding(get: { picked.map { OrbManaged.spendWeekday($0.day) } }, set: { label in
+                selected = label.flatMap { l in list.first { OrbManaged.spendWeekday($0.day) == l }?.day }
+            }))
+            .frame(height: 64)
+            Text(caption(picked, sum.today))
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                .accessibilityIdentifier("managed.spend.caption")
+        }
+        .redacted(reason: days == nil ? .placeholder : [])
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func caption(_ d: OrbDailySpend?, _ today: Double) -> String {
+        if let d { return OrbManaged.spendDayDetail(d, titles: titles) }
+        return OrbManaged.usd(today) + " today" + (budget.daily_cap_usd.map { " of \(OrbManaged.usd($0)) daily cap" } ?? "")
+    }
+
+    private func barColor(_ d: OrbDailySpend, last: Bool) -> Color {
+        if days == nil { return Color.secondary.opacity(0.25) }
+        if d.day == selected { return .accentColor }
+        return Color.accentColor.opacity(last ? 0.9 : 0.5)
+    }
+
+    /// Placeholder bars (heights only) while the first list is loading.
+    private static let skeleton: [OrbDailySpend] = [0.4, 0.65, 0.4, 0.65, 0.4, 0.65, 0.4].enumerated().map {
+        OrbDailySpend(day: "2026-01-0\($0.offset + 1)", usd: $0.element, missions: [], sizes: [])
     }
 }
 

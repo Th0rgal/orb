@@ -797,3 +797,137 @@ async fn unlimited_caps_never_refuse_and_report_null() {
     assert!(json["daily_cap_usd"].is_null());
     assert!(json["max_concurrent"].is_null());
 }
+
+fn spend_machine(
+    id: &str,
+    size: &str,
+    mission: Option<&str>,
+    created: &str,
+    destroyed: Option<&str>,
+    cost: f64,
+) -> ManagedMachine {
+    let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+    ManagedMachine {
+        name: String::new(),
+        antigravity_projected: false,
+        id: id.into(),
+        provider: "fake".into(),
+        provider_id: None,
+        node_id: format!("managed-{id}"),
+        image: "orb-node-base".into(),
+        size: size.into(),
+        cpu: 2,
+        ram_gb: 4,
+        disk_gb: 12,
+        usd_per_hour: 1.0,
+        state: if destroyed.is_some() {
+            MachineState::Destroyed
+        } else {
+            MachineState::Online
+        },
+        created_at: at(created),
+        expires_at: at("2030-01-01T00:00:00Z"),
+        online_at: None,
+        destroyed_at: destroyed.map(at),
+        destroy_reason: None,
+        cost_usd: cost,
+        cost_is_metered: true,
+        owner_mission_id: mission.map(Into::into),
+        owner_user_id: None,
+        reason: None,
+        error: None,
+        ledger_closed: destroyed.is_some(),
+        last_busy_at: None,
+    }
+}
+
+#[test]
+fn daily_spend_buckets_by_day_mission_and_size() {
+    let now: DateTime<Utc> = "2026-10-23T12:00:00Z".parse().unwrap();
+    let machines = vec![
+        // Out of range: before the 7-day window.
+        spend_machine(
+            "old",
+            "small",
+            Some("m1"),
+            "2026-10-01T10:00:00Z",
+            Some("2026-10-01T11:00:00Z"),
+            5.0,
+        ),
+        // Single day.
+        spend_machine(
+            "a",
+            "small",
+            Some("m1"),
+            "2026-10-20T10:00:00Z",
+            Some("2026-10-20T11:00:00Z"),
+            0.03,
+        ),
+        spend_machine(
+            "b",
+            "large",
+            Some("m2"),
+            "2026-10-20T12:00:00Z",
+            Some("2026-10-20T13:00:00Z"),
+            0.5,
+        ),
+        // Spans midnight evenly: half on 21st, half on 22nd.
+        spend_machine(
+            "c",
+            "small",
+            None,
+            "2026-10-21T23:00:00Z",
+            Some("2026-10-22T01:00:00Z"),
+            0.2,
+        ),
+        // Running now, unmetered: accrued estimate (2h at $1/h) counts today.
+        {
+            let mut m = spend_machine("d", "small", Some("m3"), "2026-10-23T10:00:00Z", None, 0.0);
+            m.cost_is_metered = false;
+            m
+        },
+        // Zero-cost machine is ignored.
+        spend_machine(
+            "z",
+            "small",
+            Some("m9"),
+            "2026-10-19T10:00:00Z",
+            Some("2026-10-19T10:00:00Z"),
+            0.0,
+        ),
+    ];
+    let days = daily_spend(&machines, 7, now);
+    assert_eq!(days.len(), 7);
+    assert_eq!(days[0].day, "2026-10-17");
+    assert_eq!(days[6].day, "2026-10-23");
+    assert!(days[..3]
+        .iter()
+        .all(|d| d.usd == 0.0 && d.missions.is_empty()));
+    let d20 = &days[3];
+    assert_eq!(d20.usd, 0.53);
+    assert_eq!(
+        d20.missions[0],
+        SpendPart {
+            mission_id: Some("m2".into()),
+            usd: 0.5
+        }
+    );
+    assert_eq!(d20.missions[1].mission_id.as_deref(), Some("m1"));
+    assert_eq!(d20.sizes[0].size, "large");
+    assert_eq!(days[4].usd, 0.1);
+    assert_eq!(days[4].missions[0].mission_id, None);
+    assert_eq!(days[5].usd, 0.1);
+    assert_eq!(days[6].usd, 2.0);
+    assert_eq!(days[6].missions[0].mission_id.as_deref(), Some("m3"));
+}
+
+#[test]
+fn daily_spend_empty_registry_is_all_zero_days() {
+    let now: DateTime<Utc> = "2026-10-23T12:00:00Z".parse().unwrap();
+    let days = daily_spend(&[], 3, now);
+    assert_eq!(
+        days.iter().map(|d| d.day.as_str()).collect::<Vec<_>>(),
+        ["2026-10-21", "2026-10-22", "2026-10-23"]
+    );
+    assert!(days.iter().all(|d| d.usd == 0.0));
+}

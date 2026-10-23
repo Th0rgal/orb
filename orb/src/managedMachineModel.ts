@@ -41,7 +41,11 @@ export interface ManagedBudget {
   max_size: string;
 }
 
-export interface ManagedMachinesResponse { machines: ManagedMachine[]; budget: ManagedBudget; sizes: ManagedSize[]; enabled: boolean }
+/** One UTC day of spend from Core, oldest first; missions/sizes highest first. */
+export interface DailySpend { day: string; usd: number; missions: { mission_id: string | null; usd: number }[]; sizes: { size: string; usd: number }[] }
+
+/** `daily_spend` is absent on Cores that predate the spend chart. */
+export interface ManagedMachinesResponse { machines: ManagedMachine[]; budget: ManagedBudget; sizes: ManagedSize[]; enabled: boolean; daily_spend?: DailySpend[] }
 
 export interface CreateManagedMachine { wait?: boolean; size?: string; cpu?: number; ram_gb?: number; ttl_minutes?: number; image?: string; reason?: string }
 
@@ -185,4 +189,30 @@ export function managedError(error: unknown): string {
   const prefix = code === "budget_exceeded" ? "Daily budget reached" : code === "quota_exceeded" ? "Machine limit reached" : "";
   if (prefix) return message ? `${prefix}: ${message}` : `${prefix}.`;
   return message || `Request failed (${error.status})`;
+}
+
+/** Totals for the spend chart header: the window's sum, today (the last day) and the tallest bar. */
+export function spendSummary(days: readonly DailySpend[]) {
+  const total = days.reduce((sum, d) => sum + d.usd, 0);
+  return { total, today: days.at(-1)?.usd ?? 0, max: days.reduce((m, d) => Math.max(m, d.usd), 0) };
+}
+
+/** Bar height as a 0…1 fraction of the tallest day; zero days stay at 0 (drawn as a baseline). */
+export const spendFraction = (usd: number, max: number) => max > 0 && usd > 0 ? Math.max(usd / max, 0.04) : 0;
+
+/** "Mon" for an ISO `YYYY-MM-DD` UTC day. */
+export const spendWeekday = (day: string) => new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" });
+/** "Mon 20 Oct" for an ISO `YYYY-MM-DD` UTC day. */
+export const spendDayLabel = (day: string) => new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+
+/** The first `top` mission ids of a day (null = no mission) and how many more there are. */
+export const topMissions = (d: DailySpend, top = 2) => ({ ids: d.missions.slice(0, top).map(m => m.mission_id), more: Math.max(0, d.missions.length - top) });
+
+/** "Mon 20 Oct · $0.53 · Fix login $0.50, Mission 1a2b3c4d $0.03 +1 more". */
+export function spendDayDetail(d: DailySpend, title: (missionId: string) => string | undefined, top = 2): string {
+  if (d.usd <= 0) return `${spendDayLabel(d.day)} · no spend`;
+  const name = (id: string | null) => id ? title(id) ?? `Mission ${id.slice(0, 8)}` : "No mission";
+  const parts = d.missions.slice(0, top).map(m => `${name(m.mission_id)} ${usd(m.usd)}`);
+  const { more } = topMissions(d, top);
+  return `${spendDayLabel(d.day)} · ${usd(d.usd)}${parts.length ? ` · ${parts.join(", ")}` : ""}${more > 0 ? ` +${more} more` : ""}`;
 }
