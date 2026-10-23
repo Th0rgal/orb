@@ -138,11 +138,26 @@ pub enum JobLiveness {
 #[cfg(target_os = "linux")]
 fn proc_stat_fields(pid: u32) -> Option<Result<Vec<String>, ()>> {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => Some(
-            stat.rsplit_once(") ")
-                .map(|(_, rest)| rest.split_whitespace().map(str::to_string).collect())
-                .ok_or(()),
-        ),
+        Ok(stat) => {
+            let Some(open_idx) = stat.find('(') else {
+                return Some(Err(()));
+            };
+            let Some(close_idx) = stat.rfind(") ") else {
+                return Some(Err(()));
+            };
+            let rest = &stat[close_idx + 2..];
+            let fields: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+            if !crate::orb_spec::proc_stat_fields_valid(
+                open_idx as u64,
+                close_idx as u64,
+                stat.len() as u64,
+                20,
+                fields.len() as u64,
+            ) {
+                return Some(Err(()));
+            }
+            Some(Ok(fields))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => Some(Err(())),
     }

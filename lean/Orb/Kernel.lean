@@ -131,19 +131,19 @@ def verifyTokenRotation
      scopeAndExpiryOk == 1 then 1 else 0
 
 /--
-  Unboxed C-ABI Bounded Process Log Window Gate (`leansys_verify_log_window` from `lean-sys`):
+  Unboxed C-ABI Bounded Process Log Window Gate (`orb_verify_log_window`):
   Verifies that `offset ≤ fileSize`, `reqLen ≤ maxChunk`, `maxChunk ≤ hardCap`,
   `actualLen ≤ reqLen`, and `actualLen ≤ fileSize - offset`.
 -/
-@[inline, export leansys_verify_log_window]
+@[inline, export orb_verify_log_window]
 def verifyLogWindow (offset reqLen maxChunk hardCap fileSize actualLen : UInt64) : UInt8 :=
   if offset ≤ fileSize && reqLen ≤ maxChunk && maxChunk ≤ hardCap &&
      actualLen ≤ reqLen && actualLen ≤ fileSize - offset then 1 else 0
 
 /--
-  Unboxed C-ABI Bijective 64-bit Avalanche Word Mixer (`leansys_mix64_word` from `lean-sys`).
+  Unboxed C-ABI Bijective 64-bit Avalanche Word Mixer (`orb_mix64_word`).
 -/
-@[inline, export leansys_mix64_word]
+@[inline, export orb_mix64_word]
 def mix64Word (acc word : UInt64) : UInt64 :=
   let v1 := acc + word * 0xBF58476D1CE4E5B9
   let v2 := (v1 <<< 31) ||| (v1 >>> 33)

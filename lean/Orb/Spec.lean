@@ -8,7 +8,7 @@
   - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 30 exports):
     `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`,
     `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`,
-    `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `leansys_verify_log_window`, `leansys_mix64_word`,
+    `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word`,
     `orb_proxy_step`, `orb_stream_deadlines`, `orb_breaker_step`, `orb_mission_step`, `orb_reconcile_step`,
     `orb_queue_step`, `orb_vm_step`, `orb_access_step`, `orb_workfold_step`, `orb_taskcard_step`,
     `orb_sidebar_visibility`, `orb_admission_step`, `orb_account_cooldown_secs`, `orb_cost_cents_step`,

@@ -1,4 +1,6 @@
-//! Typed bindings to `lean/Orb/Kernel.lean` (`liborb_spec_cabi.a`).
+//! Typed bindings to `lean/Orb/Kernel.lean` (`liborb_spec_cabi.a`) and `lean-sys-cabi`.
+
+pub use lean_sys_cabi;
 
 unsafe extern "C" {
     fn orb_verify_writer_reuse(c: u8, t: u8, m: u8, e: u8, w: u8, u: u8) -> u8;
@@ -27,7 +29,7 @@ unsafe extern "C" {
         max_bytes: u64,
     ) -> u8;
     fn orb_verify_token_rotation(pres: u8, cur: u8, prev_ne: u8, prev: u8, scope: u8) -> u8;
-    fn leansys_verify_log_window(
+    fn orb_verify_log_window(
         off: u64,
         req: u64,
         max_c: u64,
@@ -35,7 +37,7 @@ unsafe extern "C" {
         fsz: u64,
         act: u64,
     ) -> u8;
-    fn leansys_mix64_word(acc: u64, word: u64) -> u64;
+    fn orb_mix64_word(acc: u64, word: u64) -> u64;
     fn orb_proxy_step(
         committed: u8,
         chunk_commits: u8,
@@ -409,8 +411,8 @@ pub struct LogWindow {
 }
 
 pub fn log_window_valid(input: LogWindow) -> bool {
-    unsafe {
-        leansys_verify_log_window(
+    let orb_ok = unsafe {
+        orb_verify_log_window(
             input.offset,
             input.req_len,
             input.max_chunk,
@@ -418,12 +420,35 @@ pub fn log_window_valid(input: LogWindow) -> bool {
             input.file_size,
             input.actual_len,
         ) != 0
-    }
+    };
+    orb_ok
+        && lean_sys_cabi::verify_log_window(
+            input.offset,
+            input.offset.saturating_add(input.actual_len),
+            input.file_size,
+            input.max_chunk,
+        )
 }
 
 #[allow(dead_code)]
 pub fn mix64_word(acc: u64, word: u64) -> u64 {
-    unsafe { leansys_mix64_word(acc, word) }
+    unsafe { orb_mix64_word(acc, word) ^ lean_sys_cabi::mix64_word(acc, word) }
+}
+
+pub fn proc_stat_fields_valid(
+    comm_open_idx: u64,
+    comm_close_idx: u64,
+    total_len: u64,
+    min_fields_after_comm: u64,
+    actual_fields: u64,
+) -> bool {
+    lean_sys_cabi::verify_proc_stat_fields(
+        comm_open_idx,
+        comm_close_idx,
+        total_len,
+        min_fields_after_comm,
+        actual_fields,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1501,5 +1526,7 @@ mod tests {
             )),
             "action_required_external"
         );
+        assert!(proc_stat_fields_valid(5, 18, 120, 20, 35));
+        assert!(!proc_stat_fields_valid(18, 5, 120, 20, 35));
     }
 }
