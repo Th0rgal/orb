@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
@@ -37,6 +38,7 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.platform.testTag
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -93,6 +95,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -930,9 +933,15 @@ fun OrbConversationPage(
         }
     }
 
+    // Follow the latest message only while the reader has not scrolled away.
+    val transcriptFollow = remember(missionId) { OrbTranscriptFollow() }
+    var followPinned by remember(missionId) { mutableStateOf(true) }
+    fun syncFollow() { followPinned = transcriptFollow.pinned }
+
     fun sendTurn(rawInput: String? = null) {
         val baseText = (rawInput ?: inputText).trim()
         if (baseText.isEmpty() && pendingAttachments.isEmpty()) return
+        transcriptFollow.pin(); syncFollow()
         if (rawInput == null) {
             OrbMissionCommand.parse(baseText)?.let { (command, arg) ->
                 runMissionCommand(command, arg)
@@ -1333,11 +1342,9 @@ fun OrbConversationPage(
 
     LaunchedEffect(turns.size, turns.lastOrNull()?.id, workStepCount, streamingText.length, completedPlanTurnKey) {
         if (turns.isNotEmpty()) {
-            val layout = listState.layoutInfo
-            val totalItems = layout.totalItemsCount
-            val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index ?: 0
-            val nearBottom = !hasAnchoredInitial || totalItems == 0 || lastVisible >= totalItems - 3
-            if (nearBottom) {
+            // Not "the last few items are visible": one tall turn is several screens,
+            // and a reader scrolled up into it was pulled to the bottom on every delta.
+            if (transcriptFollow.shouldFollow(hasAnchoredInitial)) {
                 scrollToAbsoluteBottom()
                 if (!hasAnchoredInitial) {
                     // Settle tall rows (markdown, images) for a couple of frames before revealing.
@@ -1511,12 +1518,24 @@ fun OrbConversationPage(
             }
         }
 
+        // Pinned state comes from the reader's own drags and flings, never from content growth.
+        LaunchedEffect(listState, missionId) {
+            listState.interactionSource.interactions.collect { interaction ->
+                if (interaction is DragInteraction.Start) { transcriptFollow.onDragStart(); syncFollow() }
+            }
+        }
+        LaunchedEffect(listState, missionId) {
+            snapshotFlow { listState.isScrollInProgress }.collect { moving ->
+                if (!moving) { transcriptFollow.onSettled(atEnd = !listState.canScrollForward); syncFollow() }
+            }
+        }
+
         // Conversation Body
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
             state = listState,
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
+                .fillMaxSize()
                 // Keep the list invisible until it has been anchored at the bottom, so
                 // opening a conversation lands there without showing the top first.
                 .graphicsLayer { alpha = if (hasAnchoredInitial || turns.isEmpty()) 1f else 0f },
@@ -1862,6 +1881,25 @@ fun OrbConversationPage(
                     }
                 }
             }
+        }
+        if (!followPinned && hasAnchoredInitial && listState.canScrollForward) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 10.dp)
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .orbPressClickable {
+                        transcriptFollow.pin(); syncFollow()
+                        scope.launch { scrollToAbsoluteBottom() }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(imageVector = Icons.Default.KeyboardArrowDown, contentDescription = "Jump to latest", tint = Color.White, modifier = Modifier.size(20.dp))
+            }
+        }
         }
 
         // Composer Area

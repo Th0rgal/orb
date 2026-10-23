@@ -5,6 +5,7 @@ import { QuizAnswer } from "./QuizAnswer";
 import * as Ic from "./icons";
 import { For, Show, createSignal, createEffect, on, onMount, onCleanup } from 'solid-js';
 import { createPinnedScroll } from './mission/pinnedScroll';
+import { JumpToLatest } from './mission/JumpToLatest';
 import { api, getMission, openExternalUrl, type Mission } from './api';
 import { cloudAccounts, cloudAccountLabel, cloudAttachmentBlock, cloudLaunchSeeds, defaultCloudProvider, readCloudProvider, writeCloudProvider, type CloudLaunchSeed, cloudCanSend, cloudExecution, cloudNames, cloudPhase, launchCloud, safeCloudUrl, type CloudAccount, type CloudExecution, type CloudProvider, type CloudTurn } from './cloudAgentApi';
 import './cloudAgents.css';
@@ -276,7 +277,7 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
         <For each={turn.artifacts.filter(a=>!a.kind)}>{artifact => <p><button class="na-drop-btn" onClick={() => void download(artifact.path)}>Download {artifact.path}</button></p>}</For>
       </>}</For>
     </>}</Show>
-  </div></div><div class="dock" ref={floatingDock}><div class="col">
+  </div></div><div class="dock" ref={floatingDock}><JumpToLatest pinned={pin.pinned} onJump={pin.pin} /><div class="col">
     <Show when={!execution() && seed()}>{s => <>
       <Composer picker={false} textOnly scope={`cloud:${p.id || 'launch'}`} placeholder="Send follow-up" busy disabled onPending={() => {}} onSend={() => false}/>
       <div class="cloud-conversation-meta"><ProviderLogo type={s().provider}/><span>{cloudNames[s().provider]}</span><span role="status">{cloudPhase('submitting')}</span></div>
