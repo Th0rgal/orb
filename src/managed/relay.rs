@@ -80,7 +80,7 @@ impl RelayHub {
         // A node that has not polled for a while is treated as unreachable,
         // like a refused TCP connect: the request was never delivered.
         let last = *ch.last_poll.lock().await;
-        if !last.is_some_and(|t| t.elapsed() < Duration::from_secs(90)) {
+        if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(90)) {
             return Err(RelayError::NodeNotConnected);
         }
         request.timeout_secs = timeout.as_secs();
