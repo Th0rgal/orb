@@ -293,35 +293,29 @@ pub fn stranded_pending(
 }
 
 pub fn classify_mission(facts: &MissionFacts) -> MissionVerdict {
-    if facts.is_client_placed {
-        return MissionVerdict::Keep;
-    }
-    match facts.status {
-        MissionStatus::Active => {
-            if facts.is_assistant_mode
-                || facts.running_in_actor
-                || facts.has_live_scope
-                || facts.has_durable_run
-                || facts.recently_updated
-            {
-                MissionVerdict::Keep
-            } else {
-                MissionVerdict::InterruptAndResume
-            }
-        }
-        // Pending missions never started a harness — the dispatcher owns
-        // them; interrupting would only add churn.
-        MissionStatus::AwaitingUser => {
-            if !facts.has_events
-                && !facts.has_durable_run
-                && !facts.running_in_actor
-                && !facts.already_tagged_orphaned
-            {
-                MissionVerdict::TagOrphaned
-            } else {
-                MissionVerdict::Keep
-            }
-        }
+    let status = match facts.status {
+        MissionStatus::Active => 0,
+        MissionStatus::AwaitingUser => 1,
+        MissionStatus::Interrupted => 2,
+        _ => 3,
+    };
+    match crate::orb_spec::reconcile_step(crate::orb_spec::ReconcileInput {
+        status,
+        is_client_placed: facts.is_client_placed,
+        same_boot_id: false,
+        is_assistant_mode: facts.is_assistant_mode,
+        running_in_actor: facts.running_in_actor,
+        has_live_scope: facts.has_live_scope,
+        has_durable_run: facts.has_durable_run,
+        recently_updated: facts.recently_updated,
+        has_events: facts.has_events,
+        already_orphaned: facts.already_tagged_orphaned,
+        is_service_restart: false,
+        within_horizon: false,
+        live_retry_exists: false,
+    }) {
+        crate::orb_spec::ReconcileVerdict::InterruptAndResume => MissionVerdict::InterruptAndResume,
+        crate::orb_spec::ReconcileVerdict::TagOrphaned => MissionVerdict::TagOrphaned,
         _ => MissionVerdict::Keep,
     }
 }
@@ -355,14 +349,27 @@ pub struct InterruptedFacts {
 /// True iff an `interrupted(service_restart)` mission with no live backing,
 /// recently touched, and no competing live retry should be auto-resumed.
 pub fn should_reresume_interrupted(facts: &InterruptedFacts) -> bool {
-    !facts.is_client_placed
-        && facts.status == MissionStatus::Interrupted
-        && facts.is_service_restart
-        && !facts.running_in_actor
-        && !facts.has_live_scope
-        && !facts.has_durable_run
-        && facts.within_horizon
-        && !facts.live_retry_exists
+    let status = match facts.status {
+        MissionStatus::Active => 0,
+        MissionStatus::AwaitingUser => 1,
+        MissionStatus::Interrupted => 2,
+        _ => 3,
+    };
+    crate::orb_spec::reconcile_step(crate::orb_spec::ReconcileInput {
+        status,
+        is_client_placed: facts.is_client_placed,
+        same_boot_id: false,
+        is_assistant_mode: false,
+        running_in_actor: facts.running_in_actor,
+        has_live_scope: facts.has_live_scope,
+        has_durable_run: facts.has_durable_run,
+        recently_updated: false,
+        has_events: true,
+        already_orphaned: false,
+        is_service_restart: facts.is_service_restart,
+        within_horizon: facts.within_horizon,
+        live_retry_exists: facts.live_retry_exists,
+    }) == crate::orb_spec::ReconcileVerdict::ReresumeInterrupted
 }
 
 // ==================== systemd enumeration ====================

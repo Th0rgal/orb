@@ -1,0 +1,201 @@
+{
+  "version": 1,
+  "description": "Cross-client projection invariants generated and verified by the Lean 4 formal kernel (lean/Orb/Kernel.lean & lean/Orb/Spec.lean): orb_workfold_step, orb_taskcard_step, and orb_sidebar_visibility.",
+  "workfold_cases": [
+    {
+      "name": "narration text between tools folds into WorkFold",
+      "input": {
+        "is_text": true,
+        "cumulative": false,
+        "non_empty": true,
+        "tool_ahead": true,
+        "fold_has_tool": false,
+        "next_is_tool": true
+      },
+      "expected": {
+        "fold": true,
+        "next_fold_has_tool": false
+      }
+    },
+    {
+      "name": "final answer after last tool stays visible top-level",
+      "input": {
+        "is_text": true,
+        "cumulative": false,
+        "non_empty": true,
+        "tool_ahead": false,
+        "fold_has_tool": true,
+        "next_is_tool": false
+      },
+      "expected": {
+        "fold": false,
+        "next_fold_has_tool": false
+      }
+    },
+    {
+      "name": "cumulative producer bubble is never folded as narration",
+      "input": {
+        "is_text": true,
+        "cumulative": true,
+        "non_empty": true,
+        "tool_ahead": true,
+        "fold_has_tool": true,
+        "next_is_tool": true
+      },
+      "expected": {
+        "fold": false,
+        "next_fold_has_tool": false
+      }
+    },
+    {
+      "name": "text next to orchestration tool alone without prior work fold stays top-level",
+      "input": {
+        "is_text": true,
+        "cumulative": false,
+        "non_empty": true,
+        "tool_ahead": true,
+        "fold_has_tool": false,
+        "next_is_tool": false
+      },
+      "expected": {
+        "fold": false,
+        "next_fold_has_tool": false
+      }
+    }
+  ],
+  "taskcard_cases": [
+    {
+      "name": "running turn is live",
+      "input": {
+        "ended": false,
+        "all_done_or_cancelled": false,
+        "outcome_finished": false,
+        "has_open_tasks": true
+      },
+      "expected": {
+        "state": "live",
+        "mark_open_stale": false,
+        "clear_in_progress": false
+      }
+    },
+    {
+      "name": "ended turn with all tasks completed or cancelled is done",
+      "input": {
+        "ended": true,
+        "all_done_or_cancelled": true,
+        "outcome_finished": true,
+        "has_open_tasks": false
+      },
+      "expected": {
+        "state": "done",
+        "mark_open_stale": false,
+        "clear_in_progress": false
+      }
+    },
+    {
+      "name": "ended turn with final answer and open tasks is stale (not updated), never stopped",
+      "input": {
+        "ended": true,
+        "all_done_or_cancelled": false,
+        "outcome_finished": true,
+        "has_open_tasks": true
+      },
+      "expected": {
+        "state": "stale",
+        "mark_open_stale": true,
+        "clear_in_progress": true
+      }
+    },
+    {
+      "name": "ended turn interrupted before final answer is stopped",
+      "input": {
+        "ended": true,
+        "all_done_or_cancelled": false,
+        "outcome_finished": false,
+        "has_open_tasks": true
+      },
+      "expected": {
+        "state": "stopped",
+        "mark_open_stale": false,
+        "clear_in_progress": true
+      }
+    }
+  ],
+  "sidebar_visibility_cases": [
+    {
+      "name": "archived parent with visible descendant stays in main tree and out of archive-only list",
+      "input": {
+        "is_archived": true,
+        "has_visible_descendant": true,
+        "is_working": false,
+        "is_selected": false,
+        "is_superseded": false,
+        "ancestor_superseded": false
+      },
+      "expected": {
+        "show_in_main_tree": true,
+        "show_in_archive_only": false
+      }
+    },
+    {
+      "name": "archived mission without visible descendant goes to archive-only list",
+      "input": {
+        "is_archived": true,
+        "has_visible_descendant": false,
+        "is_working": false,
+        "is_selected": false,
+        "is_superseded": false,
+        "ancestor_superseded": false
+      },
+      "expected": {
+        "show_in_main_tree": false,
+        "show_in_archive_only": true
+      }
+    },
+    {
+      "name": "superseded stopped mission is hidden unless selected or still running",
+      "input": {
+        "is_archived": false,
+        "has_visible_descendant": false,
+        "is_working": false,
+        "is_selected": false,
+        "is_superseded": true,
+        "ancestor_superseded": false
+      },
+      "expected": {
+        "show_in_main_tree": false,
+        "show_in_archive_only": false
+      }
+    },
+    {
+      "name": "superseded mission that is still working stays visible in main tree",
+      "input": {
+        "is_archived": false,
+        "has_visible_descendant": false,
+        "is_working": true,
+        "is_selected": false,
+        "is_superseded": true,
+        "ancestor_superseded": true
+      },
+      "expected": {
+        "show_in_main_tree": true,
+        "show_in_archive_only": false
+      }
+    },
+    {
+      "name": "superseded mission that is explicitly selected stays visible in main tree",
+      "input": {
+        "is_archived": false,
+        "has_visible_descendant": false,
+        "is_working": false,
+        "is_selected": true,
+        "is_superseded": true,
+        "ancestor_superseded": false
+      },
+      "expected": {
+        "show_in_main_tree": true,
+        "show_in_archive_only": false
+      }
+    }
+  ]
+}

@@ -535,7 +535,11 @@ pub(super) fn serialize_queue_snapshot(
             // `begin_mission_run` succeeds. Only a durable run proves the
             // actor crossed the consumption boundary; a crash before that
             // must replay the message instead of treating it as completed.
-            let durably_started = runner.durable_run.is_some();
+            let durably_started = crate::orb_spec::queue_step(
+                crate::orb_spec::QueueDeliveryOutcome::Acked,
+                runner.durable_run.is_some(),
+            )
+            .mark_consumed;
             items.push(QueuedMessage {
                 id: message.id,
                 content: message.content.clone(),

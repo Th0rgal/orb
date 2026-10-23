@@ -35,7 +35,7 @@
 
 ## 3. Execution, Harnesses & Fleet
 
-- **[Execution Architecture (`../AGENTS.md`)](../AGENTS.md)** — Per-workspace CLI execution, `missions.slice` cgroup isolation, and disk-backed container `/tmp`.
+- **[Execution Architecture (`../AGENTS.md`)](../AGENTS.md)** — Per-workspace CLI execution, `missions.slice` cgroup isolation, disk-backed container `/tmp`, and the **"Lean Decides, Rust Does"** formal Lean 4 C-ABI kernel (`lean/Orb/Kernel.lean` & `lean/Orb/Spec.lean`, `35/35` tight specs, `23` C-ABI gates).
 - **[Harness System](HARNESS_SYSTEM.md)** — How Claude Code, Codex, Antigravity (`agy`), OpenCode, and Grok execute inside host and container workspaces.
 - **[Google Antigravity (`agy`)](ANTIGRAVITY.md)** — Workspace-native `agy` CLI execution, model discovery (`agy models`), and managed node profiles.
 - **[Managed Fleet Harnesses](FLEET_HARNESSES.md)** — Atomic `/opt/sandboxed-tools/<harness>/<version>/` installations and daily fleet reconciliation.

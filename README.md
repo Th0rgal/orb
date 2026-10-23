@@ -100,9 +100,9 @@ ChatGPT browser or create a Cursor Cloud API account.
 **Orb is the client; sandboxed.sh (the project's former name) is now the backend to the Orb clients.**
 Desktop is built with Tauri and SolidJS; iOS uses SwiftUI. The Rust backend owns
 projects, missions, event history and remote-node coordination, backed by a
-formally verified Lean 4 orchestration and node lifecycle kernel
-(`lean/Orb/Kernel.lean` & `lean/Orb/Spec.lean`, `0 sorryAx`, `24/24` tight
-specs, `12` C-ABI gates compiled directly to `liborb_spec_cabi.a` with zero C
+formally verified Lean 4 orchestration, proxy, mission lifecycle, and cross-client projection kernel
+(`lean/Orb/Kernel.lean` & `lean/Orb/Spec.lean`, `0 sorryAx`, `35/35` tight
+specs across 5 Layer-I Meta-Specs, `23` C-ABI gates compiled directly to `liborb_spec_cabi.a` with zero C
 fallback). Cloud adapters observe provider work independently of the client
 window.
 

@@ -150,4 +150,226 @@ def mix64Word (acc word : UInt64) : UInt64 :=
   let v3 := v2 * 0x9E3779B97F4A7C15
   v3 ^^^ (v3 >>> 27)
 
+/--
+  Unboxed C-ABI Proxy SSE Commitment & Transparent Reroute Stepper (`orb_proxy_step`):
+  Packs `(committedNext : UInt8, action : UInt8, excludeCurrent : UInt8)` into a 32-bit word:
+  `bit 0 = committedNext`, `bits 8..15 = action (0 = pass, 1 = reroute_same, 2 = reroute_exclude, 3 = fail_stall)`,
+  `bit 16 = excludeCurrent`.
+  - Commitment is sticky (`committedNext = 1` iff `committed == 1 || chunkCommits == 1`).
+  - Once committed (`committed == 1`), transparent reroute (`action == 1 || action == 2`) is forbidden.
+-/
+@[inline, export orb_proxy_step]
+def proxyStep (committed chunkCommits stalled : UInt8) (retries maxRetries : UInt32) : UInt32 :=
+  let cNext : UInt32 := if committed == 1 || chunkCommits == 1 then 1 else 0
+  if stalled == 1 then
+    if committed == 0 && retries < maxRetries then
+      if retries + 1 ≥ 2 then cNext ||| 0x00010200
+      else cNext ||| 0x00000100
+    else
+      cNext ||| 0x00000300
+  else
+    cNext
+
+/--
+  Unboxed C-ABI Proxy 3-Clock Discipline Gate (`orb_stream_deadlines`):
+  Packs `(emitKeepalive : UInt8, upstreamStalled : UInt8, touchLiveness : UInt8)` into a 32-bit word:
+  - Clock 1 (`bit 0 = emitKeepalive`): `clientElapsedMs ≥ keepaliveMs && atEventBoundary == 1`
+  - Clock 2 (`bit 8 = upstreamStalled`): `upstreamElapsedMs ≥ max baseIdleMs providerFloorMs`
+  - Clock 3 (`bit 16 = touchLiveness`): `hasMissionHeader == 1 && authVerified == 1`
+-/
+@[inline, export orb_stream_deadlines]
+def streamDeadlines
+    (clientElapsedMs keepaliveMs upstreamElapsedMs baseIdleMs providerFloorMs : UInt64)
+    (atEventBoundary hasMissionHeader authVerified : UInt8) : UInt32 :=
+  let effIdle := if providerFloorMs > baseIdleMs then providerFloorMs else baseIdleMs
+  let ka : UInt32 := if clientElapsedMs ≥ keepaliveMs && atEventBoundary == 1 then 1 else 0
+  let stall : UInt32 := if upstreamElapsedMs ≥ effIdle then 256 else 0
+  let live : UInt32 := if hasMissionHeader == 1 && authVerified == 1 then 65536 else 0
+  ka ||| stall ||| live
+
+/--
+  Unboxed C-ABI Provider Circuit-Breaker Stepper (`orb_breaker_step`):
+  `reason`: `0 = ok`, `1 = rate_limit_429`, `2 = quota_exhausted`, `3 = payment_required_402`,
+            `4 = transient_502_timeout`, `5 = auth_401_403`.
+  Packs `(parkAccount : UInt8, poisonSubscription : UInt8, applyCooldown : UInt8)` into a 32-bit word:
+  `bit 0 = parkAccount`, `bit 8 = poisonSubscription`, `bit 16 = applyCooldown`.
+  - Transient 502/timeout (`reason == 4`) with `transientStreak < transientThreshold` applies zero cooldown (`0`)
+    and never poisons the subscription.
+  - Only `rate_limit_429` (`1`) or `quota_exhausted` (`2`) may poison a shared subscription (`bit 8`).
+  - `quota_exhausted` (`2`) and `payment_required_402` (`3`) park the account across restarts (`bit 0`).
+-/
+@[inline, export orb_breaker_step]
+def breakerStep (reason : UInt8) (transientStreak transientThreshold : UInt32) : UInt32 :=
+  if reason == 0 then 0
+  else if reason == 4 then
+    if transientStreak ≥ transientThreshold && transientThreshold ≥ 1 then 65536 else 0
+  else if reason == 2 || reason == 3 then
+    let sub : UInt32 := if reason == 2 then 256 else 0
+    (1 : UInt32) ||| sub ||| 65536
+  else if reason == 1 then
+    65792
+  else
+    65536
+
+/--
+  Unboxed C-ABI Host `/goal` & Mission Turn-End Stepper (`orb_mission_step`):
+  `signal`: `0 = none`, `1 = complete`, `2 = aborted`.
+  Returns outcome code:
+  `0 = stopped`, `1 = complete`, `2 = aborted`, `3 = already_queued`,
+  `4 = paused_wakeup`, `5 = stalled`, `6 = budget_limited`, `7 = continue_goal`.
+  When `armed == 1`, `signal == 0`, `continuationPending == 0`, and `wakeupArmed == 1`,
+  returns `4 (paused_wakeup)` instead of completing or queuing a duplicate continuation.
+-/
+@[inline, export orb_mission_step]
+def missionStep
+    (armed signal continuationPending wakeupArmed madeProgress : UInt8)
+    (priorNoProgress maxNoProgress priorContinuations maxContinuations hasMaxCont : UInt32) : UInt8 :=
+  if armed == 0 then 0
+  else if signal == 1 then 1
+  else if signal == 2 then 2
+  else if continuationPending == 1 then 3
+  else if wakeupArmed == 1 then 4
+  else
+    let effMaxNoProg := if maxNoProgress ≥ 1 then maxNoProgress else 1
+    let noProg := if madeProgress == 1 then 0 else priorNoProgress + 1
+    if noProg ≥ effMaxNoProg then 5
+    else if hasMaxCont == 1 && priorContinuations + 1 > maxContinuations then 6
+    else 7
+
+/--
+  Unboxed C-ABI Boot-Scoped Orphan & Ghost-Active Reconciler Stepper (`orb_reconcile_step`):
+  `status`: `0 = active`, `1 = awaiting_user`, `2 = interrupted`, `3 = other`.
+  Returns verdict: `0 = keep`, `1 = interrupt_and_resume`, `2 = tag_orphaned`, `3 = reresume_interrupted`.
+  - A mission from the current boot (`sameBootId == 1`) or with a live runner/scope/durable run is never
+    reaped as a ghost-active or orphan (`0 = keep`).
+-/
+@[inline, export orb_reconcile_step]
+def reconcileStep
+    (status isClientPlaced sameBootId isAssistantMode runningInActor
+     hasLiveScope hasDurableRun recentlyUpdated hasEvents alreadyOrphaned
+     isServiceRestart withinHorizon liveRetryExists : UInt8) : UInt8 :=
+  if isClientPlaced == 1 || sameBootId == 1 || runningInActor == 1 ||
+     hasLiveScope == 1 || hasDurableRun == 1 then 0
+  else if status == 0 then
+    if isAssistantMode == 0 && recentlyUpdated == 0 then 1 else 0
+  else if status == 1 then
+    if hasEvents == 0 && alreadyOrphaned == 0 then 2 else 0
+  else if status == 2 then
+    if isServiceRestart == 1 && withinHorizon == 1 && liveRetryExists == 0 then 3 else 0
+  else 0
+
+/--
+  Unboxed C-ABI Follow-Up Queue Retention & Uncertain-Delivery Stepper (`orb_queue_step`):
+  `deliveryOutcome`: `0 = acked`, `1 = rejected`, `2 = uncertain_timeout`, `3 = persist_failed`.
+  Packs `(retainInQueue : UInt8, markConsumed : UInt8, blockCancel : UInt8)` into a 32-bit word:
+  `bit 0 = retainInQueue`, `bit 8 = markConsumed`, `bit 16 = blockCancel`.
+  - Only confirmed delivery (`deliveryOutcome == 0 && durablyStarted == 1`) marks the message consumed (`bit 8`)
+    and drops it from the pending queue (`retainInQueue == 0`).
+  - Uncertain delivery (`deliveryOutcome == 2`) retains the entry and blocks cancellation (`bit 16`).
+-/
+@[inline, export orb_queue_step]
+def queueStep (deliveryOutcome durablyStarted : UInt8) : UInt32 :=
+  if deliveryOutcome == 0 && durablyStarted == 1 then
+    256
+  else if deliveryOutcome == 2 then
+    65537
+  else
+    1
+
+/--
+  Unboxed C-ABI Managed VM Admission, Budget, RAM & Reaper Stepper (`orb_vm_step`):
+  `op`: `0 = spawn_admit`, `1 = reap_check`.
+  - For `op == 0 (spawn_admit)`: admits (`1`) iff `sizeRank ≤ maxSizeRank`, `activeCount < maxConcurrent`,
+    `spentPlusNewCents ≤ dailyCapCents`, `ttlMinutes ≥ 5 && ttlMinutes ≤ maxTtlMinutes`,
+    `jobMemPct ≤ 90`, and `secretProjected == 0` (managed VMs are untrusted: never project secrets).
+  - For `op == 1 (reap_check)`: returns `1` (reap) iff `ttlExpired == 1 || (busy == 0 && (ownerEnded == 1 || idleExpired == 1))`.
+-/
+@[inline, export orb_vm_step]
+def vmStep
+    (op sizeRank maxSizeRank secretProjected ttlExpired busy ownerEnded idleExpired : UInt8)
+    (activeCount maxConcurrent ttlMinutes maxTtlMinutes jobMemPct : UInt32)
+    (spentPlusNewCents dailyCapCents : UInt64) : UInt8 :=
+  if op == 0 then
+    if sizeRank ≤ maxSizeRank && activeCount < maxConcurrent &&
+       spentPlusNewCents ≤ dailyCapCents && ttlMinutes ≥ 5 &&
+       ttlMinutes ≤ maxTtlMinutes && jobMemPct ≤ 90 && secretProjected == 0 then 1 else 0
+  else
+    if ttlExpired == 1 || (busy == 0 && (ownerEnded == 1 || idleExpired == 1)) then 1 else 0
+
+/--
+  Unboxed C-ABI Pre-Grant Mission-Access Non-Disclosure & Read-Only Gate (`orb_access_step`):
+  Packs `(allowTool : UInt8, discloseTitle : UInt8, alreadyInScope : UInt8)` into a 32-bit word:
+  `bit 0 = allowTool`, `bit 8 = discloseTitle`, `bit 16 = alreadyInScope`.
+  - In-scope targets (`sameOwner == 1 && (isSelfOrChild == 1)`) allow read tools (`isReadTool == 1`) or self access.
+  - Cross-mission access (`isSelfOrChild == 0`) is strictly read-only (`isReadTool == 1`), requires a live
+    approved grant (`sameOwner == 1 && grantApproved == 1 && grantUnexpired == 1`), and never discloses
+    `target_title` (`discloseTitle == 0`) before a live grant exists (regardless of whether `targetExists` is 0 or 1).
+-/
+@[inline, export orb_access_step]
+def accessStep
+    (sameOwner isSelfOrChild isReadTool grantApproved grantUnexpired _targetExists : UInt8) : UInt32 :=
+  if sameOwner == 1 && isSelfOrChild == 1 then
+    65793
+  else if sameOwner == 1 && grantApproved == 1 && grantUnexpired == 1 then
+    let allow : UInt32 := if isReadTool == 1 then 1 else 0
+    allow ||| 256
+  else
+    0
+
+/--
+  Unboxed C-ABI Cross-Client Work-Fold & Narration Classification Stepper (`orb_workfold_step`):
+  `itemKind`: `0 = user`, `1 = think`, `2 = text`, `3 = work_tool`, `4 = standalone_tool`, `5 = other`.
+  Packs `(foldItem : UInt8, foldHasToolNext : UInt8)` into a 32-bit word:
+  `bit 0 = foldItem`, `bit 8 = foldHasToolNext`.
+  - A `text` item (`itemKind == 2`) folds into the work group (`foldItem == 1`) iff
+    `isCumulative == 0 && isNonEmpty == 1 && toolAhead == 1 && (foldHasTool == 1 || nextIsTool == 1)`.
+  - Text after the turn's last work tool (`toolAhead == 0`) or cumulative text (`isCumulative == 1`)
+    never folds (`foldItem == 0`).
+-/
+@[inline, export orb_workfold_step]
+def workfoldStep
+    (itemKind isCumulative isNonEmpty toolAhead nextIsTool foldHasTool : UInt8) : UInt32 :=
+  if itemKind == 3 then
+    257
+  else if itemKind == 1 then
+    if foldHasTool == 1 then 257 else 1
+  else if itemKind == 2 then
+    if isCumulative == 0 && isNonEmpty == 1 && toolAhead == 1 &&
+       (foldHasTool == 1 || nextIsTool == 1) then
+      if foldHasTool == 1 then 257 else 1
+    else
+      0
+  else
+    0
+
+/--
+  Unboxed C-ABI Cross-Client Tasks-Card State Stepper (`orb_taskcard_step`):
+  Returns card state: `0 = live`, `1 = done`, `2 = stale`, `3 = stopped`.
+  - While the turn is running (`turnEnded == 0`), returns `0 (live)`.
+  - Once ended (`turnEnded == 1`), if `allClosed == 1` returns `1 (done)`;
+    else if `turnOutcomeFinished == 1` returns `2 (stale)`; else returns `3 (stopped)`.
+-/
+@[inline, export orb_taskcard_step]
+def taskcardStep (turnEnded allClosed turnOutcomeFinished : UInt8) : UInt8 :=
+  if turnEnded == 0 then 0
+  else if allClosed == 1 then 1
+  else if turnOutcomeFinished == 1 then 2
+  else 3
+
+/--
+  Unboxed C-ABI Cross-Client Sidebar Hierarchy Visibility Stepper (`orb_sidebar_visibility`):
+  Packs `(retainInMainTree : UInt8, showInArchiveOnly : UInt8, isCycleSafeChild : UInt8)` into a 32-bit word:
+  `bit 0 = retainInMainTree`, `bit 8 = showInArchiveOnly`, `bit 16 = isCycleSafeChild`.
+  - A mission is retained in the main tree (`bit 0`) iff `matchesFilter == 1 || hasVisibleDescendant == 1`.
+  - An archived mission (`isAcknowledged == 1`) appears in archive-only rows (`bit 8`) iff it is NOT retained in the main tree.
+  - A child link is cycle-safe (`bit 16`) iff `hasParent == 1 && isFork == 0 && parentReachesSelf == 0`.
+-/
+@[inline, export orb_sidebar_visibility]
+def sidebarVisibility
+    (matchesFilter hasVisibleDescendant isAcknowledged hasParent isFork parentReachesSelf : UInt8) : UInt32 :=
+  let retain : UInt32 := if matchesFilter == 1 || hasVisibleDescendant == 1 then 1 else 0
+  let archiveOnly : UInt32 := if isAcknowledged == 1 && retain == 0 then 256 else 0
+  let cycleSafe : UInt32 := if hasParent == 1 && isFork == 0 && parentReachesSelf == 0 then 65536 else 0
+  retain ||| archiveOnly ||| cycleSafe
+
 end Orb.Kernel

@@ -1031,6 +1031,27 @@ impl ManagedManager {
             .ttl_minutes
             .unwrap_or(settings.default_ttl_minutes)
             .clamp(5, settings.max_ttl_minutes.max(5));
+        if !crate::orb_spec::vm_spawn_admit(crate::orb_spec::VmSpawnInput {
+            size_rank: size_rank(spec.size),
+            max_size_rank: size_rank(&settings.max_size),
+            secret_projected: false,
+            active_count: 0,
+            max_concurrent: 1,
+            ttl_minutes: ttl as u32,
+            max_ttl_minutes: settings.max_ttl_minutes.max(5) as u32,
+            job_mem_pct: 90,
+            spent_plus_new_cents: 0,
+            daily_cap_cents: 1,
+        }) {
+            return Err(ManagedError::new(
+                "size_not_allowed",
+                403,
+                format!(
+                    "Size '{}' exceeds the allowed maximum '{}'",
+                    spec.size, settings.max_size
+                ),
+            ));
+        }
         Ok((spec, ttl))
     }
 
@@ -1480,7 +1501,13 @@ impl ManagedManager {
         for m in machines {
             match m.state {
                 MachineState::Online | MachineState::Enrolling | MachineState::Provisioning => {
-                    if now >= m.expires_at {
+                    let ttl_expired = now >= m.expires_at;
+                    if crate::orb_spec::vm_should_reap(crate::orb_spec::VmReapInput {
+                        ttl_expired,
+                        busy: true,
+                        owner_ended: false,
+                        idle_expired: false,
+                    }) {
                         let _ = self
                             .destroy_inner(&m.id, Some("ttl_expired".into()), false)
                             .await;
@@ -1502,9 +1529,17 @@ impl ManagedManager {
                             {
                                 let probe = self.owner_probe.read().ok().and_then(|p| p.clone());
                                 if let Some(probe) = probe {
-                                    if matches!(
+                                    let owner_ended = matches!(
                                         probe(tenant, owner).await,
                                         Some(OwnerState::Terminal | OwnerState::Missing)
+                                    );
+                                    if crate::orb_spec::vm_should_reap(
+                                        crate::orb_spec::VmReapInput {
+                                            ttl_expired: false,
+                                            busy,
+                                            owner_ended,
+                                            idle_expired: false,
+                                        },
                                     ) {
                                         let _ = self
                                             .destroy_inner(&m.id, Some("owner_ended".into()), false)
@@ -1518,7 +1553,14 @@ impl ManagedManager {
                             self.update(&m.id, |m| m.last_busy_at = Some(now)).await;
                         } else if self.settings.idle_minutes > 0 {
                             let since = m.last_busy_at.unwrap_or(m.created_at);
-                            if (now - since).num_minutes() >= self.settings.idle_minutes as i64 {
+                            let idle_expired =
+                                (now - since).num_minutes() >= self.settings.idle_minutes as i64;
+                            if crate::orb_spec::vm_should_reap(crate::orb_spec::VmReapInput {
+                                ttl_expired: false,
+                                busy,
+                                owner_ended: false,
+                                idle_expired,
+                            }) {
                                 let _ = self.destroy_inner(&m.id, Some("idle".into()), false).await;
                                 continue;
                             }

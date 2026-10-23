@@ -736,7 +736,12 @@ impl ProviderHealthTracker {
             }
             let streak = health.transient_failures.len();
             let threshold = transient_failure_threshold();
-            if streak < threshold {
+            let verdict = crate::orb_spec::breaker_step(
+                crate::orb_spec::BreakerReason::Transient502Timeout,
+                streak as u32,
+                threshold as u32,
+            );
+            if !verdict.apply_cooldown {
                 tracing::info!(
                     account_id = %account_id,
                     reason = %reason,
@@ -762,7 +767,18 @@ impl ProviderHealthTracker {
             return cooldown;
         }
 
-        let is_auth_error = matches!(reason, CooldownReason::AuthError);
+        let breaker_verdict = crate::orb_spec::breaker_step(
+            match reason {
+                CooldownReason::QuotaExhausted => crate::orb_spec::BreakerReason::QuotaExhausted,
+                CooldownReason::PaymentRequired => {
+                    crate::orb_spec::BreakerReason::PaymentRequired402
+                }
+                CooldownReason::AuthError => crate::orb_spec::BreakerReason::Auth401Or403,
+                _ => crate::orb_spec::BreakerReason::RateLimit429,
+            },
+            0,
+            1,
+        );
         let account_streak = if reason.is_account_error() {
             health.consecutive_failures
         } else {
@@ -830,7 +846,9 @@ impl ProviderHealthTracker {
         // Propagate the cooldown to the shared subscription, if known. Auth
         // errors stay account-local — a revoked token on one record doesn't
         // say anything about the other records that share the subscription.
-        if let (Some(key), false) = (subscription, is_auth_error) {
+        let propagate_to_sub = breaker_verdict.poison_subscription
+            || matches!(reason, CooldownReason::PaymentRequired);
+        if let (Some(key), true) = (subscription, propagate_to_sub) {
             let mut subs = self.subscription_cooldowns.write().await;
             let entry = subs.entry(key.clone()).or_default();
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
@@ -852,10 +870,7 @@ impl ProviderHealthTracker {
         // An exhausted allowance does not come back with a restart: keep the
         // cooldown on disk. No reset time was announced on this path, so it
         // is the fixed quota window (or the upstream retry delay).
-        if matches!(
-            reason,
-            CooldownReason::QuotaExhausted | CooldownReason::PaymentRequired
-        ) {
+        if breaker_verdict.park_account {
             let label = if matches!(reason, CooldownReason::PaymentRequired) {
                 OUT_OF_CREDIT_LIMIT
             } else {

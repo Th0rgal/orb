@@ -58,6 +58,17 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_verify_token_rotation",
     "leansys_verify_log_window",
     "leansys_mix64_word",
+    "orb_proxy_step",
+    "orb_stream_deadlines",
+    "orb_breaker_step",
+    "orb_mission_step",
+    "orb_reconcile_step",
+    "orb_queue_step",
+    "orb_vm_step",
+    "orb_access_step",
+    "orb_workfold_step",
+    "orb_taskcard_step",
+    "orb_sidebar_visibility",
 ];
 
 fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {

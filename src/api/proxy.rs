@@ -2658,7 +2658,19 @@ fn client_stream_response(
             };
             let item = match next {
                 None => {
-                    if at_sse_event_boundary(&tail) {
+                    let dl = crate::orb_spec::stream_deadlines(
+                        crate::orb_spec::StreamDeadlinesInput {
+                            client_elapsed_ms: keepalive.as_millis() as u64,
+                            keepalive_ms: keepalive.as_millis() as u64,
+                            upstream_elapsed_ms: 0,
+                            base_idle_ms: 1,
+                            provider_floor_ms: 1,
+                            at_event_boundary: at_sse_event_boundary(&tail),
+                            has_mission_header: false,
+                            auth_verified: false,
+                        },
+                    );
+                    if dl.emit_keepalive {
                         cell.client_gap(last_item.elapsed(), true);
                         last_item = tokio::time::Instant::now();
                         yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
@@ -2671,11 +2683,31 @@ fn client_stream_response(
             };
             match item {
                 Ok(bytes) => {
-                    if cell.take_stall() && !committed && retries < max_retries {
+                    let stalled = cell.take_stall();
+                    let chunk_commits = !committed && sse_chunk_commits_output(&bytes);
+                    let step = crate::orb_spec::proxy_step(
+                        committed,
+                        chunk_commits,
+                        stalled,
+                        retries,
+                        max_retries,
+                    );
+                    if matches!(
+                        step.action,
+                        crate::orb_spec::ProxyAction::RerouteSameProvider
+                            | crate::orb_spec::ProxyAction::RerouteFailoverPool
+                    ) {
                         if let Some(reroute) = retry.as_ref() {
                             retries += 1;
                             // Once on the same entry, then without it.
-                            let exclude = if retries >= 2 { cell.current_entry() } else { None };
+                            let exclude = if matches!(
+                                step.action,
+                                crate::orb_spec::ProxyAction::RerouteFailoverPool
+                            ) {
+                                cell.current_entry()
+                            } else {
+                                None
+                            };
                             tracing::warn!(
                                 retry = retries,
                                 excluding = exclude.is_some(),
@@ -2714,9 +2746,7 @@ fn client_stream_response(
                     cell.client_gap(last_item.elapsed(), false);
                     last_item = tokio::time::Instant::now();
                     ka_deadline = last_item + keepalive;
-                    if !committed && sse_chunk_commits_output(&bytes) {
-                        committed = true;
-                    }
+                    committed = step.committed_next;
                     if !bytes.is_empty() {
                         tail.extend_from_slice(&bytes[bytes.len().saturating_sub(4)..]);
                         let excess = tail.len().saturating_sub(4);

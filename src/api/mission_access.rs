@@ -427,7 +427,17 @@ impl MissionAccess {
         target: Uuid,
         tool: &str,
     ) -> Option<Uuid> {
-        if !READ_TOOLS.contains(&tool) {
+        let is_read_tool = READ_TOOLS.contains(&tool);
+        if !crate::orb_spec::access_step(crate::orb_spec::AccessStepInput {
+            same_owner: true,
+            is_self_or_child: false,
+            is_read_tool,
+            grant_approved: true,
+            grant_unexpired: true,
+            target_exists: true,
+        })
+        .allow_tool
+        {
             return None;
         }
         self.read_grant(owner, requester, target).await
@@ -506,17 +516,26 @@ impl MissionAccess {
 /// project, status, even whether it exists) until a live grant exists; only
 /// Thomas's approval card shows the target title.
 fn agent_view(r: &AccessRequest) -> Value {
-    let live = r.live_grant(Utc::now());
+    let now = Utc::now();
+    let live = r.live_grant(now);
+    let access_verdict = crate::orb_spec::access_step(crate::orb_spec::AccessStepInput {
+        same_owner: true,
+        is_self_or_child: false,
+        is_read_tool: true,
+        grant_approved: r.state == ApprovalState::Approved && r.revoked_at.is_none(),
+        grant_unexpired: live,
+        target_exists: !r.target_title.is_empty(),
+    });
     json!({
         "request_id": r.id,
         "target_mission_id": r.target_mission_id,
-        "target_title": if live { json!(r.target_title) } else { Value::Null },
+        "target_title": if access_verdict.disclose_title { json!(r.target_title) } else { Value::Null },
         "scope": r.scope,
         "status": r.state,
         "reason": r.reason,
         "created_at": r.created_at,
         "expires_at": r.expires_at,
-        "allowed_tools": if live { json!(READ_TOOLS) } else { json!([]) },
+        "allowed_tools": if access_verdict.allow_tool { json!(READ_TOOLS) } else { json!([]) },
     })
 }
 

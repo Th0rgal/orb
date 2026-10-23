@@ -138,38 +138,44 @@ impl Outcome {
 }
 
 pub(crate) fn decide(input: &Input<'_>) -> Outcome {
-    if !input.armed {
-        return Outcome::Stopped;
-    }
-    match signal(input.text) {
-        Signal::Complete => return Outcome::Complete,
-        Signal::Aborted(reason) => return Outcome::Aborted(reason),
-        Signal::None => {}
-    }
-    if input.continuation_pending {
-        return Outcome::AlreadyQueued;
-    }
-    if input.wakeup_armed {
-        return Outcome::Paused;
-    }
+    let parsed_signal = signal(input.text);
+    let signal_code = match &parsed_signal {
+        Signal::None => 0,
+        Signal::Complete => 1,
+        Signal::Aborted(_) => 2,
+    };
     let no_progress = if input.made_progress {
         0
     } else {
         input.prior_no_progress.saturating_add(1)
     };
-    if no_progress >= input.max_no_progress.max(1) {
-        return Outcome::Stalled { turns: no_progress };
-    }
     let continuations = input.prior_continuations.saturating_add(1);
-    if input
-        .max_continuations
-        .is_some_and(|max| continuations > max)
-    {
-        return Outcome::BudgetLimited;
-    }
-    Outcome::Continue {
-        no_progress,
-        continuations,
+    match crate::orb_spec::mission_step(crate::orb_spec::MissionStepInput {
+        armed: input.armed,
+        signal: signal_code,
+        continuation_pending: input.continuation_pending,
+        wakeup_armed: input.wakeup_armed,
+        made_progress: input.made_progress,
+        prior_no_progress: input.prior_no_progress,
+        max_no_progress: input.max_no_progress,
+        prior_continuations: input.prior_continuations,
+        max_continuations: input.max_continuations.unwrap_or(0),
+        has_max_continuations: input.max_continuations.is_some(),
+    }) {
+        crate::orb_spec::MissionStepOutcome::Stopped => Outcome::Stopped,
+        crate::orb_spec::MissionStepOutcome::Complete => Outcome::Complete,
+        crate::orb_spec::MissionStepOutcome::Aborted => match parsed_signal {
+            Signal::Aborted(reason) => Outcome::Aborted(reason),
+            _ => Outcome::Aborted(String::new()),
+        },
+        crate::orb_spec::MissionStepOutcome::AlreadyQueued => Outcome::AlreadyQueued,
+        crate::orb_spec::MissionStepOutcome::PausedWakeup => Outcome::Paused,
+        crate::orb_spec::MissionStepOutcome::Stalled => Outcome::Stalled { turns: no_progress },
+        crate::orb_spec::MissionStepOutcome::BudgetLimited => Outcome::BudgetLimited,
+        crate::orb_spec::MissionStepOutcome::ContinueGoal => Outcome::Continue {
+            no_progress,
+            continuations,
+        },
     }
 }
 
