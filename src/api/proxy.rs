@@ -6121,6 +6121,15 @@ fn classify_429(
     retry_after: Option<std::time::Duration>,
     body: &[u8],
 ) -> (CooldownReason, Option<std::time::Duration>) {
+    // An explicit hard-exhaustion report wins over transient signals: the
+    // CLIProxyAPI `model_cooldown` body for an exhausted subscription
+    // ("rate_limit_exceeded: Subscription quota exhausted. Your usage window
+    // resets at ...") also carries `Retry-After: 60` and the words
+    // "rate_limit", which used to cap the cooldown at 60s and re-hit the
+    // exhausted account every minute for days.
+    if let Some(reset_in) = body_hard_exhaustion_reset(body) {
+        return (CooldownReason::QuotaExhausted, reset_in);
+    }
     let transient = retry_after.is_some() || body_is_per_minute_rate_limit(body);
     if !transient && body_is_quota_exhausted(body) {
         return (CooldownReason::QuotaExhausted, retry_after);
@@ -6129,6 +6138,35 @@ fn classify_429(
         CooldownReason::RateLimit,
         rate_429_cooldown(provider_type, retry_after),
     )
+}
+
+/// Minimum reset horizon for a CLIProxyAPI `model_cooldown` body to count as a
+/// hard exhaustion even without explicit quota wording.
+const HARD_EXHAUSTION_MIN_RESET_SECS: u64 = 3600;
+
+/// When the 429 body unambiguously reports an exhausted subscription/usage
+/// window, return `Some(time until reset)` (inner None when the body gives no
+/// reset time). Returns None for ordinary transient rate limits.
+fn body_hard_exhaustion_reset(body: &[u8]) -> Option<Option<std::time::Duration>> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let err = v.get("error").unwrap_or(&v);
+    let text = |k: &str| {
+        err.get(k)
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    };
+    let wording = format!("{} {}", text("message"), text("last_upstream_error"));
+    let explicit = wording.contains("quota exhausted") || wording.contains("usage window resets");
+    let now = chrono::Utc::now();
+    let reset_in = crate::account_limits::parse_limit_reset_from_body(body, now)
+        .and_then(|at| (at - now).to_std().ok());
+    let long_model_cooldown = text("code") == "model_cooldown"
+        && reset_in.is_some_and(|d| d.as_secs() >= HARD_EXHAUSTION_MIN_RESET_SECS);
+    if !(explicit || long_model_cooldown) {
+        return None;
+    }
+    Some(reset_in)
 }
 
 fn body_is_quota_exhausted(body: &[u8]) -> bool {
@@ -10695,6 +10733,32 @@ mod tests {
         let (reason, cd) = classify_429(ProviderType::Anthropic, Some(secs(1800)), b"429");
         assert!(matches!(reason, CooldownReason::RateLimit));
         assert_eq!(cd, Some(secs(60)));
+    }
+
+    #[test]
+    fn classify_429_muse_subscription_quota_exhausted_is_quota() {
+        // Real CLIProxyAPI body for an exhausted Muse subscription, served with
+        // Retry-After: 60. Must park the account until the window resets.
+        let body = br#"{"error":{"code":"model_cooldown","last_upstream_error":"rate_limit_exceeded: Subscription quota exhausted. Your usage window resets at 2026-10-26T00:00:00Z.","message":"All credentials for model muse-wonder-full-1.0 are cooling down via provider meta (last error: rate_limit_exceeded: Subscription quota exhausted. Your usage window resets at 2026-10-26T00:00:00Z.)","model":"muse-wonder-full-1.0","provider":"meta","reset_seconds":179316,"reset_time":"49h48m35s"}}"#;
+        let (reason, cd) = classify_429(
+            ProviderType::MuseCode,
+            Some(std::time::Duration::from_secs(60)),
+            body,
+        );
+        assert!(matches!(reason, CooldownReason::QuotaExhausted));
+        let secs = cd.unwrap().as_secs();
+        assert!((179_000..=179_316).contains(&secs), "cooldown {secs}");
+    }
+
+    #[test]
+    fn classify_429_short_model_cooldown_stays_transient() {
+        let body = br#"{"error":{"code":"model_cooldown","message":"All credentials for model x are cooling down","reset_seconds":30}}"#;
+        let (reason, _) = classify_429(
+            ProviderType::MuseCode,
+            Some(std::time::Duration::from_secs(30)),
+            body,
+        );
+        assert!(matches!(reason, CooldownReason::RateLimit));
     }
 
     #[test]
