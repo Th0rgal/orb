@@ -18,6 +18,7 @@ WORKDIR /build
 # Everything the crate compiles: build.rs reads catalog/, and the sources
 # include shared/*.rs and some scripts/ via #[path] / include_str!.
 COPY Cargo.toml Cargo.lock build.rs ./
+COPY crates/ crates/
 COPY lean/ lean/
 COPY src/ src/
 COPY shared/ shared/

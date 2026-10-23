@@ -64,14 +64,23 @@ fn detect_budgeted(
     comparison_budget: usize,
 ) -> Verdict {
     let started = Instant::now();
-    if cancel.is_cancelled() || time_budget.is_zero() {
-        return Verdict::Inconclusive;
-    }
-    if min_len == 0 || repeats < 2 || window == 0 {
-        return Verdict::Clear;
-    }
-    if min_len > 256 {
-        return Verdict::Inconclusive;
+    let cancel_or_zero = cancel.is_cancelled() || time_budget.is_zero();
+    match crate::orb_spec::stream_loop_step(
+        cancel_or_zero,
+        false,
+        window.min(MAX_WINDOW) as u32,
+        min_len.min(u32::MAX as usize) as u32,
+        repeats.min(u32::MAX as usize) as u32,
+        0,
+        0,
+        0,
+        comparison_budget as u64,
+    ) {
+        crate::orb_spec::StreamLoopVerdict::Inconclusive => return Verdict::Inconclusive,
+        crate::orb_spec::StreamLoopVerdict::Clear if min_len == 0 || repeats < 2 || window == 0 => {
+            return Verdict::Clear;
+        }
+        _ => {}
     }
     let mut chars: Vec<char> = text.chars().rev().take(window.min(MAX_WINDOW)).collect();
     chars.reverse();
@@ -145,6 +154,20 @@ fn detect_budgeted(
                 }
                 if chars[previous.exemplar + offset] != chars[start + offset] {
                     // Collision: fail open rather than guess or build an unbounded bucket.
+                    debug_assert_eq!(
+                        crate::orb_spec::stream_loop_step(
+                            false,
+                            true,
+                            n as u32,
+                            len as u32,
+                            repeats as u32,
+                            previous.count as u32,
+                            2,
+                            comparisons as u64,
+                            comparison_budget as u64,
+                        ),
+                        crate::orb_spec::StreamLoopVerdict::Inconclusive
+                    );
                     return Verdict::Inconclusive;
                 }
             }
@@ -165,8 +188,19 @@ fn detect_budgeted(
                     .filter(|word| word.chars().count() >= 4)
                     .map(str::to_ascii_lowercase)
                     .collect();
-                previous.noise = words.len() < 2;
-                if !previous.noise {
+                let step = crate::orb_spec::stream_loop_step(
+                    false,
+                    false,
+                    n as u32,
+                    len as u32,
+                    repeats as u32,
+                    previous.count as u32,
+                    words.len().min(u32::MAX as usize) as u32,
+                    comparisons as u64,
+                    comparison_budget as u64,
+                );
+                previous.noise = step != crate::orb_spec::StreamLoopVerdict::Repeated;
+                if step == crate::orb_spec::StreamLoopVerdict::Repeated {
                     return Verdict::Repeated {
                         needle,
                         evidence: chars[previous.first..start + len].iter().collect(),

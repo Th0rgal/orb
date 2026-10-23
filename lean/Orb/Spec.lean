@@ -5,12 +5,14 @@
     `ScopedAuthority`, `ConservedResource`, `ProjectionStability`) + compatibility combinators
     (`LinearLeaseSpec`, `IdempotentOutboxSpec`, `DagScheduleSpec`, `QuotaCircuitSpec`)
   - Layer II: Declarative Corollaries (≤ 3 lines each, Mathlib4 algebraic proof style)
-  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 23 exports):
+  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 30 exports):
     `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`,
     `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`,
     `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `leansys_verify_log_window`, `leansys_mix64_word`,
     `orb_proxy_step`, `orb_stream_deadlines`, `orb_breaker_step`, `orb_mission_step`, `orb_reconcile_step`,
-    `orb_queue_step`, `orb_vm_step`, `orb_access_step`, `orb_workfold_step`, `orb_taskcard_step`, `orb_sidebar_visibility`
+    `orb_queue_step`, `orb_vm_step`, `orb_access_step`, `orb_workfold_step`, `orb_taskcard_step`,
+    `orb_sidebar_visibility`, `orb_admission_step`, `orb_account_cooldown_secs`, `orb_cost_cents_step`,
+    `orb_stream_loop_step`, `orb_job_ledger_step`, `orb_proc_liveness_step`, `orb_pr_gate_step`
 -/
 
 import Orb.Kernel
@@ -60,7 +62,7 @@ structure StickyFence (State Event : Type) where
   sticky       : ∀ s e, fenced s = true → fenced (step s e) = true
   forbids_post : ∀ s e, fenced s = true → preFenceAct (step s e) = false
 
-theorem StickyFence.fence_blocks_act (F : StickyFence State Event) (s : State) (e : Event)
+theorem StickyFence.fence_blocks_act {State Event : Type} (F : StickyFence State Event) (s : State) (e : Event)
     (h_fenced : F.fenced s = true) :
     F.fenced (F.step s e) = true ∧ F.preFenceAct (F.step s e) = false :=
   ⟨F.sticky s e h_fenced, F.forbids_post s e h_fenced⟩
@@ -76,7 +78,7 @@ structure ClockDiscipline (Input : Type) where
   guardOk   : Input → Bool
   isolated  : ∀ x, ((eval x &&& clockMask) != 0) = true → guardOk x = true
 
-theorem ClockDiscipline.rejects_cross_clock (C : ClockDiscipline Input) (x : Input)
+theorem ClockDiscipline.rejects_cross_clock {Input : Type} (C : ClockDiscipline Input) (x : Input)
     (h_no_guard : C.guardOk x = false) :
     ((C.eval x &&& C.clockMask) != 0) = false :=
   Bool.eq_false_iff.mpr (fun h_on => by simpa [h_no_guard] using C.isolated x h_on)
@@ -91,7 +93,7 @@ structure ScopedAuthority (Input : Type) where
   scopeValid : Input → Bool
   sound      : ∀ x, admit x = true → scopeValid x = true
 
-theorem ScopedAuthority.rejects_out_of_scope (A : ScopedAuthority Input) (x : Input)
+theorem ScopedAuthority.rejects_out_of_scope {Input : Type} (A : ScopedAuthority Input) (x : Input)
     (h_bad : A.scopeValid x = false) :
     A.admit x = false :=
   Bool.eq_false_iff.mpr (fun h_ok => by simpa [h_bad] using A.sound x h_ok)
@@ -106,7 +108,7 @@ structure ConservedResource (Input : Type) where
   withinBudget : Input → Bool
   conserved    : ∀ x, admit x = true → withinBudget x = true
 
-theorem ConservedResource.rejects_overflow (R : ConservedResource Input) (x : Input)
+theorem ConservedResource.rejects_overflow {Input : Type} (R : ConservedResource Input) (x : Input)
     (h_over : R.withinBudget x = false) :
     R.admit x = false :=
   Bool.eq_false_iff.mpr (fun h_ok => by simpa [h_over] using R.conserved x h_ok)
@@ -122,7 +124,7 @@ structure ProjectionStability (Input Out : Type) where
   stable      : Input → Out → Bool
   preserves   : ∀ x, validIn x = true → stable x (project x) = true
 
-theorem ProjectionStability.ensures_stable (P : ProjectionStability Input Out) (x : Input)
+theorem ProjectionStability.ensures_stable {Input Out : Type} (P : ProjectionStability Input Out) (x : Input)
     (h_in : P.validIn x = true) :
     P.stable x (P.project x) = true :=
   P.preserves x h_in
@@ -137,7 +139,7 @@ structure LinearLeaseSpec (σ α : Type) where
   preserves_inv : ∀ s x, gate s x = true → inv s → inv (step s x)
   gate_iff_safe : ∀ s x, gate s x = true ↔ safe s x = true
 
-theorem LinearLeaseSpec.rejects_unsafe (L : LinearLeaseSpec σ α) (s : σ) (x : α)
+theorem LinearLeaseSpec.rejects_unsafe {σ α : Type} (L : LinearLeaseSpec σ α) (s : σ) (x : α)
     (h_unsafe : L.safe s x = false) : L.gate s x = false :=
   Bool.eq_false_iff.mpr (fun h => by simpa [h_unsafe] using (L.gate_iff_safe s x).mp h)
 
@@ -146,7 +148,7 @@ structure IdempotentOutboxSpec (Row Req : Type) where
   safeReplay : Row → Req → Bool
   admit_iff_safe_replay : ∀ r q, admit r q = true ↔ safeReplay r q = true
 
-theorem IdempotentOutboxSpec.rejects_conflicting_replay (O : IdempotentOutboxSpec Row Req)
+theorem IdempotentOutboxSpec.rejects_conflicting_replay {Row Req : Type} (O : IdempotentOutboxSpec Row Req)
     (r : Row) (q : Req) (h_bad : O.safeReplay r q = false) : O.admit r q = false :=
   Bool.eq_false_iff.mpr (fun h => by simpa [h_bad] using (O.admit_iff_safe_replay r q).mp h)
 
@@ -155,7 +157,7 @@ structure DagScheduleSpec (BoardState : Type) where
   slotSafe : BoardState → Bool
   schedule_iff_slot_safe : ∀ b, canSchedule b = true ↔ slotSafe b = true
 
-theorem DagScheduleSpec.rejects_starvation (D : DagScheduleSpec BoardState) (b : BoardState)
+theorem DagScheduleSpec.rejects_starvation {BoardState : Type} (D : DagScheduleSpec BoardState) (b : BoardState)
     (h_bad : D.slotSafe b = false) : D.canSchedule b = false :=
   Bool.eq_false_iff.mpr (fun h => by simpa [h_bad] using (D.schedule_iff_slot_safe b).mp h)
 
@@ -164,7 +166,7 @@ structure QuotaCircuitSpec (State : Type) where
   safeTransition : State → Bool
   valid_iff_safe : ∀ s, validTransition s = true ↔ safeTransition s = true
 
-theorem QuotaCircuitSpec.rejects_invalid_transition (Q : QuotaCircuitSpec State) (s : State)
+theorem QuotaCircuitSpec.rejects_invalid_transition {State : Type} (Q : QuotaCircuitSpec State) (s : State)
     (h_bad : Q.safeTransition s = false) : Q.validTransition s = false :=
   Bool.eq_false_iff.mpr (fun h => by simpa [h_bad] using (Q.valid_iff_safe s).mp h)
 
@@ -558,5 +560,58 @@ theorem sidebar_main_archive_disjoint_and_cycle_safe
       (sidebarVisibility filt visDesc ack hasPar isFork 1 &&& 256) = 0) ∧
     (sidebarVisibility filt visDesc ack hasPar isFork 1 &&& 65536) = 0 := by
   unfold sidebarVisibility; repeat (first | split | decide | simp_all)
+
+/-- Corollary 24 (`ScopedAuthority` & `ConservedResource` — `orb_admission_step`): Ambiguous recovery (`recoveryPhase == 2`)
+    fences both assignments (`bit 16 == 1`, `admit == 0`), and forged disk tags (`reservedTagForged == 1`) are always rejected. -/
+theorem admission_fences_ambiguous_and_rejects_forged_tag
+    (isQuiescent : UInt8) (reqBytes freeBytes : UInt64) :
+    admissionStep 2 isQuiescent 0 reqBytes freeBytes = 65536 ∧
+    admissionStep 0 isQuiescent 1 reqBytes freeBytes = 0 := by
+  unfold admissionStep; constructor <;> (repeat (first | split | decide | simp_all))
+
+/-- Corollary 25 (`ClockDiscipline` — `orb_account_cooldown_secs`): Account circuit-breaker cooldowns
+    double from 600s on the first error (`1 -> 600`, `2 -> 1200`) and saturate at `maxSecs` (`21 -> 21600`). -/
+theorem account_cooldown_exponential_and_capped :
+    accountCooldownSecs 600 21600 1 = 600 ∧
+    accountCooldownSecs 600 21600 2 = 1200 ∧
+    accountCooldownSecs 600 21600 25 = 21600 := by decide
+
+/-- Corollary 26 (`ConservedResource` — `orb_cost_cents_step`): Cache-creation tokens are deducted from
+    regular input tokens without underflow (`inputTokens < cacheCreateTokens` saturates regular input to `0`). -/
+theorem cost_cents_no_underflow_and_rounds_nearest :
+    costCentsStep 100 0 500 0 3000 15000 0 0 = 0 ∧
+    costCentsStep 1000 1000 0 0 3000 15000 0 0 = 2 := by decide
+
+/-- Corollary 27 (`ConservedResource` — `orb_stream_loop_step`): Hash collisions (`hashCollision == 1`)
+    or comparison budget exhaustion (`comparisons > comparisonBudget`) fail open to `2 (inconclusive)`, never `1 (repeated)`. -/
+theorem stream_loop_collision_or_single_word_never_triggers
+    (win minL rep cnt words : UInt32) (cmp bud : UInt64) :
+    streamLoopStep 0 1 win minL rep cnt words cmp bud ≠ 1 ∧
+    streamLoopStep 0 0 win minL rep cnt 1 cmp bud ≠ 1 := by
+  unfold streamLoopStep; constructor <;> (repeat (first | split | decide | simp_all))
+
+/-- Corollary 28 (`StickyFence` — `orb_job_ledger_step`): Once a newer terminal receipt (`newerTerminalExists == 1`)
+    or newer tentative submission (`newerAmbiguousTentative == 1`) exists, the older wait lease is dropped (`bit 0 == 0`). -/
+theorem job_ledger_newer_supersedes_wait_lease
+    (isAcc expectsCont ambig : UInt8) :
+    (jobLedgerStep isAcc expectsCont 1 ambig &&& 1) = 0 ∧
+    (jobLedgerStep isAcc expectsCont 0 1 &&& 1) = 0 := by
+  unfold jobLedgerStep; constructor <;> (repeat (first | split | decide | simp_all))
+
+/-- Corollary 29 (`ScopedAuthority` — `orb_proc_liveness_step`): A reused PID with mismatched `start_ticks`
+    is classified as `0 (dead)`, while a transient `/proc/<pid>/stat` read error returns `2 (inconclusive_alive)`. -/
+theorem proc_liveness_rejects_pid_reuse_and_keeps_read_err
+    (isZomb hasTicks : UInt8) (fields : UInt32) (t1 t2 : UInt64) :
+    procLivenessStep 0 1 isZomb hasTicks fields t1 t2 = 2 ∧
+    procLivenessStep 0 0 0 1 25 1000 2000 = 0 := by
+  unfold procLivenessStep; constructor <;> (repeat (first | split | decide | simp_all))
+
+/-- Corollary 30 (`ProjectionStability` — `orb_pr_gate_step`): Head SHA drift (`exactHead == 0`) or external
+    `action_required` (`actionRequired == 1`) always blocks `8 (ready_for_review_or_merge)`, even when checks are green. -/
+theorem pr_gate_head_drift_or_action_required_blocks_merge
+    (actReq blk beh conf : UInt8) :
+    prGateStep 0 0 0 0 actReq blk beh conf 1 1 = 3 ∧
+    prGateStep 0 0 0 1 1 blk beh conf 1 1 = 4 := by
+  unfold prGateStep; constructor <;> rfl
 
 end Orb.Spec

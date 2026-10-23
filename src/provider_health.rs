@@ -86,8 +86,7 @@ fn account_error_max_secs() -> u64 {
 pub fn account_error_cooldown(consecutive: u32) -> std::time::Duration {
     let base = account_error_base_secs();
     let max = account_error_max_secs().max(base);
-    let exp = consecutive.saturating_sub(1).min(20);
-    let secs = base.saturating_mul(1u64 << exp).min(max);
+    let secs = crate::orb_spec::account_cooldown_secs(base, max, consecutive);
     std::time::Duration::from_secs(secs)
 }
 

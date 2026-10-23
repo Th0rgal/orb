@@ -164,23 +164,31 @@ fn process_start_ticks(_pid: u32) -> Option<u64> {
 fn pid_is_alive(pid: u32, start_ticks: Option<u64>) -> bool {
     #[cfg(target_os = "linux")]
     {
-        match proc_stat_fields(pid) {
-            None => false,
+        let verdict = match proc_stat_fields(pid) {
+            None => crate::orb_spec::proc_liveness_step(true, false, false, false, 0, 0, 0),
             // Unreadable: inconclusive, so keep the job alive.
-            Some(Err(())) => true,
-            Some(Ok(fields)) => {
-                if matches!(fields.first().map(String::as_str), Some("Z" | "X")) {
-                    return false;
-                }
-                match (
-                    start_ticks,
-                    fields.get(19).and_then(|v| v.parse::<u64>().ok()),
-                ) {
-                    (Some(expected), Some(actual)) => expected == actual,
-                    _ => true,
-                }
+            Some(Err(())) => {
+                crate::orb_spec::proc_liveness_step(false, true, false, false, 0, 0, 0)
             }
-        }
+            Some(Ok(fields)) => {
+                let is_zombie = matches!(fields.first().map(String::as_str), Some("Z" | "X"));
+                let actual_ticks = fields.get(19).and_then(|v| v.parse::<u64>().ok());
+                let (has_expected, exp_ticks, act_ticks) = match (start_ticks, actual_ticks) {
+                    (Some(expected), Some(actual)) => (true, expected, actual),
+                    _ => (false, 0, 0),
+                };
+                crate::orb_spec::proc_liveness_step(
+                    false,
+                    false,
+                    is_zombie,
+                    has_expected,
+                    fields.len().max(20) as u32,
+                    exp_ticks,
+                    act_ticks,
+                )
+            }
+        };
+        verdict != crate::orb_spec::ProcLivenessVerdict::Dead
     }
     #[cfg(not(target_os = "linux"))]
     {

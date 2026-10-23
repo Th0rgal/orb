@@ -303,10 +303,17 @@ pub async fn current_remote_build_wait_handle(
             && validation_order(handle.submission_sequence, handle.started_at) > current_order
     });
 
-    if newer_terminal_exists || newer_ambiguous_submission_exists {
-        Ok(None)
-    } else {
+    if crate::orb_spec::job_ledger_step(
+        current_handle.kind == JobHandleKind::RemoteBuild && current_handle.accepted_at.is_some(),
+        current_handle.expects_mission_continuation(),
+        newer_terminal_exists,
+        newer_ambiguous_submission_exists,
+    )
+    .retain_wait_handle
+    {
         Ok(Some(current_handle.clone()))
+    } else {
+        Ok(None)
     }
 }
 
@@ -582,7 +589,7 @@ pub async fn terminal_wake_disposition(
     let receipts = load_receipts_result(working_dir).await?;
     let receipt_order = validation_order(receipt.submission_sequence, receipt.started_at);
 
-    if let Some(newer) = handles
+    let newer_handle_id = handles
         .iter()
         .filter(|handle| {
             handle.kind == JobHandleKind::RemoteBuild
@@ -592,10 +599,8 @@ pub async fn terminal_wake_disposition(
                 && validation_order(handle.submission_sequence, handle.started_at) > receipt_order
         })
         .max_by_key(|handle| validation_order(handle.submission_sequence, handle.started_at))
-    {
-        return Ok(TerminalWakeDisposition::SupersededBy(newer.job_id));
-    }
-    if let Some(newer) = receipts
+        .map(|h| h.job_id);
+    let newer_receipt_id = receipts
         .iter()
         .filter(|candidate| {
             candidate.mission_id == receipt.mission_id
@@ -607,29 +612,36 @@ pub async fn terminal_wake_disposition(
         .max_by_key(|candidate| {
             validation_order(candidate.submission_sequence, candidate.started_at)
         })
-    {
-        return Ok(TerminalWakeDisposition::SupersededBy(newer.job_id));
-    }
-    if handles.iter().any(|handle| {
+        .map(|r| r.job_id);
+    let superseding_id = newer_handle_id.or(newer_receipt_id);
+    let ambiguous_tentative = handles.iter().any(|handle| {
         handle.kind == JobHandleKind::Tentative
             && handle.continuation_requested()
             && handle.mission_id == receipt.mission_id
             && handle.job_id != receipt.job_id
             && validation_order(handle.submission_sequence, handle.started_at) >= receipt_order
-    }) {
-        return Ok(TerminalWakeDisposition::Deferred);
-    }
-    if handles.iter().any(|handle| {
+    }) || handles.iter().any(|handle| {
         handle.kind == JobHandleKind::RemoteBuild
             && handle.expects_mission_continuation()
             && handle.mission_id == receipt.mission_id
             && handle.job_id != receipt.job_id
             && validation_order(handle.submission_sequence, handle.started_at) == receipt_order
             && (handle.submission_sequence == 0 || receipt.submission_sequence == 0)
-    }) {
-        return Ok(TerminalWakeDisposition::Deferred);
+    });
+    match crate::orb_spec::job_ledger_step(
+        true,
+        receipt.wake_required || receipt.continuation_expected,
+        superseding_id.is_some(),
+        ambiguous_tentative,
+    )
+    .wake
+    {
+        crate::orb_spec::JobLedgerWake::Superseded => Ok(TerminalWakeDisposition::SupersededBy(
+            superseding_id.expect("superseding id present"),
+        )),
+        crate::orb_spec::JobLedgerWake::Deferred => Ok(TerminalWakeDisposition::Deferred),
+        crate::orb_spec::JobLedgerWake::Ready => Ok(TerminalWakeDisposition::Ready),
     }
-    Ok(TerminalWakeDisposition::Ready)
 }
 
 pub async fn mark_terminal_wake_suppressed(

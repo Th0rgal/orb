@@ -163,8 +163,17 @@ pub(super) fn write_disk_reservation_ledger(
 /// by older servers, but never accept this reserved namespace from an API
 /// request.
 pub(super) fn contains_internal_disk_reservation_tag(tags: &[String]) -> bool {
-    tags.iter()
-        .any(|tag| tag.trim().starts_with(DISK_RESERVATION_TAG_PREFIX))
+    let forged = tags
+        .iter()
+        .any(|tag| tag.trim().starts_with(DISK_RESERVATION_TAG_PREFIX));
+    !crate::orb_spec::admission_step(crate::orb_spec::AdmissionStepInput {
+        recovery_phase: 0,
+        is_quiescent: true,
+        reserved_tag_forged: forged,
+        emergency_plus_cand_bytes: 0,
+        free_disk_bytes: 0,
+    })
+    .admit
 }
 
 /// Only missions that are actually running hold a scratch lease.
@@ -517,7 +526,15 @@ pub(super) async fn reserve_local_mission_disk(
     let estimate = estimate_gib.saturating_mul(1 << 30);
     let emergency = mission_disk_reserve_gib().saturating_mul(1 << 30);
     let hard_required = disk_admission_hard_required_bytes(emergency, estimate);
-    if usage.available < hard_required {
+    if !crate::orb_spec::admission_step(crate::orb_spec::AdmissionStepInput {
+        recovery_phase: 0,
+        is_quiescent: true,
+        reserved_tag_forged: false,
+        emergency_plus_cand_bytes: hard_required,
+        free_disk_bytes: usage.available,
+    })
+    .admit
+    {
         return Err(format!(
             "mission admission refused on filesystem {}: {} GiB free, {} GiB candidate estimate, {} GiB emergency reserve ({} GiB required)",
             usage.filesystem,

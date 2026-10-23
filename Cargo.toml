@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/orb-spec"]
+
 [package]
 name = "sandboxed_sh"
 version = "1.3.0"
@@ -7,6 +10,7 @@ description = "Self-hosted orchestrator for AI coding agents (formerly Open Agen
 authors = ["sandboxed.sh Contributors"]
 
 [dependencies]
+orb-spec = { path = "crates/orb-spec" }
 notify = "8"
 tempfile = "3"
 # Async runtime

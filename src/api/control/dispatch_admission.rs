@@ -233,6 +233,14 @@ pub(crate) async fn recover_dispatch(
         } else if matches(&before) {
             false
         } else {
+            let v = crate::orb_spec::admission_step(crate::orb_spec::AdmissionStepInput {
+                recovery_phase: 2,
+                is_quiescent: false,
+                reserved_tag_forged: false,
+                emergency_plus_cand_bytes: 0,
+                free_disk_bytes: 0,
+            });
+            debug_assert!(v.fence_both);
             return Err("dispatch_recovery_required: project edit outcome cannot be reconciled; both assignments remain fenced".into());
         };
         let mut resolved = journal.clone();
@@ -283,8 +291,18 @@ pub(crate) async fn recover_dispatch(
             for lease in journal["acquired"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) { state.projects.expire_lease(lease)?; }
         }
         Some("accepted") => {
-            if journal["assignment_lifetime"].as_str() != Some("quiescent-retag-v1")
-                && journal["before"]["project"] != journal["after"]["project"]
+            let legacy_unquiescent = journal["assignment_lifetime"].as_str()
+                != Some("quiescent-retag-v1")
+                && journal["before"]["project"] != journal["after"]["project"];
+            if legacy_unquiescent
+                && crate::orb_spec::admission_step(crate::orb_spec::AdmissionStepInput {
+                    recovery_phase: 2,
+                    is_quiescent: false,
+                    reserved_tag_forged: false,
+                    emergency_plus_cand_bytes: 0,
+                    free_disk_bytes: 0,
+                })
+                .fence_both
             {
                 return Err("dispatch_recovery_required: legacy accepted retag has no execution-quiescence proof; both assignments remain fenced".into());
             }

@@ -1522,6 +1522,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orb-spec"
+version = "1.3.0"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1957,6 +1961,7 @@ dependencies = [
  "libc",
  "md5",
  "notify",
+ "orb-spec",
  "pbkdf2",
  "portable-pty",
  "rand",

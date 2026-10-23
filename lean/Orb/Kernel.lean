@@ -372,4 +372,137 @@ def sidebarVisibility
   let cycleSafe : UInt32 := if hasParent == 1 && isFork == 0 && parentReachesSelf == 0 then 65536 else 0
   retain ||| archiveOnly ||| cycleSafe
 
+/--
+  Unboxed C-ABI Dispatch Admission, Quiescence & Disk Budget Gate (`orb_admission_step`):
+  Packs `(admit : UInt8, rollbackRequired : UInt8, fenceBoth : UInt8)` into a 32-bit word:
+  `bit 0 = admit`, `bit 8 = rollbackRequired`, `bit 16 = fenceBoth`.
+  - If `recoveryPhase == 1` (`"rejected"` or `"preparing"`): returns `256` (`rollbackRequired == 1`).
+  - If `recoveryPhase == 2` (ambiguous/unknown crash state or legacy non-quiescent retag): returns `65536` (`fenceBoth == 1`).
+  - If `recoveryPhase == 0` (live dispatch admission): admits (`1`) iff `isQuiescent == 1 && reservedTagForged == 0 && emergencyPlusCandBytes ≤ freeDiskBytes`.
+-/
+@[inline, export orb_admission_step]
+def admissionStep
+    (recoveryPhase isQuiescent reservedTagForged : UInt8)
+    (emergencyPlusCandBytes freeDiskBytes : UInt64) : UInt32 :=
+  if recoveryPhase == 1 then
+    256
+  else if recoveryPhase == 2 then
+    65536
+  else if isQuiescent == 1 && reservedTagForged == 0 && emergencyPlusCandBytes ≤ freeDiskBytes then
+    1
+  else
+    0
+
+/--
+  Unboxed C-ABI Account Circuit-Breaker Exponential Cooldown Calculator (`orb_account_cooldown_secs`):
+  Computes `min(max(baseSecs, maxSecs), baseSecs * 2^(min(max(consecutive, 1) - 1, 20)))`
+  with saturating 64-bit arithmetic and floor `≥ 1`.
+-/
+@[inline, export orb_account_cooldown_secs]
+def accountCooldownSecs (baseSecs maxSecs : UInt64) (consecutive : UInt32) : UInt64 :=
+  let effBase := if baseSecs ≥ 1 then baseSecs else 600
+  let effMax := if maxSecs > effBase then maxSecs else effBase
+  let rawExp := if consecutive > 1 then consecutive - 1 else 0
+  let exp : UInt64 := (if rawExp > 20 then 20 else rawExp).toUInt64
+  let factor : UInt64 := (1 : UInt64) <<< exp
+  if effBase > effMax / factor then effMax else effBase * factor
+
+/--
+  Unboxed C-ABI Integer Token Pricing & Cents Rounding Kernel (`orb_cost_cents_step`):
+  Computes rounded cents from token counts and nanodollar-per-token rates without floating-point drift:
+  - Regular input tokens saturate at `inputTokens - min(inputTokens, cacheCreateTokens)`
+  - Rounds nearest cent via `(totalNano + 5_000_000) / 10_000_000`.
+-/
+@[inline, export orb_cost_cents_step]
+def costCentsStep
+    (inputTokens outputTokens cacheCreateTokens cacheReadTokens : UInt64)
+    (inputNano outputNano cacheCreateNano cacheReadNano : UInt64) : UInt64 :=
+  let regInput := if inputTokens ≥ cacheCreateTokens then inputTokens - cacheCreateTokens else 0
+  let totalNano :=
+    regInput * inputNano +
+    outputTokens * outputNano +
+    cacheCreateTokens * cacheCreateNano +
+    cacheReadTokens * cacheReadNano
+  (totalNano + 5000000) / 10000000
+
+/--
+  Unboxed C-ABI Stream Repetition & Loop Detector Gate (`orb_stream_loop_step`):
+  Returns verdict: `0 = clear`, `1 = repeated`, `2 = inconclusive`.
+  - If `cancelledOrTimedOut == 1 || minLen > 256 || comparisons > comparisonBudget`: returns `2 (inconclusive)`.
+  - Else if `minLen == 0 || repeats < 2 || windowLen < minLen * repeats`: returns `0 (clear)`.
+  - Else if `hashCollision == 1`: returns `2 (inconclusive)`.
+  - Else if `nonOverlappingCount ≥ repeats && distinctWords4Plus ≥ 2`: returns `1 (repeated)`.
+  - Otherwise returns `0 (clear)`.
+-/
+@[inline, export orb_stream_loop_step]
+def streamLoopStep
+    (cancelledOrTimedOut hashCollision : UInt8)
+    (windowLen minLen repeats nonOverlappingCount distinctWords4Plus : UInt32)
+    (comparisons comparisonBudget : UInt64) : UInt8 :=
+  if cancelledOrTimedOut == 1 || minLen > 256 || comparisons > comparisonBudget then 2
+  else if minLen == 0 || repeats < 2 || windowLen < minLen * repeats then 0
+  else if hashCollision == 1 then 2
+  else if nonOverlappingCount ≥ repeats && distinctWords4Plus ≥ 2 then 1
+  else 0
+
+/--
+  Unboxed C-ABI Remote Build Wait-Lease & Terminal Wake Supersession Stepper (`orb_job_ledger_step`):
+  Packs `(retainWaitHandle : UInt8, wakeDisposition : UInt8)` into a 32-bit word:
+  `bit 0 = retainWaitHandle`, `bits 8..15 = wakeDisposition (0 = ready, 1 = deferred, 2 = superseded)`.
+  - Wait handle is retained (`bit 0 == 1`) iff `isAcceptedRemoteBuild == 1 && expectsContinuation == 1 && newerTerminalExists == 0 && newerAmbiguousTentative == 0`.
+  - Wake disposition is `2 (superseded)` when `newerTerminalExists == 1`, else `1 (deferred)` when `newerAmbiguousTentative == 1`, else `0 (ready)`.
+-/
+@[inline, export orb_job_ledger_step]
+def jobLedgerStep
+    (isAcceptedRemoteBuild expectsContinuation newerTerminalExists newerAmbiguousTentative : UInt8) : UInt32 :=
+  let disp : UInt32 :=
+    if newerTerminalExists == 1 then 512
+    else if newerAmbiguousTentative == 1 then 256
+    else 0
+  let retain : UInt32 :=
+    if isAcceptedRemoteBuild == 1 && expectsContinuation == 1 && disp == 0 then 1 else 0
+  retain ||| disp
+
+/--
+  Unboxed C-ABI Linux `/proc/<pid>/stat` Liveness & Start-Ticks Gate (`orb_proc_liveness_step`):
+  Returns liveness verdict: `0 = dead`, `1 = alive`, `2 = inconclusive_alive`.
+  - If `procMissing == 1`: returns `0 (dead)`.
+  - If `procReadError == 1`: returns `2 (inconclusive_alive)` (never reap on transient procfs read error).
+  - If `isZombieOrDeadState == 1 || fieldsAfterComm < 20`: returns `0 (dead)`.
+  - If `hasExpectedTicks == 1 && actualStartTicks != expectedStartTicks`: returns `0 (dead)` (PID reused).
+  - Otherwise returns `1 (alive)`.
+-/
+@[inline, export orb_proc_liveness_step]
+def procLivenessStep
+    (procMissing procReadError isZombieOrDeadState hasExpectedTicks : UInt8)
+    (fieldsAfterComm : UInt32)
+    (expectedStartTicks actualStartTicks : UInt64) : UInt8 :=
+  if procMissing == 1 then 0
+  else if procReadError == 1 then 2
+  else if isZombieOrDeadState == 1 || fieldsAfterComm < 20 then 0
+  else if hasExpectedTicks == 1 && actualStartTicks != expectedStartTicks then 0
+  else 1
+
+/--
+  Unboxed C-ABI GitHub PR Gate Recommendation Stepper (`orb_pr_gate_step`):
+  Returns recommendation code:
+  `0 = already_merged`, `1 = wait_for_ready_for_review`, `2 = closed_without_merge`,
+  `3 = head_changed_since_worker`, `4 = action_required_external`, `5 = blocked_by_policy`,
+  `6 = needs_update_with_base`, `7 = needs_conflict_resolution`,
+  `8 = ready_for_review_or_merge`, `9 = needs_checks_or_review`.
+-/
+@[inline, export orb_pr_gate_step]
+def prGateStep
+    (merged draft closed exactHead actionRequired blocked behind conflicting checksGreen workflowsGreen : UInt8) : UInt8 :=
+  if merged == 1 then 0
+  else if draft == 1 then 1
+  else if closed == 1 then 2
+  else if exactHead == 0 then 3
+  else if actionRequired == 1 then 4
+  else if blocked == 1 then 5
+  else if behind == 1 then 6
+  else if conflicting == 1 then 7
+  else if checksGreen == 1 && workflowsGreen == 1 then 8
+  else 9
+
 end Orb.Kernel

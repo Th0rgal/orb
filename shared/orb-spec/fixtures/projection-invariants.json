@@ -197,5 +197,64 @@
         "show_in_archive_only": false
       }
     }
+  ],
+  "pr_gate_cases": [
+    {
+      "name": "head drift since worker turn outranks external action and check gates",
+      "input": {
+        "merged": false,
+        "draft": false,
+        "closed": false,
+        "exact_head": false,
+        "action_required": true,
+        "blocked": false,
+        "behind": false,
+        "conflicting": false,
+        "checks_green": true,
+        "workflows_green": true
+      },
+      "expected": {
+        "code": 3,
+        "recommendation": "head_changed_since_worker"
+      }
+    },
+    {
+      "name": "exact head with green checks and workflows is ready for review or merge",
+      "input": {
+        "merged": false,
+        "draft": false,
+        "closed": false,
+        "exact_head": true,
+        "action_required": false,
+        "blocked": false,
+        "behind": false,
+        "conflicting": false,
+        "checks_green": true,
+        "workflows_green": true
+      },
+      "expected": {
+        "code": 8,
+        "recommendation": "ready_for_review_or_merge"
+      }
+    },
+    {
+      "name": "exact head behind base needs update before conflict or check evaluation",
+      "input": {
+        "merged": false,
+        "draft": false,
+        "closed": false,
+        "exact_head": true,
+        "action_required": false,
+        "blocked": false,
+        "behind": true,
+        "conflicting": true,
+        "checks_green": true,
+        "workflows_green": true
+      },
+      "expected": {
+        "code": 6,
+        "recommendation": "needs_update_with_base"
+      }
+    }
   ]
 }

@@ -824,27 +824,19 @@ fn apply_pr_gate_recommendation(gates: &mut PrGates) {
         _ => true,
     };
     let closed = gates.state.eq_ignore_ascii_case("closed");
-    gates.recommendation = if gates.merged {
-        Some("already_merged".to_string())
-    } else if gates.draft {
-        Some("wait_for_ready_for_review".to_string())
-    } else if closed {
-        Some("closed_without_merge".to_string())
-    } else if !exact_head {
-        Some("head_changed_since_worker".to_string())
-    } else if action_required {
-        Some("action_required_external".to_string())
-    } else if blocked {
-        Some("blocked_by_policy".to_string())
-    } else if behind {
-        Some("needs_update_with_base".to_string())
-    } else if gates.conflicting {
-        Some("needs_conflict_resolution".to_string())
-    } else if checks_green && workflow_runs_green {
-        Some("ready_for_review_or_merge".to_string())
-    } else {
-        Some("needs_checks_or_review".to_string())
-    };
+    let code = orb_spec::pr_gate_step(
+        gates.merged,
+        gates.draft,
+        closed,
+        exact_head,
+        action_required,
+        blocked,
+        behind,
+        gates.conflicting,
+        checks_green,
+        workflow_runs_green,
+    );
+    gates.recommendation = Some(orb_spec::pr_gate_recommendation(code).to_string());
 }
 
 #[cfg(test)]

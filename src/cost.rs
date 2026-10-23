@@ -671,39 +671,25 @@ pub fn cost_cents_from_usage(model: &str, usage: &TokenUsage) -> u64 {
         return 0;
     };
 
-    // Calculate cost in nanodollars
-    let mut cost_nano: u64 = 0;
+    let cache_create_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
+    let cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
+    let cache_create_nano = pricing
+        .cache_create_nano_per_token
+        .unwrap_or(pricing.input_nano_per_token);
+    let cache_read_nano = pricing
+        .cache_read_nano_per_token
+        .unwrap_or(pricing.input_nano_per_token);
 
-    // Regular input tokens
-    let regular_input = usage
-        .input_tokens
-        .saturating_sub(usage.cache_creation_input_tokens.unwrap_or(0));
-    cost_nano += regular_input.saturating_mul(pricing.input_nano_per_token);
-
-    // Output tokens
-    cost_nano += usage
-        .output_tokens
-        .saturating_mul(pricing.output_nano_per_token);
-
-    // Cache creation tokens (usually more expensive)
-    if let Some(cache_create) = usage.cache_creation_input_tokens {
-        let rate = pricing
-            .cache_create_nano_per_token
-            .unwrap_or(pricing.input_nano_per_token);
-        cost_nano += cache_create.saturating_mul(rate);
-    }
-
-    // Cache read tokens (usually much cheaper)
-    if let Some(cache_read) = usage.cache_read_input_tokens {
-        let rate = pricing
-            .cache_read_nano_per_token
-            .unwrap_or(pricing.input_nano_per_token);
-        cost_nano += cache_read.saturating_mul(rate);
-    }
-
-    // Convert nanodollars to cents: 1 cent = $0.01 = 10_000_000 nanodollars
-    // Round to nearest cent
-    (cost_nano + 5_000_000) / 10_000_000
+    crate::orb_spec::cost_cents_step(
+        usage.input_tokens,
+        usage.output_tokens,
+        cache_create_tokens,
+        cache_read_tokens,
+        pricing.input_nano_per_token,
+        pricing.output_nano_per_token,
+        cache_create_nano,
+        cache_read_nano,
+    )
 }
 
 /// Resolve cost and provenance from optional actual billing, model name, and

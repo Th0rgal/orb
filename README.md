@@ -101,8 +101,8 @@ ChatGPT browser or create a Cursor Cloud API account.
 Desktop is built with Tauri and SolidJS; iOS uses SwiftUI. The Rust backend owns
 projects, missions, event history and remote-node coordination, backed by a
 formally verified Lean 4 orchestration, proxy, mission lifecycle, and cross-client projection kernel
-(`lean/Orb/Kernel.lean` & `lean/Orb/Spec.lean`, `0 sorryAx`, `35/35` tight
-specs across 5 Layer-I Meta-Specs, `23` C-ABI gates compiled directly to `liborb_spec_cabi.a` with zero C
+(`lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` & `crates/orb-spec`, `0 sorryAx`, `42/42` tight
+specs across 5 Layer-I Meta-Specs, `30` C-ABI gates compiled directly to `liborb_spec_cabi.a` with zero C
 fallback). Cloud adapters observe provider work independently of the client
 window.
 
