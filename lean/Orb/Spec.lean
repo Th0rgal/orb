@@ -5,14 +5,15 @@
     `ScopedAuthority`, `ConservedResource`, `ProjectionStability`) + compatibility combinators
     (`LinearLeaseSpec`, `IdempotentOutboxSpec`, `DagScheduleSpec`, `QuotaCircuitSpec`)
   - Layer II: Declarative Corollaries (≤ 3 lines each, Mathlib4 algebraic proof style)
-  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 30 exports):
+  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 34 exports):
     `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`,
     `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`,
     `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word`,
     `orb_proxy_step`, `orb_stream_deadlines`, `orb_breaker_step`, `orb_mission_step`, `orb_reconcile_step`,
     `orb_queue_step`, `orb_vm_step`, `orb_access_step`, `orb_workfold_step`, `orb_taskcard_step`,
     `orb_sidebar_visibility`, `orb_admission_step`, `orb_account_cooldown_secs`, `orb_cost_cents_step`,
-    `orb_stream_loop_step`, `orb_job_ledger_step`, `orb_proc_liveness_step`, `orb_pr_gate_step`
+    `orb_stream_loop_step`, `orb_job_ledger_step`, `orb_proc_liveness_step`, `orb_pr_gate_step`,
+    `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`
 -/
 
 import Orb.Kernel
@@ -613,5 +614,47 @@ theorem pr_gate_head_drift_or_action_required_blocks_merge
     prGateStep 0 0 0 0 actReq blk beh conf 1 1 = 3 ∧
     prGateStep 0 0 0 1 1 blk beh conf 1 1 = 4 := by
   unfold prGateStep; constructor <;> rfl
+
+/-- Corollary 31 (`ProjectionStability` — `orb_turn_summary_step`): Once a turn ends (`turnEnded == 1`),
+    an `in_progress (1)` task settles to `pending (0)` (`isActive == 0`), and `completed (2)` stays done (`bit 8`). -/
+theorem turn_summary_settles_in_progress_on_turn_end
+    (allClosed outcomeFinished : UInt8) :
+    (turnSummaryStep 1 1 allClosed outcomeFinished &&& 0xFF) = 0 ∧
+    (turnSummaryStep 1 1 allClosed outcomeFinished &&& 65536) = 0 ∧
+    (turnSummaryStep 2 1 allClosed outcomeFinished &&& 256) = 256 := by
+  unfold turnSummaryStep taskcardStep; repeat (first | split | decide | simp_all)
+
+/-- Corollary 32 (`ProjectionStability` — `orb_usage_limit_status`): Allowed/ok/missing status (`0`) is hidden (`0`),
+    `seven_day_opus (3)` suppresses percentage (`bit 16 == 0`), and `rejected (2)` at 30s clamps reset to `1m`. -/
+theorem usage_limit_status_matches_cross_client_invariants
+    (claim hasUtil pct hasReset : UInt8) (rem : UInt64) :
+    usageLimitStatus 0 claim hasUtil pct hasReset rem = 0 ∧
+    (usageLimitStatus 1 3 1 88 0 0 &&& 65536) = 0 ∧
+    ((usageLimitStatus 2 0 0 0 1 30 >>> 32) &&& 0xFF) = 1 ∧
+    (usageLimitStatus 2 0 0 0 1 30 >>> 40) = 1 := by
+  unfold usageLimitStatus; repeat (first | constructor | rfl | decide)
+
+/-- Corollary 33 (`ProjectionStability` — `orb_relative_time_bucket`): Elapsed times `< 45s` return `0 ("now")`,
+    and `45..59s` clamp to `1m` (`unit = 1`, `value = 1`), never `"0m"`. -/
+theorem relative_time_bucket_never_zero_minutes :
+    relativeTimeBucket 44 = 0 ∧
+    relativeTimeBucket 45 = 257 ∧
+    relativeTimeBucket 59 = 257 ∧
+    relativeTimeBucket 3600 = 258 := by decide
+
+/-- Packed state decoder/stepper for incremental vs batch SSE transcript projection. -/
+def applyTranscriptEvent (packedState : UInt64) (ev : UInt8 × UInt32) : UInt64 :=
+  let len : UInt32 := (packedState &&& 0xFFFFFFFF).toUInt32
+  let seq : UInt32 := (packedState >>> 32).toUInt32
+  transcriptPatchStep len seq ev.1 ev.2
+
+/-- Corollary 34 (`ProjectionStability` — `orb_transcript_patch_step`): Incremental SSE chunk folding
+    equals batch transcript projection over the concatenated event stream (`foldl` homomorphism). -/
+theorem stream_apply_eq_batch
+    (init : UInt64) (chunk1 chunk2 : List (UInt8 × UInt32)) :
+    (chunk1 ++ chunk2).foldl applyTranscriptEvent init =
+      chunk2.foldl applyTranscriptEvent (chunk1.foldl applyTranscriptEvent init) ∧
+    (transcriptPatchStep 120 4 2 50 &&& 0xFFFFFFFF) = 0 :=
+  ⟨List.foldl_append, by decide⟩
 
 end Orb.Spec

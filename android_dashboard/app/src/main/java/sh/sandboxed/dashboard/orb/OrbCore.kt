@@ -216,17 +216,8 @@ object OrbJSON {
     }
 
     /** Elapsed seconds -> "now" / "Nm" (min 1) / "Nh" / "Nd" / "Nw"; see shared/orb-spec/fixtures/relative-time.json. */
-    fun relativeSeconds(elapsed: Long): String {
-        val seconds = elapsed.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
-        if (seconds < 45) return "now"
-        val minutes = maxOf(1, seconds / 60)
-        if (seconds < 3600) return "${minutes}m"
-        val hours = seconds / 3600
-        if (seconds < 86_400) return "${hours}h"
-        val days = seconds / 86_400
-        if (seconds < 604_800) return "${days}d"
-        return "${seconds / 604_800}w"
-    }
+    fun relativeSeconds(elapsed: Long): String =
+        OrbKernel.relativeTimeString(elapsed.coerceIn(0L, Int.MAX_VALUE.toLong()))
 
     fun cleanTitle(raw: String?): String {
         val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return "Untitled"

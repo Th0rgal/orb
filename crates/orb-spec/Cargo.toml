@@ -7,4 +7,4 @@ description = "Zero-dependency typed Rust bindings and C-ABI archive builder for
 authors = ["sandboxed.sh Contributors"]
 
 [dependencies]
-lean-sys-cabi = { git = "https://github.com/Th0rgal/lean-sys.git", rev = "29cfe92b8fc6965a7af19ee09d3e2e32590eb0c5" }
+lean-sys-cabi = { git = "https://github.com/Th0rgal/lean-sys.git", rev = "f07aebf9035356030482d9e9411d18dd070c9a7b" }

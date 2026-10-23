@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Cross-client projection invariants generated and verified by the Lean 4 formal kernel (lean/Orb/Kernel.lean & lean/Orb/Spec.lean): orb_workfold_step, orb_taskcard_step, and orb_sidebar_visibility.",
+  "description": "Cross-client projection invariants generated and verified by the Lean 4 formal kernel (lean/Orb/Kernel.lean & lean/Orb/Spec.lean): orb_workfold_step, orb_taskcard_step, orb_sidebar_visibility, orb_pr_gate_step, orb_turn_summary_step, orb_usage_limit_status, orb_relative_time_bucket, and orb_transcript_patch_step.",
   "workfold_cases": [
     {
       "name": "narration text between tools folds into WorkFold",
@@ -254,6 +254,56 @@
       "expected": {
         "code": 6,
         "recommendation": "needs_update_with_base"
+      }
+    }
+  ],
+  "turn_summary_cases": [
+    {
+      "name": "in_progress task settles to pending when turn ends",
+      "input": {
+        "raw_status": 1,
+        "turn_ended": true,
+        "all_closed": false,
+        "turn_outcome_finished": true
+      },
+      "expected": {
+        "normalized_status": 0,
+        "is_done": false,
+        "is_active": false,
+        "card_state": 2
+      }
+    },
+    {
+      "name": "completed task stays done and active task stays active while turn is live",
+      "input": {
+        "raw_status": 1,
+        "turn_ended": false,
+        "all_closed": false,
+        "turn_outcome_finished": false
+      },
+      "expected": {
+        "normalized_status": 1,
+        "is_done": false,
+        "is_active": true,
+        "card_state": 0
+      }
+    }
+  ],
+  "transcript_patch_cases": [
+    {
+      "name": "incremental SSE chunk fold matches batch transcript projection",
+      "chunk1": [
+        { "event_kind": 0, "delta_len": 12 },
+        { "event_kind": 0, "delta_len": 8 }
+      ],
+      "chunk2": [
+        { "event_kind": 1, "delta_len": 25 },
+        { "event_kind": 2, "delta_len": 0 },
+        { "event_kind": 0, "delta_len": 14 }
+      ],
+      "expected": {
+        "final_len": 14,
+        "final_seq": 5
       }
     }
   ]

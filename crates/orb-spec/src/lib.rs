@@ -183,6 +183,27 @@ unsafe extern "C" {
         checks_green: u8,
         workflows_green: u8,
     ) -> u8;
+    fn orb_turn_summary_step(
+        raw_status: u8,
+        turn_ended: u8,
+        all_closed: u8,
+        turn_outcome_finished: u8,
+    ) -> u32;
+    fn orb_usage_limit_status(
+        status_kind: u8,
+        claim_kind: u8,
+        has_utilization: u8,
+        utilization_pct: u8,
+        has_reset: u8,
+        reset_rem_secs: u64,
+    ) -> u64;
+    fn orb_relative_time_bucket(elapsed_secs: u64) -> u64;
+    fn orb_transcript_patch_step(
+        state_len: u32,
+        state_seq: u32,
+        event_kind: u8,
+        delta_len: u32,
+    ) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1101,6 +1122,122 @@ pub fn pr_gate_recommendation(code: u8) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnSummaryVerdict {
+    pub normalized_status: u8,
+    pub is_done: bool,
+    pub is_active: bool,
+    pub card_state: u8,
+}
+
+pub fn turn_summary_step(
+    raw_status: u8,
+    turn_ended: bool,
+    all_closed: bool,
+    turn_outcome_finished: bool,
+) -> TurnSummaryVerdict {
+    let raw = unsafe {
+        orb_turn_summary_step(
+            raw_status,
+            u8::from(turn_ended),
+            u8::from(all_closed),
+            u8::from(turn_outcome_finished),
+        )
+    };
+    TurnSummaryVerdict {
+        normalized_status: (raw & 0xFF) as u8,
+        is_done: ((raw >> 8) & 1) != 0,
+        is_active: ((raw >> 16) & 1) != 0,
+        card_state: ((raw >> 24) & 0xFF) as u8,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageLimitStatusVerdict {
+    pub tone: u8,
+    pub window_kind: u8,
+    pub show_pct: bool,
+    pub pct: u8,
+    pub reset_unit: u8,
+    pub reset_value: u32,
+}
+
+pub fn usage_limit_status_step(
+    status_kind: u8,
+    claim_kind: u8,
+    has_utilization: bool,
+    utilization_pct: u8,
+    has_reset: bool,
+    reset_rem_secs: u64,
+) -> UsageLimitStatusVerdict {
+    let raw = unsafe {
+        orb_usage_limit_status(
+            status_kind,
+            claim_kind,
+            u8::from(has_utilization),
+            utilization_pct,
+            u8::from(has_reset),
+            reset_rem_secs,
+        )
+    };
+    UsageLimitStatusVerdict {
+        tone: (raw & 0xFF) as u8,
+        window_kind: ((raw >> 8) & 0xFF) as u8,
+        show_pct: ((raw >> 16) & 1) != 0,
+        pct: ((raw >> 24) & 0xFF) as u8,
+        reset_unit: ((raw >> 32) & 0xFF) as u8,
+        reset_value: ((raw >> 40) & 0xFFFFFF) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelativeTimeBucket {
+    pub unit: u8,
+    pub value: u32,
+}
+
+pub fn relative_time_bucket(elapsed_secs: u64) -> RelativeTimeBucket {
+    let raw = unsafe { orb_relative_time_bucket(elapsed_secs) };
+    RelativeTimeBucket {
+        unit: (raw & 0xFF) as u8,
+        value: ((raw >> 8) & 0xFFFF_FFFF) as u32,
+    }
+}
+
+pub fn format_relative_time_secs(elapsed_secs: i64) -> String {
+    let clamped = if elapsed_secs <= 0 {
+        0u64
+    } else {
+        elapsed_secs as u64
+    };
+    let bucket = relative_time_bucket(clamped);
+    match bucket.unit {
+        0 => "now".to_string(),
+        1 => format!("{}m", bucket.value),
+        2 => format!("{}h", bucket.value),
+        3 => format!("{}d", bucket.value),
+        _ => format!("{}w", bucket.value),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptPatchState {
+    pub len: u32,
+    pub seq: u32,
+}
+
+pub fn transcript_patch_step(
+    state: TranscriptPatchState,
+    event_kind: u8,
+    delta_len: u32,
+) -> TranscriptPatchState {
+    let raw = unsafe { orb_transcript_patch_step(state.len, state.seq, event_kind, delta_len) };
+    TranscriptPatchState {
+        len: (raw & 0xFFFF_FFFF) as u32,
+        seq: (raw >> 32) as u32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1529,5 +1666,75 @@ mod tests {
         );
         assert!(proc_stat_fields_valid(5, 18, 120, 20, 35));
         assert!(!proc_stat_fields_valid(18, 5, 120, 20, 35));
+    }
+
+    #[test]
+    fn turn_summary_usage_limit_relative_time_and_transcript_patch_match_fixtures() {
+        let settled = turn_summary_step(1, true, false, true);
+        assert_eq!(
+            settled,
+            TurnSummaryVerdict {
+                normalized_status: 0,
+                is_done: false,
+                is_active: false,
+                card_state: 2,
+            }
+        );
+        let live_active = turn_summary_step(1, false, false, false);
+        assert_eq!(
+            live_active,
+            TurnSummaryVerdict {
+                normalized_status: 1,
+                is_done: false,
+                is_active: true,
+                card_state: 0,
+            }
+        );
+
+        assert_eq!(usage_limit_status_step(0, 0, false, 0, false, 0).tone, 0);
+        let warn_7d = usage_limit_status_step(1, 2, true, 88, false, 0);
+        assert_eq!(warn_7d.tone, 1);
+        assert_eq!(warn_7d.window_kind, 2);
+        assert!(warn_7d.show_pct);
+        assert_eq!(warn_7d.pct, 88);
+        let warn_opus = usage_limit_status_step(1, 3, true, 88, false, 0);
+        assert!(!warn_opus.show_pct);
+        let rej_min = usage_limit_status_step(2, 0, false, 0, true, 30);
+        assert_eq!(rej_min.tone, 2);
+        assert_eq!(rej_min.reset_unit, 1);
+        assert_eq!(rej_min.reset_value, 1);
+        let rej_days = usage_limit_status_step(2, 0, false, 0, true, 259_200);
+        assert_eq!(rej_days.reset_unit, 3);
+        assert_eq!(rej_days.reset_value, 3);
+
+        assert_eq!(format_relative_time_secs(-30), "now");
+        assert_eq!(format_relative_time_secs(44), "now");
+        assert_eq!(format_relative_time_secs(45), "1m");
+        assert_eq!(format_relative_time_secs(59), "1m");
+        assert_eq!(format_relative_time_secs(120), "2m");
+        assert_eq!(format_relative_time_secs(3_600), "1h");
+        assert_eq!(format_relative_time_secs(86_400), "1d");
+        assert_eq!(format_relative_time_secs(604_800), "1w");
+
+        let chunk1 = [(0u8, 12u32), (0u8, 8u32)];
+        let chunk2 = [(1u8, 25u32), (2u8, 0u32), (0u8, 14u32)];
+        let init = TranscriptPatchState { len: 0, seq: 0 };
+        let inc = chunk2.iter().fold(
+            chunk1
+                .iter()
+                .fold(init, |s, &(k, d)| transcript_patch_step(s, k, d)),
+            |s, &(k, d)| transcript_patch_step(s, k, d),
+        );
+        let batch = chunk1
+            .iter()
+            .chain(chunk2.iter())
+            .fold(init, |s, &(k, d)| transcript_patch_step(s, k, d));
+        assert_eq!(inc, batch);
+        assert_eq!(inc, TranscriptPatchState { len: 14, seq: 5 });
+
+        assert!(lean_sys_cabi::sse_frame_scan(0, 12, 64, 1, b'\n'));
+        assert!(lean_sys_cabi::gfm_pipe_scan(0, 24, 64, 3, 3, false));
+        assert!(lean_sys_cabi::tag_scan(0, 32, 4, 8, 64, 1));
+        assert_ne!(lean_sys_cabi::transcript_index(0, 40, 128, 1, 9), 0);
     }
 }

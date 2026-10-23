@@ -47,13 +47,28 @@ object OrbNarration {
         var foldHasTool = false
         for (i in items.indices) {
             val item = items[i]
-            when {
-                item is OrbStreamItem.Text ->
-                    if (!item.cumulative && item.text.isNotBlank() && toolAhead[i] && (foldHasTool || nextIsTool[i])) keys.add(item.key)
-                    else foldHasTool = false
-                isWorkTool(item) -> foldHasTool = true
-                item !is OrbStreamItem.Think -> foldHasTool = false
+            val itemKind = when {
+                item is OrbStreamItem.User -> 0
+                item is OrbStreamItem.Think -> 1
+                item is OrbStreamItem.Text -> 2
+                isWorkTool(item) -> 3
+                item is OrbStreamItem.Tool -> 4
+                else -> 5
             }
+            val isCumulative = item is OrbStreamItem.Text && item.cumulative
+            val isNonEmpty = item is OrbStreamItem.Text && item.text.isNotBlank()
+            val verdict = OrbKernel.workfoldStep(
+                itemKind = itemKind,
+                isCumulative = isCumulative,
+                isNonEmpty = isNonEmpty,
+                toolAhead = toolAhead[i],
+                nextIsTool = nextIsTool[i],
+                foldHasTool = foldHasTool
+            )
+            if (item is OrbStreamItem.Text && verdict.foldItem) {
+                keys.add(item.key)
+            }
+            foldHasTool = verdict.foldHasToolNext
         }
         return keys
     }

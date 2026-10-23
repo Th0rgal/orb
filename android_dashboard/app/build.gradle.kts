@@ -75,6 +75,7 @@ android {
         unitTests.all {
             // Tests read the cross-platform tables in shared/orb-spec straight from the repo.
             it.systemProperty("orb.spec.dir", rootProject.file("../shared/orb-spec").absolutePath)
+            it.systemProperty("java.library.path", rootProject.file("app/src/test/resources/jni").absolutePath)
         }
     }
     lint {

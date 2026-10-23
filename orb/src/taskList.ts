@@ -1,4 +1,5 @@
 import type { StreamItem } from "./transcriptModel";
+import { orbTaskcardStep } from "./orbKernel";
 import { normalizeTaskStatus, parseChecklist, toolArgs, toolName, type Checklist, type TaskItem, type TaskStatus } from "./workModel";
 
 /**
@@ -133,9 +134,10 @@ export function taskCardView(tasks: TaskItem[], ended: boolean, outcome: TurnOut
   const done = tasks.filter(t => t.status === "completed").length;
   const finished = tasks.every(t => t.status === "completed" || t.status === "cancelled");
   const counted = `${done}/${tasks.length} completed`;
-  if (!ended) return { tasks, label: counted, state: "live" };
-  if (finished) return { tasks, label: counted, state: "done" };
-  if (outcome === "finished") return {
+  const state = orbTaskcardStep(ended, finished, outcome === "finished");
+  if (state === "live") return { tasks, label: counted, state: "live" };
+  if (state === "done") return { tasks, label: counted, state: "done" };
+  if (state === "stale") return {
     tasks: tasks.map(t => t.status === "in_progress" || t.status === "pending" ? { ...t, status: "stale" as const } : t),
     label: `Task list not updated · turn finished (${counted})`,
     state: "stale",

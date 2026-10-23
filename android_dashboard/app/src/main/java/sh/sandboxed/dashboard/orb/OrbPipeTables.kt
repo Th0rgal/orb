@@ -33,7 +33,7 @@ object OrbPipeTables {
             }
         }
         out.add(t.substring(start).trim())
-        return if (out.size >= 3) out else null
+        return if (out.size >= 3 && OrbKernel.gfmPipeRowAdmitted(0, t.length, t.length, out.size, out.size, inCode)) out else null
     }
 
     private fun row(cells: List<String>) = "| " + cells.joinToString(" | ") + " |"

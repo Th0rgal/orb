@@ -24,6 +24,8 @@
  * - The table is separated from surrounding text by blank lines.
  */
 
+import { leansysGfmPipeRowAdmitted } from "./orbKernel";
+
 const NUMERIC = /^[+\-−]?[$€£]?\d[\d   ,.']*%?$/;
 const SEPARATOR = /^:?-+:?$/;
 const BLOCK_START = /^(?:#|>|[-*+]\s|\d+[.)]\s)/;
@@ -51,7 +53,7 @@ export function loosePipeCells(line: string): string[] | null {
     }
   }
   cells.push(t.slice(start).trim());
-  return cells.length >= 3 ? cells : null;
+  return cells.length >= 3 && leansysGfmPipeRowAdmitted(t.length, cells.length, cells.length, inCode) ? cells : null;
 }
 
 const row = (cells: string[]) => `| ${cells.join(" | ")} |`;

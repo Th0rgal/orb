@@ -255,14 +255,31 @@ struct OrbWorkModel: Equatable {
         var keys = Set<String>()
         var foldHasTool = false
         for (i, item) in items.enumerated() {
+            let itemKind: Int
+            var isCumulative = false
+            var isNonEmpty = false
+            var textKey = ""
             switch item {
+            case .user: itemKind = 0
+            case .think: itemKind = 1
             case let .text(key, text, cumulative):
-                if !cumulative && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && toolAhead[i] && (foldHasTool || nextIsTool[i]) {
-                    keys.insert(key)
-                } else { foldHasTool = false }
-            case .think: break
-            default: foldHasTool = isWorkTool(item)
+                itemKind = 2
+                isCumulative = cumulative
+                isNonEmpty = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                textKey = key
+            default:
+                itemKind = isWorkTool(item) ? 3 : 4
             }
+            let verdict = OrbKernel.workfoldStep(
+                itemKind: itemKind,
+                isCumulative: isCumulative,
+                isNonEmpty: isNonEmpty,
+                toolAhead: toolAhead[i],
+                nextIsTool: nextIsTool[i],
+                foldHasTool: foldHasTool
+            )
+            if itemKind == 2 && verdict.foldItem { keys.insert(textKey) }
+            foldHasTool = verdict.foldHasToolNext
         }
         return keys
     }

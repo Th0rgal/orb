@@ -1186,7 +1186,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lean-sys-cabi"
 version = "0.2.0"
-source = "git+https://github.com/Th0rgal/lean-sys.git?rev=29cfe92b8fc6965a7af19ee09d3e2e32590eb0c5#29cfe92b8fc6965a7af19ee09d3e2e32590eb0c5"
+source = "git+https://github.com/Th0rgal/lean-sys.git?rev=f07aebf9035356030482d9e9411d18dd070c9a7b#f07aebf9035356030482d9e9411d18dd070c9a7b"
 
 [[package]]
 name = "leb128fmt"

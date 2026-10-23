@@ -28,7 +28,10 @@ class OrbPolishTest {
         assertTrue(device.wait(Until.hasObject(By.text("Needs you")), 20_000))
         fun capture(name: String) {
             device.waitForIdle()
-            assertTrue(device.takeScreenshot(File(context.getExternalFilesDir(null), "$name.png")))
+            val ext = File(context.getExternalFilesDir(null), "$name.png")
+            assertTrue(device.takeScreenshot(ext))
+            val tmpDir = File("/data/local/tmp/orb_after").apply { mkdirs() }
+            runCatching { ext.copyTo(File(tmpDir, "$name.png"), overwrite = true) }
         }
         capture("polished-inbox")
         val peek = device.wait(Until.findObject(By.text("Peek")), 5_000)
@@ -57,19 +60,39 @@ class OrbPolishTest {
             .putExtra("orb_open_mission", "existing"))
         val input = device.wait(Until.findObject(By.clazz("android.widget.EditText")), 20_000)
         assertNotNull(input)
-        device.waitForIdle()
-        assertTrue(device.takeScreenshot(File(context.getExternalFilesDir(null), "polished-composer.png")))
+        fun capture(name: String) {
+            device.waitForIdle()
+            val ext = File(context.getExternalFilesDir(null), "$name.png")
+            assertTrue(device.takeScreenshot(ext))
+            val tmpDir = File("/data/local/tmp/orb_after").apply { mkdirs() }
+            runCatching { ext.copyTo(File(tmpDir, "$name.png"), overwrite = true) }
+        }
+        capture("polished-composer")
         input.click()
         input.text = "Unsent composer check"
         assertTrue(device.wait(Until.hasObject(By.text("Unsent composer check")), 5_000))
-        device.waitForIdle()
-        assertTrue(device.takeScreenshot(File(context.getExternalFilesDir(null), "polished-composer-keyboard.png")))
+        capture("polished-composer-keyboard")
         device.findObject(By.text(java.util.regex.Pattern.compile(".*claude.*", java.util.regex.Pattern.CASE_INSENSITIVE))).click()
         assertTrue(device.wait(Until.hasObject(By.text("Agent Configuration")), 5_000))
-        device.waitForIdle()
-        assertTrue(device.takeScreenshot(File(context.getExternalFilesDir(null), "polished-model-picker.png")))
+        capture("polished-model-picker")
         device.findObject(By.text("Done")).click()
         assertTrue(device.wait(Until.hasObject(By.text("Unsent composer check")), 5_000))
+        check(sh.sandboxed.dashboard.orb.OrbKernel.nativeLoaded) { "OrbKernel native JNI library must load on Android device" }
+    }
+
+    @Test fun richTranscriptAndWorkFold() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        check(context.packageName.endsWith(".preview"))
+        check(sh.sandboxed.dashboard.orb.OrbKernel.nativeLoaded) { "OrbKernel native JNI library must load on Android device" }
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        context.startActivity(Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            .putExtra("orb_base_url", "http://127.0.0.1:18766")
+            .putExtra("orb_open_project", "orb-test")
+            .putExtra("orb_open_mission", "shared-files"))
+        assertTrue(device.wait(Until.hasObject(By.textContains("Quarterly report")), 20_000))
+        device.waitForIdle()
+        assertTrue(device.takeScreenshot(File(context.getExternalFilesDir(null), "after-shared-files.png")))
     }
 
 }

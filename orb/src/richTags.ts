@@ -4,6 +4,8 @@
  * `<image path="./chart.png" alt="Chart" />`, `<file path="./r.pdf" name="Report" />`
  * and the paired `<file path="r.pdf">Report</file>` form.
  */
+import { leansysRichTagAdmitted } from "./orbKernel";
+
 export const RICH_TAG = /<(image|file)\s+([^>]*?)(?:\/\s*>|>([^<]*?)<\/\1\s*>)/gi;
 
 export type RichTag = { type: "image" | "file"; path: string; label: string; unavailable?: true };
@@ -16,6 +18,8 @@ export function parseRichTag(type: string, attrs: string, inner?: string): RichT
   const path = values.path?.trim();
   if (!path) return null;
   const kind = type.toLowerCase() as RichTag["type"];
+  const tagKind = kind === "image" ? 2 : 1;
+  if (!leansysRichTagAdmitted(attrs.length + 7, Math.max(1, attrs.length), tagKind)) return null;
   const label = present(kind === "image" ? values.alt : values.name) ?? present(inner) ?? path.split("/").pop() ?? path;
   return values.unavailable === "true" ? { type: kind, path, label, unavailable: true } : { type: kind, path, label };
 }
