@@ -25,4 +25,16 @@ function App() {
   </div>;
 }
 render(() => <App />, document.getElementById("root")!);
-Object.assign(window, { anchorHarness: { apply: (ev: StreamEvent) => setItems(v => applyStreamEvent(v, ev)) } });
+const log: StreamEvent[] = [...events];
+Object.assign(window, { anchorHarness: {
+  apply: (ev: StreamEvent) => { log.push(ev); setItems(v => applyStreamEvent(v, ev)); },
+  /** Cached first paint vs network: show `stale` now (spine-like: no tools, fewer
+   * turns), then the fresh history (tools and narration folded into earlier turns,
+   * newer turns appended) as one replacement, like MissionView's resync. */
+  cacheThenNetwork: (fresh: StreamEvent[], stale: StreamEvent[]) => { log.splice(0, log.length, ...fresh); setItems(buildTranscript(stale)); return () => setItems(buildTranscript(fresh)); },
+  swap: () => setItems(buildTranscript(log)),
+  /** A spine-like resync: older turns come back shorter (their tools/narration are not in this page). */
+  shrink: () => { for (const e of log) if (e.type === "assistant_message" && typeof e.data.content === "string" && e.data.content.length > 40) e.data = { ...e.data, content: (e.data.content as string).slice(0, 40) }; setItems(buildTranscript(log)); },
+  /** A poll's resync: the whole transcript rebuilt from history, keeping `keep` latest turns (a reset page window). */
+  resync: (keep?: number) => { let ev = log; if (keep) { const users = ev.flatMap((e, i) => e.type === "user_message" ? [i] : []); ev = ev.slice(users[Math.max(0, users.length - keep)]); } setItems(buildTranscript(ev)); },
+} });
