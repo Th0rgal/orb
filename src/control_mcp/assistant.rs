@@ -265,7 +265,37 @@ struct SpawnManagedParams {
     image: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    /// Registry name of a project snapshot to start from.
+    #[serde(default)]
+    from_snapshot: Option<String>,
     /// Set by the gateway to the calling mission; never trusted from agents.
+    #[serde(default)]
+    owner_mission_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManagedActionParams {
+    machine_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    size: Option<String>,
+    #[serde(default)]
+    ttl_minutes: Option<u64>,
+    #[serde(default)]
+    reason: Option<String>,
+    /// Set by the gateway to the calling mission.
+    #[serde(default)]
+    owner_mission_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotScopeParams {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    /// Set by the gateway to the calling mission.
     #[serde(default)]
     owner_mission_id: Option<String>,
 }
@@ -309,6 +339,8 @@ struct StartMissionParams {
     remote_node_id: Option<String>,
     #[serde(default)]
     managed_ttl_minutes: Option<u64>,
+    #[serde(default)]
+    managed_from_snapshot: Option<String>,
     /// Optional managed-machine budget (USD) for the new mission's subtree;
     /// under a parent budget it is a sub-budget carved from the parent pool.
     #[serde(default)]
@@ -1494,6 +1526,7 @@ impl AssistantMcp {
                         "ram_gb": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Minimum RAM in GB needed (alternative to size)."},
                         "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Initial lifetime; auto-extended while busy (within budget). Default 60."},
                         "image": {"type": "string", "description": "Image (named snapshot). Default orb-node-base."},
+                        "from_snapshot": {"type": "string", "description": "Start from one of your project's snapshots (list_managed_snapshots) with repos, toolchains and caches ready."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
                     }
                 }),
@@ -1502,6 +1535,36 @@ impl AssistantMcp {
                 name: "list_managed_machines".to_string(),
                 description: "List live managed VMs (boat.dev) compactly: name, size, state, owner, expires_at, reap_at, cost so far, plus today's spend, running count and caps (null = unlimited). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
                 input_schema: json!({"type": "object", "properties": {"verbose": {"type": "boolean", "description": "Full rows and history (large)."}}}),
+            },
+            ToolDefinition {
+                name: "snapshot_managed_machine".to_string(),
+                description: "Save a named snapshot of a managed VM for your project (warm image: repos cloned, toolchains installed, build caches built). Put state outside /tmp and ~/.cache (snapshots do not keep them). Takes seconds to minutes (status saving -> ready); delivered secrets are removed first. Start children from it with spawn_managed_machine(from_snapshot=name) or start_mission(remote_node_id=\"auto-managed:<size>\", managed_from_snapshot=name). 10 snapshots are free, then $1.70/month each; Core keeps the newest 2 per project and deletes ones unused for 14 days.".to_string(),
+                input_schema: json!({"type":"object","required":["machine_id","name"],"properties":{"machine_id":{"type":"string"},"name":{"type":"string","description":"Short label, e.g. lean-native-warm"}}}),
+            },
+            ToolDefinition {
+                name: "list_managed_snapshots".to_string(),
+                description: "List your project's managed-VM snapshots: name, label, status, source machine, size, created/last used, monthly storage cost.".to_string(),
+                input_schema: json!({"type":"object","properties":{}}),
+            },
+            ToolDefinition {
+                name: "delete_managed_snapshot".to_string(),
+                description: "Delete one of your project's snapshots (refused while a machine is being created from it).".to_string(),
+                input_schema: json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}),
+            },
+            ToolDefinition {
+                name: "fork_managed_machine".to_string(),
+                description: "Create a new managed VM from another VM's current state (a subagent starting from your built tree). Boat forks from the latest background snapshot, which can be about a minute stale: write and `sync` what the child needs and wait ~60 s first, or take a named snapshot for an exact copy. Same size unless size is given; budget and caps apply like a new VM. Then start_mission(remote_node_id=<returned name>).".to_string(),
+                input_schema: json!({"type":"object","required":["machine_id"],"properties":{"machine_id":{"type":"string"},"size":{"type":"string","enum":["small","default","large","xlarge"]},"ttl_minutes":{"type":"integer","minimum":5,"maximum":720},"reason":{"type":"string"}}}),
+            },
+            ToolDefinition {
+                name: "stop_managed_machine".to_string(),
+                description: "Stop a managed VM you will need again later: billing stops, the disk is kept (resume within 24 h). Prefer this to leaving a VM idle.".to_string(),
+                input_schema: json!({"type":"object","required":["machine_id"],"properties":{"machine_id":{"type":"string"}}}),
+            },
+            ToolDefinition {
+                name: "resume_managed_machine".to_string(),
+                description: "Resume a stopped managed VM (same name and node id; files kept, processes restart). Budget and caps apply.".to_string(),
+                input_schema: json!({"type":"object","required":["machine_id"],"properties":{"machine_id":{"type":"string"},"ttl_minutes":{"type":"integer","minimum":5,"maximum":720}}}),
             },
             ToolDefinition {
                 name: "get_budget".to_string(),
@@ -2589,6 +2652,7 @@ impl AssistantMcp {
                         ttl_minutes: params.managed_ttl_minutes,
                         image: None,
                         reason: Some(format!("start_mission: {}", params.title)),
+                        from_snapshot: params.managed_from_snapshot.clone(),
                         owner_mission_id: None,
                     },
                     params.parent_mission_id.map(|id| id.to_string()),
@@ -3127,6 +3191,7 @@ impl AssistantMcp {
                     "ttl_minutes": params.ttl_minutes,
                     "image": params.image,
                     "reason": params.reason,
+                    "from_snapshot": params.from_snapshot,
                     "owner_mission_id": owner_mission_id,
                     "sub_budget_usd": sub_budget_usd,
                     "reuse_idle": reuse_idle,
@@ -4113,6 +4178,74 @@ impl AssistantMcp {
                 } else {
                     compact_managed_list(&list)
                 })
+            }
+            "snapshot_managed_machine" => {
+                let p: ManagedActionParams = parse_params(arguments)?;
+                self.managed_request(
+                    reqwest::Method::POST,
+                    format!("/api/managed-machines/{}/snapshot", urlencoding::encode(&p.machine_id)),
+                    Some(json!({"name": p.name.unwrap_or_default(), "owner_mission_id": p.owner_mission_id})),
+                )
+                .await
+            }
+            "fork_managed_machine" => {
+                let p: ManagedActionParams = parse_params(arguments)?;
+                self.managed_request(
+                    reqwest::Method::POST,
+                    format!("/api/managed-machines/{}/fork", urlencoding::encode(&p.machine_id)),
+                    Some(json!({"size": p.size, "ttl_minutes": p.ttl_minutes, "reason": p.reason, "owner_mission_id": p.owner_mission_id, "wait": true})),
+                )
+                .await
+            }
+            "stop_managed_machine" | "resume_managed_machine" => {
+                let p: ManagedActionParams = parse_params(arguments)?;
+                let action = if name == "stop_managed_machine" {
+                    "stop"
+                } else {
+                    "resume"
+                };
+                self.managed_request(
+                    reqwest::Method::POST,
+                    format!(
+                        "/api/managed-machines/{}/{action}",
+                        urlencoding::encode(&p.machine_id)
+                    ),
+                    Some(json!({"ttl_minutes": p.ttl_minutes})),
+                )
+                .await
+            }
+            "list_managed_snapshots" | "delete_managed_snapshot" => {
+                let p: SnapshotScopeParams = parse_params(arguments)?;
+                let mut query = Vec::new();
+                if let Some(o) = &p.owner_mission_id {
+                    query.push(format!("owner_mission_id={}", urlencoding::encode(o)));
+                } else if let Some(pr) = &p.project {
+                    query.push(format!("project={}", urlencoding::encode(pr)));
+                }
+                let q = if query.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{}", query.join("&"))
+                };
+                if name == "list_managed_snapshots" {
+                    self.managed_request(
+                        reqwest::Method::GET,
+                        format!("/api/managed-machines/snapshots{q}"),
+                        None,
+                    )
+                    .await
+                } else {
+                    let n = p.name.ok_or("delete_managed_snapshot needs name")?;
+                    self.managed_request(
+                        reqwest::Method::DELETE,
+                        format!(
+                            "/api/managed-machines/snapshots/{}{q}",
+                            urlencoding::encode(&n)
+                        ),
+                        None,
+                    )
+                    .await
+                }
             }
             "get_budget" => {
                 let params: GetBudgetParams = parse_params(arguments)?;

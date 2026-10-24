@@ -195,7 +195,7 @@ object OrbManagedMachines {
     fun revert(machines: List<ManagedMachine>, original: ManagedMachine): List<ManagedMachine> =
         machines.map { if (it.id == original.id) original else it }
 
-    fun isLive(m: ManagedMachine): Boolean = m.state != "destroyed" && m.state != "failed"
+    fun isLive(m: ManagedMachine): Boolean = m.state != "destroyed" && m.state != "failed" && m.state != "stopped"
 
     fun canAct(m: ManagedMachine): Boolean = isLive(m) && m.state != "destroying"
 
@@ -258,6 +258,7 @@ object OrbManagedMachines {
         "destroying" -> "Destroying…"
         "destroyed" -> "Destroyed"
         "failed" -> "Failed"
+        "stopped" -> "Stopped"
         else -> s
     }
 
