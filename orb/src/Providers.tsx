@@ -889,8 +889,8 @@ function MistralUsageConnect(p: { a: AIProvider; usage?: ProviderUsage; onUsage?
 function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
-  const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "error", "quota_exhausted", "pool_exhausted", "out_of_credit", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
-  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", quota_exhausted: "Quota exhausted", pool_exhausted: (p.usage && quotaExhaustedLabel(usageWindows(p.usage))) || "Quota exhausted", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "needs_verification", "error", "quota_exhausted", "pool_exhausted", "out_of_credit", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
+  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Needs Google verification", quota_exhausted: "Quota exhausted", pool_exhausted: (p.usage && quotaExhaustedLabel(usageWindows(p.usage))) || "Quota exhausted", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
   const expandable = () => status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;

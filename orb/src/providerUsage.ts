@@ -66,6 +66,8 @@ export function effectiveProviderStatus(a: AIProvider, usage?: ProviderUsage, he
   if (health?.account_state === "out_of_credit") return "out_of_credit";
   if (health?.account_state === "auth_failed") return "auth_failed";
   if (a.status.type === "needs_reauth" || usage?.status === "needs_reauth") return "needs_reauth";
+  // Google refuses to serve the account until its owner verifies it.
+  if (usage?.status === "needs_verification") return "needs_verification";
   if (usage?.error) return "error";
   const quota = usage ? quotaExhaustedLabel(usageWindows(usage)) : null;
   if (quota) return quota === "Quota exhausted" ? "quota_exhausted" : "pool_exhausted";

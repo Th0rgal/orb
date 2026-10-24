@@ -1992,6 +1992,15 @@ impl ModelChainStore {
 
         for entry in entries {
             let resolved_start = resolved.len();
+            // A model no connected account offers would only produce
+            // upstream 404s and cooldowns: skip the entry outright.
+            if crate::api::antigravity_accounts::model_unoffered(
+                &self.storage_path,
+                &entry.provider_id,
+                &entry.model_id,
+            ) {
+                continue;
+            }
             let provider_type = match crate::ai_providers::ProviderType::from_id(&entry.provider_id)
             {
                 Some(pt) => pt,
@@ -2090,6 +2099,15 @@ impl ModelChainStore {
                         | crate::ai_providers::ProviderType::MuseCode
                 ) && (!crate::api::oauth_owner::management_enabled()
                     || crate::api::cli_proxy_accounts::needs_reconnect(account))
+                {
+                    continue;
+                }
+                // Google refuses to serve an unverified Antigravity account.
+                if provider_type == crate::ai_providers::ProviderType::Antigravity
+                    && account
+                        .cli_proxy_auth_file
+                        .as_deref()
+                        .is_some_and(crate::api::antigravity_accounts::needs_verification)
                 {
                     continue;
                 }

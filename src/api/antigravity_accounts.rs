@@ -1,0 +1,637 @@
+//! Which connected Google Antigravity account serves, and when to switch.
+//!
+//! Several Antigravity logins can be connected through CLIProxyAPI. Each
+//! auth file carries a numeric `priority` (larger wins, CLIProxyAPI's own
+//! convention). This module keeps, per auth file:
+//! - eligibility: Google refuses to onboard some accounts until the owner
+//!   verifies them (`loadCodeAssist` returns no companion project and an
+//!   `ineligibleTiers` entry such as `VALIDATION_REQUIRED`). Such an account
+//!   cannot serve a single request, so it is excluded from Core routing,
+//!   demoted below every eligible login in CLIProxyAPI, and never handed to a
+//!   machine as the native sign-in;
+//! - remaining Gemini quota (`retrieveUserQuota`), so the native sign-in moves
+//!   to an account with quota left when the preferred one is exhausted, and
+//!   back once its window resets.
+//!
+//! Eligibility is re-checked periodically: once the owner verifies the
+//! account, its project id is written to the auth file (CLIProxyAPI watches
+//! the directory), its configured priority is restored, and it becomes the
+//! routing and machine sign-in again without any manual step.
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{LazyLock, RwLock};
+
+use serde_json::{json, Value};
+
+/// Base priority Core restores when an account becomes eligible again.
+const BASE_PRIORITY_KEY: &str = "sandboxed_base_priority";
+/// CLIProxyAPI priority of an account Google refuses to serve: below any
+/// eligible login, so the proxy only reaches it when nothing else is left.
+const DEMOTED_PRIORITY: i64 = -1000;
+const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Eligibility {
+    Eligible,
+    /// Google requires the owner to verify the account before it serves.
+    NeedsVerification,
+    /// Not checked yet, or the check failed transiently.
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Health {
+    pub eligibility: Eligibility,
+    /// Lowest remaining fraction across Gemini models, if reported.
+    pub gemini_remaining: Option<f64>,
+    /// When that Gemini window resets (Unix seconds).
+    pub gemini_reset: Option<i64>,
+}
+
+static HEALTH: LazyLock<RwLock<HashMap<String, Health>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static CHOSEN: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
+
+pub(crate) fn health(file: &str) -> Option<Health> {
+    HEALTH.read().ok()?.get(file).cloned()
+}
+
+fn set_health(file: &str, health: Health) {
+    if let Ok(mut map) = HEALTH.write() {
+        map.insert(file.to_string(), health);
+    }
+}
+
+/// True when Google refuses to serve this auth file until it is verified.
+pub(crate) fn needs_verification(file: &str) -> bool {
+    health(file).is_some_and(|h| h.eligibility == Eligibility::NeedsVerification)
+}
+
+/// Eligibility from a `loadCodeAssist` response.
+pub(crate) fn eligibility(assist: &Value) -> Eligibility {
+    let has_project = assist["cloudaicompanionProject"]
+        .as_str()
+        .or_else(|| assist["cloudaicompanionProject"]["id"].as_str())
+        .is_some_and(|p| !p.trim().is_empty());
+    if has_project {
+        return Eligibility::Eligible;
+    }
+    let ineligible = assist["ineligibleTiers"]
+        .as_array()
+        .is_some_and(|tiers| !tiers.is_empty());
+    let onboarded = assist["currentTier"].is_object() || assist["paidTier"].is_object();
+    if ineligible && !onboarded {
+        Eligibility::NeedsVerification
+    } else if onboarded {
+        // Onboarded without a project id in this response: still serves.
+        Eligibility::Eligible
+    } else {
+        Eligibility::Unknown
+    }
+}
+
+pub(crate) fn project(assist: &Value) -> Option<String> {
+    assist["cloudaicompanionProject"]
+        .as_str()
+        .or_else(|| assist["cloudaicompanionProject"]["id"].as_str())
+        .filter(|p| !p.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn is_gemini(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("gemini") || m.starts_with("agy-")
+}
+
+/// Lowest remaining Gemini fraction and its earliest reset, from either
+/// `retrieveUserQuota` (`buckets[]`) or `fetchAvailableModels`
+/// (`models{id: {quotaInfo}}`). Google omits `remainingFraction` when it is
+/// zero (proto3 default), so a bucket with a reset and no fraction is empty.
+pub(crate) fn gemini_quota(payload: &Value) -> (Option<f64>, Option<i64>) {
+    let mut entries: Vec<(&str, &Value)> = Vec::new();
+    for bucket in payload["buckets"].as_array().into_iter().flatten() {
+        if let Some(id) = bucket["modelId"].as_str() {
+            entries.push((id, bucket));
+        }
+    }
+    for (id, model) in payload["models"].as_object().into_iter().flatten() {
+        entries.push((id.as_str(), &model["quotaInfo"]));
+    }
+    let mut remaining: Option<f64> = None;
+    let mut reset: Option<i64> = None;
+    for (id, info) in entries {
+        if !is_gemini(id) {
+            continue;
+        }
+        let at = info["resetTime"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.timestamp());
+        let fraction = match info["remainingFraction"].as_f64() {
+            Some(f) if f.is_finite() => f.clamp(0.0, 1.0),
+            Some(_) => continue,
+            None if at.is_some() => 0.0,
+            None => continue,
+        };
+        remaining = Some(remaining.map_or(fraction, |r: f64| r.min(fraction)));
+        if fraction < 1.0 {
+            reset = match (reset, at) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+    }
+    (remaining, reset)
+}
+
+/// One connected Antigravity login, as needed to pick between them.
+#[derive(Clone, Debug)]
+pub(crate) struct Candidate {
+    pub file: String,
+    /// Configured priority (larger wins).
+    pub priority: i64,
+    pub expires_at: i64,
+}
+
+fn has_gemini_quota(health: Option<&Health>, now: i64) -> bool {
+    match health {
+        Some(Health {
+            gemini_remaining: Some(r),
+            gemini_reset,
+            ..
+        }) if *r <= 0.0 => gemini_reset.is_some_and(|at| at <= now),
+        _ => true,
+    }
+}
+
+/// The login that should serve native runs: highest priority among eligible
+/// accounts with Gemini quota left; failing that, the eligible one whose
+/// quota resets first; never an account Google refuses to serve.
+pub(crate) fn choose<'a>(
+    candidates: &'a [Candidate],
+    health: &HashMap<String, Health>,
+    now: i64,
+) -> Option<&'a Candidate> {
+    let mut eligible: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| {
+            health
+                .get(&c.file)
+                .is_none_or(|h| h.eligibility != Eligibility::NeedsVerification)
+        })
+        .collect();
+    eligible.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| b.expires_at.cmp(&a.expires_at))
+            .then_with(|| a.file.cmp(&b.file))
+    });
+    eligible
+        .iter()
+        .copied()
+        .find(|c| has_gemini_quota(health.get(&c.file), now))
+        .or_else(|| {
+            eligible.iter().copied().min_by_key(|c| {
+                health
+                    .get(&c.file)
+                    .and_then(|h| h.gemini_reset)
+                    .unwrap_or(i64::MAX)
+            })
+        })
+}
+
+fn read_json(path: &Path) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Configured priority of an auth file: the base Core saved before demoting
+/// it, else its CLIProxyAPI priority, else 0.
+fn base_priority(value: &Value) -> i64 {
+    value[BASE_PRIORITY_KEY]
+        .as_i64()
+        .or_else(|| value["priority"].as_i64())
+        .unwrap_or(0)
+}
+
+/// Connected, enabled Antigravity logins in the routing namespace.
+pub(crate) fn candidates(dir: &Path) -> Vec<Candidate> {
+    super::cli_proxy_accounts::accounts_in(dir)
+        .into_iter()
+        .filter(|a| {
+            a.provider == crate::ai_providers::ProviderType::Antigravity
+                && !a.disabled
+                && a.prefix.as_deref() == Some("antigravity")
+        })
+        .map(|a| Candidate {
+            priority: read_json(&dir.join(&a.file))
+                .map(|v| base_priority(&v))
+                .unwrap_or(0),
+            expires_at: a.oauth.expires_at,
+            file: a.file,
+        })
+        .collect()
+}
+
+/// The auth file native runs should use now.
+pub(crate) fn chosen_file(dir: &Path) -> Option<String> {
+    let candidates = candidates(dir);
+    let map = HEALTH.read().map(|m| m.clone()).unwrap_or_default();
+    choose(&candidates, &map, chrono::Utc::now().timestamp()).map(|c| c.file.clone())
+}
+
+/// Desired edits to an auth file for its eligibility; `None` when unchanged.
+pub(crate) fn reconcile_file(
+    value: &Value,
+    eligibility: Eligibility,
+    project: Option<&str>,
+) -> Option<Value> {
+    let mut next = value.clone();
+    let obj = next.as_object_mut()?;
+    match eligibility {
+        Eligibility::NeedsVerification => {
+            if !obj.contains_key(BASE_PRIORITY_KEY) {
+                let base = obj.get("priority").and_then(Value::as_i64).unwrap_or(0);
+                obj.insert(BASE_PRIORITY_KEY.into(), json!(base));
+            }
+            obj.insert("priority".into(), json!(DEMOTED_PRIORITY));
+        }
+        Eligibility::Eligible => {
+            if let Some(base) = obj.remove(BASE_PRIORITY_KEY) {
+                obj.insert("priority".into(), base);
+            }
+            let missing = obj
+                .get("project_id")
+                .and_then(Value::as_str)
+                .is_none_or(|p| p.trim().is_empty());
+            if let (true, Some(project)) = (missing, project) {
+                obj.insert("project_id".into(), json!(project));
+            }
+        }
+        Eligibility::Unknown => return None,
+    }
+    (next != *value).then_some(next)
+}
+
+/// Rewrite an auth file atomically, keeping its owner and 0600 mode.
+fn write_auth_file(path: &Path, value: &Value) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::other("refusing a symlinked auth file"));
+    }
+    let tmp = path.with_extension("json.sandboxed-tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(&serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?)?;
+    file.sync_all()?;
+    drop(file);
+    let _ = std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()));
+    std::fs::rename(&tmp, path)
+}
+
+/// Re-check every connected login once; returns the chosen file when the
+/// native sign-in changed (including the first selection after startup).
+pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
+    let dir = super::cli_proxy_accounts::auth_dir()?;
+    for account in super::cli_proxy_accounts::accounts_in(&dir) {
+        if account.provider != crate::ai_providers::ProviderType::Antigravity
+            || account.disabled
+            || account.prefix.as_deref() != Some("antigravity")
+        {
+            continue;
+        }
+        let token = &account.oauth.access_token;
+        let assist = super::antigravity_usage::call(
+            client,
+            token,
+            "loadCodeAssist",
+            super::antigravity_usage::assist_body(),
+        )
+        .await
+        .ok();
+        let eligibility = assist.as_ref().map_or(Eligibility::Unknown, eligibility);
+        let project = assist.as_ref().and_then(project);
+        let previous = health(&account.file);
+        if eligibility == Eligibility::NeedsVerification
+            && previous.as_ref().map(|h| h.eligibility) != Some(Eligibility::NeedsVerification)
+        {
+            tracing::warn!(
+                account = %account.identity,
+                "Antigravity account needs Google verification; excluded from routing and machine sign-in"
+            );
+        }
+        let path = dir.join(&account.file);
+        if let Some(value) = read_json(&path) {
+            if let Some(next) = reconcile_file(&value, eligibility, project.as_deref()) {
+                if let Err(error) = write_auth_file(&path, &next) {
+                    tracing::warn!(account = %account.identity, "Antigravity auth file not updated: {error}");
+                } else {
+                    tracing::info!(account = %account.identity, ?eligibility, "Antigravity routing priority reconciled");
+                }
+            }
+        }
+        let (gemini_remaining, gemini_reset) = if eligibility == Eligibility::Eligible {
+            let body = project
+                .as_deref()
+                .map_or_else(|| json!({}), |p| json!({"project": p}));
+            match super::antigravity_usage::call(client, token, "retrieveUserQuota", body).await {
+                Ok(quota) => gemini_quota(&quota),
+                Err(_) => previous
+                    .as_ref()
+                    .map_or((None, None), |h| (h.gemini_remaining, h.gemini_reset)),
+            }
+        } else {
+            (None, None)
+        };
+        set_health(
+            &account.file,
+            Health {
+                eligibility: match (eligibility, previous.as_ref()) {
+                    // Keep the last known verdict through a transient failure.
+                    (Eligibility::Unknown, Some(h)) => h.eligibility,
+                    (e, _) => e,
+                },
+                gemini_remaining,
+                gemini_reset,
+            },
+        );
+    }
+    let chosen = chosen_file(&dir);
+    let mut last = CHOSEN.write().ok()?;
+    if *last != chosen {
+        // Also on the first pass after startup, so a priority change made
+        // while Core was down reaches every machine; installing the login a
+        // machine already holds is a no-op.
+        tracing::info!(from = ?*last, to = ?chosen, "Antigravity machine sign-in selected");
+        last.clone_from(&chosen);
+        return chosen;
+    }
+    None
+}
+
+/// Periodic eligibility/quota check; pushes the new sign-in to every static
+/// node when the choice changes (managed VMs pick it up at their next run).
+pub(crate) fn spawn_refresh_loop(state: std::sync::Arc<super::routes::AppState>) {
+    tokio::spawn(async move {
+        loop {
+            if super::oauth_owner::management_enabled()
+                && refresh_once(&state.http_client).await.is_some()
+            {
+                {
+                    let ids: Vec<String> = state
+                        .config
+                        .remote_nodes
+                        .nodes
+                        .iter()
+                        .map(|n| n.id.clone())
+                        .collect();
+                    for id in ids {
+                        match super::antigravity_native::sync_node(&state, &id).await {
+                            Ok(sync) => {
+                                tracing::info!(node = %id, ?sync, "Antigravity sign-in switched")
+                            }
+                            Err(error) => {
+                                tracing::warn!(node = %id, "Antigravity sign-in not switched: {error}")
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(REFRESH_EVERY).await;
+        }
+    });
+}
+
+/// Providers whose catalog is the proxy's own per-login model list, so a
+/// model missing from every discovered catalog is genuinely not offered.
+const CATALOG_SCOPED: &[&str] = &["antigravity"];
+
+/// Pure check: `Some(true)` when every complete catalog of `provider` lacks
+/// `model`, `None` when there is no complete catalog to judge by.
+pub(crate) fn unoffered_in(
+    state: &crate::model_catalog::DiscoveryState,
+    provider: &str,
+    model: &str,
+) -> Option<bool> {
+    let mut judged = false;
+    for o in state
+        .connections
+        .iter()
+        .filter(|o| o.provider_id == provider)
+    {
+        let Some(success) = o.last_success.as_ref() else {
+            continue;
+        };
+        if success.completeness != crate::model_catalog::Completeness::Complete {
+            return None;
+        }
+        judged = true;
+        if success.models.iter().any(|m| m.id == model) {
+            return Some(false);
+        }
+    }
+    judged.then_some(true)
+}
+
+type CatalogCache = Option<(std::time::Instant, crate::model_catalog::DiscoveryState)>;
+static CATALOG: LazyLock<RwLock<CatalogCache>> = LazyLock::new(|| RwLock::new(None));
+static LOGGED_UNOFFERED: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(Default::default);
+
+/// True when a chain entry's model is offered by no connected account of a
+/// catalog-scoped provider (logged once per model). `chains_path` is the
+/// model-chain store file; the discovery state lives next to it.
+pub(crate) fn model_unoffered(chains_path: &Path, provider: &str, model: &str) -> bool {
+    if !CATALOG_SCOPED.contains(&provider) {
+        return false;
+    }
+    let fresh = CATALOG.read().ok().and_then(|c| {
+        c.as_ref()
+            .filter(|(at, _)| at.elapsed().as_secs() < 60)
+            .map(|(_, s)| unoffered_in(s, provider, model))
+    });
+    let verdict = match fresh {
+        Some(v) => v,
+        None => {
+            let Some(root) = chains_path.parent().and_then(Path::parent) else {
+                return false;
+            };
+            let state = crate::model_catalog::read_state(root);
+            let v = unoffered_in(&state, provider, model);
+            if let Ok(mut c) = CATALOG.write() {
+                *c = Some((std::time::Instant::now(), state));
+            }
+            v
+        }
+    };
+    let unoffered = verdict == Some(true);
+    if unoffered {
+        if let Ok(mut logged) = LOGGED_UNOFFERED.lock() {
+            if logged.insert(format!("{provider}/{model}")) {
+                tracing::warn!(
+                    provider,
+                    model,
+                    "Chain entry skipped: no connected account offers this model"
+                );
+            }
+        }
+    }
+    unoffered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(file: &str, priority: i64) -> Candidate {
+        Candidate {
+            file: file.into(),
+            priority,
+            expires_at: 0,
+        }
+    }
+
+    fn h(e: Eligibility, remaining: Option<f64>, reset: Option<i64>) -> Health {
+        Health {
+            eligibility: e,
+            gemini_remaining: remaining,
+            gemini_reset: reset,
+        }
+    }
+
+    #[test]
+    fn unverified_account_is_never_chosen() {
+        let c = [cand("new", 100), cand("old", 10)];
+        let mut m = HashMap::new();
+        m.insert("new".into(), h(Eligibility::NeedsVerification, None, None));
+        assert_eq!(choose(&c, &m, 0).unwrap().file, "old");
+        m.insert("old".into(), h(Eligibility::NeedsVerification, None, None));
+        assert!(choose(&c, &m, 0).is_none());
+    }
+
+    #[test]
+    fn priority_wins_then_fails_over_on_exhausted_quota_and_back_after_reset() {
+        let c = [cand("old", 10), cand("new", 100)];
+        let mut m = HashMap::new();
+        assert_eq!(
+            choose(&c, &m, 0).unwrap().file,
+            "new",
+            "unchecked keeps priority"
+        );
+        m.insert("new".into(), h(Eligibility::Eligible, Some(0.0), Some(500)));
+        m.insert("old".into(), h(Eligibility::Eligible, Some(0.4), None));
+        assert_eq!(choose(&c, &m, 100).unwrap().file, "old");
+        assert_eq!(choose(&c, &m, 500).unwrap().file, "new", "window reset");
+    }
+
+    #[test]
+    fn all_exhausted_picks_the_earliest_reset() {
+        let c = [cand("a", 100), cand("b", 10)];
+        let mut m = HashMap::new();
+        m.insert("a".into(), h(Eligibility::Eligible, Some(0.0), Some(900)));
+        m.insert("b".into(), h(Eligibility::Eligible, Some(0.0), Some(300)));
+        assert_eq!(choose(&c, &m, 0).unwrap().file, "b");
+    }
+
+    #[test]
+    fn eligibility_reads_validation_required_and_projects() {
+        let unverified = json!({"allowedTiers":[{"id":"standard-tier"}],"ineligibleTiers":[{"reasonCode":"VALIDATION_REQUIRED","tierId":"free-tier"}]});
+        assert_eq!(eligibility(&unverified), Eligibility::NeedsVerification);
+        let ok =
+            json!({"currentTier":{"id":"free-tier"},"cloudaicompanionProject":"aicode-consumers"});
+        assert_eq!(eligibility(&ok), Eligibility::Eligible);
+        assert_eq!(project(&ok).as_deref(), Some("aicode-consumers"));
+        assert_eq!(eligibility(&json!({})), Eligibility::Unknown);
+    }
+
+    #[test]
+    fn gemini_quota_treats_missing_fraction_with_reset_as_empty() {
+        let models = json!({"models":{
+            "gemini-3.8-flash-tiered":{"quotaInfo":{"resetTime":"2026-10-24T09:51:51Z"}},
+            "claude-sonnet-4-6":{"quotaInfo":{"remainingFraction":1,"resetTime":"2026-10-24T09:43:30Z"}}}});
+        let (r, at) = gemini_quota(&models);
+        assert_eq!(r, Some(0.0));
+        assert_eq!(at, Some(1_792_835_511));
+        let buckets = json!({"buckets":[
+            {"modelId":"gemini-3-flash","remainingFraction":0.5,"resetTime":"2026-10-24T09:51:51Z"},
+            {"modelId":"chat_20706","remainingFraction":1},
+            {"modelId":"claude-opus-4-6-thinking","remainingFraction":0.0}]});
+        assert_eq!(gemini_quota(&buckets).0, Some(0.5));
+        assert_eq!(gemini_quota(&json!({})), (None, None));
+    }
+
+    #[test]
+    fn reconcile_demotes_then_restores_priority_and_fills_project() {
+        let start = json!({"type":"antigravity","priority":100});
+        let demoted = reconcile_file(&start, Eligibility::NeedsVerification, None).unwrap();
+        assert_eq!(demoted["priority"], json!(DEMOTED_PRIORITY));
+        assert_eq!(demoted[BASE_PRIORITY_KEY], json!(100));
+        assert_eq!(base_priority(&demoted), 100);
+        assert!(reconcile_file(&demoted, Eligibility::NeedsVerification, None).is_none());
+        assert!(reconcile_file(&demoted, Eligibility::Unknown, None).is_none());
+        let restored = reconcile_file(&demoted, Eligibility::Eligible, Some("proj")).unwrap();
+        assert_eq!(restored["priority"], json!(100));
+        assert_eq!(restored["project_id"], json!("proj"));
+        assert!(restored.get(BASE_PRIORITY_KEY).is_none());
+        assert!(reconcile_file(&restored, Eligibility::Eligible, Some("other")).is_none());
+    }
+
+    #[test]
+    fn unoffered_needs_a_complete_catalog_without_the_model() {
+        use crate::model_catalog::{Completeness, DiscoveryState};
+        let state: DiscoveryState = serde_json::from_value(json!({
+            "schema_version": 1,
+            "connections": [{
+                "connection": "x", "provider_id": "antigravity", "access_profile": "oauth",
+                "exportable": false, "checked_at": "2026-10-24T04:39:17Z", "status": "discovered",
+                "diagnostic": null,
+                "last_success": {"observed_at": "2026-10-24T04:39:17Z", "completeness": "complete",
+                    "models": [{"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash"}]}
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            unoffered_in(&state, "antigravity", "gemini-4-argon-high"),
+            Some(true)
+        );
+        assert_eq!(
+            unoffered_in(&state, "antigravity", "gemini-3.8-flash-high"),
+            Some(false)
+        );
+        assert_eq!(unoffered_in(&state, "openai", "gpt"), None);
+        let mut partial = state.clone();
+        partial.connections[0]
+            .last_success
+            .as_mut()
+            .unwrap()
+            .completeness = Completeness::Partial;
+        assert_eq!(
+            unoffered_in(&partial, "antigravity", "gemini-4-argon-high"),
+            None
+        );
+        assert!(!model_unoffered(
+            Path::new("/nonexistent/x/model_chains.json"),
+            "openai",
+            "m"
+        ));
+    }
+
+    #[test]
+    fn write_keeps_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("antigravity-a.json");
+        std::fs::write(&path, b"{}").unwrap();
+        write_auth_file(&path, &json!({"priority":1})).unwrap();
+        assert_eq!(read_json(&path).unwrap()["priority"], json!(1));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
