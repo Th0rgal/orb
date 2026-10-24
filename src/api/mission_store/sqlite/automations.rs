@@ -117,16 +117,22 @@ impl SqliteMissionStore {
             ?;
             if let Some(key) = a.active.then(|| crate::api::control::wakeup_supersession_key(a.variables.get("__wakeup_source").map(String::as_str), &a.trigger)).flatten() {
                 let priors: Vec<(String, String, String, String)> = {
-                    let mut stmt = tx.prepare("SELECT id, variables, trigger_type, trigger_data FROM automations WHERE mission_id = ? AND id != ?")?;
+                    let mut stmt = tx.prepare("SELECT id, variables, trigger_type, trigger_data FROM automations WHERE mission_id = ? AND id != ? AND active = 1 ORDER BY created_at DESC, id DESC")?;
                     let rows = stmt.query_map(params![a.mission_id.to_string(), a.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<Vec<_>, _>>()?;
                     rows
                 };
+                // Keep the key's quota of newest active rows (counting this one).
+                let mut keep = crate::api::control::wakeup_supersession_keep(&key).saturating_sub(1);
                 for (id, vars, kind, data) in priors {
                     let vars: std::collections::HashMap<String, String> = serde_json::from_str(&vars).unwrap_or_default();
                     let mut trigger: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
                     trigger["type"] = serde_json::Value::String(kind);
                     let Ok(trigger) = serde_json::from_value::<TriggerType>(trigger) else { continue };
                     if crate::api::control::wakeup_supersession_key(vars.get("__wakeup_source").map(String::as_str), &trigger).as_ref() == Some(&key) {
+                        if keep > 0 {
+                            keep -= 1;
+                            continue;
+                        }
                         tx.execute("UPDATE automations SET active = 0 WHERE id = ?", [&id])?;
                         tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE automation_id = ? AND trigger_source = 'durable_schedule' AND status NOT IN ('cancelled','skipped') AND COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true'", params![now_string(), id])?;
                     }
