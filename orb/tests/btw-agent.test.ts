@@ -341,8 +341,8 @@ it('replaces a deleted saved side mission without hiding other lookup errors',as
  vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='deleted-parent'?'active':'awaiting_user',history:[],tags:[],created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'deleted-child'});
  await askBtwAgent('deleted-parent','First','',[],new AbortController().signal,()=>{});
- vi.mocked(getMission).mockRejectedValueOnce(new ApiError(503,'Unavailable'));
- await expect(askBtwAgent('deleted-parent','Next','',[],new AbortController().signal,()=>{})).rejects.toThrow('503');
+ vi.mocked(getMission).mockRejectedValueOnce(new ApiError(500,'Unavailable'));
+ await expect(askBtwAgent('deleted-parent','Next','',[],new AbortController().signal,()=>{})).rejects.toThrow('500');
  expect(btwSession('deleted-parent')?.id).toBe('deleted-child');
  vi.mocked(getMission).mockRejectedValueOnce(new ApiError(404,'Not found'));
  vi.mocked(api).mockResolvedValue({id:'replacement-child'});
@@ -365,7 +365,7 @@ it('rotates rejected content keys but retains uncertain launch keys',async()=>{
  vi.mocked(api).mockRejectedValueOnce(new Error('network lost again'));
  await expect(ask()).rejects.toThrow('network lost again');
  const fresh=attempt();expect(fresh).not.toBe(original);
- vi.mocked(api).mockRejectedValueOnce(new ApiError(503,'Unavailable'));
+ vi.mocked(api).mockRejectedValueOnce(new ApiError(500,'Unavailable'));
  await expect(ask()).rejects.toThrow('Unavailable');
  expect(attempt()).toBe(fresh);
 });
