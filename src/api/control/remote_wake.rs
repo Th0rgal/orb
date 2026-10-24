@@ -1164,6 +1164,7 @@ pub(super) async fn remote_library_skills(
         let body = crate::uploads::Upload {
             name: format!("library-skills-{}.tar.gz", &sha[..12]),
             data_base64: base64::engine::general_purpose::STANDARD.encode(&archive),
+            placement: Default::default(),
         };
         let response = state
             .http_client

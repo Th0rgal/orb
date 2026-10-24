@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::{
     collections::HashSet,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -11,6 +11,74 @@ fn selected() -> &'static Mutex<HashSet<PathBuf>> {
     static PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     PATHS.get_or_init(|| Mutex::new(HashSet::new()))
 }
+/// Files found in a picked or dropped folder, offered but not yet readable.
+/// The client grants the subset it will upload (`grant_upload_folder`) once the
+/// user confirmed; grants are per batch and revoked on cancel or finish.
+#[derive(Default)]
+struct FolderBatches {
+    offered: std::collections::HashMap<String, std::collections::HashMap<String, PathBuf>>,
+    order: Vec<String>,
+    granted: std::collections::HashMap<String, HashSet<PathBuf>>,
+}
+const MAX_OFFERED_BATCHES: usize = 8;
+fn folders() -> &'static Mutex<FolderBatches> {
+    static BATCHES: OnceLock<Mutex<FolderBatches>> = OnceLock::new();
+    BATCHES.get_or_init(|| Mutex::new(FolderBatches::default()))
+}
+fn offer(files: &[FolderFile]) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut batches = folders().lock().ok()?;
+    batches.offered.insert(
+        id.clone(),
+        files
+            .iter()
+            .map(|f| (f.relative_path.clone(), PathBuf::from(&f.path)))
+            .collect(),
+    );
+    batches.order.push(id.clone());
+    while batches.order.len() > MAX_OFFERED_BATCHES {
+        let old = batches.order.remove(0);
+        batches.offered.remove(&old);
+    }
+    Some(id)
+}
+fn granted(path: &Path) -> bool {
+    folders()
+        .lock()
+        .map(|b| b.granted.values().any(|set| set.contains(path)))
+        .unwrap_or(false)
+}
+
+/// Makes the confirmed subset of an offered folder readable. Unknown paths are ignored.
+#[tauri::command]
+pub fn grant_upload_folder(batch: String, relative_paths: Vec<String>) -> Result<usize, String> {
+    let mut batches = folders().lock().map_err(|e| e.to_string())?;
+    let offered = batches
+        .offered
+        .remove(&batch)
+        .ok_or("This folder selection expired. Choose the folder again.")?;
+    batches.order.retain(|id| id != &batch);
+    let set: HashSet<PathBuf> = relative_paths
+        .iter()
+        .filter_map(|r| offered.get(r).cloned())
+        .collect();
+    let count = set.len();
+    batches.granted.insert(batch, set);
+    Ok(count)
+}
+
+#[tauri::command]
+pub fn revoke_upload_folder(batch: String) {
+    if let Ok(mut batches) = folders().lock() {
+        batches.granted.remove(&batch);
+        batches.offered.remove(&batch);
+        batches.order.retain(|id| id != &batch);
+    }
+}
+
 #[derive(Serialize)]
 pub struct Selection {
     name: String,
@@ -80,22 +148,171 @@ pub async fn read_upload_file(path: String, max_bytes: Option<u64>) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
-// Only OS-delivered drop paths enter the same allowlist as file-picker selections.
-pub fn allow_drop(paths: &[PathBuf]) -> Vec<String> {
-    let Ok(mut allowed) = selected().lock() else {
-        return vec![];
-    };
-    paths
-        .iter()
-        .filter_map(|path| {
-            let path = path.canonicalize().ok()?;
-            if !path.is_file() {
-                return None;
+/// Never worth sending to an agent; skipped when walking a folder.
+const SKIP: &[&str] = &[
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "__MACOSX",
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+];
+/// Never offered from a folder walk: hidden files, secrets and build output,
+/// mirroring Core's shared-context `valid_path` exclusions.
+fn excluded(name: &str) -> bool {
+    name.starts_with('.')
+        || SKIP.contains(&name)
+        || matches!(
+            name,
+            "target"
+                | "vendor"
+                | "id_rsa"
+                | "id_ed25519"
+                | "id_ecdsa"
+                | "credentials.json"
+                | "auth.json"
+        )
+        || name.ends_with('~')
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+}
+
+/// One past the client's folder limit, so it can say the folder is too large.
+pub const MAX_FOLDER_FILES: usize = 2001;
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct FolderFile {
+    name: String,
+    path: String,
+    /// `<folder name>/<path inside the folder>`, always with `/`.
+    relative_path: String,
+    size: u64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FolderOffer {
+    batch: Option<String>,
+    files: Vec<FolderFile>,
+}
+impl FolderOffer {
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+/// Regular files under `root`, sorted. Links are not followed, so a folder can
+/// never reach outside itself. Nothing becomes readable here; see `offer`.
+fn walk_folder(root: &Path) -> Result<Vec<FolderFile>, String> {
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    if !root.is_dir() {
+        return Err("Only folders can be attached as folders".into());
+    }
+    let root_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Folder names must be valid text")?
+        .to_string();
+    let mut out = Vec::new();
+    let mut stack = vec![(root.clone(), root_name)];
+    while let Some((dir, prefix)) = stack.pop() {
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        for entry in entries {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if excluded(&name) {
+                continue;
             }
-            allowed.insert(path.clone());
-            Some(path.to_string_lossy().into_owned())
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let relative = format!("{prefix}/{name}");
+            if kind.is_dir() {
+                stack.push((entry.path(), relative));
+            } else if kind.is_file() {
+                let path = entry.path();
+                out.push(FolderFile {
+                    name,
+                    path: path.to_string_lossy().into_owned(),
+                    relative_path: relative,
+                    size: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                });
+                if out.len() >= MAX_FOLDER_FILES {
+                    break;
+                }
+            }
+        }
+        if out.len() >= MAX_FOLDER_FILES {
+            break;
+        }
+    }
+    out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn pick_upload_folder() -> Result<FolderOffer, String> {
+    let Some(folder) = rfd::AsyncFileDialog::new()
+        .set_title("Attach a folder")
+        .pick_folder()
+        .await
+    else {
+        return Ok(FolderOffer {
+            batch: None,
+            files: vec![],
+        });
+    };
+    let path = folder.path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        let files = walk_folder(&path)?;
+        Ok(FolderOffer {
+            batch: offer(&files),
+            files,
         })
-        .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// Only OS-delivered drop paths enter the same allowlist as file-picker selections.
+// Dropped folders are walked; their files come back with folder-relative paths.
+pub fn allow_drop(paths: &[PathBuf]) -> (Vec<String>, FolderOffer) {
+    let mut files = Vec::new();
+    let mut entries = Vec::new();
+    for path in paths {
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if path.is_dir() {
+            entries.extend(walk_folder(&path).unwrap_or_default());
+        } else if path.is_file() {
+            if let Ok(mut allowed) = selected().lock() {
+                allowed.insert(path.clone());
+            }
+            files.push(path.to_string_lossy().into_owned());
+        }
+    }
+    let batch = offer(&entries);
+    (
+        files,
+        FolderOffer {
+            batch,
+            files: entries,
+        },
+    )
 }
 
 #[tauri::command]
@@ -149,10 +366,11 @@ fn verify_allowed_file(path: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(path);
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
     if canonical != path
-        || !selected()
+        || !(selected()
             .lock()
             .map_err(|e| e.to_string())?
             .contains(&canonical)
+            || granted(&canonical))
     {
         return Err("Choose this file again using the file picker".into());
     }
@@ -274,8 +492,10 @@ mod tests {
         std::fs::write(&allowed, "ok").unwrap();
         std::fs::write(&other, "secret").unwrap();
         std::fs::create_dir(root.join("folder")).unwrap();
-        let dropped = allow_drop(&[allowed.clone(), root.join("folder"), root.join("missing")]);
+        let (dropped, entries) =
+            allow_drop(&[allowed.clone(), root.join("folder"), root.join("missing")]);
         assert_eq!(dropped, vec![allowed.to_string_lossy().into_owned()]);
+        assert!(entries.files.is_empty() && entries.batch.is_none());
         assert_eq!(
             verify_allowed_file(&allowed.to_string_lossy()).unwrap(),
             allowed
@@ -293,5 +513,67 @@ mod tests {
             std::os::unix::fs::symlink(&allowed, &link).unwrap();
             assert!(verify_allowed_file(&link.to_string_lossy()).is_err());
         }
+    }
+
+    #[test]
+    fn dropped_folders_are_offered_without_secrets_and_granted_per_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("Questões (1)");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("sub/b é.pdf"), "bb").unwrap();
+        for junk in [
+            ".DS_Store",
+            ".env",
+            "server.pem",
+            "api.key",
+            "node_modules/x/index.js",
+            ".git/HEAD",
+            ".ssh/id_ed25519",
+            "credentials.json",
+        ] {
+            std::fs::write(root.join(junk), "secret").unwrap();
+        }
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
+        let (files, offer) = allow_drop(&[root.clone()]);
+        assert!(files.is_empty());
+        let relative: Vec<_> = offer
+            .files
+            .iter()
+            .map(|e| e.relative_path.as_str())
+            .collect();
+        assert_eq!(
+            relative,
+            vec!["Questões (1)/a.txt", "Questões (1)/sub/b é.pdf"]
+        );
+        assert_eq!(offer.files[1].size, 2);
+        let a = root.join("a.txt");
+        let b = root.join("sub/b é.pdf");
+        // Offered is not readable until the client confirms a subset.
+        assert!(verify_allowed_file(&a.to_string_lossy()).is_err());
+        let batch = offer.batch.unwrap();
+        assert_eq!(
+            grant_upload_folder(
+                batch.clone(),
+                vec!["Questões (1)/a.txt".into(), "Questões (1)/../x".into()]
+            )
+            .unwrap(),
+            1
+        );
+        assert!(verify_allowed_file(&a.to_string_lossy()).is_ok());
+        assert!(verify_allowed_file(&b.to_string_lossy()).is_err());
+        assert!(verify_allowed_file(&outside.to_string_lossy()).is_err());
+        // A batch is granted once; revoking removes the grant.
+        assert!(
+            grant_upload_folder(batch.clone(), vec!["Questões (1)/sub/b é.pdf".into()]).is_err()
+        );
+        revoke_upload_folder(batch);
+        assert!(verify_allowed_file(&a.to_string_lossy()).is_err());
     }
 }
