@@ -3448,9 +3448,18 @@ mod tests {
         let mut lines = fixture.lines();
         let head: Vec<&str> = lines.by_ref().take(4).collect();
         observer.stream.feed(&format!("{}\n", head.join("\n")));
-        let cron = observer.stream.antigravity.as_ref().unwrap().blocking_cron().cloned().unwrap();
+        let cron = observer
+            .stream
+            .antigravity
+            .as_ref()
+            .unwrap()
+            .blocking_cron()
+            .cloned()
+            .unwrap();
         assert_eq!(cron.expression, "*/30 * * * *");
-        observer.stream.feed(&format!("{}\n", lines.collect::<Vec<_>>().join("\n")));
+        observer
+            .stream
+            .feed(&format!("{}\n", lines.collect::<Vec<_>>().join("\n")));
         let status: NodeJobStatus = serde_json::from_value(serde_json::json!({"job_id":job_id,"mission_id":mission_id,"state":"cancelled","exit_code":null,"created_at":"2026-10-24T10:42:00Z",
             "cancellation":{"actor":NATIVE_SCHEDULE_ACTOR,"reason":"Antigravity recurring schedule handed off to Core","requested_at":"2026-10-24T10:42:01Z"}})).unwrap();
         let verdict = observer.verdict(&status, "old-agent").await;
@@ -3458,7 +3467,10 @@ mod tests {
         // the failure names that, never a cancellation or `interrupted`.
         let error = verdict.cli_error.unwrap();
         assert!(error.contains("resume could not be scheduled"), "{error}");
-        assert!(!error.contains("Cancelled by") && !error.contains("interrupted"), "{error}");
+        assert!(
+            !error.contains("Cancelled by") && !error.contains("interrupted"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
