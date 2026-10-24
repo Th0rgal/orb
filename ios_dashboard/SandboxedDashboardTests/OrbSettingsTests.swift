@@ -31,8 +31,20 @@ final class OrbSettingsTests: XCTestCase {
         let cases = try XCTUnwrap(spec["cases"] as? [[String: Any]])
         for c in cases {
             let windows = try XCTUnwrap(c["windows"] as? [[String: Any]]).map { ($0["label"] as? String ?? "", ($0["used"] as? NSNumber)?.doubleValue ?? 0) }
-            XCTAssertEqual(OrbProviderQuota.quotaExhaustedLabel(windows), c["expected"] as? String, c["name"] as? String ?? "?")
+            let expected = (c["expected"] as? [String: Any]).map { OrbQuotaStatus(level: OrbQuotaLevel(rawValue: $0["level"] as? String ?? "")!, label: $0["label"] as? String ?? "", accountWide: $0["accountWide"] as? Bool ?? false) }
+            XCTAssertEqual(OrbProviderQuota.quotaStatus(windows), expected, c["name"] as? String ?? "?")
         }
+    }
+    func testQuotaLevelMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/quota-level.json")
+        for c in try XCTUnwrap(spec["cases"] as? [[String: Any]]) {
+            let used = (c["used"] as? NSNumber)?.doubleValue
+            XCTAssertEqual(OrbQuotaLevel.of(used, hasReset: c["hasReset"] as? Bool ?? false).rawValue, c["expected"] as? String, c["name"] as? String ?? "?")
+        }
+    }
+    func testAntigravityResetWithoutFigureIsSpent() {
+        let value: OrbJSON = .object(["antigravity_windows": .array([.object(["label": .string("Gemini · 5h"), "reset_at": .number(2_000_000_000)])])])
+        XCTAssertEqual(OrbProviderQuota.windows(value).map(\.1), [1])
     }
     func testQuotaUnitsAndRemainingPercent() {
         let values: OrbJSON = .object(["unified_5h_utilization": .number(0.4), "codex_primary_used_percent": .number(20), "minimax_weekly_remaining_percent": .number(70)])

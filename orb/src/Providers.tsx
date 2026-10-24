@@ -5,7 +5,7 @@ import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
-import { quotaExhaustedLabel, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows } from "./providerUsage";
+import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows } from "./providerUsage";
 import { PopupMenu } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
@@ -540,7 +540,7 @@ function UsageSummary(p: { usage: ProviderUsage }) {
       <div class="p-usage compact">
         <For each={windows()}>
           {(w, i) => (
-            <span class={`p-usage-chip${w.used >= 1 ? " exhausted" : ""}${i() === top() ? " top" : ""}`} title={w.detail ?? `${w.label} window: ${Math.round(w.used * 100)}% used`}>
+            <span class={`p-usage-chip ${w.level}${i() === top() ? " top" : ""}`} title={w.detail ?? `${w.label} window: ${Math.round(w.used * 100)}% used`}>
               <span class="p-usage-label">{w.label === "7d" ? "Weekly" : w.label}</span>
               <span class="p-usage-pct">{Math.round(w.used * 100)}%</span>
             </span>
@@ -886,11 +886,25 @@ function MistralUsageConnect(p: { a: AIProvider; usage?: ProviderUsage; onUsage?
   </div>;
 }
 
+/** Email that truncates in the middle of the local part, keeping "@domain" readable. */
+function EmailLabel(p: { email: string }) {
+  const at = () => p.email.lastIndexOf("@");
+  return (
+    <span class="p-account-email" title={p.email}>
+      <span class="sr-only">{p.email}</span>
+      <span class="p-email-local" aria-hidden="true">{at() > 0 ? p.email.slice(0, at()) : p.email}</span>
+      <Show when={at() > 0}><span class="p-email-domain" aria-hidden="true">{p.email.slice(at())}</span></Show>
+    </span>
+  );
+}
+
 function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
-  const stClass = () => status() === "connected" ? "connected" : ["needs_reauth", "needs_verification", "error", "quota_exhausted", "pool_exhausted", "out_of_credit", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
-  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Needs Google verification", quota_exhausted: "Quota exhausted", pool_exhausted: (p.usage && quotaExhaustedLabel(usageWindows(p.usage))) || "Quota exhausted", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
+  // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
+  const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
+  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Needs Google verification", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
   const expandable = () => status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
@@ -898,6 +912,10 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<str
   const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
   const needsAuth = () => ["needs_reauth", "needs_auth"].includes(status());
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
+  const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
+    : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
+    : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan} plan`
+    : p.usage?.muse_plan || p.usage?.mistral_plan || undefined;
   const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
   return (
     <div class="p-acc-wrap">
@@ -907,18 +925,11 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<str
         <div class="s-row-text">
           <div class="s-row-title">
             <span class="p-account-name">{title()}</span>
-            <Show when={email()}><span class="p-account-email" title={email()}>{email()}</span></Show>
+            <Show when={email()}>{e => <EmailLabel email={e()} />}</Show>
           </div>
           <div class="s-row-desc">
-            <span class={`p-st ${stClass()}`}>{stLabel()}</span>
-            <Show when={a.provider_type === "antigravity"}><span class="p-dot">·</span><span>{p.usage?.antigravity_plan || "Subscription account"}</span></Show>
-            <Show when={a.provider_type === "google"}><span class="p-dot">·</span><span>{a.has_api_key && !a.has_oauth ? "API key" : "Model routing"}</span></Show>
-            <Show when={p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan}>
-              <span class="p-dot">·</span><span>{p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan} plan</span>
-            </Show>
-            <Show when={p.usage?.muse_plan || p.usage?.mistral_plan}>
-              <span class="p-dot">·</span><span>{p.usage!.muse_plan || p.usage!.mistral_plan}</span>
-            </Show>
+            <span class={`p-st ${stClass()}`} title={stLabel()}>{stLabel()}</span>
+            <Show when={plan()}><span class="p-plan" title={plan()}><span class="p-dot">·</span>{plan()}</span></Show>
 
           </div>
         </div>

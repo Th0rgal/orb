@@ -5,12 +5,21 @@ import { render, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Providers } from "../src/Providers";
 import { clearConnection, setConnection, type AIProvider, type ProviderUsage } from "../src/api";
-import { effectiveProviderStatus, quotaExhaustedLabel } from "../src/providerUsage";
+import { codingPlanWindows, effectiveProviderStatus, quotaLevel, quotaStatus } from "../src/providerUsage";
 
-const fixture = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec", "fixtures", "quota-exhausted.json"), "utf8")) as { cases: Array<{ name: string; windows: { label: string; used: number }[]; expected: string | null }> };
+const fixture = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec", "fixtures", "quota-exhausted.json"), "utf8")) as { cases: Array<{ name: string; windows: { label: string; used: number }[]; expected: { level: string; label: string; accountWide: boolean } | null }> };
+const levels = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec", "fixtures", "quota-level.json"), "utf8")) as { cases: Array<{ name: string; used: number | null; hasReset?: boolean; expected: string }> };
 
 describe("shared/orb-spec/fixtures/quota-exhausted.json", () => {
-  for (const c of fixture.cases) it(c.name, () => expect(quotaExhaustedLabel(c.windows)).toBe(c.expected));
+  for (const c of fixture.cases) it(c.name, () => expect(quotaStatus(c.windows)).toEqual(c.expected));
+});
+
+describe("shared/orb-spec/fixtures/quota-level.json", () => {
+  for (const c of levels.cases) it(c.name, () => expect(quotaLevel(c.used, c.hasReset)).toBe(c.expected));
+});
+
+it("reads an Antigravity window with a reset but no figure as spent", () => {
+  expect(codingPlanWindows({ provider_type: "antigravity", antigravity_windows: [{ label: "Gemini · 5h", reset_at: 2000000000 } as never] } as ProviderUsage)).toEqual([{ label: "Gemini · 5h", used: 1, reset: 2000000000 }]);
 });
 
 const antigravity = { id: "agy", name: "Antigravity (thomas@example.com)", provider_type: "antigravity", enabled: true, uses_oauth: true, credential_owner: "cli_proxy", status: { type: "connected" } } as AIProvider;
@@ -34,6 +43,7 @@ it("shows 'Gemini quota exhausted' and highlights only the spent chip", async ()
   await waitFor(() => expect(container.querySelectorAll(".p-usage.compact .p-usage-chip")).toHaveLength(2));
   const chips = [...container.querySelectorAll(".p-usage.compact .p-usage-chip")];
   expect(chips.map(c => c.classList.contains("exhausted"))).toEqual([true, false]);
+  expect(container.querySelector(".p-st")?.classList.contains("exhausted")).toBe(true);
   expect(chips[0].classList.contains("top")).toBe(true);
   expect(container.querySelector(".p-usage-more")?.textContent).toBe("+1");
 });
