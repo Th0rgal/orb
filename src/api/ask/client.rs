@@ -50,6 +50,8 @@ pub struct AskCompletion {
 pub struct AskClient {
     http: reqwest::Client,
     config: MetadataLlmConfig,
+    /// Sent as `x-sandboxed-caller` so Core's own usage is attributed.
+    purpose: crate::api::usage_attribution::CorePurpose,
 }
 
 fn decode_xml_text(s: &str) -> String {
@@ -177,8 +179,16 @@ fn parse_text_tool_calls(raw_content: &str) -> Vec<ToolCall> {
 }
 
 impl AskClient {
-    pub fn new(http: reqwest::Client, config: MetadataLlmConfig) -> Self {
-        Self { http, config }
+    pub fn new(
+        http: reqwest::Client,
+        config: MetadataLlmConfig,
+        purpose: crate::api::usage_attribution::CorePurpose,
+    ) -> Self {
+        Self {
+            http,
+            config,
+            purpose,
+        }
     }
 
     pub fn model(&self) -> &str {
@@ -226,6 +236,10 @@ impl AskClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header(
+                crate::api::usage_attribution::CALLER_HEADER,
+                self.purpose.header_value(),
+            )
             .timeout(std::time::Duration::from_secs(60))
             .json(&body)
             .send()
@@ -339,6 +353,10 @@ impl AskClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header(
+                crate::api::usage_attribution::CALLER_HEADER,
+                self.purpose.header_value(),
+            )
             .timeout(std::time::Duration::from_secs(120))
             .json(&body)
             .send()

@@ -819,7 +819,8 @@ pub struct HourlyUsageStats {
 #[serde(rename_all = "snake_case")]
 pub enum UsageSource {
     /// A mission's harness (Claude Code, OpenCode, Codex, ...): assistant
-    /// message metadata in `mission_events`.
+    /// message metadata in `mission_events`. Route `harness_direct`: only
+    /// counted for missions with no proxied traffic (see `sqlite_usage`).
     Harness,
     /// The OpenAI-compatible `/v1` router (`proxy_usage`): external clients
     /// with proxy keys, and harnesses that route through the builtin proxy.
@@ -831,6 +832,15 @@ impl UsageSource {
         match self {
             Self::Harness => "harness",
             Self::Router => "router",
+        }
+    }
+
+    /// Attribution route: `proxy` (Core's `/v1` router) or `harness_direct`
+    /// (a harness that talks to its provider with its own login).
+    pub fn route(self) -> &'static str {
+        match self {
+            Self::Harness => "harness_direct",
+            Self::Router => "proxy",
         }
     }
 }
@@ -851,6 +861,12 @@ pub struct ProxyUsageRecord {
     pub api_key_name: Option<String>,
     /// Mission the request belongs to (mission header or mission-scoped key).
     pub mission_id: Option<Uuid>,
+    /// Closed-enum caller kind (`usage_attribution::CallerKind::as_str`).
+    pub caller_kind: Option<String>,
+    /// `core` calls only: why Core called a model.
+    pub purpose: Option<String>,
+    /// Reasoning tokens, already included in `output_tokens`.
+    pub reasoning_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -907,6 +923,13 @@ pub struct UsageRecord {
     pub backend: Option<String>,
     pub mission_id: Option<String>,
     pub mission_title: Option<String>,
+    /// Top-level mission of `mission_id` (itself when it has no parent).
+    pub root_mission_id: Option<String>,
+    /// Closed-enum caller kind: mission, subagent, hermes, orb_ui, core,
+    /// script or unknown (see `docs/specs/usage-attribution.md`).
+    pub caller_kind: String,
+    /// `core` calls only: why Core called a model.
+    pub purpose: Option<String>,
     pub api_key_id: Option<String>,
     pub api_key_name: Option<String>,
     pub account_id: Option<String>,
@@ -914,6 +937,8 @@ pub struct UsageRecord {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Reasoning tokens, already included in `output_tokens` (router only).
+    pub reasoning_tokens: u64,
     pub cost_cents: u64,
     /// False when the stored cost is not actual and the model has no price.
     pub cost_known: bool,

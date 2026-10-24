@@ -104,6 +104,7 @@ pub mod track_repair;
 pub mod tracker_import;
 pub mod types;
 pub(crate) mod uploads;
+pub(crate) mod usage_attribution;
 pub mod usage_optimize;
 pub(crate) mod usage_summary;
 pub mod validation;

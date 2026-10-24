@@ -1415,6 +1415,10 @@ pub(crate) struct UsageAttribution {
     pub api_key_name: Option<String>,
     /// Mission from the liveness header, or a mission-scoped launch key.
     pub mission_id: Option<uuid::Uuid>,
+    /// Caller kind derived from the credential (see `usage_attribution`).
+    pub caller_kind: super::usage_attribution::CallerKind,
+    /// `core` calls only: why Core called a model.
+    pub purpose: Option<String>,
 }
 
 /// Resolve attribution from the request headers. The bearer token is only
@@ -1434,7 +1438,37 @@ async fn usage_attribution(
         Some(token) if !internal => state.proxy_api_keys.find_by_token(token).await,
         _ => None,
     };
-    attribution_from(headers, key.as_ref(), internal)
+    resolve_attribution(state, headers, key.as_ref(), internal).await
+}
+
+/// Attribution with mission ancestry looked up, so a launch key may claim its
+/// own subagents and subagents are told apart from root missions.
+async fn resolve_attribution(
+    state: &super::routes::AppState,
+    headers: &HeaderMap,
+    key: Option<&super::proxy_keys::KeySummary>,
+    internal_secret: bool,
+) -> UsageAttribution {
+    use super::usage_attribution::{ancestry, hint_from, principal_for};
+    let principal = principal_for(key.map(|k| k.name.as_str()), internal_secret);
+    let hint = hint_from(headers);
+    let (mut principal_chain, mut hint_chain) = (Vec::new(), Vec::new());
+    if principal.mission.is_some() || hint.mission.is_some() {
+        let user = super::auth::implicit_single_tenant_user(&state.config);
+        let store = state
+            .control
+            .get_or_spawn(&user)
+            .await
+            .mission_store
+            .clone();
+        if let Some(m) = principal.mission {
+            principal_chain = ancestry(store.as_ref(), m).await;
+        }
+        if let Some(m) = hint.mission {
+            hint_chain = ancestry(store.as_ref(), m).await;
+        }
+    }
+    attribution_from(headers, key, internal_secret, &principal_chain, &hint_chain)
 }
 
 /// Mission whose job the proxy reports alive to the remote startup watchdog:
@@ -1443,29 +1477,35 @@ fn liveness_mission(attribution: &UsageAttribution) -> Option<uuid::Uuid> {
     attribution.mission_id
 }
 
-/// The mission header is caller-controlled, so it is trusted only from the
-/// internal proxy secret (Core's own harnesses). A mission-scoped launch key
-/// always attributes to its own mission; other keys never take the header.
+/// Headers are caller-controlled hints: the verified `orb_attribution_step`
+/// accepts them only inside the credential's scope. The internal proxy
+/// secret (Core's own harnesses) may name any mission; a mission-scoped
+/// launch key its own mission or a descendant; other keys never a mission.
+/// `principal_chain` / `hint_chain`: ancestry of the key's and the header's
+/// mission (see `usage_attribution::ancestry`).
 fn attribution_from(
     headers: &HeaderMap,
     key: Option<&super::proxy_keys::KeySummary>,
     internal_secret: bool,
+    principal_chain: &[uuid::Uuid],
+    hint_chain: &[uuid::Uuid],
 ) -> UsageAttribution {
-    let header_mission = headers
-        .get(crate::api::proxy_liveness::MISSION_ID_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| uuid::Uuid::parse_str(v.trim()).ok());
-    let key_mission = key
-        .and_then(|k| k.name.strip_prefix("remote-launch:"))
-        .and_then(|id| uuid::Uuid::parse_str(id).ok());
+    use super::usage_attribution::{hint_from, principal_for, resolve};
+    let principal = principal_for(key.map(|k| k.name.as_str()), internal_secret);
+    let hint = hint_from(headers);
+    let resolved = resolve(principal, principal_chain, &hint, hint_chain);
+    if !resolved.accepted {
+        tracing::debug!(
+            caller_kind = resolved.kind.as_str(),
+            "Ignoring out-of-scope usage attribution hint"
+        );
+    }
     UsageAttribution {
         api_key_id: key.map(|k| k.id),
         api_key_name: key.map(|k| k.name.clone()),
-        mission_id: match (key_mission, internal_secret) {
-            (Some(mission), _) => Some(mission),
-            (None, true) => header_mission,
-            (None, false) => None,
-        },
+        mission_id: resolved.mission_id,
+        caller_kind: resolved.kind,
+        purpose: resolved.purpose,
     }
 }
 
@@ -1477,6 +1517,8 @@ pub(crate) struct ProxyTokens {
     pub output: u64,
     pub cache_creation: u64,
     pub cache_read: u64,
+    /// Reasoning/thought tokens, already included in `output`.
+    pub reasoning: u64,
 }
 
 impl ProxyTokens {
@@ -1544,6 +1586,7 @@ impl UsageAccumulator {
             output: self.output,
             cache_creation: self.cache_creation,
             cache_read: self.cache_read.max(self.cached_in_input),
+            reasoning: self.reasoning,
         }
     }
 }
@@ -1620,6 +1663,9 @@ fn proxy_usage_record(
         api_key_id: target.attribution.api_key_id,
         api_key_name: target.attribution.api_key_name.clone(),
         mission_id: target.attribution.mission_id,
+        caller_kind: Some(target.attribution.caller_kind.as_str().to_string()),
+        purpose: target.attribution.purpose.clone(),
+        reasoning_tokens: tokens.reasoning,
         input_tokens: tokens.input,
         output_tokens: tokens.output,
         cache_creation_tokens: tokens.cache_creation,
@@ -1641,7 +1687,7 @@ async fn record_proxy_usage(
             tokens.input + tokens.cache_read,
             tokens.output,
             tokens.cache_read,
-            0,
+            tokens.reasoning,
         );
     }
     let record = proxy_usage_record(target, tokens);
@@ -1781,7 +1827,8 @@ async fn native_protocol_proxy(
         .is_some_and(|t| {
             !state.proxy_secret.is_empty() && super::auth::constant_time_eq(t, &state.proxy_secret)
         });
-    let attribution = attribution_from(&headers, execution_key.as_ref(), internal_secret);
+    let attribution =
+        resolve_attribution(&state, &headers, execution_key.as_ref(), internal_secret).await;
     let _in_flight = attribution
         .mission_id
         .map(crate::api::proxy_liveness::begin_request);
@@ -2964,7 +3011,7 @@ async fn chat_completions_routed(
     let liveness_mission_id = liveness_mission(&attribution);
     let _in_flight = liveness_mission_id.map(crate::api::proxy_liveness::begin_request);
     if let Some(cell) = super::proxy_timing::current() {
-        cell.set_attribution(attribution.mission_id, attribution.api_key_name.clone());
+        cell.set_attribution(&attribution);
     }
 
     let exact_chain_exists = state.chain_store.get(&requested_model).await.is_some();
@@ -9781,7 +9828,8 @@ mod tests {
                 input: 20,
                 output: 9,
                 cache_creation: 7,
-                cache_read: 300
+                cache_read: 300,
+                reasoning: 0
             }
         );
         assert!(buffer.is_empty());
@@ -9802,7 +9850,8 @@ mod tests {
                 input: 200,
                 output: 50,
                 cache_creation: 0,
-                cache_read: 800
+                cache_read: 800,
+                reasoning: 0
             }
         );
         // Google raw bodies report cached content inside promptTokenCount.
@@ -9813,7 +9862,8 @@ mod tests {
                 input: 100,
                 output: 20,
                 cache_creation: 0,
-                cache_read: 400
+                cache_read: 400,
+                reasoning: 0
             }
         );
     }
@@ -9835,13 +9885,15 @@ mod tests {
         };
 
         // Internal proxy secret: Core's own harness, header honoured.
-        let a = attribution_from(&headers, None, true);
+        let a = attribution_from(&headers, None, true, &[], &[]);
         assert_eq!(a.mission_id, Some(claimed));
         assert_eq!(a.api_key_id, None);
+        assert_eq!(a.caller_kind.as_str(), "mission");
 
         // Ordinary proxy key: header ignored, key still attributed.
-        let a = attribution_from(&headers, Some(&key), false);
+        let a = attribution_from(&headers, Some(&key), false, &[], &[]);
         assert_eq!(a.mission_id, None);
+        assert_eq!(a.caller_kind.as_str(), "script");
         assert_eq!(a.api_key_id, Some(key.id));
         assert_eq!(a.api_key_name.as_deref(), Some("Cursor"));
 
@@ -9852,17 +9904,17 @@ mod tests {
             ..key
         };
         assert_eq!(
-            attribution_from(&headers, Some(&launch_key), false).mission_id,
+            attribution_from(&headers, Some(&launch_key), false, &[], &[]).mission_id,
             Some(launched)
         );
         assert_eq!(
-            attribution_from(&HeaderMap::new(), Some(&launch_key), false).mission_id,
+            attribution_from(&HeaderMap::new(), Some(&launch_key), false, &[], &[]).mission_id,
             Some(launched)
         );
 
         // Unauthenticated-by-key callers (e.g. JWT chain tests): header ignored.
         assert_eq!(
-            attribution_from(&headers, None, false),
+            attribution_from(&headers, None, false, &[], &[]),
             UsageAttribution::default()
         );
     }
@@ -9882,7 +9934,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_used_at: None,
         };
-        let attribution = attribution_from(&headers, Some(&key), false);
+        let attribution = attribution_from(&headers, Some(&key), false, &[], &[]);
         let liveness = liveness_mission(&attribution);
         assert_eq!(liveness, None);
         let _guard = liveness.map(crate::api::proxy_liveness::begin_request);
@@ -9896,7 +9948,13 @@ mod tests {
             ..key
         };
         assert_eq!(
-            liveness_mission(&attribution_from(&headers, Some(&launch_key), false)),
+            liveness_mission(&attribution_from(
+                &headers,
+                Some(&launch_key),
+                false,
+                &[],
+                &[]
+            )),
             Some(victim)
         );
     }
@@ -9919,15 +9977,14 @@ mod tests {
                 api_key_id: Some(key),
                 api_key_name: Some("bot".into()),
                 mission_id: None,
+                ..Default::default()
             },
         );
         let record = proxy_usage_record(
             &target,
             ProxyTokens {
                 input: 1_000_000,
-                output: 0,
-                cache_creation: 0,
-                cache_read: 0,
+                ..Default::default()
             },
         );
         assert_eq!(record.model, "gemini-4-argon");

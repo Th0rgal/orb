@@ -614,4 +614,43 @@ def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaL
     nextLen.toUInt64 ||| ((satAdd32 stateSeq 1).toUInt64 <<< 32)
   else stateLen.toUInt64 ||| (stateSeq.toUInt64 <<< 32)
 
+/--
+  Usage attribution scope (`orb_attribution_step`). Caller kinds:
+  `0 = unknown`, `1 = mission`, `2 = subagent`, `3 = hermes`, `4 = orb_ui`, `5 = core`, `6 = script`.
+  `principalKind` is derived server-side from the authenticated credential (out-of-range = `unknown`);
+  `claimedKind` is the client hint (`0 = no claim`). A claim is in scope iff it is empty, or
+  - the principal is `core` (internal proxy secret) and claims `mission`, `subagent` or `core`;
+  - the principal is a mission key (`1`/`2`) and claims its own mission (`sameMission == 1`)
+    or a subagent descending from it (`isDescendant == 1`);
+  - the principal is `hermes`, `orb_ui` or `script` and claims exactly its own kind.
+-/
+@[inline] def attributionInScope (principalKind claimedKind sameMission isDescendant : UInt8) : Bool :=
+  claimedKind == 0 ||
+  (principalKind == 5 && (claimedKind == 1 || claimedKind == 2 || claimedKind == 5)) ||
+  ((principalKind == 1 || principalKind == 2) &&
+    ((claimedKind == 1 && sameMission == 1) || (claimedKind == 2 && isDescendant == 1))) ||
+  ((principalKind == 3 || principalKind == 4 || principalKind == 6) && claimedKind == principalKind)
+
+/-- Principal kind clamped to the closed enum (`> 6` is `unknown`). -/
+@[inline] def attributionPrincipal (principalKind : UInt8) : UInt8 :=
+  if principalKind ≤ 6 then principalKind else 0
+
+/-- Final caller kind: the claim when in scope (and non-empty), the principal's own kind otherwise. -/
+@[inline] def attributionKind (principalKind claimedKind sameMission isDescendant : UInt8) : UInt8 :=
+  if attributionInScope (attributionPrincipal principalKind) claimedKind sameMission isDescendant then
+    (if claimedKind == 0 then attributionPrincipal principalKind else claimedKind)
+  else attributionPrincipal principalKind
+
+/--
+  Unboxed C-ABI Usage Attribution Stepper (`orb_attribution_step`):
+  packs `bits 0..7 = caller kind` (`attributionKind`) and `bit 8 = claim accepted`.
+  A rejected (forged or out-of-scope) claim keeps the principal's own kind, so the caller is
+  never empty and `unknown` is returned only when no credential binding exists.
+-/
+@[inline, export orb_attribution_step]
+def attributionStep (principalKind claimedKind sameMission isDescendant : UInt8) : UInt32 :=
+  (attributionKind principalKind claimedKind sameMission isDescendant).toUInt32 |||
+    (if attributionInScope (attributionPrincipal principalKind) claimedKind sameMission isDescendant
+     then 256 else 0)
+
 end Orb.Kernel

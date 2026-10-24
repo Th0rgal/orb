@@ -204,6 +204,12 @@ unsafe extern "C" {
         event_kind: u8,
         delta_len: u32,
     ) -> u64;
+    fn orb_attribution_step(
+        principal_kind: u8,
+        claimed_kind: u8,
+        same_mission: u8,
+        is_descendant: u8,
+    ) -> u32;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1238,9 +1244,98 @@ pub fn transcript_patch_step(
     }
 }
 
+/// Caller kinds of `orb_attribution_step` (closed enum, see `docs/specs/usage-attribution.md`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum CallerKind {
+    #[default]
+    Unknown = 0,
+    Mission = 1,
+    Subagent = 2,
+    Hermes = 3,
+    OrbUi = 4,
+    Core = 5,
+    Script = 6,
+}
+
+impl CallerKind {
+    pub fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Mission,
+            2 => Self::Subagent,
+            3 => Self::Hermes,
+            4 => Self::OrbUi,
+            5 => Self::Core,
+            6 => Self::Script,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Mission => "mission",
+            Self::Subagent => "subagent",
+            Self::Hermes => "hermes",
+            Self::OrbUi => "orb_ui",
+            Self::Core => "core",
+            Self::Script => "script",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttributionVerdict {
+    pub kind: CallerKind,
+    /// The client hint was inside the principal's scope (or absent).
+    pub accepted: bool,
+}
+
+/// Verified attribution step: the kind is derived from the authenticated
+/// principal; a client claim only refines it within the principal's scope.
+/// `claimed = None` means no hint.
+pub fn attribution_step(
+    principal: CallerKind,
+    claimed: Option<CallerKind>,
+    same_mission: bool,
+    is_descendant: bool,
+) -> AttributionVerdict {
+    let raw = unsafe {
+        orb_attribution_step(
+            principal as u8,
+            claimed.map_or(0, |k| k as u8),
+            u8::from(same_mission),
+            u8::from(is_descendant),
+        )
+    };
+    AttributionVerdict {
+        kind: CallerKind::from_u8((raw & 0xFF) as u8),
+        accepted: (raw >> 8) & 1 == 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attribution_step_rejects_forged_hints_and_never_returns_empty() {
+        use CallerKind::*;
+        let v = attribution_step(Script, Some(Mission), false, false);
+        assert_eq!((v.kind, v.accepted), (Script, false));
+        let v = attribution_step(Mission, Some(Subagent), false, false);
+        assert_eq!((v.kind, v.accepted), (Mission, false));
+        let v = attribution_step(Mission, Some(Subagent), false, true);
+        assert_eq!((v.kind, v.accepted), (Subagent, true));
+        let v = attribution_step(Core, None, false, false);
+        assert_eq!((v.kind, v.accepted), (Core, true));
+        let v = attribution_step(Core, Some(Mission), false, false);
+        assert_eq!((v.kind, v.accepted), (Mission, true));
+        let v = attribution_step(Unknown, Some(Core), false, false);
+        assert_eq!((v.kind, v.accepted), (Unknown, false));
+        let v = attribution_step(Hermes, Some(OrbUi), false, false);
+        assert_eq!((v.kind, v.accepted), (Hermes, false));
+    }
 
     #[test]
     fn writer_reuse_gate_enforces_continuation_and_retag_rules() {

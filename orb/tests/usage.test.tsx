@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@solidjs/testing-library";
+import { render, screen, fireEvent, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageSettings } from "../src/UsageSettings";
 import { setConnection } from "../src/api";
@@ -43,6 +43,11 @@ export function summary(window = "24h"): UsageSummary {
     by_mission: [{ key: "m-1", label: "Fix login", cost_status: "known", ...harness }],
     by_api_key: [{ key: "key-argon", label: "Nightly bot", cost_status: "known", ...argon }],
     by_account: [],
+    by_caller_kind: [
+      { key: "script", label: null, cost_status: "partial", ...totals({ requests: 254, input_tokens: 2_000_400, output_tokens: 100_000, cost_cents: 520, unknown_cost_requests: 4 }) },
+      { key: "subagent", label: null, cost_status: "known", ...harness },
+    ],
+    by_purpose: [],
     by_day: [{ day: "2026-10-20", router_requests: 254, ...all }],
     by_hour: [{ hour: "2026-10-20T09", router_requests: 250, ...argon }, { hour: "2026-10-20T11", router_requests: 4, ...harness }],
   };
@@ -71,6 +76,9 @@ describe("usage helpers", () => {
     expect(daily.granularity).toBe("day");
     expect(daily.buckets).toHaveLength(30);
     expect(daily.buckets.at(-1)!.key).toBe("2026-10-20");
+    const forcedDaily = chartBuckets(summary("24h"), now, "day");
+    expect(forcedDaily.granularity).toBe("day");
+    expect(forcedDaily.buckets.map(b => b.key)).toEqual(["2026-10-20"]);
   });
 });
 
@@ -94,7 +102,7 @@ describe("Usage page", () => {
     await screen.findByText("gemini-4-argon");
     expect(screen.getByText("$6.10+")).toBeTruthy();
     expect(screen.getByText("96%")).toBeTruthy();
-    expect(screen.getByText("Unknown")).toBeTruthy();
+    expect(within(screen.getByRole("table", { name: "Usage by model" })).getByText("Unknown")).toBeTruthy();
     expect(screen.getByText("Router · google")).toBeTruthy();
     expect(requests.find(r => r.startsWith("/api/ai/usage/"))).toBe("/api/ai/usage/summary?window=24h");
 
@@ -109,6 +117,27 @@ describe("Usage page", () => {
     window.value = "5h";
     fireEvent.change(window);
     await waitFor(() => expect(requests).toContain("/api/ai/usage/summary?window=5h&api_key=key-argon"));
+  });
+
+  it("breaks usage down by caller kind, filters by caller and toggles day/hour", async () => {
+    render(() => <UsageSettings />);
+    await screen.findByText("gemini-4-argon");
+    const groupBy = screen.getByLabelText("Group by") as HTMLSelectElement;
+    groupBy.value = "caller_kind";
+    fireEvent.change(groupBy);
+    expect(await screen.findByRole("button", { name: "Script / API key" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Subagent" }));
+    await waitFor(() => expect(requests).toContain("/api/ai/usage/summary?window=24h&caller_kind=subagent"));
+    await waitFor(() => expect((screen.getByLabelText("Caller") as HTMLSelectElement).value).toBe("subagent"));
+
+    const chart = () => screen.getByRole("figure");
+    expect(chart().getAttribute("aria-label")).toBe("tokens per hour");
+    fireEvent.click(screen.getByRole("radio", { name: "Day" }));
+    await waitFor(() => expect(chart().getAttribute("aria-label")).toBe("tokens per day"));
+    const window = screen.getByLabelText("Time window") as HTMLSelectElement;
+    window.value = "30d";
+    fireEvent.change(window);
+    await waitFor(() => expect((screen.getByRole("radio", { name: "Hour" }) as HTMLButtonElement).disabled).toBe(true));
   });
 
   it("shows router reliability with red flags and switches the window", async () => {
