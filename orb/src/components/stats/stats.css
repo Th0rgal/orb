@@ -1,0 +1,79 @@
+/* Stats primitives. See docs/ui/stats.md. Outcome palette validated with the
+   dataviz CVD checker in this order (ok, limited, client, server, timeout):
+   adjacent CVD dE >= 8.3, normal-vision dE >= 15.6, >= 3:1 on --bg, both themes. */
+:root {
+  --viz-ok: #199e70; --viz-limited: #b88a10; --viz-client: #3987e5; --viz-server: #e66767; --viz-timeout: #9085e9;
+  --viz-line: var(--fg-3); --viz-track: var(--bg-active);
+}
+:root[data-theme="light"] {
+  --viz-ok: #16996a; --viz-limited: #876a0a; --viz-client: #2a78d6; --viz-server: #c0283a; --viz-timeout: #6250d6;
+}
+
+.st-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.st-tile { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 2px; align-items: end; padding: 9px 12px; border-radius: var(--radius-lg); background: var(--bg-elev); min-width: 0; }
+.st-tile-label { grid-column: 1 / -1; color: var(--fg-3); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-tile-value { font-size: 16px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg-strong); }
+.st-tile-value[data-tone="warning"] { color: var(--warning); }
+.st-tile-value[data-tone="danger"] { color: var(--danger); }
+.st-spark { width: 64px; height: 20px; display: block; overflow: visible; }
+.st-spark polyline { fill: none; stroke: var(--viz-line); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.st-spark-empty { width: 64px; height: 20px; }
+
+.st-sk { display: block; border-radius: var(--radius-xs); background: var(--bg-active); animation: sk-pulse 1.4s ease-in-out infinite; }
+.st-tile .st-sk { height: 19px; width: 60%; }
+
+.st-outcome { display: flex; gap: 2px; height: 8px; width: 100%; min-width: 48px; border-radius: 4px; overflow: hidden; background: var(--viz-track); }
+.st-outcome > i { display: block; height: 100%; min-width: 2px; }
+.st-outcome > i[data-k="ok"] { background: var(--viz-ok); }
+.st-outcome > i[data-k="limited"] { background: var(--viz-limited); }
+.st-outcome > i[data-k="client"] { background: var(--viz-client); }
+.st-outcome > i[data-k="server"] { background: var(--viz-server); }
+.st-outcome > i[data-k="timeout"] { background: var(--viz-timeout); }
+.st-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 8px 2px 0; color: var(--fg-3); font-size: 11.5px; }
+.st-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.st-legend i { width: 8px; height: 8px; border-radius: 2px; }
+.st-legend i[data-k="ok"] { background: var(--viz-ok); } .st-legend i[data-k="limited"] { background: var(--viz-limited); }
+.st-legend i[data-k="client"] { background: var(--viz-client); } .st-legend i[data-k="server"] { background: var(--viz-server); }
+.st-legend i[data-k="timeout"] { background: var(--viz-timeout); }
+
+.st-range { position: relative; height: 14px; min-width: 48px; }
+.st-range::before { content: ""; position: absolute; left: 0; right: 0; top: 6px; height: 2px; border-radius: 1px; background: var(--viz-track); }
+.st-range > i { position: absolute; top: 4px; height: 6px; border-radius: 3px; background: var(--fg-3); min-width: 6px; }
+.st-range > b { position: absolute; top: 2px; width: 2px; height: 10px; border-radius: 1px; background: var(--fg-strong); }
+.st-range[data-tone="warning"] > i { background: var(--warning); }
+
+.st-pill { box-sizing: border-box; display: inline-flex; vertical-align: middle; align-items: center; gap: 5px; height: 20px; max-width: 100%; padding: 0 8px; border-radius: 10px; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg-2); background: var(--bg-active); }
+.st-pill > span { overflow: hidden; text-overflow: ellipsis; }
+.st-pill .st-pill-short { display: none; }
+.st-pill::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--fg-3); }
+.st-pill[data-tone="warning"] { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
+.st-pill[data-tone="warning"]::before { background: var(--warning); }
+.st-pill[data-tone="danger"] { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.st-pill[data-tone="danger"]::before { background: var(--danger); }
+
+.st-table { margin-top: 10px; border-radius: var(--radius-lg); background: var(--bg-elev); overflow: hidden; font-size: 13px; }
+.st-tr { display: grid; grid-template-columns: var(--st-cols); gap: 12px; align-items: center; min-height: 38px; padding: 6px 12px; border-bottom: 1px solid var(--stroke-soft); }
+.st-tr:last-child { border-bottom: 0; }
+.st-tr > * { min-width: 0; }
+.st-th > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-th { min-height: 30px; color: var(--fg-3); font-size: 11.5px; }
+.st-tr > [data-align="end"] { text-align: right; justify-self: end; max-width: 100%; font-variant-numeric: tabular-nums; color: var(--fg-2); }
+.st-row { cursor: pointer; width: 100%; border: 0; border-bottom: 1px solid var(--stroke-soft); background: transparent; color: inherit; font: inherit; text-align: left; }
+.st-row:hover { background: var(--bg-hover); }
+.st-row:focus-visible { outline: 2px solid var(--focus-border); outline-offset: -2px; }
+.st-row[aria-expanded="true"] { background: var(--bg-hover); }
+.st-detail { padding: 8px 12px 12px; border-bottom: 1px solid var(--stroke-soft); background: var(--bg-hover); color: var(--fg-2); font-size: 12px; }
+.st-more { display: flex; width: 100%; justify-content: center; gap: 6px; padding: 8px 12px; border: 0; background: transparent; color: var(--fg-3); font: 12px var(--sans); cursor: pointer; }
+.st-more:hover { color: var(--fg); }
+.st-cell-name { display: flex; flex-direction: column; min-width: 0; }
+.st-cell-name strong { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.st-cell-name span { color: var(--fg-3); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-tr .st-sk { height: 10px; }
+
+@media (max-width: 560px) {
+  .st-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .st-tr { grid-template-columns: var(--st-cols-narrow, var(--st-cols)); gap: 8px; }
+  .st-tr > [data-narrow="hide"] { display: none; }
+  .st-pill[data-short] .st-pill-long { display: none; }
+  .st-pill[data-short] .st-pill-short { display: inline; }
+}
