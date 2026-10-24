@@ -102,6 +102,7 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_relative_time_bucket",
     "orb_transcript_patch_step",
     "orb_attribution_step",
+    "orb_schedule_step",
 ];
 
 fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {

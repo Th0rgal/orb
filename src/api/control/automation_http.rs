@@ -131,13 +131,19 @@ pub async fn create_automation(
         .get("__wakeup_request_id")
         .map(|key| Uuid::new_v5(&mission_id, key.as_bytes()))
         .unwrap_or_else(Uuid::new_v4);
-    if let Some(existing) = control
+    let existing = control
         .mission_store
         .get_automation(automation_id)
         .await
-        .map_err(internal_error)?
-    {
-        return Ok(Json(existing));
+        .map_err(internal_error)?;
+    // Same idempotency key (e.g. an agent re-scheduling after a restart):
+    // the verified step keeps the existing row, active or cancelled.
+    if let Some(existing) = existing {
+        if crate::orb_spec::schedule_register(true, false, true)
+            == crate::orb_spec::ScheduleAction::Dedupe
+        {
+            return Ok(Json(existing));
+        }
     }
     if let Some(generation) = wakeup_generation {
         if !control
@@ -262,7 +268,8 @@ pub async fn create_automation(
         driver: mission_store::AutomationDriver::Scheduler,
     };
 
-    let is_one_shot_wakeup = automation.variables.contains_key("__wakeup_source");
+    let is_one_shot_wakeup = automation.variables.contains_key("__wakeup_source")
+        && automation.stop_policy == mission_store::StopPolicy::AfterFirstFire;
     let wakeup_key = wakeup_supersession_key(
         automation
             .variables

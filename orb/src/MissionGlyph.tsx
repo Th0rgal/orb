@@ -65,7 +65,7 @@ export function MissionGlyph(p: { status: string; missionId?: string; unread?: b
       <Show when={item.error}><p class="inline-error" role="alert">{item.error}</p></Show>
       <Show when={item.state === "scheduled" || item.state === "queued" || item.state === "error"}>
         <div class="wake-up-actions"><Show when={item.state === "scheduled" || item.state === "queued"}><button type="button" disabled={busy()} onClick={() => void act(item.id, "resume")}>Resume now</button></Show>
-        <button type="button" disabled={busy()} onClick={() => void act(item.id, "cancel")}>{item.source === "orb-local-rejected" ? "Dismiss rejected request" : "Cancel wake-up"}</button></div>
+        <button type="button" disabled={busy()} onClick={() => void act(item.id, "cancel")}>{item.source === "orb-local-rejected" ? "Dismiss rejected request" : item.recurrence ? "Cancel schedule" : "Cancel wake-up"}</button></div>
       </Show>
     </div>}</For>
   </Dialog></Show></>;

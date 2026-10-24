@@ -188,6 +188,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     }
     let mut thoughts = crate::antigravity::thoughts::Reader::new(&thought_home);
     let mut thought_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut handed_off: Option<crate::antigravity::NativeCron> = None;
     loop {
         let line = tokio::select! {
             _ = ctx.cancel.cancelled() => {
@@ -264,6 +265,29 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
         if bound {
             thoughts.observe(&value);
         }
+        // agy holds every later step behind an ACTIVE recurring `schedule`
+        // until it exits: Core takes the schedule over and ends this run, and
+        // a wake-up resumes the conversation unblocked.
+        let blocking_cron = stream.blocking_cron().cloned().filter(|_| bound);
+        if let Some(cron) = blocking_cron {
+            match crate::api::mission_runner::register_native_cron(
+                ctx.mission_id,
+                &cron.expression,
+                &cron.prompt,
+            )
+            .await
+            {
+                Ok(_) => {
+                    stream.cron_handoff = true;
+                    handed_off = Some(cron);
+                }
+                Err(error) => {
+                    stream.error = Some(format!(
+                        "Antigravity recurring schedule could not become a Core schedule: {error}"
+                    ));
+                }
+            }
+        }
         for tool in tools {
             if tool["type"] == "text_op" {
                 if let Ok(ops) = serde_json::from_value(tool["ops"].clone()) {
@@ -294,6 +318,10 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
             };
             let _ = ctx.events_tx.send(event);
         }
+        if handed_off.is_some() || (stream.error.is_some() && stream.blocking_cron().is_some()) {
+            stop(&mut child).await;
+            break;
+        }
     }
     let status = tokio::select! {
         _ = ctx.cancel.cancelled() => {
@@ -318,6 +346,33 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     }
     stream.reconcile_transcript_background_tasks(&thought_home);
     let mut result = match stream.finish() {
+        Ok(()) if handed_off.is_some() => {
+            let cron = handed_off.as_ref().expect("checked");
+            match crate::api::mission_runner::register_native_cron_resume(
+                ctx.mission_id,
+                claim,
+                cron,
+            )
+            .await
+            {
+                Ok(_) => AgentResult::success(
+                    format!(
+                        "{}\n\nAntigravity's recurring schedule is now a Core schedule ({}): {}",
+                        stream.summary(),
+                        crate::api::mission_runner::describe_cron(&cron.expression),
+                        cron.prompt
+                    )
+                    .trim()
+                    .to_string(),
+                    0,
+                )
+                .with_terminal_reason(TerminalReason::TurnComplete),
+                Err(error) => AgentResult::failure(
+                    format!("Antigravity recurring schedule was handed off but its resume could not be scheduled: {error}"),
+                    0,
+                ),
+            }
+        }
         Ok(()) if status.is_ok_and(|s| s.success()) || stream.reconciled_post_response_failure => {
             AgentResult::success(stream.summary(), 0)
                 .with_terminal_reason(TerminalReason::TurnComplete)
