@@ -24,7 +24,7 @@ pub(super) async fn list(store: &SqliteMissionStore) -> Result<Vec<Execution>, S
             .filter_map(|v| match serde_json::from_str::<Execution>(v) {
                 Ok(e) => Some(e),
                 Err(e) => {
-                    tracing::debug!("skipping unreadable cloud execution row: {e}");
+                    tracing::trace!("skipping unreadable cloud execution row: {e}");
                     None
                 }
             })
