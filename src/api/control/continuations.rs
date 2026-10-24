@@ -541,6 +541,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_schedules_keep_the_three_newest_per_mission() {
+        let (_dir, store, a) = fixture().await;
+        let mut ids = vec![];
+        for (i, cron) in ["*/30 * * * *", "0 * * * *", "0 9 * * *", "*/15 * * * *"]
+            .iter()
+            .enumerate()
+        {
+            let mut n = a.clone();
+            n.id = Uuid::new_v4();
+            n.trigger = TriggerType::Cron {
+                expression: (*cron).into(),
+                timezone: "UTC".into(),
+            };
+            n.stop_policy = StopPolicy::Never;
+            n.created_at = format!("2026-10-24T10:0{i}:00Z");
+            n.variables = HashMap::from([(
+                "__wakeup_source".into(),
+                crate::api::mission_runner::ANTIGRAVITY_SCHEDULE_SOURCE.into(),
+            )]);
+            store.create_automation(n.clone()).await.unwrap();
+            ids.push(n.id);
+        }
+        let mut active = vec![];
+        for id in &ids {
+            active.push(store.get_automation(*id).await.unwrap().unwrap().active);
+        }
+        assert_eq!(active, [false, true, true, true]);
+    }
+
+    #[tokio::test]
     async fn continuation_replacement_cancels_pending_delivery() {
         let (_dir, store, a) = fixture().await;
         stage(&store, &a, "old".into()).await.unwrap();
