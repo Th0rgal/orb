@@ -5086,7 +5086,9 @@ fn fast_mode_accepts_supported_codex_models_only() {
     assert!(validate_fast_mode("codex", Some("gpt-5.6-sol"), true).is_ok());
     assert!(validate_fast_mode("codex", Some("gpt-5.5"), true).is_ok());
     assert!(validate_fast_mode("codex", Some("gpt-5.4-mini"), true).is_ok());
-    assert!(validate_fast_mode("codex", None, true).is_err());
+    let missing = validate_fast_mode("codex", None, true).unwrap_err();
+    assert!(missing.contains("Codex default"), "{missing}");
+    assert!(missing.contains("model_override"), "{missing}");
     assert!(validate_fast_mode("claudecode", Some("gpt-5.6-sol"), true).is_err());
     assert!(validate_fast_mode("codex", Some("gpt-5.3-codex"), true).is_err());
     assert!(validate_fast_mode("codex", Some("gpt-5.3-codex"), false).is_ok());

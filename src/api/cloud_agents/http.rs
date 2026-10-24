@@ -146,7 +146,7 @@ pub async fn create(
         || req.fast_mode
     {
         return Err(bad(
-            "Cloud execution accepts only service capabilities, not harness settings",
+            "Cloud execution accepts only service capabilities, not harness settings: remove backend/agent/config_profile/model_override/model_effort/fast_mode (pick a hosted model with cloud.model, see list_cloud_models), or drop `cloud` and launch natively with backend=opencode and model_override=<provider>/<model>",
         ));
     }
     if req.remote_node_id.is_some()
@@ -156,7 +156,7 @@ pub async fn create(
         || req.attachments.as_ref().is_some_and(|a| !a.is_empty())
     {
         return Err(bad(
-            "Cloud missions do not expose Orb folders, machines or attachments",
+            "Cloud missions do not expose Orb folders, machines or attachments: remove remote_node_id/placement/working_directory/workspace_id/attachments, or drop `cloud` and launch natively with backend=opencode",
         ));
     }
     let prompt = req

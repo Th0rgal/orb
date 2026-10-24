@@ -395,6 +395,134 @@ struct StartMissionParams {
     attachments: Option<Vec<Value>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConsultModelParams {
+    /// Full `<provider>/<model>` or a short alias (`gpt-6-astra`, `fable-5.1`).
+    model: String,
+    question: String,
+    #[serde(default)]
+    files: Vec<String>,
+    /// Default true: the consultant is a pr-readonly reviewer.
+    #[serde(default)]
+    read_only: Option<bool>,
+    /// Retired: waiting would hold a shared dispatcher permit. Rejected
+    /// with a pointer to get_consult_result.
+    #[serde(default)]
+    wait_secs: Option<u64>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    github_pr: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    origin_session_id: Option<String>,
+    // Placement and lineage: filled by the mission gateway from the caller.
+    #[serde(default)]
+    parent_mission_id: Option<Uuid>,
+    #[serde(default)]
+    caller: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    remote_node_id: Option<String>,
+}
+
+fn normalize_model_token(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace(['.', '_'], "-")
+}
+
+/// Resolve `consult_model`'s `model` against the opencode model options
+/// (`provider/model` values plus routing chain ids). A full id must exist; a
+/// short alias must name exactly one model (optionally without its `claude-`
+/// prefix). Unknown and ambiguous inputs list the close valid ids.
+fn resolve_consult_model(input: &str, options: &[String]) -> Result<String, String> {
+    let wanted = normalize_model_token(input);
+    if wanted.is_empty() {
+        return Err("model is required, e.g. openai/gpt-6-astra or fable-5.1".into());
+    }
+    if let Some(exact) = options.iter().find(|o| normalize_model_token(o) == wanted) {
+        return Ok(exact.clone());
+    }
+    let mut matches: Vec<&String> = if wanted.contains('/') {
+        Vec::new()
+    } else {
+        options
+            .iter()
+            .filter(|o| {
+                let model = normalize_model_token(o.split_once('/').map_or(o.as_str(), |(_, m)| m));
+                model == wanted || model == format!("claude-{wanted}")
+            })
+            .collect()
+    };
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => {
+            let family = wanted
+                .rsplit('/')
+                .next()
+                .unwrap_or(&wanted)
+                .split('-')
+                .find(|t| !t.is_empty() && *t != "claude")
+                .unwrap_or("")
+                .to_string();
+            let mut close: Vec<&str> = options
+                .iter()
+                .filter(|o| !family.is_empty() && normalize_model_token(o).contains(&family))
+                .map(String::as_str)
+                .collect();
+            if close.is_empty() {
+                close = options.iter().map(String::as_str).collect();
+            }
+            close.truncate(25);
+            Err(format!(
+                "Unknown model '{input}' for backend opencode. Pass one of these exact ids (or an unambiguous short alias): {}",
+                close.join(", ")
+            ))
+        }
+        many => Err(format!(
+            "Model alias '{input}' is ambiguous; pass the full id, one of: {}",
+            many.iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn consult_prompt(question: &str, files: &[String], read_only: bool) -> String {
+    let mut prompt = String::new();
+    if read_only {
+        prompt.push_str(
+            "You are consulted for a second opinion. Work read-only: inspect files, run read-only commands, do not modify files, branches or PRs.\n\n",
+        );
+    }
+    prompt.push_str(question.trim());
+    let files: Vec<&str> = files
+        .iter()
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+        .collect();
+    if !files.is_empty() {
+        prompt.push_str("\n\nRead these files before answering:\n");
+        for file in files {
+            prompt.push_str("- ");
+            prompt.push_str(file);
+            prompt.push('\n');
+        }
+    }
+    prompt.push_str("\n\nEnd with a concise, self-contained final answer.");
+    prompt
+}
+
+fn mission_is_running(status: &str) -> bool {
+    matches!(status, "pending" | "active" | "waiting_background")
+}
+
 /// PR writers own an outcome, not one conversational turn. Make that runtime
 /// invariant explicit even when a controller forgets the `/goal` prefix; a
 /// bounded reviewer (`writer: false`) remains a normal one-turn mission.
@@ -1684,7 +1812,7 @@ impl AssistantMcp {
             ToolDefinition { name: "get_cloud_execution".into(), description: "Read a bounded page of durable hosted turns, external identities and results. Defaults to the latest turn and 4096 characters per result/detail; prompts are omitted. Pass offset=0 to read from the beginning. Follow page.next_offset for subsequent turns. To continue text, select that turn with offset and limit=1, then pass its text_slices field's next_offset as text_offset. Character offsets are Unicode scalar values. Poll the last unfinished turn again until terminal; revision changes as execution advances. Artifact/branch payloads are omitted; counts are included. Transport loss is not completion.".into(), input_schema: json!({"type":"object","required":["mission_id"],"properties":{"mission_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":5},"text_offset":{"type":"integer","minimum":0},"text_limit":{"type":"integer","minimum":1,"maximum":8192},"include_prompt":{"type":"boolean"}}}) },
             ToolDefinition {
                 name: "start_mission".to_string(),
-                description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. To consult another model (review, second opinion, very hard read-only question), use backend=opencode with model_override=<provider>/<model> (e.g. openai/gpt-6-astra, anthropic/claude-fable-5-1) and writer=false. For compatibility, a native agent name (codex/claudecode/antigravity/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
+                description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. To consult another model (review, second opinion, very hard read-only question), use consult_model instead: it creates the read-only opencode child (same project and machine, writer=false) and resolves short model aliases. For compatibility, a native agent name (codex/claudecode/antigravity/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
@@ -1726,6 +1854,33 @@ impl AssistantMcp {
                             }
                         }
                     }
+                }),
+            },
+            ToolDefinition {
+                name: "consult_model".to_string(),
+                description: "Ask another model a question (review, second opinion, very hard read-only question) without hand-building a mission. Creates a child mission in the caller's project, on the caller's machine and workspace, with backend=opencode, model_override=<provider>/<model> and writer=false (pr-readonly) unless read_only=false. `model` is a full <provider>/<model> id or a short alias (gpt-6-astra, fable-5.1, opus-5.5); unknown or ambiguous names are rejected with the valid ids. It returns {mission_id} at once and never waits: poll get_consult_result(mission_id) until it returns the answer.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["model", "question"],
+                    "properties": {
+                        "model": {"type": "string", "description": "<provider>/<model> (e.g. openai/gpt-6-astra) or a short alias (gpt-6-astra, fable-5.1, opus-5.5)."},
+                        "question": {"type": "string", "description": "The question, with all context the consultant needs."},
+                        "files": {"type": "array", "items": {"type": "string"}, "description": "Paths (in the shared workspace) the consultant must read."},
+                        "read_only": {"type": "boolean", "description": "Default true (writer=false, pr-readonly). false lets the consultant write."},
+                        "title": {"type": "string"},
+                        "project": {"type": "string", "description": "Defaults to the calling mission's project."},
+                        "github_pr": {"type": "string", "description": "PR under review (owner/repo#123), if any."},
+                        "origin_session_id": {"type": "string", "description": "Injected by the Hermes plugin when present; never invent one."}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "get_consult_result".to_string(),
+                description: "Read the outcome of a consult_model mission without waiting: {status, done} while it runs, plus the consultant's final answer once it is no longer pending/active. Poll it (e.g. every minute) instead of blocking.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["mission_id"],
+                    "properties": {"mission_id": {"type": "string"}}
                 }),
             },
             ToolDefinition {
@@ -2537,20 +2692,47 @@ impl AssistantMcp {
     async fn start_mission(&self, mut params: StartMissionParams) -> Result<Value, String> {
         // A scoped controller must launch work under its own project — an
         // untagged mission would escape both the roster and this scope.
+        if let (Some(scope), None) = (
+            &self.project_scope,
+            params
+                .project
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty()),
+        ) {
+            // One allowed project is unambiguous: launch there instead of
+            // refusing the call.
+            if scope.len() == 1 {
+                params.project = scope.iter().next().cloned();
+            }
+        }
         if self.project_scope.is_some() {
-            match params.project.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            match params
+                .project
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
                 Some(project) => self.assert_project_scope(project)?,
                 None => {
-                    return Err(
-                        "scoped controllers must pass `project` on start_mission so the                          mission stays inside their scope"
-                            .to_string(),
-                    )
+                    let mut allowed: Vec<&str> = self
+                        .project_scope
+                        .iter()
+                        .flatten()
+                        .map(String::as_str)
+                        .collect();
+                    allowed.sort_unstable();
+                    return Err(format!(
+                        "scoped controllers must pass `project` on start_mission so the mission stays inside their scope: pass project=\"{}\" (allowed: {})",
+                        allowed.first().copied().unwrap_or_default(),
+                        allowed.join(", ")
+                    ));
                 }
             }
         }
         let workspace_id = if params.cloud.is_some() {
             if params.workspace_id.is_some() {
-                return Err("Cloud execution does not accept a workspace".into());
+                return Err("Cloud execution does not accept a workspace: remove workspace_id, or drop `cloud` and launch natively (e.g. backend=opencode with model_override=<provider>/<model>)".into());
             }
             None
         } else {
@@ -2751,6 +2933,103 @@ impl AssistantMcp {
                 "note": "The subagent runs on a managed VM (reused from an ended sibling when one of the same size was idle). It belongs to the subagent: it is destroyed a few minutes after the subagent ends (or 15 idle minutes after it is interrupted or waiting), and at its TTL at the latest (default 60 min, auto-extended in 30 min chunks while busy and within budget). destroy_managed_machine releases it earlier."
             }))
         }
+    }
+
+    /// Model ids an opencode mission accepts (`provider/model` and chains).
+    async fn opencode_model_options(&self) -> Result<Vec<String>, String> {
+        let response = self.api_get("/api/providers/backend-models").await?;
+        let catalog = Self::response_value(response, "List opencode models").await?;
+        Ok(catalog["backends"]["opencode"]
+            .as_array()
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|o| o["value"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `consult_model`: a read-only opencode child built on `start_mission`.
+    async fn consult_model(&self, params: ConsultModelParams) -> Result<Value, String> {
+        if params.wait_secs.is_some_and(|w| w > 0) {
+            return Err("consult_model never waits (a blocking wait would hold a shared dispatcher slot): drop wait_secs, then poll get_consult_result(mission_id) until it returns the answer".into());
+        }
+        if params.question.trim().is_empty() {
+            return Err("question is required: write the full question for the consultant".into());
+        }
+        let model = resolve_consult_model(&params.model, &self.opencode_model_options().await?)?;
+        let read_only = params.read_only.unwrap_or(true);
+        let title = params
+            .title
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("Consult {model}"));
+        let started = self
+            .start_mission(StartMissionParams {
+                parent_mission_id: params.parent_mission_id,
+                caller: params.caller,
+                cloud: None,
+                title,
+                prompt: consult_prompt(&params.question, &params.files, read_only),
+                workspace_id: params.workspace_id,
+                remote_node_id: params.remote_node_id,
+                managed_ttl_minutes: None,
+                managed_from_snapshot: None,
+                budget_usd: None,
+                backend: Some("opencode".into()),
+                model_override: Some(model.clone()),
+                model_effort: None,
+                fast_mode: None,
+                config_profile: None,
+                agent: None,
+                project: params.project,
+                track: None,
+                idempotency_key: params.idempotency_key,
+                supersedes_mission_id: None,
+                intent: Some("consult_model".into()),
+                github_pr: params.github_pr,
+                writer: Some(!read_only),
+                request_merge_authority: None,
+                tags: Some(vec!["consult-model".into()]),
+                desired_state: None,
+                acceptance_criteria: Vec::new(),
+                next_check_at: None,
+                estimated_disk_gib: None,
+                origin_session_id: params.origin_session_id,
+                attachments: None,
+            })
+            .await?;
+        let mission_id = started["mission"]["id"]
+            .as_str()
+            .ok_or("Created mission response did not include an id")?
+            .to_string();
+        let status = started["mission"]["status"].as_str().unwrap_or("pending");
+        Ok(json!({
+            "mission_id": mission_id,
+            "model": model,
+            "status": status,
+            "read_only": read_only,
+            "next": format!("Poll get_consult_result(mission_id=\"{mission_id}\") until done=true; it returns the consultant's answer."),
+        }))
+    }
+
+    /// Non-blocking read of a consult_model mission's answer.
+    async fn get_consult_result(&self, params: MissionIdParams) -> Result<Value, String> {
+        let id = self.resolve_mission_id(&params.mission_id).await?;
+        let digest = self
+            .get_mission_digest(MissionIdParams {
+                mission_id: id.to_string(),
+            })
+            .await?;
+        let status = digest["status"].as_str().unwrap_or("pending").to_string();
+        let done = !mission_is_running(&status);
+        let mut out = json!({"mission_id": id, "status": status, "done": done});
+        if done {
+            out["answer"] = json!(self.last_assistant_message_bounded(&id, 20_000).await);
+        } else {
+            out["next"] = json!("Still running: call get_consult_result again later.");
+        }
+        Ok(out)
     }
 
     /// Run a bash command through `POST /api/workspaces/:id/exec`, which
@@ -3885,6 +4164,14 @@ impl AssistantMcp {
     /// Most recent assistant message content (truncated), for judging whether a
     /// mission gave up early or finished cleanly.
     async fn last_assistant_message(&self, mission_id: &Uuid) -> Option<String> {
+        self.last_assistant_message_bounded(mission_id, 600).await
+    }
+
+    async fn last_assistant_message_bounded(
+        &self,
+        mission_id: &Uuid,
+        max: usize,
+    ) -> Option<String> {
         let events = self
             .get_mission_events(MissionEventsParams {
                 mission_id: mission_id.to_string(),
@@ -3906,7 +4193,7 @@ impl AssistantMcp {
                 )
             })
             .and_then(|event| event.get("content").and_then(Value::as_str))
-            .map(|content| truncate_snippet(content, 600))
+            .map(|content| truncate_snippet(content, max))
     }
 
     async fn get_mission_health(&self, params: MissionHealthParams) -> Result<Value, String> {
@@ -4137,6 +4424,14 @@ impl AssistantMcp {
             "start_mission" => {
                 let params: StartMissionParams = parse_params(arguments)?;
                 self.start_mission(params).await
+            }
+            "consult_model" => {
+                let params: ConsultModelParams = parse_params(arguments)?;
+                self.consult_model(params).await
+            }
+            "get_consult_result" => {
+                let params: MissionIdParams = parse_params(arguments)?;
+                self.get_consult_result(params).await
             }
             "send_message_to_mission" => {
                 let params: SendMessageParams = parse_params(arguments)?;
@@ -5356,7 +5651,7 @@ mod tests {
                 );
             }
         }
-        let value = if path == "/api/control/missions" {
+        let value = if path == "/api/control/missions" && method != axum::http::Method::POST {
             json!([state.mission.clone()])
         } else if path.ends_with("/events") || path.ends_with("/running") {
             json!([])
@@ -5608,6 +5903,179 @@ mod tests {
             "missing data must not claim goal mode is disabled"
         );
         assert!(legacy["goal_objective"].is_null());
+    }
+
+    #[test]
+    fn consult_model_aliases_resolve_unambiguously() {
+        let options: Vec<String> = [
+            "openai/gpt-6-astra",
+            "anthropic/claude-fable-5-1",
+            "anthropic/claude-opus-5-5",
+            "openrouter/claude-opus-5-5",
+            "xai/grok-4.6",
+            "grok",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let r = |m: &str| resolve_consult_model(m, &options);
+        assert_eq!(r("gpt-6-astra").unwrap(), "openai/gpt-6-astra");
+        assert_eq!(r("fable-5.1").unwrap(), "anthropic/claude-fable-5-1");
+        assert_eq!(r("FABLE-5-1").unwrap(), "anthropic/claude-fable-5-1");
+        assert_eq!(r("openai/gpt-6-astra").unwrap(), "openai/gpt-6-astra");
+        assert_eq!(r("grok-4.6").unwrap(), "xai/grok-4.6");
+        assert_eq!(r("grok").unwrap(), "grok");
+        let ambiguous = r("opus-5.5").unwrap_err();
+        assert!(ambiguous.contains("ambiguous"), "{ambiguous}");
+        assert!(
+            ambiguous.contains("anthropic/claude-opus-5-5"),
+            "{ambiguous}"
+        );
+        assert!(
+            ambiguous.contains("openrouter/claude-opus-5-5"),
+            "{ambiguous}"
+        );
+        let unknown = r("gpt-6-nova").unwrap_err();
+        assert!(unknown.contains("openai/gpt-6-astra"), "{unknown}");
+        assert!(!unknown.contains("fable"), "{unknown}");
+        assert!(r("openai/gpt-9").unwrap_err().contains("Unknown model"));
+        assert!(r(" ").is_err());
+    }
+
+    #[test]
+    fn consult_prompt_is_read_only_and_lists_files() {
+        let prompt = consult_prompt("Is this sound?", &["src/a.rs".into(), " ".into()], true);
+        assert!(prompt.contains("read-only"));
+        assert!(prompt.contains("- src/a.rs\n"));
+        assert!(!prompt.contains("- \n"));
+        assert!(!consult_prompt("q", &[], false).contains("read-only"));
+    }
+
+    #[tokio::test]
+    async fn consult_model_creates_a_read_only_opencode_child() {
+        let (assistant, state, task) = mock_assistant(
+            json!({
+                "id": "11111111-1111-1111-1111-111111111111",
+                "status": "pending",
+                "backends": {"opencode": [
+                    {"value": "openai/gpt-6-astra"},
+                    {"value": "anthropic/claude-fable-5-1"}
+                ]}
+            }),
+            false,
+        )
+        .await;
+        let parent = "22222222-2222-2222-2222-222222222222";
+        let out = assistant
+            .handle_call(
+                "consult_model",
+                json!({
+                    "model": "fable-5.1", "question": "Review the plan",
+                    "files": ["docs/plan.md"], "idempotency_key": "k1",
+                    "parent_mission_id": parent, "caller": "mission",
+                    "project": "orb", "workspace_id": "33333333-3333-3333-3333-333333333333"
+                }),
+            )
+            .await
+            .unwrap();
+        let unknown = assistant
+            .handle_call("consult_model", json!({"model": "gpt-9", "question": "q"}))
+            .await
+            .unwrap_err();
+        task.abort();
+        assert_eq!(out["mission_id"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(out["model"], "anthropic/claude-fable-5-1");
+        assert!(out["next"].as_str().unwrap().contains("get_consult_result"));
+        assert!(unknown.contains("openai/gpt-6-astra"), "{unknown}");
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "an unknown model never creates a mission"
+        );
+        let (path, body) = &requests[0];
+        assert_eq!(path, "/api/control/missions");
+        assert_eq!(body["backend"], "opencode");
+        assert_eq!(body["model_override"], "anthropic/claude-fable-5-1");
+        assert_eq!(body["writer"], false);
+        assert_eq!(body["parent_mission_id"], parent);
+        assert_eq!(body["project"], "orb");
+        assert_eq!(body["origin"], "mission");
+        assert!(body["prompt"].as_str().unwrap().contains("docs/plan.md"));
+        assert!(body["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("consult-model")));
+    }
+
+    #[tokio::test]
+    async fn consult_model_never_waits_and_results_are_polled() {
+        let (assistant, state, task) = mock_assistant(
+            json!({
+                "id": "11111111-1111-1111-1111-111111111111",
+                "status": "active",
+                "backends": {"opencode": [{"value": "openai/gpt-6-astra"}]}
+            }),
+            false,
+        )
+        .await;
+        let assistant = std::sync::Arc::new(assistant);
+        let waiting = assistant
+            .handle_call(
+                "consult_model",
+                json!({"model": "gpt-6-astra", "question": "q", "wait_secs": 60}),
+            )
+            .await
+            .unwrap_err();
+        assert!(waiting.contains("get_consult_result"), "{waiting}");
+        // Many concurrent consults all return their handle promptly: nothing
+        // sleeps or polls inside the shared action dispatcher.
+        let calls = (0..16).map(|i| {
+            let assistant = assistant.clone();
+            tokio::spawn(async move {
+                assistant
+                    .handle_call(
+                        "consult_model",
+                        json!({"model": "gpt-6-astra", "question": "q", "idempotency_key": format!("k{i}")}),
+                    )
+                    .await
+            })
+        });
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::join_all(calls),
+        )
+        .await
+        .expect("consult_model must not block");
+        for result in results {
+            assert_eq!(result.unwrap().unwrap()["status"], "active");
+        }
+        let running = assistant
+            .handle_call(
+                "get_consult_result",
+                json!({"mission_id": "11111111-1111-1111-1111-111111111111"}),
+            )
+            .await
+            .unwrap();
+        task.abort();
+        assert_eq!(running["done"], false);
+        assert!(running.get("answer").is_none());
+        assert_eq!(state.requests.lock().unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn single_project_scope_fills_a_missing_project() {
+        let (mut assistant, state, task) =
+            mock_assistant(json!({"id": "11111111-1111-1111-1111-111111111111"}), false).await;
+        assistant.project_scope = Some(["verity".to_string()].into_iter().collect());
+        let params = parse_params(json!({"title": "t", "prompt": "p"})).unwrap();
+        assistant.start_mission(params).await.unwrap();
+        assistant.project_scope = Some(["a".to_string(), "b".to_string()].into_iter().collect());
+        let params = parse_params(json!({"title": "t", "prompt": "p"})).unwrap();
+        let error = assistant.start_mission(params).await.unwrap_err();
+        task.abort();
+        assert!(error.contains("project=\"a\""), "{error}");
+        assert_eq!(state.requests.lock().unwrap()[0].1["project"], "verity");
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 ---
 name: sandboxed-sh-missions
-description: "Delegate coding/automation tasks to sandboxed.sh missions via the mcp_sandboxed_assistant_* MCP. Each mission runs in an isolated container (workspace) with a chosen agent profile and a self-contained prompt. Use this skill whenever the user wants to 'launch a mission', 'sandboxed', 'spawn a worker', or delegate a multi-step coding/research task that should run in a clean environment. To consult another model (second opinion), start an opencode mission with model_override=<provider>/<model> (e.g. openai/gpt-6-astra, anthropic/claude-fable-5-1)."
+description: "Delegate coding/automation tasks to sandboxed.sh missions via the mcp_sandboxed_assistant_* MCP. Each mission runs in an isolated container (workspace) with a chosen agent profile and a self-contained prompt. Use this skill whenever the user wants to 'launch a mission', 'sandboxed', 'spawn a worker', or delegate a multi-step coding/research task that should run in a clean environment. To consult another model (review, second opinion), call consult_model(model=..., question=...): it starts the read-only opencode child for you."
 license: MIT
 metadata:
   hermes:
@@ -144,6 +144,32 @@ Recovery pattern:
 4. Relaunch a fresh mission with the shortened `/goal`; do not keep retrying the same oversized objective.
 
 This limit is separate from model context size. A model can handle the information, but the Codex goal API rejects overlong goal objectives before execution starts.
+
+### Consulting another model: `consult_model`
+
+For a review, second opinion or very hard read-only question, call
+`consult_model` instead of hand-building a `start_mission`:
+
+```
+consult_model(model="gpt-6-astra",        # or "fable-5.1", "opus-5.5", or a full "openai/gpt-6-astra"
+              question="<self-contained question + expected decision/artifact>",
+              files=["docs/plan.md"],      # optional: paths the consultant must read
+              idempotency_key="<stable key>")
+```
+
+It creates a child mission in the caller's project (inherited from the
+parent), on the parent's machine and workspace, with backend=opencode,
+model_override=<provider>/<model> and writer=false (pr-readonly). Pass
+`read_only=false` only if the consultant must write. Short aliases resolve
+against the live opencode catalog; an unknown or ambiguous name is rejected
+with the valid ids. It returns {mission_id} immediately and never waits:
+poll get_consult_result(mission_id) until done=true, which returns the
+answer; send follow-ups to the same mission.
+
+Launch rejections name their fix: a child with a different project is told to
+use the parent's project (omit `project` to inherit it), and a cloud launch
+carrying placement/harness fields is told which field to remove or to launch
+natively with backend=opencode.
 
 ### Backend tiering for cost optimisation (multi-provider routing)
 
