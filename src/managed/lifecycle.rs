@@ -55,7 +55,7 @@ impl Default for LifecyclePolicy {
         Self {
             idle_minutes: 30,
             ended_grace_minutes: 5,
-            waiting_grace_minutes: 60,
+            waiting_grace_minutes: 15,
         }
     }
 }

@@ -486,6 +486,10 @@ async fn authorize(
         "spawn_managed_machine" => {
             args["owner_mission_id"] = json!(own.to_string());
         }
+        // A mission reads its own budget only.
+        "get_budget" => {
+            args["mission_id"] = json!(own.to_string());
+        }
         "destroy_managed_machine" | "extend_managed_machine" => {
             let id = args
                 .get("machine_id")
@@ -493,10 +497,21 @@ async fn authorize(
                 .unwrap_or_default()
                 .to_string();
             managed_owner_check(&store, own, &id).await?;
-            // Extending is a takeover: the caller's lifetime now governs the VM.
+            // Extending a descendant's VM is a takeover (the caller's lifetime
+            // now governs it). A child extending a VM its ancestor rented
+            // leaves the ancestor as owner: the child is a tenant, and the
+            // VM must not go when that child completes.
             if tool.definition.name == "extend_managed_machine" {
                 if let Some(manager) = crate::managed::global() {
-                    manager.adopt(&id, &own.to_string()).await;
+                    let owner = manager
+                        .get(&id)
+                        .await
+                        .and_then(|m| m.owner_mission_id)
+                        .and_then(|o| Uuid::parse_str(&o).ok());
+                    let caller_chain = mission_lineage(&store, own).await;
+                    if !owner_is_ancestor(&caller_chain, owner) {
+                        manager.adopt(&id, &own.to_string()).await;
+                    }
                 }
             }
         }
@@ -631,6 +646,11 @@ async fn mission_lineage(
         }
     }
     chain
+}
+
+/// The machine's owner is the caller or one of its ancestors.
+pub(crate) fn owner_is_ancestor(caller_chain: &[Uuid], owner: Option<Uuid>) -> bool {
+    owner.is_some_and(|o| caller_chain.contains(&o))
 }
 
 /// Owner, ancestor or descendant of the owning mission may act on a machine.
@@ -1230,5 +1250,20 @@ mod tests {
         assert!(claim_call_slot(Uuid::new_v4()).is_ok());
         permits.pop();
         assert!(claim_call_slot(id).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod managed_ancestor_tests {
+    use uuid::Uuid;
+
+    #[test]
+    fn a_child_never_takes_over_its_ancestors_vm() {
+        let (parent, child) = (Uuid::new_v4(), Uuid::new_v4());
+        let chain = vec![child, parent];
+        assert!(super::owner_is_ancestor(&chain, Some(parent)));
+        assert!(super::owner_is_ancestor(&chain, Some(child)));
+        assert!(!super::owner_is_ancestor(&chain, Some(Uuid::new_v4())));
+        assert!(!super::owner_is_ancestor(&chain, None));
     }
 }

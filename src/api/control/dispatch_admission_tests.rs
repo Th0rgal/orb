@@ -13191,3 +13191,110 @@ async fn queued_followup_is_delivered_after_running_project_move() {
     assert_eq!(leases[0].slug, "verity");
     NATIVE_FIXTURES.lock().unwrap().remove(&a.id);
 }
+
+#[tokio::test]
+async fn auto_managed_launch_is_validated_before_any_vm_is_rented() {
+    // Boat review 2026-10-24: four VMs were rented and destroyed because the
+    // child launch failed after the VM existed (REMOTE_MODEL_REQUIRED,
+    // REMOTE_AUTH_REQUIRED for grok, parallel_missions_cap).
+    let h = Harness::new().await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    {
+        let mut registry = h.state.backend_registry.write().await;
+        registry.register(Arc::new(crate::backend::opencode::OpenCodeBackend::new(
+            "http://127.0.0.1:1".into(),
+            None,
+            true,
+        )));
+        registry.register(Arc::new(crate::backend::grok::GrokBackend::new()));
+    }
+    let before = h
+        .control
+        .mission_store
+        .list_missions(500, 0)
+        .await
+        .unwrap()
+        .len();
+    let check = |body: serde_json::Value| {
+        let state = h.state.clone();
+        let user = h.user.clone();
+        async move {
+            let request: CreateMissionRequest = serde_json::from_value(body).unwrap();
+            super::create_mission_inner(
+                State(state),
+                Extension(user),
+                Some(Json(request)),
+                false,
+                None,
+            )
+            .await
+        }
+    };
+    let ok = check(json!({
+        "title": "probe", "backend": "claudecode", "prompt": "do it",
+        "remote_node_id": "auto-managed:small", "validate_only": true,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(ok.1 .0["valid"], json!(true));
+    let err = check(json!({
+        "title": "probe", "backend": "opencode", "prompt": "do it",
+        "remote_node_id": "auto-managed:small", "validate_only": true,
+    }))
+    .await
+    .unwrap_err();
+    assert!(err.1.starts_with("REMOTE_MODEL_REQUIRED"), "{err:?}");
+    let err = check(json!({
+        "title": "probe", "backend": "grok", "prompt": "do it",
+        "remote_node_id": "auto-managed", "validate_only": true,
+    }))
+    .await
+    .unwrap_err();
+    assert!(err.1.starts_with("REMOTE_AUTH_REQUIRED"), "{err:?}");
+    // auto-managed is never persisted as a placement.
+    let err = check(json!({
+        "title": "probe", "backend": "claudecode", "prompt": "do it",
+        "remote_node_id": "auto-managed:small",
+    }))
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    let after = h
+        .control
+        .mission_store
+        .list_missions(500, 0)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(before, after, "validation must not create missions");
+}
+
+#[tokio::test]
+async fn managed_spawn_refuses_a_mission_of_another_tenant() {
+    // A VM must never be charged to (or escape through) a mission the caller
+    // does not own: its budget pool is resolved only from the caller's store.
+    let h = Harness::new().await;
+    let foreign = Uuid::new_v4();
+    let req: crate::managed::SpawnRequest = serde_json::from_value(json!({
+        "owner_mission_id": foreign.to_string(), "wait": false,
+    }))
+    .unwrap();
+    let response = crate::api::managed_machines::spawn(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(req),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // The caller's own mission resolves: lineage starts there.
+    let own = h.writer(MissionStatus::Active, None).await;
+    let chain = crate::api::mission_budget::lineage(&h.control.mission_store, own.id).await;
+    assert_eq!(chain.first(), Some(&own.id.to_string()));
+    assert!(
+        crate::api::mission_budget::lineage(&h.control.mission_store, foreign)
+            .await
+            .is_empty()
+    );
+}

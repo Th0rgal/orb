@@ -45,7 +45,7 @@ for h in claude codex opencode gemini agy; do
   if [ -n "$want" ] && grep -qF -- "$want" <<<"$got"; then pass "$h --version $want (as $NU)"
   else fail "$h --version: want '$want' got '$(echo "$got" | head -1 | cut -c1-100)'"; fi
 done
-for t in claude codex opencode gemini agy lake lean elan turbo-lean lean-native certified-search research-governor sandboxed-node node; do
+for t in claude codex opencode gemini agy lake lean elan turbo-lean lean-native certified-search research-governor sandboxed-node node gh rg fd clang lld; do
   as_node sh -c "command -v $t" >/dev/null || fail "$t not on PATH for $NU"
 done
 check "lake --version" as_node lake --version

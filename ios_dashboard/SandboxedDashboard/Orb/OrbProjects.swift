@@ -1431,6 +1431,7 @@ struct OrbProjectPage: View {
     @State private var deletingFolder: String?
     @State private var loadedArchived = false
     @State private var renamingMission: OrbRow?
+    @State private var settingsMission: OrbRow?
     @State private var missionTitleDraft = ""
     private let moveClipboard = OrbMoveClipboard.shared
     private let api = OrbCore.shared
@@ -1564,6 +1565,10 @@ struct OrbProjectPage: View {
                 TextField("Folder name", text: $folderName)
                 Button("Create") { Task { await mkdir() } }
                 Button("Cancel", role: .cancel) { newFolderParent = ""; folderName = "" }
+            }
+            .sheet(item: $settingsMission) { row in
+                OrbMissionSettingsSheet(missionId: row.id, title: OrbStyle.displayTitle(row.name))
+                    .presentationDetents([.medium, .large])
             }
             .alert("Rename conversation", isPresented: Binding(get: { renamingMission != nil }, set: { if !$0 { renamingMission = nil } })) {
                 TextField("Title", text: $missionTitleDraft)
@@ -1858,6 +1863,7 @@ struct OrbProjectPage: View {
     @ViewBuilder private func missionMenu(_ row: OrbRow) -> some View {
         Button { missionTitleDraft = OrbStyle.displayTitle(row.name); renamingMission = row } label: { Label("Rename", systemImage: "pencil") }
         Button { moveClipboard.pick(row, from: project.id) } label: { Label("Move…", systemImage: "folder") }
+        Button { settingsMission = row } label: { Label("Mission settings…", systemImage: "slider.horizontal.3") }
         Divider()
         if row.missionState?.canReopen == true {
             Button { Task { await setStatus(row, "paused") } } label: {

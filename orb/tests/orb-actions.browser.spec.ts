@@ -109,7 +109,7 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
   // Identity actions only — no project/file creation leaking onto an agent row.
-  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Copy mission ID"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Copy mission ID", "Mission settings…"]);
 
   await menu.getByRole("menuitem", { name: "Copy mission ID" }).click();
   expect(await copied(page)).toEqual([MISSION_ID]);
@@ -119,6 +119,18 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
   await expect(row).toHaveClass(/active/);
   await expect(page.locator(".tb-title")).toHaveText("New Agent");
   await expect(page.getByPlaceholder("Describe a task, / for commands, @ for context")).toBeVisible();
+});
+
+test("right-click an agent row: Mission settings… opens the settings sheet", async ({ page }) => {
+  await setup(page);
+  await expandProject(page);
+  await page.getByRole("button", { name: /Lido SRv3 report/ }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Mission settings…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Mission settings" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Budget" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).first().click();
+  await expect(dialog).not.toBeVisible();
 });
 
 test("finished agent rows offer the same copy, and it is never an execution id", async ({ page }) => {

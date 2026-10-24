@@ -118,6 +118,16 @@ pub struct CreateMissionRequest {
     /// owner, and the parent its requester.
     #[serde(default)]
     pub claim_managed_machine_id: Option<String>,
+    /// Optional managed-machine spending budget (USD) for this mission and
+    /// its descendants. Under an ancestor budget it is a sub-budget and must
+    /// fit the ancestor pool's remaining amount.
+    #[serde(default)]
+    pub budget_usd: Option<f64>,
+    /// Run every check a create would run (model, harness auth, caps,
+    /// budget) and return `{"valid": true}` without creating anything.
+    /// `start_mission` with `auto-managed` calls this before renting a VM.
+    #[serde(default)]
+    pub validate_only: Option<bool>,
     /// Catch-all for unrecognized request fields. Serde ignores unknown fields
     /// by default, which has repeatedly hidden client bugs (a `prompt` sent
     /// before the field existed, a mistyped `target_mission_id`). Captured
@@ -984,6 +994,8 @@ pub(in crate::api) async fn create_mission_inner(
         attachments: None,
         placement: None,
         claim_managed_machine_id: None,
+        budget_usd: None,
+        validate_only: None,
         extra: Default::default(),
     });
 
@@ -1919,7 +1931,16 @@ pub(in crate::api) async fn create_mission_inner(
                 "remote-node MVP does not support future not_before scheduling yet; create the remote mission after the dispatch window opens".to_string(),
             ));
         }
-        if node_id.eq_ignore_ascii_case("auto") {
+        if is_auto_managed(node_id) {
+            // The VM does not exist yet: only a pre-rent validation may name
+            // `auto-managed`; start_mission rents it, then creates for real.
+            if req.validate_only != Some(true) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "auto-managed placement is resolved by start_mission; pass the rented machine's node id".to_string(),
+                ));
+            }
+        } else if node_id.eq_ignore_ascii_case("auto") {
             // Capacity-aware auto placement, resolved BEFORE the mission is
             // persisted so placement failures surface as a clean API error
             // instead of an orphaned failed mission.
@@ -1983,9 +2004,14 @@ pub(in crate::api) async fn create_mission_inner(
     }
 
     if let (Some(node_id), Some(plan)) = (remote_node_id.as_deref(), remote_plan.as_ref()) {
-        remote_grok::require_node_managed_auth(&state, node_id, plan)
-            .await
-            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        if is_auto_managed(node_id) {
+            managed_auth_precheck(plan, crate::managed::global().as_deref(), &user.id)
+                .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        } else {
+            remote_grok::require_node_managed_auth(&state, node_id, plan)
+                .await
+                .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        }
     }
 
     let control = control_for_user(&state, &user).await;
@@ -2039,6 +2065,39 @@ pub(in crate::api) async fn create_mission_inner(
                 .await
                 .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         }
+    }
+    // Budget: a sub-budget must fit the parent's pool (checked before the
+    // mission exists; recorded once it does).
+    if let Some(amount) = req.budget_usd {
+        crate::managed::budget::validate_amount(amount)
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        if let (Some(parent), Some(manager)) = (req.parent_mission_id, crate::managed::global()) {
+            if let Some(pool) =
+                crate::api::mission_budget::pool_for(&control.mission_store, parent, &user.id).await
+            {
+                if let Some(max) = manager.max_grant("", Some(&pool)).await {
+                    if amount > max + 1e-9 {
+                        return Err((
+                            StatusCode::PAYMENT_REQUIRED,
+                            serde_json::json!({
+                                "error": "sub_budget_exceeds_pool",
+                                "pool_id": pool,
+                                "requested_usd": amount,
+                                "remaining_usd": max,
+                                "message": format!("budget_usd ${amount:.2} exceeds the parent pool's remaining ${max:.4}"),
+                            })
+                            .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if req.validate_only == Some(true) {
+        return Ok((
+            axum::http::HeaderMap::new(),
+            Json(serde_json::json!({ "valid": true })),
+        ));
     }
     if let Err(error) = control
         .cmd_tx
@@ -2108,6 +2167,34 @@ pub(in crate::api) async fn create_mission_inner(
             .await
         {
             tracing::warn!(mission_id = %mission.id, %machine, %error, "could not record the managed machine's owner");
+        }
+    }
+
+    if let Some(amount) = req.budget_usd {
+        if let Err(error) = crate::api::mission_budget::set_budget(
+            &control.mission_store,
+            &user,
+            mission.id,
+            Some(amount),
+        )
+        .await
+        {
+            tracing::warn!(mission_id = %mission.id, %error, "could not record the mission budget");
+        }
+    }
+    // The claimed machine charges to the new mission's pool.
+    if let (Some(machine), Some(manager)) = (
+        req.claim_managed_machine_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty()),
+        crate::managed::global(),
+    ) {
+        let pool =
+            crate::api::mission_budget::pool_for(&control.mission_store, mission.id, &user.id)
+                .await;
+        if pool.is_some() {
+            manager.set_machine_pool(machine, pool).await;
         }
     }
 
@@ -2764,4 +2851,43 @@ pub(super) fn remote_dispatch_is_scheduled_for_future(
         .map(str::trim)
         .is_some_and(|id| !id.is_empty())
         && not_before.is_some_and(|t| t > now)
+}
+
+/// `auto-managed` / `auto-managed:<size>`: a VM start_mission rents.
+pub(crate) fn is_auto_managed(node_id: &str) -> bool {
+    node_id.to_ascii_lowercase().starts_with("auto-managed")
+}
+
+/// Harness auth a fresh `orb-node-base` VM can satisfy, decided before the
+/// VM is rented: the image has no grok login, and the owner's Antigravity
+/// sign-in is projected only when the operator allows it.
+pub(crate) fn managed_auth_precheck(
+    plan: &RemoteHarnessPlan,
+    manager: Option<&crate::managed::ManagedManager>,
+    user_id: &str,
+) -> Result<(), String> {
+    match plan {
+        RemoteHarnessPlan::Grok { .. } => Err(format!(
+            "{}: managed VMs (orb-node-base) have no grok login; pick claudecode, codex or opencode (with model_override) for auto-managed",
+            remote_grok::REMOTE_AUTH_REQUIRED
+        )),
+        RemoteHarnessPlan::Antigravity { .. } => {
+            let allowed = manager.is_some_and(|m| m.runtime_settings().antigravity_on_managed)
+                && crate::managed::antigravity_owner_allowed(
+                    Some(user_id),
+                    std::env::var("SANDBOXED_MANAGED_ANTIGRAVITY_USERS")
+                        .ok()
+                        .as_deref(),
+                );
+            if allowed {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: Antigravity sign-in projection onto managed VMs is disabled for this owner",
+                    remote_grok::REMOTE_AUTH_REQUIRED
+                ))
+            }
+        }
+        _ => Ok(()),
+    }
 }

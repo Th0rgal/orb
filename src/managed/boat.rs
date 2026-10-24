@@ -126,6 +126,12 @@ pub fn is_ready_state(state: &str) -> bool {
 }
 
 /// boat states after which nothing is billed.
+/// boat answers `HTTP 400 stop_failed` for a sandbox that is not yet
+/// stoppable (fresh, still booting): retry the delete.
+pub fn stop_failed_retryable(error: &str) -> bool {
+    error.contains("stop_failed")
+}
+
 pub fn is_stopped_state(state: &str) -> bool {
     matches!(
         state,
@@ -241,6 +247,29 @@ impl ManagedProvider for BoatProvider {
             Ok(_) => Ok(()),
             // Already stopped / gone.
             Err(e) if e.contains("HTTP 404") || e.contains("HTTP 409") => Ok(()),
+            // A sandbox that is still starting answers `stop_failed`: wait
+            // for it to settle and retry the delete instead of leaving it.
+            Err(e) if stop_failed_retryable(&e) => {
+                let mut last = e;
+                for attempt in 1..=3u64 {
+                    tokio::time::sleep(Duration::from_secs(3 * attempt)).await;
+                    match self
+                        .call(
+                            reqwest::Method::DELETE,
+                            &format!("/sandboxes/{provider_id}"),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) => return Ok(()),
+                        Err(e) if e.contains("HTTP 404") => return Ok(()),
+                        Err(e) => last = e,
+                    }
+                }
+                Err(last)
+            }
             Err(e) => Err(e),
         }
     }

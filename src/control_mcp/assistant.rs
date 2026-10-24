@@ -271,6 +271,20 @@ struct SpawnManagedParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListManagedParams {
+    /// Full rows (every field, last 24 h history) instead of the summary.
+    #[serde(default)]
+    verbose: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetBudgetParams {
+    /// Set by the gateway to the calling mission (executors); Hermes may name one.
+    #[serde(default)]
+    mission_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ManagedIdParams {
     machine_id: String,
     #[serde(default)]
@@ -295,6 +309,10 @@ struct StartMissionParams {
     remote_node_id: Option<String>,
     #[serde(default)]
     managed_ttl_minutes: Option<u64>,
+    /// Optional managed-machine budget (USD) for the new mission's subtree;
+    /// under a parent budget it is a sub-budget carved from the parent pool.
+    #[serde(default)]
+    budget_usd: Option<f64>,
     #[serde(default)]
     backend: Option<String>,
     #[serde(default)]
@@ -1467,14 +1485,14 @@ impl AssistantMcp {
         vec![
             ToolDefinition {
                 name: "spawn_managed_machine".to_string(),
-                description: "Rent a fresh, disposable cloud VM (boat.dev, EU) and enroll it as a compute node, so you can run a subagent or heavy job on dedicated CPU/RAM instead of sharing the fleet. Use this whenever a task needs more compute than you have (parallel builds, big test suites, memory-hungry Lean/Rust/ML work, isolation from the shared nodes) or get_compute_fleet shows no free capacity. You choose the size: small = 2 vCPU / 4 GB RAM / 12 GB disk ($0.018/h, default), default = 4 vCPU / 8 GB / 50 GB ($0.036/h), large = 8 vCPU / 16 GB / 125 GB ($0.072/h), xlarge = 16 vCPU / 32 GB / 251 GB ($0.20/h); or pass cpu and/or ram_gb and the smallest fitting size is picked. The VM comes with claude, codex, opencode, gemini, agy, elan/Lean v4.35.0, turbo-lean, lean-native and certified-search, but NO credentials and no private checkouts (it is an untrusted, managed trust class: never send secrets or private-host work there). Result (via get_action) has its short `name` (e.g. small-a, large-b): start a subagent there with start_mission(remote_node_id=name, backend=..., prompt=...). Shortcut: start_mission(remote_node_id=\"auto-managed:<size>\") spawns and places in one call. Every machine has a TTL (default 120 min, max 720) and is destroyed a few minutes after your mission ends, after 30 idle minutes while your mission is not working, or at its TTL. Call destroy_managed_machine as soon as you are done.".to_string(),
+                description: "Rent a fresh, disposable cloud VM (boat.dev, EU) and enroll it as a compute node, so you can run a subagent or heavy job on dedicated CPU/RAM instead of sharing the fleet. Use this whenever a task needs more compute than you have (parallel builds, big test suites, memory-hungry Lean/Rust/ML work, isolation from the shared nodes) or get_compute_fleet shows no free capacity. You choose the size: small = 2 vCPU / 4 GB RAM / 12 GB disk ($0.018/h, default), default = 4 vCPU / 8 GB / 50 GB ($0.036/h), large = 8 vCPU / 16 GB / 125 GB ($0.072/h), xlarge = 16 vCPU / 32 GB / 251 GB ($0.20/h); or pass cpu and/or ram_gb and the smallest fitting size is picked. The VM comes with claude, codex, opencode, gemini, agy, elan/Lean v4.35.0, turbo-lean, lean-native and certified-search, but NO credentials and no private checkouts (it is an untrusted, managed trust class: never send secrets or private-host work there). Result (via get_action) has its short `name` (e.g. small-a, large-b): start a subagent there with start_mission(remote_node_id=name, backend=..., prompt=...). Shortcut: start_mission(remote_node_id=\"auto-managed:<size>\") spawns and places in one call. All sizes run the same CPU (AMD Ryzen 9 9950X, Zen 5, AVX-512, VPCLMULQDQ): size buys cores and RAM, not CPU features, so use small or default for probes and audits. Every machine has a TTL (default 60 min, auto-extended in 30 min chunks while busy, max 720) and is destroyed a few minutes after your mission ends, 15 idle minutes after it is interrupted or waiting, or at its TTL. It is charged to your mission's budget pool if one is set (see get_budget). Call destroy_managed_machine as soon as you are done.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "size": {"type": "string", "enum": ["small", "default", "large", "xlarge"], "description": "small=2 vCPU/4 GB, default=4 vCPU/8 GB, large=8 vCPU/16 GB, xlarge=16 vCPU/32 GB. Omit to use cpu/ram_gb or the default (small)."},
                         "cpu": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Minimum vCPUs needed (alternative to size)."},
                         "ram_gb": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Minimum RAM in GB needed (alternative to size)."},
-                        "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Hard lifetime; the VM is destroyed when it expires. Default 120."},
+                        "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Initial lifetime; auto-extended while busy (within budget). Default 60."},
                         "image": {"type": "string", "description": "Image (named snapshot). Default orb-node-base."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
                     }
@@ -1482,8 +1500,13 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "list_managed_machines".to_string(),
-                description: "List rented managed VMs (boat.dev): id, node_id, size, CPU/RAM, state, TTL (expires_at), cost so far, plus today's spend and running count (and any operator-set caps; null means unlimited) and the size/price table. Check this before spawning to reuse a machine you already own.".to_string(),
-                input_schema: json!({"type": "object", "properties": {}}),
+                description: "List live managed VMs (boat.dev) compactly: name, size, state, owner, expires_at, reap_at, cost so far, plus today's spend, running count and caps (null = unlimited). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
+                input_schema: json!({"type": "object", "properties": {"verbose": {"type": "boolean", "description": "Full rows and history (large)."}}}),
+            },
+            ToolDefinition {
+                name: "get_budget".to_string(),
+                description: "Your mission's managed-VM spending budget: mode (own, pooled from an ancestor, or none = only the daily cap), the pool's budget, spent, reserved (min(TTL, 60 min) of each live VM), held by children's sub-budgets, remaining, the most you may grant a child (start_mission budget_usd), and each child's usage. Spawns, extensions and sub-budgets beyond the remaining amount are refused with budget_exceeded / sub_budget_exceeds_pool.".to_string(),
+                input_schema: json!({"type": "object", "properties": {"mission_id": {"type": "string", "description": "Hermes only; missions always get their own."}}}),
             },
             ToolDefinition {
                 name: "destroy_managed_machine".to_string(),
@@ -2522,15 +2545,55 @@ impl AssistantMcp {
             None => None,
         };
         let mut managed_machine = Value::Null;
-        if let Some(size) = params
+        let mut managed_reused = false;
+        let auto_managed_size = params
             .remote_node_id
             .as_deref()
             .map(str::trim)
             .filter(|r| r.to_ascii_lowercase().starts_with("auto-managed"))
-            .map(|r| r.split_once(':').map(|(_, s)| s.trim().to_string()))
-        {
+            .map(|r| r.split_once(':').map(|(_, s)| s.trim().to_string()));
+        if let Some(size) = auto_managed_size {
+            // Validate the launch (model, harness auth, caps, budget) before
+            // renting: a rejected child must never cost a VM.
+            let check = self
+                .api_post(
+                    "/api/control/missions",
+                    json!({
+                        "validate_only": true,
+                        "title": params.title,
+                        "parent_mission_id": params.parent_mission_id,
+                        "remote_node_id": params.remote_node_id,
+                        "backend": backend,
+                        "model_override": params.model_override,
+                        "model_effort": params.model_effort,
+                        "fast_mode": params.fast_mode.unwrap_or(false),
+                        "prompt": prompt,
+                        "project": params.project,
+                        "track": params.track,
+                        "idempotency_key": params.idempotency_key,
+                        "github_pr": params.github_pr,
+                        "writer": writer,
+                        "tags": tags,
+                        "budget_usd": params.budget_usd,
+                        "origin": if started_by_mission { "mission" } else { "hermes" },
+                        "origin_session_id": origin_session_id,
+                    }),
+                )
+                .await?;
+            let status = check.status();
+            let text = check.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(format!(
+                    "start_mission rejected before renting a managed VM (nothing was created or billed): {text}"
+                ));
+            }
+            let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            if parsed["valid"].as_bool() != Some(true) && parsed["id"].as_str().is_some() {
+                // Idempotent replay of an existing mission: nothing to rent.
+                return Ok(json!({ "mission": parsed }));
+            }
             let spawned = self
-                .spawn_managed_machine(
+                .spawn_managed_machine_with(
                     SpawnManagedParams {
                         size: size.filter(|s| !s.is_empty()),
                         cpu: None,
@@ -2541,9 +2604,12 @@ impl AssistantMcp {
                         owner_mission_id: None,
                     },
                     params.parent_mission_id.map(|id| id.to_string()),
+                    params.budget_usd,
+                    true,
                 )
                 .await?;
             params.remote_node_id = spawned["node_id"].as_str().map(str::to_string);
+            managed_reused = spawned["machine"]["reused"].as_bool() == Some(true);
             managed_machine = spawned["machine"].clone();
         }
         let mut body = json!({
@@ -2586,6 +2652,7 @@ impl AssistantMcp {
             // The VM rented above serves this new mission: Core makes the
             // mission its owner (the caller becomes the requester).
             "claim_managed_machine_id": managed_machine["id"].as_str(),
+            "budget_usd": params.budget_usd,
         });
         if let Some(cloud) = params.cloud {
             body["cloud"] = cloud;
@@ -2605,12 +2672,13 @@ impl AssistantMcp {
         let mission = match created {
             Ok(mission) if mission["id"].as_str().is_some() => mission,
             other => {
-                // Do not leave a rented VM behind for a mission that never started.
-                if let Some(id) = managed_machine["id"].as_str() {
+                // Do not leave a rented VM behind for a mission that never
+                // started (a reused sibling VM is released to its grace).
+                if let (Some(id), false) = (managed_machine["id"].as_str(), managed_reused) {
                     let _ = self
                         .managed_request(
                             reqwest::Method::DELETE,
-                            format!("/api/managed-machines/{id}"),
+                            format!("/api/managed-machines/{id}?reason=launch_failed"),
                             None,
                         )
                         .await;
@@ -2627,7 +2695,8 @@ impl AssistantMcp {
             Ok(json!({
                 "mission": mission,
                 "managed_machine": managed_machine,
-                "note": "The subagent runs on a rented managed VM. It belongs to the subagent: it is destroyed shortly after the subagent ends (or after 30 idle minutes once the subagent is interrupted or waiting), and at its TTL at the latest. destroy_managed_machine releases it earlier."
+                "reused_idle_machine": managed_reused,
+                "note": "The subagent runs on a managed VM (reused from an ended sibling when one of the same size was idle). It belongs to the subagent: it is destroyed a few minutes after the subagent ends (or 15 idle minutes after it is interrupted or waiting), and at its TTL at the latest (default 60 min, auto-extended in 30 min chunks while busy and within budget). destroy_managed_machine releases it earlier."
             }))
         }
     }
@@ -3048,6 +3117,17 @@ impl AssistantMcp {
         params: SpawnManagedParams,
         owner_mission_id: Option<String>,
     ) -> Result<Value, String> {
+        self.spawn_managed_machine_with(params, owner_mission_id, None, false)
+            .await
+    }
+
+    async fn spawn_managed_machine_with(
+        &self,
+        params: SpawnManagedParams,
+        owner_mission_id: Option<String>,
+        sub_budget_usd: Option<f64>,
+        reuse_idle: bool,
+    ) -> Result<Value, String> {
         let machine = self
             .managed_request(
                 reqwest::Method::POST,
@@ -3060,6 +3140,8 @@ impl AssistantMcp {
                     "image": params.image,
                     "reason": params.reason,
                     "owner_mission_id": owner_mission_id,
+                    "sub_budget_usd": sub_budget_usd,
+                    "reuse_idle": reuse_idle,
                     "wait": true,
                 })),
             )
@@ -4035,8 +4117,27 @@ impl AssistantMcp {
                 self.spawn_managed_machine(params, owner).await
             }
             "list_managed_machines" => {
-                self.managed_request(reqwest::Method::GET, "/api/managed-machines".into(), None)
-                    .await
+                let params: ListManagedParams = parse_params(arguments)?;
+                let list = self
+                    .managed_request(reqwest::Method::GET, "/api/managed-machines".into(), None)
+                    .await?;
+                Ok(if params.verbose == Some(true) {
+                    list
+                } else {
+                    compact_managed_list(&list)
+                })
+            }
+            "get_budget" => {
+                let params: GetBudgetParams = parse_params(arguments)?;
+                let id = params
+                    .mission_id
+                    .ok_or("get_budget needs mission_id (set automatically for missions)")?;
+                self.managed_request(
+                    reqwest::Method::GET,
+                    format!("/api/control/missions/{}/budget", urlencoding::encode(&id)),
+                    None,
+                )
+                .await
             }
             "destroy_managed_machine" => {
                 let params: ManagedIdParams = parse_params(arguments)?;
@@ -7040,5 +7141,71 @@ mod tests {
         assert_eq!(current["env_vars"]["TOKEN"], "secret");
         assert_eq!(current["skills"], json!(["lean", "github"]));
         assert_eq!(current["mcps_replace_defaults"], false);
+    }
+}
+
+/// `list_managed_machines` summary: live machines with the fields an agent
+/// needs, plus the budget block (the full list was ~60 KB and truncated).
+fn compact_managed_list(list: &Value) -> Value {
+    let machines: Vec<Value> = list["machines"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|m| !matches!(m["state"].as_str(), Some("destroyed") | Some("failed")))
+                .map(|m| {
+                    json!({
+                        "name": m["name"],
+                        "id": m["id"],
+                        "node_id": m["node_id"],
+                        "size": m["size"],
+                        "state": m["state"],
+                        "owner_mission_id": m["owner_mission_id"],
+                        "expires_at": m["expires_at"],
+                        "reap_at": m["reap_at"],
+                        "reap_reason": m["reap_reason"],
+                        "cost_usd": m["cost_usd"],
+                        "budget_pool_id": m["budget_pool_id"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let today = list["daily_spend"]
+        .as_array()
+        .and_then(|d| d.last())
+        .map(|d| d["usd"].clone())
+        .unwrap_or(Value::Null);
+    json!({
+        "enabled": list["enabled"],
+        "machines": machines,
+        "budget": list["budget"],
+        "spend_today_usd": today,
+        "hint": "verbose=true for full rows and history; get_budget for your mission's budget pool",
+    })
+}
+
+#[cfg(test)]
+mod compact_managed_tests {
+    use serde_json::json;
+
+    #[test]
+    fn compact_list_keeps_live_summary_rows_only() {
+        let full = json!({
+            "enabled": true,
+            "machines": [
+                {"name": "small-a", "id": "mm1", "state": "online", "size": "small",
+                 "cpu": 2, "error": null, "reason": "long text"},
+                {"name": "", "id": "mm0", "state": "destroyed", "size": "xlarge"}
+            ],
+            "budget": {"spent_today_usd": 0.1},
+            "daily_spend": [{"day": "2026-10-23", "usd": 1.0}, {"day": "2026-10-24", "usd": 0.25}],
+            "sizes": [{"size": "small"}],
+        });
+        let c = super::compact_managed_list(&full);
+        assert_eq!(c["machines"].as_array().unwrap().len(), 1);
+        assert_eq!(c["machines"][0]["name"], "small-a");
+        assert!(c["machines"][0].get("reason").is_none());
+        assert_eq!(c["spend_today_usd"], 0.25);
+        assert!(c.get("sizes").is_none());
     }
 }
