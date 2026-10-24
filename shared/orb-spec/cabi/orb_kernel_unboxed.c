@@ -5348,3 +5348,32 @@ goto v___jp_1739_;
 }
 }
 }
+LEAN_EXPORT uint64_t orb_stats_settle_step(uint64_t v_acc_1791_, uint64_t v_cost_1792_, uint8_t v_seen_1793_){
+_start:
+{
+uint8_t v___x_1794_; uint8_t v___x_1795_; 
+v___x_1794_ = 1;
+v___x_1795_ = lean_uint8_dec_eq(v_seen_1793_, v___x_1794_);
+if (v___x_1795_ == 0)
+{
+uint64_t v___x_1796_; uint64_t v___x_1797_; uint8_t v___x_1798_; 
+v___x_1796_ = 18446744073709551615ULL;
+v___x_1797_ = lean_uint64_sub(v___x_1796_, v_cost_1792_);
+v___x_1798_ = lean_uint64_dec_le(v_acc_1791_, v___x_1797_);
+if (v___x_1798_ == 0)
+{
+return v___x_1796_;
+}
+else
+{
+uint64_t v___x_1799_; 
+v___x_1799_ = lean_uint64_add(v_acc_1791_, v_cost_1792_);
+return v___x_1799_;
+}
+}
+else
+{
+return v_acc_1791_;
+}
+}
+}

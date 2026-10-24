@@ -57,6 +57,7 @@ pub mod metadata_llm;
 pub(crate) mod minimax_usage;
 pub mod mission_access;
 pub mod mission_budget;
+pub mod mission_stats;
 pub mod mission_horizon;
 pub mod mission_payload;
 pub mod mission_runner;

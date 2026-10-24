@@ -178,6 +178,7 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
         SELECT
             e.timestamp,
             e.mission_id,
+            e.id AS event_row,
             m.backend,
             m.title,
             COALESCE(json_extract(e.metadata, '$.model'), '') AS raw_model,
@@ -204,25 +205,26 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
                 [
-                    row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
                 ],
-                row.get::<_, String>(10)?,
-                row.get::<_, i64>(11)?,
-                row.get::<_, Option<String>>(12)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, i64>(2)?,
             ))
         })
         .map_err(err)?;
     let mut out = Vec::new();
     for row in rows {
-        let (timestamp, mission_id, backend, title, raw, stored, tokens, source, cost, parent) =
+        let (timestamp, mission_id, backend, title, raw, stored, tokens, source, cost, parent, row_id) =
             row.map_err(err)?;
         let model = super::usage_model_key(&raw, &stored);
         let [input, output, creation, read] = tokens.map(non_negative);
@@ -244,6 +246,7 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
             || crate::cost::has_pricing(&model)
             || !usage.has_usage();
         out.push(UsageRecord {
+            request_id: Some(format!("event:{row_id}")),
             timestamp,
             source: UsageSource::Harness,
             model,
@@ -280,7 +283,7 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
             p.timestamp, p.model, p.provider, p.account_id, p.api_key_id, p.api_key_name,
             p.mission_id, m.backend, m.title,
             p.input_tokens, p.output_tokens, p.cache_creation_tokens, p.cache_read_tokens,
-            p.cost_cents, p.caller_kind, p.purpose, p.reasoning_tokens
+            p.cost_cents, p.caller_kind, p.purpose, p.reasoning_tokens, p.id
         FROM proxy_usage p
         LEFT JOIN missions m ON m.id = p.mission_id
         WHERE (?1 IS NULL OR p.timestamp >= ?1)
@@ -311,12 +314,13 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
                     row.get::<_, Option<String>>(14)?,
                     row.get::<_, Option<String>>(15)?,
                 ],
+                row.get::<_, i64>(17)?,
             ))
         })
         .map_err(err)?;
     let mut out = Vec::new();
     for row in rows {
-        let ([timestamp, model], attribution, numbers, [caller_kind, purpose]) =
+        let ([timestamp, model], attribution, numbers, [caller_kind, purpose], row_id) =
             row.map_err(err)?;
         let [provider, account_id, api_key_id, api_key_name, mission_id, backend, title] =
             attribution;
@@ -330,6 +334,7 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
             &token_usage(input, output, creation, read),
         );
         out.push(UsageRecord {
+            request_id: Some(format!("proxy:{row_id}")),
             timestamp,
             source: UsageSource::Router,
             model,

@@ -57,3 +57,15 @@ test("mission settings fits a 390px window", async ({ page }) => {
   expect(box!.width).toBeLessThanOrEqual(390);
   await shot(page, "mission-settings-390");
 });
+
+test("stats section: totals, served models, subagents, period toggle", async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 1300 });
+  await page.goto(`/tests/mission-settings.html?theme=dark`);
+  const dialog = page.getByRole("dialog", { name: "Mission settings" });
+  await expect(dialog.getByTestId("stats-total")).toHaveText("$6.12");
+  await expect(dialog.getByRole("table", { name: "Spend by served model" })).toContainText("antigravity/gemini-4-argon");
+  await expect(dialog.getByRole("list", { name: "Subagent spend" })).toContainText("Audit lean-native");
+  await shot(page, "mission-settings-stats");
+  await dialog.getByRole("radio", { name: "Today" }).click();
+  await expect(dialog.getByTestId("stats-total")).toHaveText("$1.40");
+});

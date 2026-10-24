@@ -14,7 +14,7 @@
     `orb_sidebar_visibility`, `orb_admission_step`, `orb_account_cooldown_secs`, `orb_cost_cents_step`,
     `orb_stream_loop_step`, `orb_job_ledger_step`, `orb_proc_liveness_step`, `orb_pr_gate_step`,
     `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`,
-    `orb_attribution_step`
+    `orb_attribution_step`, `orb_stats_settle_step`
 -/
 
 import Orb.Kernel
@@ -810,5 +810,96 @@ def attributionTotal : ProjectionStability AttributionClaim UInt8 where
 theorem attribution_forged_hint_rejected_keeps_principal :
     attributionStep 6 1 0 0 = 6 ∧ attributionStep 1 2 0 0 = 1 ∧ attributionStep 0 5 0 0 = 0 ∧
     attributionStep 1 2 0 1 = 258 ∧ attributionStep 5 0 0 0 = 261 := by decide
+
+/-! ## Spend statistics (`orb_stats_settle_step`, `docs/specs/mission-stats.md`)
+
+A settled spend row: request id, the bucket it is grouped in (served `(provider, model)`, or the VM
+bucket; or a mission id for subtree totals), and its cost. Statistics are pure aggregation, so
+conservation is a property of the grouping, stated over `Nat`. -/
+
+structure StatRow where
+  id    : Nat
+  key   : Nat
+  cents : Nat
+  deriving Repr, DecidableEq
+
+/-- Total cost of rows. -/
+def statTotal : List StatRow → Nat
+  | [] => 0
+  | r :: rs => r.cents + statTotal rs
+
+/-- Grouping by an ordered list of buckets: bucket `k` takes the rows with key `k`, the rest go on. -/
+def statBuckets : List Nat → List StatRow → Nat
+  | [], _ => 0
+  | k :: ks, rows => statTotal (rows.filter (·.key == k)) + statBuckets ks (rows.filter (·.key != k))
+
+theorem statTotal_split (p : StatRow → Bool) (rows : List StatRow) :
+    statTotal rows = statTotal (rows.filter p) + statTotal (rows.filter (fun r => !p r)) := by
+  induction rows with
+  | nil => rfl
+  | cons r rs ih => cases h : p r <;> simp [statTotal, List.filter, h, ih] <;> omega
+
+/-- Conservation (`ConservedResource` for statistics): when every row's key is listed, the bucket
+    totals sum to the total. Instances: per-mission total = Σ served models + VM bucket; subtree total
+    = own + Σ children (keys = mission ids). -/
+theorem statBuckets_conserve (keys : List Nat) (rows : List StatRow)
+    (h : ∀ r ∈ rows, r.key ∈ keys) : statBuckets keys rows = statTotal rows := by
+  induction keys generalizing rows with
+  | nil =>
+    cases rows with
+    | nil => rfl
+    | cons r rs => exact absurd (h r (List.mem_cons_self ..)) (List.not_mem_nil)
+  | cons k ks ih =>
+    have hrest : ∀ r ∈ rows.filter (·.key != k), r.key ∈ ks := by
+      intro r hr
+      have ⟨hm, hk⟩ := List.mem_filter.mp hr
+      have := h r hm
+      simp at hk this
+      rcases this with h1 | h1 <;> simp_all
+    rw [statBuckets, ih _ hrest, statTotal_split (·.key == k) rows]
+    rfl
+
+/-- Settle with replay protection: a row whose id was already settled adds nothing. -/
+def statSettle : List Nat → List StatRow → Nat
+  | _, [] => 0
+  | seen, r :: rs =>
+    if r.id ∈ seen then statSettle seen rs else r.cents + statSettle (r.id :: seen) rs
+
+/-- Idempotency (`IdempotentOutboxSpec` instance): the kernel step admits a request's cost iff its id
+    was not settled yet; a replay is rejected. -/
+def statsOutbox : IdempotentOutboxSpec (List Nat) Nat where
+  admit seen id := statsSettle 0 1 (if id ∈ seen then 1 else 0) == 1
+  safeReplay seen id := !(decide (id ∈ seen))
+  admit_iff_safe_replay seen id := by
+    by_cases h : id ∈ seen <;> simp [statsSettle, h] <;> decide
+
+/-- Replaying an already-settled request changes no total. -/
+theorem statSettle_replay (seen : List Nat) (r : StatRow) (rs : List StatRow) (h : r.id ∈ seen) :
+    statSettle seen (r :: rs) = statSettle seen rs := by
+  simp [statSettle, h]
+
+/-- Without replays (all ids fresh and distinct), settling is the plain total. -/
+theorem statSettle_fresh (seen : List Nat) (rows : List StatRow)
+    (h : ∀ r ∈ rows, r.id ∉ seen) (hd : (rows.map (·.id)).Nodup) :
+    statSettle seen rows = statTotal rows := by
+  induction rows generalizing seen with
+  | nil => rfl
+  | cons r rs ih =>
+    have hr : r.id ∉ seen := h r (List.mem_cons_self ..)
+    have hd' := List.nodup_cons.mp (by simpa only [List.map_cons] using hd)
+    simp only [statSettle, if_neg hr, statTotal]
+    congr 1
+    apply ih
+    · intro x hx hmem
+      rcases List.mem_cons.mp hmem with h1 | h1
+      · exact hd'.1 (h1 ▸ List.mem_map.mpr ⟨x, hx, rfl⟩)
+      · exact h x (List.mem_cons_of_mem _ hx) h1
+    · exact hd'.2
+
+/-- Corollary 37 (`orb_stats_settle_step`): a fresh request adds its cost, a replay adds nothing, and
+    the total saturates instead of wrapping. -/
+theorem stats_settle_fresh_replay_saturate :
+    statsSettleStep 10 5 0 = 15 ∧ statsSettleStep 10 5 1 = 10 ∧
+    statsSettleStep 18446744073709551610 10 0 = 18446744073709551615 := by decide
 
 end Orb.Spec
