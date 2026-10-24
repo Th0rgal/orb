@@ -914,6 +914,10 @@ pub struct ProxyOutcomeRecord {
 /// filters and groups these; see `crate::api::usage_summary`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageRecord {
+    /// Stable id of the ledger row (`proxy:<row>` or `event:<row>`), so an
+    /// aggregation can settle each request exactly once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// RFC3339 timestamp (UTC).
     pub timestamp: String,
     pub source: UsageSource,
