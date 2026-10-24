@@ -255,6 +255,27 @@ pub(super) async fn automation_scheduler_loop(
                 continue;
             }
 
+            // Agent schedules end on TTL, a finished mission, or a cadence
+            // that breaks today's bounds (rows persisted before them), even
+            // when no slot is due.
+            if is_native_schedule(&automation) {
+                let in_bounds = match &automation.trigger {
+                    TriggerType::Cron { expression, .. } => {
+                        crate::api::mission_runner::bounded_native_cron(expression).as_deref()
+                            == Ok(expression.trim())
+                    }
+                    _ => false,
+                };
+                let ended = !in_bounds || native_schedule_owner_ended(&automation, mission.status);
+                if native_schedule_tick(&automation, ended) == crate::orb_spec::ScheduleAction::Drop
+                {
+                    let _ = mission_store
+                        .update_automation_active(automation.id, false)
+                        .await;
+                    continue;
+                }
+            }
+
             let schedule = match &automation.trigger {
                 TriggerType::Interval { seconds } => ScheduleKind::Interval(*seconds),
                 TriggerType::Cron {
@@ -376,8 +397,7 @@ pub(super) async fn automation_scheduler_loop(
             // Agent-created recurring schedules go through the verified step:
             // one fire per due slot, nothing after a cancel or for a gone owner.
             if is_native_schedule(&automation) {
-                let ended = native_schedule_owner_ended(&automation, mission.status);
-                match native_schedule_tick(&automation, ended) {
+                match native_schedule_tick(&automation, false) {
                     crate::orb_spec::ScheduleAction::Fire => {}
                     crate::orb_spec::ScheduleAction::Drop => {
                         let _ = mission_store
