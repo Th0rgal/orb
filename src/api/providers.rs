@@ -325,6 +325,7 @@ pub(crate) async fn catalog_model_options_for_state(
         &store_providers,
         state.config.working_dir.as_path(),
     );
+    merge_claude_code_models(&mut providers);
     drop(cached);
     apply_cli_proxy_catalog(&mut providers, &store_providers).await;
 
@@ -1520,8 +1521,14 @@ async fn refresh_catalog_once(
     ai_providers: &AIProviderStore,
     working_dir: &Path,
 ) -> (usize, usize) {
-    let (mut fetched, fetched_kimi_generation) =
-        fetch_model_catalog(ai_providers, working_dir).await;
+    let claude_cli = crate::claude_code_models::configured_cli();
+    let ((mut fetched, fetched_kimi_generation), claude_code) = tokio::join!(
+        fetch_model_catalog(ai_providers, working_dir),
+        crate::claude_code_models::refresh(&claude_cli),
+    );
+    if let Err(error) = claude_code {
+        tracing::warn!(%error, "Claude Code model discovery failed; keeping the last listing");
+    }
     let mut current = catalog.write().await;
     if kimi_catalog_generation() != fetched_kimi_generation {
         fetched.remove("kimi");
@@ -1732,6 +1739,19 @@ fn apply_connection_models(providers: &mut Vec<Provider>, store: &[AIProvider], 
                 models,
             });
         }
+    }
+}
+
+/// The subscription has no catalog endpoint; the installed Claude Code CLI
+/// lists what the account can run. It supplements the snapshot after the
+/// connection lists, which would otherwise replace it.
+fn merge_claude_code_models(providers: &mut [Provider]) {
+    let models = crate::claude_code_models::cached();
+    if models.is_empty() {
+        return;
+    }
+    if let Some(anthropic) = providers.iter_mut().find(|p| p.id == "anthropic") {
+        merge_provider_models(&mut anthropic.models, models);
     }
 }
 
@@ -2054,6 +2074,7 @@ pub async fn list_providers(
         &store_providers,
         state.config.working_dir.as_path(),
     );
+    merge_claude_code_models(&mut providers);
     drop(cached);
     retire_superseded_claude_models(&mut providers);
 
@@ -2180,6 +2201,7 @@ pub async fn list_backend_model_options(
         &store_providers,
         state.config.working_dir.as_path(),
     );
+    merge_claude_code_models(&mut providers);
     drop(cached);
     // This endpoint is what the desktop client's harness/model pickers read
     // (`listBackendModels` in orb/src/api.ts), and it assembles its own provider
