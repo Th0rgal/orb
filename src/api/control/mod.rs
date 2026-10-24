@@ -17,6 +17,7 @@ pub(crate) mod deferred_messages;
 pub(crate) mod dispatch_admission;
 #[cfg(test)]
 pub(crate) mod dispatch_admission_tests;
+pub(crate) mod dispatch_capacity;
 pub(crate) mod execution_ownership;
 pub mod fork;
 pub(crate) mod host_goal;
