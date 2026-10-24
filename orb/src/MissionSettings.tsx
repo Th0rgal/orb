@@ -1,6 +1,8 @@
 import { For, Show, createSignal, onMount } from "solid-js";
 import { Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
+import { MissionStatsSection } from "./MissionStatsSection";
+import type { getMissionStats } from "./missionStats";
 import {
   exceedsGrant, getMissionBudget, modeLine, money, optimisticBudget, parseAmount, putMissionBudget, usedFraction,
   type MissionBudget,
@@ -25,6 +27,7 @@ export function MissionSettings(p: {
   /** Injected in tests and the gallery; default to the Core API. */
   load?: (id: string) => Promise<MissionBudget>;
   save?: (id: string, budget: number | null) => Promise<MissionBudget>;
+  loadStats?: typeof getMissionStats;
 }) {
   const loadBudget = (id: string) => (p.load ?? getMissionBudget)(id);
   const saveBudget = (id: string, budget: number | null) => (p.save ?? putMissionBudget)(id, budget);
@@ -161,5 +164,6 @@ export function MissionSettings(p: {
         </>}
       </Show>
     </section>
+    <MissionStatsSection missionId={p.missionId} titleOf={p.titleOf} load={p.loadStats} />
   </Dialog>;
 }

@@ -60,6 +60,7 @@ pub mod mission_budget;
 pub mod mission_horizon;
 pub mod mission_payload;
 pub mod mission_runner;
+pub mod mission_stats;
 pub mod mission_store;
 pub mod mission_workspace_gc;
 pub(crate) mod mistral_login;

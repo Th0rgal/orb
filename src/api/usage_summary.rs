@@ -484,6 +484,7 @@ mod tests {
 
     fn record(source: UsageSource, model: &str, hour: &str) -> UsageRecord {
         UsageRecord {
+            request_id: None,
             timestamp: format!("2026-10-19T{hour}:15:00+00:00"),
             source,
             model: model.into(),

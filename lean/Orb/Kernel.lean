@@ -682,4 +682,20 @@ def scheduleStep (op known cancelled ownerTerminal authorized busy : UInt8)
     (lastFired nextDue now : UInt64) : UInt8 :=
   scheduleAction op known cancelled ownerTerminal authorized busy lastFired nextDue now
 
+/--
+  Spend statistics settle step (`orb_stats_settle_step`): add one priced request's cost to a running
+  total exactly once. `seen == 1` means the request id is already in the ledger (a replay), which adds
+  nothing. Saturating at `UInt64.max`, so a total never wraps. Statistics only: the planned
+  `budget_reserve` / `chain_pick` enforcement steps will reuse it (see `docs/specs/mission-stats.md`).
+-/
+@[inline] def statsSettle (acc cost : UInt64) (seen : UInt8) : UInt64 :=
+  if seen == 1 then acc
+  else if acc ≤ 18446744073709551615 - cost then acc + cost
+  else 18446744073709551615
+
+/-- Unboxed C-ABI Stats Settle Stepper (`orb_stats_settle_step`). -/
+@[inline, export orb_stats_settle_step]
+def statsSettleStep (acc cost : UInt64) (seen : UInt8) : UInt64 :=
+  statsSettle acc cost seen
+
 end Orb.Kernel
