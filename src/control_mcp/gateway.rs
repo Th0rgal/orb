@@ -483,7 +483,21 @@ async fn authorize(
     }
     // Managed machines belong to the mission tree that rented them.
     match tool.definition.name.as_str() {
-        "spawn_managed_machine" => {
+        "spawn_managed_machine" | "list_managed_snapshots" | "delete_managed_snapshot" => {
+            args["owner_mission_id"] = json!(own.to_string());
+        }
+        // Machine-level actions: the machine must belong to the caller's
+        // tree; a fork or snapshot is attributed to the caller.
+        "snapshot_managed_machine"
+        | "fork_managed_machine"
+        | "stop_managed_machine"
+        | "resume_managed_machine" => {
+            let id = args
+                .get("machine_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            managed_owner_check(&store, own, &id).await?;
             args["owner_mission_id"] = json!(own.to_string());
         }
         // A mission reads its own budget only.

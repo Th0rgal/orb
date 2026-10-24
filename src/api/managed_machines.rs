@@ -51,7 +51,16 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
             "/api/managed-machines/settings",
             get(get_settings).put(put_settings),
         )
+        .route("/api/managed-machines/snapshots", get(list_snapshots))
+        .route(
+            "/api/managed-machines/snapshots/:name",
+            axum::routing::delete(delete_snapshot),
+        )
         .route("/api/managed-machines/:id", get(get_one).delete(destroy))
+        .route("/api/managed-machines/:id/stop", post(stop))
+        .route("/api/managed-machines/:id/resume", post(resume))
+        .route("/api/managed-machines/:id/fork", post(fork))
+        .route("/api/managed-machines/:id/snapshot", post(snapshot))
         .route("/api/managed-machines/:id/extend", post(extend))
         .route("/api/managed-machines/:id/owner", post(set_owner))
 }
@@ -121,11 +130,20 @@ async fn get_one(Path(id): Path<String>) -> Response {
 pub(crate) async fn spawn(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
-    Json(mut req): Json<SpawnRequest>,
+    Json(req): Json<SpawnRequest>,
+) -> Response {
+    spawn_for(&state, &user, req).await
+}
+
+/// Shared by spawn and fork: tenant, budget pool and sibling reuse.
+async fn spawn_for(
+    state: &Arc<AppState>,
+    user: &crate::api::auth::AuthUser,
+    mut req: SpawnRequest,
 ) -> Response {
     // The owner's tenant comes from the authenticated caller, never the body.
     req.owner_user_id = Some(user.id.clone());
-    let store = crate::api::control::control_for_user(&state, &user)
+    let store = crate::api::control::control_for_user(state, user)
         .await
         .mission_store;
     // The mission the machine is charged to: its owner, else its requester.
@@ -150,7 +168,7 @@ pub(crate) async fn spawn(
         Ok(m) => m,
         Err(r) => return r,
     };
-    if req.reuse_idle == Some(true) {
+    if req.reuse_idle == Some(true) && req.from_snapshot.is_none() && req.fork_of.is_none() {
         if let (Some(parent), Ok((spec, _))) = (charged, ManagedManager::plan(&m.settings, &req)) {
             if let Some(machine) = reuse_idle_sibling(&m, &store, &req, parent, spec.size).await {
                 let mut body = serde_json::to_value(&machine).unwrap_or_default();
@@ -544,5 +562,245 @@ mod tests {
         );
         let r = super::client_destroy_reason(Some("ttl_expired\n<script>"));
         assert_eq!(r, "requested: ttl_expiredscript");
+    }
+}
+
+// ------------------------------------------------- snapshots, fork, stop
+
+#[derive(Deserialize, Default)]
+struct MissionScope {
+    /// The calling mission (set by the gateway); its project scopes snapshots.
+    owner_mission_id: Option<uuid::Uuid>,
+    /// Orb/API without a mission: an explicit project, or `all=true`.
+    project: Option<String>,
+    all: Option<bool>,
+}
+
+/// The project a request is scoped to. A mission must be in the caller's
+/// store (404 otherwise).
+async fn scope_project(
+    state: &Arc<AppState>,
+    user: &crate::api::auth::AuthUser,
+    scope: &MissionScope,
+) -> Result<Option<String>, Response> {
+    let Some(mission) = scope.owner_mission_id else {
+        return Ok(scope.project.clone().filter(|p| !p.trim().is_empty()));
+    };
+    let store = crate::api::control::control_for_user(state, user)
+        .await
+        .mission_store;
+    match store.get_mission(mission).await {
+        Ok(Some(m)) => Ok(m.project.project),
+        _ => Err(err(ManagedError {
+            error: "unknown_mission",
+            message: "Owner mission not found".into(),
+            status: 404,
+        })),
+    }
+}
+
+async fn list_snapshots(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Query(scope): Query<MissionScope>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    if scope.all == Some(true) && scope.owner_mission_id.is_none() {
+        let mine: Vec<_> = m
+            .all_snapshots()
+            .await
+            .into_iter()
+            .filter(|s| s.owner_user_id.as_deref() == Some(user.id.as_str()))
+            .collect();
+        return Json(json!({ "snapshots": mine })).into_response();
+    }
+    let project = match scope_project(&state, &user, &scope).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    Json(json!({
+        "project": project,
+        "snapshots": m.list_snapshots(Some(&user.id), project.as_deref()).await,
+        "included_free": crate::managed::snapshots::INCLUDED_SNAPSHOTS,
+        "usd_per_month_beyond": crate::managed::snapshots::SNAPSHOT_USD_PER_MONTH,
+    }))
+    .into_response()
+}
+
+async fn delete_snapshot(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(name): Path<String>,
+    Query(scope): Query<MissionScope>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let project = match scope_project(&state, &user, &scope).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match m
+        .delete_snapshot(&name, Some(&user.id), project.as_deref())
+        .await
+    {
+        Ok(()) => Json(json!({"deleted": name})).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SnapshotBody {
+    name: String,
+    owner_mission_id: Option<uuid::Uuid>,
+    project: Option<String>,
+}
+
+async fn snapshot(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Json(body): Json<SnapshotBody>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let scope = MissionScope {
+        owner_mission_id: body.owner_mission_id,
+        project: body.project.clone(),
+        all: None,
+    };
+    let project = match scope_project(&state, &user, &scope).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let owner = body.owner_mission_id.map(|u| u.to_string());
+    match m
+        .snapshot_machine(
+            &id,
+            &body.name,
+            project.as_deref(),
+            owner.as_deref(),
+            Some(&user.id),
+        )
+        .await
+    {
+        Ok(s) => (StatusCode::ACCEPTED, Json(s)).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ForkBody {
+    size: Option<String>,
+    ttl_minutes: Option<u64>,
+    reason: Option<String>,
+    owner_mission_id: Option<String>,
+    requested_by_mission_id: Option<String>,
+    wait: Option<bool>,
+}
+
+async fn fork(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    body: Option<Json<ForkBody>>,
+) -> Response {
+    let body = body.map(|b| b.0).unwrap_or_default();
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    // A fork keeps the source's size unless one is asked for.
+    let size = match body.size {
+        Some(s) => Some(s),
+        None => m.get(&id).await.map(|src| src.size),
+    };
+    let req = SpawnRequest {
+        size,
+        ttl_minutes: body.ttl_minutes,
+        reason: body.reason.or_else(|| Some(format!("fork of {id}"))),
+        owner_mission_id: body.owner_mission_id,
+        requested_by_mission_id: body.requested_by_mission_id,
+        wait: body.wait,
+        fork_of: Some(id),
+        ..Default::default()
+    };
+    spawn_for(&state, &user, req).await
+}
+
+/// Only the machine's own tenant may stop/resume it.
+async fn tenant_machine(
+    m: &ManagedManager,
+    id: &str,
+    user: &crate::api::auth::AuthUser,
+) -> Result<crate::managed::ManagedMachine, Response> {
+    match m.get(id).await {
+        Some(x)
+            if x.owner_user_id.is_none()
+                || x.owner_user_id.as_deref() == Some(user.id.as_str()) =>
+        {
+            Ok(x)
+        }
+        Some(_) => Err(err(ManagedError {
+            error: "forbidden",
+            message: "Managed machine belongs to another user".into(),
+            status: 403,
+        })),
+        None => Err(err(ManagedError {
+            error: "not_found",
+            message: "Unknown managed machine".into(),
+            status: 404,
+        })),
+    }
+}
+
+async fn stop(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let machine = match tenant_machine(&m, &id, &user).await {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    match m.stop_inner(&machine.id, "requested", false).await {
+        Ok(x) => Json(x).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ResumeBody {
+    ttl_minutes: Option<u64>,
+}
+
+async fn resume(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    body: Option<Json<ResumeBody>>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let machine = match tenant_machine(&m, &id, &user).await {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    match m
+        .resume(&machine.id, body.and_then(|b| b.0.ttl_minutes))
+        .await
+    {
+        Ok(x) => (StatusCode::ACCEPTED, Json(x)).into_response(),
+        Err(e) => err(e),
     }
 }

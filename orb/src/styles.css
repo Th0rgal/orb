@@ -4050,3 +4050,4 @@ select.orb-select-native:disabled { cursor: default; }
 .spend-skel.w1 { width: 110px; } .spend-skel.w2 { width: 70px; } .spend-skel.w4 { width: 150px; } .spend-skel.w3 { width: 22px; height: 8px; }
 .spend-chart.loading .spend-col { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .spend-skel, .spend-bar.skel { animation: none; } .spend-bar { transition: none; } }
+.managed-stopped-head { margin: 14px 0 6px; }

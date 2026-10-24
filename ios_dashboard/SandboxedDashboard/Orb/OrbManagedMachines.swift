@@ -104,7 +104,7 @@ enum OrbManaged {
         if let i = copy.machines.firstIndex(where: { $0.id == id }) { copy.machines[i].state = "destroying" }
         return copy
     }
-    static func isLive(_ m: OrbManagedMachine) -> Bool { m.state != "destroyed" && m.state != "failed" }
+    static func isLive(_ m: OrbManagedMachine) -> Bool { m.state != "destroyed" && m.state != "failed" && m.state != "stopped" }
 
     static func date(_ value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
@@ -145,7 +145,7 @@ enum OrbManaged {
         return m.cost_usd + max(0, until.timeIntervalSince(fetchedAt)) / 3600 * m.usd_per_hour
     }
     static func stateLabel(_ s: String) -> String {
-        ["provisioning": "Provisioning", "enrolling": "Enrolling", "online": "Online", "destroying": "Destroying…", "destroyed": "Destroyed", "failed": "Failed"][s] ?? s
+        ["provisioning": "Provisioning", "enrolling": "Enrolling", "online": "Online", "destroying": "Destroying…", "destroyed": "Destroyed", "failed": "Failed", "stopped": "Stopped"][s] ?? s
     }
     static func number(_ v: Double) -> String { v == v.rounded() ? String(Int(v)) : String(v) }
     static func sizeSpec(cpu: Double, ramGB: Double, diskGB: Double? = nil) -> String {

@@ -20,6 +20,9 @@ fn settings() -> ManagedSettings {
         orphan_grace_minutes: 0,
         reconcile_secs: 300,
         auto_extend_minutes: 30,
+        stopped_retention_hours: 24,
+        snapshot_keep: 2,
+        snapshot_unused_days: 14,
     }
 }
 
@@ -36,6 +39,10 @@ struct FakeProvider {
     destroyed: std::sync::Mutex<Vec<String>>,
     listed: std::sync::Mutex<Vec<ProviderMachine>>,
     execs: std::sync::Mutex<Vec<String>>,
+    forks: std::sync::Mutex<Vec<String>>,
+    stopped: std::sync::Mutex<Vec<String>>,
+    saved: std::sync::Mutex<Vec<(String, String)>>,
+    deleted_snapshots: std::sync::Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -74,6 +81,32 @@ impl ManagedProvider for FakeProvider {
     async fn exec(&self, _: &str, command: &str, _: u64) -> Result<Value, String> {
         self.execs.lock().unwrap().push(command.to_string());
         Ok(Value::Null)
+    }
+    async fn stop(&self, provider_id: &str) -> Result<(), String> {
+        self.stopped.lock().unwrap().push(provider_id.into());
+        Ok(())
+    }
+    async fn fork(&self, provider_id: &str, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
+        self.forks.lock().unwrap().push(provider_id.into());
+        self.spawn(spec).await
+    }
+    async fn save_snapshot(&self, provider_id: &str, name: &str) -> Result<(), String> {
+        self.saved
+            .lock()
+            .unwrap()
+            .push((provider_id.into(), name.into()));
+        Ok(())
+    }
+    async fn snapshot(&self, name: &str) -> Result<ProviderSnapshot, String> {
+        Ok(ProviderSnapshot {
+            name: name.into(),
+            status: "ready".into(),
+            size_bytes: Some(1),
+        })
+    }
+    async fn delete_snapshot(&self, name: &str) -> Result<(), String> {
+        self.deleted_snapshots.lock().unwrap().push(name.into());
+        Ok(())
     }
     async fn usage(&self, _: &str) -> Result<ProviderUsage, String> {
         Ok(ProviderUsage {
@@ -482,6 +515,14 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        stopped_at: None,
+        stopped_by_reaper: false,
+        source_snapshot: None,
+        forked_from: None,
+        fork_source_provider_id: None,
+        resumes: 0,
+        run_started_at: None,
+        cost_before_resume: 0.0,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -753,7 +794,7 @@ async fn antigravity_setting_owner_and_wipe_on_destroy() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|c| c.contains("rm -rf"))
+            .filter(|c| c.contains("managed-auth") && c.ends_with("&& sync"))
             .count(),
         1
     );
@@ -864,6 +905,14 @@ fn spend_machine(
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
+        stopped_at: None,
+        stopped_by_reaper: false,
+        source_snapshot: None,
+        forked_from: None,
+        fork_source_provider_id: None,
+        resumes: 0,
+        run_started_at: None,
+        cost_before_resume: 0.0,
     }
 }
 
@@ -1650,4 +1699,289 @@ async fn removing_a_sub_budget_moves_its_spend_to_the_parent_pool() {
     // Both the departed VM's $0.30 and the live VM's $0.20 now count here.
     assert!((root.spent_usd - 0.50).abs() < 1e-6, "{root:?}");
     assert_eq!(root.carved_usd, 0.0);
+}
+
+// ------------------------------------------------- snapshots, fork, stop
+
+use super::snapshots as snaps;
+
+fn snap(name: &str, project: &str, days_old: i64, status: &str) -> snaps::ManagedSnapshot {
+    snaps::ManagedSnapshot {
+        name: name.into(),
+        label: name.into(),
+        project: Some(project.into()),
+        owner_mission_id: None,
+        owner_user_id: Some("t1".into()),
+        source_machine_id: "mm1".into(),
+        source_size: "small".into(),
+        created_at: Utc::now() - chrono::Duration::days(days_old),
+        last_used_at: None,
+        status: status.into(),
+        size_bytes: None,
+        error: None,
+        monthly_usd: 0.0,
+    }
+}
+
+#[test]
+fn snapshot_names_pricing_and_cleanup_plan() {
+    assert_eq!(
+        snaps::snapshot_name(Some("Lean Native!"), "warm tree", "ab12"),
+        "orb-snap-lean-native-warm-tree-ab12"
+    );
+    assert_eq!(snaps::snapshot_name(None, "", "x"), "orb-snap-none-warm-x");
+    assert!(snaps::stops_instead_of_destroy("owner_interrupted_idle"));
+    assert!(!snaps::stops_instead_of_destroy("owner_completed"));
+    assert!(!snaps::stops_instead_of_destroy("idle_user_owned"));
+    let list = vec![
+        snap("a-new", "a", 0, "ready"),
+        snap("a-mid", "a", 1, "ready"),
+        snap("a-old", "a", 2, "ready"),
+        snap("a-older", "a", 3, "ready"),
+        snap("b-stale", "b", 20, "ready"),
+        snap("b-failed", "b", 0, "failed"),
+        snap("b-saving", "b", 0, "saving"),
+    ];
+    // Keep 2 newest per project; a-older is being provisioned from.
+    let plan = snaps::cleanup_plan(&list, 2, 14, &["a-older".into()], Utc::now());
+    assert_eq!(plan, vec!["a-old", "b-failed", "b-stale"]);
+    let mut many: Vec<_> = (0..12)
+        .map(|i| snap(&format!("s{i}"), "a", 12 - i, "ready"))
+        .collect();
+    snaps::price_snapshots(&mut many);
+    assert_eq!(many.iter().filter(|s| s.monthly_usd > 0.0).count(), 2);
+    assert_eq!(many[11].monthly_usd, snaps::SNAPSHOT_USD_PER_MONTH);
+}
+
+async fn wait_provider_id(m: &Arc<ManagedManager>, id: &str) -> ManagedMachine {
+    for _ in 0..200 {
+        let x = m.get(id).await.unwrap();
+        if x.provider_id.is_some() {
+            return x;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no provider id");
+}
+
+#[tokio::test]
+async fn snapshot_then_spawn_from_it_is_tenant_and_status_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let src = online_machine(&m, "owner").await;
+    let s = m
+        .snapshot_machine(
+            &src.id,
+            "lean warm",
+            Some("lean"),
+            Some("owner"),
+            Some("t1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(s.status, "saving");
+    assert!(s.name.starts_with("orb-snap-lean-lean-warm-"));
+    assert_eq!(fake.saved.lock().unwrap()[0].1, s.name);
+    // Delivered secrets are wiped before saving.
+    assert!(fake
+        .execs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.contains(".paloma-secrets")));
+    let spawn = |tenant: &str| SpawnRequest {
+        from_snapshot: Some("lean-warm".into()),
+        owner_user_id: Some(tenant.into()),
+        wait: Some(false),
+        ttl_minutes: Some(30),
+        ..Default::default()
+    };
+    assert_eq!(
+        m.spawn(spawn("t1")).await.unwrap_err().error,
+        "snapshot_not_ready"
+    );
+    m.snapshots.lock().await[0].status = "ready".into();
+    assert_eq!(
+        m.spawn(spawn("t2")).await.unwrap_err().error,
+        "snapshot_not_found"
+    );
+    let vm = m.spawn(spawn("t1")).await.unwrap();
+    assert_eq!(vm.image, s.name);
+    assert_eq!(vm.source_snapshot.as_deref(), Some(s.name.as_str()));
+    assert!(m.snapshots.lock().await[0].last_used_at.is_some());
+    // Visible only to the same tenant and project.
+    assert_eq!(m.list_snapshots(Some("t1"), Some("lean")).await.len(), 1);
+    assert!(m.list_snapshots(Some("t1"), Some("other")).await.is_empty());
+    assert!(m.list_snapshots(Some("t2"), Some("lean")).await.is_empty());
+    // A machine being created from it blocks deletion.
+    m.update(&vm.id, |x| x.state = MachineState::Provisioning)
+        .await;
+    assert_eq!(
+        m.delete_snapshot(&s.name, Some("t1"), Some("lean"))
+            .await
+            .unwrap_err()
+            .error,
+        "snapshot_in_use"
+    );
+    m.update(&vm.id, |x| x.state = MachineState::Online).await;
+    m.delete_snapshot("lean-warm", Some("t1"), Some("lean"))
+        .await
+        .unwrap();
+    assert_eq!(fake.deleted_snapshots.lock().unwrap().as_slice(), [s.name]);
+}
+
+#[tokio::test]
+async fn fork_copies_an_online_machine_but_never_a_projected_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = None;
+    let (m, fake) = manager(dir.path(), s);
+    let src = online_machine(&m, "parent").await;
+    let child = m
+        .spawn(SpawnRequest {
+            fork_of: Some(src.name.clone()),
+            owner_mission_id: Some("parent".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ttl_minutes: Some(30),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(child.forked_from.as_deref(), Some(src.id.as_str()));
+    let child = wait_provider_id(&m, &child.id).await;
+    assert_eq!(
+        fake.forks.lock().unwrap().as_slice(),
+        [src.provider_id.clone().unwrap()]
+    );
+    assert_ne!(child.node_id, src.node_id);
+    m.update(&src.id, |x| x.antigravity_projected = true).await;
+    let e = m
+        .spawn(SpawnRequest {
+            fork_of: Some(src.id.clone()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "not_forkable");
+    // Another tenant cannot fork it either.
+    m.update(&src.id, |x| x.antigravity_projected = false).await;
+    let e = m
+        .spawn(SpawnRequest {
+            fork_of: Some(src.id.clone()),
+            owner_user_id: Some("t2".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "forbidden");
+}
+
+#[tokio::test]
+async fn stop_and_resume_keep_the_node_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let vm = online_machine(&m, "owner").await;
+    let old_pid = vm.provider_id.clone().unwrap();
+    let stopped = m.stop_inner(&vm.id, "requested", false).await.unwrap();
+    assert_eq!(stopped.state, MachineState::Stopped);
+    assert_eq!(fake.stopped.lock().unwrap().as_slice(), [old_pid.clone()]);
+    assert_eq!(m.budget().await.active, 0);
+    assert!(node_config(&vm.node_id).is_none());
+    let resumed = m.resume(&vm.id, Some(30)).await.unwrap();
+    assert_eq!(
+        (resumed.id.as_str(), resumed.node_id.as_str()),
+        (vm.id.as_str(), vm.node_id.as_str())
+    );
+    assert_eq!(resumed.resumes, 1);
+    let after = wait_provider_id(&m, &vm.id).await;
+    assert_ne!(after.provider_id, Some(old_pid.clone()));
+    assert_eq!(fake.forks.lock().unwrap().as_slice(), [old_pid]);
+    // Resuming something that is not stopped is refused.
+    assert_eq!(
+        m.resume(&vm.id, None).await.unwrap_err().error,
+        "not_stopped"
+    );
+}
+
+#[tokio::test]
+async fn reaper_stops_for_waiting_owners_and_closes_after_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.waiting_grace_minutes = 15;
+    let (m, fake) = manager(dir.path(), s);
+    let vm = online_machine(&m, "waiting").await;
+    m.update(&vm.id, |x| {
+        x.last_busy_at = Some(Utc::now() - chrono::Duration::hours(2))
+    })
+    .await;
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "waiting".to_string(),
+        OwnerState::Waiting {
+            status: "interrupted",
+            since: Utc::now() - chrono::Duration::hours(1),
+        },
+    );
+    m.set_owner_probe(probe_from(map));
+    m.reap_once().await;
+    let row = m.get(&vm.id).await.unwrap();
+    assert_eq!(row.state, MachineState::Stopped);
+    assert!(row.stopped_by_reaper);
+    assert_eq!(fake.stopped.lock().unwrap().len(), 1);
+    assert!(fake.destroyed.lock().unwrap().is_empty());
+    // Still waiting: kept stopped. Past the retention: closed.
+    m.reap_once().await;
+    assert_eq!(m.get(&vm.id).await.unwrap().state, MachineState::Stopped);
+    m.update(&vm.id, |x| {
+        x.stopped_at = Some(Utc::now() - chrono::Duration::hours(25))
+    })
+    .await;
+    m.reap_once().await;
+    let row = m.get(&vm.id).await.unwrap();
+    assert_eq!(row.state, MachineState::Destroyed);
+    assert_eq!(row.destroy_reason.as_deref(), Some("stopped_retention"));
+}
+
+#[tokio::test]
+async fn a_stopped_machine_closes_when_its_owner_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let vm = online_machine(&m, "done").await;
+    m.stop_inner(&vm.id, "requested", false).await.unwrap();
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "done".to_string(),
+        OwnerState::Terminal {
+            status: "completed",
+        },
+    );
+    m.set_owner_probe(probe_from(map));
+    m.reap_once().await;
+    let row = m.get(&vm.id).await.unwrap();
+    assert_eq!(row.state, MachineState::Destroyed);
+    assert_eq!(row.destroy_reason.as_deref(), Some("owner_completed"));
+}
+
+#[tokio::test]
+async fn reaper_resumes_a_machine_it_stopped_when_the_owner_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let vm = online_machine(&m, "back").await;
+    m.stop_inner(&vm.id, "owner_interrupted_idle", true)
+        .await
+        .unwrap();
+    let mut map = std::collections::HashMap::new();
+    map.insert("back".to_string(), OwnerState::Working);
+    m.set_owner_probe(probe_from(map));
+    m.reap_once().await;
+    let row = m.get(&vm.id).await.unwrap();
+    assert_eq!(row.resumes, 1);
+    assert_ne!(row.state, MachineState::Stopped);
+    // Provisioning (the fork) runs in the background.
+    wait_provider_id(&m, &vm.id).await;
+    assert_eq!(fake.forks.lock().unwrap().len(), 1);
 }

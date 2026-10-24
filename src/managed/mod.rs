@@ -23,6 +23,8 @@
 //! `SANDBOXED_PUBLIC_URL`), `SANDBOXED_MANAGED_IDLE_MINUTES` (30),
 //! `SANDBOXED_MANAGED_OWNER_GRACE_MINUTES` (5),
 //! `SANDBOXED_MANAGED_WAITING_GRACE_MINUTES` (15),
+//! `SANDBOXED_MANAGED_STOPPED_RETENTION_HOURS` (24), `SANDBOXED_MANAGED_SNAPSHOT_KEEP` (2),
+//! `SANDBOXED_MANAGED_SNAPSHOT_UNUSED_DAYS` (14),
 //! `SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES` (10),
 //! `SANDBOXED_MANAGED_RECONCILE_SECS` (120).
 //!
@@ -32,6 +34,7 @@ pub mod boat;
 pub mod budget;
 pub mod lifecycle;
 pub mod relay;
+pub mod snapshots;
 
 pub use lifecycle::{owner_state_for_status, LifecyclePolicy, Owner, OwnerState, ReapDecision};
 
@@ -101,6 +104,33 @@ pub trait ManagedProvider: Send + Sync {
         timeout_secs: u64,
     ) -> Result<Value, String>;
     async fn usage(&self, provider_id: &str) -> Result<ProviderUsage, String>;
+    /// Stop (keep the disk for resume/fork). Nothing is billed afterwards.
+    async fn stop(&self, provider_id: &str) -> Result<(), String> {
+        self.destroy(provider_id).await
+    }
+    /// New sandbox from the latest snapshot of `provider_id` (running or
+    /// stopped). The copy can be up to about a minute stale.
+    async fn fork(&self, _provider_id: &str, _spec: &SpawnSpec) -> Result<ProviderMachine, String> {
+        Err("fork is not supported by this provider".into())
+    }
+    /// Save a named snapshot of a sandbox (async: poll `snapshot`).
+    async fn save_snapshot(&self, _provider_id: &str, _name: &str) -> Result<(), String> {
+        Err("snapshots are not supported by this provider".into())
+    }
+    async fn snapshot(&self, _name: &str) -> Result<ProviderSnapshot, String> {
+        Err("snapshots are not supported by this provider".into())
+    }
+    async fn delete_snapshot(&self, _name: &str) -> Result<(), String> {
+        Err("snapshots are not supported by this provider".into())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ProviderSnapshot {
+    pub name: String,
+    /// `saving`, `ready` or `failed`.
+    pub status: String,
+    pub size_bytes: Option<u64>,
 }
 
 // ------------------------------------------------------------------- sizes
@@ -196,6 +226,13 @@ pub struct ManagedSettings {
     /// Minutes added to a busy machine's TTL when it is about to expire
     /// (0 disables auto-extend). Each chunk is checked against budgets.
     pub auto_extend_minutes: u64,
+    /// How long a stopped machine may be resumed before it is closed
+    /// (boat keeps the disk 14 days).
+    pub stopped_retention_hours: u64,
+    /// Warm snapshots kept per project by the cleanup.
+    pub snapshot_keep: usize,
+    /// Snapshots unused this long are deleted by the cleanup.
+    pub snapshot_unused_days: i64,
 }
 
 impl ManagedSettings {
@@ -298,6 +335,10 @@ impl ManagedSettings {
             orphan_grace_minutes: env_parse("SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES").unwrap_or(10),
             reconcile_secs: env_parse("SANDBOXED_MANAGED_RECONCILE_SECS").unwrap_or(120),
             auto_extend_minutes: env_parse("SANDBOXED_MANAGED_AUTO_EXTEND_MINUTES").unwrap_or(30),
+            stopped_retention_hours: env_parse("SANDBOXED_MANAGED_STOPPED_RETENTION_HOURS")
+                .unwrap_or(24),
+            snapshot_keep: env_parse("SANDBOXED_MANAGED_SNAPSHOT_KEEP").unwrap_or(2),
+            snapshot_unused_days: env_parse("SANDBOXED_MANAGED_SNAPSHOT_UNUSED_DAYS").unwrap_or(14),
         }
     }
 }
@@ -313,11 +354,14 @@ pub enum MachineState {
     Destroying,
     Destroyed,
     Failed,
+    /// Stopped with its disk kept (boat keeps it 14 days): costs nothing,
+    /// can be resumed (as a fork of the stopped sandbox, same node id).
+    Stopped,
 }
 
 impl MachineState {
     pub fn is_live(self) -> bool {
-        !matches!(self, Self::Destroyed | Self::Failed)
+        !matches!(self, Self::Destroyed | Self::Failed | Self::Stopped)
     }
 }
 
@@ -390,6 +434,33 @@ pub struct ManagedMachine {
     /// Automatic TTL extensions granted while the node was busy.
     #[serde(default)]
     pub auto_extensions: u32,
+    /// When it was stopped (state `Stopped`).
+    #[serde(default)]
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// Stopped by the reaper while its owner waited: resumed automatically
+    /// when the owner works again.
+    #[serde(default)]
+    pub stopped_by_reaper: bool,
+    /// Named snapshot this machine was created from (registry name).
+    #[serde(default)]
+    pub source_snapshot: Option<String>,
+    /// Machine this one was forked from (fork_managed_machine).
+    #[serde(default)]
+    pub forked_from: Option<String>,
+    /// Provider sandbox the next provisioning forks from (fork or resume);
+    /// cleared once provisioning starts.
+    #[serde(default)]
+    pub fork_source_provider_id: Option<String>,
+    /// Start of the current run (after a resume); `created_at` otherwise.
+    #[serde(default)]
+    pub run_started_at: Option<DateTime<Utc>>,
+    /// Cost of the runs before the last resume (their sandboxes are
+    /// metered separately by the provider).
+    #[serde(default)]
+    pub cost_before_resume: f64,
+    /// Times this machine was resumed from `Stopped`.
+    #[serde(default)]
+    pub resumes: u32,
     /// Cost already charged to earlier pools when the VM changed pool
     /// (reuse, claim): `(pool id, usd)`. The current pool is charged only
     /// `spent - pool_spent_offset`.
@@ -418,9 +489,14 @@ impl ManagedMachine {
     }
 
     fn estimated_cost(&self, now: DateTime<Utc>) -> f64 {
-        let end = self.destroyed_at.unwrap_or(now).min(self.expires_at);
-        let secs = (end - self.created_at).num_seconds().max(0) as f64;
-        secs / 3600.0 * self.usd_per_hour
+        let end = self
+            .destroyed_at
+            .or(self.stopped_at)
+            .unwrap_or(now)
+            .min(self.expires_at);
+        let start = self.run_started_at.unwrap_or(self.created_at);
+        let secs = (end - start).num_seconds().max(0) as f64;
+        self.cost_before_resume + secs / 3600.0 * self.usd_per_hour
     }
 
     fn remaining_commitment(&self, now: DateTime<Utc>) -> f64 {
@@ -464,6 +540,14 @@ pub struct SpawnRequest {
     /// reservation must fit it (and the pool it is carved from).
     #[serde(default)]
     pub sub_budget_usd: Option<f64>,
+    /// Create from this named snapshot (registry name from
+    /// `list_managed_snapshots`) instead of the default image.
+    #[serde(default)]
+    pub from_snapshot: Option<String>,
+    /// Fork this machine (id/name): set by the API from the path, never
+    /// from a body.
+    #[serde(skip)]
+    pub fork_of: Option<String>,
     /// Prefer an idle machine of the same size whose owner (a child of the
     /// requester) has ended, inside its grace window, over a fresh rent.
     #[serde(default)]
@@ -664,6 +748,7 @@ pub struct ManagedManager {
     dir: PathBuf,
     machines: Mutex<Vec<ManagedMachine>>,
     budgets: Mutex<HashMap<String, budget::BudgetPool>>,
+    snapshots: Mutex<Vec<snapshots::ManagedSnapshot>>,
     secrets: Mutex<HashMap<String, MachineSecrets>>,
     /// Serialises spawn admission so two callers cannot both pass the caps.
     admission: Mutex<()>,
@@ -930,6 +1015,7 @@ impl ManagedManager {
             dir,
             machines: Mutex::new(Vec::new()),
             budgets: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(Vec::new()),
             secrets: Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             relay: relay::RelayHub::default(),
@@ -1130,6 +1216,7 @@ impl ManagedManager {
             }
         }
         *self.machines.lock().await = machines.machines;
+        self.load_snapshots().await;
         if let Some(b) = std::fs::read(self.budgets_path())
             .ok()
             .and_then(|b| serde_json::from_slice::<HashMap<String, budget::BudgetPool>>(&b).ok())
@@ -1261,7 +1348,9 @@ impl ManagedManager {
             .lock()
             .await
             .iter()
-            .filter(|m| m.state.is_live() || m.created_at >= cutoff)
+            .filter(|m| {
+                m.state.is_live() || m.state == MachineState::Stopped || m.created_at >= cutoff
+            })
             .cloned()
             .collect();
         machines.sort_by_key(|m| std::cmp::Reverse(m.created_at));
@@ -1400,7 +1489,7 @@ impl ManagedManager {
             )
         })?;
         let (spec, ttl_minutes) = Self::plan(&self.settings, &req)?;
-        let image = Self::resolve_image(&self.settings, req.image.as_deref())?;
+        let (image, source_snapshot, fork_source) = self.resolve_source(&req).await?;
 
         let machine = {
             let _guard = self.admission.lock().await;
@@ -1508,6 +1597,14 @@ impl ManagedManager {
                 last_busy_at: None,
                 budget_pool_id: req.budget_pool_id.clone(),
                 auto_extensions: 0,
+                stopped_at: None,
+                stopped_by_reaper: false,
+                source_snapshot: source_snapshot.clone(),
+                forked_from: fork_source.as_ref().map(|(id, _)| id.clone()),
+                fork_source_provider_id: fork_source.as_ref().map(|(_, pid)| pid.clone()),
+                resumes: 0,
+                run_started_at: None,
+                cost_before_resume: 0.0,
                 prior_pool_charges: Vec::new(),
                 pool_spent_offset: 0.0,
             };
@@ -1557,12 +1654,23 @@ impl ManagedManager {
             ttl_seconds: ttl_minutes * 60 + 300,
             image: Some(m.image.clone()),
             name: format!("{SANDBOX_NAME_PREFIX}{}", m.id),
-            idempotency_key: format!("orb-managed-{}", m.id),
+            // A resume provisions the same machine id again.
+            idempotency_key: if m.resumes == 0 {
+                format!("orb-managed-{}", m.id)
+            } else {
+                format!("orb-managed-{}-r{}", m.id, m.resumes)
+            },
         };
-        let created = provider.spawn(&spec).await?;
+        let created = match m.fork_source_provider_id.clone() {
+            Some(source) => provider.fork(&source, &spec).await?,
+            None => provider.spawn(&spec).await?,
+        };
         let provider_id = created.provider_id.clone();
-        self.update(id, |m| m.provider_id = Some(provider_id.clone()))
-            .await;
+        self.update(id, |m| {
+            m.provider_id = Some(provider_id.clone());
+            m.fork_source_provider_id = None;
+        })
+        .await;
         let m = self.get(id).await.ok_or("machine vanished")?;
         self.ledger("provider_created", &m);
 
@@ -1638,7 +1746,9 @@ impl ManagedManager {
         provider
             .exec(
                 &provider_id,
-                "chmod 600 /home/user/.orb/enroll.env && sudo systemctl restart orb-node.service",
+                // A fork or snapshot carries the source node's credential and
+                // projected sign-in: drop them so this VM enrolls fresh.
+                "chmod 600 /home/user/.orb/enroll.env && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && sudo systemctl restart orb-node.service",
                 60,
             )
             .await
@@ -1798,7 +1908,7 @@ impl ManagedManager {
     ) -> Result<ManagedMachine, ManagedError> {
         let Some(m) = self
             .update(id, |m| {
-                if m.state.is_live() {
+                if m.state.is_live() || m.state == MachineState::Stopped {
                     m.state = MachineState::Destroying;
                     if m.destroy_reason.is_none() {
                         m.destroy_reason = reason.clone();
@@ -1891,7 +2001,7 @@ impl ManagedManager {
             let closed = !usage.running && !m.state.is_live();
             if let Some(m) = self
                 .update(id, |m| {
-                    m.cost_usd = usage.dollars;
+                    m.cost_usd = m.cost_before_resume + usage.dollars;
                     m.cost_is_metered = true;
                     if closed {
                         m.ledger_closed = true;
@@ -1979,7 +2089,7 @@ impl ManagedManager {
 
     /// One reaper pass: lifecycle rules (spec), TTL and cost refresh.
     /// Reconcile runs separately.
-    pub async fn reap_once(&self) {
+    pub async fn reap_once(self: &Arc<Self>) {
         let now = Utc::now();
         let machines = self.machines.lock().await.clone();
         let dry_run = self.dry_run();
@@ -2015,9 +2125,15 @@ impl ManagedManager {
                                         idle_expired: !ttl && !decision.is_owner_rule(),
                                     });
                                 if admitted && (ttl || !dry_run) {
-                                    let _ = self
-                                        .destroy_inner(&m.id, Some(reason.clone()), false)
-                                        .await;
+                                    // A waiting owner may resume: stop (disk
+                                    // kept, nothing billed) instead of destroy.
+                                    if snapshots::stops_instead_of_destroy(reason) {
+                                        let _ = self.stop_inner(&m.id, reason, true).await;
+                                    } else {
+                                        let _ = self
+                                            .destroy_inner(&m.id, Some(reason.clone()), false)
+                                            .await;
+                                    }
                                     continue;
                                 }
                                 if admitted {
@@ -2064,6 +2180,9 @@ impl ManagedManager {
                     if !m.ledger_closed {
                         self.refresh_usage(&m.id).await;
                     }
+                }
+                MachineState::Stopped => {
+                    self.reap_stopped(&m, now).await;
                 }
             }
         }
@@ -2702,6 +2821,7 @@ pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<Managed
                     Ok(report) => tracing::debug!(%report, "managed reconcile"),
                     Err(e) => tracing::warn!(error = %e, "managed reconcile failed"),
                 }
+                rec.cleanup_snapshots().await;
                 tokio::time::sleep(Duration::from_secs(rec.settings.reconcile_secs.max(30))).await;
             }
         });

@@ -274,6 +274,97 @@ impl ManagedProvider for BoatProvider {
         }
     }
 
+    async fn stop(&self, provider_id: &str) -> Result<(), String> {
+        match self
+            .call(
+                reqwest::Method::POST,
+                &format!("/sandboxes/{provider_id}/stop"),
+                Some(json!({})),
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("HTTP 404") || e.contains("HTTP 409") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn fork(&self, provider_id: &str, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
+        let v = self
+            .call(
+                reqwest::Method::POST,
+                &format!("/sandboxes/{provider_id}/fork"),
+                Some(json!({"type": spec.size, "ttlSeconds": spec.ttl_seconds, "noEnv": true})),
+                Some(&spec.idempotency_key),
+                Some(Duration::from_secs(120)),
+            )
+            .await?;
+        let machine = machine_from(&v).ok_or("boat fork: no sandbox id in response")?;
+        let _ = self
+            .call(
+                reqwest::Method::PATCH,
+                &format!("/sandboxes/{}", machine.provider_id),
+                Some(json!({"name": spec.name})),
+                None,
+                None,
+            )
+            .await;
+        Ok(machine)
+    }
+
+    async fn save_snapshot(&self, provider_id: &str, name: &str) -> Result<(), String> {
+        self.call(
+            reqwest::Method::POST,
+            "/saved-snapshots",
+            Some(json!({"sandboxId": provider_id, "name": name})),
+            None,
+            Some(Duration::from_secs(60)),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn snapshot(&self, name: &str) -> Result<super::ProviderSnapshot, String> {
+        let v = self
+            .call(
+                reqwest::Method::GET,
+                &format!("/saved-snapshots/{}", urlencoding::encode(name)),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let s = v.get("snapshot").unwrap_or(&v);
+        Ok(super::ProviderSnapshot {
+            name: name.to_string(),
+            status: s
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            size_bytes: s.get("sizeBytes").and_then(Value::as_u64),
+        })
+    }
+
+    async fn delete_snapshot(&self, name: &str) -> Result<(), String> {
+        match self
+            .call(
+                reqwest::Method::DELETE,
+                &format!("/saved-snapshots/{}", urlencoding::encode(name)),
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("HTTP 404") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn extend(&self, provider_id: &str, ttl_seconds: u64) -> Result<(), String> {
         self.call(
             reqwest::Method::PATCH,

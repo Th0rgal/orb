@@ -1,7 +1,7 @@
 /** Managed (boat.dev) machines: API client and presentation logic. */
 import { api, ApiError } from "./api";
 
-export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying" | "destroyed" | "failed";
+export type ManagedState = "provisioning" | "enrolling" | "online" | "destroying" | "destroyed" | "failed" | "stopped";
 
 export interface ManagedMachine {
   id: string;
@@ -68,6 +68,30 @@ export async function listManagedMachines(): Promise<ManagedMachinesResponse | n
 const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 export const createManagedMachine = (body: CreateManagedMachine) => api<ManagedMachine>("/api/managed-machines", json(body));
 export const destroyManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const stopManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/stop`, json({}));
+export const resumeManagedMachine = (id: string) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/resume`, json({}));
+
+/** A named snapshot (`GET /api/managed-machines/snapshots?all=true`). */
+export type ManagedSnapshot = {
+  name: string; label: string; project?: string | null; source_machine_id: string; source_size: string;
+  created_at: string; last_used_at?: string | null; status: "saving" | "ready" | "failed" | string;
+  size_bytes?: number | null; error?: string | null; monthly_usd: number;
+};
+export const listManagedSnapshots = () => api<{ snapshots: ManagedSnapshot[] }>(`/api/managed-machines/snapshots?all=true`, { method: "GET" });
+export const deleteManagedSnapshot = (s: Pick<ManagedSnapshot, "name" | "project">) =>
+  api<{ deleted: string }>(`/api/managed-machines/snapshots/${encodeURIComponent(s.name)}${s.project ? `?project=${encodeURIComponent(s.project)}` : ""}`, { method: "DELETE" });
+/** "lean-warm · lean · 3.2 GB · used 2 h ago · free" */
+export function snapshotLine(s: ManagedSnapshot, now = Date.now()): string {
+  const gb = s.size_bytes ? `${(s.size_bytes / 1e9).toFixed(1)} GB` : "";
+  const used = s.last_used_at ? `used ${ago(Date.parse(s.last_used_at), now)}` : `saved ${ago(Date.parse(s.created_at), now)}`;
+  const cost = s.monthly_usd > 0 ? `${usd(s.monthly_usd)}/month` : "included";
+  return [s.project ?? "no project", gb, used, cost].filter(Boolean).join(" · ");
+}
+const ago = (t: number, now: number) => {
+  if (!Number.isFinite(t)) return "";
+  const m = Math.max(0, Math.round((now - t) / 60000));
+  return m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+};
 export const extendManagedMachine = (id: string, ttl_minutes: number) => api<ManagedMachine>(`/api/managed-machines/${encodeURIComponent(id)}/extend`, json({ ttl_minutes }));
 
 export { isManagedNode } from "./machines/nodes";
@@ -87,7 +111,9 @@ export async function getManagedSettings(): Promise<ManagedSettings | null> {
 export const putManagedSettings = (body: ManagedSettings) =>
   api<ManagedSettings>("/api/managed-machines/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
-export const isLive = (m: Pick<ManagedMachine, "state">) => m.state !== "destroyed" && m.state !== "failed";
+export const isLive = (m: Pick<ManagedMachine, "state">) => m.state !== "destroyed" && m.state !== "failed" && m.state !== "stopped";
+/** Stopped: disk kept, nothing billed, resumable within the retention. */
+export const isStopped = (m: Pick<ManagedMachine, "state">) => m.state === "stopped";
 
 /** "$0.42", "$12.30", "<$0.01" for tiny non-zero amounts. */
 export function usd(amount: number | null | undefined): string {
@@ -136,7 +162,7 @@ export const estimateCost = (usdPerHourRate: number, ttlMinutes: number) => usdP
 
 export const stateLabel = (s: string) =>
   s === "provisioning" || s === "enrolling" ? "Starting…" : s === "online" ? "Online"
-  : s === "destroying" ? "Destroying…" : s === "destroyed" ? "Destroyed" : s === "failed" ? "Failed" : s;
+  : s === "destroying" ? "Destroying…" : s === "destroyed" ? "Destroyed" : s === "failed" ? "Failed" : s === "stopped" ? "Stopped" : s;
 
 export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: number }) =>
   `${s.cpu} vCPU · ${s.ram_gb} GB${s.disk_gb != null ? ` · ${s.disk_gb} GB disk` : ""}`;
@@ -176,7 +202,7 @@ export const costLine = (cost: number, rate: number) => `${usd(cost)} so far · 
 
 /** Machines destroyed or failed during the last 24 hours, newest first. */
 export function recentMachines(machines: ManagedMachine[], now = Date.now()): ManagedMachine[] {
-  return machines.filter(m => !isLive(m)).filter(m => {
+  return machines.filter(m => !isLive(m) && !isStopped(m)).filter(m => {
     const t = Date.parse(m.destroyed_at ?? m.created_at);
     return Number.isFinite(t) && now - t <= 86_400_000;
   }).sort((a, b) => Date.parse(b.destroyed_at ?? b.created_at) - Date.parse(a.destroyed_at ?? a.created_at));

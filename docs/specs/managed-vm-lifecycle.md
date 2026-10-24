@@ -119,6 +119,37 @@ rewritten to https, and the orbnode rustup env when the image has it. The
 `total_ms`. The image recipe adds gh, ripgrep, fd, clang/llvm/lld and an
 orbnode-owned rustup with stable and 1.93.0.
 
+## Snapshots, forks, stop
+
+Code: `src/managed/snapshots.rs`. Agent guide: `skills/boat-machines/SKILL.md`.
+
+- **Named snapshots** (`snapshot_managed_machine`, `POST
+  /api/managed-machines/:id/snapshot`) are recorded in
+  `.sandboxed-sh/managed_snapshots.json` with owner mission, tenant, project
+  (the owner mission's), source machine and size. Delivered
+  `.paloma-secrets` are deleted on the VM first; a VM holding a projected
+  Antigravity sign-in cannot be saved or forked. Visible and usable only
+  within the same tenant and project. Pricing: 10 included, then $1.70/month.
+- **From a snapshot**: `spawn_managed_machine(from_snapshot)` and
+  `start_mission(auto-managed, managed_from_snapshot)`; `last_used_at` is
+  recorded. Budget and caps apply as for any rent.
+- **Fork** (`fork_managed_machine`, `POST /:id/fork`): new machine from the
+  source's latest background snapshot (up to ~1 min stale), owner = caller,
+  `forked_from` recorded. Provisioning deletes the copied `node.cred` and
+  `managed-auth` before enrolling.
+- **Stop / resume**: stop keeps the disk (`Stopped`, unregistered, no
+  billing). The boat key has no `sandbox.resume`, so resume forks the
+  stopped sandbox and keeps the machine's id, node id, owner and pool;
+  cost of earlier runs is kept in `cost_before_resume`.
+- **Reaper**: rule 5 (owner interrupted/awaiting/blocked/paused and idle)
+  stops instead of destroying (`stopped_by_reaper`), and such a machine is
+  resumed when its owner works again. A stopped machine is closed after
+  `SANDBOXED_MANAGED_STOPPED_RETENTION_HOURS` (24) or when its owner ends.
+- **Snapshot cleanup** (each reconcile pass, dry-run aware): keep the newest
+  `SANDBOXED_MANAGED_SNAPSHOT_KEEP` (2) ready snapshots per project, delete
+  ones unused for `SANDBOXED_MANAGED_SNAPSHOT_UNUSED_DAYS` (14) and failed
+  saves; never one a provisioning machine is being created from.
+
 ## Reconciler (every `reconcile_secs`)
 
 - Provider VM with our name prefix and no live registry row (and no spawn in
