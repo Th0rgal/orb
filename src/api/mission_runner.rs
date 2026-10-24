@@ -824,6 +824,89 @@ pub(crate) fn describe_cron(expression: &str) -> String {
     }
 }
 
+/// Agent-created schedules never fire more often than this.
+pub(crate) const NATIVE_SCHEDULE_MIN_PERIOD_SECONDS: i64 = 300;
+/// Agent-created schedules stop after this long (the agent can re-create one).
+pub(crate) const NATIVE_SCHEDULE_TTL_SECONDS: i64 = 7 * 24 * 3600;
+
+/// Validate an agent cron. One firing more often than every
+/// `NATIVE_SCHEDULE_MIN_PERIOD_SECONDS` keeps all its other fields and only
+/// thins its minute field to a subset spaced at least 5 minutes apart (also
+/// across the hour), so the result fires at a subset of the original times.
+pub(crate) fn bounded_native_cron(expression: &str) -> Result<String, String> {
+    let expression = expression.trim();
+    let gap = native_cron_min_gap(expression)?;
+    if gap >= NATIVE_SCHEDULE_MIN_PERIOD_SECONDS {
+        return Ok(expression.to_string());
+    }
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    let too_frequent =
+        || format!("Schedules may fire at most every 5 minutes; `{expression}` fires more often");
+    if fields.len() != 5 {
+        return Err(too_frequent());
+    }
+    let minutes = native_cron_minutes(fields[0]).ok_or_else(too_frequent)?;
+    let mut kept: Vec<u32> = Vec::new();
+    for m in minutes {
+        let spaced = kept.last().is_none_or(|last| m >= last + 5)
+            && kept.first().is_none_or(|first| first + 60 >= m + 5);
+        if spaced {
+            kept.push(m);
+        }
+    }
+    let minute = kept
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let thinned = std::iter::once(minute.as_str())
+        .chain(fields[1..].iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if native_cron_min_gap(&thinned)? < NATIVE_SCHEDULE_MIN_PERIOD_SECONDS {
+        return Err(too_frequent());
+    }
+    Ok(thinned)
+}
+
+/// The minutes (0..60) a 5-field cron minute field selects.
+fn native_cron_minutes(field: &str) -> Option<Vec<u32>> {
+    let cron = croner::Cron::new(&format!("{field} 0 1 1 *"))
+        .parse()
+        .ok()?;
+    let start = chrono::DateTime::parse_from_rfc3339("2030-12-31T23:59:00Z")
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let mut at = start;
+    let mut minutes = Vec::new();
+    while let Ok(next) = cron.find_next_occurrence(&at, false) {
+        if next.format("%Y%m%d%H").to_string() != "2031010100" {
+            break;
+        }
+        minutes.push(chrono::Timelike::minute(&next));
+        at = next;
+    }
+    Some(minutes)
+}
+
+/// Tightest gap between consecutive fires over the next ~2 weeks of samples.
+fn native_cron_min_gap(expression: &str) -> Result<i64, String> {
+    let cron = croner::Cron::new(expression)
+        .parse()
+        .map_err(|_| format!("Invalid cron expression: {expression}"))?;
+    let mut min_gap = i64::MAX;
+    if let Ok(mut prev) = cron.find_next_occurrence(&chrono::Utc::now(), false) {
+        for _ in 0..4000 {
+            let Ok(next) = cron.find_next_occurrence(&prev, false) else {
+                break;
+            };
+            min_gap = min_gap.min((next - prev).num_seconds());
+            prev = next;
+        }
+    }
+    Ok(min_gap)
+}
+
 /// Turn an Antigravity recurring `schedule` into a durable Core cron
 /// schedule for the mission: each tick sends the prompt as a queued message.
 /// It is listed with the mission's wake-ups and can be cancelled there.
@@ -832,9 +915,15 @@ pub(crate) async fn register_native_cron(
     expression: &str,
     prompt: &str,
 ) -> Result<serde_json::Value, String> {
-    if croner::Cron::new(expression).parse().is_err() {
-        return Err(format!("Invalid cron expression: {expression}"));
-    }
+    // A refused cron still ends the blocked native run; the resume prompt
+    // tells the agent why no schedule exists.
+    let expression = match bounded_native_cron(expression) {
+        Ok(expression) => expression,
+        Err(refused) => return Ok(serde_json::json!({ "refused": refused })),
+    };
+    let expression = expression.as_str();
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(NATIVE_SCHEDULE_TTL_SECONDS)).to_rfc3339();
     let body = serde_json::json!({
         "command_source": { "type": "inline", "content": prompt },
         "trigger": { "type": "cron", "expression": expression, "timezone": "UTC" },
@@ -843,6 +932,7 @@ pub(crate) async fn register_native_cron(
             "__wakeup_source": ANTIGRAVITY_SCHEDULE_SOURCE,
             "__wakeup_request_id": native_cron_request_id(expression, prompt),
             "__wakeup_reason": format!("Antigravity schedule ({})", describe_cron(expression)),
+            "__schedule_expires_at": expires_at,
         },
         "start_immediately": false,
     });
@@ -866,11 +956,24 @@ pub(crate) async fn register_native_cron_resume(
 }
 
 pub(crate) fn native_cron_resume_prompt(cron: &crate::antigravity::NativeCron) -> String {
-    format!(
-        "[Orb] Your recurring `schedule` ({}, `{}`) is now owned by Orb: at each tick Orb sends you its prompt as a new message, and the user can see and cancel it on the mission. A headless run cannot keep a native cron alive, so your previous run was ended right after that call. Do not call `schedule` again for this; continue the work you were doing where it stopped.",
-        describe_cron(&cron.expression),
-        cron.expression
-    )
+    let ended = "A headless run cannot keep a native cron alive, so your previous run was ended right after that call.";
+    match bounded_native_cron(&cron.expression) {
+        Err(refused) => format!(
+            "[Orb] Your recurring `schedule` (`{}`) was not created: {refused}. {ended} Continue the work you were doing where it stopped; if you still need a schedule, call `schedule` once with a cron that fires at most every 5 minutes.",
+            cron.expression
+        ),
+        Ok(bounded) => {
+            let adjusted = if bounded == cron.expression.trim() {
+                String::new()
+            } else {
+                format!(" It was thinned to `{bounded}` because schedules fire at most every 5 minutes.")
+            };
+            format!(
+                "[Orb] Your recurring `schedule` ({}, `{bounded}`) is now owned by Orb: at each tick Orb sends you its prompt as a new message, and the user can see and cancel it on the mission. It expires after 7 days.{adjusted} {ended} Do not call `schedule` again for this; continue the work you were doing where it stopped.",
+                describe_cron(&bounded)
+            )
+        }
+    }
 }
 
 pub(crate) fn spawn_claude_builtin_wakeup_automation(
@@ -15331,5 +15434,71 @@ mod tests {
         );
         assert!(super::limit_reset_of(dir.path(), &key(&sibling)).is_none());
         crate::account_limits::shared().clear(&key(&first));
+    }
+}
+
+#[cfg(test)]
+mod native_cron_bounds_tests {
+    #[test]
+    fn agent_crons_are_thinned_to_a_subset_of_their_fires() {
+        use super::bounded_native_cron as b;
+        assert_eq!(b("*/30 * * * *").unwrap(), "*/30 * * * *");
+        assert_eq!(b("0 9 * * *").unwrap(), "0 9 * * *");
+        assert_eq!(
+            b("* 9 * * 1")
+                .unwrap()
+                .split(' ')
+                .skip(1)
+                .collect::<Vec<_>>(),
+            ["9", "*", "*", "1"]
+        );
+        assert_eq!(b("0,1 * * * *").unwrap(), "0 * * * *");
+        assert!(b("not a cron").is_err());
+        assert!(b("* * * * * *").is_err(), "seconds-level crons are refused");
+        let cron = |e: &str| crate::antigravity::NativeCron {
+            step: 1,
+            expression: e.into(),
+            prompt: "p".into(),
+        };
+        assert!(super::native_cron_resume_prompt(&cron("* * * * * *")).contains("was not created"));
+        assert!(super::native_cron_resume_prompt(&cron("*/2 * * * *")).contains("thinned to"));
+        assert!(!super::native_cron_resume_prompt(&cron("*/30 * * * *")).contains("thinned"));
+        // Over a sampled week the bounded schedule fires at a subset of the
+        // original times, never more often, and at least 5 minutes apart.
+        let week = |e: &str| {
+            let cron = croner::Cron::new(e).parse().unwrap();
+            let mut at = chrono::DateTime::parse_from_rfc3339("2030-01-07T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            let end = at + chrono::Duration::days(7);
+            let mut fires = std::collections::BTreeSet::new();
+            while let Ok(next) = cron.find_next_occurrence(&at, false) {
+                if next >= end {
+                    break;
+                }
+                fires.insert(next);
+                at = next;
+            }
+            fires
+        };
+        for original in [
+            "* 9 * * 1",
+            "* * * * *",
+            "*/2 * * * *",
+            "0,1,2,3,30 8-10 * * 1-5",
+            "*/3 */2 1 * *",
+            "58,59,0,1 * * * *",
+        ] {
+            let bounded = b(original).unwrap();
+            let (o, n) = (week(original), week(&bounded));
+            assert!(n.is_subset(&o), "{original} -> {bounded}");
+            assert!(!n.is_empty() || o.is_empty(), "{original} -> {bounded}");
+            assert!(
+                n.iter()
+                    .zip(n.iter().skip(1))
+                    .all(|(x, y)| (*y - *x).num_seconds() >= 300),
+                "{original} -> {bounded}"
+            );
+        }
     }
 }

@@ -326,10 +326,18 @@ pub async fn create_automation(
                 })
                 .collect();
             wakeup_iteration = (priors.len() as u32).saturating_add(1);
-            for prior in priors
+            let mut older: Vec<_> = priors
                 .into_iter()
                 .filter(|a| a.active && (a.created_at.clone(), a.id.to_string()) < new_key)
-            {
+                .collect();
+            // Newest first; keep the source's quota (counting the new row).
+            older.sort_by(|a, b| {
+                (b.created_at.as_str(), b.id.to_string())
+                    .cmp(&(a.created_at.as_str(), a.id.to_string()))
+            });
+            let keep =
+                super::control_queue::wakeup_supersession_keep(&wakeup_key).saturating_sub(1);
+            for prior in older.into_iter().skip(keep) {
                 if let Err(e) = control
                     .mission_store
                     .update_automation_active(prior.id, false)

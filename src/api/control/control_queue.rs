@@ -428,6 +428,19 @@ pub(super) fn remote_node_needs_on_demand_probe(
     true
 }
 
+const ANTIGRAVITY_SCHEDULE_POOL: &str = "antigravity-schedule";
+/// Active agent-created recurring schedules allowed per mission.
+pub(crate) const MAX_NATIVE_SCHEDULES_PER_MISSION: usize = 3;
+
+/// How many active wake-ups (including the newest) a supersession key keeps.
+pub(crate) fn wakeup_supersession_keep(key: &str) -> usize {
+    if key == ANTIGRAVITY_SCHEDULE_POOL {
+        MAX_NATIVE_SCHEDULES_PER_MISSION
+    } else {
+        1
+    }
+}
+
 pub(crate) fn wakeup_supersession_key(
     source: Option<&str>,
     trigger: &mission_store::TriggerType,
@@ -438,12 +451,10 @@ pub(crate) fn wakeup_supersession_key(
         "claude-builtin" | "automation-manager" | "orb-local" => Some("wall-clock".to_string()),
         // Durable completions are independent. Only a replacement watcher for
         // the same job may supersede an older one.
-        // One native recurring schedule per cron expression: an agent that
-        // re-schedules the same cadence with reworded instructions replaces it.
+        // Agent-created recurring schedules share one bounded pool per mission
+        // (`wakeup_supersession_keep`): the oldest is replaced beyond the cap.
         crate::api::mission_runner::ANTIGRAVITY_SCHEDULE_SOURCE => match trigger {
-            mission_store::TriggerType::Cron { expression, .. } => {
-                Some(format!("antigravity-cron:{}", expression.trim()))
-            }
+            mission_store::TriggerType::Cron { .. } => Some(ANTIGRAVITY_SCHEDULE_POOL.to_string()),
             _ => None,
         },
         "durable-job-terminal" => match trigger {
@@ -595,4 +606,25 @@ pub(super) async fn persist_control_queue_if_changed(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod native_schedule_pool_tests {
+    use super::*;
+    #[test]
+    fn agent_schedules_share_one_pool_capped_per_mission() {
+        let cron = |e: &str| mission_store::TriggerType::Cron {
+            expression: e.into(),
+            timezone: "UTC".into(),
+        };
+        let src = Some(crate::api::mission_runner::ANTIGRAVITY_SCHEDULE_SOURCE);
+        let a = wakeup_supersession_key(src, &cron("*/30 * * * *")).unwrap();
+        let b = wakeup_supersession_key(src, &cron("0 * * * *")).unwrap();
+        assert_eq!(a, b, "different cadences count against the same cap");
+        assert_eq!(
+            wakeup_supersession_keep(&a),
+            MAX_NATIVE_SCHEDULES_PER_MISSION
+        );
+        assert_eq!(wakeup_supersession_keep("wall-clock"), 1);
+    }
 }

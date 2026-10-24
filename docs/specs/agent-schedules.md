@@ -107,12 +107,24 @@ custom axioms are allowed: `crates/orb-spec/build.rs` compiles with
   caller can register a schedule or make one fire. Every unauthorized
   operation is dropped.
 
-## Dedupe and supersession
+## Dedupe, bounds and supersession
 
 - Same cron and same prompt gives the same automation id. Re-registering
   returns the existing row, including a cancelled one. A user's cancel is
   sticky for that key.
-- Same cron with a reworded prompt replaces the older schedule
-  (`wakeup_supersession_key`: `antigravity-cron:<expression>`).
+- At most 3 active agent schedules per mission
+  (`MAX_NATIVE_SCHEDULES_PER_MISSION`). A new one beyond the cap replaces the
+  oldest, whatever its cadence.
+- Minimum period (`bounded_native_cron`): a cron that would fire more often
+  than every 5 minutes keeps its hour, day-of-month, month and weekday fields.
+  Only its minute field is thinned, to minutes at least 5 apart (also across
+  the hour), so it fires at a subset of the original times. For example,
+  `* 9 * * 1` becomes `0,5,…,55 9 * * 1`. A cron that cannot be thinned
+  (seconds-level or invalid) is refused. The run is still ended, and the
+  resume prompt tells the agent why.
+- Each schedule expires 7 days after registration (`__schedule_expires_at`),
+  and stops when its mission is `completed` or `not_feasible`. An
+  acknowledged or awaiting mission keeps it. The scheduler deactivates the row
+  through `orb_schedule_step` (owner ended → drop).
 - A tick that finds the mission busy waits. The slot fires once, at the first
   idle tick.
