@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
@@ -1041,6 +1042,7 @@ fun OrbProjectPage(
     var deleteFolderTarget by remember { mutableStateOf<String?>(null) }
     var deleteMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
     var renameMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
+    var settingsMissionTarget by remember { mutableStateOf<OrbRow?>(null) }
     var renameMissionDraft by remember { mutableStateOf("") }
 
     val projectSlug = remember(liveProject) {
@@ -1649,6 +1651,10 @@ fun OrbProjectPage(
                                 renameMissionDraft = OrbJSON.cleanTitle(node.mission.str("title", "name") ?: "")
                                 renameMissionTarget = node.mission
                             },
+                            onSettings = {
+                                contextMenuMission = null
+                                settingsMissionTarget = node.mission
+                            },
                             onMove = {
                                 contextMenuMission = null
                                 OrbMoveClipboard.pick(node.mission, projectSlug)
@@ -1829,6 +1835,10 @@ fun OrbProjectPage(
                                         contextMenuMission = null
                                         renameMissionDraft = OrbJSON.cleanTitle(node.mission.str("title", "name") ?: "")
                                         renameMissionTarget = node.mission
+                                    },
+                                    onSettings = {
+                                        contextMenuMission = null
+                                        settingsMissionTarget = node.mission
                                     },
                                     onMove = {
                                         contextMenuMission = null
@@ -2044,6 +2054,15 @@ fun OrbProjectPage(
         )
     }
 
+    settingsMissionTarget?.let { target ->
+        OrbMissionSettingsDialog(
+            core = core,
+            missionId = target.id,
+            title = OrbJSON.cleanTitle(target.str("title", "name") ?: ""),
+            onDismiss = { settingsMissionTarget = null },
+        )
+    }
+
     renameMissionTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { renameMissionTarget = null },
@@ -2233,6 +2252,7 @@ private fun OrbMissionListItem(
     showContextMenu: Boolean,
     onDismissContextMenu: () -> Unit,
     onRename: () -> Unit,
+    onSettings: () -> Unit,
     onMove: () -> Unit,
     onArchive: () -> Unit,
     onPause: () -> Unit,
@@ -2441,6 +2461,11 @@ private fun OrbMissionListItem(
                 text = { Text("Move…", color = Color.White) },
                 leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = Color.White) },
                 onClick = onMove
+            )
+            DropdownMenuItem(
+                text = { Text("Mission settings…", color = Color.White) },
+                leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, tint = Color.White) },
+                onClick = onSettings
             )
             HorizontalDivider(color = OrbStyle.border)
             DropdownMenuItem(

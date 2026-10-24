@@ -20,8 +20,9 @@ import { readProjectFileVersion } from "./projectContext";
 import { moveMissions, planMissionMoves } from "./missionMove";
 import { RunningWorkers, deleteDescendants, descendantsSentence, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
+const MissionSettings = lazy(() => import("./MissionSettings").then(m => ({ default: m.MissionSettings })));
 import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
-import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on, batch, lazy } from "solid-js";
 import { mergeById, pollWhileVisible } from "./poll";
 import { createStore, reconcile } from "solid-js/store";
 import * as Ic from "./icons";
@@ -209,6 +210,15 @@ export function LiveProjectsSection(p: {
   const [makingFile, setMakingFile] = createSignal(false);
   /** The context menu targets the selected group without opening its conversation. */
   const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission } | null>(null);
+  const [settingsMission, setSettingsMission] = createSignal<Mission | null>(null);
+  /** Title of any loaded mission (children and pool owners in Mission settings). */
+  const loadedTitle = (id: string) => {
+    for (const list of Object.values(missions)) {
+      const m = list?.find(x => x.id === id);
+      if (m) return m.title ?? undefined;
+    }
+    return undefined;
+  };
   const [multiSelectMenu, setMultiSelectMenu] = createSignal<{ x: number; y: number; treeIds: string[] } | null>(null);
   const [deleteTargets, setDeleteTargets] = createSignal<string[]>([]);
   const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);
@@ -1634,6 +1644,7 @@ export function LiveProjectsSection(p: {
     { kind: "item", label: "Move", icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id) },
     { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginMissionRename(mission) },
     { kind: "item", label: "Copy mission ID", icon: Ic.CopyIcon, onClick: () => void copyMissionId(mission) },
+    { kind: "item", label: "Mission settings…", icon: Ic.SlidersIcon, onClick: () => { setMissionMenu(null); setSettingsMission(mission); } },
     ...(isArchivable(mission.status)
       ? [{ kind: "item" as const, label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void archiveConversation(mission) }]
       : []),
@@ -2082,6 +2093,9 @@ export function LiveProjectsSection(p: {
       }><ConfirmDialog destructive title={target.directory ? "Delete folder?" : "Delete file?"} description={target.directory ? `Delete ${target.path} and all files and subfolders inside? This cannot be undone.` : `Delete ${target.path}?`} action="Delete" busy={fileBusy()} error={fileActionError()} onConfirm={() => void saveFileAction()} onClose={() => !fileBusy() && setFileAction(null)} /></Show>}</Show>
       <Show when={actionMenu()}>
         {(menu) => <PopupMenu {...menu()} focus={actionFocus()} items={menuItems(menu().slug, menu().path)} onClose={() => setActionMenu(null)} />}
+      </Show>
+      <Show when={settingsMission()}>
+        {m => <MissionSettings missionId={m().id} title={m().title ?? `Agent ${m().id.slice(0, 8)}`} titleOf={loadedTitle} onClose={() => setSettingsMission(null)} />}
       </Show>
       <Show when={missionMenu()}>
         {(menu) => <PopupMenu x={menu().x} y={menu().y} focus={false} items={missionMenuItems(menu().mission, menu().x, menu().y)} onDismissSubmenu={() => setForkTarget(null)} onClose={() => { setForkTarget(null); setMissionMenu(null); }}>

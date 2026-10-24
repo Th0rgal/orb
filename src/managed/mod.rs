@@ -15,19 +15,21 @@
 //! Configuration (all optional, env):
 //! `BOAT_API_KEY` (enables the feature), `SANDBOXED_MANAGED_ENABLED`,
 //! `SANDBOXED_MANAGED_DAILY_CAP_USD` (20; `none` = unlimited),
-//! `SANDBOXED_MANAGED_MAX_CONCURRENT` (6; `none` = unlimited), `SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` (120),
+//! `SANDBOXED_MANAGED_MAX_CONCURRENT` (6; `none` = unlimited), `SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` (60),
+//! `SANDBOXED_MANAGED_AUTO_EXTEND_MINUTES` (30; 0 = off),
 //! `SANDBOXED_MANAGED_MAX_TTL_MINUTES` (720), `SANDBOXED_MANAGED_DEFAULT_SIZE`
 //! (small), `SANDBOXED_MANAGED_MAX_SIZE` (xlarge), `SANDBOXED_MANAGED_IMAGE`
 //! (orb-node-base), `SANDBOXED_MANAGED_CORE_URL` (defaults to
 //! `SANDBOXED_PUBLIC_URL`), `SANDBOXED_MANAGED_IDLE_MINUTES` (30),
 //! `SANDBOXED_MANAGED_OWNER_GRACE_MINUTES` (5),
-//! `SANDBOXED_MANAGED_WAITING_GRACE_MINUTES` (60),
+//! `SANDBOXED_MANAGED_WAITING_GRACE_MINUTES` (15),
 //! `SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES` (10),
 //! `SANDBOXED_MANAGED_RECONCILE_SECS` (120).
 //!
 //! Lifecycle (ownership, reaping, reconciliation): `docs/specs/managed-vm-lifecycle.md`.
 
 pub mod boat;
+pub mod budget;
 pub mod lifecycle;
 pub mod relay;
 
@@ -53,6 +55,11 @@ pub const NODE_PREFIX: &str = "managed-";
 pub const SANDBOX_NAME_PREFIX: &str = "orb-managed-";
 const TOKEN_ENV_PREFIX: &str = "SANDBOXED_MANAGED_TOKEN_";
 const ENROLL_ENV_PATH: &str = "/home/user/.orb/enroll.env";
+const PROVISION_PATH: &str = "/home/user/.orb/provision.sh";
+/// Per-VM fixups run as root before orb-node starts (writable
+/// `/tmp/opencode`, GitHub credential helper, user rustup env).
+pub const PROVISION_SCRIPT: &str =
+    include_str!("../../deploy/managed-images/orb-node-provision.sh");
 
 // ---------------------------------------------------------------- provider
 
@@ -187,6 +194,9 @@ pub struct ManagedSettings {
     /// Grace before a provider VM unknown to the registry is stopped.
     pub orphan_grace_minutes: u64,
     pub reconcile_secs: u64,
+    /// Minutes added to a busy machine's TTL when it is about to expire
+    /// (0 disables auto-extend). Each chunk is checked against budgets.
+    pub auto_extend_minutes: u64,
 }
 
 impl ManagedSettings {
@@ -270,7 +280,7 @@ impl ManagedSettings {
                 6,
             ),
             default_ttl_minutes: env_parse::<u64>("SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES")
-                .unwrap_or(120)
+                .unwrap_or(60)
                 .min(max_ttl),
             max_ttl_minutes: max_ttl,
             default_size,
@@ -285,9 +295,10 @@ impl ManagedSettings {
             idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(30),
             owner_grace_minutes: env_parse("SANDBOXED_MANAGED_OWNER_GRACE_MINUTES").unwrap_or(5),
             waiting_grace_minutes: env_parse("SANDBOXED_MANAGED_WAITING_GRACE_MINUTES")
-                .unwrap_or(60),
+                .unwrap_or(15),
             orphan_grace_minutes: env_parse("SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES").unwrap_or(10),
             reconcile_secs: env_parse("SANDBOXED_MANAGED_RECONCILE_SECS").unwrap_or(120),
+            auto_extend_minutes: env_parse("SANDBOXED_MANAGED_AUTO_EXTEND_MINUTES").unwrap_or(30),
         }
     }
 }
@@ -373,6 +384,13 @@ pub struct ManagedMachine {
     pub ledger_closed: bool,
     #[serde(default)]
     pub last_busy_at: Option<DateTime<Utc>>,
+    /// Mission budget pool this machine is charged to (`budget.rs`); `None`
+    /// when no pool applies (only the daily cap).
+    #[serde(default)]
+    pub budget_pool_id: Option<String>,
+    /// Automatic TTL extensions granted while the node was busy.
+    #[serde(default)]
+    pub auto_extensions: u32,
 }
 
 impl ManagedMachine {
@@ -415,6 +433,18 @@ pub struct SpawnRequest {
     pub owner_user_id: Option<String>,
     /// Wait until the node is online (default true).
     pub wait: Option<bool>,
+    /// Budget pool the machine is charged to. Resolved by the API from the
+    /// caller's mission lineage; never from the body.
+    #[serde(skip)]
+    pub budget_pool_id: Option<String>,
+    /// The machine is for a child that will get this sub-budget: the
+    /// reservation must fit it (and the pool it is carved from).
+    #[serde(default)]
+    pub sub_budget_usd: Option<f64>,
+    /// Prefer an idle machine of the same size whose owner (a child of the
+    /// requester) has ended, inside its grace window, over a fresh rent.
+    #[serde(default)]
+    pub reuse_idle: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -610,6 +640,7 @@ pub struct ManagedManager {
     core_port: u16,
     dir: PathBuf,
     machines: Mutex<Vec<ManagedMachine>>,
+    budgets: Mutex<HashMap<String, budget::BudgetPool>>,
     secrets: Mutex<HashMap<String, MachineSecrets>>,
     /// Serialises spawn admission so two callers cannot both pass the caps.
     admission: Mutex<()>,
@@ -875,6 +906,7 @@ impl ManagedManager {
             core_port,
             dir,
             machines: Mutex::new(Vec::new()),
+            budgets: Mutex::new(HashMap::new()),
             secrets: Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             relay: relay::RelayHub::default(),
@@ -1035,6 +1067,9 @@ impl ManagedManager {
     fn secrets_path(&self) -> PathBuf {
         self.dir.join("managed_machine_secrets.json")
     }
+    fn budgets_path(&self) -> PathBuf {
+        self.dir.join("mission_budgets.json")
+    }
     fn ledger_path(&self) -> PathBuf {
         self.dir.join("managed_ledger.jsonl")
     }
@@ -1072,6 +1107,12 @@ impl ManagedManager {
             }
         }
         *self.machines.lock().await = machines.machines;
+        if let Some(b) = std::fs::read(self.budgets_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<HashMap<String, budget::BudgetPool>>(&b).ok())
+        {
+            *self.budgets.lock().await = b;
+        }
         *self.secrets.lock().await = secrets;
         if let Some(rt) = std::fs::read(self.runtime_path())
             .ok()
@@ -1100,8 +1141,12 @@ impl ManagedManager {
     }
 
     fn ledger(&self, event: &str, machine: &ManagedMachine) {
+        self.ledger_with(event, machine, Value::Null);
+    }
+
+    fn ledger_with(&self, event: &str, machine: &ManagedMachine, extra: Value) {
         use std::io::Write;
-        let line = serde_json::json!({
+        let mut line = serde_json::json!({
             "at": Utc::now(),
             "event": event,
             "machine_id": machine.id,
@@ -1114,7 +1159,13 @@ impl ManagedManager {
             "ledger_closed": machine.ledger_closed,
             "owner_mission_id": machine.owner_mission_id,
             "reason": machine.destroy_reason.as_ref().or(machine.reason.as_ref()),
+            "budget_pool_id": machine.budget_pool_id,
         });
+        if let (Some(line), Some(extra)) = (line.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra {
+                line.insert(k.clone(), v.clone());
+            }
+        }
         let _ = std::fs::create_dir_all(&self.dir);
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -1361,6 +1412,25 @@ impl ManagedManager {
                     ),
                 ));
             }
+            let reserve = budget::reservation_for(ttl_minutes, spec.usd_per_hour);
+            if let Some(sub) = req.sub_budget_usd {
+                if reserve > sub {
+                    return Err(ManagedError::new(
+                        "budget_exceeded",
+                        402,
+                        format!(
+                            "The child's sub-budget ${sub:.2} cannot cover this machine's reservation ${reserve:.4} ({} for {} min); use a smaller size or a larger sub-budget",
+                            spec.size,
+                            ttl_minutes.min(budget::RESERVE_MINUTES as u64)
+                        ),
+                    ));
+                }
+            }
+            if let Some(pool) = req.budget_pool_id.as_deref() {
+                // A sub-budget child carves its whole budget from the pool.
+                let needed = req.sub_budget_usd.unwrap_or(0.0).max(reserve);
+                self.check_pool(pool, needed, "this machine").await?;
+            }
             let id = format!("mm{}", random_id());
             let now = Utc::now();
             let live_names: Vec<String> = self
@@ -1413,6 +1483,8 @@ impl ManagedManager {
                 error: None,
                 ledger_closed: false,
                 last_busy_at: None,
+                budget_pool_id: req.budget_pool_id.clone(),
+                auto_extensions: 0,
             };
             self.machines.lock().await.push(machine.clone());
             self.persist().await;
@@ -1452,6 +1524,7 @@ impl ManagedManager {
         ttl_minutes: u64,
     ) -> Result<ManagedMachine, String> {
         let m = self.get(id).await.ok_or("machine vanished")?;
+        let started = tokio::time::Instant::now();
         // boat stops the sandbox itself at TTL + a small grace, even if Core
         // is down: the hard backstop against runaway cost.
         let spec = SpawnSpec {
@@ -1484,6 +1557,7 @@ impl ManagedManager {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+        let ready_ms = started.elapsed().as_millis() as u64;
 
         // One-time enrollment token, delivered as a file (never in a command
         // line: boat keeps command history).
@@ -1517,6 +1591,25 @@ impl ManagedManager {
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
         wrote.map_err(|e| format!("write enrollment file: {e}"))?;
+        let provision_started = tokio::time::Instant::now();
+        // Image fixups are best effort: a failure is logged, never fatal.
+        let provisioned = match provider
+            .write_file(&provider_id, PROVISION_PATH, PROVISION_SCRIPT)
+            .await
+        {
+            Ok(()) => provider
+                .exec(&provider_id, &format!("sudo bash {PROVISION_PATH}"), 60)
+                .await
+                .and_then(|v| match exec_exit_code(&v) {
+                    Some(code) if code != 0 => Err(format!("exit code {code}")),
+                    _ => Ok(()),
+                }),
+            Err(e) => Err(e),
+        };
+        let provision_ms = provision_started.elapsed().as_millis() as u64;
+        if let Err(error) = &provisioned {
+            tracing::warn!(machine = %id, %error, "managed VM provisioning script failed");
+        }
         provider
             .exec(
                 &provider_id,
@@ -1525,6 +1618,7 @@ impl ManagedManager {
             )
             .await
             .map_err(|e| format!("start orb-node: {e}"))?;
+        let enroll_started = tokio::time::Instant::now();
 
         // Wait for the node to enroll and answer a heartbeat over the relay.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
@@ -1547,7 +1641,29 @@ impl ManagedManager {
                             })
                             .await
                             .ok_or("machine vanished")?;
-                        self.ledger("online", &m);
+                        let enroll_ms = enroll_started.elapsed().as_millis() as u64;
+                        let total_ms = started.elapsed().as_millis() as u64;
+                        tracing::info!(
+                            machine = %id,
+                            size = %m.size,
+                            ready_ms,
+                            provision_ms,
+                            provision_ok = provisioned.is_ok(),
+                            enroll_ms,
+                            total_ms,
+                            "managed machine online"
+                        );
+                        self.ledger_with(
+                            "online",
+                            &m,
+                            serde_json::json!({
+                                "ready_ms": ready_ms,
+                                "provision_ms": provision_ms,
+                                "provision_ok": provisioned.is_ok(),
+                                "enroll_ms": enroll_ms,
+                                "total_ms": total_ms,
+                            }),
+                        );
                         return Ok(m);
                     }
                 }
@@ -1614,6 +1730,15 @@ impl ManagedManager {
             return Err(ManagedError::new("not_live", 409, "Machine is not running"));
         }
         let ttl = ttl_minutes.clamp(5, self.settings.max_ttl_minutes);
+        if let Some(pool) = m.budget_pool_id.as_deref() {
+            let _guard = self.admission.lock().await;
+            self.check_pool(
+                pool,
+                budget::reservation_for(ttl, m.usd_per_hour),
+                "this extension",
+            )
+            .await?;
+        }
         let max_end =
             m.created_at + chrono::Duration::minutes(self.settings.max_ttl_minutes as i64);
         // Adds to the current deadline (never shortens it).
@@ -1848,6 +1973,9 @@ impl ManagedManager {
                         let busy = Self::node_busy(&m.node_id);
                         if busy {
                             self.update(&m.id, |m| m.last_busy_at = Some(now)).await;
+                            if self.auto_extend(&m, now).await {
+                                continue;
+                            }
                         }
                         let (decision, _) = self.decide_for(&m, now).await;
                         match &decision {
@@ -2085,6 +2213,369 @@ impl ManagedManager {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ budgets
+
+/// A mission's budget as the API returns it.
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionBudgetView {
+    pub mission_id: String,
+    /// The mission has its own budget (a pool root).
+    pub own_budget_usd: Option<f64>,
+    /// The pool the mission draws from (itself, an ancestor, or none).
+    pub pool_id: Option<String>,
+    /// `pooled` (draws from an ancestor), `own` (its own budget) or `none`.
+    pub mode: &'static str,
+    pub pool: Option<budget::PoolUsage>,
+    /// Most this mission's own budget may be set to (the parent pool's
+    /// remaining plus what this mission already holds); `None` = no limit.
+    pub max_grant_usd: Option<f64>,
+    pub children: Vec<ChildBudgetView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChildBudgetView {
+    pub mission_id: String,
+    /// `pooled` or `sub_budget`.
+    pub mode: &'static str,
+    pub budget_usd: Option<f64>,
+    pub spent_usd: f64,
+    pub reserved_usd: f64,
+}
+
+impl ManagedManager {
+    async fn persist_budgets(&self) {
+        let budgets = self.budgets.lock().await.clone();
+        let _ = std::fs::create_dir_all(&self.dir);
+        write_atomic(
+            &self.budgets_path(),
+            &serde_json::to_vec_pretty(&budgets).unwrap_or_default(),
+            false,
+        );
+    }
+
+    pub async fn budget_pools(&self) -> HashMap<String, budget::BudgetPool> {
+        self.budgets.lock().await.clone()
+    }
+
+    /// Which pools' owners still run (their sub-budget stays carved).
+    async fn open_pools(
+        &self,
+        pools: &HashMap<String, budget::BudgetPool>,
+    ) -> HashMap<String, bool> {
+        let probe = self.owner_probe.read().ok().and_then(|p| p.clone());
+        let mut out = HashMap::new();
+        for p in pools.values() {
+            let open = match (&probe, &p.owner_user_id) {
+                (Some(probe), Some(tenant)) => !matches!(
+                    probe(tenant.clone(), p.mission_id.clone()).await,
+                    Some(OwnerState::Terminal { .. }) | Some(OwnerState::Missing)
+                ),
+                _ => true,
+            };
+            out.insert(p.mission_id.clone(), open);
+        }
+        out
+    }
+
+    pub async fn pool_usage(&self, pool_id: &str) -> Option<budget::PoolUsage> {
+        let pools = self.budget_pools().await;
+        if !pools.contains_key(pool_id) {
+            return None;
+        }
+        let open = self.open_pools(&pools).await;
+        let machines = self.machines.lock().await.clone();
+        budget::pool_usage(pool_id, &pools, &machines, Utc::now(), &|id| {
+            open.get(id).copied().unwrap_or(true)
+        })
+    }
+
+    /// Reject a spend of `needed` that does not fit `pool_id`. A pool that
+    /// no longer exists (budget removed) imposes no limit.
+    async fn check_pool(&self, pool_id: &str, needed: f64, what: &str) -> Result<(), ManagedError> {
+        let Some(u) = self.pool_usage(pool_id).await else {
+            return Ok(());
+        };
+        if needed > u.available_usd + 1e-9 {
+            return Err(ManagedError::new(
+                "budget_exceeded",
+                402,
+                budget::exceeded_message(&u, needed, what),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Most `mission_id`'s own budget may be: the parent pool's remaining
+    /// plus what this mission's pool already holds there.
+    pub async fn max_grant(&self, mission_id: &str, parent_pool: Option<&str>) -> Option<f64> {
+        let parent = self.pool_usage(parent_pool?).await?;
+        let held = match self.pool_usage(mission_id).await {
+            Some(own) => (own.spent_usd + own.reserved_usd + own.carved_usd).max(own.budget_usd),
+            None => 0.0,
+        };
+        Some((parent.available_usd + held).max(0.0))
+    }
+
+    /// Set (`Some`) or remove (`None`) a mission's own budget. A budget
+    /// under an ancestor pool is a sub-budget and must fit that pool.
+    pub async fn set_mission_budget(
+        &self,
+        mission_id: &str,
+        amount: Option<f64>,
+        parent_pool: Option<String>,
+        owner_user_id: Option<String>,
+    ) -> Result<(), ManagedError> {
+        let _guard = self.admission.lock().await;
+        match amount {
+            None => {
+                self.budgets.lock().await.remove(mission_id);
+                // Machines charged to it fall back to the parent pool.
+                let mut machines = self.machines.lock().await;
+                for m in machines
+                    .iter_mut()
+                    .filter(|m| m.budget_pool_id.as_deref() == Some(mission_id))
+                {
+                    m.budget_pool_id = parent_pool.clone();
+                }
+                drop(machines);
+                // Child pools re-attach to the parent pool.
+                for p in self.budgets.lock().await.values_mut() {
+                    if p.parent_pool_id.as_deref() == Some(mission_id) {
+                        p.parent_pool_id = parent_pool.clone();
+                    }
+                }
+            }
+            Some(raw) => {
+                let amount = budget::validate_amount(raw)
+                    .map_err(|e| ManagedError::new("invalid_budget", 400, e))?;
+                if let Some(max) = self.max_grant(mission_id, parent_pool.as_deref()).await {
+                    if amount > max + 1e-9 {
+                        return Err(ManagedError::new(
+                            "sub_budget_exceeds_pool",
+                            402,
+                            format!(
+                                "Sub-budget ${amount:.2} exceeds what the parent pool {} can grant (${max:.4} remaining)",
+                                parent_pool.as_deref().unwrap_or_default()
+                            ),
+                        ));
+                    }
+                }
+                let mut pools = self.budgets.lock().await;
+                let existed = pools.contains_key(mission_id);
+                pools.insert(
+                    mission_id.to_string(),
+                    budget::BudgetPool {
+                        mission_id: mission_id.to_string(),
+                        budget_usd: amount,
+                        parent_pool_id: parent_pool.clone().filter(|p| p != mission_id),
+                        owner_user_id,
+                        updated_at: Utc::now(),
+                    },
+                );
+                drop(pools);
+                if !existed {
+                    // Live machines this mission owns now charge to its pool.
+                    let mut machines = self.machines.lock().await;
+                    for m in machines.iter_mut().filter(|m| {
+                        m.state.is_live()
+                            && m.owner_mission_id.as_deref() == Some(mission_id)
+                            && m.budget_pool_id == parent_pool
+                    }) {
+                        m.budget_pool_id = Some(mission_id.to_string());
+                    }
+                }
+            }
+        }
+        self.persist_budgets().await;
+        self.persist().await;
+        Ok(())
+    }
+
+    /// Re-attach a pool to its current nearest ancestor pool.
+    pub async fn reparent_pool(&self, mission_id: &str, parent_pool: Option<String>) {
+        let changed = {
+            let mut pools = self.budgets.lock().await;
+            match pools.get_mut(mission_id) {
+                Some(p) if p.parent_pool_id != parent_pool => {
+                    p.parent_pool_id = parent_pool.filter(|p| p != mission_id);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.persist_budgets().await;
+        }
+    }
+
+    /// Charge a machine to a pool (the child that claimed it).
+    pub async fn set_machine_pool(&self, id: &str, pool: Option<String>) {
+        if let Some(m) = self.get(id).await {
+            if m.budget_pool_id != pool {
+                if let Some(m) = self.update(&m.id, |m| m.budget_pool_id = pool).await {
+                    self.ledger("budget_pool_set", &m);
+                }
+            }
+        }
+    }
+
+    /// Budget view for one mission. `lineage` is the mission then its
+    /// ancestors; `children` its direct children.
+    pub async fn mission_budget(
+        &self,
+        mission_id: &str,
+        lineage: &[String],
+        children: &[String],
+    ) -> MissionBudgetView {
+        let pools = self.budget_pools().await;
+        let pool_id = budget::nearest_pool(lineage.iter().map(String::as_str), &pools);
+        let parent_pool = budget::nearest_pool(lineage.iter().skip(1).map(String::as_str), &pools);
+        let open = self.open_pools(&pools).await;
+        let machines = self.machines.lock().await.clone();
+        let now = Utc::now();
+        let is_open = |id: &str| open.get(id).copied().unwrap_or(true);
+        let pool = pool_id
+            .as_deref()
+            .and_then(|p| budget::pool_usage(p, &pools, &machines, now, &is_open));
+        let own = pools.get(mission_id).map(|p| p.budget_usd);
+        let children = children
+            .iter()
+            .map(|c| match pools.get(c) {
+                Some(p) => {
+                    let u = budget::pool_usage(c, &pools, &machines, now, &is_open);
+                    ChildBudgetView {
+                        mission_id: c.clone(),
+                        mode: "sub_budget",
+                        budget_usd: Some(p.budget_usd),
+                        spent_usd: u.as_ref().map_or(0.0, |u| u.spent_usd),
+                        reserved_usd: u.as_ref().map_or(0.0, |u| u.reserved_usd + u.carved_usd),
+                    }
+                }
+                None => {
+                    let mine = machines.iter().filter(|m| {
+                        m.owner_mission_id.as_deref() == Some(c.as_str())
+                            && m.budget_pool_id.is_some()
+                            && m.budget_pool_id == pool_id
+                    });
+                    let (spent, reserved) = mine.fold((0.0, 0.0), |(s, r), m| {
+                        (
+                            s + budget::machine_spent(m, now),
+                            r + budget::machine_reserved(m, now),
+                        )
+                    });
+                    ChildBudgetView {
+                        mission_id: c.clone(),
+                        mode: "pooled",
+                        budget_usd: None,
+                        spent_usd: (spent * 10000.0).round() / 10000.0,
+                        reserved_usd: (reserved * 10000.0).round() / 10000.0,
+                    }
+                }
+            })
+            .collect();
+        drop(machines);
+        let max_grant_usd = self.max_grant(mission_id, parent_pool.as_deref()).await;
+        MissionBudgetView {
+            mission_id: mission_id.to_string(),
+            own_budget_usd: own,
+            mode: if own.is_some() {
+                "own"
+            } else if pool_id.is_some() {
+                "pooled"
+            } else {
+                "none"
+            },
+            pool_id,
+            pool,
+            max_grant_usd,
+            children,
+        }
+    }
+
+    /// Hand an idle machine whose owner (a sibling of the new child, i.e. a
+    /// child of `requested_by`) has ended to a new child of `requested_by`,
+    /// instead of renting a fresh one. `ended(owner)` says whether the owner
+    /// mission is terminal and a child of `requested_by` (checked by the
+    /// caller against the mission store). Returns the released machine,
+    /// unowned and requested by `requested_by`, ready to be claimed.
+    pub async fn take_idle_sibling(
+        &self,
+        size: &str,
+        image: &str,
+        requested_by: &str,
+        tenant: Option<&str>,
+        candidates_ok: &(dyn Fn(&str) -> bool + Sync),
+    ) -> Option<ManagedMachine> {
+        let _guard = self.admission.lock().await;
+        let pick = self
+            .machines
+            .lock()
+            .await
+            .iter()
+            .filter(|m| {
+                m.state == MachineState::Online
+                    && m.size == size
+                    && m.image == image
+                    && Utc::now() + chrono::Duration::minutes(10) < m.expires_at
+                    && (m.owner_user_id.as_deref() == tenant || m.owner_user_id.is_none())
+                    && m.owner_mission_id.as_deref().is_some_and(candidates_ok)
+                    && !Self::node_busy(&m.node_id)
+            })
+            .min_by_key(|m| m.created_at)
+            .cloned()?;
+        let m = self
+            .update(&pick.id, |m| {
+                m.owner_mission_id = None;
+                m.requested_by_mission_id = Some(requested_by.to_string());
+                m.reap_at = None;
+                m.reap_reason = None;
+                m.last_busy_at = Some(Utc::now());
+            })
+            .await?;
+        self.ledger("reused_idle", &m);
+        Some(m)
+    }
+
+    /// While busy and close to its TTL, extend by `auto_extend_minutes` if
+    /// the pool (and the daily cap) allow. Returns true when extended.
+    async fn auto_extend(&self, m: &ManagedMachine, now: DateTime<Utc>) -> bool {
+        let chunk = self.settings.auto_extend_minutes;
+        if chunk == 0 || m.expires_at - now > chrono::Duration::minutes(10) {
+            return false;
+        }
+        let max_end =
+            m.created_at + chrono::Duration::minutes(self.settings.max_ttl_minutes as i64);
+        if m.expires_at >= max_end {
+            return false;
+        }
+        if let Some(cap) = self.settings.daily_cap_usd {
+            let b = self.budget().await;
+            if b.spent_today_usd + b.committed_usd + chunk as f64 / 60.0 * m.usd_per_hour > cap {
+                return false;
+            }
+        }
+        match self.extend(&m.id, chunk).await {
+            Ok(m) => {
+                if let Some(m) = self.update(&m.id, |m| m.auto_extensions += 1).await {
+                    self.ledger("auto_extended", &m);
+                }
+                true
+            }
+            Err(e) => {
+                tracing::info!(machine = %m.id, error = %e, "managed auto-extend refused");
+                false
+            }
+        }
+    }
+}
+
+/// Exit code of a provider exec result, when it reports one.
+pub fn exec_exit_code(v: &Value) -> Option<i64> {
+    ["exitCode", "exit_code", "code"]
+        .iter()
+        .find_map(|k| v.get(*k).and_then(Value::as_i64))
 }
 
 /// Per-job memory ceiling on a managed VM: 90% of its RAM (GiB).

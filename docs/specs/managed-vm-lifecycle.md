@@ -18,10 +18,20 @@ destroy: `orb_vm_step` op `reap_check`.
 Creation paths:
 
 - `spawn_managed_machine` (gateway): owner = calling mission.
-- `start_mission` with `auto-managed`: the VM is rented with owner = caller,
-  then `POST /api/control/missions` carries `claim_managed_machine_id`; once
-  the child exists Core makes the child the owner and the caller the
-  requester.
+- `start_mission` with `auto-managed`: Core first validates the launch
+  (`POST /api/control/missions` with `validate_only: true`: model, harness
+  auth a fresh `orb-node-base` VM can satisfy (no grok login; Antigravity only
+  when projection is allowed), project caps, sub-budget). A rejection rents
+  nothing. Then the VM is rented with owner = caller (or an idle VM of the
+  same size/image left by an ended sibling, still inside its owner grace, is
+  handed over: `reuse_idle`), and `POST /api/control/missions` carries
+  `claim_managed_machine_id`; once the child exists Core makes the child the
+  owner and the caller the requester. If the create still fails, the rented
+  VM is destroyed (`requested: launch_failed`).
+- A child that targets or extends a VM rented by an ancestor is a tenant:
+  `extend_managed_machine` adopts the VM only when the current owner is a
+  descendant of the caller, never an ancestor, so a parent's shared VM is not
+  released when a child completes.
 - A mission whose harness is Hermes calls `start_mission` through the
   assistant connector with `origin_session_id = orb_<mission uuid>`. Core
   makes that mission the parent when it exists in the caller's store (an
@@ -60,12 +70,54 @@ A rule whose due time is in the future is persisted as `reap_at` /
 
 Defaults (env): `SANDBOXED_MANAGED_IDLE_MINUTES` 30,
 `SANDBOXED_MANAGED_OWNER_GRACE_MINUTES` 5,
-`SANDBOXED_MANAGED_WAITING_GRACE_MINUTES` 60,
+`SANDBOXED_MANAGED_WAITING_GRACE_MINUTES` 15,
+`SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` 60 with
+`SANDBOXED_MANAGED_AUTO_EXTEND_MINUTES` 30 (a busy VM within 10 minutes of
+its TTL is extended by one chunk if its budget pool and the daily cap allow),
 `SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES` 10,
 `SANDBOXED_MANAGED_RECONCILE_SECS` 120.
 
 Owner death cascades through the tree: a descendant still running on the VM
 holds a lease, so rule 2 protects it; once nothing runs there, rule 3 applies.
+
+## Budgets (optional, off by default)
+
+A mission may carry `budget_usd` (Orb: right-click a mission, "Mission
+settings…"; agents: `start_mission(budget_usd=…)` for a child, `get_budget`).
+It is a pool shared by the mission's subtree. A descendant given its own
+budget gets a sub-pool carved from the nearest ancestor pool; the grant must
+not exceed that pool's remaining amount (`sub_budget_exceeds_pool`). Without
+any pool in its lineage a mission is limited only by the daily cap.
+
+Each VM records `budget_pool_id` at create (the pool of its owner, or of the
+child it is claimed for). Per pool, derived from the registry
+(`src/managed/budget.rs`):
+
+- `spent` = metered (or estimated so far) cost of its VMs;
+- `reserved` = for each live VM, `min(remaining TTL, 60 min) × usd_per_hour`;
+- `carved` = each child pool's budget while its owner runs, only its use
+  once the owner is terminal (unused money returns);
+- `available = budget − spent − reserved − carved`.
+
+Checked under the admission lock at `spawn_managed_machine`, `start_mission`
+auto-managed (before renting), `extend_managed_machine` and auto-extend
+(each needs `min(minutes, 60) × price`), and sub-budget grants. Refusals are
+`402 budget_exceeded` with the remaining amount. The daily cap stays the
+outer bound (`none` = unlimited). Budgets persist in
+`.sandboxed-sh/mission_budgets.json`; ledger events
+(`budget_pool_set`, `auto_extended`, `reused_idle`) go to the managed ledger.
+
+## Provisioning
+
+`provision` runs `deploy/managed-images/orb-node-provision.sh` as root before
+starting `orb-node` (best effort, logged): `/tmp/opencode` writable by
+`orbnode`, a git credential helper answering only `https://github.com` with
+the mission's GitHub token (the `paloma-secrets` file Core delivered, else
+`GITHUB_TOKEN`/`GH_TOKEN`; never written by the script), ssh GitHub URLs
+rewritten to https, and the orbnode rustup env when the image has it. The
+`online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and
+`total_ms`. The image recipe adds gh, ripgrep, fd, clang/llvm/lld and an
+orbnode-owned rustup with stable and 1.93.0.
 
 ## Reconciler (every `reconcile_secs`)
 

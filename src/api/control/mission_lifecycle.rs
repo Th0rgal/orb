@@ -393,6 +393,8 @@ pub async fn clone_mission(
         attachments: None,
         placement: None,
         claim_managed_machine_id: None,
+        budget_usd: None,
+        validate_only: None,
         extra: Default::default(),
     };
 

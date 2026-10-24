@@ -61,6 +61,11 @@ LEAN_VERSION=4.35.0
 LEAN_TOOLCHAIN=leanprover/lean4:v$LEAN_VERSION
 LEAN_URL=https://github.com/leanprover/lean4/releases/download/v$LEAN_VERSION/lean-$LEAN_VERSION-linux.tar.zst
 LEAN_SHA256=7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d
+RUSTUP_VERSION=1.28.2
+RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
+RUSTUP_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+# Preinstalled toolchains (projects pin 1.93.0, e.g. ecdsafail-challenge).
+RUST_TOOLCHAINS="stable 1.93.0"
 CERTIFIED_SEARCH_COMMIT=967325bc3cd42ac20581e6140390a93e6877b03e
 CERTIFIED_SEARCH_SHA256=f000c7a8fc5e240747511be546582a3b62335daccfb03a202b08dcd9aead717a
 # Fleet builds copied from ashur:/usr/local/bin (agy 1.4.3; others built 2026-10-21).
@@ -101,7 +106,9 @@ trap 'rm -rf "$DL"' EXIT
 log "apt base packages (signed Ubuntu archive)"
 export DEBIAN_FRONTEND=noninteractive
 need=()
-for p in curl ca-certificates git jq xz-utils zstd tar gzip python3 build-essential libssl3 dbus-user-session; do
+# gh, ripgrep, fd, clang/llvm/lld: used by most missions (boat review 2026-10-24).
+for p in curl ca-certificates git jq xz-utils zstd tar gzip python3 build-essential libssl3 dbus-user-session \
+         gh ripgrep fd-find clang llvm lld pkg-config libssl-dev; do
   dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
 done
 if [ ${#need[@]} -gt 0 ]; then
@@ -243,6 +250,24 @@ as_node mkdir -p "$ELAN_HOME_DIR/toolchains"
 as_node ln -sfn "$TC_DIR" "$ELAN_HOME_DIR/toolchains/$TC_NAME"
 as_node elan default "$LEAN_TOOLCHAIN"
 as_node lean --version | grep -qF "version $LEAN_VERSION" || die "orbnode lean toolchain not active"
+log "rustup $RUSTUP_VERSION, orbnode-writable under $NODE_WORK/caches ($RUST_TOOLCHAINS)"
+# fd-find ships as fdfind on Ubuntu.
+[ -x /usr/bin/fdfind ] && sudo ln -sfn /usr/bin/fdfind "$ORB_BIN/fd"
+RUSTUP_HOME_DIR=$NODE_WORK/caches/rustup
+CARGO_HOME_DIR=$NODE_WORK/caches/cargo
+fetch "$RUSTUP_URL" "$RUSTUP_SHA256" "$DL/rustup-init"
+chmod 0755 "$DL/rustup-init"
+as_rust() { as_node env RUSTUP_HOME="$RUSTUP_HOME_DIR" CARGO_HOME="$CARGO_HOME_DIR" \
+  PATH="$CARGO_HOME_DIR/bin:$ORB_BIN:/usr/local/bin:/usr/bin:/bin" "$@"; }
+if ! as_rust test -x "$CARGO_HOME_DIR/bin/rustup"; then
+  as_rust "$DL/rustup-init" -y --no-modify-path --profile minimal --default-toolchain none
+fi
+for tc in $RUST_TOOLCHAINS; do
+  as_rust rustup toolchain install "$tc" --profile minimal -c clippy -c rustfmt
+done
+as_rust rustup default stable
+as_rust cargo --version >/dev/null || die "orbnode cargo not usable"
+
 sudo rm -f /etc/profile.d/orb-elan.sh
 sudo tee /etc/profile.d/orb-path.sh >/dev/null <<EOF
 # Pinned image tools (root-owned, not group/other-writable).
@@ -282,7 +307,10 @@ EnvironmentFile=/home/user/.orb/enroll.env
 WorkingDirectory=$NODE_HOME
 Environment=SANDBOXED_NODE_WORK_DIR=$NODE_WORK
 Environment=SANDBOXED_NODE_BIND=127.0.0.1:3088
-Environment=PATH=$ELAN_HOME_DIR/bin:$ORB_BIN:$NODE_DIR/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=$CARGO_HOME_DIR/bin:$ELAN_HOME_DIR/bin:$ORB_BIN:$NODE_DIR/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=RUSTUP_HOME=$RUSTUP_HOME_DIR
+Environment=CARGO_HOME=$CARGO_HOME_DIR
+Environment=GIT_TERMINAL_PROMPT=0
 Environment=HOME=$NODE_HOME
 Environment=ELAN_HOME=$ELAN_HOME_DIR
 Environment=XDG_RUNTIME_DIR=/run/user/$UID_N
@@ -354,11 +382,14 @@ m = {
     "turbo-lean": "$(ver $ORB_BIN/turbo-lean --version)",
     "lean-native": "$(ver $ORB_BIN/lean-native --version)",
     "certified-search": "$CERTIFIED_SEARCH_COMMIT",
+    "rustup": "$(ver as_rust rustup --version)",
+    "rust_toolchains": "$RUST_TOOLCHAINS",
+    "gh": "$(ver gh --version)", "rg": "$(ver rg --version)", "clang": "$(ver clang --version)",
   },
   "pins_sha256": {
     "claude": "$CLAUDE_SHA256", "codex": "$CODEX_SHA256", "gemini": "$GEMINI_SHA256",
     "opencode": "$OPENCODE_SHA256", "nodejs": "$NODEJS_SHA256", "elan": "$ELAN_SHA256",
-    "lean": "$LEAN_SHA256", "certified-search": "$CERTIFIED_SEARCH_SHA256",
+    "lean": "$LEAN_SHA256", "rustup-init": "$RUSTUP_SHA256", "certified-search": "$CERTIFIED_SEARCH_SHA256",
     $(for b in "${!FLEET_SHA256[@]}"; do printf '"%s": "%s", ' "$b" "${FLEET_SHA256[$b]}"; done)
   },
   "tool_provenance": info.get("tools", {}),

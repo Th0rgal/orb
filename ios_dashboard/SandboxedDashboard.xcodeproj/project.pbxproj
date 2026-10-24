@@ -58,6 +58,7 @@
 		6DC6CC0049892748B787B5A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F47BD46D6393291DC560EA07 /* Assets.xcassets */; };
 		71559C7052796FED7EBACF3F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018CEF52A93FCF430A128017 /* Theme.swift */; };
 		75E99993878487B1D727240C /* OrbSendFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61E0273040D5CCC300571EAB /* OrbSendFlowTests.swift */; };
+		7BCE2A1BEF140CC4592389CE /* OrbMissionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1EA34EDE4E3ABF51473613 /* OrbMissionSettings.swift */; };
 		7BF4F2BBD394ACD3E95AE38E /* OrbTranscriptScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 919CD711EE488A95E44AE184 /* OrbTranscriptScrollTests.swift */; };
 		7D0338496466B0EF19ADC62F /* OrbSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */; };
 		7D66DE4AAB83D1B96E54FEDB /* boat-subagent-3a510e9b-events.json in Resources */ = {isa = PBXBuildFile; fileRef = D394CB61D8D3ACCE76255FAF /* boat-subagent-3a510e9b-events.json */; };
@@ -82,6 +83,7 @@
 		B5EE1ADCDB8858D11427C724 /* OrbSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21640FEB52CF2B7E7E341BAA /* OrbSettingsTests.swift */; };
 		BB5DB1F08C030B1179CC282F /* OrbLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 056EA2099041C13447B4B6C0 /* OrbLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C565A0819B851735DAA71172 /* OrbMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD651E846151C5070BA0765 /* OrbMath.swift */; };
+		C60896D7D6FAD14C0A2C630F /* OrbMissionBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F526F4756A22E75CD4F94C2 /* OrbMissionBudgetTests.swift */; };
 		C7AB925DE11602AB4B34D1EE /* OrbNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3A9EEA92978894DB2B0A410 /* OrbNotifications.swift */; };
 		D057B578B2884C4B2B36B1C3 /* FidoApprovalState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EB13B92B70F6884D323E5FF /* FidoApprovalState.swift */; };
 		D314F053110462DA1D1579A3 /* OrbOrchestration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4850661AEB161601E6B749B3 /* OrbOrchestration.swift */; };
@@ -192,6 +194,7 @@
 		61E0273040D5CCC300571EAB /* OrbSendFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSendFlowTests.swift; sourceTree = "<group>"; };
 		638B9371C6F740D854A74424 /* OrbTranscriptComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTranscriptComponents.swift; sourceTree = "<group>"; };
 		6E793D17A373009D35033D9E /* OrbMessageImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMessageImages.swift; sourceTree = "<group>"; };
+		6F526F4756A22E75CD4F94C2 /* OrbMissionBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMissionBudgetTests.swift; sourceTree = "<group>"; };
 		70D8E88BB09A731DE6517295 /* OrbClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbClient.swift; sourceTree = "<group>"; };
 		717FFF091D1EDB3F27D08712 /* OrbCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbCore.swift; sourceTree = "<group>"; };
 		724E777341C65EAED74C6580 /* OrbFileService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFileService.swift; sourceTree = "<group>"; };
@@ -223,6 +226,7 @@
 		BA4DE96B58D59E4D20C580BB /* OrbTurnStatusUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTurnStatusUITests.swift; sourceTree = "<group>"; };
 		BA6CA5F698C6D1559550F7FF /* OrbProjects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjects.swift; sourceTree = "<group>"; };
 		BB4BFC16F121E10DCFD755BC /* OrbLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbLog.swift; sourceTree = "<group>"; };
+		BC1EA34EDE4E3ABF51473613 /* OrbMissionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMissionSettings.swift; sourceTree = "<group>"; };
 		BDD651E846151C5070BA0765 /* OrbMath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMath.swift; sourceTree = "<group>"; };
 		BFA9AF87C230C7A8BAFB1E26 /* OrbConversation+Menu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "OrbConversation+Menu.swift"; sourceTree = "<group>"; };
 		C56C02CD1D4A5276DBD3EB7F /* OrbFleetLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFleetLiveActivity.swift; sourceTree = "<group>"; };
@@ -261,8 +265,7 @@
 			children = (
 				9331F1134F0091DB717302CC /* OrbFleetActivity.swift */,
 			);
-			name = Shared;
-			path = OrbLiveActivity/Shared;
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		483C1FA7AD3A618854BB5B14 /* OrbLiveActivity */ = {
@@ -330,6 +333,7 @@
 				BDD651E846151C5070BA0765 /* OrbMath.swift */,
 				3591A1E21D5838299181604D /* OrbMermaid.swift */,
 				6E793D17A373009D35033D9E /* OrbMessageImages.swift */,
+				BC1EA34EDE4E3ABF51473613 /* OrbMissionSettings.swift */,
 				2B18EE0CF61F06F5599C3DAC /* OrbMissionState.swift */,
 				D5842FF467EAE932385EE76A /* OrbMoveSheet.swift */,
 				A3A9EEA92978894DB2B0A410 /* OrbNotifications.swift */,
@@ -389,7 +393,6 @@
 				6DBC9AF3F2EFD0B5057A2EB6 /* SandboxedDashboard */,
 				A5A307A24CE6E469C4A2FA0D /* SandboxedDashboardTests */,
 				69E84F6BBDAEC47870846B46 /* SandboxedDashboardUITests */,
-				35EE4E34BE8C2BF15EEDF6F8 /* Shared */,
 				057719CAD3366030137C44B3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -405,6 +408,7 @@
 				98CD2374A807C1FF479EFE74 /* OrbDictationTests.swift */,
 				3BFFBD04FCC178FC78D9FCCD /* OrbFileRefTests.swift */,
 				9988836186A90C53BA0E03C9 /* OrbManagedMachinesTests.swift */,
+				6F526F4756A22E75CD4F94C2 /* OrbMissionBudgetTests.swift */,
 				AC6DD2AB1561B02E9E7D2A27 /* OrbNarrationFoldTests.swift */,
 				19DEFD6DEF4AA10F64C572BB /* OrbOrchestrationTests.swift */,
 				F53850B216B91D0B012B5A7B /* OrbPipeTablesTests.swift */,
@@ -543,6 +547,7 @@
 				};
 			};
 			buildConfigurationList = 210E554B4D49DD6F4EE7F3FD /* Build configuration list for PBXProject "SandboxedDashboard" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -552,12 +557,11 @@
 			mainGroup = 9402FD943158ED3148A81A0C;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 057719CAD3366030137C44B3 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
 				14C19B3219EFE4065FBC9952 /* OrbLiveActivity */,
+				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
 				C50B6EE186DD640BD408EEA7 /* SandboxedDashboardTests */,
 				8A8DCA11CAC3A5FFA56DC86C /* SandboxedDashboardUITests */,
 			);
@@ -633,6 +637,7 @@
 				C565A0819B851735DAA71172 /* OrbMath.swift in Sources */,
 				29EA1E2FB2CB813214E418EE /* OrbMermaid.swift in Sources */,
 				A93C114237EAF4604D4B9571 /* OrbMessageImages.swift in Sources */,
+				7BCE2A1BEF140CC4592389CE /* OrbMissionSettings.swift in Sources */,
 				0693D4053A9B20410B6E92A5 /* OrbMissionState.swift in Sources */,
 				16A8B03318B0155BB0CF1E38 /* OrbMoveSheet.swift in Sources */,
 				C7AB925DE11602AB4B34D1EE /* OrbNotifications.swift in Sources */,
@@ -673,6 +678,7 @@
 				382AC983DA8881DF18A6F5A6 /* OrbDictationTests.swift in Sources */,
 				0185E800C657153F3FC1D91D /* OrbFileRefTests.swift in Sources */,
 				480B0F5C7FF0C910CAF24912 /* OrbManagedMachinesTests.swift in Sources */,
+				C60896D7D6FAD14C0A2C630F /* OrbMissionBudgetTests.swift in Sources */,
 				4AE0D482C73514CDD1AB8ED4 /* OrbNarrationFoldTests.swift in Sources */,
 				EDF59F07CB1E3E17A8E534AF /* OrbOrchestrationTests.swift in Sources */,
 				5610DFBA5FB6D5110ECFF7C6 /* OrbPipeTablesTests.swift in Sources */,
@@ -767,7 +773,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102307;
+				CURRENT_PROJECT_VERSION = 2026102401;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -787,7 +793,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.10.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -918,7 +924,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102307;
+				CURRENT_PROJECT_VERSION = 2026102401;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_PREVIEWS = YES;
@@ -932,7 +938,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.10.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

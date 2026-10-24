@@ -19,6 +19,7 @@ fn settings() -> ManagedSettings {
         waiting_grace_minutes: 60,
         orphan_grace_minutes: 0,
         reconcile_secs: 300,
+        auto_extend_minutes: 30,
     }
 }
 
@@ -477,6 +478,8 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         error: None,
         ledger_closed: false,
         last_busy_at: None,
+        budget_pool_id: None,
+        auto_extensions: 0,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -855,6 +858,8 @@ fn spend_machine(
         error: None,
         ledger_closed: destroyed.is_some(),
         last_busy_at: None,
+        budget_pool_id: None,
+        auto_extensions: 0,
     }
 }
 
@@ -1203,4 +1208,259 @@ async fn claim_rejects_cross_user_and_forged_requester() {
         m.get(&a.id).await.unwrap().owner_mission_id.as_deref(),
         Some("caller")
     );
+}
+
+// ---------------------------------------------------------------- budgets
+
+fn pool(id: &str, usd: f64, parent: Option<&str>) -> budget::BudgetPool {
+    budget::BudgetPool {
+        mission_id: id.into(),
+        budget_usd: usd,
+        parent_pool_id: parent.map(Into::into),
+        owner_user_id: Some("t1".into()),
+        updated_at: Utc::now(),
+    }
+}
+
+fn pooled_machine(id: &str, pool: &str, rate: f64, ttl_min: i64, spent: f64) -> ManagedMachine {
+    let mut m = spend_machine(id, "small", Some(id), "2026-10-24T00:00:00Z", None, spent);
+    let now = Utc::now();
+    m.created_at = now;
+    m.expires_at = now + chrono::Duration::minutes(ttl_min);
+    m.usd_per_hour = rate;
+    m.budget_pool_id = Some(pool.into());
+    m
+}
+
+#[test]
+fn pool_usage_reserves_at_most_an_hour_and_carves_open_children() {
+    let mut pools = HashMap::new();
+    pools.insert("root".to_string(), pool("root", 1.0, None));
+    pools.insert("child".to_string(), pool("child", 0.3, Some("root")));
+    // 3 h TTL at $0.20/h reserves only 60 min = $0.20; spent $0.05.
+    let machines = vec![
+        pooled_machine("a", "root", 0.20, 180, 0.05),
+        pooled_machine("b", "child", 0.10, 30, 0.01),
+    ];
+    let now = Utc::now();
+    let u = budget::pool_usage("root", &pools, &machines, now, &|_| true).unwrap();
+    assert!((u.reserved_usd - 0.20).abs() < 0.002, "{u:?}");
+    assert!((u.spent_usd - 0.05).abs() < 1e-9);
+    // Open child holds its whole sub-budget.
+    assert!((u.carved_usd - 0.3).abs() < 1e-9, "{u:?}");
+    assert!((u.available_usd - (1.0 - 0.05 - 0.20 - 0.3)).abs() < 0.002);
+    // Ended child returns what it did not use (spent + its 30 min reserve).
+    let closed = budget::pool_usage("root", &pools, &machines, now, &|_| false).unwrap();
+    assert!(closed.carved_usd < 0.07, "{closed:?}");
+    let c = budget::pool_usage("child", &pools, &machines, now, &|_| true).unwrap();
+    assert!((c.reserved_usd - 0.05).abs() < 0.002, "{c:?}");
+    assert_eq!(c.live_machines, 1);
+}
+
+#[test]
+fn nearest_pool_walks_the_lineage_and_amounts_are_validated() {
+    let mut pools = HashMap::new();
+    pools.insert("gp".to_string(), pool("gp", 1.0, None));
+    assert_eq!(
+        budget::nearest_pool(["kid", "parent", "gp"], &pools).as_deref(),
+        Some("gp")
+    );
+    assert_eq!(budget::nearest_pool(["x", "y"], &pools), None);
+    assert!(budget::validate_amount(-1.0).is_err());
+    assert!(budget::validate_amount(f64::NAN).is_err());
+    assert_eq!(budget::validate_amount(2.5).unwrap(), 2.5);
+    assert!((budget::reservation_for(180, 0.2) - 0.2).abs() < 1e-9);
+    assert!((budget::reservation_for(30, 0.2) - 0.1).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn spawn_and_extend_respect_the_pool_and_sub_budgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.daily_cap_usd = None;
+    s.max_concurrent = None;
+    let (m, _) = manager(dir.path(), s);
+    m.set_mission_budget("root", Some(0.10), None, Some("t1".into()))
+        .await
+        .unwrap();
+    // xlarge reserves 60 min * $0.20 = $0.20 > $0.10.
+    let e = m
+        .spawn(SpawnRequest {
+            size: Some("xlarge".into()),
+            wait: Some(false),
+            budget_pool_id: Some("root".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!((e.error, e.status), ("budget_exceeded", 402));
+    assert!(e.message.contains("remaining $0.1000"), "{}", e.message);
+    // small (60 min * $0.018) fits.
+    let ok = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            budget_pool_id: Some("root".into()),
+            owner_mission_id: Some("root".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(ok.budget_pool_id.as_deref(), Some("root"));
+    // A sub-budget larger than the pool's remaining is refused...
+    let e = m
+        .set_mission_budget("kid", Some(0.5), Some("root".into()), Some("t1".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "sub_budget_exceeds_pool");
+    // ...and a machine for a child whose sub-budget cannot cover it too.
+    let e = m
+        .spawn(SpawnRequest {
+            size: Some("large".into()),
+            wait: Some(false),
+            budget_pool_id: Some("root".into()),
+            sub_budget_usd: Some(0.01),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "budget_exceeded");
+    m.set_mission_budget("kid", Some(0.05), Some("root".into()), Some("t1".into()))
+        .await
+        .unwrap();
+    let u = m.pool_usage("root").await.unwrap();
+    assert!((u.carved_usd - 0.05).abs() < 1e-9);
+    // Extending past the remaining pool is refused with the remaining amount.
+    m.set_mission_budget("root", Some(0.07), None, Some("t1".into()))
+        .await
+        .unwrap();
+    let e = m.extend(&ok.id, 60).await.unwrap_err();
+    assert_eq!(e.error, "budget_exceeded");
+    // Removing the budget lifts the pool limit (daily cap still applies).
+    m.set_mission_budget("root", None, None, None)
+        .await
+        .unwrap();
+    assert!(m.pool_usage("root").await.is_none());
+    assert!(m.extend(&ok.id, 60).await.is_ok());
+    // Persisted across a restart.
+    m.set_mission_budget("root", Some(3.0), None, None)
+        .await
+        .unwrap();
+    let (m2, _) = manager(dir.path(), settings());
+    m2.load().await;
+    assert_eq!(m2.budget_pools().await["root"].budget_usd, 3.0);
+}
+
+#[tokio::test]
+async fn mission_budget_view_reports_pooled_and_sub_budget_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    m.set_mission_budget("root", Some(1.0), None, None)
+        .await
+        .unwrap();
+    m.set_mission_budget("kid2", Some(0.2), Some("root".into()), None)
+        .await
+        .unwrap();
+    let v = m
+        .mission_budget(
+            "root",
+            &["root".to_string()],
+            &["kid1".to_string(), "kid2".to_string()],
+        )
+        .await;
+    assert_eq!(v.mode, "own");
+    assert_eq!(v.children[0].mode, "pooled");
+    assert_eq!(v.children[1].mode, "sub_budget");
+    assert_eq!(v.max_grant_usd, None);
+    let kid = m
+        .mission_budget("kid1", &["kid1".to_string(), "root".to_string()], &[])
+        .await;
+    assert_eq!((kid.mode, kid.pool_id.as_deref()), ("pooled", Some("root")));
+    assert!((kid.max_grant_usd.unwrap() - 0.8).abs() < 1e-9);
+    let none = m.mission_budget("solo", &["solo".to_string()], &[]).await;
+    assert_eq!(none.mode, "none");
+}
+
+#[tokio::test]
+async fn idle_machine_of_an_ended_sibling_is_reused_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let vm = online_machine(&m, "sib-done").await;
+    let got = m
+        .take_idle_sibling("small", "orb-node-base", "parent", Some("t1"), &|o| {
+            o == "sib-done"
+        })
+        .await
+        .unwrap();
+    assert_eq!(got.id, vm.id);
+    assert_eq!(got.owner_mission_id, None);
+    assert_eq!(got.requested_by_mission_id.as_deref(), Some("parent"));
+    // Wrong size, other tenant, or already taken: nothing.
+    assert!(m
+        .take_idle_sibling("small", "orb-node-base", "parent", Some("t1"), &|o| o
+            == "sib-done")
+        .await
+        .is_none());
+    let other = online_machine(&m, "sib2").await;
+    assert!(m
+        .take_idle_sibling("large", "orb-node-base", "parent", Some("t1"), &|_| true)
+        .await
+        .is_none());
+    assert!(m
+        .take_idle_sibling("small", "orb-node-base", "parent", Some("t2"), &|_| true)
+        .await
+        .is_none());
+    let _ = other;
+}
+
+#[test]
+fn defaults_shorten_idle_tails() {
+    let s = ManagedSettings::from_env(true);
+    assert_eq!(s.waiting_grace_minutes, 15);
+    assert_eq!(s.default_ttl_minutes, 60);
+    assert_eq!(s.auto_extend_minutes, 30);
+    assert_eq!(LifecyclePolicy::default().waiting_grace_minutes, 15);
+}
+
+#[test]
+fn boat_stop_failed_is_retryable_and_exit_codes_are_read() {
+    assert!(boat::stop_failed_retryable(
+        "boat POST /sandboxes/bx_1/stop -> HTTP 400 stop_failed"
+    ));
+    assert!(!boat::stop_failed_retryable("HTTP 500 internal"));
+    assert_eq!(exec_exit_code(&serde_json::json!({"exitCode": 2})), Some(2));
+    assert_eq!(exec_exit_code(&Value::Null), None);
+}
+
+#[test]
+fn provision_script_is_embedded_and_scoped() {
+    assert!(PROVISION_SCRIPT.contains("/tmp/opencode"));
+    assert!(PROVISION_SCRIPT.contains("credential.https://github.com.helper"));
+    assert!(PROVISION_SCRIPT.contains("RUSTUP_HOME"));
+    // The helper answers github.com only and never echoes the token to logs.
+    assert!(PROVISION_SCRIPT.contains("[ \"$host\" = github.com ] || exit 0"));
+    assert!(!PROVISION_SCRIPT.contains("set -x"));
+}
+
+#[tokio::test]
+async fn provision_runs_the_script_before_starting_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let machine = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            ttl_minutes: Some(30),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if fake.execs.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let execs = fake.execs.lock().unwrap().clone();
+    assert!(execs[0].contains("provision.sh"), "{execs:?}");
+    assert!(execs[1].contains("systemctl restart orb-node"), "{execs:?}");
+    let _ = m.destroy(&machine.id, "test").await;
 }

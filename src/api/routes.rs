@@ -884,6 +884,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .route("/api/remote-nodes", get(list_remote_nodes))
         .merge(super::managed_machines::protected_routes())
+        .merge(super::mission_budget::routes())
         .route("/api/nodes/:name/cordon", post(cordon_remote_node))
         .route("/api/nodes/:name/uncordon", post(uncordon_remote_node))
         .route("/api/ai/usage/summary", get(get_ai_usage_summary))

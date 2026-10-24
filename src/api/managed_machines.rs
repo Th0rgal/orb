@@ -119,6 +119,7 @@ async fn get_one(Path(id): Path<String>) -> Response {
 }
 
 async fn spawn(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
     Json(mut req): Json<SpawnRequest>,
 ) -> Response {
@@ -128,10 +129,73 @@ async fn spawn(
         Ok(m) => m,
         Err(r) => return r,
     };
+    let store = crate::api::control::control_for_user(&state, &user)
+        .await
+        .mission_store;
+    // The mission the machine is charged to: its owner, else its requester.
+    let charged = req
+        .owner_mission_id
+        .as_deref()
+        .or(req.requested_by_mission_id.as_deref())
+        .and_then(|id| uuid::Uuid::parse_str(id).ok());
+    if let Some(mission) = charged {
+        req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission).await;
+    }
+    if req.reuse_idle == Some(true) {
+        if let (Some(parent), Ok((spec, _))) = (charged, ManagedManager::plan(&m.settings, &req)) {
+            if let Some(machine) = reuse_idle_sibling(&m, &store, &req, parent, spec.size).await {
+                let mut body = serde_json::to_value(&machine).unwrap_or_default();
+                body["reused"] = json!(true);
+                return (StatusCode::OK, Json(body)).into_response();
+            }
+        }
+    }
     match m.spawn(req).await {
         Ok(machine) => (StatusCode::CREATED, Json(machine)).into_response(),
         Err(e) => err(e),
     }
+}
+
+/// An idle VM of the same size/image whose owner is an ended child of
+/// `parent` (a sibling of the child about to start) and is still inside its
+/// grace window: hand it over instead of renting.
+async fn reuse_idle_sibling(
+    m: &Arc<ManagedManager>,
+    store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    req: &SpawnRequest,
+    parent: uuid::Uuid,
+    size: &str,
+) -> Option<crate::managed::ManagedMachine> {
+    let image = ManagedManager::resolve_image(&m.settings, req.image.as_deref()).ok()?;
+    let ended: std::collections::HashSet<String> = store
+        .get_child_missions(parent)
+        .await
+        .ok()?
+        .into_iter()
+        .filter(|c| {
+            matches!(
+                crate::managed::owner_state_for_status(&c.status.to_string(), chrono::Utc::now()),
+                crate::managed::OwnerState::Terminal { .. }
+            )
+        })
+        .map(|c| c.id.to_string())
+        .collect();
+    if ended.is_empty() {
+        return None;
+    }
+    let parent_id = parent.to_string();
+    let machine = m
+        .take_idle_sibling(
+            size,
+            &image,
+            &parent_id,
+            req.owner_user_id.as_deref(),
+            &|owner| ended.contains(owner),
+        )
+        .await?;
+    m.set_machine_pool(&machine.id, req.budget_pool_id.clone())
+        .await;
+    m.get(&machine.id).await
 }
 
 /// What the lifecycle reaper would do now for each live machine, and
@@ -209,12 +273,37 @@ async fn extend(Path(id): Path<String>, Json(body): Json<ExtendBody>) -> Respons
     }
 }
 
-async fn destroy(Path(id): Path<String>) -> Response {
+#[derive(Deserialize)]
+struct DestroyQuery {
+    reason: Option<String>,
+}
+
+/// `destroy_reason` from a client: short, printable, prefixed so it can
+/// never pose as a reaper reason.
+fn client_destroy_reason(raw: Option<&str>) -> String {
+    match raw
+        .map(|r| {
+            r.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || "_-:. ".contains(*c))
+                .take(120)
+                .collect::<String>()
+        })
+        .filter(|r| !r.trim().is_empty())
+    {
+        Some(r) => format!("requested: {}", r.trim()),
+        None => "requested".to_string(),
+    }
+}
+
+async fn destroy(Path(id): Path<String>, Query(q): Query<DestroyQuery>) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
-    match m.destroy(&id, "requested").await {
+    match m
+        .destroy(&id, &client_destroy_reason(q.reason.as_deref()))
+        .await
+    {
         Ok(machine) => Json(machine).into_response(),
         Err(e) => err(e),
     }
@@ -430,5 +519,19 @@ async fn relay_tunnel(
             (StatusCode::GATEWAY_TIMEOUT, "managed node did not answer").into_response()
         }
         Err(RelayError::Closed) => (StatusCode::GONE, "managed machine destroyed").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn client_destroy_reason_is_prefixed_and_sanitized() {
+        assert_eq!(super::client_destroy_reason(None), "requested");
+        assert_eq!(
+            super::client_destroy_reason(Some("launch_failed")),
+            "requested: launch_failed"
+        );
+        let r = super::client_destroy_reason(Some("ttl_expired\n<script>"));
+        assert_eq!(r, "requested: ttl_expiredscript");
     }
 }
