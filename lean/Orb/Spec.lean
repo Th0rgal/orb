@@ -5,7 +5,7 @@
     `ScopedAuthority`, `ConservedResource`, `ProjectionStability`) + compatibility combinators
     (`LinearLeaseSpec`, `IdempotentOutboxSpec`, `DagScheduleSpec`, `QuotaCircuitSpec`)
   - Layer II: Declarative Corollaries (≤ 3 lines each, Mathlib4 algebraic proof style)
-  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 35 exports):
+  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 36 exports):
     `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`,
     `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`,
     `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word`,
@@ -14,7 +14,7 @@
     `orb_sidebar_visibility`, `orb_admission_step`, `orb_account_cooldown_secs`, `orb_cost_cents_step`,
     `orb_stream_loop_step`, `orb_job_ledger_step`, `orb_proc_liveness_step`, `orb_pr_gate_step`,
     `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`,
-    `orb_attribution_step`
+    `orb_attribution_step`, `orb_schedule_step`
 -/
 
 import Orb.Kernel
@@ -810,5 +810,135 @@ def attributionTotal : ProjectionStability AttributionClaim UInt8 where
 theorem attribution_forged_hint_rejected_keeps_principal :
     attributionStep 6 1 0 0 = 6 ∧ attributionStep 1 2 0 0 = 1 ∧ attributionStep 0 5 0 0 = 0 ∧
     attributionStep 1 2 0 1 = 258 ∧ attributionStep 5 0 0 0 = 261 := by decide
+
+/-! ## Layer II: Native Recurring Schedules (`orb_schedule_step`, `IdempotentOutboxSpec` + `ClockDiscipline`
+    + `StickyFence` + `ScopedAuthority`) -/
+
+/-- Inputs of one schedule decision, named as in `docs/specs/agent-schedules.md`. -/
+structure ScheduleInput where
+  op            : UInt8
+  known         : UInt8
+  cancelled     : UInt8
+  ownerTerminal : UInt8
+  authorized    : UInt8
+  busy          : UInt8
+  lastFired     : UInt64
+  nextDue       : UInt64
+  now           : UInt64
+  deriving Repr, DecidableEq
+
+def ScheduleInput.action (x : ScheduleInput) : UInt8 :=
+  scheduleStep x.op x.known x.cancelled x.ownerTerminal x.authorized x.busy x.lastFired x.nextDue x.now
+
+/-- Registration is admitted (a new row) iff the caller is authorized, the key is new and the
+    owner is live. -/
+theorem schedule_register_iff (k c t a b : UInt8) (l d n : UInt64) :
+    scheduleStep 0 k c t a b l d n = 1 ↔ a = 1 ∧ k ≠ 1 ∧ t ≠ 1 := by
+  unfold scheduleStep scheduleAction
+  by_cases ha : a = 1 <;> by_cases hk : k = 1 <;> by_cases ht : t = 1 <;> simp [ha, hk, ht]
+
+/-- `IdempotentOutboxSpec` instance: the outbox row is the `known` bit of the key. Replaying a
+    registration (same mission, cron and prompt, e.g. after a restart) is never admitted again. -/
+def scheduleOutbox : IdempotentOutboxSpec UInt8 ScheduleInput where
+  admit known q := scheduleStep 0 known q.cancelled q.ownerTerminal q.authorized q.busy
+    q.lastFired q.nextDue q.now == 1
+  safeReplay known q := q.authorized == 1 && known != 1 && q.ownerTerminal != 1
+  admit_iff_safe_replay known q := by
+    simp only [beq_iff_eq, schedule_register_iff, Bool.and_eq_true, bne_iff_ne, ne_eq, and_assoc]
+
+/-- Corollary 37 (`IdempotentOutboxSpec`): re-registering a known key is a no-op — it dedupes
+    for an authorized caller and is dropped otherwise, whatever the other inputs. -/
+theorem schedule_reregister_is_noop (c t a b : UInt8) (l d n : UInt64) :
+    scheduleStep 0 1 c t a b l d n = (if a = 1 then 2 else 0) := by
+  unfold scheduleStep scheduleAction; by_cases ha : a = 1 <;> simp [ha]
+
+/-- A tick fires exactly when the next slot is due, not yet consumed and the mission is idle. -/
+theorem schedule_fire_iff (c t a b : UInt8) (l d n : UInt64) :
+    scheduleStep 1 0 c t a b l d n = 3 ↔
+      a = 1 ∧ c ≠ 1 ∧ t ≠ 1 ∧ l < d ∧ d ≤ n ∧ b ≠ 1 := by
+  unfold scheduleStep scheduleAction
+  by_cases ha : a = 1 <;> by_cases hc : c = 1 <;> by_cases ht : t = 1 <;>
+    by_cases hl : l < d <;> by_cases hd : d ≤ n <;> by_cases hb : b = 1 <;> simp [ha, hc, ht, hl, hd, hb]
+
+/-- `ClockDiscipline` instance: the fire bit is only ever set by the schedule's own due-slot guard. -/
+def scheduleClock : ClockDiscipline ScheduleInput where
+  eval x := if scheduleStep 1 0 x.cancelled x.ownerTerminal x.authorized x.busy x.lastFired x.nextDue x.now = 3
+    then 1 else 0
+  clockMask := 1
+  guardOk x := decide (x.lastFired < x.nextDue) && decide (x.nextDue ≤ x.now)
+  isolated x h := by
+    by_cases hf : scheduleStep 1 0 x.cancelled x.ownerTerminal x.authorized x.busy x.lastFired x.nextDue x.now = 3
+    · have := (schedule_fire_iff _ _ _ _ _ _ _).mp hf; simp [this.2.2.2.1, this.2.2.2.2.1]
+    · simp [hf] at h
+
+/-- Corollary 38 (`ClockDiscipline`): a fire strictly advances the reference, and the advanced
+    reference consumes the slot — the same slot never fires twice, at any later time. After any
+    downtime the scheduler therefore fires at most once for all the slots it missed. -/
+theorem schedule_fires_once_per_slot (c t a b c' t' a' b' : UInt8) (l d n n' : UInt64)
+    (h : scheduleStep 1 0 c t a b l d n = 3) :
+    l < scheduleNextRef 3 l n ∧ scheduleStep 1 0 c' t' a' b' (scheduleNextRef 3 l n) d n' ≠ 3 := by
+  have ⟨_, _, _, hl, hd, _⟩ := (schedule_fire_iff _ _ _ _ _ _ _).mp h
+  simp only [scheduleNextRef, beq_self_eq_true, if_true]
+  refine ⟨?_, fun h' => ?_⟩
+  · simp only [UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le] at *; omega
+  · have := ((schedule_fire_iff _ _ _ _ _ _ _).mp h').2.2.2.1
+    simp only [UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le] at *; omega
+
+/-- Corollary 39 (`ClockDiscipline`): without a fire the reference never moves, so the next due
+    slot is stable while the scheduler waits (busy or early ticks never shift the cadence). -/
+theorem schedule_ref_monotone (act : UInt8) (l n : UInt64) (h : l ≤ n) :
+    l ≤ scheduleNextRef act l n ∧ (act ≠ 3 → scheduleNextRef act l n = l) := by
+  unfold scheduleNextRef; by_cases ha : act = 3 <;> simp [ha, h]
+
+/-- Durable state of one schedule row between scheduler ticks. -/
+structure ScheduleState where
+  cancelled     : UInt8
+  ownerTerminal : UInt8
+  lastFired     : UInt64
+  deriving Repr, DecidableEq
+
+/-- A scheduler tick observed by a row: `(nextDue, now, busy)`. -/
+structure ScheduleTick where
+  nextDue : UInt64
+  now     : UInt64
+  busy    : UInt8
+  deriving Repr, DecidableEq
+
+def ScheduleState.tick (s : ScheduleState) (e : ScheduleTick) : ScheduleState :=
+  let act := scheduleStep 1 0 s.cancelled s.ownerTerminal 1 e.busy s.lastFired e.nextDue e.now
+  { s with lastFired := scheduleNextRef act s.lastFired e.now }
+
+/-- `StickyFence` instance: once cancelled (by the user or a mission Stop) or orphaned, a schedule
+    stays fenced across every later tick and can never fire, even for the most permissive tick. -/
+def scheduleFence : StickyFence ScheduleState ScheduleTick where
+  fenced s := s.cancelled == 1 || s.ownerTerminal == 1
+  preFenceAct s := scheduleStep 1 0 s.cancelled s.ownerTerminal 1 0 0 1 0xFFFFFFFFFFFFFFFF == 3
+  step := ScheduleState.tick
+  sticky s e h := by simpa [ScheduleState.tick] using h
+  forbids_post s e h := by
+    simp only [ScheduleState.tick, beq_iff_eq, Bool.or_eq_true] at h ⊢
+    rcases h with h | h <;> simp [h, scheduleStep, scheduleAction]
+
+/-- Corollary 40 (`StickyFence`): a cancelled schedule or a terminal owner drops every tick,
+    for every clock value and busy state. -/
+theorem schedule_fenced_drops (k a b : UInt8) (l d n : UInt64) (c t : UInt8) (h : c = 1 ∨ t = 1) :
+    scheduleStep 1 k c t a b l d n ≠ 3 ∧ scheduleStep 1 k c t a b l d n ≠ 1 := by
+  unfold scheduleStep scheduleAction
+  rcases h with h | h <;> by_cases ha : a = 1 <;> simp [h, ha]
+
+/-- `ScopedAuthority` instance: only the owning mission/user can register a schedule or make it fire. -/
+def scheduleAuthority : ScopedAuthority ScheduleInput where
+  admit x := x.action == 1 || x.action == 3
+  scopeValid x := x.authorized == 1
+  sound x h := by
+    unfold ScheduleInput.action scheduleStep scheduleAction at h
+    by_cases ha : x.authorized = 1
+    · simp [ha]
+    · simp [ha] at h
+
+/-- Corollary 41 (`ScopedAuthority`): an unauthorized caller is dropped for every operation. -/
+theorem schedule_unauthorized_drops (op k c t a b : UInt8) (l d n : UInt64) (h : a ≠ 1) :
+    scheduleStep op k c t a b l d n = 0 := by
+  unfold scheduleStep scheduleAction; simp [h]
 
 end Orb.Spec

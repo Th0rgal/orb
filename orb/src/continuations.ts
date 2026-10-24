@@ -8,6 +8,8 @@ export interface Continuation {
   reason?: string | null;
   source?: string | null;
   error?: string | null;
+  /** Recurring schedules only, e.g. "every 30 min". */
+  recurrence?: string | null;
 }
 export interface ContinuationSummary { count: number; items: Continuation[] }
 
@@ -20,7 +22,12 @@ export function continuationLabel(summary: ContinuationSummary): string {
   if (item.state === "queued") return "Wake-up queued";
   if (item.trigger === "job") return "Will resume when the job finishes";
   const date = item.next_at ? new Date(item.next_at) : null;
-  const time = date && Number.isFinite(date.getTime()) ? date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : null;
+  const valid = date && Number.isFinite(date.getTime()) ? date : null;
+  if (item.recurrence) {
+    const next = valid?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    return next ? `Scheduled: ${item.recurrence} — next at ${next}` : `Scheduled: ${item.recurrence}`;
+  }
+  const time = valid?.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   return time ? `Wake-up scheduled for ${time}` : "Scheduled wake-up";
 }
 

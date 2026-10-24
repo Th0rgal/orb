@@ -40,6 +40,7 @@ uint64_t orb_usage_limit_status(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uin
 uint64_t orb_relative_time_bucket(uint64_t);
 uint64_t orb_transcript_patch_step(uint32_t, uint32_t, uint8_t, uint32_t);
 uint32_t orb_attribution_step(uint8_t, uint8_t, uint8_t, uint8_t);
+uint8_t orb_schedule_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_slice_bounds(uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_wal_frame(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_cas_digest(uint64_t, uint64_t, uint8_t);

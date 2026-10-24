@@ -741,7 +741,6 @@ pub(crate) async fn register_core_wakeup(
     prompt: String,
     variables: std::collections::HashMap<String, String>,
 ) -> Result<serde_json::Value, String> {
-    let api_base = localhost_api_base_url_from_env().ok_or("Wake-up unavailable: PORT is unset")?;
     let delay = delay_seconds.clamp(
         CLAUDE_BUILTIN_WAKEUP_MIN_SECONDS,
         CLAUDE_BUILTIN_WAKEUP_MAX_SECONDS,
@@ -753,6 +752,16 @@ pub(crate) async fn register_core_wakeup(
         "variables": variables,
         "start_immediately": false,
     });
+    post_mission_automation(mission_id, body).await
+}
+
+/// Create a mission automation through the automation API (Stop fencing,
+/// idempotent `__wakeup_request_id`, supersession).
+async fn post_mission_automation(
+    mission_id: Uuid,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let api_base = localhost_api_base_url_from_env().ok_or("Wake-up unavailable: PORT is unset")?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -779,6 +788,89 @@ pub(crate) async fn register_core_wakeup(
         .json()
         .await
         .map_err(|e| format!("Invalid wake-up receipt: {e}"))
+}
+
+/// `__wakeup_source` of a recurring schedule an Antigravity agent created
+/// with its native `schedule` tool (`CronExpression`).
+pub(crate) const ANTIGRAVITY_SCHEDULE_SOURCE: &str = "antigravity-schedule";
+
+/// Idempotency key of a native recurring schedule: the same cron and prompt
+/// re-registered after a restart is the same schedule (`orb_schedule_step`).
+pub(crate) fn native_cron_request_id(expression: &str, prompt: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{}\0{}", expression.trim(), prompt.trim()));
+    format!("antigravity-cron:{}", hex::encode(&digest[..16]))
+}
+
+/// Short human text for the common cron shapes (`*/30 * * * *` → "every 30 min").
+pub(crate) fn describe_cron(expression: &str) -> String {
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    let every = |field: &str| -> Option<u32> {
+        field
+            .strip_prefix("*/")
+            .and_then(|n| n.parse().ok())
+            .filter(|n| *n > 0)
+    };
+    match fields.as_slice() {
+        [m, "*", "*", "*", "*"] if *m == "*" => "every minute".into(),
+        [m, "*", "*", "*", "*"] if every(m).is_some() => {
+            format!("every {} min", every(m).unwrap_or_default())
+        }
+        [m, "*", "*", "*", "*"] if m.parse::<u32>().is_ok() => "every hour".into(),
+        [m, h, "*", "*", "*"] if m.parse::<u32>().is_ok() && every(h).is_some() => {
+            format!("every {} h", every(h).unwrap_or_default())
+        }
+        _ => format!("cron {expression}"),
+    }
+}
+
+/// Turn an Antigravity recurring `schedule` into a durable Core cron
+/// schedule for the mission: each tick sends the prompt as a queued message.
+/// It is listed with the mission's wake-ups and can be cancelled there.
+pub(crate) async fn register_native_cron(
+    mission_id: Uuid,
+    expression: &str,
+    prompt: &str,
+) -> Result<serde_json::Value, String> {
+    if croner::Cron::new(expression).parse().is_err() {
+        return Err(format!("Invalid cron expression: {expression}"));
+    }
+    let body = serde_json::json!({
+        "command_source": { "type": "inline", "content": prompt },
+        "trigger": { "type": "cron", "expression": expression, "timezone": "UTC" },
+        "stop_policy": { "type": "never" }, "fresh_session": "keep",
+        "variables": {
+            "__wakeup_source": ANTIGRAVITY_SCHEDULE_SOURCE,
+            "__wakeup_request_id": native_cron_request_id(expression, prompt),
+            "__wakeup_reason": format!("Antigravity schedule ({})", describe_cron(expression)),
+        },
+        "start_immediately": false,
+    });
+    post_mission_automation(mission_id, body).await
+}
+
+/// After a handoff, continue the conversation as soon as the scheduler allows.
+pub(crate) async fn register_native_cron_resume(
+    mission_id: Uuid,
+    job_id: Uuid,
+    cron: &crate::antigravity::NativeCron,
+) -> Result<serde_json::Value, String> {
+    register_claude_builtin_wakeup(
+        mission_id,
+        format!("antigravity-cron-resume:{job_id}"),
+        CLAUDE_BUILTIN_WAKEUP_MIN_SECONDS,
+        native_cron_resume_prompt(cron),
+        "Continue after Antigravity schedule handoff".into(),
+    )
+    .await
+}
+
+pub(crate) fn native_cron_resume_prompt(cron: &crate::antigravity::NativeCron) -> String {
+    format!(
+        "[Orb] Your recurring `schedule` ({}, `{}`) is now owned by Orb: at each tick Orb sends you its prompt as a new message, and the user can see and cancel it on the mission. A headless run cannot keep a native cron alive, so your previous run was ended right after that call. Do not call `schedule` again for this; continue the work you were doing where it stopped.",
+        describe_cron(&cron.expression),
+        cron.expression
+    )
 }
 
 pub(crate) fn spawn_claude_builtin_wakeup_automation(

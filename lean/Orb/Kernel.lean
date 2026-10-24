@@ -653,4 +653,33 @@ def attributionStep (principalKind claimedKind sameMission isDescendant : UInt8)
     (if attributionInScope (attributionPrincipal principalKind) claimedKind sameMission isDescendant
      then 256 else 0)
 
+/--
+  Native recurring schedule step (`orb_schedule_step`, `docs/specs/agent-schedules.md`).
+  A schedule is keyed by `hash(mission, cron, prompt)`. `op`: `0 = register`, `1 = tick`.
+  Flags are `0/1`: `known` (a row with the same key exists, active or cancelled),
+  `cancelled` (the row was cancelled or its mission stopped), `ownerTerminal` (the owning
+  mission is gone), `authorized` (the caller owns the mission), `busy` (the mission is mid-turn).
+  `lastFired` is the reference of the last fire (or registration); `nextDue` is the first cron
+  slot strictly after it; `now` is the scheduler clock.
+  Actions: `0 = drop`, `1 = register`, `2 = dedupe`, `3 = fire`, `4 = wait`.
+-/
+@[inline] def scheduleAction (op known cancelled ownerTerminal authorized busy : UInt8)
+    (lastFired nextDue now : UInt64) : UInt8 :=
+  if authorized != 1 then 0
+  else if op == 0 then (if known == 1 then 2 else if ownerTerminal == 1 then 0 else 1)
+  else if cancelled == 1 || ownerTerminal == 1 then 0
+  else if lastFired < nextDue && nextDue ≤ now && busy != 1 then 3
+  else 4
+
+/-- Reference after a step: a fire moves it to `now`, never to the (possibly long past) slot,
+    so downtime collapses every missed slot into a single fire. -/
+@[inline] def scheduleNextRef (action : UInt8) (lastFired now : UInt64) : UInt64 :=
+  if action == 3 then now else lastFired
+
+/-- Unboxed C-ABI Schedule Stepper (`orb_schedule_step`): returns `scheduleAction`. -/
+@[inline, export orb_schedule_step]
+def scheduleStep (op known cancelled ownerTerminal authorized busy : UInt8)
+    (lastFired nextDue now : UInt64) : UInt8 :=
+  scheduleAction op known cancelled ownerTerminal authorized busy lastFired nextDue now
+
 end Orb.Kernel

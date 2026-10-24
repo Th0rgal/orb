@@ -175,6 +175,14 @@ pub(super) async fn automation_scheduler_loop(
                         automation.id,
                         automation.mission_id
                     );
+                    if is_native_schedule(&automation)
+                        && native_schedule_tick(&automation, true)
+                            == crate::orb_spec::ScheduleAction::Drop
+                    {
+                        let _ = mission_store
+                            .update_automation_active(automation.id, false)
+                            .await;
+                    }
                     continue;
                 }
                 Err(e) => {
@@ -364,6 +372,20 @@ pub(super) async fn automation_scheduler_loop(
 
             if !should_trigger {
                 continue;
+            }
+            // Agent-created recurring schedules go through the verified step:
+            // one fire per due slot, nothing after a cancel or for a gone owner.
+            if is_native_schedule(&automation) {
+                match native_schedule_tick(&automation, false) {
+                    crate::orb_spec::ScheduleAction::Fire => {}
+                    crate::orb_spec::ScheduleAction::Drop => {
+                        let _ = mission_store
+                            .update_automation_active(automation.id, false)
+                            .await;
+                        continue;
+                    }
+                    _ => continue,
+                }
             }
 
             // Check if the mission is currently busy (has a running task or queued messages)
@@ -769,4 +791,41 @@ pub(super) async fn lookup_mission_backend(
         Ok(Some(m)) => Some(m.backend),
         _ => None,
     }
+}
+
+fn is_native_schedule(automation: &mission_store::Automation) -> bool {
+    automation
+        .variables
+        .get("__wakeup_source")
+        .map(String::as_str)
+        == Some(crate::api::mission_runner::ANTIGRAVITY_SCHEDULE_SOURCE)
+        && matches!(automation.trigger, mission_store::TriggerType::Cron { .. })
+}
+
+/// `orb_schedule_step` tick for an agent-created recurring schedule.
+fn native_schedule_tick(
+    automation: &mission_store::Automation,
+    owner_terminal: bool,
+) -> crate::orb_spec::ScheduleAction {
+    let reference = automation
+        .last_triggered_at
+        .as_deref()
+        .unwrap_or(&automation.created_at);
+    let secs = |at: Option<chrono::DateTime<chrono::Utc>>| {
+        at.map_or(u64::MAX, |at| u64::try_from(at.timestamp()).unwrap_or(0))
+    };
+    let last_fired = secs(
+        chrono::DateTime::parse_from_rfc3339(reference)
+            .ok()
+            .map(|at| at.with_timezone(&chrono::Utc)),
+    );
+    crate::orb_spec::schedule_tick(crate::orb_spec::ScheduleTickInput {
+        cancelled: !automation.active,
+        owner_terminal,
+        authorized: true,
+        busy: false,
+        last_fired,
+        next_due: secs(super::continuations::next_at(automation)),
+        now: secs(Some(chrono::Utc::now())),
+    })
 }

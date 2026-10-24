@@ -451,6 +451,22 @@
       "internal": true
     },
     {
+      "name": "orb_schedule_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "op", "type": "uint8_t"},
+        {"name": "known", "type": "uint8_t"},
+        {"name": "cancelled", "type": "uint8_t"},
+        {"name": "ownerTerminal", "type": "uint8_t"},
+        {"name": "authorized", "type": "uint8_t"},
+        {"name": "busy", "type": "uint8_t"},
+        {"name": "lastFired", "type": "uint64_t"},
+        {"name": "nextDue", "type": "uint64_t"},
+        {"name": "now", "type": "uint64_t"}
+      ],
+      "internal": true
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [

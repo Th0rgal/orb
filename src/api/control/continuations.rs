@@ -67,6 +67,13 @@ fn entry(a: &Automation) -> serde_json::Value {
         "trigger": if matches!(a.trigger, TriggerType::DurableJobTerminal { .. }) { "job" } else { "time" },
         "reason": a.variables.get("__wakeup_reason"),
         "source": a.variables.get("__wakeup_source"),
+        // Recurring schedules say how often they fire ("every 30 min").
+        "recurrence": match &a.trigger {
+            TriggerType::Cron { expression, .. } if !matches!(a.stop_policy, mission_store::StopPolicy::AfterFirstFire) => {
+                Some(crate::api::mission_runner::describe_cron(expression))
+            }
+            _ => None,
+        },
     })
 }
 
@@ -322,8 +329,10 @@ pub async fn action(
         .await
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, "Wake-up not found".into()))?;
+    let recurring_native = a.variables.get("__wakeup_source").map(String::as_str)
+        == Some(crate::api::mission_runner::ANTIGRAVITY_SCHEDULE_SOURCE);
     if !a.variables.contains_key("__wakeup_source")
-        || !matches!(a.stop_policy, mission_store::StopPolicy::AfterFirstFire)
+        || !(recurring_native || matches!(a.stop_policy, mission_store::StopPolicy::AfterFirstFire))
     {
         return Err((
             StatusCode::BAD_REQUEST,
