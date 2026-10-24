@@ -440,6 +440,17 @@
       }
     },
     {
+      "name": "orb_attribution_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "principalKind", "type": "uint8_t"},
+        {"name": "claimedKind", "type": "uint8_t"},
+        {"name": "sameMission", "type": "uint8_t"},
+        {"name": "isDescendant", "type": "uint8_t"}
+      ],
+      "internal": true
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [

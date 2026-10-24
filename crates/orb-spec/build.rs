@@ -80,6 +80,7 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_usage_limit_status",
     "orb_relative_time_bucket",
     "orb_transcript_patch_step",
+    "orb_attribution_step",
 ];
 
 fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {

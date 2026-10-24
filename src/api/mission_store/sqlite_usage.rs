@@ -22,6 +22,9 @@ const PROXY_USAGE_COLUMNS: &[(&str, &str)] = &[
     ("api_key_id", "TEXT"),
     ("api_key_name", "TEXT"),
     ("mission_id", "TEXT"),
+    ("caller_kind", "TEXT"),
+    ("purpose", "TEXT"),
+    ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// Add the attribution columns and their indexes. Idempotent, and tolerant of
@@ -61,8 +64,9 @@ pub(super) async fn record(
     conn.execute(
         "INSERT INTO proxy_usage (timestamp, model, input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens, cost_cents,
-            provider, account_id, api_key_id, api_key_name, mission_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            provider, account_id, api_key_id, api_key_name, mission_id,
+            caller_kind, purpose, reasoning_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             chrono::Utc::now().to_rfc3339(),
             record.model,
@@ -76,6 +80,9 @@ pub(super) async fn record(
             record.api_key_id.map(|id| id.to_string()),
             record.api_key_name,
             record.mission_id.map(|id| id.to_string()),
+            record.caller_kind,
+            record.purpose,
+            record.reasoning_tokens as i64,
         ],
     )
     .map_err(err)?;
@@ -115,6 +122,10 @@ pub(super) async fn records(
         let conn = conn.blocking_lock();
         let mut out = harness_records(&conn, since.as_deref())?;
         out.extend(router_records(&conn, since.as_deref())?);
+        let parents = mission_parents(&conn)?;
+        for r in &mut out {
+            r.root_mission_id = r.mission_id.as_deref().map(|m| root_of(&parents, m));
+        }
         out.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         Ok(out)
     })
@@ -122,6 +133,46 @@ pub(super) async fn records(
     .map_err(err)?
 }
 
+/// `mission id -> parent id` for every mission that has a parent.
+fn mission_parents(conn: &Connection) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, parent_mission_id FROM missions WHERE parent_mission_id IS NOT NULL")
+        .map_err(err)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(err)?;
+    rows.collect::<Result<_, _>>().map_err(err)
+}
+
+/// Walk parents to the top-level mission (bounded, cycle-safe).
+fn root_of(parents: &std::collections::HashMap<String, String>, mission: &str) -> String {
+    let mut current = mission;
+    for _ in 0..16 {
+        match parents.get(current) {
+            Some(parent) if parent != mission => current = parent,
+            _ => break,
+        }
+    }
+    current.to_string()
+}
+
+/// Caller kind of a legacy router row written before `caller_kind` existed,
+/// derived from the stored key the same way the proxy derives it live.
+fn legacy_caller_kind(api_key_name: Option<&str>, mission_id: Option<&str>) -> &'static str {
+    use crate::api::usage_attribution::{principal_for, CallerKind};
+    let internal = api_key_name.is_none();
+    match principal_for(api_key_name, internal).kind {
+        CallerKind::Core if mission_id.is_some() => CallerKind::Mission.as_str(),
+        kind => kind.as_str(),
+    }
+}
+
+/// Harness rows are the `harness_direct` route: usage a harness reported
+/// for traffic that did not go through Core's proxy. A mission with any
+/// proxied traffic is billed from `proxy_usage` only, so the same request is
+/// never counted twice (proxy wins).
 fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRecord>, String> {
     let sql = r#"
         SELECT
@@ -141,9 +192,11 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
                 json_extract(e.metadata, '$.cost_cents'),
                 0
             ) AS INTEGER)
+            , m.parent_mission_id
         FROM mission_events e
         LEFT JOIN missions m ON m.id = e.mission_id
         WHERE e.event_type = 'assistant_message' AND (?1 IS NULL OR e.timestamp >= ?1)
+          AND NOT EXISTS (SELECT 1 FROM proxy_usage p WHERE p.mission_id = e.mission_id)
     "#;
     let mut stmt = conn.prepare(sql).map_err(err)?;
     let rows = stmt
@@ -163,12 +216,13 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
                 ],
                 row.get::<_, String>(10)?,
                 row.get::<_, i64>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })
         .map_err(err)?;
     let mut out = Vec::new();
     for row in rows {
-        let (timestamp, mission_id, backend, title, raw, stored, tokens, source, cost) =
+        let (timestamp, mission_id, backend, title, raw, stored, tokens, source, cost, parent) =
             row.map_err(err)?;
         let model = super::usage_model_key(&raw, &stored);
         let [input, output, creation, read] = tokens.map(non_negative);
@@ -197,6 +251,14 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
             backend,
             mission_id: Some(mission_id),
             mission_title: title,
+            root_mission_id: None,
+            caller_kind: if parent.is_some() {
+                "subagent"
+            } else {
+                "mission"
+            }
+            .to_string(),
+            purpose: None,
             api_key_id: None,
             api_key_name: None,
             account_id: None,
@@ -204,6 +266,7 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
             output_tokens: output,
             cache_creation_tokens: creation,
             cache_read_tokens: read,
+            reasoning_tokens: 0,
             cost_cents,
             cost_known,
         });
@@ -217,7 +280,7 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
             p.timestamp, p.model, p.provider, p.account_id, p.api_key_id, p.api_key_name,
             p.mission_id, m.backend, m.title,
             p.input_tokens, p.output_tokens, p.cache_creation_tokens, p.cache_read_tokens,
-            p.cost_cents
+            p.cost_cents, p.caller_kind, p.purpose, p.reasoning_tokens
         FROM proxy_usage p
         LEFT JOIN missions m ON m.id = p.mission_id
         WHERE (?1 IS NULL OR p.timestamp >= ?1)
@@ -242,16 +305,25 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
                     row.get::<_, i64>(11)?,
                     row.get::<_, i64>(12)?,
                     row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(16)?,
+                ],
+                [
+                    row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<String>>(15)?,
                 ],
             ))
         })
         .map_err(err)?;
     let mut out = Vec::new();
     for row in rows {
-        let ([timestamp, model], attribution, numbers) = row.map_err(err)?;
+        let ([timestamp, model], attribution, numbers, [caller_kind, purpose]) =
+            row.map_err(err)?;
         let [provider, account_id, api_key_id, api_key_name, mission_id, backend, title] =
             attribution;
-        let [input, output, creation, read, stored_cost] = numbers.map(non_negative);
+        let [input, output, creation, read, stored_cost, reasoning] = numbers.map(non_negative);
+        let caller_kind = caller_kind.filter(|k| !k.is_empty()).unwrap_or_else(|| {
+            legacy_caller_kind(api_key_name.as_deref(), mission_id.as_deref()).to_string()
+        });
         let (cost_cents, cost_known) = router_cost(
             &model,
             stored_cost,
@@ -265,6 +337,9 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
             backend,
             mission_id,
             mission_title: title,
+            root_mission_id: None,
+            caller_kind,
+            purpose,
             api_key_id,
             api_key_name,
             account_id,
@@ -272,6 +347,7 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
             output_tokens: output,
             cache_creation_tokens: creation,
             cache_read_tokens: read,
+            reasoning_tokens: reasoning,
             cost_cents,
             cost_known,
         });
@@ -334,6 +410,9 @@ mod tests {
                 api_key_id: Some(key),
                 api_key_name: Some("Cursor".into()),
                 mission_id: None,
+                caller_kind: Some("script".into()),
+                purpose: None,
+                reasoning_tokens: 0,
                 input_tokens: 1_000_000,
                 output_tokens: 0,
                 cache_creation_tokens: 0,
@@ -378,5 +457,64 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn proxied_missions_are_not_double_counted_from_harness_events() {
+        let (_dir, store) = store().await;
+        let proxied = uuid::Uuid::new_v4().to_string();
+        let direct = uuid::Uuid::new_v4().to_string();
+        let child = uuid::Uuid::new_v4().to_string();
+        {
+            let conn = store.conn.lock().await;
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, parent) in [(&proxied, None), (&direct, None), (&child, Some(&direct))] {
+                conn.execute(
+                    "INSERT INTO missions (id, status, title, created_at, updated_at, parent_mission_id, backend, workspace_id)
+                     VALUES (?1, 'active', 't', ?2, ?2, ?3, 'antigravity', 'w')",
+                    params![id, now, parent],
+                )
+                .unwrap();
+            }
+            for id in [&proxied, &direct, &child] {
+                conn.execute(
+                    "INSERT INTO mission_events (mission_id, sequence, event_type, timestamp, content, metadata)
+                     VALUES (?1, 1, 'assistant_message', ?2, '', ?3)",
+                    params![
+                        id,
+                        now,
+                        r#"{"model":"gemini-4-argon","usage":{"input_tokens":10,"output_tokens":5}}"#
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        store
+            .record_proxy_usage_attributed(&ProxyUsageRecord {
+                model: "gemini-4-argon".into(),
+                mission_id: Some(uuid::Uuid::parse_str(&proxied).unwrap()),
+                caller_kind: Some("mission".into()),
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let records = store.get_usage_records(None).await.unwrap();
+        let for_mission = |id: &str| -> Vec<&UsageRecord> {
+            records
+                .iter()
+                .filter(|r| r.mission_id.as_deref() == Some(id))
+                .collect()
+        };
+        // Proxy wins: one row for the proxied mission, from the router.
+        assert_eq!(for_mission(&proxied).len(), 1);
+        assert_eq!(for_mission(&proxied)[0].source, UsageSource::Router);
+        // A native harness (agy) is billed from its own usage report.
+        assert_eq!(for_mission(&direct)[0].source, UsageSource::Harness);
+        assert_eq!(for_mission(&direct)[0].caller_kind, "mission");
+        let sub = for_mission(&child)[0];
+        assert_eq!(sub.caller_kind, "subagent");
+        assert_eq!(sub.root_mission_id.as_deref(), Some(direct.as_str()));
     }
 }

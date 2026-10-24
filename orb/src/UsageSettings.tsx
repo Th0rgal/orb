@@ -4,7 +4,8 @@ import { connectionVersion, isConnected } from "./api";
 import { ErrorNotice } from "./ErrorNotice";
 import { Select } from "./Select";
 import {
-  USAGE_WINDOWS, chartBuckets, costTitle, formatCost, formatTokens, getUsageSummary, totalTokens,
+  CALLER_KINDS, CALLER_KIND_LABEL, USAGE_WINDOWS, chartBuckets, costTitle, formatCost, formatTokens,
+  getUsageSummary, hourlyAvailable, totalTokens,
   type ChartBucket, type UsageFilters, type UsageSummary, type UsageTotals,
 } from "./usageApi";
 import {
@@ -13,15 +14,19 @@ import {
 } from "./proxyHealthApi";
 
 type Metric = "tokens" | "cost" | "requests";
-type GroupBy = "model" | "provider" | "source" | "mission" | "api_key" | "backend";
+type GroupBy = "caller_kind" | "model" | "provider" | "source" | "mission" | "root_mission" | "api_key" | "backend" | "purpose";
+type Granularity = "hour" | "day";
 
 const GROUPS: { value: GroupBy; label: string }[] = [
+  { value: "caller_kind", label: "Caller" },
   { value: "model", label: "Model" },
   { value: "provider", label: "Provider" },
   { value: "source", label: "Source" },
   { value: "mission", label: "Mission" },
+  { value: "root_mission", label: "Root mission" },
   { value: "api_key", label: "API key" },
   { value: "backend", label: "Harness" },
+  { value: "purpose", label: "Core purpose" },
 ];
 const SOURCE_LABEL: Record<string, string> = { harness: "Harness", router: "Router" };
 
@@ -33,21 +38,32 @@ function rowsFor(s: UsageSummary, by: GroupBy): Row[] {
     detail: [SOURCE_LABEL[m.source], m.provider].filter(Boolean).join(" · "),
     filter: m.model ? { model: m.model, source: m.source } : undefined,
   }));
-  const groups = { provider: s.by_provider, source: s.by_source, mission: s.by_mission, api_key: s.by_api_key, backend: s.by_backend }[by];
-  const empty = { provider: "Unknown provider", source: "", mission: "No mission", api_key: "Internal proxy secret", backend: "No harness" }[by];
+  const groups = {
+    caller_kind: s.by_caller_kind, provider: s.by_provider, source: s.by_source, mission: s.by_mission,
+    root_mission: s.by_root_mission, api_key: s.by_api_key, backend: s.by_backend, purpose: s.by_purpose,
+  }[by] ?? [];
+  const empty = {
+    caller_kind: "Unknown", provider: "Unknown provider", source: "", mission: "No mission", root_mission: "No mission",
+    api_key: "Internal proxy secret", backend: "No harness", purpose: "Unspecified",
+  }[by];
+  // Root missions and purposes have no matching server filter.
+  const filterKey = by === "root_mission" || by === "purpose" ? undefined : by;
   return groups.map(g => ({
     ...g, id: g.key ?? "none",
-    name: by === "source" ? SOURCE_LABEL[g.key ?? ""] ?? g.key ?? "" : g.label || g.key || empty,
+    name: by === "source" ? SOURCE_LABEL[g.key ?? ""] ?? g.key ?? ""
+      : by === "caller_kind" ? CALLER_KIND_LABEL[g.key ?? "unknown"] ?? g.key ?? empty
+      : by === "purpose" ? `core:${g.key ?? "unspecified"}`
+      : g.label || g.key || empty,
     detail: g.label && g.key && by !== "source" ? g.key.slice(0, 8) : undefined,
-    filter: g.key ? { [by]: g.key } : undefined,
+    filter: g.key && filterKey ? { [filterKey]: g.key } : undefined,
   }));
 }
 
 function metricValue(b: ChartBucket, m: Metric) { return m === "tokens" ? b.tokens : m === "cost" ? b.cost_cents : b.requests; }
 function metricText(n: number, m: Metric) { return m === "tokens" ? formatTokens(n) : m === "cost" ? `$${(n / 100).toFixed(2)}` : n.toLocaleString(); }
 
-export function UsageChart(p: { summary: UsageSummary; metric: Metric }) {
-  const data = createMemo(() => chartBuckets(p.summary));
+export function UsageChart(p: { summary: UsageSummary; metric: Metric; granularity?: Granularity }) {
+  const data = createMemo(() => chartBuckets(p.summary, new Date(), p.granularity ?? "hour"));
   const max = createMemo(() => Math.max(1, ...data().buckets.map(b => metricValue(b, p.metric))));
   const width = 600, height = 120;
   const step = () => width / Math.max(1, data().buckets.length);
@@ -147,6 +163,7 @@ export function UsageSettings() {
   const [filters, setFilters] = createSignal<UsageFilters>({});
   const [groupBy, setGroupBy] = createSignal<GroupBy>("model");
   const [metric, setMetric] = createSignal<Metric>("tokens");
+  const [granularity, setGranularity] = createSignal<Granularity>("hour");
   const [summary, setSummary] = createSignal<UsageSummary | null>(null);
   const [options, setOptions] = createSignal<UsageSummary | null>(null);
   const [loading, setLoading] = createSignal(false);
@@ -186,7 +203,8 @@ export function UsageSettings() {
   const filterLabel = (key: keyof UsageFilters, value: string) => {
     const o = options();
     const group = key === "mission" ? o?.by_mission : key === "api_key" ? o?.by_api_key : undefined;
-    return `${key === "api_key" ? "key" : key}: ${group?.find(g => g.key === value)?.label ?? SOURCE_LABEL[value] ?? value}`;
+    const name = key === "api_key" ? "key" : key === "caller_kind" ? "caller" : key;
+    return `${name}: ${group?.find(g => g.key === value)?.label ?? SOURCE_LABEL[value] ?? CALLER_KIND_LABEL[value] ?? value}`;
   };
 
   return <div class="s-body settings-body" aria-label="Usage">
@@ -200,13 +218,17 @@ export function UsageSettings() {
           <button class="s-btn" disabled={loading()} onClick={() => void load()}>{loading() ? "Refreshing…" : "Refresh"}</button>
         </div>
       </div>
-      <p class="routing-muted usage-intro">Tokens and estimated list-price cost from mission harnesses and the /v1 router. Costs marked + or Unknown include models without a published price.</p>
+      <p class="routing-muted usage-intro">Tokens and estimated list-price cost from mission harnesses and the /v1 router, attributed to the caller that owns the credential. Costs marked + or Unknown include models without a published price.</p>
       <Show when={!isConnected()}><p class="routing-muted">Connect to Core in General settings to see usage.</p></Show>
       <Show when={error()}><ErrorNotice error={`Could not load usage: ${error()}`} /></Show>
 
       <div class="usage-filters">
         <Select aria-label="Source" value={filters().source ?? ""} onChange={e => setFilter("source", e.currentTarget.value)}>
           <option value="">All sources</option><option value="harness">Harness</option><option value="router">Router</option>
+        </Select>
+        <Select aria-label="Caller" value={filters().caller_kind ?? ""} onChange={e => setFilter("caller_kind", e.currentTarget.value)}>
+          <option value="">All callers</option>
+          <For each={CALLER_KINDS}>{k => <option value={k}>{CALLER_KIND_LABEL[k]}</option>}</For>
         </Select>
         <Select aria-label="Provider" value={filters().provider ?? ""} onChange={e => setFilter("provider", e.currentTarget.value)}>
           <option value="">All providers</option>
@@ -232,13 +254,22 @@ export function UsageSettings() {
         <section class="s-sec">
           <div class="routing-heading usage-section-head">
             <h3>Over time</h3>
+            <div class="usage-seg" role="radiogroup" aria-label="Chart granularity">
+              <For each={["hour", "day"] as Granularity[]}>{g =>
+                <button role="radio" aria-checked={(hourlyAvailable(window()) ? granularity() : "day") === g}
+                  class={(hourlyAvailable(window()) ? granularity() : "day") === g ? "on" : ""}
+                  disabled={g === "hour" && !hourlyAvailable(window())}
+                  title={g === "hour" && !hourlyAvailable(window()) ? "Hourly data covers windows up to 7 days" : undefined}
+                  onClick={() => setGranularity(g)}>{g === "hour" ? "Hour" : "Day"}</button>
+              }</For>
+            </div>
             <div class="usage-seg" role="radiogroup" aria-label="Chart metric">
               <For each={["tokens", "cost", "requests"] as Metric[]}>{m =>
                 <button role="radio" aria-checked={metric() === m} class={metric() === m ? "on" : ""} onClick={() => setMetric(m)}>{m[0].toUpperCase() + m.slice(1)}</button>
               }</For>
             </div>
           </div>
-          <div class="s-card usage-chart-card"><UsageChart summary={s()} metric={metric()} /></div>
+          <div class="s-card usage-chart-card"><UsageChart summary={s()} metric={metric()} granularity={granularity()} /></div>
         </section>
 
         <section class="s-sec">

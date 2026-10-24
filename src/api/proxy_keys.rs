@@ -351,10 +351,23 @@ async fn create_key(
     if name.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Name is required".to_string()));
     }
+    // These prefixes bind a key to a principal (a mission, Hermes) for usage
+    // attribution; only Core mints them.
+    if reserved_key_name(&name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "This key name is reserved for keys Core creates".to_string(),
+        ));
+    }
     match state.proxy_api_keys.create(name).await {
         Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
+}
+
+fn reserved_key_name(name: &str) -> bool {
+    use crate::api::usage_attribution::{HERMES_KEY_PREFIX, REMOTE_LAUNCH_KEY_PREFIX};
+    name.starts_with(REMOTE_LAUNCH_KEY_PREFIX) || name.starts_with(HERMES_KEY_PREFIX)
 }
 
 async fn delete_key(

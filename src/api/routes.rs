@@ -2080,7 +2080,7 @@ pub struct UsageSummaryQuery {
 /// Query params:
 /// - `window`: "all" (default), or `Nh` / `Nd` / `Nw`. Invalid values are a
 ///   400, never a silent all-time fall back.
-/// - `backend`, `provider`, `mission`, `source` ("harness" | "router"),
+/// - `backend`, `provider`, `mission`, `source` ("harness" | "router"), `caller_kind`,
 ///   `api_key`, `model`: optional comma-separated filters.
 ///
 /// Rows carry a `source` so router and harness usage of one model stay
