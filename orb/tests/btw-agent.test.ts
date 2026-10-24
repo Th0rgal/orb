@@ -20,7 +20,7 @@ it('creates a distinct side agent and never sends to the parent',async()=>{
  const {getMissionEvents}=await import('../src/stream');
  vi.mocked(getMissionEvents).mockResolvedValueOnce([]);
  await askBtwAgent('parent','Follow up','New context',[],new AbortController().signal,()=>{});
- expect(sendMissionMessage).toHaveBeenCalledWith('child',expect.stringContaining('New context'));
+ expect(sendMissionMessage).toHaveBeenCalledWith('child',expect.stringContaining('New context'),undefined,expect.any(String));
  await stopBtw('parent');expect(cancelMission).toHaveBeenCalledWith('child');
 });
 
@@ -154,7 +154,7 @@ it('sends a follow-up to the recovered session using its own sequence boundary',
  vi.mocked(sendMissionMessage).mockImplementationOnce(async()=>{sent=true;return {} as any;});
  const receive=vi.fn();
  await askBtwAgent('follow-parent','Next','context',[],new AbortController().signal,receive);
- expect(sendMissionMessage).toHaveBeenCalledWith('follow-new',expect.stringContaining('Next'));
+ expect(sendMissionMessage).toHaveBeenCalledWith('follow-new',expect.stringContaining('Next'),undefined,expect.any(String));
  expect(api).not.toHaveBeenCalled();
  expect(btwSession('follow-parent')?.afterSequence).toBe(1);
  expect(receive).toHaveBeenLastCalledWith({type:'done',answer:'Follow-up answer'});
@@ -466,7 +466,7 @@ it('reuses a completed side session whose generated track uses the 8-char missio
  vi.mocked(sendMissionMessage).mockResolvedValueOnce({id:'m2',queued:false});
  const events:any[]=[];
  await askBtwAgent('verity-parent','Second question','ctx2',[{question:'First question',answer:'First answer'}],new AbortController().signal,e=>events.push(e));
- expect(sendMissionMessage).toHaveBeenCalledWith(childId,expect.stringContaining('Second question'));
+ expect(sendMissionMessage).toHaveBeenCalledWith(childId,expect.stringContaining('Second question'),undefined,expect.any(String));
  expect(api).not.toHaveBeenCalled();
  expect(events.at(-1)).toEqual({type:'done',answer:'Second answer'});
 });
@@ -701,4 +701,52 @@ it('reconciled history keeps only the final message as the answer',async()=>{
  const result=await reconcileBtwServerHistory('p-oc',[]);
  expect(result.history[0].answer.startsWith("C'est fait")).toBe(true);
  expect(result.history[0].answer).not.toContain('Continue if you have next steps');
+});
+
+// 2026-10-24, /btw b6cf85d2: the network stalled for ~60 s, the send's first
+// read hit the 30 s default deadline and WebKit reported "Fetch is aborted".
+const aborted=()=>new DOMException('Fetch is aborted','AbortError');
+function completedSide(parent:string){
+ localStorage.setItem('agent:'+sideQuestionKey(parent),JSON.stringify({id:'side-done',question:'Q1',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0,contextVersion:2,conversationCursor:{sequence:1,visibleHash:'h'},placement:JSON.stringify([false,undefined,undefined,undefined])}));
+}
+it('resends a side question after an aborted request with the same client message id',async()=>{
+ vi.useFakeTimers();
+ try{
+  completedSide('abort-parent');
+  let calls=0;
+  vi.mocked(getMission).mockImplementation(async id=>{if(id==='side-done'&&calls++<2)throw aborted();return {id,status:id==='abort-parent'?'active':'completed',history:[],tags:id==='side-done'?['btw-parent:abort-parent']:[],title:null,created_at:'',updated_at:''} as any;});
+ vi.mocked(sendMissionMessage).mockRejectedValueOnce(aborted()).mockResolvedValue({id:'m',queued:false} as any);
+  const events:any[]=[];
+  const run=askBtwAgent('abort-parent','Follow up','ctx',[],new AbortController().signal,e=>events.push(e),[],new AbortController().signal,'turn-1');
+  await vi.advanceTimersByTimeAsync(20000);
+  await run;
+  expect(events).toContainEqual({type:'status',text:'Connection interrupted — retrying…'});
+  expect(sendMissionMessage).toHaveBeenCalledTimes(2);
+  for(const call of vi.mocked(sendMissionMessage).mock.calls)expect(call[3]).toBe('turn-1');
+  expect(events.at(-1).type).toBe('done');
+ }finally{vi.useRealTimers();}
+});
+it('reports a question that never reached Core as not sent once retries are exhausted',async()=>{
+ vi.useFakeTimers();
+ try{
+  completedSide('down-parent');
+  vi.mocked(getMission).mockRejectedValue(aborted());
+  const run=askBtwAgent('down-parent','Follow up','ctx',[],new AbortController().signal,()=>{},[],new AbortController().signal,'turn-2');
+  const outcome=run.catch(e=>e);
+  await vi.advanceTimersByTimeAsync(60000);
+  const error=await outcome;
+  expect(error).toMatchObject({notSent:true,message:'Connection interrupted — your question was not sent. Retry to send it.'});
+  expect(getMission).toHaveBeenCalledTimes(6);
+  expect(sendMissionMessage).not.toHaveBeenCalled();
+ }finally{vi.useRealTimers();vi.mocked(getMission).mockReset();}
+});
+it('does not resend once Core accepted the question',async()=>{
+ completedSide('sent-parent');
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:id==='sent-parent'?'active':'completed',history:[],tags:['btw-parent:sent-parent'],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(sendMissionMessage).mockResolvedValue({id:'m',queued:false} as any);
+ const {getMissionEvents}=await import('../src/stream');
+ vi.mocked(getMissionEvents).mockResolvedValueOnce([]).mockRejectedValue(new Error('agent exploded'));
+ const error=await askBtwAgent('sent-parent','Q','ctx',[],new AbortController().signal,()=>{},[],new AbortController().signal,'turn-3').catch(e=>e);
+ expect(error.message).toBe('agent exploded');expect(error.notSent).toBeUndefined();
+ expect(sendMissionMessage).toHaveBeenCalledTimes(1);
 });

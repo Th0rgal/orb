@@ -4,7 +4,8 @@ import { isQueued, WORKING_STATUSES } from "./missionStatus";
 import { swallow } from "./log";
 import {deliverAssistantText,flushClientLink} from './clientLink';
 import {prepareBtwContext,type ConversationCursor} from './btwContext';
-import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion} from './api';
+import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTranscript,setClientMissionStatus,type Mission,connectionVersion,isTransientNetworkError} from './api';
+import {note} from './diagnostics';
 import {btwConfig} from './btwSettings';
 import {sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
@@ -207,12 +208,36 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  }
  }finally{stopStream?.();signal.removeEventListener('abort',abortWake);wake?.();}
 }
-export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[],launchSignal:AbortSignal=signal,allowCleanRetry=true){
+/** The question never reached Core: the panel keeps it as a pending bubble
+ * with Retry, distinct from a side agent that received it and then failed. */
+export class BtwNotSentError extends Error {
+ readonly notSent=true;
+ constructor(message:string,options?:ErrorOptions){super(message,options);this.name='BtwNotSentError';}
+}
+export const BTW_INTERRUPTED='Connection interrupted — retrying…';
+/** Backoff of the automatic resend after a transient failure (~30 s in all). */
+export const BTW_SEND_RETRY_MS=[1000,2000,4000,8000,15000];
+function notSent(error:unknown):BtwNotSentError{
+ if(error instanceof BtwNotSentError)return error;
+ const message=isTransientNetworkError(error)
+  ?'Connection interrupted — your question was not sent. Retry to send it.'
+  :error instanceof Error?error.message:String(error);
+ return new BtwNotSentError(message,{cause:error});
+}
+function pause(ms:number,signal:AbortSignal){return new Promise<void>(resolve=>{const timer=setTimeout(done,ms);function done(){clearTimeout(timer);signal.removeEventListener('abort',done);resolve();}signal.addEventListener('abort',done);});}
+/** `signal` stops following the answer (panel closed, mission switched);
+ * only `launchSignal`, the user's explicit Stop, may cancel the send itself.
+ * `clientMessageId` names this turn: every resend of it, automatic or from
+ * Retry, carries the same id so Core accepts the message at most once. */
+export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[],launchSignal:AbortSignal=signal,clientMessageId:string=crypto.randomUUID(),allowCleanRetry=true){
  const version=connectionVersion();
  const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');
  let unlock!:()=>void;locks.set(key,new Promise<void>(r=>{unlock=r;}));
  let reusedExisting=false;
- try{
+ // Set once Core accepted the question. Later failures are the side agent's,
+ // and resending would ask twice.
+ let accepted=false;
+ const launch=async()=>{
   let s=btwSession(parent);
   let current:Mission|undefined;
   if(s){
@@ -279,15 +304,15 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    // Core owns placement. A stale local view must not launch a native run for
    // a side session Core already started elsewhere.
    if(local&&!m.tags?.includes('placement:client'))local=false;
-   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0};save(parent,s);localStorage.removeItem(attemptKey);
+   s={id:m.id,question,harness:config.harness,model:config.model,local,placement,active:!local,baseline:0};save(parent,s);localStorage.removeItem(attemptKey);accepted=true;
   };
   if(!reuse)await createSide();
   else{
    const next={...s!,question,active:!local,baseline:0,afterSequence:Math.max(0,...(await getMissionEvents(s!.id)).map(e=>e.sequence))};
    delete next.brokenSession;
    try{
-    if(!local)await sendMissionMessage(next.id,prompt);
-    s=next;save(parent,s);
+    if(!local)await sendMissionMessage(next.id,prompt,undefined,clientMessageId);
+    s=next;save(parent,s);accepted=!local;
     reusedExisting=true;
    }catch(error){
     if(!(error instanceof ApiError)||error.status!==409||!error.detail.startsWith('REMOTE_RESUME_REQUIRES_REPLACEMENT:'))throw error;
@@ -304,6 +329,20 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   if(!reuse||!s!.conversationCursor)s!.conversationCursor=snapshot.cursor;
   else s!.pendingCursor=snapshot.cursor;
   s!.contextBytes=new TextEncoder().encode(snapshot.context).length;save(parent,s!);
+ };
+ try{
+  for(let attempt=0;;attempt++){
+   try{await launch();break;}
+   catch(error){
+    if(accepted)throw error;
+    // Stop, a new connection, or a refusal: never resend on our own.
+    if(launchSignal.aborted||connectionVersion()!==version||!isTransientNetworkError(error)||attempt>=BTW_SEND_RETRY_MS.length)throw notSent(error);
+    note('btw-send-retry',{attempt:attempt+1,error:error instanceof Error?`${error.name}: ${error.message}`.slice(0,200):String(error).slice(0,200)});
+    receive({type:'status',text:BTW_INTERRUPTED});
+    await pause(BTW_SEND_RETRY_MS[attempt],launchSignal);
+    if(launchSignal.aborted)throw notSent(new Error('Side question cancelled.'));
+   }
+  }
  }finally{locks.delete(key);unlock();}
  if(signal.aborted)return;
  try{
@@ -312,7 +351,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   const msg=error instanceof Error?error.message:String(error);
   if(allowCleanRetry&&reusedExisting&&!signal.aborted&&connectionVersion()===version&&msg.includes('The model returned an empty completion without running any tools')){
    receive({type:'status',text:'Starting clean side session…'});
-   await askBtwAgent(parent,question,context,history,signal,receive,attachments,launchSignal,false);
+   await askBtwAgent(parent,question,context,history,signal,receive,attachments,launchSignal,crypto.randomUUID(),false);
    return;
   }
   throw error;
