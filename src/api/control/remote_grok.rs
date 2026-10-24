@@ -476,11 +476,12 @@ impl GrokStream {
         // the process here used to turn response-length errors into cancellation.
         self.auth_required
             || self.antigravity.as_ref().is_some_and(|native| {
-                self.error.as_deref().is_some_and(|error| {
-                    !native.is_retryable()
-                        && super::usage_limit_wait::antigravity_resumable_interruption(error)
-                            .is_none()
-                })
+                !native.cron_handoff
+                    && self.error.as_deref().is_some_and(|error| {
+                        !native.is_retryable()
+                            && super::usage_limit_wait::antigravity_resumable_interruption(error)
+                                .is_none()
+                    })
             })
     }
 
@@ -977,6 +978,9 @@ pub(crate) struct NativeGrokObserver {
     offset_checkpoint: Option<(u64, std::time::Instant)>,
     /// A native Antigravity `schedule` already became a Core wake-up.
     native_wakeup_registered: bool,
+    /// A recurring Antigravity `schedule` became a Core schedule and the node
+    /// job was asked to stop so the conversation can continue unblocked.
+    cron_handoff_requested: bool,
 }
 
 /// Jobs that allocated their Claude session (`--session-id`) rather than
@@ -1210,6 +1214,7 @@ impl NativeGrokObserver {
                 .unwrap_or(0),
             offset_checkpoint: None,
             native_wakeup_registered: false,
+            cron_handoff_requested: false,
         })
     }
 
@@ -1457,6 +1462,7 @@ impl NativeGrokObserver {
             }
             Some(_) => {}
         }
+        self.hand_off_native_cron(client, node, shared_token).await;
         if self.stream.requires_error_cancellation() && !self.auth_cancel_requested {
             // Stop interactive login or a non-retryable native failure instead
             // of burning the job timeout. Recoverable results keep the CLI alive.
@@ -1473,6 +1479,62 @@ impl NativeGrokObserver {
                 tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, ?error, "remote grok job cancellation after interactive login prompt failed; poll loop will retry");
             } else {
                 self.auth_cancel_requested = true;
+            }
+        }
+    }
+
+    /// agy holds every step after an `ACTIVE` recurring `schedule` until it
+    /// exits (see `crate::antigravity::NativeCron`), so the turn would go
+    /// silent while the CLI keeps working. Core takes the schedule over, then
+    /// ends the job; the verdict resumes the conversation unblocked.
+    async fn hand_off_native_cron(
+        &mut self,
+        client: &RemoteNodeClient,
+        node: &RemoteNodeConfig,
+        shared_token: &str,
+    ) {
+        if self.cron_handoff_requested || self.session_persisted.is_none() {
+            return;
+        }
+        let Some(cron) = self
+            .stream
+            .antigravity
+            .as_ref()
+            .and_then(|s| s.blocking_cron())
+            .cloned()
+        else {
+            return;
+        };
+        if let Err(error) = crate::api::mission_runner::register_native_cron(
+            self.mission_id,
+            &cron.expression,
+            &cron.prompt,
+        )
+        .await
+        {
+            tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, %error,
+                "Antigravity recurring schedule could not become a Core schedule; retrying");
+            return;
+        }
+        match client
+            .cancel_job_with_reason(
+                node,
+                shared_token,
+                self.job_id,
+                NATIVE_SCHEDULE_ACTOR,
+                "Antigravity recurring schedule handed off to Core",
+            )
+            .await
+        {
+            Ok(_) => {
+                self.cron_handoff_requested = true;
+                if let Some(stream) = self.stream.antigravity.as_mut() {
+                    stream.cron_handoff = true;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(mission_id = %self.mission_id, job_id = %self.job_id, ?error,
+                    "Antigravity schedule handoff could not stop the node job; retrying")
             }
         }
     }
@@ -1762,10 +1824,34 @@ impl NativeGrokObserver {
             status
                 .cancellation
                 .as_ref()
-                .filter(|cause| cause.actor != "provider_error")
+                .filter(|cause| {
+                    cause.actor != "provider_error" && cause.actor != NATIVE_SCHEDULE_ACTOR
+                })
                 .map(|cause| format!("Cancelled by {}: {}", cause.actor, cause.reason))
         }) {
             self.stream.error = Some(cause);
+        }
+        // A deliberate recurring-schedule handoff survives Core restarts
+        // through the node's cancellation provenance.
+        if status
+            .cancellation
+            .as_ref()
+            .is_some_and(|cause| cause.actor == NATIVE_SCHEDULE_ACTOR)
+        {
+            if let Some(stream) = self.stream.antigravity.as_mut() {
+                stream.cron_handoff = stream.native_cron.is_some();
+            }
+        }
+        let native_cron = self
+            .stream
+            .antigravity
+            .as_ref()
+            .filter(|s| s.cron_handoff)
+            .and_then(|s| s.native_cron.clone());
+        if native_cron.is_some() && self.startup_failure.is_none() {
+            // The `interrupted` result is the handoff itself; identity errors
+            // are re-derived from the native stream below.
+            self.stream.error = None;
         }
         let exit = status.exit_code;
         let succeeded = status.state == "succeeded" && exit.unwrap_or(0) == 0;
@@ -1811,7 +1897,7 @@ impl NativeGrokObserver {
             .filter(|_| self.stream.error.is_none() && !auth_required);
         if self.stream.antigravity.is_some()
             && self.stream.error.is_none()
-            && (succeeded || native_schedule.is_some())
+            && (succeeded || native_schedule.is_some() || native_cron.is_some())
             && (self.stream.session_id.is_none()
                 || self.session_persisted != self.stream.session_id)
         {
@@ -1864,7 +1950,27 @@ impl NativeGrokObserver {
                 }
             }
         }
-        let scheduled_end = native_schedule.is_some() && self.native_wakeup_registered;
+        // Resume the conversation right after a recurring-schedule handoff.
+        if let Some(cron) = native_cron.as_ref().filter(|_| self.stream.error.is_none()) {
+            if !self.native_wakeup_registered {
+                match crate::api::mission_runner::register_native_cron_resume(
+                    self.mission_id,
+                    self.job_id,
+                    cron,
+                )
+                .await
+                {
+                    Ok(_) => self.native_wakeup_registered = true,
+                    Err(error) => {
+                        self.stream.error = Some(format!(
+                            "Antigravity recurring schedule was handed off but its resume could not be scheduled: {error}"
+                        ))
+                    }
+                }
+            }
+        }
+        let scheduled_end =
+            (native_schedule.is_some() || native_cron.is_some()) && self.native_wakeup_registered;
         // Before the native protocol starts, the CLI can only report setup
         // failures through stderr and the node's terminal process status.
         let startup_evidence = if !succeeded && self.stream.json_events == 0 {
@@ -2030,6 +2136,13 @@ impl NativeGrokObserver {
         }
 
         if success && scheduled_end {
+            if let Some(cron) = &native_cron {
+                content.push_str(&format!(
+                    "\n\nAntigravity's recurring schedule is now a Core schedule ({}): {}",
+                    crate::api::mission_runner::describe_cron(&cron.expression),
+                    cron.prompt
+                ));
+            }
             if let Some(schedule) = &native_schedule {
                 content.push_str(&format!(
                     "\n\nAntigravity scheduled a wake-up: this mission resumes in {}s with: {}",
@@ -2123,6 +2236,9 @@ fn exited_before_output_message(label: &str, exit: Option<i32>, resumed: Option<
 
 /// Marker shared with recovery: a native schedule Core could not register.
 pub(crate) const NATIVE_SCHEDULE_PREFIX: &str = "Antigravity scheduled a native wake-up in ";
+
+/// Cancellation actor of a deliberate recurring-schedule handoff.
+const NATIVE_SCHEDULE_ACTOR: &str = "native_schedule";
 
 fn native_schedule_error(delay_seconds: u64, error: &str) -> String {
     format!("{NATIVE_SCHEDULE_PREFIX}{delay_seconds}s; Core could not register it ({error})")
@@ -3320,6 +3436,41 @@ mod tests {
             Some(1800)
         );
         assert!(!error.contains("without a SUCCESS result"));
+    }
+
+    /// Captured agy stream: a recurring `schedule` stalls the stream; the
+    /// handoff's own cancellation is not a user stop nor a native failure.
+    #[tokio::test]
+    async fn recurring_schedule_handoff_is_not_a_cancelled_or_interrupted_turn() {
+        let fixture = include_str!("../../../tests/fixtures/antigravity_cron_schedule.jsonl");
+        let session = "fd68616d-2d82-4199-bace-1286e5216688";
+        let (mut observer, mission_id, job_id) = resumed_antigravity_observer(session).await;
+        let mut lines = fixture.lines();
+        let head: Vec<&str> = lines.by_ref().take(4).collect();
+        observer.stream.feed(&format!("{}\n", head.join("\n")));
+        let cron = observer
+            .stream
+            .antigravity
+            .as_ref()
+            .unwrap()
+            .blocking_cron()
+            .cloned()
+            .unwrap();
+        assert_eq!(cron.expression, "*/30 * * * *");
+        observer
+            .stream
+            .feed(&format!("{}\n", lines.collect::<Vec<_>>().join("\n")));
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({"job_id":job_id,"mission_id":mission_id,"state":"cancelled","exit_code":null,"created_at":"2026-10-24T10:42:00Z",
+            "cancellation":{"actor":NATIVE_SCHEDULE_ACTOR,"reason":"Antigravity recurring schedule handed off to Core","requested_at":"2026-10-24T10:42:01Z"}})).unwrap();
+        let verdict = observer.verdict(&status, "old-agent").await;
+        // Without a reachable Core API the resume wake-up cannot be created;
+        // the failure names that, never a cancellation or `interrupted`.
+        let error = verdict.cli_error.unwrap();
+        assert!(error.contains("resume could not be scheduled"), "{error}");
+        assert!(
+            !error.contains("Cancelled by") && !error.contains("interrupted"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

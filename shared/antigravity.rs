@@ -444,6 +444,11 @@ pub struct Stream {
     /// headless `agy -p` the CLI exits instead of waking itself, so the host
     /// must turn it into a durable wake-up.
     pub native_schedule: Option<NativeSchedule>,
+    /// A recurring native `schedule` (`CronExpression`). See [`NativeCron`].
+    pub native_cron: Option<NativeCron>,
+    /// The host took ownership of [`Self::native_cron`] and stopped the CLI on
+    /// purpose; the interrupted result is a clean, handed-off end of turn.
+    pub cron_handoff: bool,
     /// Background tasks the root agent announced it was idle-waiting for
     /// (`diagnostics: root agent idle; waiting up to … for N background task(s)`).
     pub idle_wait_tasks: Option<u32>,
@@ -455,6 +460,29 @@ pub struct NativeSchedule {
     pub step: u64,
     pub delay_seconds: u64,
     pub prompt: String,
+}
+
+/// Antigravity's recurring `schedule` tool (`CronExpression`, `Prompt`).
+///
+/// agy keeps this step `ACTIVE` for the lifetime of the cron, and its ordered
+/// stream-json emitter holds every later step behind it until the process
+/// exits (a SIGTERM loses them). The host must therefore own the schedule and
+/// end the native process, or the turn goes silent while agy keeps working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCron {
+    pub step: u64,
+    pub expression: String,
+    pub prompt: String,
+}
+
+fn parse_native_cron(step: u64, parameters: &Value) -> Option<NativeCron> {
+    let expression = parameters["CronExpression"].as_str()?.trim();
+    let prompt = parameters["Prompt"].as_str()?.trim();
+    (!expression.is_empty() && !prompt.is_empty()).then(|| NativeCron {
+        step,
+        expression: expression.to_owned(),
+        prompt: prompt.to_owned(),
+    })
 }
 
 fn parse_native_schedule(step: u64, parameters: &Value) -> Option<NativeSchedule> {
@@ -811,9 +839,13 @@ impl Stream {
             } else {
                 &body["parameters"]
             };
-            self.native_schedule = (body["state"] != "ERROR" && info["error"].is_null())
+            let ok = body["state"] != "ERROR" && info["error"].is_null();
+            self.native_schedule = ok
                 .then(|| parse_native_schedule(step, parameters))
                 .flatten();
+            if let Some(cron) = ok.then(|| parse_native_cron(step, parameters)).flatten() {
+                self.native_cron = Some(cron);
+            }
         }
         if name == "run_command" && body["state"] == "ACTIVE" {
             self.active_command_steps.insert(step);
@@ -892,6 +924,14 @@ impl Stream {
             events.push(json!({"type":"tool_call_update","toolCallId":id,"name":name,"toolName":name,"status":if body["state"] == "ERROR" || !info["error"].is_null() {"failed"} else {"completed"},"output":info["output"],"rawOutput":info["output"]}));
         }
         events
+    }
+
+    /// A recurring schedule whose `ACTIVE` step is now stalling the native
+    /// event stream (see [`NativeCron`]).
+    pub fn blocking_cron(&self) -> Option<&NativeCron> {
+        self.native_cron
+            .as_ref()
+            .filter(|cron| !self.completed_steps.contains_key(&cron.step))
     }
 
     pub fn observe_stderr(&mut self, line: &str) {
@@ -1221,6 +1261,11 @@ impl Stream {
                 .as_ref()
                 .and_then(|marker| marker.short_error.as_deref())
         };
+        // The host owns the recurring schedule and ended the CLI on purpose:
+        // its `interrupted` result and idle-wait diagnostic are expected.
+        if self.cron_handoff && !self.identity_error && self.session.is_some() {
+            return Ok(());
+        }
         if let Some(tasks) = self.idle_wait_interrupted() {
             return Err(idle_wait_interrupted_message(tasks));
         }
@@ -1543,6 +1588,77 @@ mod tests {
         s.feed(&json!({"event":"result","result":{"conversation_id":"two","status":"SUCCESS"}}));
         assert!(s.finish().is_err());
     }
+    /// Captured from agy 1.4.7: after an ACTIVE recurring `schedule` step the
+    /// CLI emitted no further step (the turn's three later steps were only in
+    /// its conversation database) and SIGTERM produced `interrupted`.
+    #[test]
+    fn recurring_schedule_stalls_the_stream_until_the_host_takes_it_over() {
+        let mut s = Stream::default();
+        let fixture = include_str!("../tests/fixtures/antigravity_cron_schedule.jsonl");
+        let mut lines = fixture
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap());
+        let mut tools = vec![];
+        for value in lines.by_ref().take(4) {
+            tools.extend(s.feed(&value));
+        }
+        let cron = s
+            .blocking_cron()
+            .cloned()
+            .expect("ACTIVE cron blocks the stream");
+        assert_eq!(
+            (cron.step, cron.expression.as_str(), cron.prompt.as_str()),
+            (2, "*/30 * * * *", "status ping")
+        );
+        assert!(
+            s.native_schedule.is_none(),
+            "a cron is not a one-shot wake-up"
+        );
+        // The tool call is still surfaced to clients.
+        assert!(tools
+            .iter()
+            .any(|t| t["type"] == "tool_call" && t["name"] == "schedule"));
+        s.observe_stderr(
+            "diagnostics: root agent idle; waiting up to 30m0s for 1 background task(s)",
+        );
+        for value in lines {
+            s.feed(&value);
+        }
+        // Without the handoff an interrupted cron turn is a failure ...
+        assert!(s.finish().is_err());
+        // ... with it, a clean end of turn that keeps the conversation identity.
+        s.cron_handoff = true;
+        assert!(s.finish().is_ok());
+        assert_eq!(
+            s.session.as_deref(),
+            Some("fd68616d-2d82-4199-bace-1286e5216688")
+        );
+        // A later DONE update of the same step means it no longer blocks.
+        let mut done = Stream::default();
+        done.feed(&json!({"event":"init","conversation_id":"c"}));
+        for state in ["ACTIVE", "DONE"] {
+            done.feed(
+                &json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":7,
+                "state":state,"step_type":"tool","tool_name":"schedule","tool_info":{"parameters":
+                {"CronExpression":"0 * * * *","Prompt":"p"}}}}),
+            );
+        }
+        assert!(done.blocking_cron().is_none());
+        assert!(done.native_cron.is_some());
+        // A failed schedule call registers nothing, and a handoff never hides an identity change.
+        let mut failed = Stream::default();
+        failed.feed(
+            &json!({"event":"step_update","step_update":{"conversation_id":"c","step_index":3,
+            "state":"ERROR","step_type":"tool","tool_name":"schedule","tool_info":{"parameters":
+            {"CronExpression":"*/5 * * * *","Prompt":"p"}}}}),
+        );
+        assert!(failed.native_cron.is_none());
+        failed.cron_handoff = true;
+        failed
+            .feed(&json!({"event":"result","result":{"conversation_id":"other","status":"ERROR"}}));
+        assert!(failed.finish().is_err());
+    }
+
     #[test]
     fn trailing_native_schedule_is_a_clean_end_of_turn() {
         let mut s = Stream::default();

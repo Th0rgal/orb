@@ -210,6 +210,17 @@ unsafe extern "C" {
         same_mission: u8,
         is_descendant: u8,
     ) -> u32;
+    fn orb_schedule_step(
+        op: u8,
+        known: u8,
+        cancelled: u8,
+        owner_terminal: u8,
+        authorized: u8,
+        busy: u8,
+        last_fired: u64,
+        next_due: u64,
+        now: u64,
+    ) -> u8;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1314,9 +1325,148 @@ pub fn attribution_step(
     }
 }
 
+/// Decision of `orb_schedule_step` (see `docs/specs/agent-schedules.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleAction {
+    /// Unauthorized, cancelled, or the owner is gone: deactivate / refuse.
+    Drop,
+    /// A new key: create the schedule.
+    Register,
+    /// The same key already exists: keep the existing row unchanged.
+    Dedupe,
+    /// The next slot is due: fire once and move the reference to `now`.
+    Fire,
+    /// Not due yet (or the mission is busy): try again on a later tick.
+    Wait,
+}
+
+/// Inputs of one tick of an existing schedule row. Times are Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduleTickInput {
+    pub cancelled: bool,
+    pub owner_terminal: bool,
+    pub authorized: bool,
+    pub busy: bool,
+    pub last_fired: u64,
+    pub next_due: u64,
+    pub now: u64,
+}
+
+fn schedule_action(raw: u8) -> ScheduleAction {
+    match raw {
+        1 => ScheduleAction::Register,
+        2 => ScheduleAction::Dedupe,
+        3 => ScheduleAction::Fire,
+        4 => ScheduleAction::Wait,
+        _ => ScheduleAction::Drop,
+    }
+}
+
+/// Verified registration step: `Register` only for an authorized caller, a new
+/// key and a live owner; a known key always dedupes.
+pub fn schedule_register(known: bool, owner_terminal: bool, authorized: bool) -> ScheduleAction {
+    schedule_action(unsafe {
+        orb_schedule_step(
+            0,
+            u8::from(known),
+            0,
+            u8::from(owner_terminal),
+            u8::from(authorized),
+            0,
+            0,
+            0,
+            0,
+        )
+    })
+}
+
+/// Verified tick step: fires at most once per due slot, never after a fence.
+pub fn schedule_tick(input: ScheduleTickInput) -> ScheduleAction {
+    schedule_action(unsafe {
+        orb_schedule_step(
+            1,
+            0,
+            u8::from(input.cancelled),
+            u8::from(input.owner_terminal),
+            u8::from(input.authorized),
+            u8::from(input.busy),
+            input.last_fired,
+            input.next_due,
+            input.now,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedule_step_dedupes_fences_and_fires_once_per_slot() {
+        assert_eq!(
+            schedule_register(false, false, true),
+            ScheduleAction::Register
+        );
+        assert_eq!(schedule_register(true, false, true), ScheduleAction::Dedupe);
+        assert_eq!(schedule_register(true, true, true), ScheduleAction::Dedupe);
+        assert_eq!(schedule_register(false, true, true), ScheduleAction::Drop);
+        assert_eq!(schedule_register(false, false, false), ScheduleAction::Drop);
+        let tick = ScheduleTickInput {
+            cancelled: false,
+            owner_terminal: false,
+            authorized: true,
+            busy: false,
+            last_fired: 100,
+            next_due: 1_900,
+            now: 1_900,
+        };
+        assert_eq!(schedule_tick(tick), ScheduleAction::Fire);
+        // Hours of downtime: still a single fire, then the slot is consumed.
+        assert_eq!(
+            schedule_tick(ScheduleTickInput {
+                now: 90_000,
+                ..tick
+            }),
+            ScheduleAction::Fire
+        );
+        assert_eq!(
+            schedule_tick(ScheduleTickInput {
+                last_fired: 90_000,
+                now: 90_001,
+                ..tick
+            }),
+            ScheduleAction::Wait
+        );
+        assert_eq!(
+            schedule_tick(ScheduleTickInput { now: 1_899, ..tick }),
+            ScheduleAction::Wait
+        );
+        assert_eq!(
+            schedule_tick(ScheduleTickInput { busy: true, ..tick }),
+            ScheduleAction::Wait
+        );
+        assert_eq!(
+            schedule_tick(ScheduleTickInput {
+                cancelled: true,
+                ..tick
+            }),
+            ScheduleAction::Drop
+        );
+        assert_eq!(
+            schedule_tick(ScheduleTickInput {
+                owner_terminal: true,
+                ..tick
+            }),
+            ScheduleAction::Drop
+        );
+        assert_eq!(
+            schedule_tick(ScheduleTickInput {
+                authorized: false,
+                ..tick
+            }),
+            ScheduleAction::Drop
+        );
+    }
 
     #[test]
     fn attribution_step_rejects_forged_hints_and_never_returns_empty() {

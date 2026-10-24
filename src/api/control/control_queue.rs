@@ -438,6 +438,14 @@ pub(crate) fn wakeup_supersession_key(
         "claude-builtin" | "automation-manager" | "orb-local" => Some("wall-clock".to_string()),
         // Durable completions are independent. Only a replacement watcher for
         // the same job may supersede an older one.
+        // One native recurring schedule per cron expression: an agent that
+        // re-schedules the same cadence with reworded instructions replaces it.
+        crate::api::mission_runner::ANTIGRAVITY_SCHEDULE_SOURCE => match trigger {
+            mission_store::TriggerType::Cron { expression, .. } => {
+                Some(format!("antigravity-cron:{}", expression.trim()))
+            }
+            _ => None,
+        },
         "durable-job-terminal" => match trigger {
             mission_store::TriggerType::DurableJobTerminal { job_id } => {
                 Some(format!("durable-job:{job_id}"))

@@ -25,6 +25,16 @@ it('distinguishes job waits, client waits, and unsynced requests',()=>{
   expect(continuationLabel({count:1,items:[{id:'x',state,trigger}]})).toBe(label);
  }
 });
+it('labels a recurring agent schedule with its cadence and next run, cancelable',()=>{
+ const next='2030-10-30T13:30:00Z';
+ const time=new Date(next).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+ const cron:ContinuationSummary={count:1,items:[{id:'cron-1',state:'scheduled',trigger:'time',next_at:next,recurrence:'every 30 min',source:'antigravity-schedule'}]};
+ expect(continuationLabel(cron)).toBe(`Scheduled: every 30 min — next at ${time}`);
+ expect(continuationLabel({count:1,items:[{...cron.items[0],next_at:null}]})).toBe('Scheduled: every 30 min');
+ const {getByRole}=render(()=><MissionGlyph status="awaiting_user" continuation={cron}/>);
+ fireEvent.click(getByRole('button',{name:/View wake-ups/}));
+ expect(screen.getByRole('button',{name:'Cancel schedule'})).toBeTruthy();
+});
 it('shows details without opening the mission row',()=>{
  const row=vi.fn();
  const {getByRole}=render(()=><div onClick={row}><MissionGlyph status="awaiting_user" continuation={wake}/></div>);
