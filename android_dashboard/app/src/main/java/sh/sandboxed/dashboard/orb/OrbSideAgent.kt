@@ -104,20 +104,32 @@ object OrbSideAgent {
             "<main_conversation_update>\n$context\n</main_conversation_update>\n\n" +
             "Current request:\n$question"
 
+    /** Resends an idempotent write after a dropped or timed-out connection (1, 2, 4, 8 s), like desktop `askBtwAgent`. */
+    suspend fun <T> retrying(work: suspend () -> T): T {
+        for (delayMs in listOf(1_000L, 2_000L, 4_000L, 8_000L)) {
+            try { return work() } catch (e: java.io.IOException) { kotlinx.coroutines.delay(delayMs) }
+        }
+        return work()
+    }
+
     suspend fun launch(core: OrbCore, parentId: String, question: String, turns: List<OrbTurn>): OrbRow {
+        // One key per question: resends after a dropped connection start it once.
+        val key = UUID.randomUUID().toString()
         val body = mapOf(
             "backend" to OrbBtwSettings.harness,
             "model_override" to OrbBtwSettings.model,
             "model_effort" to null,
-            "idempotency_key" to UUID.randomUUID().toString(),
+            "idempotency_key" to key,
             "side_question" to prompt(context(turns), question),
             "side_context_mode" to "incremental"
         )
-        val res = core.request(
-            "/api/control/missions/${core.encodeComponent(parentId)}/btw/agent",
-            method = "POST",
-            body = body
-        )
+        val res = retrying {
+            core.request(
+                "/api/control/missions/${core.encodeComponent(parentId)}/btw/agent",
+                method = "POST",
+                body = body
+            )
+        }
         val dict = OrbJSON.dict(res) ?: throw OrbError("The side agent did not start.")
         return OrbRow(dict)
     }

@@ -36,6 +36,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [turnId,setTurnId]=createSignal(crypto.randomUUID());
  const [preparing,setPreparing]=createSignal(false);
  const [runStatus,setRunStatus]=createSignal('');
+ const [notSent,setNotSent]=createSignal(false);
  const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[narration,setNarration]=createSignal<string[]>([]),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
  let abort:AbortController|undefined;
  // Set while this panel itself is launching/answering a question.
@@ -101,6 +102,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    ? rawSavedError.replace('Check its activity for tool errors, then retry.', 'The model returned an empty completion without running any tools; retry to start a clean side session.')
    : rawSavedError;
   setError(saved?.pending && !launching ? normalizedSavedError : '');
+  setNotSent(!!saved?.pending?.notSent&&!launching);
+  // Retry after a restart resends under the same id, so Core can drop a copy.
+  if(saved?.pending?.turnId)setTurnId(saved.pending.turnId as ReturnType<typeof crypto.randomUUID>);
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   setQueue(saved?.queue??[]);
   setLoadedKey(current);
@@ -172,7 +176,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  createEffect(()=>{
   const current=key();
   const snapshot={history:history(),draft:draft(),model:model(),open:side?side.visible():open(),docked:true,
-    pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments()}:undefined,
+    pending:(busy()||error())?{question:question(),answer:answer(),error:error(),attachments:pendingAttachments(),turnId:turnId(),...(notSent()?{notSent:true}:{})}:undefined,
     queue:queue()};
   if(loadedKey()===current)void writeSideQuestion(current,snapshot).then(saved=>{if(key()===current)setStorageError(!saved);});
  });
@@ -202,7 +206,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   for(const file of files)text=text.replaceAll(uploadToken(file.path),`[File: ${file.source.name}]`);
   if(current===key()){
    setPendingAttachments(attachments);
-   setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setDraft('');
+   setOpen(true);side?.show();setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setNotSent(false);setDraft('');
    revealSentQuestion();
   }
   asking=true;
@@ -217,7 +221,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     const next=appendTurn(history(),{id:activeTurnId,question:text,answer:event.answer,...(event.narration?.length?{narration:event.narration}:{}),attachments});
     setHistory(next);setBusy(false);setRunStatus('');
    }
-  },attachments,launchController.signal).catch(e=>{if(current===key()&&!controller.signal.aborted)setError(e instanceof Error?e.message:String(e));})
+  },attachments,launchController.signal,activeTurnId).catch(e=>{if(current===key()&&!controller.signal.aborted){setNotSent((e as {notSent?:unknown})?.notSent===true);setError(e instanceof Error?e.message:String(e));}})
   .finally(()=>{if(abort===controller)asking=false;if(current===key()&&abort===controller){setBusy(false);setRunStatus('');queueMicrotask(sendNext);}});
   return true;
  };
@@ -232,7 +236,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  onCleanup(()=>window.removeEventListener('keydown',escape));
  const cancel=()=>{launchAbort?.abort();void stopBtw(p.mission).then(()=>{abort?.abort();setBusy(false);setRunStatus('');setError('Side agent stopped.');}).catch(e=>setError(String(e)));};
  const retry=()=>{const asked=question(),files=pendingAttachments();void ask(asked,[],[],files,true);};
- const dismiss=()=>{setError('');setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
+ const dismiss=()=>{setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);queueMicrotask(sendNext);};
  // Reconcile the same turn through preparation, streaming and persistence.
  const [turns,setTurns]=createStore<Array<SideExchange & {id:string;pending?:boolean;error?:string}>>([]);
  createEffect(()=>{
@@ -265,7 +269,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <Show when={content().text}><MdView compact text={content().text}/></Show>
      <Show when={content().details}><details class="legacy-log"><summary>Original execution log</summary><pre>{content().details}</pre></details></Show>
      <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>
-     <Show when={exchange.error}><ErrorNotice error={exchange.error!} title="Couldn’t complete side question"><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><button type="button" class="error-notice-link" onClick={dismiss} disabled={busy()}>Dismiss</button><Show when={p.onOpenSession&&exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(p.onOpenSession?.(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
+     <Show when={exchange.error}><ErrorNotice error={exchange.error!} title={notSent()?"Question not sent":"Couldn’t complete side question"}><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><button type="button" class="error-notice-link" onClick={dismiss} disabled={busy()}>Dismiss</button><Show when={p.onOpenSession&&exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(p.onOpenSession?.(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
      <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${content().text||exchange.answer}`)}>Use in agent draft ↗</button></Show>
     </article>;}}</For>
     <Show when={queue().length}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">

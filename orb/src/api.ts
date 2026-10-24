@@ -9,7 +9,7 @@ import type { ClientRunReceipt } from "./clientRuns";
 import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
 import { applyProjectRoster } from "./projectAppearance";
-import { requestDone } from "./diagnostics";
+import { note, requestDone } from "./diagnostics";
 import { configureParentResolver, openBeyondPage, partialList, resetMissionHierarchy, stickHierarchy } from "./missionHierarchy";
 
 const URL_KEY = "orb.apiUrl";
@@ -101,6 +101,37 @@ class InvalidApiResponseError extends Error {
   }
 }
 
+/** Default deadline of a request without its own signal. WebKit reports this
+ * timeout as the same "AbortError: Fetch is aborted" as an explicit abort, so
+ * every abort is logged with its reason (`noteAbort`). */
+export const REQUEST_TIMEOUT_MS = 30_000;
+export type AbortReason = "timeout" | "caller-timeout" | "caller-abort";
+export function isAbortError(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null)?.name;
+  return name === "AbortError" || name === "TimeoutError";
+}
+function abortReason(signal?: AbortSignal | null): AbortReason {
+  if (!signal) return "timeout";
+  return isAbortError(signal.reason) && (signal.reason as { name?: string }).name === "TimeoutError" ? "caller-timeout" : "caller-abort";
+}
+/** Why a request was aborted: the default deadline (no answer in time, e.g.
+ * the network stalled) or the caller's own signal. Written to the
+ * diagnostics log and, in development, the console. */
+export function noteAbort(request: string, reason: AbortReason, ms: number): void {
+  const entry = { request: request.slice(0, 160), reason, ms: Math.round(ms) };
+  note("request-aborted", entry);
+  if (import.meta.env?.DEV) console.warn("[orb] request aborted", entry);
+}
+/** A failure that says nothing about the request itself: the connection
+ * stalled, dropped or timed out, or a proxy answered for an unreachable Core.
+ * Only idempotent operations may retry on it. */
+export function isTransientNetworkError(error: unknown): boolean {
+  if (error instanceof ApiError) return [502, 503, 504].includes(error.status);
+  if (error instanceof InvalidApiResponseError) return true;
+  if (isAbortError(error)) return true;
+  return error instanceof TypeError && /load failed|failed to fetch|networkerror|network connection|internet connection|could not connect/i.test(error.message);
+}
+
 export function api<T>(path: string, init?: RequestInit): Promise<T> {
   // Explicit signals/options retain independent cancellation semantics.
   if (!init) return sharedRead(`${connectionVersion()}:${getApiUrl()}:${path}`, () => apiRequest<T>(path));
@@ -139,7 +170,14 @@ async function sendRequest<T>(path: string, init?: RequestInit, text = false): P
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
     ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
   };
-  const res = await fetch(`${getApiUrl()}${path}`, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(30_000) });
+  const started = performance.now();
+  let res: Response;
+  try {
+    res = await fetch(`${getApiUrl()}${path}`, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  } catch (error) {
+    if (isAbortError(error)) noteAbort(`${init?.method?.toUpperCase() ?? "GET"} ${path}`, abortReason(init?.signal), performance.now() - started);
+    throw error;
+  }
   if (res.status === 401) {
     if (connectionVersion() === version) clearConnection();
     throw new Error("401 Unauthorized — reconnect in Settings → Backend");

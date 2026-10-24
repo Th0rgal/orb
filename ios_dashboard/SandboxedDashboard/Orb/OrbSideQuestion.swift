@@ -521,6 +521,9 @@ struct OrbSideQuestionSheet: View {
         withAnimation(.snappy(duration: 0.18)) { pending = text; askedAt = Date(); question = "" }
         let files = attachments
         attachments = []
+        // One id per question: every resend after a dropped connection carries it,
+        // so Core accepts the question at most once (desktop `askBtwAgent`).
+        let messageID = UUID().uuidString
         do {
             if !store.loaded { try await store.refresh() }
             if running { throw OrbHTTPError(status: 409, detail: "The side agent is still running. Stop it before sending another question.") }
@@ -537,15 +540,15 @@ struct OrbSideQuestionSheet: View {
                 content += "\nAttachment: " + receipt["path"].text
             }
             if let id = store.boundID, !freshSession, OrbBtwThreads.resumableStatuses.contains(store.boundStatus) {
-                _ = try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
-                    "mission_id": .string(id), "content": .string(content), "client_message_id": .string(UUID().uuidString),
-                ]))
+                _ = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
+                    "mission_id": .string(id), "content": .string(content), "client_message_id": .string(messageID),
+                ])) }
                 store.sent(to: id)
             } else {
-                let created = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))/btw/agent", method: "POST", body: .object([
+                let created = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))/btw/agent", method: "POST", body: .object([
                     "backend": .string(OrbBtwConfig.harness), "model_override": .string(OrbBtwConfig.model), "model_effort": .null,
-                    "idempotency_key": .string(UUID().uuidString), "side_question": .string(content),
-                ]))
+                    "idempotency_key": .string(messageID), "side_question": .string(content),
+                ])) }
                 freshSession = false
                 store.sent(to: created["id"].text)
             }
@@ -626,5 +629,25 @@ extension OrbConversation {
         if trimmed == "/btw" { return "" }
         guard trimmed.hasPrefix("/btw ") || trimmed.hasPrefix("/btw\n") else { return nil }
         return String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Resends an idempotent side-question write after a dropped or timed-out
+/// connection (1, 2, 4, 8 s), like desktop `askBtwAgent`. Other errors and
+/// cancellation are thrown at once.
+@MainActor
+enum OrbSideSend {
+    static let backoff: [UInt64] = [1, 2, 4, 8]
+    static func transient(_ error: Error) -> Bool {
+        guard let url = error as? URLError else { return false }
+        return [.timedOut, .networkConnectionLost, .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed].contains(url.code)
+    }
+    static func retrying<T>(_ work: () async throws -> T) async throws -> T {
+        for delay in backoff {
+            do { return try await work() } catch where transient(error) {
+                try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            }
+        }
+        return try await work()
     }
 }
