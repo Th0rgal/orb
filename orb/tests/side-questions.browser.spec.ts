@@ -197,3 +197,50 @@ test('side answer shows the final message and folds progress narration',async({p
  await fold.locator('summary').click();
  await expect(fold.getByText('Inspectons les événements.')).toBeVisible();
 });
+
+// /btw b6cf85d2 (2026-10-24): a network stall aborted the follow-up's first
+// request and the question never reached Core. It must resend on its own.
+async function mockFlakyFollowUp(page:import('@playwright/test').Page,failures:number){
+ const ids:string[]=[];const events:any[]=[];let failed=0;
+ const mission=(id:string)=>({id,status:id==='browser-fixture'?'active':'completed',title:'Fixture',history:[],tags:id==='side-child'?['btw-parent:browser-fixture']:[],created_at:'',updated_at:''});
+ await page.route('**/api/**',async route=>{
+  const path=new URL(route.request().url()).pathname;
+  if(path.endsWith('/btw/agent')){events.push({id:events.length+1,sequence:events.length+1,event_type:'assistant_message',content:'First answer.',timestamp:''});return route.fulfill({json:mission('side-child')});}
+  if(path==='/api/control/message'){
+   ids.push(route.request().postDataJSON().client_message_id);
+   if(failed++<failures)return route.abort('timedout');
+   events.push({id:events.length+1,sequence:events.length+1,event_type:'user_message',content:'Current request:\nSecond?',timestamp:''},{id:events.length+2,sequence:events.length+2,event_type:'assistant_message',content:'Second answer.',timestamp:''});
+   return route.fulfill({json:{id:'msg',queued:false}});
+  }
+  if(path.endsWith('/events'))return route.fulfill(eventPage(route,events));
+  if(path.includes('/missions/'))return route.fulfill({json:mission(path.split('/').at(-1)!)});
+  return route.fulfill({json:[]});
+ });
+ return ids;
+}
+async function askTwice(page:import('@playwright/test').Page){
+ await page.goto('/tests/side-questions.html');
+ await page.getByPlaceholder('Send follow-up').fill('/btw First?');
+ await page.getByTitle('Ask side question',{exact:true}).click();
+ await expect(page.getByText('First answer.',{exact:true})).toBeVisible();
+ await page.getByPlaceholder('Ask a side question…').fill('Second?');
+ await page.getByPlaceholder('Ask a side question…').press('Enter');
+}
+test('a follow-up to a completed side agent resends under one id after an aborted request',async({page})=>{
+ const ids=await mockFlakyFollowUp(page,2);
+ await askTwice(page);
+ await expect(page.getByText('Connection interrupted — retrying…')).toBeVisible();
+ await expect(page.getByText('Second answer.',{exact:true})).toBeVisible({timeout:15000});
+ expect(ids).toHaveLength(3);expect(new Set(ids).size).toBe(1);
+ await expect(page.getByText('Question not sent')).toHaveCount(0);
+});
+test('a follow-up that never reaches Core stays as a not-sent bubble whose Retry reuses its id',async({page})=>{
+ test.setTimeout(90_000);
+ const ids=await mockFlakyFollowUp(page,6);
+ await askTwice(page);
+ await expect(page.getByText('Question not sent')).toBeVisible({timeout:45000});
+ await expect(page.locator('.btw-thread .user').last()).toContainText('Second?');
+ await page.getByRole('button',{name:'Retry'}).click();
+ await expect(page.getByText('Second answer.',{exact:true})).toBeVisible({timeout:15000});
+ expect(new Set(ids).size).toBe(1);
+});
