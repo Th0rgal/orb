@@ -265,7 +265,8 @@
 			children = (
 				9331F1134F0091DB717302CC /* OrbFleetActivity.swift */,
 			);
-			path = Shared;
+			name = Shared;
+			path = OrbLiveActivity/Shared;
 			sourceTree = "<group>";
 		};
 		483C1FA7AD3A618854BB5B14 /* OrbLiveActivity */ = {
@@ -393,6 +394,7 @@
 				6DBC9AF3F2EFD0B5057A2EB6 /* SandboxedDashboard */,
 				A5A307A24CE6E469C4A2FA0D /* SandboxedDashboardTests */,
 				69E84F6BBDAEC47870846B46 /* SandboxedDashboardUITests */,
+				35EE4E34BE8C2BF15EEDF6F8 /* Shared */,
 				057719CAD3366030137C44B3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -547,7 +549,6 @@
 				};
 			};
 			buildConfigurationList = 210E554B4D49DD6F4EE7F3FD /* Build configuration list for PBXProject "SandboxedDashboard" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -557,11 +558,12 @@
 			mainGroup = 9402FD943158ED3148A81A0C;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			productRefGroup = 057719CAD3366030137C44B3 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				14C19B3219EFE4065FBC9952 /* OrbLiveActivity */,
 				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
+				14C19B3219EFE4065FBC9952 /* OrbLiveActivity */,
 				C50B6EE186DD640BD408EEA7 /* SandboxedDashboardTests */,
 				8A8DCA11CAC3A5FFA56DC86C /* SandboxedDashboardUITests */,
 			);

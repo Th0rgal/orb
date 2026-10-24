@@ -1386,9 +1386,17 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
     let (m, _) = manager(dir.path(), settings());
     let vm = online_machine(&m, "sib-done").await;
     let got = m
-        .take_idle_sibling("small", "orb-node-base", "parent", Some("t1"), &|o| {
-            o == "sib-done"
-        })
+        .take_idle_sibling(
+            &SiblingReuse {
+                size: "small",
+                image: "orb-node-base",
+                requested_by: "parent",
+                tenant: Some("t1"),
+                budget_pool_id: None,
+                sub_budget_usd: None,
+            },
+            &|o| o == "sib-done",
+        )
         .await
         .unwrap();
     assert_eq!(got.id, vm.id);
@@ -1396,17 +1404,46 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
     assert_eq!(got.requested_by_mission_id.as_deref(), Some("parent"));
     // Wrong size, other tenant, or already taken: nothing.
     assert!(m
-        .take_idle_sibling("small", "orb-node-base", "parent", Some("t1"), &|o| o
-            == "sib-done")
+        .take_idle_sibling(
+            &SiblingReuse {
+                size: "small",
+                image: "orb-node-base",
+                requested_by: "parent",
+                tenant: Some("t1"),
+                budget_pool_id: None,
+                sub_budget_usd: None
+            },
+            &|o| o == "sib-done"
+        )
         .await
         .is_none());
     let other = online_machine(&m, "sib2").await;
     assert!(m
-        .take_idle_sibling("large", "orb-node-base", "parent", Some("t1"), &|_| true)
+        .take_idle_sibling(
+            &SiblingReuse {
+                size: "large",
+                image: "orb-node-base",
+                requested_by: "parent",
+                tenant: Some("t1"),
+                budget_pool_id: None,
+                sub_budget_usd: None
+            },
+            &|_| true
+        )
         .await
         .is_none());
     assert!(m
-        .take_idle_sibling("small", "orb-node-base", "parent", Some("t2"), &|_| true)
+        .take_idle_sibling(
+            &SiblingReuse {
+                size: "small",
+                image: "orb-node-base",
+                requested_by: "parent",
+                tenant: Some("t2"),
+                budget_pool_id: None,
+                sub_budget_usd: None
+            },
+            &|_| true
+        )
         .await
         .is_none());
     let _ = other;
@@ -1463,4 +1500,71 @@ async fn provision_runs_the_script_before_starting_the_node() {
     assert!(execs[0].contains("provision.sh"), "{execs:?}");
     assert!(execs[1].contains("systemctl restart orb-node"), "{execs:?}");
     let _ = m.destroy(&machine.id, "test").await;
+}
+
+#[tokio::test]
+async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.daily_cap_usd = None;
+    s.max_concurrent = None;
+    let (m, _) = manager(dir.path(), s);
+    let vm = online_machine_sized(&m, "sib-done", Some("xlarge")).await;
+    // Pool too small for the VM's reservation ($0.20): no handover.
+    m.set_mission_budget("parent", Some(0.05), None, None)
+        .await
+        .unwrap();
+    assert!(m
+        .take_idle_sibling(
+            &SiblingReuse {
+                size: "xlarge",
+                image: "orb-node-base",
+                requested_by: "parent",
+                tenant: Some("t1"),
+                budget_pool_id: Some("parent"),
+                sub_budget_usd: None
+            },
+            &|_| true
+        )
+        .await
+        .is_none());
+    // Sub-budget too small: no handover either.
+    m.set_mission_budget("parent", Some(5.0), None, None)
+        .await
+        .unwrap();
+    assert!(m
+        .take_idle_sibling(
+            &SiblingReuse {
+                size: "xlarge",
+                image: "orb-node-base",
+                requested_by: "parent",
+                tenant: Some("t1"),
+                budget_pool_id: Some("parent"),
+                sub_budget_usd: Some(0.01)
+            },
+            &|_| true
+        )
+        .await
+        .is_none());
+    // The VM was left untouched by the refusals.
+    assert_eq!(
+        m.get(&vm.id).await.unwrap().owner_mission_id.as_deref(),
+        Some("sib-done")
+    );
+    // Within budget: handed over and charged to the new pool.
+    let got = m
+        .take_idle_sibling(
+            &SiblingReuse {
+                size: "xlarge",
+                image: "orb-node-base",
+                requested_by: "parent",
+                tenant: Some("t1"),
+                budget_pool_id: Some("parent"),
+                sub_budget_usd: Some(1.0),
+            },
+            &|_| true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.budget_pool_id.as_deref(), Some("parent"));
 }

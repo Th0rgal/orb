@@ -186,16 +186,18 @@ async fn reuse_idle_sibling(
     let parent_id = parent.to_string();
     let machine = m
         .take_idle_sibling(
-            size,
-            &image,
-            &parent_id,
-            req.owner_user_id.as_deref(),
+            &crate::managed::SiblingReuse {
+                size,
+                image: &image,
+                requested_by: &parent_id,
+                tenant: req.owner_user_id.as_deref(),
+                budget_pool_id: req.budget_pool_id.as_deref(),
+                sub_budget_usd: req.sub_budget_usd,
+            },
             &|owner| ended.contains(owner),
         )
         .await?;
-    m.set_machine_pool(&machine.id, req.budget_pool_id.clone())
-        .await;
-    m.get(&machine.id).await
+    Some(machine)
 }
 
 /// What the lifecycle reaper would do now for each live machine, and

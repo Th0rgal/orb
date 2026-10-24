@@ -3,6 +3,8 @@
 //! `GET /api/control/missions/:id/budget` and `PUT` (`{"budget_usd": n|null}`).
 //! Semantics and ledger: `crate::managed::budget`.
 
+#![allow(clippy::result_large_err)] // axum Response as the early-return error
+
 use std::sync::Arc;
 
 use axum::{
@@ -58,22 +60,61 @@ pub(crate) async fn pool_for(store: &Arc<dyn MissionStore>, mission: Uuid) -> Op
     crate::managed::budget::nearest_pool(chain.iter().map(String::as_str), &pools)
 }
 
-/// Re-attach every pool to its current nearest ancestor pool (after a
-/// budget was added or removed somewhere in the tree).
-pub(crate) async fn reparent_all(store: &Arc<dyn MissionStore>) {
+/// Re-attach the calling user's pools at or below `changed` to their
+/// current nearest ancestor pool (after a budget was added or removed at
+/// `changed`). Other users' pools are never touched, and a pool whose
+/// mission is not in this user's store keeps its parent unchanged (a failed
+/// lookup must not detach it from its pool).
+pub(crate) async fn reparent_subtree(store: &Arc<dyn MissionStore>, user_id: &str, changed: Uuid) {
     let Some(manager) = crate::managed::global() else {
         return;
     };
     let pools = manager.budget_pools().await;
-    for id in pools.keys() {
-        let Ok(uuid) = Uuid::parse_str(id) else {
+    let changed = changed.to_string();
+    for plan in reparent_plan(&pools, user_id, &changed, |id| {
+        let store = store.clone();
+        let id = id.to_string();
+        async move {
+            let uuid = Uuid::parse_str(&id).ok()?;
+            matches!(store.get_mission(uuid).await, Ok(Some(_))).then_some(())?;
+            Some(lineage(&store, uuid).await)
+        }
+    })
+    .await
+    {
+        manager.reparent_pool(&plan.0, plan.1).await;
+    }
+}
+
+/// Pure planning step of [`reparent_subtree`]: `(pool, new parent)` pairs.
+/// `lineage_of` returns `None` when the mission is unknown (skipped).
+pub(crate) async fn reparent_plan<F, Fut>(
+    pools: &std::collections::HashMap<String, crate::managed::budget::BudgetPool>,
+    user_id: &str,
+    changed: &str,
+    lineage_of: F,
+) -> Vec<(String, Option<String>)>
+where
+    F: Fn(&str) -> Fut,
+    Fut: std::future::Future<Output = Option<Vec<String>>>,
+{
+    let mut out = Vec::new();
+    for (id, pool) in pools {
+        if pool.owner_user_id.as_deref() != Some(user_id) || id == changed {
+            continue;
+        }
+        let Some(chain) = lineage_of(id).await else {
             continue;
         };
-        let chain = lineage(store, uuid).await;
+        // Only pools below the changed mission can change parent.
+        if !chain.iter().skip(1).any(|a| a == changed) {
+            continue;
+        }
         let parent =
-            crate::managed::budget::nearest_pool(chain.iter().skip(1).map(String::as_str), &pools);
-        manager.reparent_pool(id, parent).await;
+            crate::managed::budget::nearest_pool(chain.iter().skip(1).map(String::as_str), pools);
+        out.push((id.clone(), parent));
     }
+    out
 }
 
 fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -189,6 +230,58 @@ pub(crate) async fn set_budget(
     manager
         .set_mission_budget(&id.to_string(), amount, parent, Some(user.id.clone()))
         .await?;
-    reparent_all(store).await;
+    reparent_subtree(store, &user.id, id).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::managed::budget::BudgetPool;
+    use std::collections::HashMap;
+
+    fn pool(id: &str, user: &str, parent: Option<&str>) -> (String, BudgetPool) {
+        (
+            id.into(),
+            BudgetPool {
+                mission_id: id.into(),
+                budget_usd: 1.0,
+                parent_pool_id: parent.map(Into::into),
+                owner_user_id: Some(user.into()),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn reparenting_stays_in_the_callers_subtree_and_skips_unknown_missions() {
+        // u1: root -> mid -> leaf ; "gone" is a u1 pool whose mission is missing.
+        // u2: other pool under a lineage that also contains "mid" (forged).
+        let pools: HashMap<_, _> = [
+            pool("root", "u1", None),
+            pool("mid", "u1", Some("root")),
+            pool("leaf", "u1", Some("root")),
+            pool("gone", "u1", Some("root")),
+            pool("other", "u2", Some("x")),
+        ]
+        .into_iter()
+        .collect();
+        let lineages: HashMap<&str, Vec<String>> = [
+            ("root", vec!["root"]),
+            ("mid", vec!["mid", "root"]),
+            ("leaf", vec!["leaf", "mid", "root"]),
+            ("other", vec!["other", "mid", "x"]),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k, v.into_iter().map(String::from).collect()))
+        .collect();
+        let plan = reparent_plan(&pools, "u1", "mid", |id| {
+            let found = lineages.get(id).cloned();
+            async move { found }
+        })
+        .await;
+        // Only u1's leaf (below "mid") moves, to "mid"; "gone" (lookup failed)
+        // and u2's pool are untouched; the changed pool itself is skipped.
+        assert_eq!(plan, vec![("leaf".to_string(), Some("mid".to_string()))]);
+    }
 }

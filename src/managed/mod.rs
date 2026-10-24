@@ -58,8 +58,7 @@ const ENROLL_ENV_PATH: &str = "/home/user/.orb/enroll.env";
 const PROVISION_PATH: &str = "/home/user/.orb/provision.sh";
 /// Per-VM fixups run as root before orb-node starts (writable
 /// `/tmp/opencode`, GitHub credential helper, user rustup env).
-pub const PROVISION_SCRIPT: &str =
-    include_str!("../../deploy/managed-images/orb-node-provision.sh");
+pub const PROVISION_SCRIPT: &str = include_str!("orb-node-provision.sh");
 
 // ---------------------------------------------------------------- provider
 
@@ -2244,6 +2243,19 @@ pub struct ChildBudgetView {
     pub reserved_usd: f64,
 }
 
+/// What a new child asks for when an ended sibling's idle VM may serve it.
+#[derive(Debug, Clone, Copy)]
+pub struct SiblingReuse<'a> {
+    pub size: &'a str,
+    pub image: &'a str,
+    /// The parent of both siblings.
+    pub requested_by: &'a str,
+    pub tenant: Option<&'a str>,
+    /// Pool the VM will be charged to.
+    pub budget_pool_id: Option<&'a str>,
+    pub sub_budget_usd: Option<f64>,
+}
+
 impl ManagedManager {
     async fn persist_budgets(&self) {
         let budgets = self.budgets.lock().await.clone();
@@ -2502,12 +2514,17 @@ impl ManagedManager {
     /// unowned and requested by `requested_by`, ready to be claimed.
     pub async fn take_idle_sibling(
         &self,
-        size: &str,
-        image: &str,
-        requested_by: &str,
-        tenant: Option<&str>,
+        want: &SiblingReuse<'_>,
         candidates_ok: &(dyn Fn(&str) -> bool + Sync),
     ) -> Option<ManagedMachine> {
+        let SiblingReuse {
+            size,
+            image,
+            requested_by,
+            tenant,
+            budget_pool_id,
+            sub_budget_usd,
+        } = *want;
         let _guard = self.admission.lock().await;
         let pick = self
             .machines
@@ -2525,8 +2542,22 @@ impl ManagedManager {
             })
             .min_by_key(|m| m.created_at)
             .cloned()?;
+        // A handover re-charges the VM: it must pass the same budget checks
+        // as a fresh rent, or the caller falls back to normal admission.
+        let reserve = budget::machine_reserved(&pick, Utc::now());
+        if sub_budget_usd.is_some_and(|sub| reserve > sub) {
+            return None;
+        }
+        if let Some(pool) = budget_pool_id {
+            let needed = sub_budget_usd.unwrap_or(0.0).max(reserve);
+            if self.check_pool(pool, needed, "this machine").await.is_err() {
+                return None;
+            }
+        }
+        let pool = budget_pool_id.map(str::to_string);
         let m = self
             .update(&pick.id, |m| {
+                m.budget_pool_id = pool;
                 m.owner_mission_id = None;
                 m.requested_by_mission_id = Some(requested_by.to_string());
                 m.reap_at = None;

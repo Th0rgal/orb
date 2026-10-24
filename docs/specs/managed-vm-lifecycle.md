@@ -109,7 +109,7 @@ outer bound (`none` = unlimited). Budgets persist in
 
 ## Provisioning
 
-`provision` runs `deploy/managed-images/orb-node-provision.sh` as root before
+`provision` runs `src/managed/orb-node-provision.sh` as root before
 starting `orb-node` (best effort, logged): `/tmp/opencode` writable by
 `orbnode`, a git credential helper answering only `https://github.com` with
 the mission's GitHub token (the `paloma-secrets` file Core delivered, else
