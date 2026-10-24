@@ -100,7 +100,7 @@ struct OrbProvidersSettings: View {
                             OrbProviderLogo(type: provider["provider_type"].text, name: provider["name"].text)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(provider["name"].text)
-                                Text(status(provider)).font(.caption).foregroundStyle(.secondary)
+                                Text(status(provider)).font(.caption).foregroundStyle(quotaStatus(provider)?.level.color ?? .secondary)
                             }
                         }
                     }
@@ -162,9 +162,15 @@ struct OrbProvidersSettings: View {
         if p["enabled"] == .bool(false) { state = "Disabled" }
         else if p["status"]["type"].text == "needs_reauth" || detail["status"].text == "needs_reauth" { state = "Reconnect" }
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
-        else if let quota = OrbProviderQuota.quotaExhaustedLabel(OrbProviderQuota.windows(detail)) { state = quota }
+        else if let quota = OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail)) { state = quota.label }
         else { state = p["status"]["type"].text.replacingOccurrences(of: "_", with: " ") }
         return "\(p["provider_type"].text) · \(state)"
+    }
+    /// Quota severity of the row (nil while below 80% or when another state wins).
+    private func quotaStatus(_ p: OrbJSON) -> OrbQuotaStatus? {
+        let detail = usage[p["id"].text]
+        guard p["enabled"] != .bool(false), p["status"]["type"].text != "needs_reauth", detail["status"].text != "needs_reauth", detail["error"].text.isEmpty else { return nil }
+        return OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail))
     }
     private func load() async {
         guard !loading, client.current else { return }; loading = true; defer { loading = false }
@@ -246,6 +252,27 @@ struct OrbUsageLimitStatus: Equatable {
     }
 }
 
+/// Same as orb/src/providerUsage.ts quotaLevel; spec: shared/orb-spec/fixtures/quota-level.json.
+/// < 80% normal, 80-99% warning, 100% (rounded, as shown) exhausted.
+enum OrbQuotaLevel: String {
+    case normal, warning, exhausted
+    static let warningPercent = 80
+    static func of(_ used: Double?, hasReset: Bool = false) -> OrbQuotaLevel {
+        guard let used, used.isFinite else { return hasReset ? .exhausted : .normal }
+        let pct = Int((used * 100).rounded())
+        return pct >= 100 ? .exhausted : pct >= warningPercent ? .warning : .normal
+    }
+    var rank: Int { self == .exhausted ? 2 : self == .warning ? 1 : 0 }
+    /// System colors adapt to light/dark mode and Increase Contrast; nil = neutral.
+    var color: Color? { self == .exhausted ? .red : self == .warning ? .orange : nil }
+}
+
+struct OrbQuotaStatus: Equatable {
+    let level: OrbQuotaLevel
+    let label: String
+    let accountWide: Bool
+}
+
 struct OrbProviderQuota: View {
     let value: OrbJSON
     /// "Gemini · 5h" belongs to the Gemini pool; a plain "5h" to the whole account ("").
@@ -253,17 +280,36 @@ struct OrbProviderQuota: View {
         guard let range = label.range(of: " · ") else { return "" }
         return String(label[..<range.lowerBound])
     }
-    /// Same as orb/src/providerUsage.ts quotaExhaustedLabel; spec: shared/orb-spec/fixtures/quota-exhausted.json.
-    static func quotaExhaustedLabel(_ windows: [(String, Double)]) -> String? {
-        var pools: [String] = [], spent = Set<String>()
+    /// Same as orb/src/providerUsage.ts quotaStatus; spec: shared/orb-spec/fixtures/quota-exhausted.json.
+    static func quotaStatus(_ windows: [(String, Double)]) -> OrbQuotaStatus? {
+        var order: [String] = [], levels: [String: OrbQuotaLevel] = [:], pcts: [String: Int] = [:]
         for (label, used) in windows {
             let pool = quotaPool(label)
-            if !pools.contains(pool) { pools.append(pool) }
-            if used >= 1 { spent.insert(pool) }
+            if !order.contains(pool) { order.append(pool) }
+            let level = OrbQuotaLevel.of(used)
+            if level.rank > (levels[pool]?.rank ?? -1) { levels[pool] = level }
+            pcts[pool] = max(pcts[pool] ?? 0, Int((min(1, max(0, used)) * 100).rounded()))
         }
-        if spent.isEmpty { return nil }
-        if spent.contains("") || spent.count == pools.count { return "Quota exhausted" }
-        return pools.filter { spent.contains($0) }.joined(separator: ", ") + " quota exhausted"
+        for level in [OrbQuotaLevel.exhausted, .warning] {
+            let hit = order.filter { levels[$0] == level }
+            if hit.isEmpty { continue }
+            let accountWindow = hit.contains("")
+            let names = joinNames(hit.filter { !$0.isEmpty })
+            let subject = accountWindow || names.isEmpty ? "Quota" : "\(names) quota"
+            let pct = hit.map { pcts[$0] ?? 0 }.max() ?? 0
+            return level == .exhausted
+                ? OrbQuotaStatus(level: level, label: "\(subject) exhausted", accountWide: accountWindow || hit.count == order.count)
+                : OrbQuotaStatus(level: level, label: "\(subject) at \(pct)%", accountWide: accountWindow)
+        }
+        return nil
+    }
+    static func quotaExhaustedLabel(_ windows: [(String, Double)]) -> String? {
+        guard let status = quotaStatus(windows), status.level == .exhausted else { return nil }
+        return status.label
+    }
+    /// "Gemini", "Claude & GPT and Gemini", "A, B and C".
+    static func joinNames(_ names: [String]) -> String {
+        names.count < 2 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names.last!
     }
     static func windows(_ value: OrbJSON) -> [(String, Double)] {
         var result: [(String, Double)] = []
@@ -281,7 +327,11 @@ struct OrbProviderQuota: View {
         if value["zai_5h_used_percent"] == .null && value["zai_weekly_used_percent"] == .null { add("Tokens", "zai_tokens_percentage") }
         add("5h", "muse_5h_used_percent"); add("Weekly", "muse_weekly_used_percent")
         add("Monthly", "mistral_monthly_used_percent")
-        for window in value["antigravity_windows"].items { if let percent = window["used_percent"].number, percent.isFinite { result.append((window["label"].text, min(1, max(0, percent / 100)))) } }
+        for window in value["antigravity_windows"].items {
+            // Google omits a zero remaining fraction: a reset without a figure is spent.
+            if let percent = window["used_percent"].number, percent.isFinite { result.append((window["label"].text, min(1, max(0, percent / 100)))) }
+            else if window["used_percent"] == .null && window["reset_at"] != .null { result.append((window["label"].text, 1)) }
+        }
         return result
     }
     var body: some View {
@@ -292,7 +342,11 @@ struct OrbProviderQuota: View {
         }
         if windows.isEmpty { Text("No quota information available.").font(.caption).foregroundStyle(.secondary) }
         ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
-            VStack(alignment: .leading) { LabeledContent(window.0, value: "\(Int((window.1 * 100).rounded()))% used"); ProgressView(value: window.1) }
+            let level = OrbQuotaLevel.of(window.1)
+            VStack(alignment: .leading) {
+                LabeledContent(window.0) { Text("\(Int((window.1 * 100).rounded()))% used").foregroundStyle(level.color ?? .secondary).fontWeight(level == .normal ? nil : .semibold) }
+                ProgressView(value: window.1).tint(level.color)
+            }
         }
     }
 }

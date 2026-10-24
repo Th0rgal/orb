@@ -3,8 +3,10 @@
 .provider-usage-heading > :last-child { font-variant-numeric:tabular-nums; }
 .provider-usage-meter .p-bar { flex:none;height:7px;width:100%;border-radius:5px; }
 .provider-usage-meter .p-bar-fill { border-radius:5px;background:var(--blue); }
-.provider-usage-meter .p-bar-fill.warm { background:var(--amber); }
-.provider-usage-meter .p-bar-fill.hot { background:var(--red); }
+.p-bar-fill.warning { background:var(--warning) !important; }
+.p-bar-fill.exhausted { background:var(--danger) !important; }
+.provider-usage-heading.warning > :last-child { color:var(--warning);font-weight:600; }
+.provider-usage-heading.exhausted > :last-child { color:var(--danger);font-weight:600; }
 .provider-usage-reset { color:var(--fg-3);font-size:12px; }
 .cloud-provider-note { color:var(--fg-3);font-size:12px;line-height:1.6;margin:0; }
 .cloud-provider-profiles { display:flex;flex-direction:column;gap:10px;margin-bottom:16px; }
