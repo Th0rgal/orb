@@ -27,6 +27,15 @@ function App() {
     <Show when={open()}>
       <MissionSettings missionId="root" title={titles.root} titleOf={id => titles[id]} onClose={() => setOpen(false)}
         load={async () => { await wait(50); return current; }}
+        loadStats={async (_id, period) => { await wait(40); return {
+          mission_id: "root", period, since: null,
+          own: { vm_usd: 0.62, total_usd: period === "today" ? 0.91 : 4.37, models: [
+            { provider: "openai", model: "gpt-6.1-sol", requests: 41, input_tokens: 1_840_000, cache_read_tokens: 620_000, cache_write_tokens: 0, output_tokens: 96_000, cost_usd: period === "today" ? 0.21 : 2.95, shadow_priced: false, unpriced: false },
+            { provider: "antigravity", model: "gemini-4-argon", requests: 18, input_tokens: 410_000, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 22_000, cost_usd: 0.8, shadow_priced: true, unpriced: false },
+          ] },
+          subtree_total_usd: period === "today" ? 1.4 : 6.12,
+          children: [{ mission_id: "c1", title: "CPU probe (small)", total_usd: 0.31 }, { mission_id: "c2", title: "Audit lean-native", total_usd: 1.44 }],
+        }; }}
         save={async (_id, amount) => {
           await wait(150);
           if (q.get("refuse")) throw new Error("sub_budget_exceeds_pool: Sub-budget exceeds what the parent pool can grant ($1.0000 remaining)");

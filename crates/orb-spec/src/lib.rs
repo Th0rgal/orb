@@ -210,6 +210,7 @@ unsafe extern "C" {
         same_mission: u8,
         is_descendant: u8,
     ) -> u32;
+    fn orb_stats_settle_step(acc: u64, cost: u64, seen: u8) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1311,6 +1312,26 @@ pub fn attribution_step(
     AttributionVerdict {
         kind: CallerKind::from_u8((raw & 0xFF) as u8),
         accepted: (raw >> 8) & 1 == 1,
+    }
+}
+
+/// Verified spend-statistics settle step (`orb_stats_settle_step`): adds
+/// `cost` to `acc` once; a replayed request (`seen`) adds nothing; the total
+/// saturates. Conservation of the grouping it feeds is proved in
+/// `lean/Orb/Spec.lean` (`statBuckets_conserve`, `statsOutbox`).
+pub fn stats_settle_step(acc: u64, cost: u64, seen: bool) -> u64 {
+    unsafe { orb_stats_settle_step(acc, cost, u8::from(seen)) }
+}
+
+#[cfg(test)]
+mod stats_settle_tests {
+    use super::*;
+
+    #[test]
+    fn settle_adds_once_ignores_replays_and_saturates() {
+        assert_eq!(stats_settle_step(10, 5, false), 15);
+        assert_eq!(stats_settle_step(10, 5, true), 10);
+        assert_eq!(stats_settle_step(u64::MAX - 3, 10, false), u64::MAX);
     }
 }
 
