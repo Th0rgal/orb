@@ -57,6 +57,7 @@
 		6DC6CC0049892748B787B5A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F47BD46D6393291DC560EA07 /* Assets.xcassets */; };
 		71559C7052796FED7EBACF3F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018CEF52A93FCF430A128017 /* Theme.swift */; };
 		75E99993878487B1D727240C /* OrbSendFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61E0273040D5CCC300571EAB /* OrbSendFlowTests.swift */; };
+		7661C23EF58D7157706CE5DA /* OrbSendCrashUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2CEE754E5860B246959401 /* OrbSendCrashUITests.swift */; };
 		7BCE2A1BEF140CC4592389CE /* OrbMissionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1EA34EDE4E3ABF51473613 /* OrbMissionSettings.swift */; };
 		7BF4F2BBD394ACD3E95AE38E /* OrbTranscriptScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 919CD711EE488A95E44AE184 /* OrbTranscriptScrollTests.swift */; };
 		7D0338496466B0EF19ADC62F /* OrbSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */; };
@@ -244,6 +245,7 @@
 		ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSettings.swift; sourceTree = "<group>"; };
 		F47BD46D6393291DC560EA07 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F53850B216B91D0B012B5A7B /* OrbPipeTablesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbPipeTablesTests.swift; sourceTree = "<group>"; };
+		FD2CEE754E5860B246959401 /* OrbSendCrashUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSendCrashUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -293,6 +295,7 @@
 				44B11EBF7D649DC57B826888 /* OrbFlowUITests.swift */,
 				54A0C852566E4DC6B1E9620D /* OrbLiveUITests.swift */,
 				334241EC204257F79272E6D6 /* OrbPerformanceUITests.swift */,
+				FD2CEE754E5860B246959401 /* OrbSendCrashUITests.swift */,
 				D427073D171A43F58458E2BD /* OrbTranscriptUITests.swift */,
 				BA4DE96B58D59E4D20C580BB /* OrbTurnStatusUITests.swift */,
 			);
@@ -700,6 +703,7 @@
 				284053CC23619D1645909FFC /* OrbFlowUITests.swift in Sources */,
 				4CA1C40455E8DABE4CD24A9A /* OrbLiveUITests.swift in Sources */,
 				569623D0C2EE48F6F322D9FD /* OrbPerformanceUITests.swift in Sources */,
+				7661C23EF58D7157706CE5DA /* OrbSendCrashUITests.swift in Sources */,
 				49E481A8A26C33A25CD64BE2 /* OrbTranscriptUITests.swift in Sources */,
 				D5D2F259EE3EBFC6397C82A1 /* OrbTurnStatusUITests.swift in Sources */,
 			);
@@ -771,7 +775,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102404;
+				CURRENT_PROJECT_VERSION = 2026102405;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -922,7 +926,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102404;
+				CURRENT_PROJECT_VERSION = 2026102405;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_PREVIEWS = YES;

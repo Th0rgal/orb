@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import sandboxed_sh
 
@@ -125,5 +126,25 @@ final class OrbTranscriptModelTests: XCTestCase {
     func testHistoryIsLinearOnManyUserEvents() {
         let events = (0..<5_000).map { userEvent(Int64($0), "message \($0)") }
         measure { _ = OrbTranscriptModel.computeHistory(isCloud: false, turns: [], mission: .null, events: events, optimisticPrompt: nil) }
+    }
+
+    /// SwiftUI writes the resolved position back through `.scrollPosition` while it applies
+    /// a request. If that write invalidated the transcript, the body re-issued the request in
+    /// the same update and a long transcript never settled (send hang, mission 1c33522d).
+    @MainActor func testScrollPositionWriteBackDoesNotInvalidateButRequestsDo() {
+        let scroller = OrbTranscriptScroller()
+        final class Counter: @unchecked Sendable { var value = 0 }
+        let counter = Counter()
+        var changes: Int { counter.value }
+        func track() { withObservationTracking { _ = scroller.position } onChange: { counter.value += 1 } }
+        track()
+        var resolved = ScrollPosition(edge: .bottom); resolved.scrollTo(y: 1234)
+        scroller.position = resolved
+        XCTAssertEqual(changes, 0, "a write-back from SwiftUI must not invalidate the view")
+        XCTAssertEqual(scroller.position, resolved, "the write-back is still stored")
+        scroller.scrollToBottom()
+        XCTAssertEqual(changes, 1, "Orb's own scroll request reaches SwiftUI")
+        track(); scroller.scroll(toProgress: 0.2)
+        XCTAssertEqual(changes, 2)
     }
 }

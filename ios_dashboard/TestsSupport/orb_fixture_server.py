@@ -61,10 +61,16 @@ SHARED_MESSAGE=('Here are the results.\n\n<image path="./chart.png" alt="Growth 
 SHARED_OLD='Earlier draft:\n\n<file path="./old/gone.csv" name="gone.csv" />'
 
 REPLAY = {}
+REPLAY_MISSION = {}
 def load_replay(mid, path):
     """Serve a stored-events export (a JSON list of Core `mission_events` rows) as an
-    opencode mission that is still running: the long-transcript shape behind crash reports."""
+    opencode mission that is still running: the long-transcript shape behind crash reports.
+    An object {"mission": {...}, "events": [...]} also overrides mission fields (status,
+    backend, model_override, title...), e.g. a completed antigravity mission."""
     events=json.loads(Path(path).read_text())
+    if isinstance(events, dict):
+        REPLAY_MISSION[mid]={k:v for k,v in events.get('mission',{}).items() if v is not None}
+        events=events['events']
     for e in events:
         if isinstance(e.get('metadata'), str): e['metadata']=json.loads(e['metadata'] or '{}')
         e['metadata']=e.get('metadata') or {}; e['mission_id']=mid
@@ -90,6 +96,35 @@ def synthetic_long_running():
         add('assistant_message', f'Turn {turn} done.\n\n| Pass | Lean | Rust |\n| --- | --- | --- |\n| clang | 1.0 | 1.0 |\n\n```mermaid\ngraph TD; A-->B;\n```')
     history=[dict(role='user' if e['event_type']=='user_message' else 'assistant',content=e['content']) for e in rows if e['event_type'] in ('user_message','assistant_message')]
     REPLAY['long-running']=(rows, history)
+
+def synthetic_finished_antigravity():
+    """The shape of mission 1c33522d (finished antigravity mission, gemini model override):
+    11 turns, ~420 read/edit/command calls, thinking between them, narration, and long
+    Markdown answers up to 25 KB ("Show full response"). Sending there hung the app
+    (scroll-position feedback loop). Synthetic text only."""
+    mid='finished-antigravity'; rows=[]; t=time.time()-5*3600
+    def add(kind, content, tool=None, call=None):
+        rows.append(dict(id=len(rows)+1,mission_id=mid,sequence=len(rows)+1,event_type=kind,timestamp=iso(t+len(rows)*10),event_id=f'fa-{len(rows)+1}',tool_call_id=call,tool_name=tool,content=content,metadata={}))
+    def answer(turn, size):
+        part=(f'\n\n## Step {turn} section\n\n- `src/Module{turn}.lean` updated with **ground truth** checks\n- verification passed (0 sorry, 0 axiom)\n\n'
+              'A paragraph explaining the change in detail, with `inline code` and a [link](https://example.com/spec). ' * 6)
+        body=f'All steps of turn {turn} are complete.'
+        while len(body) < size: body+=part
+        return body+'\n\n```sh\nmake check\n```'
+    for turn in range(11):
+        add('user_message', f'Turn {turn}: continue the plan and implement the next step.')
+        for i in range(38):
+            call=f'fa{turn}-{i}'; tool=['read_file','edit_file','run_command'][i%3]
+            add('thinking', f'**Checking step {i}**\n\nLooking at module {i} before editing.')
+            add('tool_call', json.dumps({'Path':f'/w/src/Module{i}.lean'} if tool!='run_command' else {'CommandLine':f'make check STEP={i}'}), tool, call)
+            add('tool_result', json.dumps({'name':tool,'output':'ok\n'*(40 if tool=='run_command' else 5),'status':'completed','toolCallId':call}), tool, call)
+            if i in (12, 25): add('assistant_message_canonical', f'Step {i} passes; moving to the next file.')
+        text=answer(turn, 25000 if turn==10 else (15000 if turn>=8 else 1500))
+        add('assistant_message_canonical', text); add('assistant_message', text)
+        add('mission_status_changed', 'completed')
+    history=[dict(role='user' if e['event_type']=='user_message' else 'assistant',content=e['content']) for e in rows if e['event_type'] in ('user_message','assistant_message')]
+    REPLAY[mid]=(rows, history)
+    REPLAY_MISSION[mid]=dict(title='Finished antigravity mission',status='completed',backend='antigravity',model_override='gemini-4-argon-medium',track='mission-finished',updated_at='2026-10-08T10:00:00Z')
 
 RESET_AT = 0
 def reset():
@@ -163,6 +198,7 @@ def reset():
     # Long running opencode transcripts (synthetic, plus any --replay export), listed last.
     for mid,(events,history) in REPLAY.items():
         MISSIONS[mid]=dict(id=mid,title='Long running transcript' if mid=='long-running' else 'Replayed long transcript',status='active',project='orb-test',backend='opencode',tags=[],model_override='test-model',history=list(history),created_at='2026-10-09T10:00:00Z',updated_at='2026-10-09T10:01:00Z')
+        MISSIONS[mid].update(REPLAY_MISSION.get(mid,{}), project='orb-test')
         QUEUE_EVENTS[mid]=[dict(e) for e in events]
 
 BTW_COMPACTION='## Objective\nAnswer the side question.\n\n## Progress\n- read the logs\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.'
@@ -244,6 +280,7 @@ def agent_events(mid):
     return rows
 
 synthetic_long_running()
+synthetic_finished_antigravity()
 reset()
 
 class Handler(BaseHTTPRequestHandler):
@@ -294,8 +331,8 @@ class Handler(BaseHTTPRequestHandler):
         if p.endswith('/events') and p.split('/')[4]=='boat-parent': return self.send(boat_events())
         if p.endswith('/events') and p.split('/')[4] in ('agent-work','agent-done'): return self.send(agent_events(p.split('/')[4]))
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
-        if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'}])
-        if p=='/api/providers/backend-models': return self.send({'backends':{b:[{'value':'test-model','label':'Test model'}] for b in ['claudecode','codex']}})
+        if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'},{'id':'antigravity','name':'Antigravity'}])
+        if p=='/api/providers/backend-models': return self.send({'backends':{b:[{'value':'test-model','label':'Test model'}] for b in ['claudecode','codex']}|{'antigravity':[{'value':'gemini-4-argon-medium','label':'Gemini 4 Argon (medium)'},{'value':'gemini-4-argon-high','label':'Gemini 4 Argon (high)'}]}})
         if p=='/api/remote-nodes': return self.send({'nodes':[{'id':'test-node','name':'Test node','status':'online','cordoned':CORDONED,'active_jobs':2,'mem_total_bytes':8589934592,'mem_available_bytes':4294967296}]})
         if p=='/api/cloud/accounts': return self.send([{'id':p+'-test','provider':p,'label':p+' account','available':True,'capabilities':{'cancel':True,'follow_up':True,'models':p!='grok_bot','attachments':False}} for p in ['cursor_cloud','grok_bot']])
         if p.endswith('/options'): return self.send({'models':{'items':[{'id':'test-cloud-model','displayName':'Test cloud model'}]},'repositories':{'items':[{'url':'https://github.com/example/orb-test'}]}})
@@ -466,6 +503,8 @@ class Handler(BaseHTTPRequestHandler):
                 QUEUE.append(dict(id=key,mission_id=mid,content=body['content'],source='remote-queue',deliver_at=time.time()+4))
                 RECEIPTS[key]={'id':key,'queued':True}; return self.send(RECEIPTS[key])
             m['history'].append({'role':'user','content':body['content']}); qadd(mid,'user_message',body['content'],key)
+            if m['status']!='active':  # Core resumes a finished mission, which completes again
+                m['status']='running'; later(mid,6,'mission_status_changed','completed',status='completed')
             for i in range(3):
                 later(mid,1+i,'tool_call',json.dumps({'command':f'lake build Step{i}'}))
             later(mid,5,'assistant_message','REPLAY_REPLY_OK: still building.')
@@ -495,7 +534,7 @@ if __name__=='__main__':
             if time.time()-RESET_AT > 60: continue
             with LOCK:
                 for mid in REPLAY:
-                    if mid not in QUEUE_EVENTS: continue
+                    if mid not in QUEUE_EVENTS or MISSIONS.get(mid,{}).get('status')!='active': continue
                     qadd(mid,'tool_call',json.dumps({'command':f'lake build Fractal.Step{n}'}),tool_call_id=f'tick-{n}',tool_name='bash')
                     qadd(mid,'tool_result','build output line\n'*1200,tool_call_id=f'tick-{n}',tool_name='bash')
     threading.Thread(target=replay_ticker,daemon=True).start()

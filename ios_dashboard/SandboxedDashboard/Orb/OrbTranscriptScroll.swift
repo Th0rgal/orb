@@ -44,7 +44,22 @@ struct OrbScrollMetrics: Equatable {
 /// bottom in view. Dragging away unpins; reaching the bottom again re-pins.
 @MainActor @Observable
 final class OrbTranscriptScroller {
-    var position = ScrollPosition(edge: .bottom)
+    /// Bound to `.scrollPosition`. SwiftUI writes the resolved position back while it
+    /// applies a scroll request; if that write-back notified observers, the transcript
+    /// body would re-read the binding as a new request inside the same update, and on a
+    /// long transcript that ping-pong never settles: the main thread spins and iOS kills
+    /// the app (send on finished mission 1c33522d, build 1393). Write-backs are stored
+    /// silently; only Orb's own requests (`request`) invalidate the view.
+    @ObservationIgnored private var storedPosition = ScrollPosition(edge: .bottom)
+    var position: ScrollPosition {
+        get { access(keyPath: \.position); return storedPosition }
+        set { storedPosition = newValue }
+    }
+
+    private func request(_ change: (inout ScrollPosition) -> Void) {
+        withMutation(keyPath: \.position) { change(&storedPosition) }
+    }
+
     var pinned = true
     var metrics = OrbScrollMetrics()
     var interacting = false
@@ -59,8 +74,8 @@ final class OrbTranscriptScroller {
 
     func scrollToBottom(animated: Bool = false) {
         pinned = true
-        if animated { withAnimation(.snappy(duration: 0.25)) { position.scrollTo(edge: .bottom) } }
-        else { position.scrollTo(edge: .bottom) }
+        if animated { withAnimation(.snappy(duration: 0.25)) { request { $0.scrollTo(edge: .bottom) } } }
+        else { request { $0.scrollTo(edge: .bottom) } }
     }
 
     /// Fraction 0 (top) ... 1 (bottom) of the scrollable range.
@@ -70,7 +85,7 @@ final class OrbTranscriptScroller {
         // `ScrollPosition` y is measured from the top of the content (inset-adjusted).
         if clamped >= 0.999 { scrollToBottom(); return }
         pinned = false
-        position.scrollTo(y: clamped * (m.maxOffsetY + m.topInset))
+        request { $0.scrollTo(y: clamped * (m.maxOffsetY + m.topInset)) }
     }
 
     func update(_ value: OrbScrollMetrics) {
@@ -86,7 +101,7 @@ final class OrbTranscriptScroller {
         if pinned && value.distanceFromBottom > 1 &&
             (value.contentHeight != old.contentHeight || value.visibleHeight != old.visibleHeight ||
              value.bottomInset != old.bottomInset || value.distanceFromBottom > old.distanceFromBottom + 0.5 || old.contentHeight == 0) {
-            position.scrollTo(edge: .bottom)
+            request { $0.scrollTo(edge: .bottom) }
         }
     }
 

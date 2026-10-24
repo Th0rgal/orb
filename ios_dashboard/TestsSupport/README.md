@@ -39,6 +39,12 @@ in progress (task list in harness vocabulary, edits, a running command, turn sta
 `btw-live`, which answers 45 s after each `/__reset`; a question sent to a side thread
 streams a progress update, then its answer 16 s later.
 
+`OrbSendCrashUITests` (default fixture, 18766) sends on `finished-antigravity`, a finished
+antigravity mission with a model override and 15-25 KB answers (the shape of mission
+1c33522d, synthetic text). The fixture resumes it like Core does. `--replay MID=export.json`
+also accepts `{"mission": {...}, "events": [...]}` to override mission fields (status,
+backend, model_override); set `TEST_RUNNER_ORB_REPLAY_MISSION=MID` to run the test on it.
+
 `OrbTranscriptUITests` (default fixture) covers the shared transcript container on
 `long-rich` (30 rich turns: wide code, wide tables, long URLs): opens at the bottom, no
 horizontal offset, jump-to-latest pill, fast-scroll thumb, early composer input, header
