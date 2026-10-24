@@ -635,6 +635,7 @@ extension OrbConversation {
 /// Resends an idempotent side-question write after a dropped or timed-out
 /// connection (1, 2, 4, 8 s), like desktop `askBtwAgent`. Other errors and
 /// cancellation are thrown at once.
+@MainActor
 enum OrbSideSend {
     static let backoff: [UInt64] = [1, 2, 4, 8]
     static func transient(_ error: Error) -> Bool {
