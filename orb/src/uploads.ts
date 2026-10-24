@@ -5,7 +5,8 @@ import { api, connectionVersion, getApiUrl } from "./api";
 import { mentionText, scanMentions } from "./attach";
 
 /** `relativePath` is set for files that came from a folder ("Folder/sub/a.txt"). */
-export interface UploadSource { name: string; localPath?: string; file?: File; relativePath?: string }
+/** `grant` names the desktop folder offer a walked file belongs to; it is readable only once granted. */
+export interface UploadSource { name: string; localPath?: string; file?: File; relativePath?: string; size?: number; grant?: string }
 /** A folder upload is one entry whose `path` is the uploaded folder. */
 export interface UploadedFolder { name: string; count: number; bytes: number; files: string[] }
 export interface UploadedFile { source: UploadSource; path: string; destination: string; connection: number; endpoint?: string; dataBase64?: string; confirmedLarge?: boolean; folder?: UploadedFolder }
@@ -29,8 +30,20 @@ export async function pickNativeFiles(): Promise<UploadSource[]> {
 export async function pickNativeFolder(): Promise<UploadSource[]> {
   const invoke = nativeInvoke();
   if (!invoke) throw new Error("Use the desktop app to attach a folder.");
-  const files = await invoke<Array<{ name: string; path: string; relative_path?: string }>>("pick_upload_folder");
-  return files.map(file => ({ name: file.name, localPath: file.path, ...(file.relative_path ? { relativePath: file.relative_path } : {}) }));
+  return folderOfferSources(await invoke<FolderOffer>("pick_upload_folder"));
+}
+
+export interface FolderOffer { batch?: string | null; files: Array<{ name: string; path: string; relative_path: string; size: number }> }
+export const folderOfferSources = (offer: FolderOffer | undefined): UploadSource[] =>
+  (offer?.files ?? []).map(file => ({ name: file.name, localPath: file.path, relativePath: file.relative_path, size: file.size, ...(offer?.batch ? { grant: offer.batch } : {}) }));
+
+/** Makes exactly the files about to upload readable by the desktop; returns a revoke. */
+export async function grantFolderSources(sources: UploadSource[]): Promise<() => void> {
+  const invoke = nativeInvoke();
+  const batch = sources.find(source => source.grant)?.grant;
+  if (!invoke || !batch) return () => {};
+  await invoke("grant_upload_folder", { batch, relativePaths: sources.map(source => source.relativePath) });
+  return () => { void invoke("revoke_upload_folder", { batch }).catch(swallow("uploads.revokeFolder", {})); };
 }
 
 export function softLimitForDestination(destination: string): number {
@@ -141,6 +154,8 @@ export interface ResumableTransferOptions {
   confirmedLarge?: boolean;
   /** Folder uploads share one batch directory and keep `source.relativePath`. */
   batchId?: string;
+  /** Proves to the machine that later files belong to the batch the first one created. */
+  batchToken?: string;
   chunkSize?: number;
   concurrency?: number;
   signal?: AbortSignal;
@@ -273,9 +288,9 @@ export async function uploadContextBlobResumable(
   return { hash: done.hash, size: done.size, uploadId };
 }
 
-function machineName(source: UploadSource, batchId?: string): { name: string; batch_id?: string; relative_path?: string } {
+function machineName(source: UploadSource, batchId?: string, batchToken?: string): { name: string; batch_id?: string; relative_path?: string; batch_token?: string } {
   const name = cleanUploadName(source.name);
-  return batchId && source.relativePath ? { name, batch_id: batchId, relative_path: cleanRelativePath(source.relativePath) } : { name };
+  return batchId && batchToken && source.relativePath ? { name, batch_id: batchId, relative_path: cleanRelativePath(source.relativePath), batch_token: batchToken } : { name };
 }
 
 export async function uploadDirectMachineResumable(
@@ -289,7 +304,7 @@ export async function uploadDirectMachineResumable(
   const query = `?node_id=${encodeURIComponent(nodeId)}`;
   const status = await runChunkedSession(
     `/api/uploads/sessions`,
-    { node_id: nodeId, upload_id: uploadId, ...machineName(source, options.batchId), size },
+    { node_id: nodeId, upload_id: uploadId, ...machineName(source, options.batchId, options.batchToken), size },
     idx => `/api/uploads/sessions/${encodeURIComponent(uploadId)}/chunks/${idx}${query}`,
     source,
     size,
@@ -416,7 +431,7 @@ export async function transferFile(
   const receipt = await api<UploadReceipt>("/api/uploads", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ node_id: destination, ...machineName(source, options.batchId), data_base64: data }),
+    body: JSON.stringify({ node_id: destination, ...machineName(source, options.batchId, options.batchToken), data_base64: data }),
   });
   if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
   return { source, path: receipt.path, destination, connection, endpoint: getApiUrl() };

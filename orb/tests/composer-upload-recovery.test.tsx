@@ -51,3 +51,28 @@ it("sends a restored attachment that is already uploaded without touching the or
   await waitFor(() => expect(send).toHaveBeenCalledWith(`Explique @"${PATH}"`, []));
   expect(invoke).not.toHaveBeenCalled();
 });
+
+it("grants only the confirmed folder files to the desktop and revokes the grant when done", async () => {
+  const handlers = new Map<string, (event: any) => void>();
+  const calls: Array<[string, any]> = [];
+  const invoke = vi.fn(async (cmd: string, args: any) => { calls.push([cmd, args]); return cmd === "read_upload_file" ? btoa("x") : cmd === "grant_upload_folder" ? 2 : cmd === "stat_upload_file" ? { size: 1, modified: 0 } : undefined; });
+  (window as any).__TAURI__ = { core: { invoke }, event: { listen: vi.fn(async (name, handler) => { handlers.set(name, handler); return () => handlers.delete(name); }) } };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(String(url).endsWith("/blobs") ? { hash: "h" } : String(url).endsWith("/operations") ? { conflict: false } : []))));
+  vi.mocked(readComposerDraft).mockResolvedValue(undefined);
+  const view = render(() => <Composer scope="m:grant" projectSlug="pilot" uploadTarget="old-agent" placeholder="Reply" busy={false} onSend={() => true} />);
+  const el = view.container.querySelector(".composer") as HTMLElement;
+  vi.spyOn(el, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+  vi.spyOn(el, "getBoundingClientRect").mockReturnValue({ left: 0, right: 400, top: 0, bottom: 400 } as DOMRect);
+  await waitFor(() => expect(handlers.has("orb-upload-drop")).toBe(true));
+  handlers.get("orb-upload-drop")!({ payload: { paths: [], x: 10, y: 10, folder: { batch: "offer-1", files: [
+    { name: "a.pdf", path: "/U/Aulas/a.pdf", relative_path: "Aulas/a.pdf", size: 1 },
+    { name: "b.pdf", path: "/U/Aulas/sub/b.pdf", relative_path: "Aulas/sub/b.pdf", size: 1 },
+  ] } } });
+  const input = screen.getByPlaceholderText("Reply") as HTMLTextAreaElement;
+  await waitFor(() => expect(input.value).toMatch(/^@attachments\/[0-9a-f-]+\/Aulas\/ $/));
+  const files = calls.filter(([cmd]) => cmd !== "voice_capability");
+  const order = files.map(([cmd]) => cmd);
+  expect(order[0]).toBe("grant_upload_folder");
+  expect(files[0][1]).toEqual({ batch: "offer-1", relativePaths: ["Aulas/a.pdf", "Aulas/sub/b.pdf"] });
+  expect(order.at(-1)).toBe("revoke_upload_folder");
+});

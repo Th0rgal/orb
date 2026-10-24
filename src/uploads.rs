@@ -24,6 +24,60 @@ pub struct Placement {
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relative_path: Option<String>,
+    /// Secret chosen by the batch's creator. The first file claims the batch
+    /// with it; later files must present the same token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_token: Option<String>,
+}
+
+/// A batch accepts files for this long after its first file; then it is sealed.
+pub const BATCH_OPEN_SECS: u64 = 6 * 60 * 60;
+
+/// Claims `batch` for `token`, or checks that `token` owns it. The claim is an
+/// atomic `create_new` of `<root>/.batches/<batch>`, holding SHA-256(token).
+fn claim_batch(root: &Path, batch: &str, token: &str) -> Result<(), String> {
+    if token.len() < 32
+        || token.len() > 128
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err("Invalid folder upload token".into());
+    }
+    let owners = root.join(".batches");
+    fs::create_dir_all(&owners).map_err(|e| format!("Create batch registry: {e}"))?;
+    let owner = owners.join(batch);
+    let digest = hex::encode(Sha256::digest(token.as_bytes()));
+    match OpenOptions::new().write(true).create_new(true).open(&owner) {
+        Ok(mut file) => {
+            file.write_all(digest.as_bytes())
+                .and_then(|_| file.sync_all())
+                .map_err(|e| format!("Record batch owner: {e}"))?;
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("Record batch owner: {e}")),
+    }
+    let stored = fs::read(&owner).map_err(|_| "This folder upload belongs to someone else")?;
+    let same = stored.len() == digest.len()
+        && stored
+            .iter()
+            .zip(digest.as_bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+    if !same {
+        return Err("This folder upload belongs to someone else".into());
+    }
+    let age = fs::metadata(&owner)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(u64::MAX);
+    if age > BATCH_OPEN_SECS {
+        return Err("This folder upload is closed; upload the folder again".into());
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -132,6 +186,11 @@ fn destination(root: &Path, name: &str, placement: &Placement) -> Result<PathBuf
                 .hyphenated()
                 .to_string();
             let relative = validate_relative_upload_path(relative)?;
+            let token = placement
+                .batch_token
+                .as_deref()
+                .ok_or("Folder uploads need a batch token")?;
+            claim_batch(root, &batch, token)?;
             let path = root.join(batch).join(&relative);
             let parent = path.parent().ok_or("Invalid folder path")?;
             fs::create_dir_all(parent).map_err(|e| format!("Create upload folder: {e}"))?;
@@ -205,6 +264,9 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
     validate_upload_name(&req.name)?;
     if let Some(relative) = &req.placement.relative_path {
         validate_relative_upload_path(relative)?;
+        if req.placement.batch_token.is_none() {
+            return Err("Folder uploads need a batch token".into());
+        }
     }
     if req.size > MAX_RESUMABLE_BYTES {
         return Err("Files must be 2 GiB or smaller".into());
@@ -397,16 +459,19 @@ pub fn complete_session(root: &Path, upload_id: &str) -> Result<Receipt, String>
 
     let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
     let final_path = destination(&canonical_root, &meta.name, &meta.placement)?;
-    // A folder upload never replaces a file already placed in its batch.
-    if fs::symlink_metadata(&final_path).is_ok() {
-        return Err("A file with this path was already uploaded".into());
-    }
-    if let Err(e) = fs::rename(&part_path, &final_path) {
+    // link() fails if the target exists: an atomic no-replace placement, so a
+    // concurrent upload of the same path can never overwrite the other.
+    if let Err(e) = fs::hard_link(&part_path, &final_path) {
         if meta.placement.batch_id.is_none() {
             let _ = fs::remove_dir(final_path.parent().unwrap_or(&canonical_root));
         }
-        return Err(format!("Finalize uploaded file: {e}"));
+        return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
+            "A file with this path was already uploaded".into()
+        } else {
+            format!("Finalize uploaded file: {e}")
+        });
     }
+    let _ = fs::remove_file(&part_path);
     let _ = fs::remove_file(dir.join("bitmap.bin"));
     let receipt = Receipt {
         name: nfc(&meta.name),
@@ -442,7 +507,7 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let path = destination(&root, &upload.name, &upload.placement)?;
     let single = upload.placement.batch_id.is_none();
-    let result = (|| {
+    let result: Result<Receipt, String> = (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -474,11 +539,76 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const TOKEN: &str = "a3f1c2d4e5f60718293a4b5c6d7e8f90a1b2c3d4";
     fn folder(batch: &str, relative: &str) -> Placement {
         Placement {
             batch_id: Some(batch.into()),
             relative_path: Some(relative.into()),
+            batch_token: Some(TOKEN.into()),
         }
+    }
+    #[test]
+    fn a_batch_only_takes_files_from_its_creator() {
+        let root = tempfile::tempdir().unwrap();
+        let up = |placement: Placement| {
+            store(
+                root.path(),
+                Upload {
+                    name: "a.txt".into(),
+                    data_base64: "YQ==".into(),
+                    placement,
+                },
+            )
+        };
+        up(folder(BATCH, "F/a.txt")).unwrap();
+        let mut foreign = folder(BATCH, "F/b.txt");
+        foreign.batch_token = Some("ffffffffffffffffffffffffffffffffffffffff".into());
+        assert!(up(foreign).unwrap_err().contains("someone else"));
+        let mut missing = folder(BATCH, "F/c.txt");
+        missing.batch_token = None;
+        assert!(up(missing).is_err());
+        let mut short = folder(BATCH, "F/d.txt");
+        short.batch_token = Some("short".into());
+        assert!(up(short).is_err());
+        up(folder(BATCH, "F/e.txt")).unwrap();
+        let batch_dir = root.path().canonicalize().unwrap().join(BATCH).join("F");
+        let mut names: Vec<_> = fs::read_dir(batch_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "e.txt"]);
+    }
+    #[test]
+    fn concurrent_uploads_of_one_path_never_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_path_buf();
+        let results: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let id = format!("race_{i}");
+                    init_or_status_session(
+                        &path,
+                        SessionInit {
+                            upload_id: id.clone(),
+                            name: "same.txt".into(),
+                            size: 1,
+                            chunk_size: Some(4),
+                            placement: folder(BATCH, "F/same.txt"),
+                        },
+                    )
+                    .unwrap();
+                    write_session_chunk(&path, &id, 0, &[b'0' + i as u8]).unwrap();
+                    complete_session(&path, &id)
+                })
+            })
+            .map(|t| t.join().unwrap())
+            .collect();
+        let winners: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+        assert_eq!(winners.len(), 1, "{results:?}");
+        let content = fs::read(&winners[0].path).unwrap();
+        assert_eq!(winners[0].sha256, hex::encode(Sha256::digest(&content)));
     }
     const BATCH: &str = "497dfe42-8ff1-44a8-b0f8-6b74a4866833";
     #[test]
@@ -541,10 +671,12 @@ mod tests {
             Placement {
                 batch_id: Some(BATCH.into()),
                 relative_path: None,
+                batch_token: Some(TOKEN.into()),
             },
             Placement {
                 batch_id: None,
                 relative_path: Some("a/b.txt".into()),
+                batch_token: Some(TOKEN.into()),
             },
         ] {
             assert!(store(

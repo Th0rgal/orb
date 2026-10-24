@@ -1,8 +1,8 @@
 import { onCleanup, onMount } from 'solid-js';
-import type { UploadSource } from './uploads';
+import { folderOfferSources, type FolderOffer, type UploadSource } from './uploads';
 
-/** `entries` carries files found inside dropped folders (relative to the folder's parent). */
-type Drop = { paths: string[]; entries?: Array<{ path: string; relative_path?: string }>; x: number; y: number };
+/** `folder` offers files found inside dropped folders (relative to the folder's parent). */
+type Drop = { paths: string[]; folder?: FolderOffer; x: number; y: number };
 type NativeDrop = { paths: string[]; position: { x: number; y: number } };
 
 // Wry's macOS drag positions are window points, despite Tauri's PhysicalPosition
@@ -26,16 +26,16 @@ export function nativeComposerDrop(element: () => HTMLElement | undefined, attac
     if (deferred) { clearTimeout(deferred.timer); apply(deferred.drop); }
     deferred = { x: drop.x, y: drop.y, drop, timer: setTimeout(() => { deferred = undefined; apply(drop); }, 120) };
   };
-  const apply = ({ paths, entries, x, y }: Drop) => {
+  const apply = ({ paths, folder, x, y }: Drop) => {
     const scale = /^Mac/.test(navigator.platform) ? 1 : (window.devicePixelRatio || 1);
     const el = targetAt?targetAt(x/scale,y/scale):element();
     highlighted?.classList.remove('drop-active');
     el?.classList.remove('drop-active');
-    if (stopped || !el || !el.getClientRects().length || (!paths.length && !entries?.length) || !Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (stopped || !el || !el.getClientRects().length || (!paths.length && !folder?.files.length) || !Number.isFinite(x) || !Number.isFinite(y)) return;
     const bounds = el.getBoundingClientRect();
     if (x / scale < bounds.left || x / scale > bounds.right || y / scale < bounds.top || y / scale > bounds.bottom) return;
     const name = (path: string) => path.split(/[\\/]/).at(-1) ?? 'file';
-    void attach([...paths.map(path => ({ name: name(path), localPath: path })), ...(entries ?? []).map(entry => ({ name: name(entry.path), localPath: entry.path, ...(entry.relative_path ? { relativePath: entry.relative_path } : {}) }))],el);
+    void attach([...paths.map(path => ({ name: name(path), localPath: path })), ...folderOfferSources(folder)],el);
   };
   onMount(() => {
     const native = (window as any).__TAURI__;

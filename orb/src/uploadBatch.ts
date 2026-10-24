@@ -119,6 +119,8 @@ export function createFolderUpload(params: {
     running: false,
     cancelled: false,
   });
+  // 160-bit secret; only this composer can add files to the batch on a machine.
+  const token = Array.from(crypto.getRandomValues(new Uint8Array(20)), b => b.toString(16).padStart(2, "0")).join("");
   let abort = new AbortController();
   const uploadOne = async (index: number, signal: AbortSignal) => {
     const file = batch.files[index];
@@ -127,6 +129,7 @@ export function createFolderUpload(params: {
       try {
         const result = await params.transfer(file.source, params.destination, {
           batchId: id,
+          batchToken: token,
           signal,
           confirmedLarge: file.size > softLimitForDestination(params.destination),
           // Byte progress for large files; small ones count when they finish.

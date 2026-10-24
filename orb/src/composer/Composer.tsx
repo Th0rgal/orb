@@ -6,7 +6,7 @@ import { Popover } from "../Popover";
 import { CyberPicker, draftCyber, setDraftCyber } from "../cyberAccess";
 import {MentionPicker} from "../MentionPicker";
 import { nativeComposerDrop } from "../composerDrop";
-import { backgroundUploads, cancelBackgroundUpload, encoded, formatFileSize, HARD_MAX_BYTES, hasNativePicker, pauseBackgroundUpload, pickNativeFiles, pickNativeFolder, prepareUploads, resumeBackgroundUpload, softLimitForDestination, startBackgroundUpload, statUploadSource, transferFile, uploadToken, type UploadedFile, type UploadSource } from "../uploads";
+import { backgroundUploads, cancelBackgroundUpload, encoded, formatFileSize, HARD_MAX_BYTES, hasNativePicker, pauseBackgroundUpload, pickNativeFiles, pickNativeFolder, grantFolderSources, prepareUploads, resumeBackgroundUpload, softLimitForDestination, startBackgroundUpload, statUploadSource, transferFile, uploadToken, type UploadedFile, type UploadSource } from "../uploads";
 import { readComposerDraft, saveComposerDraft } from "../composerDrafts";
 import { BATCH_MAX_BYTES, BATCH_MAX_FILES, BATCH_WARN_BYTES, BATCH_WARN_FILES, batchTotals, createFolderUpload, localFolderPath, folderPathFromResults, sourcesFromDataTransfer, splitSources, type FolderUpload } from "../uploadBatch";
 import { FolderUploadChip } from "./FolderUploadChip";
@@ -177,7 +177,7 @@ export function Composer(p: {
   };
   // Folder uploads: one chip per folder, one mention once every file landed.
   const [folderUploads, setFolderUploads] = createSignal<FolderUpload[]>([]);
-  onCleanup(() => folderUploads().forEach(upload => upload.cancel()));
+  onCleanup(() => folderUploads().forEach(upload => { upload.cancel(); revokes.get(upload)?.(); }));
   const [pendingFolder, setPendingFolder] = createSignal<{ root: string; files: Array<{ source: UploadSource; size: number }>; skipped: number; destination: string } | null>(null);
   /** Names of attachments whose original file is gone; their mentions were removed from the draft. */
   const [staleFiles, setStaleFiles] = createSignal<string[]>([]);
@@ -194,19 +194,30 @@ export function Composer(p: {
     }
     try {
       const files: Array<{ source: UploadSource; size: number }> = [];
-      for (const source of sources) files.push({ source, size: (await statUploadSource(source)).size });
+      for (const source of sources) files.push({ source, size: source.size ?? (await statUploadSource(source)).size });
       const bytes = files.reduce((sum, file) => sum + file.size, 0);
       if (bytes > BATCH_MAX_BYTES) { setUploadError(`${root} is ${formatFileSize(bytes)}; folders can be up to ${formatFileSize(BATCH_MAX_BYTES)}.`); return; }
       const request = { root, files, skipped, destination };
       if (files.length > BATCH_WARN_FILES || bytes > BATCH_WARN_BYTES) setPendingFolder(request);
-      else startFolder(request);
+      else await startFolder(request);
     } catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
   };
-  const startFolder = (request: { root: string; files: Array<{ source: UploadSource; size: number }>; skipped: number; destination: string }) => {
+  const revokes = new Map<FolderUpload, () => void>();
+  const startFolder = async (request: { root: string; files: Array<{ source: UploadSource; size: number }>; skipped: number; destination: string }) => {
     const scope = p.scope;
+    let revoke: () => void;
+    // Only now, after any confirmation, may the desktop read these files.
+    try { revoke = await grantFolderSources(request.files.map(file => file.source)); }
+    catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); return; }
+    if (disposed || scope !== p.scope) { revoke(); return; }
     const upload = createFolderUpload({ ...request, transfer: transferFile });
+    revokes.set(upload, revoke);
     setFolderUploads(list => [...list, upload]);
     void runFolder(upload, scope);
+  };
+  const dropFolder = (upload: FolderUpload) => {
+    revokes.get(upload)?.(); revokes.delete(upload);
+    setFolderUploads(list => list.filter(item => item !== upload));
   };
   const runFolder = async (upload: FolderUpload, scope = p.scope) => {
     await upload.run();
@@ -217,7 +228,7 @@ export function Composer(p: {
   };
   const finishFolder = (upload: FolderUpload) => {
     const done = upload.batch.files.filter(file => file.state === "done" && file.result);
-    setFolderUploads(list => list.filter(item => item !== upload));
+    dropFolder(upload);
     if (!done.length) return;
     const path = folderPathFromResults(done.map(file => ({ relativePath: file.source.relativePath!, path: file.result!.path })));
     if (path) insertFolder(upload.batch.root, path, done.length, done.reduce((sum, file) => sum + file.size, 0), done.map(file => file.source.relativePath!), upload.batch.destination);
@@ -288,7 +299,7 @@ export function Composer(p: {
   const [mode, setMode] = createSignal<ComposerMode | null>(null);
   const [draftReady, setDraftReady] = createSignal(false);
   createEffect(on(() => p.scope, (scope, previous) => {
-    if (previous !== undefined && previous !== scope) { setText(""); setImages([]); setMode(null); uploaded = []; bumpUploads(n => n + 1); folderUploads().forEach(upload => upload.cancel()); setFolderUploads([]); setPendingFolder(null); setStaleFiles([]); }
+    if (previous !== undefined && previous !== scope) { setText(""); setImages([]); setMode(null); uploaded = []; bumpUploads(n => n + 1); folderUploads().forEach(upload => { upload.cancel(); dropFolder(upload); }); setPendingFolder(null); setStaleFiles([]); }
     setDraftReady(false);
     if (!scope) { setDraftReady(true); return; }
     let current=true;
@@ -948,14 +959,14 @@ export function Composer(p: {
           </div>
           <div class="composer-large-confirm-actions">
             <button type="button" class="s-btn" onClick={() => setPendingFolder(null)}>Cancel</button>
-            <button type="button" class="s-btn primary" onClick={() => { const next = request(); setPendingFolder(null); startFolder(next); }}>Upload folder</button>
+            <button type="button" class="s-btn primary" onClick={() => { const next = request(); setPendingFolder(null); void startFolder(next); }}>Upload folder</button>
           </div>
         </div>
       )}</Show>
       <Show when={folderUploads().length || fileChips().some(file => file.folder)}>
         <div class="composer-bg-uploads" aria-label="Attached folders">
           <For each={folderUploads()}>{upload => <FolderUploadChip batch={upload.batch}
-            onCancel={() => { upload.cancel(); setFolderUploads(list => list.filter(item => item !== upload)); }}
+            onCancel={() => { upload.cancel(); dropFolder(upload); }}
             onRetry={() => void runFolder(upload)}
             onSkipFailed={() => finishFolder(upload)} />}</For>
           <For each={fileChips().filter(file => file.folder)}>{file => <FolderUploadChip folder={file.folder} onRemove={() => removeUploadedFile(file)} />}</For>
