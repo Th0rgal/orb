@@ -106,11 +106,18 @@ fn pool_usage_depth(
     let mut spent = 0.0;
     let mut reserved = 0.0;
     let mut live = 0;
-    for m in machines
-        .iter()
-        .filter(|m| m.budget_pool_id.as_deref() == Some(pool_id))
-    {
-        spent += machine_spent(m, now);
+    for m in machines {
+        // Cost charged here before the VM moved to another pool.
+        spent += m
+            .prior_pool_charges
+            .iter()
+            .filter(|(p, _)| p == pool_id)
+            .map(|(_, usd)| usd)
+            .sum::<f64>();
+        if m.budget_pool_id.as_deref() != Some(pool_id) {
+            continue;
+        }
+        spent += (machine_spent(m, now) - m.pool_spent_offset).max(0.0);
         reserved += machine_reserved(m, now);
         if m.state.is_live() {
             live += 1;

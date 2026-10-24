@@ -480,6 +480,8 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         last_busy_at: None,
         budget_pool_id: None,
         auto_extensions: 0,
+        prior_pool_charges: Vec::new(),
+        pool_spent_offset: 0.0,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -860,6 +862,8 @@ fn spend_machine(
         last_busy_at: None,
         budget_pool_id: None,
         auto_extensions: 0,
+        prior_pool_charges: Vec::new(),
+        pool_spent_offset: 0.0,
     }
 }
 
@@ -1567,4 +1571,29 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
         .await
         .unwrap();
     assert_eq!(got.budget_pool_id.as_deref(), Some("parent"));
+}
+
+#[test]
+fn a_vm_changing_pool_keeps_its_past_cost_on_the_old_pool() {
+    let mut pools = HashMap::new();
+    pools.insert("old".to_string(), pool("old", 1.0, None));
+    pools.insert("new".to_string(), pool("new", 1.0, None));
+    let now = Utc::now();
+    let mut vm = pooled_machine("a", "old", 0.20, 30, 0.40);
+    vm.change_pool(Some("new".into()), now);
+    let machines = vec![vm.clone()];
+    let old = budget::pool_usage("old", &pools, &machines, now, &|_| true).unwrap();
+    let new = budget::pool_usage("new", &pools, &machines, now, &|_| true).unwrap();
+    assert!((old.spent_usd - 0.40).abs() < 1e-9, "{old:?}");
+    assert_eq!(old.reserved_usd, 0.0);
+    assert_eq!(new.spent_usd, 0.0, "{new:?}");
+    assert!(new.reserved_usd > 0.0);
+    // Later spend lands on the new pool only.
+    let mut later = vm;
+    later.cost_usd = 0.55;
+    let machines = vec![later];
+    let new = budget::pool_usage("new", &pools, &machines, now, &|_| true).unwrap();
+    let old = budget::pool_usage("old", &pools, &machines, now, &|_| true).unwrap();
+    assert!((new.spent_usd - 0.15).abs() < 1e-9, "{new:?}");
+    assert!((old.spent_usd - 0.40).abs() < 1e-9);
 }

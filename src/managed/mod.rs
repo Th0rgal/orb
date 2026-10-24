@@ -390,9 +390,33 @@ pub struct ManagedMachine {
     /// Automatic TTL extensions granted while the node was busy.
     #[serde(default)]
     pub auto_extensions: u32,
+    /// Cost already charged to earlier pools when the VM changed pool
+    /// (reuse, claim): `(pool id, usd)`. The current pool is charged only
+    /// `spent - pool_spent_offset`.
+    #[serde(default)]
+    pub prior_pool_charges: Vec<(String, f64)>,
+    #[serde(default)]
+    pub pool_spent_offset: f64,
 }
 
 impl ManagedMachine {
+    /// Move the VM to `pool`: what it cost so far stays with the old pool,
+    /// only future cost is charged to the new one.
+    pub fn change_pool(&mut self, pool: Option<String>, now: DateTime<Utc>) {
+        if self.budget_pool_id == pool {
+            return;
+        }
+        let spent = budget::machine_spent(self, now);
+        if let Some(old) = self.budget_pool_id.take() {
+            let share = (spent - self.pool_spent_offset).max(0.0);
+            if share > 0.0 {
+                self.prior_pool_charges.push((old, share));
+            }
+        }
+        self.pool_spent_offset = spent;
+        self.budget_pool_id = pool;
+    }
+
     fn estimated_cost(&self, now: DateTime<Utc>) -> f64 {
         let end = self.destroyed_at.unwrap_or(now).min(self.expires_at);
         let secs = (end - self.created_at).num_seconds().max(0) as f64;
@@ -1484,6 +1508,8 @@ impl ManagedManager {
                 last_busy_at: None,
                 budget_pool_id: req.budget_pool_id.clone(),
                 auto_extensions: 0,
+                prior_pool_charges: Vec::new(),
+                pool_spent_offset: 0.0,
             };
             self.machines.lock().await.push(machine.clone());
             self.persist().await;
@@ -2426,7 +2452,10 @@ impl ManagedManager {
     pub async fn set_machine_pool(&self, id: &str, pool: Option<String>) {
         if let Some(m) = self.get(id).await {
             if m.budget_pool_id != pool {
-                if let Some(m) = self.update(&m.id, |m| m.budget_pool_id = pool).await {
+                if let Some(m) = self
+                    .update(&m.id, |m| m.change_pool(pool, Utc::now()))
+                    .await
+                {
                     self.ledger("budget_pool_set", &m);
                 }
             }
@@ -2557,7 +2586,7 @@ impl ManagedManager {
         let pool = budget_pool_id.map(str::to_string);
         let m = self
             .update(&pick.id, |m| {
-                m.budget_pool_id = pool;
+                m.change_pool(pool, Utc::now());
                 m.owner_mission_id = None;
                 m.requested_by_mission_id = Some(requested_by.to_string());
                 m.reap_at = None;
