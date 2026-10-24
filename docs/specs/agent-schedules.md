@@ -115,8 +115,13 @@ custom axioms are allowed: `crates/orb-spec/build.rs` compiles with
 - At most 3 active agent schedules per mission
   (`MAX_NATIVE_SCHEDULES_PER_MISSION`). A new one beyond the cap replaces the
   oldest, whatever its cadence.
-- Minimum period: a cron that would fire more often than every 5 minutes is
-  rounded up to `*/5 * * * *` (`bounded_native_cron`).
+- Minimum period (`bounded_native_cron`): a cron that would fire more often
+  than every 5 minutes keeps its hour, day-of-month, month and weekday fields.
+  Only its minute field is thinned, to minutes at least 5 apart (also across
+  the hour), so it fires at a subset of the original times. For example,
+  `* 9 * * 1` becomes `0,5,…,55 9 * * 1`. A cron that cannot be thinned
+  (seconds-level or invalid) is refused. The run is still ended, and the
+  resume prompt tells the agent why.
 - Each schedule expires 7 days after registration (`__schedule_expires_at`),
   and stops when its mission is `completed` or `not_feasible`. An
   acknowledged or awaiting mission keeps it. The scheduler deactivates the row
