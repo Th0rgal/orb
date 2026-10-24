@@ -116,20 +116,20 @@ impl SqliteMissionStore {
             )
             ?;
             if let Some(key) = a.active.then(|| crate::api::control::wakeup_supersession_key(a.variables.get("__wakeup_source").map(String::as_str), &a.trigger)).flatten() {
-                let priors: Vec<(String, String, String, String)> = {
-                    let mut stmt = tx.prepare("SELECT id, variables, trigger_type, trigger_data FROM automations WHERE mission_id = ? AND id != ? AND active = 1 ORDER BY created_at DESC, id DESC")?;
-                    let rows = stmt.query_map(params![a.mission_id.to_string(), a.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<Vec<_>, _>>()?;
+                let priors: Vec<(String, String, String, String, bool)> = {
+                    let mut stmt = tx.prepare("SELECT id, variables, trigger_type, trigger_data, active FROM automations WHERE mission_id = ? AND id != ? ORDER BY created_at DESC, id DESC")?;
+                    let rows = stmt.query_map(params![a.mission_id.to_string(), a.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<Result<Vec<_>, _>>()?;
                     rows
                 };
                 // Keep the key's quota of newest active rows (counting this one).
                 let mut keep = crate::api::control::wakeup_supersession_keep(&key).saturating_sub(1);
-                for (id, vars, kind, data) in priors {
+                for (id, vars, kind, data, active) in priors {
                     let vars: std::collections::HashMap<String, String> = serde_json::from_str(&vars).unwrap_or_default();
                     let mut trigger: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
                     trigger["type"] = serde_json::Value::String(kind);
                     let Ok(trigger) = serde_json::from_value::<TriggerType>(trigger) else { continue };
                     if crate::api::control::wakeup_supersession_key(vars.get("__wakeup_source").map(String::as_str), &trigger).as_ref() == Some(&key) {
-                        if keep > 0 {
+                        if active && keep > 0 {
                             keep -= 1;
                             continue;
                         }
