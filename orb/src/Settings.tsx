@@ -148,7 +148,7 @@ function LocalAgentsCard() {
         {(id) => {
           const found = () => row(id);
           return (
-            <Row title={harnessName(id)} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
+            <Row title={harnessName(id)} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : found()?.models?.length ? ` · ${found()!.models!.map(([, label]) => label.replace(/^Claude\s+/, "")).join(", ")}` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
               <input
                 class="s-input"
                 aria-label={`${harnessName(id)} path`}

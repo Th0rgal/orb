@@ -157,16 +157,21 @@ export async function localAgentForLaunch(id:string):Promise<ScanRow|undefined>{
 }
 
 const localModelRequests = new Set<string>();
-function refreshLocalAntigravityModels() {
-  const path = installed().find(row => row.id === "antigravity")?.path;
-  const invoke = tauriInvoke();
-  if (!path || !invoke || localModelRequests.has(path)) return;
-  localModelRequests.add(path);
-  void invoke("local_antigravity_models", {path}).then(models => {
-    setInstalled(rows => rows.map(row => row.id === "antigravity" && row.path === path ? {...row,models:models as [string,string][],auth_error:null} : row));
-  }).catch(error => {
-    setInstalled(rows => rows.map(row => row.id === "antigravity" && row.path === path ? {...row,models:[],auth_error:String(error)} : row));
-  }).finally(() => localModelRequests.delete(path));
+const LOCAL_MODEL_COMMANDS: Record<string, string> = {antigravity: "local_antigravity_models", claudecode: "local_claude_models"};
+function refreshLocalModels() {
+  for (const [id, command] of Object.entries(LOCAL_MODEL_COMMANDS)) {
+    const path = installed().find(row => row.id === id)?.path;
+    const invoke = tauriInvoke();
+    const key = `${id}:${path}`;
+    if (!path || !invoke || localModelRequests.has(key)) continue;
+    localModelRequests.add(key);
+    void invoke(command, {path}).then(models => {
+      setInstalled(rows => rows.map(row => row.id === id && row.path === path ? {...row,models:models as [string,string][],auth_error:null} : row));
+    }).catch(error => {
+      // A failed Claude probe keeps Core's list; only Antigravity requires account models.
+      setInstalled(rows => rows.map(row => row.id === id && row.path === path ? {...row,models:[],auth_error:id === "antigravity" ? String(error) : null} : row));
+    }).finally(() => localModelRequests.delete(key));
+  }
 }
 
 export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
@@ -184,7 +189,7 @@ export function refreshLocalAgents(force = false): Promise<ScanRow[]> {
       // Vibe also checks its bridge interpreter; retain that native preflight result.
       setInstalled(Array.isArray(rows) ? rows.map(row => ({...row, installed: !!row.path && (row.id !== "vibe" || row.installed)})) : []);
       scannedAt = Date.now(); scannedPaths = key;
-      refreshLocalAntigravityModels();
+      refreshLocalModels();
       return installed();
     } catch { return installed(); }
   })().finally(() => { setScanning(false); scanPromise = undefined; });

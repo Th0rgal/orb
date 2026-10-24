@@ -42,6 +42,7 @@ pub mod antigravity_auth;
 pub mod api;
 pub mod backend;
 pub mod backend_config;
+pub mod claude_code_models;
 #[path = "../shared/codex_speed.rs"]
 pub mod codex_speed;
 pub mod config;
