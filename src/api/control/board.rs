@@ -3426,6 +3426,58 @@ mod tests {
     }
 
     #[test]
+    fn automatic_retry_is_bounded_by_max_attempts() {
+        let mut task = mk("bounded", &[], BoardTaskStatus::Running, None);
+        for attempts in 0..=MAX_ATTEMPTS + 1 {
+            task.attempts = attempts;
+            assert_eq!(
+                eligible_for_automatic_retry(
+                    &task,
+                    BoardTaskOutcome::Failed,
+                    AutomaticRetry::Allowed
+                ),
+                attempts < MAX_ATTEMPTS,
+                "attempts={attempts}"
+            );
+            assert!(!eligible_for_automatic_retry(
+                &task,
+                BoardTaskOutcome::Success,
+                AutomaticRetry::Allowed
+            ));
+        }
+    }
+
+    #[test]
+    fn only_a_merged_prior_attempt_parks_the_retry() {
+        let mut task = mk("disposition", &[], BoardTaskStatus::Pending, None);
+        for attempts in 0..=MAX_ATTEMPTS + 1 {
+            task.attempts = attempts;
+            for (preflight, merged) in [
+                (RetryPreflight::NothingFound, false),
+                (
+                    RetryPreflight::Surviving {
+                        branch_state: "pushed".into(),
+                        pr_number: Some(7),
+                    },
+                    false,
+                ),
+                (RetryPreflight::Merged { pr_number: 7 }, true),
+            ] {
+                let expected = if merged && attempts > 0 {
+                    RetryDisposition::ParkForBossReview
+                } else {
+                    RetryDisposition::Spawn
+                };
+                assert_eq!(
+                    retry_disposition(&task, &preflight),
+                    expected,
+                    "attempts={attempts}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn retry_with_merged_pr_is_parked_for_boss_review() {
         let mut task = mk("merged", &[], BoardTaskStatus::Pending, None);
         task.attempts = 1;
