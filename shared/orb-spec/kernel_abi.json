@@ -467,6 +467,16 @@
       "internal": true
     },
     {
+      "name": "orb_stats_settle_step",
+      "ret": "uint64_t",
+      "params": [
+        {"name": "acc", "type": "uint64_t"},
+        {"name": "cost", "type": "uint64_t"},
+        {"name": "seen", "type": "uint8_t"}
+      ],
+      "internal": true
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [

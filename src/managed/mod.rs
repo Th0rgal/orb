@@ -1372,6 +1372,11 @@ impl ManagedManager {
         }
     }
 
+    /// Every machine row (stats: VM cost per owner mission).
+    pub async fn machines_snapshot(&self) -> Vec<ManagedMachine> {
+        self.machines.lock().await.clone()
+    }
+
     pub async fn daily_spend(&self, days: u32) -> Vec<DailySpend> {
         daily_spend(&self.machines.lock().await, days, Utc::now())
     }

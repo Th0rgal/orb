@@ -98,3 +98,20 @@
 .mission-settings .ms-child-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mission-settings .ms-child-mode, .mission-settings .ms-child-spent { color: var(--fg-2); font-variant-numeric: tabular-nums; }
 @media (max-width: 480px) { .mission-settings .ms-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.mission-settings .ms-section + .ms-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--overlay-border, #333); }
+.mission-settings .ms-period { display: inline-flex; border: 1px solid var(--overlay-border, #333); border-radius: 6px; overflow: hidden; }
+.mission-settings .ms-period button { background: transparent; border: 0; color: var(--fg-2); font-size: 12px; padding: 4px 10px; cursor: pointer; }
+.mission-settings .ms-period button.on { background: var(--overlay-field, rgba(127,127,127,.15)); color: var(--fg); }
+.mission-settings .ms-stats-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.mission-settings .ms-stale { opacity: .6; transition: opacity 120ms; }
+.mission-settings .ms-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; font-variant-numeric: tabular-nums; }
+.mission-settings .ms-table th { text-align: right; color: var(--fg-2); font-weight: 400; padding: 4px 6px; }
+.mission-settings .ms-table td { text-align: right; padding: 5px 6px; border-top: 1px solid var(--overlay-border, #333); white-space: nowrap; }
+.mission-settings .ms-table th:first-child, .mission-settings .ms-table td.ms-model { text-align: left; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.mission-settings .ms-flag { margin-left: 6px; font-size: 10px; color: var(--fg-2); border: 1px solid var(--overlay-border, #333); border-radius: 4px; padding: 0 4px; }
+@media (max-width: 480px) { .mission-settings .ms-table th:nth-child(3), .mission-settings .ms-table td:nth-child(3), .mission-settings .ms-table th:nth-child(4), .mission-settings .ms-table td:nth-child(4) { display: none; } }
+.mission-settings .ms-table + .ms-sub, .mission-settings .ms-hint + .ms-sub { margin-top: 14px; }
+/* Stats tiles in the sheet carry no sparkline: let the value use the width. */
+.mission-settings .st-tile .st-spark-empty { display: none; }
+.mission-settings .ms-model-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

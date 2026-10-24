@@ -103,6 +103,7 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_transcript_patch_step",
     "orb_attribution_step",
     "orb_schedule_step",
+    "orb_stats_settle_step",
 ];
 
 fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
