@@ -224,8 +224,19 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
         .map_err(err)?;
     let mut out = Vec::new();
     for row in rows {
-        let (timestamp, mission_id, backend, title, raw, stored, tokens, source, cost, parent, row_id) =
-            row.map_err(err)?;
+        let (
+            timestamp,
+            mission_id,
+            backend,
+            title,
+            raw,
+            stored,
+            tokens,
+            source,
+            cost,
+            parent,
+            row_id,
+        ) = row.map_err(err)?;
         let model = super::usage_model_key(&raw, &stored);
         let [input, output, creation, read] = tokens.map(non_negative);
         let stored_cost = non_negative(cost);

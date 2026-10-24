@@ -117,8 +117,7 @@ impl ShadowPrices {
         if self.local_providers.iter().any(|p| p == provider) {
             Billing::Local
         } else if self.subscription_providers.iter().any(|p| p == provider)
-            || r
-                .account_id
+            || r.account_id
                 .as_deref()
                 .is_some_and(|a| self.subscription_accounts.iter().any(|s| s == a))
         {
@@ -250,9 +249,9 @@ pub fn own_stats(
         })
         .collect();
     models.sort_by(|a, b| b.cents.cmp(&a.cents).then_with(|| a.model.cmp(&b.model)));
-    let total_cents = models
-        .iter()
-        .fold(vm_cents, |acc, l| crate::orb_spec::stats_settle_step(acc, l.cents, false));
+    let total_cents = models.iter().fold(vm_cents, |acc, l| {
+        crate::orb_spec::stats_settle_step(acc, l.cents, false)
+    });
     OwnStats {
         models,
         vm_usd: cents_usd(vm_cents),
@@ -310,7 +309,12 @@ pub(crate) async fn subtree(
         if !seen.insert(id) || out.len() >= 2000 {
             continue;
         }
-        let title = store.get_mission(id).await.ok().flatten().and_then(|m| m.title);
+        let title = store
+            .get_mission(id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|m| m.title);
         out.push((id, parent, title));
         for child in store.get_child_missions(id).await.unwrap_or_default() {
             queue.push((child.id, Some(id)));
@@ -360,7 +364,11 @@ pub fn compute(
             .iter()
             .filter(|(_, p, _)| *p == Some(*id))
             .fold(own, |acc, (c, _, _)| {
-                crate::orb_spec::stats_settle_step(acc, subtree_cents.get(c).copied().unwrap_or(0), false)
+                crate::orb_spec::stats_settle_step(
+                    acc,
+                    subtree_cents.get(c).copied().unwrap_or(0),
+                    false,
+                )
             });
         subtree_cents.insert(*id, kids);
     }
@@ -396,7 +404,11 @@ struct StatsQuery {
 }
 
 fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    (status, Json(json!({"error": code, "message": message.into()}))).into_response()
+    (
+        status,
+        Json(json!({"error": code, "message": message.into()})),
+    )
+        .into_response()
 }
 
 async fn get_stats(
@@ -452,18 +464,26 @@ async fn put_shadow_prices(
     State(state): State<Arc<AppState>>,
     Json(table): Json<ShadowPrices>,
 ) -> Response {
-    if table
-        .prices
-        .values()
-        .any(|p| [p.input, p.cache_read, p.cache_write, p.output].iter().any(|v| !v.is_finite() || *v < 0.0))
-    {
-        return error(StatusCode::BAD_REQUEST, "invalid_price", "Prices must be non-negative numbers");
+    if table.prices.values().any(|p| {
+        [p.input, p.cache_read, p.cache_write, p.output]
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0)
+    }) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_price",
+            "Prices must be non-negative numbers",
+        );
     }
     let path = ShadowPrices::path(&state.config.working_dir);
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
     match std::fs::write(&path, serde_json::to_vec_pretty(&table).unwrap_or_default()) {
         Ok(()) => Json(table).into_response(),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e.to_string()),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "write_failed",
+            e.to_string(),
+        ),
     }
 }
 
@@ -500,7 +520,12 @@ mod tests {
 
     #[test]
     fn mission_and_subtree_totals_are_conserved_and_replays_count_once() {
-        let (root, a, b, gc) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (root, a, b, gc) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
         let tree = vec![
             (root, None, Some("root".into())),
             (a, Some(root), Some("a".into())),
@@ -518,15 +543,32 @@ mod tests {
             rec("proxy:6", &b.to_string(), "google", "gemini-4-argon", 10),
         ];
         let vm: HashMap<String, u64> = [(r.clone(), 40), (gc.to_string(), 7)].into();
-        let s = compute(root, &tree, &records, &vm, &ShadowPrices::default(), "lifetime", None);
+        let s = compute(
+            root,
+            &tree,
+            &records,
+            &vm,
+            &ShadowPrices::default(),
+            "lifetime",
+            None,
+        );
         // Own: models (200 + 300) + VM 40, the replay counted once.
-        let sol = s.own.models.iter().find(|m| m.model == "gpt-6.1-sol").unwrap();
+        let sol = s
+            .own
+            .models
+            .iter()
+            .find(|m| m.model == "gpt-6.1-sol")
+            .unwrap();
         assert_eq!((sol.requests, sol.cost_usd), (2, 2.0));
         let models: f64 = s.own.models.iter().map(|m| m.cost_usd).sum();
         assert!((s.own.total_usd - (models + s.own.vm_usd)).abs() < 1e-9);
         assert_eq!(s.own.total_usd, 5.4);
         // Spark is local (0); the grandchild VM rolls up into child a.
-        let child_a = s.children.iter().find(|c| c.title.as_deref() == Some("a")).unwrap();
+        let child_a = s
+            .children
+            .iter()
+            .find(|c| c.title.as_deref() == Some("a"))
+            .unwrap();
         assert_eq!(child_a.total_usd, 0.57);
         let kids: f64 = s.children.iter().map(|c| c.total_usd).sum();
         assert!((s.subtree_total_usd - (s.own.total_usd + kids)).abs() < 1e-9);
@@ -538,7 +580,12 @@ mod tests {
         let mut table = ShadowPrices::default();
         table.prices.insert(
             "antigravity/gemini-4-argon".into(),
-            TokenPrice { input: 2.0, cache_read: 0.5, cache_write: 0.0, output: 12.0 },
+            TokenPrice {
+                input: 2.0,
+                cache_read: 0.5,
+                cache_write: 0.0,
+                output: 12.0,
+            },
         );
         let sub = rec("proxy:1", "m", "antigravity", "gemini-4-argon", 0);
         // (1000*2 + 500*0.5 + 100*12) / 1e6 = $0.00345 -> 0 cents rounded
@@ -557,7 +604,10 @@ mod tests {
         table.subscription_accounts.push("acc-1".into());
         assert_eq!(table.billing(&oauth), Billing::Subscription);
         // Local inference is free and not shadow-priced.
-        assert_eq!(price_cents(&rec("p", "m", "spark", "q", 9), &table), (0, false, true));
+        assert_eq!(
+            price_cents(&rec("p", "m", "spark", "q", 9), &table),
+            (0, false, true)
+        );
     }
 
     #[test]
