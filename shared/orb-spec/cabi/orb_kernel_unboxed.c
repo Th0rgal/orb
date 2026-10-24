@@ -4064,6 +4064,112 @@ goto v___jp_1739_;
 }
 }
 
+LEAN_EXPORT uint8_t orb_schedule_step(uint8_t v_op_1834_, uint8_t v_known_1835_, uint8_t v_cancelled_1836_, uint8_t v_ownerTerminal_1837_, uint8_t v_authorized_1838_, uint8_t v_busy_1839_, uint64_t v_lastFired_1840_, uint64_t v_nextDue_1841_, uint64_t v_now_1842_){
+_start:
+{
+uint8_t v___x_1843_; uint8_t v___y_1845_; uint8_t v___x_1850_; 
+v___x_1843_ = 1;
+v___x_1850_ = lean_uint8_dec_eq(v_authorized_1838_, v___x_1843_);
+if (v___x_1850_ == 0)
+{
+uint8_t v___x_1851_; 
+v___x_1851_ = 0;
+return v___x_1851_;
+}
+else
+{
+uint8_t v___x_1852_; uint8_t v___x_1853_; 
+v___x_1852_ = 0;
+v___x_1853_ = lean_uint8_dec_eq(v_op_1834_, v___x_1852_);
+if (v___x_1853_ == 0)
+{
+uint8_t v___x_1854_; 
+v___x_1854_ = lean_uint8_dec_eq(v_cancelled_1836_, v___x_1843_);
+if (v___x_1854_ == 0)
+{
+uint8_t v___x_1855_; 
+v___x_1855_ = lean_uint8_dec_eq(v_ownerTerminal_1837_, v___x_1843_);
+if (v___x_1855_ == 0)
+{
+uint8_t v___x_1856_; 
+v___x_1856_ = lean_uint64_dec_lt(v_lastFired_1840_, v_nextDue_1841_);
+if (v___x_1856_ == 0)
+{
+v___y_1845_ = v___x_1856_;
+goto v___jp_1844_;
+}
+else
+{
+uint8_t v___x_1857_; 
+v___x_1857_ = lean_uint64_dec_le(v_nextDue_1841_, v_now_1842_);
+v___y_1845_ = v___x_1857_;
+goto v___jp_1844_;
+}
+}
+else
+{
+return v___x_1852_;
+}
+}
+else
+{
+return v___x_1852_;
+}
+}
+else
+{
+uint8_t v___x_1858_; 
+v___x_1858_ = lean_uint8_dec_eq(v_known_1835_, v___x_1843_);
+if (v___x_1858_ == 0)
+{
+uint8_t v___x_1859_; 
+v___x_1859_ = lean_uint8_dec_eq(v_ownerTerminal_1837_, v___x_1843_);
+if (v___x_1859_ == 0)
+{
+return v___x_1843_;
+}
+else
+{
+return v___x_1852_;
+}
+}
+else
+{
+uint8_t v___x_1860_; 
+v___x_1860_ = 2;
+return v___x_1860_;
+}
+}
+}
+v___jp_1844_:
+{
+if (v___y_1845_ == 0)
+{
+uint8_t v___x_1846_; 
+v___x_1846_ = 4;
+return v___x_1846_;
+}
+else
+{
+uint8_t v___x_1847_; 
+v___x_1847_ = lean_uint8_dec_eq(v_busy_1839_, v___x_1843_);
+if (v___x_1847_ == 0)
+{
+uint8_t v___x_1848_; 
+v___x_1848_ = 3;
+return v___x_1848_;
+}
+else
+{
+uint8_t v___x_1849_; 
+v___x_1849_ = 4;
+return v___x_1849_;
+}
+}
+}
+}
+}
+
 LEAN_EXPORT uint8_t leansys_verify_slice_bounds(uint64_t v_off_143_, uint64_t v_len_144_, uint64_t v_cap_145_){
 _start:
 {
