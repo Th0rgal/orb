@@ -824,6 +824,37 @@ pub(crate) fn describe_cron(expression: &str) -> String {
     }
 }
 
+/// Agent-created schedules never fire more often than this.
+pub(crate) const NATIVE_SCHEDULE_MIN_PERIOD_SECONDS: i64 = 300;
+/// Agent-created schedules stop after this long (the agent can re-create one).
+pub(crate) const NATIVE_SCHEDULE_TTL_SECONDS: i64 = 7 * 24 * 3600;
+const NATIVE_SCHEDULE_FLOOR: &str = "*/5 * * * *";
+
+/// Validate an agent cron and round anything firing more often than every
+/// `NATIVE_SCHEDULE_MIN_PERIOD_SECONDS` up to every 5 minutes.
+pub(crate) fn bounded_native_cron(expression: &str) -> Result<String, String> {
+    let expression = expression.trim();
+    let cron = croner::Cron::new(expression)
+        .parse()
+        .map_err(|_| format!("Invalid cron expression: {expression}"))?;
+    // Sample upcoming occurrences: the tightest gap bounds the period.
+    let mut min_gap = i64::MAX;
+    if let Ok(mut prev) = cron.find_next_occurrence(&chrono::Utc::now(), false) {
+        for _ in 0..300 {
+            let Ok(next) = cron.find_next_occurrence(&prev, false) else {
+                break;
+            };
+            min_gap = min_gap.min((next - prev).num_seconds());
+            prev = next;
+        }
+    }
+    Ok(if min_gap < NATIVE_SCHEDULE_MIN_PERIOD_SECONDS {
+        NATIVE_SCHEDULE_FLOOR.to_string()
+    } else {
+        expression.to_string()
+    })
+}
+
 /// Turn an Antigravity recurring `schedule` into a durable Core cron
 /// schedule for the mission: each tick sends the prompt as a queued message.
 /// It is listed with the mission's wake-ups and can be cancelled there.
@@ -832,9 +863,10 @@ pub(crate) async fn register_native_cron(
     expression: &str,
     prompt: &str,
 ) -> Result<serde_json::Value, String> {
-    if croner::Cron::new(expression).parse().is_err() {
-        return Err(format!("Invalid cron expression: {expression}"));
-    }
+    let expression = bounded_native_cron(expression)?;
+    let expression = expression.as_str();
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(NATIVE_SCHEDULE_TTL_SECONDS)).to_rfc3339();
     let body = serde_json::json!({
         "command_source": { "type": "inline", "content": prompt },
         "trigger": { "type": "cron", "expression": expression, "timezone": "UTC" },
@@ -843,6 +875,7 @@ pub(crate) async fn register_native_cron(
             "__wakeup_source": ANTIGRAVITY_SCHEDULE_SOURCE,
             "__wakeup_request_id": native_cron_request_id(expression, prompt),
             "__wakeup_reason": format!("Antigravity schedule ({})", describe_cron(expression)),
+            "__schedule_expires_at": expires_at,
         },
         "start_immediately": false,
     });
@@ -15331,5 +15364,20 @@ mod tests {
         );
         assert!(super::limit_reset_of(dir.path(), &key(&sibling)).is_none());
         crate::account_limits::shared().clear(&key(&first));
+    }
+}
+
+#[cfg(test)]
+mod native_cron_bounds_tests {
+    #[test]
+    fn agent_crons_are_rounded_up_to_the_minimum_period() {
+        use super::bounded_native_cron as b;
+        assert_eq!(b("* * * * *").unwrap(), "*/5 * * * *");
+        assert_eq!(b("*/2 * * * *").unwrap(), "*/5 * * * *");
+        assert_eq!(b("0,1 * * * *").unwrap(), "*/5 * * * *");
+        assert_eq!(b("*/5 * * * *").unwrap(), "*/5 * * * *");
+        assert_eq!(b("*/30 * * * *").unwrap(), "*/30 * * * *");
+        assert_eq!(b("0 9 * * *").unwrap(), "0 9 * * *");
+        assert!(b("not a cron").is_err());
     }
 }

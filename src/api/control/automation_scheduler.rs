@@ -376,7 +376,8 @@ pub(super) async fn automation_scheduler_loop(
             // Agent-created recurring schedules go through the verified step:
             // one fire per due slot, nothing after a cancel or for a gone owner.
             if is_native_schedule(&automation) {
-                match native_schedule_tick(&automation, false) {
+                let ended = native_schedule_owner_ended(&automation, mission.status);
+                match native_schedule_tick(&automation, ended) {
                     crate::orb_spec::ScheduleAction::Fire => {}
                     crate::orb_spec::ScheduleAction::Drop => {
                         let _ = mission_store
@@ -828,4 +829,78 @@ fn native_schedule_tick(
         next_due: secs(super::continuations::next_at(automation)),
         now: secs(Some(chrono::Utc::now())),
     })
+}
+
+/// An agent-created schedule outlives neither its TTL nor a finished mission.
+/// Acknowledged/AwaitingUser missions keep it: reading a mission is not an end.
+fn native_schedule_owner_ended(
+    automation: &mission_store::Automation,
+    status: MissionStatus,
+) -> bool {
+    let expired = automation
+        .variables
+        .get("__schedule_expires_at")
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| at <= chrono::Utc::now());
+    expired
+        || matches!(
+            status,
+            MissionStatus::Completed | MissionStatus::NotFeasible
+        )
+}
+
+#[cfg(test)]
+mod native_schedule_bounds_tests {
+    use super::*;
+
+    fn schedule(expires: &str) -> mission_store::Automation {
+        mission_store::Automation {
+            id: Uuid::new_v4(),
+            mission_id: Uuid::new_v4(),
+            command_source: CommandSource::Inline {
+                content: "status".into(),
+            },
+            trigger: TriggerType::Cron {
+                expression: "*/30 * * * *".into(),
+                timezone: "UTC".into(),
+            },
+            variables: std::collections::HashMap::from([
+                (
+                    "__wakeup_source".into(),
+                    crate::api::mission_runner::ANTIGRAVITY_SCHEDULE_SOURCE.into(),
+                ),
+                ("__schedule_expires_at".into(), expires.into()),
+            ]),
+            active: true,
+            stop_policy: mission_store::StopPolicy::Never,
+            fresh_session: Default::default(),
+            created_at: "2026-10-24T10:00:00Z".into(),
+            last_triggered_at: None,
+            retry_config: Default::default(),
+            consecutive_failures: 0,
+            driver: mission_store::AutomationDriver::Scheduler,
+        }
+    }
+
+    #[test]
+    fn native_schedule_stops_after_ttl_or_a_finished_mission() {
+        let live = schedule("2999-01-01T00:00:00Z");
+        assert!(!native_schedule_owner_ended(&live, MissionStatus::Active));
+        assert!(!native_schedule_owner_ended(
+            &live,
+            MissionStatus::Acknowledged
+        ));
+        assert!(native_schedule_owner_ended(&live, MissionStatus::Completed));
+        let expired = schedule("2026-10-01T00:00:00Z");
+        assert!(native_schedule_owner_ended(&expired, MissionStatus::Active));
+        // A due slot of an ended schedule is dropped, never fired.
+        assert_eq!(
+            native_schedule_tick(&expired, true),
+            crate::orb_spec::ScheduleAction::Drop
+        );
+        assert_eq!(
+            native_schedule_tick(&live, false),
+            crate::orb_spec::ScheduleAction::Fire
+        );
+    }
 }
