@@ -10077,8 +10077,17 @@ async fn get_provider_usage(
             if let Some(login) = login {
                 match super::antigravity_usage::read(&client, &login.oauth.access_token).await {
                     super::subscription_usage::Quota::Fields(fields) => {
+                        let unverified = fields.get("antigravity_eligibility")
+                            == Some(&serde_json::json!("needs_verification"));
                         if let Some(obj) = info.as_object_mut() {
                             obj.extend(fields);
+                        }
+                        if unverified {
+                            info["status"] = serde_json::json!("needs_verification");
+                            info["usage_note"] = serde_json::json!(format!(
+                                "Needs Google verification ({}). Sign in to Antigravity with this account and complete Google's verification; it is excluded from routing and machine sign-in until then.",
+                                login.identity
+                            ));
                         }
                     }
                     super::subscription_usage::Quota::Unauthorized => {

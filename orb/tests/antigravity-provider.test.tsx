@@ -2,7 +2,7 @@ import { render, fireEvent, waitFor } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import { AntigravityProvider } from "../src/AntigravityProvider";
 import * as api from "../src/api";
-import { codingPlanWindows } from "../src/providerUsage";
+import { codingPlanWindows, effectiveProviderStatus, quotaExhaustedLabel, usageWindows } from "../src/providerUsage";
 afterEach(() => vi.restoreAllMocks());
 const node = (id: string, extra: Partial<api.RemoteNodeView> = {}) => ({ id, status: "online", cordoned: false, ...extra }) as api.RemoteNodeView;
 
@@ -60,4 +60,15 @@ it("ignores late answers from a previous connection", async () => {
 it("maps Google quota windows onto the plan bars", () => {
   const windows = codingPlanWindows({ provider_type: "antigravity", antigravity_windows: [{ label: "Claude", used_percent: 60, reset_at: 1_800_000_000 }, { label: "Gemini Pro", used_percent: 0 }] } as api.ProviderUsage);
   expect(windows).toEqual([{ label: "Claude", used: 0.6, reset: 1_800_000_000 }, { label: "Gemini Pro", used: 0, reset: undefined }]);
+});
+
+it("shows an exhausted Gemini group next to Claude & GPT", () => {
+  const usage = { provider_type: "antigravity", antigravity_windows: [{ label: "Claude & GPT · 5h", used_percent: 0 }, { label: "Claude & GPT · Weekly", used_percent: 0 }, { label: "Gemini · 5h", used_percent: 100, reset_at: 1_792_835_511 }] } as api.ProviderUsage;
+  expect(codingPlanWindows(usage).map(w => w.label)).toContain("Gemini · 5h");
+  expect(quotaExhaustedLabel(usageWindows(usage))).toMatch(/Gemini/);
+});
+
+it("flags an account Google has not verified", () => {
+  const account = { provider_type: "antigravity", enabled: true, status: { type: "connected" } } as unknown as api.AIProvider;
+  expect(effectiveProviderStatus(account, { provider_type: "antigravity", status: "needs_verification" } as api.ProviderUsage)).toBe("needs_verification");
 });

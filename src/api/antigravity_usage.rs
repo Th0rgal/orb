@@ -53,17 +53,18 @@ pub fn parse_quota(payload: &Value) -> Vec<Value> {
         let Some(label) = bucket["modelId"].as_str().and_then(family) else {
             continue;
         };
-        let Some(remaining) = bucket["remainingFraction"]
-            .as_f64()
-            .filter(|f| f.is_finite())
-        else {
-            continue;
-        };
-        let used = (1.0 - remaining).clamp(0.0, 1.0) * 100.0;
         let reset = bucket["resetTime"]
             .as_str()
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.timestamp());
+        // Google omits a zero `remainingFraction` (proto3 default).
+        let remaining = match bucket["remainingFraction"].as_f64() {
+            Some(f) if f.is_finite() => f,
+            Some(_) => continue,
+            None if reset.is_some() => 0.0,
+            None => continue,
+        };
+        let used = (1.0 - remaining).clamp(0.0, 1.0) * 100.0;
         if reset.is_none() && used == 0.0 {
             continue;
         }
@@ -151,6 +152,18 @@ pub fn parse_summary(payload: &Value) -> Vec<Value> {
     out
 }
 
+/// One "Gemini · 5h" window from the per-model view: the least remaining
+/// Gemini model and its reset. `None` when no Gemini model is metered.
+pub fn gemini_window(payload: &Value) -> Option<Value> {
+    let (remaining, reset) = super::antigravity_accounts::gemini_quota(payload);
+    let used = (1.0 - remaining?).clamp(0.0, 1.0) * 100.0;
+    let mut v = json!({"label": "Gemini · 5h", "used_percent": (used * 10.0).round() / 10.0});
+    if let Some(reset) = reset {
+        v["reset_at"] = json!(reset);
+    }
+    Some(v)
+}
+
 /// Plan name: the paid Google One tier when present, else the base tier.
 pub fn parse_plan(payload: &Value) -> Option<String> {
     ["paidTier", "currentTier"].iter().find_map(|tier| {
@@ -161,7 +174,11 @@ pub fn parse_plan(payload: &Value) -> Option<String> {
     })
 }
 
-async fn call(
+pub(crate) fn assist_body() -> Value {
+    json!({"metadata": {"ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"}})
+}
+
+pub(crate) async fn call(
     client: &reqwest::Client,
     token: &str,
     method: &str,
@@ -190,18 +207,21 @@ async fn call(
 
 /// Read the plan and windows with the routing login's access token.
 pub async fn read(client: &reqwest::Client, access_token: &str) -> Quota {
-    let assist = match call(
-        client,
-        access_token,
-        "loadCodeAssist",
-        json!({"metadata": {"ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"}}),
-    )
-    .await
-    {
+    let assist = match call(client, access_token, "loadCodeAssist", assist_body()).await {
         Ok(v) => v,
         Err(q) => return q,
     };
     let mut fields = Map::new();
+    if super::antigravity_accounts::eligibility(&assist)
+        == super::antigravity_accounts::Eligibility::NeedsVerification
+    {
+        // Google serves nothing until the owner verifies the account.
+        fields.insert(
+            "antigravity_eligibility".into(),
+            json!("needs_verification"),
+        );
+        return Quota::Fields(fields);
+    }
     if let Some(plan) = parse_plan(&assist) {
         fields.insert("antigravity_plan".into(), json!(plan));
     }
@@ -218,8 +238,20 @@ pub async fn read(client: &reqwest::Client, access_token: &str) -> Quota {
     .await
     {
         Ok(summary) => {
-            let windows = parse_summary(&summary);
+            let mut windows = parse_summary(&summary);
             if !windows.is_empty() {
+                // The summary drops the Gemini group entirely once it is
+                // exhausted; read it from the per-model view instead.
+                if !windows
+                    .iter()
+                    .any(|w| w["label"].as_str().is_some_and(|l| l.starts_with("Gemini")))
+                {
+                    if let Ok(quota) =
+                        call(client, access_token, "retrieveUserQuota", body.clone()).await
+                    {
+                        windows.extend(gemini_window(&quota));
+                    }
+                }
                 fields.insert("antigravity_windows".into(), Value::Array(windows));
                 return Quota::Fields(fields);
             }

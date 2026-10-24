@@ -5,25 +5,17 @@
 //! profile of the Core workspace that runs `agy`, and pushes it to a remote
 //! node over the node's authenticated `/managed-auth/antigravity` endpoint. It
 //! never travels inside a job payload.
-use crate::ai_providers::ProviderType;
 use crate::antigravity_auth::{Credential, PROFILE_DIR};
 
 /// The Antigravity login CLIProxyAPI routes with, if one is connected.
 pub(crate) fn routing_credential() -> Option<Credential> {
     let dir = super::cli_proxy_accounts::auth_dir()?;
+    // Highest-priority eligible login with Gemini quota left; see
+    // [`super::antigravity_accounts::choose`].
+    let file = super::antigravity_accounts::chosen_file(&dir)?;
     super::cli_proxy_accounts::accounts_in(&dir)
         .into_iter()
-        .filter(|a| {
-            a.provider == ProviderType::Antigravity
-                && !a.disabled
-                && a.prefix.as_deref() == Some("antigravity")
-        })
-        .max_by(|a, b| {
-            a.oauth
-                .expires_at
-                .cmp(&b.oauth.expires_at)
-                .then_with(|| b.file.cmp(&a.file))
-        })
+        .find(|a| a.file == file)
         .map(|a| Credential {
             access_token: a.oauth.access_token,
             refresh_token: a.oauth.refresh_token,
