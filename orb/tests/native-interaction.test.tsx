@@ -18,7 +18,7 @@ function transport(read:(command:string,args?:any)=>Promise<any>){return async(c
 };}
 describe('native plan interactions',()=>{
  it('only exposes Plan when the destination confirms support',()=>{
-  for(const harness of ['codex','claudecode','opencode','grok','gemini','chatgpt']) {
+  for(const harness of ['codex','claudecode','opencode','grok','gemini']) {
    expect(composerModes(harness).some(m=>m.id==='plan')).toBe(false);
   }
   for (const harness of ['codex', 'claudecode', 'vibe']) {

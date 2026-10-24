@@ -214,11 +214,12 @@ execution context:
 - Auth uses OpenAI API keys or Codex/ChatGPT credentials discovered by the
   backend.
 
-### ChatGPT UI
+### Consulting another model
 
-- Drives the ChatGPT web app through a service-side browser profile pool
-  (`src/backend/chatgpt_ui`, `scripts/chatgpt_ui_driver.py`). It is also the
-  engine behind ChatGPT cloud agents. See `docs/CHATGPT_UI_HARNESS.md`.
+- There is no browser/web-UI harness. To get a review or second opinion from
+  another model, start an `opencode` mission with
+  `model_override=<provider>/<model>` (e.g. `openai/gpt-6-astra`,
+  `anthropic/claude-fable-5-1`).
 
 ### Antigravity and Grok
 

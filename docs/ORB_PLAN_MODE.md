@@ -43,7 +43,7 @@ future run. Backend/process restarts do not recreate an expired native request.
 | Claude Code 2.1.278 / Core 2.1.280 | Real native question → approve → file creation passed | Real dev mission question → approve → file creation passed |
 | OpenCode 1.15.13 | ACP initialization and Plan selection passed using Orb's `OPENCODE_DB=orb-local.db`; tested session did not expose a native question tool | Plan not advertised by this adapter |
 | Grok 1.0.40 | ACP initialization and Plan selection passed; prompt rejected with HTTP 402, usage balance exhausted | Plan not advertised by this adapter |
-| Gemini / ChatGPT UI | Not selectable as Orb local harnesses | Plan not advertised |
+| Gemini | Not selectable as Orb local harnesses | Plan not advertised |
 
 OpenCode and Grok remain hidden in the Plan menu until their entire native
 interaction path is implemented and validated. Their CLI accepting a mode is

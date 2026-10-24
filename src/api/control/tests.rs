@@ -13,19 +13,11 @@ fn a_settings_handoff_resumes_only_dead_missions() {
 #[test]
 fn registered_liveness_interrupt_skips_hermes_tagged_writer() {
     assert!(super::skip_idle_registered_liveness_interrupt(
-        Some("codex"),
         None,
         None,
         &["origin:hermes-assistant".to_string()],
     ));
-    assert!(super::skip_idle_registered_liveness_interrupt(
-        Some("chatgpt_ui"),
-        None,
-        None,
-        &[],
-    ));
     assert!(!super::skip_idle_registered_liveness_interrupt(
-        Some("codex"),
         None,
         None,
         &[],
@@ -6230,7 +6222,7 @@ fn test_mission_status_for_terminal_reason_defers_turn_complete_until_idle_final
 #[test]
 fn deferred_goal_replaces_stale_prompt_on_failed_follow_up() {
     let original = "You are GPT-5.6 Pro with web search. Research…";
-    let follow_up = "retry now, chatgpt ui is fixed";
+    let follow_up = "retry now, the provider is fixed";
     assert_eq!(
         deferred_goal_for_incoming_message(MissionStatus::Failed, Some(original), follow_up),
         follow_up
@@ -6309,7 +6301,6 @@ fn durable_remote_job_heartbeat_keeps_projected_health_healthy() {
         600,
         true,
         true,
-        None,
     );
     assert!(matches!(
         health,
@@ -6321,26 +6312,10 @@ fn durable_remote_job_heartbeat_keeps_projected_health_healthy() {
         600,
         true,
         false,
-        None,
     );
     assert!(matches!(
         without_remote_job,
         crate::api::mission_runner::MissionHealth::Stalled { .. }
-    ));
-}
-
-#[test]
-fn chatgpt_ui_hidden_reasoning_keeps_projected_health_healthy() {
-    let health = projected_running_health(
-        crate::api::mission_runner::MissionRunState::Running,
-        STUCK_SECONDS * 2,
-        false,
-        false,
-        Some("chatgpt_ui"),
-    );
-    assert!(matches!(
-        health,
-        crate::api::mission_runner::MissionHealth::Healthy
     ));
 }
 
@@ -8077,31 +8052,6 @@ fn grok_transport_timeout_cannot_be_promoted_to_success() {
 }
 
 #[test]
-fn chatgpt_ui_transport_resume_replays_the_original_prompt() {
-    let original = "You are GPT-5.6 Pro. Rewrite EIP-8282 in French.";
-    assert_eq!(
-        transport_auto_resume_message(Some("chatgpt_ui"), Some(original)),
-        original
-    );
-    assert_eq!(
-        transport_auto_resume_message(Some("chatgpt_ui"), Some("  \n ")),
-        CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT
-    );
-    assert_eq!(
-        transport_auto_resume_message(Some("chatgpt_ui"), None),
-        CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT
-    );
-    assert_eq!(
-        transport_auto_resume_message(Some("codex"), Some(original)),
-        TRANSPORT_AUTO_RESUME_PROMPT
-    );
-    assert_eq!(
-        transport_auto_resume_message(Some("opencode"), None),
-        TRANSPORT_AUTO_RESUME_PROMPT
-    );
-}
-
-#[test]
 fn maybe_recover_soft_llm_error_preserves_pending_tool_transport_failure() {
     let mut result = crate::agents::AgentResult::failure(
         "Codex stopped while tool calls were still pending: remote build".to_string(),
@@ -8129,12 +8079,12 @@ fn maybe_recover_soft_llm_error_preserves_pending_tool_transport_failure() {
 #[test]
 fn maybe_recover_soft_llm_error_preserves_structured_provider_failure() {
     let mut result = crate::agents::AgentResult::failure(
-        "chatgpt_ui: chatgpt-ui-v2: UI check failed at model_selection".to_string(),
+        "provider: v2: model check failed at model_selection".to_string(),
         0,
     )
     .with_terminal_reason(TerminalReason::LlmError)
     .with_data(serde_json::json!({
-        "provider_error_source": "chatgpt_ui_driver",
+        "provider_error_source": "provider_driver",
         "failure_class": crate::agents::FailureClass::ProviderError,
         "classification_source": "structured",
     }));

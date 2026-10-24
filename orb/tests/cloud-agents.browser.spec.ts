@@ -105,8 +105,7 @@ test('section shortcuts and real model variants use the shared menus',async({pag
   if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
   let json:unknown={};
   if(path==='/api/projects')json={projects:[{slug:'demo',title:'Demo'}]};
-  else if(path==='/api/cloud/accounts')json=[{id:'chatgpt-profile',provider:'chatgpt',label:'ChatGPT · chatgpt-profile',available:true,experimental:true,capabilities:{models:true}},{id:'cursor-default',provider:'cursor_cloud',label:'Cursor Cloud',available:true,capabilities:{models:true}}];
-  else if(path==='/api/cloud/chatgpt/options')json={models:{items:[{id:'gpt-6-pro',displayName:'GPT-6 Pro'},{id:'gpt-6-high',displayName:'GPT-6 High'}]}};
+  else if(path==='/api/cloud/accounts')json=[{id:'cursor-default',provider:'cursor_cloud',label:'Cursor Cloud',available:true,capabilities:{models:true}}];
   else if(path==='/api/cloud/cursor/options')json={models:{items:[{id:'grok-4.6',displayName:'Grok 4.6',parameters:[{id:'effort',values:[{value:'high',displayName:'High'}]}],variants:[{isDefault:true,params:[{id:'effort',value:'high'}]}]}]},repositories:{items:[]}};
   else if(path==='/api/control/missions' && route.request().method()==='POST'){launches.push(route.request().postDataJSON());return route.fulfill({status:503,body:'Test submission ends here'});}
   else if(path==='/api/control/missions'||path==='/api/control/queue'||path==='/api/backends')json=[];
@@ -120,14 +119,7 @@ test('section shortcuts and real model variants use the shared menus',async({pag
  await page.getByRole('button',{name:'Cloud agent',exact:true}).waitFor();
  await page.keyboard.press('Meta+2');
  const form=page.getByRole('region',{name:'Cloud agent'});
- await expect(form.getByText('Profile 1',{exact:true})).toBeVisible();
- await expect(form.getByText('GPT-6 Pro',{exact:true})).toBeVisible();
  await expect(form.getByText('Experimental',{exact:true})).toHaveCount(0);
- await form.getByLabel('Model',{exact:true}).click();
- await page.getByRole('option',{name:'GPT-6 High'}).click();
- await expect(form.getByText('GPT-6 High',{exact:true})).toBeVisible();
- await form.getByLabel('Service',{exact:true}).click();
- await page.getByRole('option',{name:'Cursor Cloud'}).click();
  await expect(form.getByText('Grok 4.6 · High',{exact:true})).toBeVisible();
  await form.getByLabel('Prompt',{exact:true}).fill('Variant test');
  await form.getByRole('button',{name:'Create cloud agent'}).click();

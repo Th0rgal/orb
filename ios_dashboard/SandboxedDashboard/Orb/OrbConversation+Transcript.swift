@@ -301,14 +301,6 @@ extension OrbConversation {
                 }
                 .id(item.0)
             }
-        } else if let quiz = quiz(for: item) {
-            VStack(alignment: .leading, spacing: 12) {
-                if !quiz.before.isEmpty { OrbRichText(source: quiz.before) }
-                OrbQuiz(quiz: quiz, disabled: busy || cloudBlocked || working) { reply in await sendReply(reply) }
-                if !quiz.after.isEmpty { OrbRichText(source: quiz.after) }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .id(item.0)
         } else {
             let parsedRemote = OrbRemoteLog.parse(item.2)
             VStack(alignment: .leading, spacing: 4) {

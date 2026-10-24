@@ -530,7 +530,6 @@ mod tests {
             };
             assert!(require_runtime_owner(harness, Some(&user)).is_ok());
         }
-        assert!(require_runtime_owner("chatgpt_ui", None).is_ok());
     }
 
     #[tokio::test]

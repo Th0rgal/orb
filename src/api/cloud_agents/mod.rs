@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub mod chatgpt;
 pub mod cursor;
 pub mod grok;
 pub mod hermes;
@@ -14,7 +13,6 @@ pub mod worker;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
-    Chatgpt,
     GrokBot,
     CursorCloud,
     Hermes,
@@ -22,7 +20,6 @@ pub enum Provider {
 impl Provider {
     pub fn backend(self) -> &'static str {
         match self {
-            Self::Chatgpt => "cloud_chatgpt",
             Self::GrokBot => "cloud_grok_bot",
             Self::CursorCloud => "cloud_cursor",
             Self::Hermes => "cloud_hermes",

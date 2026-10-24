@@ -179,7 +179,6 @@ enum OrbStyle {
             "gemini": "Gemini",
             "antigravity": "Antigravity",
             "amp": "Amp",
-            "cloud_chatgpt": "ChatGPT",
             "cloud_cursor": "Cursor Cloud",
             "cloud_cursor_cloud": "Cursor Cloud",
             "cloud_grok_bot": "Grok Bot",

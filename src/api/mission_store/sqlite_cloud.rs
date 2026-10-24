@@ -11,12 +11,24 @@ pub(super) async fn list(store: &SqliteMissionStore) -> Result<Vec<Execution>, S
         let mut q = c
             .prepare("SELECT data FROM cloud_executions")
             .map_err(err)?;
-        let result = q
+        let rows = q
             .query_map([], |r| r.get::<_, String>(0))
             .map_err(err)?
-            .map(|v| serde_json::from_str(&v.map_err(err)?).map_err(err))
-            .collect();
-        result
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        // Rows of removed providers (e.g. the retired ChatGPT browser agent)
+        // stay in the table for history but no longer deserialize; skip them
+        // instead of failing every cloud listing.
+        Ok(rows
+            .iter()
+            .filter_map(|v| match serde_json::from_str::<Execution>(v) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    tracing::debug!("skipping unreadable cloud execution row: {e}");
+                    None
+                }
+            })
+            .collect())
     })
     .await
     .map_err(err)?

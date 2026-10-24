@@ -48,7 +48,7 @@ describe("effort options come from the core's own gate", () => {
   });
 
   it("offers nothing for harnesses the core forces to null", () => {
-    for (const backend of ["opencode", "grok", "gemini", "chatgpt_ui", "", null, undefined]) {
+    for (const backend of ["opencode", "grok", "gemini", "", null, undefined]) {
       expect(supportedEfforts(backend)).toEqual([]);
       expect(harnessSupportsEffort(backend)).toBe(false);
       expect(normalizeEffort("high", backend)).toBeNull();

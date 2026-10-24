@@ -5,11 +5,8 @@ description: >
   weeks): diagnose where a model is struggling, switch backends/models, push it
   to exhaust its budget instead of giving up, and send targeted hints. Trigger
   terms: mission, sandboxed.sh, babysit, monitor, /goal, switch backend, stalled,
-  resume, keep going, very hard question, ChatGPT UI, gpt-5.6-pro.
-metadata:
-  policy: chatgpt-ui-pool
-  policy_version: 1.4.0
-version: 1.14.0
+  resume, keep going, very hard question, consult another model.
+version: 1.15.0
 ---
 
 # Hermes Mission Control
@@ -17,8 +14,6 @@ version: 1.14.0
 You manage sandboxed.sh missions on the operator's behalf. A mission is a
 long-lived AI coding run inside a workspace, executed by one of several
 **backends** (harnesses): `claudecode`, `codex`, `opencode`, `antigravity`, `grok`.
-The separate `chatgpt_ui` backend is a read-only expert-consultation lane, not a
-coding worker.
 Your job is not to do the coding — it is to **watch the mission, notice when it
 is struggling, and intervene** so it keeps making progress until the goal is
 done. Some missions run for days or weeks; prefer durable callbacks and
@@ -142,13 +137,6 @@ Match the signal to the fix. The health `recommendation` usually tells you which
   the answer is Y, move on to Z"), or switch model.
 - **Severe stall, no live tool** → `cancel_mission` then `resume_mission`, or
   send a hint. A `warning` stall with a tool running is fine — leave it.
-- **Running `chatgpt_ui` mission** → event silence alone is never stall
-  evidence. GPT Pro can expose only `Pro thinking` until visible answer text
-  begins. While the run is non-terminal and its durable heartbeat advances,
-  wait for the driver's result or explicit absolute timeout. Do **not** cancel,
-  resume, or submit a replacement: the browser profile is exclusive and the
-  duplicate would either waste the in-flight answer or contend for the same
-  profile.
 - **Idle but goal not done (gave up early)** → the #1 failure mode. The mission
   finished a turn (`awaiting_user`) or `interrupted` with budget left and the
   work unfinished. **Push it to continue**, don't let it sit:
@@ -257,27 +245,17 @@ everywhere you write instructions for an agent:
   (`backend="gemini"`) is retired; switch old missions explicitly, without reusing
   their native session IDs.
 - `grok` — provider-specific alternate when another provider is rate-limited.
-- `chatgpt_ui` with `model_override: gpt-5.6-pro` — reserve for exceptionally
-  difficult, self-contained research, synthesis, or design-conflict questions.
-  Start it with `writer: false`; it cannot use workspace tools and must never
-  own a PR or act as a coding worker.
-
 ### Very-hard-question escalation
 
 1. Make the question self-contained. Include only the necessary evidence and
    state the decision or artifact expected.
-2. Call `start_mission` with `backend: chatgpt_ui`,
-   `model_override: gpt-5.6-pro`, and `writer: false`. Persist the returned
-   mission ID before doing anything else.
-3. Treat the call as asynchronous. Poll `get_mission_health` or
-   `get_mission_digest`; do not repeatedly submit replacements while the same
-   mission is active. A fresh durable run heartbeat is the liveness proof;
-   `seconds_since_activity` only measures visible UI events and may remain stale
-   during a long hidden Pro reasoning phase.
-4. Read the completed text from the mission events. If the response generated
-   files, call `list_mission_shared_files`, then `download_shared_file` for each
-   file you actually need.
-5. Use the result as evidence or advice. Route any repository edits and
+2. To consult another model, start an opencode mission with
+   `model_override=<provider>/<model>` (e.g. `openai/gpt-6-astra`,
+   `anthropic/claude-fable-5-1`), `backend: opencode`, and `writer: false`.
+   Persist the returned mission ID before doing anything else.
+3. Poll `get_mission_health` or `get_mission_digest`; do not submit
+   replacements while the same mission is active.
+4. Use the result as evidence or advice. Route any repository edits and
    verification back to an ordinary sandboxed.sh worker/reviewer mission.
 
 When a model "isn't working," first prove it's the **model** and not the
@@ -285,72 +263,15 @@ When a model "isn't working," first prove it's the **model** and not the
 concluding the model is too weak. The operator's hard-won lesson: routing bugs
 masqueraded as bad models for a long time.
 
-## ChatGPT UI pool policy (policy_version 1.4.0)
+## Writer policy
 
-Binding rules for every `chatgpt_ui` mission you start or manage. The
-authoritative versioned policy is `docs/policy/CHATGPT_UI_POOL_POLICY.md` in
-the sandboxed.sh repo (machine-checked by `scripts/policy_lint.py` in CI);
-this section must stay in sync with it.
-
-- **Live capacity.** Pool capacity is the number of configured
-  `chatgpt_ui` profile slots (`profile_dirs`), each guarded by an exclusive
-  cross-process lock. Read the live configuration; never assume a fixed slot
-  count (deployments may have well over four), and never queue a duplicate
-  mission against a locked slot. The pool
-  prefers clean profiles and waits when every slot is locked, quarantined, or
-  unavailable; it never fails open onto an unhealthy profile.
-- **Pace shared-account starts.** Extra browser slots increase the number of
-  long Pro turns that can overlap, but profiles for one account share its
-  server-side request allowance. The runtime spaces new launches by 30 seconds
-  by default. Do not defeat this pacing or burst-dispatch manually.
-- **Read-only Pro lanes.** Concurrent `gpt-5.6-pro` consultations are fine
-  **only** with `writer: false` and **only** on disjoint slots (distinct
-  profiles). A `chatgpt_ui` mission never writes repositories or owns a PR.
-- **Compatibility failure → retry once, elsewhere.** On a
-  `compatibility=chatgpt-ui-v2` failure, retry at most 1 time, on a *different*
-  healthy slot (unlocked, no auth/rate-limit signals). Never the same slot;
-  confirm that alternate slot from live pool telemetry before retrying. If the
-  retry fails too, escalate to the operator.
-- **Backend-wide failure wave → stop dispatching.** Two distinct slots failing
-  compatibility or `transport_unavailable` within 3 minutes open a 5-minute
-  global circuit. New turns wait without leasing a profile. Treat the pool as
-  unavailable until the circuit closes; capacity callbacks must not
-  redispatch into it.
-- **Availability is probe-gated.** Before starting, resuming, or redispatching
-  any `chatgpt_ui` mission, call `get_chatgpt_ui_pool_status` and require
-  `availability.state == available`. `cooldown` and `probing` are both
-  unavailable. Cooldown expiry does not authorize work: sandboxed.sh runs one
-  bounded browser probe that never enters or submits a prompt, and only probe
-  success changes the state back to `available`.
-- **Follow-ups preserve the discussion.** A later turn on a completed
-  `chatgpt_ui` mission continues the same ChatGPT conversation on its owning
-  profile. Resume or message the existing mission when the question depends on
-  prior context; create a new mission only for an independent lane. A missing
-  conversation route fails closed and must not be treated as a fresh success.
-- **Auth failure → never blind-retry.** `auth_required` is terminal for that
-  mission and gets 0 automatic retries. The slot is quarantined for 30
-  minutes; cooldown expiry permits a later explicit recovery attempt but does
-  not prove the login was repaired. Never use an auth-failed slot for the
-  one compatibility retry. Pool health starts `chatgpt-ui-relogin.service`,
-  which logs in one idle profile from Bitwarden `CHATGPT_USERNAME` /
-  `CHATGPT_PASSWORD` / `CHATGPT_OTP` and clones it over other idle dead slots.
-  That repair is not a mission retry. If relogin fails (CAPTCHA, emailed MFA,
-  missing secrets), escalate to the operator — do not VNC first.
-- **Rate limited → wait.** 0 automatic retries; allowance must recover.
-  Do not shuffle the request across slots of the same account. One exact “Too
-  many requests” page opens a shared 10-minute circuit immediately; an older
-  in-flight turn completing does not close it.
-- **Global browser launch failure → preserve the pool.** A generic
-  `browser_launch` failure can be a host-wide Chromium/Playwright problem and
-  does not make the selected profile unhealthy. Only a proven profile-local
-  Chromium singleton conflict quarantines that slot.
 - **Never concurrent writers.** At most 1 writer mission per workspace.
   Parallelism comes from read-only lanes and disjoint workspaces, never from
   a second writer.
 - **Lean writers validate first.** Before any writer commits Lean changes,
   the change must pass validation run independently of that writer (separate
-  mission or reviewer lane). Pro-lane advice feeds validation; it never
-  replaces it.
+  mission or reviewer lane). Consultation advice feeds validation; it
+  never replaces it.
 
 ## Operating principles
 

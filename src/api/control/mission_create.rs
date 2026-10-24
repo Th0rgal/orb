@@ -574,10 +574,7 @@ pub(super) async fn live_mission_on_workspace(
         if let Some(mission) = page.into_iter().find(|mission| {
             Some(mission.id) != excluded_parent
                 && mission.workspace_id == workspace_id
-                && !matches!(
-                    mission.backend.as_str(),
-                    "cloud_chatgpt" | "cloud_grok_bot" | "cloud_cursor"
-                )
+                && !matches!(mission.backend.as_str(), "cloud_grok_bot" | "cloud_cursor")
                 && campaign_slot_held_by(mission.status)
                 && (!shared || directory.is_some_and(|dir| mission_uses_directory(mission, dir)))
         }) {
@@ -1603,7 +1600,7 @@ pub(in crate::api) async fn create_mission_inner(
         let backend_id = backend.as_deref();
         let skip_validation = matches!(
             backend_id,
-            Some("claudecode" | "codex" | "grok" | "antigravity" | "vibe" | "chatgpt_ui")
+            Some("claudecode" | "codex" | "grok" | "antigravity" | "vibe")
         );
         if !skip_validation {
             super::super::library::validate_agent_exists(
@@ -1618,6 +1615,9 @@ pub(in crate::api) async fn create_mission_inner(
 
     // Validate backend exists
     if let Some(ref backend_id) = backend {
+        if let Some(message) = crate::backend::retired_backend_error(backend_id) {
+            return Err((StatusCode::BAD_REQUEST, message.to_string()));
+        }
         let registry = state.backend_registry.read().await;
         if registry.get(backend_id).is_none() {
             return Err((

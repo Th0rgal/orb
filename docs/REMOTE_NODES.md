@@ -360,7 +360,7 @@ raw command:
 
 - The server plans the node execution from `backend` + `model_override`.
   Nodes run `claude` and `opencode` only (`REMOTE_NODE_HARNESSES`); selecting
-  `grok`, `codex`, `gemini` or `chatgpt_ui` is a `400` naming the supported
+  `grok`, `codex` or `gemini` is a `400` naming the supported
   harnesses **before** any mission exists. Nothing is silently swapped.
 - The harness talks back to this core's model proxy with a key minted for the
   mission (`remote-launch:<node>:<mission>`), delivered in the job env and

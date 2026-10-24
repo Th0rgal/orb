@@ -2386,7 +2386,7 @@ async fn check_backend_preflight(
 
     let cli_path = if matches!(
         backend_id.as_str(),
-        "claudecode" | "codex" | "antigravity" | "chatgpt_ui" | "vibe"
+        "claudecode" | "codex" | "antigravity" | "vibe"
     ) {
         state
             .backend_configs
@@ -2395,11 +2395,7 @@ async fn check_backend_preflight(
             .and_then(|config| {
                 config
                     .settings
-                    .get(if backend_id == "chatgpt_ui" {
-                        "driver_path"
-                    } else {
-                        "cli_path"
-                    })
+                    .get("cli_path")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             })

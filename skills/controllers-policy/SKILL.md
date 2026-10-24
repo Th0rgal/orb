@@ -407,7 +407,7 @@ laisses pourrir/escalader est une erreur de supervision.
 
 Discover `list_cloud_accounts` before selecting a cloud service. `start_mission`
 accepts `cloud: {provider, account, repository?, git_ref?, model?}` and a stable
-`idempotency_key`. Providers are `chatgpt`, `grok_bot`, `cursor_cloud`; there is no
+`idempotency_key`. Providers are `grok_bot` and `cursor_cloud`; there is no
 Codex Cloud. Never put credentials or local folder paths in the cloud selection.
 Use `get_cloud_execution` for durable provider state and results. A response
 finishing is not track acceptance. `submission_uncertain` requires reconciliation,
@@ -418,7 +418,7 @@ leases; keep such attempts on the existing executor until supported.
 
 ### Cloud model selection and verified Grok Bot
 
-Use `list_cloud_models` with `provider: chatgpt | cursor_cloud` before selecting a model. Creation accepts `cloud.model` and Cursor `cloud.model_params: [{id,value}]`. Follow-ups accept `cloud_model` and `cloud_model_params` in `send_message_to_mission`; these settings belong to that turn, not earlier turns. Keep the same `client_message_id` on retries, including the same model parameters. Grok Bot has no model selector or attachment capability. Its dedicated Bots share the account computer: archiving an Orb mission must not delete provider files. Never replace an uncertain submission with a new mission.
+Use `list_cloud_models` with `provider: cursor_cloud` before selecting a model. Creation accepts `cloud.model` and Cursor `cloud.model_params: [{id,value}]`. Follow-ups accept `cloud_model` and `cloud_model_params` in `send_message_to_mission`; these settings belong to that turn, not earlier turns. Keep the same `client_message_id` on retries, including the same model parameters. Grok Bot has no model selector or attachment capability. Its dedicated Bots share the account computer: archiving an Orb mission must not delete provider files. Never replace an uncertain submission with a new mission.
 
 
 Workspace Git operations (`create_worktree`, `remove_worktree`, `merge_branch`)

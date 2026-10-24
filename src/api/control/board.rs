@@ -105,40 +105,13 @@ enum RetryDisposition {
 enum AutomaticRetry {
     Allowed,
     Suppressed,
-    DifferentChatGptUiProfile(usize),
 }
 
-fn chatgpt_ui_compatibility_profile_slot(output: &str) -> Option<usize> {
-    const INDEX_MARKER: &str = "profile_index=";
-    const LEGACY_MARKER: &str = "compatibility=chatgpt-ui-v2; profile_slot=";
-    let tail = output
-        .split_once(INDEX_MARKER)
-        .or_else(|| output.split_once(LEGACY_MARKER))?
-        .1;
-    let digits = tail
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
-}
-
-fn automatic_retry(
-    task: &BoardTask,
-    terminal_reason: Option<TerminalReason>,
-    output: &str,
-) -> AutomaticRetry {
+fn automatic_retry(terminal_reason: Option<TerminalReason>) -> AutomaticRetry {
     if terminal_reason.is_some_and(TerminalReason::requires_external_recovery) {
         return AutomaticRetry::Suppressed;
     }
-    if task.backend != "chatgpt_ui" {
-        return AutomaticRetry::Allowed;
-    }
-    match terminal_reason {
-        Some(TerminalReason::AuthError | TerminalReason::RateLimited) => AutomaticRetry::Suppressed,
-        _ => chatgpt_ui_compatibility_profile_slot(output)
-            .map(AutomaticRetry::DifferentChatGptUiProfile)
-            .unwrap_or(AutomaticRetry::Allowed),
-    }
+    AutomaticRetry::Allowed
 }
 
 fn persisted_terminal_reason(reason: Option<&str>) -> Option<TerminalReason> {
@@ -168,7 +141,7 @@ fn retry_disposition(task: &BoardTask, preflight: &RetryPreflight) -> RetryDispo
         max_attempts: MAX_ATTEMPTS,
         requires_external_recovery: false,
         preflight_merged: merged,
-        chatgpt_ui_blocked: false,
+        retry_suppressed: false,
     }) {
         RetryDisposition::Spawn
     } else {
@@ -1140,33 +1113,6 @@ async fn replay_pending_board_outbox(
             }
             continue;
         }
-        if matches!(item.delivery_kind.as_str(), "spawn" | "retry") {
-            if let Some(task_id) = item.task_id {
-                match mission_store.get_board_task(task_id).await {
-                    Ok(Some(task)) => {
-                        if let Some(profile_slot) = task
-                            .prior_result_digest
-                            .as_deref()
-                            .and_then(chatgpt_ui_compatibility_profile_slot)
-                        {
-                            crate::api::runners::chatgpt_ui::profile_pool::exclude_profile_for_mission(
-                                target,
-                                profile_slot,
-                            );
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            task = %task_id,
-                            target = %target,
-                            "board: could not restore ChatGPT UI retry requirement before outbox replay: {error}"
-                        );
-                        continue;
-                    }
-                }
-            }
-        }
         let _ = dispatch_board_outbox_item(
             mission_store,
             cmd_tx,
@@ -1511,16 +1457,6 @@ pub async fn scheduler_pass(
                     if seconds_since(&task.updated_at) > STUCK_PENDING_SECS {
                         tracing::info!(task = %task.task_key, worker = %worker_id,
                             "board: re-kicking stuck pending worker");
-                        if let Some(profile_slot) = task
-                            .prior_result_digest
-                            .as_deref()
-                            .and_then(chatgpt_ui_compatibility_profile_slot)
-                        {
-                            crate::api::runners::chatgpt_ui::profile_pool::exclude_profile_for_mission(
-                                worker_id,
-                                profile_slot,
-                            );
-                        }
                         let prompt = format!(
                             "{}{}",
                             retry_prompt(task, &RetryPreflight::NothingFound),
@@ -2060,17 +1996,6 @@ async fn spawn_task_worker(
         }
     }
 
-    if let Some(profile_slot) = task
-        .prior_result_digest
-        .as_deref()
-        .and_then(chatgpt_ui_compatibility_profile_slot)
-    {
-        crate::api::runners::chatgpt_ui::profile_pool::exclude_profile_for_mission(
-            mission.id,
-            profile_slot,
-        );
-    }
-
     let mut t = task.clone();
     t.model_override = model_override;
     t.worker_mission_id = Some(mission.id);
@@ -2138,7 +2063,7 @@ fn eligible_for_automatic_retry(
             max_attempts: MAX_ATTEMPTS,
             requires_external_recovery: task.risk_class.eq_ignore_ascii_case("high"),
             preflight_merged: false,
-            chatgpt_ui_blocked: retry == AutomaticRetry::Suppressed,
+            retry_suppressed: retry == AutomaticRetry::Suppressed,
         })
 }
 
@@ -2153,11 +2078,10 @@ async fn settle_task(
     output: &str,
     terminal_reason: Option<TerminalReason>,
 ) {
-    let retry = automatic_retry(&task, terminal_reason, output);
+    let retry = automatic_retry(terminal_reason);
     let terminal_class = match terminal_reason {
         Some(TerminalReason::AuthError) => "auth",
         Some(TerminalReason::RateLimited) => "rate_limited",
-        _ if matches!(retry, AutomaticRetry::DifferentChatGptUiProfile(_)) => "compatibility",
         _ => match outcome {
             BoardTaskOutcome::Success => "success",
             BoardTaskOutcome::Blocked => "blocked",
@@ -3199,12 +3123,8 @@ mod tests {
             .await
             .expect("list task")
             .remove(0);
-        task.backend = "chatgpt_ui".into();
         task.status = BoardTaskStatus::Running;
         task.worker_mission_id = Some(worker.id);
-        task.prior_result_digest = Some(
-            "chatgpt_ui: compatibility=chatgpt-ui-v2; profile_slot=4; selector mismatch".into(),
-        );
         task.attempts = 1;
         store
             .save_board_task(&task)
@@ -3258,13 +3178,6 @@ mod tests {
             .expect("pending outbox");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].idempotency_key, retry_key);
-        assert_eq!(
-            crate::api::runners::chatgpt_ui::profile_pool::take_excluded_profile_for_tests(
-                worker.id
-            ),
-            Some(4),
-            "durable replay must restore the different-slot requirement before dispatch"
-        );
     }
 
     #[test]
@@ -3796,38 +3709,6 @@ mod tests {
             classify_outcome(Some(TerminalReason::Completed), true, "done"),
             BoardTaskOutcome::Success
         );
-    }
-
-    #[test]
-    fn chatgpt_ui_auth_and_rate_limits_never_auto_retry() {
-        let task = mk("chatgpt-ui-policy", &[], BoardTaskStatus::Running, None);
-        let mut task = task;
-        task.backend = "chatgpt_ui".into();
-        assert_eq!(
-            automatic_retry(&task, Some(TerminalReason::AuthError), "login required"),
-            AutomaticRetry::Suppressed
-        );
-        assert_eq!(
-            automatic_retry(
-                &task,
-                Some(TerminalReason::RateLimited),
-                "allowance exhausted"
-            ),
-            AutomaticRetry::Suppressed
-        );
-    }
-
-    #[test]
-    fn chatgpt_ui_compatibility_retry_carries_failed_slot() {
-        let task = mk("chatgpt-ui-policy", &[], BoardTaskStatus::Running, None);
-        let mut task = task;
-        task.backend = "chatgpt_ui".into();
-        let output = "chatgpt_ui: compatibility=chatgpt-ui-v2; profile_slot=3; profile_index=2; selector mismatch";
-        assert_eq!(
-            automatic_retry(&task, Some(TerminalReason::LlmError), output),
-            AutomaticRetry::DifferentChatGptUiProfile(2)
-        );
-        assert_eq!(chatgpt_ui_compatibility_profile_slot(output), Some(2));
     }
 
     #[test]

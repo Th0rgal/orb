@@ -6,8 +6,6 @@
 //! shrink down to orchestration (dispatch, retry/fallback, TerminalReason).
 
 pub(crate) mod antigravity;
-pub(crate) mod chatgpt_ui;
-pub(crate) mod chatgpt_ui_jobs;
 pub(crate) mod claudecode;
 pub(crate) mod codex;
 pub(crate) mod errors;
@@ -189,7 +187,6 @@ impl HarnessRunner for AntigravityRunner {
         Box::pin(antigravity::run(ctx))
     }
 }
-pub(crate) struct ChatGptUiRunner;
 
 impl HarnessRunner for ClaudeCodeRunner {
     fn name(&self) -> &'static str {
@@ -354,27 +351,6 @@ impl HarnessRunner for GrokRunner {
     }
 }
 
-impl HarnessRunner for ChatGptUiRunner {
-    fn name(&self) -> &'static str {
-        "chatgpt_ui"
-    }
-
-    fn run_turn<'a>(
-        &'a self,
-        ctx: TurnContext<'a>,
-    ) -> Pin<Box<dyn Future<Output = AgentResult> + Send + 'a>> {
-        Box::pin(chatgpt_ui::run_chatgpt_ui_turn(
-            ctx.work_dir,
-            ctx.message,
-            ctx.model,
-            ctx.mission_id,
-            ctx.events_tx,
-            ctx.cancel,
-            ctx.app_working_dir,
-        ))
-    }
-}
-
 /// Resolve a backend id to its turn runner.
 pub(crate) fn runner_for(backend_id: &str) -> Option<&'static dyn HarnessRunner> {
     match backend_id {
@@ -384,7 +360,6 @@ pub(crate) fn runner_for(backend_id: &str) -> Option<&'static dyn HarnessRunner>
         "grok" => Some(&GrokRunner),
         "antigravity" => Some(&AntigravityRunner),
         "vibe" => Some(&VibeRunner),
-        "chatgpt_ui" => Some(&ChatGptUiRunner),
         _ => None,
     }
 }
@@ -617,7 +592,6 @@ mod tests {
             "grok",
             "antigravity",
             "vibe",
-            "chatgpt_ui",
         ] {
             let runner = runner_for(backend).expect("runner exists");
             assert_eq!(runner.name(), backend);
@@ -634,7 +608,7 @@ mod tests {
             runner_for("codex").unwrap().mid_turn_kind(),
             MidTurnKind::CodexAppServer
         );
-        for backend in ["opencode", "grok", "chatgpt_ui"] {
+        for backend in ["opencode", "grok"] {
             assert_eq!(
                 runner_for(backend).unwrap().mid_turn_kind(),
                 MidTurnKind::None

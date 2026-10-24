@@ -361,7 +361,7 @@ pub struct BoardRetry {
     pub max_attempts: u32,
     pub requires_external_recovery: bool,
     pub preflight_merged: bool,
-    pub chatgpt_ui_blocked: bool,
+    pub retry_suppressed: bool,
 }
 
 pub fn board_retry_allowed(input: BoardRetry) -> bool {
@@ -371,7 +371,7 @@ pub fn board_retry_allowed(input: BoardRetry) -> bool {
             input.max_attempts,
             u8::from(input.requires_external_recovery),
             u8::from(input.preflight_merged),
-            u8::from(input.chatgpt_ui_blocked),
+            u8::from(input.retry_suppressed),
         ) != 0
     }
 }
@@ -1342,21 +1342,21 @@ mod tests {
             max_attempts: 5,
             requires_external_recovery: false,
             preflight_merged: false,
-            chatgpt_ui_blocked: false,
+            retry_suppressed: false,
         }));
         assert!(!board_retry_allowed(BoardRetry {
             attempts: 5,
             max_attempts: 5,
             requires_external_recovery: false,
             preflight_merged: false,
-            chatgpt_ui_blocked: false,
+            retry_suppressed: false,
         }));
         assert!(!board_retry_allowed(BoardRetry {
             attempts: 0,
             max_attempts: 0,
             requires_external_recovery: false,
             preflight_merged: false,
-            chatgpt_ui_blocked: false,
+            retry_suppressed: false,
         }));
         assert!(board_slots_available(BoardSlots {
             max_parallel: 8,

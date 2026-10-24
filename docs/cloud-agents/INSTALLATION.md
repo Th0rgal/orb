@@ -1,5 +1,9 @@
 # Orb cloud installation — 2026-09-26
 
+> Historical record. The ChatGPT web-UI cloud agent and `chatgpt_ui` harness
+> described here have since been removed; ChatGPT entries are kept only as
+> rollout evidence.
+
 Core was deployed through the guarded `/api/system/deploy` endpoint on
 `agent-core`, without forcing past active missions. Production and
 `hermes-assistant` passed service health checks after restart.

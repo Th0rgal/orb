@@ -29,11 +29,11 @@
       "text": "Here is the rebuilt PDF with the updated cover:"
     },
     {
-      "name": "ChatGPT UI downloads, relative without ./ (prod 3054114)",
-      "input": "<file path=\"chatgpt-ui-downloads/br_s3_v29_sieve_audit.py\" name=\"br_s3_v29_sieve_audit.py\" />\n\n<file path=\"chatgpt-ui-downloads/br_s3_v29_sieve_audit.json\" name=\"br_s3_v29_sieve_audit.json\" />",
+      "name": "Downloads, relative without ./ (prod 3054114)",
+      "input": "<file path=\"mission-downloads/br_s3_v29_sieve_audit.py\" name=\"br_s3_v29_sieve_audit.py\" />\n\n<file path=\"mission-downloads/br_s3_v29_sieve_audit.json\" name=\"br_s3_v29_sieve_audit.json\" />",
       "refs": [
-        {"type": "file", "path": "chatgpt-ui-downloads/br_s3_v29_sieve_audit.py", "label": "br_s3_v29_sieve_audit.py"},
-        {"type": "file", "path": "chatgpt-ui-downloads/br_s3_v29_sieve_audit.json", "label": "br_s3_v29_sieve_audit.json"}
+        {"type": "file", "path": "mission-downloads/br_s3_v29_sieve_audit.py", "label": "br_s3_v29_sieve_audit.py"},
+        {"type": "file", "path": "mission-downloads/br_s3_v29_sieve_audit.json", "label": "br_s3_v29_sieve_audit.json"}
       ],
       "text": ""
     },

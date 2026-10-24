@@ -303,7 +303,6 @@ async fn authorize(
         if matches!(
             tool.definition.name.as_str(),
             "get_compute_fleet"
-                | "get_chatgpt_ui_pool_status"
                 | "list_workspaces"
                 | "get_workspace"
                 | "create_workspace"

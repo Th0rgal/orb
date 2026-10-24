@@ -144,7 +144,7 @@ struct OrbForkSheet: View {
         do {
             let catalog = try await OrbReadCache.agentCatalog()
             let response = catalog["backends"]
-            backends = (response.items.isEmpty ? response["backends"].items : response.items).filter { $0.selfID != "chatgpt_ui" }
+            backends = response.items.isEmpty ? response["backends"].items : response.items
             modelsMap = catalog["models"]["backends"]
             if backend.isEmpty {
                 backend = mission["backend"].text.isEmpty ? (backends.first?.selfID ?? "") : mission["backend"].text

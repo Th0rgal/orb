@@ -60,7 +60,7 @@ class ProjectSkillsTest(unittest.TestCase):
         for native in set(skills.NATIVE.values()):
             self.assertFalse((self.cwd / native / 'orb-marker').is_symlink())
         shutil.rmtree(self.source / 'skills')
-        self.prepare('chatgpt_ui')
+        self.prepare('unknown')
         self.assertEqual(json.loads((self.cwd / skills.MANIFEST).read_text())['entries'], {})
 
     def test_cleanup_phase_removes_stale_entries_before_library_takes_old_name(self):
@@ -354,11 +354,10 @@ class ProjectSkillsTest(unittest.TestCase):
         self.assertIn('Edited original.', (copy / 'SKILL.md').read_text())
 
     def test_unsupported_harness_fails_only_when_skills_exist(self):
-        self.assertEqual(self.prepare('chatgpt_ui')['skills'], 0)
+        self.assertEqual(self.prepare('unknown')['skills'], 0)
         self.skill()
-        for harness in ('unknown', 'chatgpt_ui'):
-            with self.assertRaisesRegex(ValueError, 'no supported'):
-                self.prepare(harness)
+        with self.assertRaisesRegex(ValueError, 'no supported'):
+            self.prepare('unknown')
 
     def test_grok_fails_clearly_when_trust_or_configuration_hides_skills(self):
         self.skill()

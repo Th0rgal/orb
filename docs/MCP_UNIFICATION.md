@@ -2,6 +2,9 @@
 
 Core/Hermes production cutover and fleet `sandboxed-mcp` rollout are active in
 production (`agent-core`), with suffixed `-dev` companions on development.
+
+> The ChatGPT web-UI cloud agent has since been removed. ChatGPT entries in the
+> validation log below are historical evidence only.
 Packaged Orb rollout and retirement of legacy companion binaries remain the final
 release gates tracked below.
 
@@ -82,7 +85,7 @@ of legacy binaries/configuration references remain separate release gates.
 - Gemini live validation was explicitly waived by the operator.
 - Exercise five harnesses on Core, old-agent and local; capability absence or
   blocked authentication is not a passing test.
-- Exercise real ChatGPT, GrokBot and Cursor cloud lifecycles, retry, reconnect,
+- Exercise real GrokBot and Cursor cloud lifecycles, retry, reconnect,
   cancellation, expiry, revocation and crash recovery on dedicated test missions.
 - Verify Verity continuity read-only. Its last observed remote run stopped at
   the node's 7,200-second timeout; do not mistake that for MCP test success.

@@ -2,7 +2,7 @@
 # For AI Agents and LLMs
 # https://orb.thomas.md (formerly https://sandboxed.sh)
 
-> Orb: All your AI providers, machines, and agent harnesses in one place. Connect subscriptions, API keys, and your own hardware to your machines and orchestrate AI coding agents (Claude Code, Codex, Antigravity (`agy`), OpenCode, and Grok) and cloud agents (Hermes, ChatGPT, Grok Bot, Cursor Cloud) on macOS, iOS, and Web.
+> Orb: All your AI providers, machines, and agent harnesses in one place. Connect subscriptions, API keys, and your own hardware to your machines and orchestrate AI coding agents (Claude Code, Codex, Antigravity (`agy`), OpenCode, and Grok) and cloud agents (Hermes, Grok Bot, Cursor Cloud) on macOS, iOS, and Web.
 > Note: `sandboxed.sh` is the former name of the project and is now the Rust backend (`sandboxed-sh`) to the Orb clients.
 
 ## How to Access Documentation as Raw Markdown
@@ -36,7 +36,7 @@ All pages are available as raw markdown:
 ### Three Execution Modes
 1. **Your computer (`placement: "client"`)**: Orb Desktop spawns local CLIs (`claude`, `codex`, `agy`, `opencode`, `grok`) on macOS in `~/.orb/local-runs/<mission-id>` while syncing transcripts and `@context` to Core.
 2. **Your private cloud (`core` or `remote_node_id`)**: Core or leased `sandboxed-node` machines run harnesses inside per-mission host directories or `systemd-nspawn` containers under `missions.slice` cgroups.
-3. **Cloud agents**: Core adapters connect to durable **Hermes** coordinator sessions, **ChatGPT** web profiles, **Grok Bot**, or **Cursor Cloud**.
+3. **Cloud agents**: Core adapters connect to durable **Hermes** coordinator sessions, **Grok Bot**, or **Cursor Cloud**.
 
 ### Key API Endpoints
 ```http

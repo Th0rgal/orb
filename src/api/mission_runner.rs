@@ -4112,10 +4112,6 @@ pub(crate) async fn run_mission_turn(
         // confusing chdir error from the rejected-CLI path. See prod
         // mission 1aef657a (2026-05-16).
         config.default_model = Some(resolve_grok_default_model());
-    } else if backend_id == "chatgpt_ui" && model_override.is_none() {
-        // Model labels in the web UI are account/rollout dependent. Only use
-        // an explicit operator setting; never claim a hard-coded model exists.
-        config.default_model = get_backend_string_setting("chatgpt_ui", "model");
     }
     tracing::info!(
         mission_id = %mission_id,
@@ -4659,7 +4655,7 @@ pub(crate) async fn run_mission_turn(
             // session and --session/--continue must fire.
             is_continuation || has_opencode_session,
         ),
-        "grok" | "codex" | "chatgpt_ui" => (
+        "grok" | "codex" => (
             if is_goal_mode {
                 user_message.clone()
             } else {
@@ -4748,8 +4744,13 @@ pub(crate) async fn run_mission_turn(
             // Don't send Error event - the failure will be emitted as an
             // AssistantMessage with success=false by the caller (control.rs),
             // avoiding duplicate messages.
-            AgentResult::failure(format!("Unsupported backend: {}", backend_id), 0)
-                .with_terminal_reason(TerminalReason::LlmError)
+            AgentResult::failure(
+                crate::backend::retired_backend_error(&backend_id)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Unsupported backend: {}", backend_id)),
+                0,
+            )
+            .with_terminal_reason(TerminalReason::LlmError)
         }
     };
 
@@ -4858,41 +4859,6 @@ pub(crate) fn get_backend_string_setting(backend_id: &str, key: &str) -> Option<
         }
     }
     None
-}
-
-/// Read a string-array setting from a backend's config entry.
-pub(crate) fn get_backend_string_list_setting(backend_id: &str, key: &str) -> Vec<String> {
-    let Some(configs) = read_backend_configs() else {
-        return Vec::new();
-    };
-    configs
-        .into_iter()
-        .find_map(|config| {
-            (config.get("id")?.as_str()? == backend_id).then(|| {
-                config
-                    .get("settings")
-                    .and_then(|settings| settings.get(key))
-                    .and_then(|value| value.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|value| value.as_str())
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-        })
-        .unwrap_or_default()
-}
-
-/// Read an unsigned integer setting from a backend's config entry.
-pub(crate) fn get_backend_u64_setting(backend_id: &str, key: &str) -> Option<u64> {
-    let configs = read_backend_configs()?;
-    configs.into_iter().find_map(|config| {
-        (config.get("id")?.as_str()? == backend_id)
-            .then(|| config.get("settings")?.get(key)?.as_u64())
-            .flatten()
-    })
 }
 
 /// Read a boolean setting from a backend's config entry.
@@ -9013,33 +8979,6 @@ pub(crate) fn resolve_host_executable(program: &str) -> Option<std::path::PathBu
     None
 }
 
-fn host_executable_available(program: &str) -> bool {
-    let executable = if std::path::Path::new(program).components().count() > 1 {
-        let path = std::path::PathBuf::from(program);
-        path.is_file().then_some(path)
-    } else {
-        std::env::var_os("PATH").and_then(|path| {
-            std::env::split_paths(&path)
-                .map(|dir| dir.join(program))
-                .find(|candidate| candidate.is_file())
-        })
-    };
-    let Some(executable) = executable else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        executable
-            .metadata()
-            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 pub(crate) const ELF_EM_X86_64: u16 = 62;
 pub(crate) const ELF_EM_AARCH64: u16 = 183;
@@ -9641,39 +9580,6 @@ pub async fn check_backend_prerequisites(
                 }),
             }
         }
-        "chatgpt_ui" => {
-            let driver_available =
-                cli_path.is_some_and(|path| std::path::Path::new(path).is_file());
-            let profile_available = get_backend_string_setting("chatgpt_ui", "profile_dir")
-                .is_some_and(|path| std::path::Path::new(&path).is_dir());
-            let python_path = get_backend_string_setting("chatgpt_ui", "python_path")
-                .unwrap_or_else(|| "python3".to_string());
-            let python_available = host_executable_available(&python_path);
-            let available = driver_available && profile_available && python_available;
-            let mut missing_dependencies = Vec::new();
-            if !driver_available {
-                missing_dependencies.push("configured ChatGPT UI driver".to_string());
-            }
-            if !profile_available {
-                missing_dependencies.push("configured ChatGPT UI profile directory".to_string());
-            }
-            if !python_available {
-                missing_dependencies.push("configured ChatGPT UI Python executable".to_string());
-            }
-            BackendPreflightResult {
-                backend_id: "chatgpt_ui".to_string(),
-                // Authentication cannot be established without opening a
-                // clean browser page. The turn driver performs that check.
-                available,
-                cli_available: available,
-                auto_install_possible: false,
-                missing_dependencies,
-                message: Some(
-                    "Driver, Python executable, and profile directory checked; authentication remains unknown until a clean UI turn"
-                        .to_string(),
-                ),
-            }
-        }
         _ => BackendPreflightResult {
             backend_id: backend_id.to_string(),
             available: false,
@@ -9681,7 +9587,7 @@ pub async fn check_backend_prerequisites(
             auto_install_possible: false,
             missing_dependencies: vec![format!("unknown backend: {}", backend_id)],
             message: Some(format!(
-                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, grok, antigravity, vibe, chatgpt_ui",
+                "Unknown backend '{}'. Supported backends: claudecode, opencode, codex, grok, antigravity, vibe",
                 backend_id
             )),
         },
@@ -10086,15 +9992,7 @@ impl From<&MissionRunner> for RunningMissionInfo {
             history_len: runner.history.len(),
             seconds_since_activity,
             tool_call_in_flight,
-            health: if runner.backend_id == "chatgpt_ui" && runner.state == MissionRunState::Running
-            {
-                // GPT Pro can keep its visible DOM at `Pro thinking` for the
-                // whole hidden reasoning phase. The runner/driver owns an
-                // absolute deadline, so DOM-event age is not stall evidence.
-                MissionHealth::Healthy
-            } else {
-                running_health(runner.state, seconds_since_activity, tool_call_in_flight)
-            },
+            health: running_health(runner.state, seconds_since_activity, tool_call_in_flight),
             expected_deliverables: runner.deliverables.deliverables.len(),
             current_activity: runner.current_activity.clone(),
             subtask_total: runner.subtasks.len(),

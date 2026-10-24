@@ -619,12 +619,11 @@ impl Config {
                     "antigravity",
                     "vibe",
                     "codex",
-                    "chatgpt_ui",
                 ]
                 .contains(&backend.as_str())
             {
                 tracing::warn!(
-                    "Invalid DEFAULT_BACKEND '{}'. Expected one of: claudecode, opencode, grok, antigravity, vibe, codex, chatgpt_ui",
+                    "Invalid DEFAULT_BACKEND '{}'. Expected one of: claudecode, opencode, grok, antigravity, vibe, codex",
                     v
                 );
                 None

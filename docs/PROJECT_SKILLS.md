@@ -53,7 +53,7 @@ Native discovery uses these managed entries in the execution directory:
 | OpenCode | `.opencode/skills/<name>` |
 | Antigravity | `.agents/skills/<name>` |
 | Grok | `.grok/skills/<name>` |
-| ChatGPT UI / hosted agents | No project filesystem discovery integration; unsupported |
+| Hosted cloud agents | No project filesystem discovery integration; unsupported |
 
 Entries normally link individual skill folders to the live synchronized tree.
 When links cannot be created, Orb generates source-labelled copies and refreshes

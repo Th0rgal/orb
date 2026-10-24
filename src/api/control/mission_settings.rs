@@ -655,6 +655,11 @@ pub async fn update_mission_settings(
     let effective_backend = backend.clone().unwrap_or_else(|| current.backend.clone());
 
     {
+        if backend_changed {
+            if let Some(message) = crate::backend::retired_backend_error(&effective_backend) {
+                return Err((StatusCode::BAD_REQUEST, message.to_string()));
+            }
+        }
         let registry = state.backend_registry.read().await;
         if registry.get(&effective_backend).is_none() {
             return Err((
@@ -714,7 +719,7 @@ pub async fn update_mission_settings(
     if let Some(ref agent_name) = effective_agent {
         let skip_validation = matches!(
             effective_backend.as_str(),
-            "claudecode" | "codex" | "grok" | "antigravity" | "vibe" | "chatgpt_ui"
+            "claudecode" | "codex" | "grok" | "antigravity" | "vibe"
         );
         if !skip_validation {
             super::super::library::validate_agent_exists(

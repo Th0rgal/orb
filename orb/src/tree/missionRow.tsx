@@ -6,7 +6,7 @@ import type { RowData } from "./TreeView";
 
 /** Known placement only: remote node, then workspace. Never invented. */
 export function missionMachine(m: { backend?: string; remote_job?: { node_id?: string } | null; remote_node_id?: string | null; workspace_name?: string | null }): string | undefined {
-  if (m.backend?.startsWith("cloud_")) return ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[m.backend];
+  if (m.backend?.startsWith("cloud_")) return ({cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[m.backend];
   const id = missionNode(m) ?? m.workspace_name;
   return id ? nodeLabel(id) : undefined;
 }

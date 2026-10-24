@@ -103,7 +103,7 @@ export function ArchitectureDiagram() {
               <code>sandboxed-mcp</code>
             </li>
             <li>
-              <strong>CLIProxyAPI &amp; Cloud:</strong> OAuth token refresh for Claude/Codex/Antigravity + Hermes, ChatGPT, Grok Bot, Cursor Cloud
+              <strong>CLIProxyAPI &amp; Cloud:</strong> OAuth token refresh for Claude/Codex/Antigravity + Hermes, Grok Bot, Cursor Cloud
             </li>
           </ul>
 

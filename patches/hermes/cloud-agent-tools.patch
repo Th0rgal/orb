@@ -10,7 +10,7 @@
 +
 +Discover accounts and effective capabilities with `list_cloud_accounts`. An
 +available account can be selected through `start_mission.cloud` with provider
-+`chatgpt`, `grok_bot`, or `cursor_cloud`, an account reference, optional supported
++`grok_bot` or `cursor_cloud`, an account reference, optional supported
 +model/repository/ref, and a stable `idempotency_key`. Never send credentials or
 +local directory contents in that selection. Connecting an account starts no work.
 +
