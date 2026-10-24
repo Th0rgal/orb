@@ -852,6 +852,7 @@ fn native_schedule_owner_ended(
 #[cfg(test)]
 mod native_schedule_bounds_tests {
     use super::*;
+    use crate::api::mission_store::{CommandSource, TriggerType};
 
     fn schedule(expires: &str) -> mission_store::Automation {
         mission_store::Automation {
