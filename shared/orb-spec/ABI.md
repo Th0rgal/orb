@@ -41,13 +41,15 @@ parameter names, unsupported types, and `sat_u8` on anything other than `uint8_t
 
 ## Changing a kernel signature
 
-1. Change the Lean spec and regenerate `cabi/orb_kernel_unboxed.c`.
+1. Change the Lean spec and regenerate `cabi/orb_kernel_unboxed.c` with
+   `scripts/gen_orb_kernel_unboxed.py` (CI runs it with `--check`).
 2. Update the entry in `kernel_abi.json` and run the generator.
 3. Update the matching `external fun` in `OrbKernel.kt`. The lint compares its
    arity and Kotlin types with the manifest.
 4. Rebuild the host test library
    `android_dashboard/app/src/test/resources/jni/liborb_kernel.so` and the
-   Android `jniLibs` (NDK).
+   Android `jniLibs` with `scripts/build_android_kernel_so.sh` (NDK; CI checks
+   the recorded source hash and the exported ABI with `--check`).
 
 For example, `leansys_sse_frame_scan` takes six arguments. The last,
 `lastByte`, is the final byte of the frame, so a frame can only be admitted

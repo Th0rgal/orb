@@ -17,7 +17,7 @@ concurrency:
 jobs:
   kernel-abi:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,6 +27,19 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Install Elan (Lean toolchains come from lean-toolchain files)
+        run: |
+          curl --retry 5 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+      - name: Lean build (sorry is an error) and axiom / vacuity audit
+        working-directory: lean
+        run: |
+          set -euo pipefail
+          lake build
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
+      - name: Vendored C matches Lean (Orb.Kernel + pinned lean-sys)
+        run: python3 scripts/gen_orb_kernel_unboxed.py --check
       - name: Generated bindings are up to date
         run: python3 scripts/gen_kernel_bindings.py --check
       - name: Kernel call-site lint
@@ -54,3 +67,5 @@ jobs:
           assert not missing, f"missing exports: {missing}"
           print(f"{len(want)} manifest symbols exported")
           PY
+      - name: Android JNI libraries rebuild with the NDK and match sources / ABI
+        run: scripts/build_android_kernel_so.sh --check

@@ -8,3 +8,6 @@ authors = ["sandboxed.sh Contributors"]
 
 [dependencies]
 lean-sys-cabi = { git = "https://github.com/Th0rgal/lean-sys.git", rev = "c51f7f331e84c96f4207b91b606ec27b423f5a98" }
+
+[dev-dependencies]
+serde_json = "1"

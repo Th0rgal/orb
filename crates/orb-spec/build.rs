@@ -4,20 +4,43 @@ use std::{
     process::Command,
 };
 
-fn find_elan_tool(tool_name: &str) -> Option<PathBuf> {
+/// `leanprover/lean4:v4.31.0` -> `4.31.0`.
+fn pinned_lean_version(lean_dir: &Path) -> String {
+    let path = lean_dir.join("lean-toolchain");
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    raw.trim()
+        .rsplit(':')
+        .next()
+        .map(|v| v.trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| panic!("unparseable {}: {raw:?}", path.display()))
+}
+
+/// True when `lean --version` (run from `lean_dir`, so an elan shim resolves
+/// `lean-toolchain`) reports exactly `version`.
+fn lean_matches(lean: &Path, lean_dir: &Path, version: &str) -> bool {
+    Command::new(lean)
+        .current_dir(lean_dir)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| {
+            String::from_utf8_lossy(&o.stdout).contains(&format!("version {version},"))
+        })
+}
+
+/// Finds a `lean` binary whose version matches `lean/lean-toolchain`.
+/// Candidates: `$ORB_LEAN`, `$PATH`, then elan homes (`bin/` shim and
+/// `toolchains/*` whose directory name ends in the pinned version).
+fn find_lean(lean_dir: &Path, version: &str) -> Option<PathBuf> {
+    let mut cands = Vec::new();
     if let Ok(explicit) = env::var("ORB_LEAN") {
-        let path = PathBuf::from(explicit);
-        if path.is_file() && path.file_name().and_then(|s| s.to_str()) == Some(tool_name) {
-            return Some(path);
-        }
+        cands.push(PathBuf::from(explicit));
     }
     if let Ok(path_var) = env::var("PATH") {
-        for dir in env::split_paths(&path_var) {
-            let cand = dir.join(tool_name);
-            if cand.is_file() {
-                return Some(cand);
-            }
-        }
+        cands.extend(env::split_paths(&path_var).map(|d| d.join("lean")));
     }
     let mut roots = Vec::new();
     if let Ok(elan_home) = env::var("ELAN_HOME") {
@@ -27,22 +50,20 @@ fn find_elan_tool(tool_name: &str) -> Option<PathBuf> {
         roots.push(PathBuf::from(home).join(".elan"));
     }
     roots.push(PathBuf::from("/var/lib/sandboxed-node/caches/elan"));
+    let tc_suffix = format!("v{version}");
     for root in roots {
-        let bin_cand = root.join("bin").join(tool_name);
-        if bin_cand.is_file() {
-            return Some(bin_cand);
-        }
-        let tc_dir = root.join("toolchains");
-        if let Ok(entries) = fs::read_dir(&tc_dir) {
+        cands.push(root.join("bin").join("lean"));
+        if let Ok(entries) = fs::read_dir(root.join("toolchains")) {
             for entry in entries.flatten() {
-                let cand = entry.path().join("bin").join(tool_name);
-                if cand.is_file() {
-                    return Some(cand);
+                if entry.file_name().to_string_lossy().ends_with(&tc_suffix) {
+                    cands.push(entry.path().join("bin").join("lean"));
                 }
             }
         }
     }
-    None
+    cands
+        .into_iter()
+        .find(|c| c.is_file() && lean_matches(c, lean_dir, version))
 }
 
 const ORB_EXPORTS: &[&str] = &[
@@ -113,12 +134,18 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
     let gc_obj_path = out_dir.join("Orb_Kernel_gc.o");
     let lib_path = out_dir.join("liborb_spec_cabi.a");
 
-    let lean_bin = find_elan_tool("lean").unwrap_or_else(|| {
-        panic!("lean not found; set ORB_LEAN or install elan (leanprover/lean4:v4.31.0)")
+    let version = pinned_lean_version(&lean_dir);
+    let lean_bin = find_lean(&lean_dir, &version).unwrap_or_else(|| {
+        panic!(
+            "no lean {version} found (lean/lean-toolchain); set ORB_LEAN or run \
+             `elan toolchain install leanprover/lean4:v{version}`"
+        )
     });
 
     let kernel_status = Command::new(&lean_bin)
         .current_dir(&lean_dir)
+        // `declaration uses 'sorry'` is only a warning; make it fatal.
+        .arg("-DwarningAsError=true")
         .arg("Orb/Kernel.lean")
         .arg("-o")
         .arg(&kernel_olean)
@@ -128,12 +155,13 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
         .unwrap_or_else(|e| panic!("failed to run lean on Orb/Kernel.lean: {e}"));
     assert!(
         kernel_status.success() && spec_c_path.is_file(),
-        "lean failed to compile Orb/Kernel.lean to C"
+        "lean failed to compile Orb/Kernel.lean to C (warnings, incl. sorry, are errors)"
     );
 
     let spec_status = Command::new(&lean_bin)
         .current_dir(&lean_dir)
         .env("LEAN_PATH", out_dir)
+        .arg("-DwarningAsError=true")
         .arg("Orb/Spec.lean")
         .arg("-o")
         .arg(&spec_olean)
@@ -141,7 +169,7 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
         .unwrap_or_else(|e| panic!("failed to run lean on Orb/Spec.lean: {e}"));
     assert!(
         spec_status.success() && spec_olean.is_file(),
-        "lean failed to typecheck Orb/Spec.lean (0 sorryAx required)"
+        "lean failed to typecheck Orb/Spec.lean (warnings, incl. sorry, are errors)"
     );
 
     let lean_prefix = Command::new(&lean_bin)
