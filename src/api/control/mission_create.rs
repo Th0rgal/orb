@@ -240,6 +240,13 @@ pub(super) fn validate_fast_mode(
     if backend != "codex" {
         return Err("fast_mode is only supported by the Codex backend".to_string());
     }
+    if model.is_none() {
+        return Err(format!(
+            "fast_mode requires an explicit model_override; without one the Codex default '{}' would be used. Pass model_override with a GPT-6.1, GPT-6, GPT-5.6, GPT-5.5, or GPT-5.4 model (e.g. model_override=\"{}\")",
+            resolve_codex_default_model(),
+            resolve_codex_default_model()
+        ));
+    }
     if !codex_fast_mode_model_supported(model) {
         return Err(format!(
             "fast_mode requires an explicit supported model; use a GPT-6.1, GPT-6, GPT-5.6, GPT-5.5, or GPT-5.4 model (received '{}')",
@@ -1622,7 +1629,16 @@ pub(in crate::api) async fn create_mission_inner(
         if registry.get(backend_id).is_none() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Unknown backend: {}", backend_id),
+                format!(
+                    "Unknown backend: {}. Use one of: {}",
+                    backend_id,
+                    registry
+                        .list()
+                        .into_iter()
+                        .map(|b| b.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             ));
         }
     }

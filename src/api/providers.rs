@@ -2534,7 +2534,7 @@ pub async fn validate_model_override(
                         && !provider.models.iter().any(|m| m.id == model_id)
                     {
                         return Err(format!(
-                            "Model '{}' not found for provider '{}'. Available models: {}",
+                            "Model '{}' not found for provider '{}'. Pass model_override=<provider>/<model> with one of these models: {}",
                             model_id,
                             provider_id,
                             provider
