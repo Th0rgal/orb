@@ -107,9 +107,13 @@ def extract(src):
 
 def transform(*sources):
     funcs = [f for src in sources for f in extract(src)]
-    # Keep the public C symbols and the private helpers they reach.
+    # Keep every symbol kernel_abi.json declares plus the helpers they reach.
     texts = dict(funcs)
-    keep = {n for n, _ in funcs if n.startswith(("orb_", "leansys_"))}
+    manifest = json.loads((ROOT / "shared/orb-spec/kernel_abi.json").read_text())
+    keep = {f["name"] for f in manifest["functions"]}
+    missing = sorted(keep - texts.keys())
+    if missing:
+        sys.exit(f"kernel_abi.json symbols not produced by Lean: {missing}")
     todo = list(keep)
     while todo:
         for callee in re.findall(r"\b(l_\w+|lp_\w+)\(", texts[todo.pop()]):
