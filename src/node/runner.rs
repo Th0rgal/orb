@@ -2017,16 +2017,26 @@ pub async fn read_log_chunk(
         let len = file.metadata().ok()?.len();
         let start = offset.min(len);
         let want = (len - start).min(max_bytes);
-        debug_assert!(crate::orb_spec::log_window_valid(
-            crate::orb_spec::LogWindow {
-                offset: start,
-                req_len: want,
-                max_chunk: max_bytes,
-                hard_cap: LOG_CHUNK_MAX_BYTES,
-                file_size: len,
-                actual_len: want,
-            }
-        ));
+        let window = crate::orb_spec::LogWindow {
+            offset: start,
+            req_len: want,
+            max_chunk: max_bytes,
+            hard_cap: LOG_CHUNK_MAX_BYTES,
+            file_size: len,
+            actual_len: want,
+        };
+        // Enforced in release too: never read a window the verified kernel rejects.
+        if !crate::orb_spec::log_window_valid(window) {
+            tracing::error!(
+                path = %path.display(),
+                offset = start,
+                len = want,
+                max_bytes,
+                file_size = len,
+                "log chunk window rejected by orb_verify_log_window; refusing to read"
+            );
+            return None;
+        }
         file.seek(SeekFrom::Start(start)).ok()?;
         let mut buf = vec![0u8; want as usize];
         let mut read = 0usize;

@@ -7,7 +7,6 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-orb-spec = { path = "../../crates/orb-spec" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 notify = "8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

@@ -1465,6 +1465,7 @@ name = "orb-spec"
 version = "1.3.0"
 dependencies = [
  "lean-sys-cabi",
+ "serde_json",
 ]
 
 [[package]]
