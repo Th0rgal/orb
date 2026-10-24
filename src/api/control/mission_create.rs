@@ -252,6 +252,18 @@ pub(super) fn normalize_string_patch(value: Option<Option<String>>) -> Option<Op
     })
 }
 
+/// Default model recorded on a remote Codex mission that did not pick one.
+/// `None` when the launch is not a typed remote Codex launch.
+pub(super) fn remote_codex_default_model(
+    backend: Option<&str>,
+    remote_node_id: Option<&str>,
+    remote_command: Option<&str>,
+) -> Option<String> {
+    let remote = remote_node_id.is_some_and(|id| !id.trim().is_empty());
+    let raw = remote_command.is_some_and(|c| !c.trim().is_empty());
+    (backend == Some("codex") && remote && !raw).then(resolve_codex_default_model)
+}
+
 pub(super) fn normalize_model_override_for_backend(
     backend: Option<&str>,
     raw_model: &str,
@@ -1601,6 +1613,19 @@ pub(in crate::api) async fn create_mission_inner(
                 format!("Unknown backend: {}", backend_id),
             ));
         }
+    }
+
+    // A remote Codex launch routes through this core's proxy and the node has
+    // no ChatGPT login of its own, so it must run an explicit model. Callers
+    // (agents using start_mission) rarely pass one: resolve the configured
+    // Codex default here and record it on the mission instead of failing
+    // with REMOTE_MODEL_REQUIRED.
+    if model_override.is_none() {
+        model_override = remote_codex_default_model(
+            backend.as_deref(),
+            req.remote_node_id.as_deref(),
+            req.remote_command.as_deref(),
+        );
     }
 
     // Validate model override if provided

@@ -6542,9 +6542,55 @@ fn remote_codex_uses_native_cli_and_secret_env_for_launch_and_resume() {
     assert!(execution.command.contains("service_tier"));
     assert!(plan_remote_harness(None, "codex", Some("gpt-6-astra"), Some("/goal test")).is_ok());
     assert!(execution.command.contains("thread-123"));
-    assert!(plan_remote_harness(None, "codex", None, Some("do it"))
-        .unwrap_err()
-        .starts_with(REMOTE_MODEL_REQUIRED));
+    match plan_remote_harness(None, "codex", None, Some("do it")).unwrap() {
+        RemoteHarnessPlan::Codex { model, .. } => {
+            assert_eq!(model, resolve_codex_default_model())
+        }
+        other => panic!("unexpected plan {other:?}"),
+    }
+}
+
+#[test]
+fn remote_codex_launch_without_model_records_configured_default() {
+    let default = resolve_codex_default_model();
+    assert_eq!(
+        mission_create::remote_codex_default_model(
+            Some("codex"),
+            Some("auto-managed:default"),
+            None
+        ),
+        Some(default.clone())
+    );
+    assert_eq!(
+        mission_create::remote_codex_default_model(
+            Some("codex"),
+            Some("auto-managed:large"),
+            Some("  ")
+        ),
+        Some(default)
+    );
+    // Local launches keep the runner's own default resolution.
+    assert_eq!(
+        mission_create::remote_codex_default_model(Some("codex"), None, None),
+        None
+    );
+    assert_eq!(
+        mission_create::remote_codex_default_model(Some("codex"), Some(" "), None),
+        None
+    );
+    // Raw commands carry their own auth/model.
+    assert_eq!(
+        mission_create::remote_codex_default_model(
+            Some("codex"),
+            Some("ashur"),
+            Some("codex exec x")
+        ),
+        None
+    );
+    assert_eq!(
+        mission_create::remote_codex_default_model(Some("opencode"), Some("ashur"), None),
+        None
+    );
 }
 
 #[test]

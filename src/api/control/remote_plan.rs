@@ -229,7 +229,10 @@ pub(crate) fn plan_remote_harness(
             effort: None,
             fast_mode: false,
             service_tier: None,
-            model: model.ok_or_else(|| format!("{REMOTE_MODEL_REQUIRED}: a Codex remote launch needs model_override"))?,
+            // Nodes have no ChatGPT login: the model is routed through this
+            // core's proxy, so it must be explicit. Fall back to the
+            // configured Codex default rather than failing the launch.
+            model: model.unwrap_or_else(resolve_codex_default_model),
             prompt,
             resume_session_id: None,
         }),
