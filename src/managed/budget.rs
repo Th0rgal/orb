@@ -152,14 +152,20 @@ fn pool_usage_depth(
     })
 }
 
-/// First mission in `lineage` (self first, then ancestors) that has a pool.
+/// First mission in `lineage` (self first, then ancestors) that has a pool
+/// owned by `user` (another tenant's pool is never selected).
 pub fn nearest_pool<'a>(
     lineage: impl IntoIterator<Item = &'a str>,
     pools: &HashMap<String, BudgetPool>,
+    user: &str,
 ) -> Option<String> {
     lineage
         .into_iter()
-        .find(|id| pools.contains_key(*id))
+        .find(|id| {
+            pools
+                .get(*id)
+                .is_some_and(|p| p.owner_user_id.as_deref() == Some(user))
+        })
         .map(str::to_string)
 }
 

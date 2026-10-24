@@ -30,7 +30,11 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 /// `id` then its ancestors (bounded, cycle-safe).
+/// Empty when `id` is not in this store (another tenant's or unknown).
 pub(crate) async fn lineage(store: &Arc<dyn MissionStore>, id: Uuid) -> Vec<String> {
+    if !matches!(store.get_mission(id).await, Ok(Some(_))) {
+        return Vec::new();
+    }
     let mut chain = vec![id];
     let mut cur = id;
     for _ in 0..32 {
@@ -50,14 +54,18 @@ pub(crate) async fn lineage(store: &Arc<dyn MissionStore>, id: Uuid) -> Vec<Stri
 
 /// The pool a mission (existing, or about to be created under `parent`)
 /// draws from.
-pub(crate) async fn pool_for(store: &Arc<dyn MissionStore>, mission: Uuid) -> Option<String> {
+pub(crate) async fn pool_for(
+    store: &Arc<dyn MissionStore>,
+    mission: Uuid,
+    user_id: &str,
+) -> Option<String> {
     let manager = crate::managed::global()?;
     let pools = manager.budget_pools().await;
     if pools.is_empty() {
         return None;
     }
     let chain = lineage(store, mission).await;
-    crate::managed::budget::nearest_pool(chain.iter().map(String::as_str), &pools)
+    crate::managed::budget::nearest_pool(chain.iter().map(String::as_str), &pools, user_id)
 }
 
 /// Re-attach the calling user's pools at or below `changed` to their
@@ -110,8 +118,11 @@ where
         if !chain.iter().skip(1).any(|a| a == changed) {
             continue;
         }
-        let parent =
-            crate::managed::budget::nearest_pool(chain.iter().skip(1).map(String::as_str), pools);
+        let parent = crate::managed::budget::nearest_pool(
+            chain.iter().skip(1).map(String::as_str),
+            pools,
+            user_id,
+        );
         out.push((id.clone(), parent));
     }
     out
@@ -145,6 +156,7 @@ async fn store_and_mission(
 
 pub(crate) async fn view(
     store: &Arc<dyn MissionStore>,
+    user_id: &str,
     id: Uuid,
 ) -> Result<crate::managed::MissionBudgetView, Response> {
     let manager = crate::managed::global().ok_or_else(|| {
@@ -163,7 +175,7 @@ pub(crate) async fn view(
         .map(|m| m.id.to_string())
         .collect();
     Ok(manager
-        .mission_budget(&id.to_string(), &chain, &children)
+        .mission_budget(&id.to_string(), &chain, &children, user_id)
         .await)
 }
 
@@ -176,7 +188,7 @@ async fn get_budget(
         Ok(s) => s,
         Err(r) => return r,
     };
-    match view(&store, id).await {
+    match view(&store, &user.id, id).await {
         Ok(v) => Json(v).into_response(),
         Err(r) => r,
     }
@@ -200,7 +212,7 @@ async fn put_budget(
         Err(r) => return r,
     };
     match set_budget(&store, &user, id, body.budget_usd).await {
-        Ok(()) => match view(&store, id).await {
+        Ok(()) => match view(&store, &user.id, id).await {
             Ok(v) => Json(v).into_response(),
             Err(r) => r,
         },
@@ -225,8 +237,11 @@ pub(crate) async fn set_budget(
     })?;
     let chain = lineage(store, id).await;
     let pools = manager.budget_pools().await;
-    let parent =
-        crate::managed::budget::nearest_pool(chain.iter().skip(1).map(String::as_str), &pools);
+    let parent = crate::managed::budget::nearest_pool(
+        chain.iter().skip(1).map(String::as_str),
+        &pools,
+        &user.id,
+    );
     manager
         .set_mission_budget(&id.to_string(), amount, parent, Some(user.id.clone()))
         .await?;

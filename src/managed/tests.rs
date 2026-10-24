@@ -1266,10 +1266,10 @@ fn nearest_pool_walks_the_lineage_and_amounts_are_validated() {
     let mut pools = HashMap::new();
     pools.insert("gp".to_string(), pool("gp", 1.0, None));
     assert_eq!(
-        budget::nearest_pool(["kid", "parent", "gp"], &pools).as_deref(),
+        budget::nearest_pool(["kid", "parent", "gp"], &pools, "t1").as_deref(),
         Some("gp")
     );
-    assert_eq!(budget::nearest_pool(["x", "y"], &pools), None);
+    assert_eq!(budget::nearest_pool(["x", "y"], &pools, "t1"), None);
     assert!(budget::validate_amount(-1.0).is_err());
     assert!(budget::validate_amount(f64::NAN).is_err());
     assert_eq!(budget::validate_amount(2.5).unwrap(), 2.5);
@@ -1340,13 +1340,13 @@ async fn spawn_and_extend_respect_the_pool_and_sub_budgets() {
     let e = m.extend(&ok.id, 60).await.unwrap_err();
     assert_eq!(e.error, "budget_exceeded");
     // Removing the budget lifts the pool limit (daily cap still applies).
-    m.set_mission_budget("root", None, None, None)
+    m.set_mission_budget("root", None, None, Some("t1".into()))
         .await
         .unwrap();
     assert!(m.pool_usage("root").await.is_none());
     assert!(m.extend(&ok.id, 60).await.is_ok());
     // Persisted across a restart.
-    m.set_mission_budget("root", Some(3.0), None, None)
+    m.set_mission_budget("root", Some(3.0), None, Some("t1".into()))
         .await
         .unwrap();
     let (m2, _) = manager(dir.path(), settings());
@@ -1358,10 +1358,10 @@ async fn spawn_and_extend_respect_the_pool_and_sub_budgets() {
 async fn mission_budget_view_reports_pooled_and_sub_budget_children() {
     let dir = tempfile::tempdir().unwrap();
     let (m, _) = manager(dir.path(), settings());
-    m.set_mission_budget("root", Some(1.0), None, None)
+    m.set_mission_budget("root", Some(1.0), None, Some("t1".into()))
         .await
         .unwrap();
-    m.set_mission_budget("kid2", Some(0.2), Some("root".into()), None)
+    m.set_mission_budget("kid2", Some(0.2), Some("root".into()), Some("t1".into()))
         .await
         .unwrap();
     let v = m
@@ -1369,6 +1369,7 @@ async fn mission_budget_view_reports_pooled_and_sub_budget_children() {
             "root",
             &["root".to_string()],
             &["kid1".to_string(), "kid2".to_string()],
+            "t1",
         )
         .await;
     assert_eq!(v.mode, "own");
@@ -1376,11 +1377,13 @@ async fn mission_budget_view_reports_pooled_and_sub_budget_children() {
     assert_eq!(v.children[1].mode, "sub_budget");
     assert_eq!(v.max_grant_usd, None);
     let kid = m
-        .mission_budget("kid1", &["kid1".to_string(), "root".to_string()], &[])
+        .mission_budget("kid1", &["kid1".to_string(), "root".to_string()], &[], "t1")
         .await;
     assert_eq!((kid.mode, kid.pool_id.as_deref()), ("pooled", Some("root")));
     assert!((kid.max_grant_usd.unwrap() - 0.8).abs() < 1e-9);
-    let none = m.mission_budget("solo", &["solo".to_string()], &[]).await;
+    let none = m
+        .mission_budget("solo", &["solo".to_string()], &[], "t1")
+        .await;
     assert_eq!(none.mode, "none");
 }
 
@@ -1515,7 +1518,7 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
     let (m, _) = manager(dir.path(), s);
     let vm = online_machine_sized(&m, "sib-done", Some("xlarge")).await;
     // Pool too small for the VM's reservation ($0.20): no handover.
-    m.set_mission_budget("parent", Some(0.05), None, None)
+    m.set_mission_budget("parent", Some(0.05), None, Some("t1".into()))
         .await
         .unwrap();
     assert!(m
@@ -1533,7 +1536,7 @@ async fn reusing_an_idle_sibling_vm_respects_the_target_budget() {
         .await
         .is_none());
     // Sub-budget too small: no handover either.
-    m.set_mission_budget("parent", Some(5.0), None, None)
+    m.set_mission_budget("parent", Some(5.0), None, Some("t1".into()))
         .await
         .unwrap();
     assert!(m
@@ -1596,4 +1599,55 @@ fn a_vm_changing_pool_keeps_its_past_cost_on_the_old_pool() {
     let old = budget::pool_usage("old", &pools, &machines, now, &|_| true).unwrap();
     assert!((new.spent_usd - 0.15).abs() < 1e-9, "{new:?}");
     assert!((old.spent_usd - 0.40).abs() < 1e-9);
+}
+
+#[test]
+fn foreign_pools_are_never_selected() {
+    let mut pools = HashMap::new();
+    let mut theirs = pool("gp", 1.0, None);
+    theirs.owner_user_id = Some("t2".into());
+    pools.insert("gp".to_string(), theirs);
+    assert_eq!(budget::nearest_pool(["kid", "gp"], &pools, "t1"), None);
+    assert_eq!(
+        budget::nearest_pool(["kid", "gp"], &pools, "t2").as_deref(),
+        Some("gp")
+    );
+}
+
+#[tokio::test]
+async fn removing_a_sub_budget_moves_its_spend_to_the_parent_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.daily_cap_usd = None;
+    s.max_concurrent = None;
+    let (m, _) = manager(dir.path(), s);
+    m.set_mission_budget("root", Some(5.0), None, Some("t1".into()))
+        .await
+        .unwrap();
+    m.set_mission_budget("kid", Some(1.0), Some("root".into()), Some("t1".into()))
+        .await
+        .unwrap();
+    // A VM that spent $0.30 in the kid pool, then moved to another pool.
+    let vm = online_machine(&m, "kid").await;
+    m.update(&vm.id, |x| {
+        x.budget_pool_id = Some("kid".into());
+        x.cost_usd = 0.30;
+        x.cost_is_metered = true;
+    })
+    .await;
+    m.set_machine_pool(&vm.id, Some("other".into())).await;
+    let vm2 = online_machine(&m, "kid").await;
+    m.update(&vm2.id, |x| {
+        x.budget_pool_id = Some("kid".into());
+        x.cost_usd = 0.20;
+        x.cost_is_metered = true;
+    })
+    .await;
+    m.set_mission_budget("kid", None, Some("root".into()), Some("t1".into()))
+        .await
+        .unwrap();
+    let root = m.pool_usage("root").await.unwrap();
+    // Both the departed VM's $0.30 and the live VM's $0.20 now count here.
+    assert!((root.spent_usd - 0.50).abs() < 1e-6, "{root:?}");
+    assert_eq!(root.carved_usd, 0.0);
 }

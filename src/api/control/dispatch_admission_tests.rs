@@ -13270,3 +13270,31 @@ async fn auto_managed_launch_is_validated_before_any_vm_is_rented() {
         .len();
     assert_eq!(before, after, "validation must not create missions");
 }
+
+#[tokio::test]
+async fn managed_spawn_refuses_a_mission_of_another_tenant() {
+    // A VM must never be charged to (or escape through) a mission the caller
+    // does not own: its budget pool is resolved only from the caller's store.
+    let h = Harness::new().await;
+    let foreign = Uuid::new_v4();
+    let req: crate::managed::SpawnRequest = serde_json::from_value(json!({
+        "owner_mission_id": foreign.to_string(), "wait": false,
+    }))
+    .unwrap();
+    let response = crate::api::managed_machines::spawn(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(req),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // The caller's own mission resolves: lineage starts there.
+    let own = h.writer(MissionStatus::Active, None).await;
+    let chain = crate::api::mission_budget::lineage(&h.control.mission_store, own.id).await;
+    assert_eq!(chain.first(), Some(&own.id.to_string()));
+    assert!(
+        crate::api::mission_budget::lineage(&h.control.mission_store, foreign)
+            .await
+            .is_empty()
+    );
+}

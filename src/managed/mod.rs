@@ -2369,13 +2369,23 @@ impl ManagedManager {
         match amount {
             None => {
                 self.budgets.lock().await.remove(mission_id);
-                // Machines charged to it fall back to the parent pool.
+                // Everything charged to the removed pool (current machines
+                // and cost recorded when machines left it) moves to the
+                // parent pool. Without a parent nothing is limited any more;
+                // the records stay as they are.
+                let now = Utc::now();
                 let mut machines = self.machines.lock().await;
-                for m in machines
-                    .iter_mut()
-                    .filter(|m| m.budget_pool_id.as_deref() == Some(mission_id))
-                {
-                    m.budget_pool_id = parent_pool.clone();
+                for m in machines.iter_mut() {
+                    if m.budget_pool_id.as_deref() == Some(mission_id) {
+                        m.change_pool(parent_pool.clone(), now);
+                    }
+                    if let Some(parent) = &parent_pool {
+                        for (pool, _) in m.prior_pool_charges.iter_mut() {
+                            if pool == mission_id {
+                                *pool = parent.clone();
+                            }
+                        }
+                    }
                 }
                 drop(machines);
                 // Child pools re-attach to the parent pool.
@@ -2421,7 +2431,7 @@ impl ManagedManager {
                             && m.owner_mission_id.as_deref() == Some(mission_id)
                             && m.budget_pool_id == parent_pool
                     }) {
-                        m.budget_pool_id = Some(mission_id.to_string());
+                        m.change_pool(Some(mission_id.to_string()), Utc::now());
                     }
                 }
             }
@@ -2469,10 +2479,12 @@ impl ManagedManager {
         mission_id: &str,
         lineage: &[String],
         children: &[String],
+        user_id: &str,
     ) -> MissionBudgetView {
         let pools = self.budget_pools().await;
-        let pool_id = budget::nearest_pool(lineage.iter().map(String::as_str), &pools);
-        let parent_pool = budget::nearest_pool(lineage.iter().skip(1).map(String::as_str), &pools);
+        let pool_id = budget::nearest_pool(lineage.iter().map(String::as_str), &pools, user_id);
+        let parent_pool =
+            budget::nearest_pool(lineage.iter().skip(1).map(String::as_str), &pools, user_id);
         let open = self.open_pools(&pools).await;
         let machines = self.machines.lock().await.clone();
         let now = Utc::now();

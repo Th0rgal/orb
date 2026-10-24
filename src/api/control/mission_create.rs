@@ -2073,7 +2073,7 @@ pub(in crate::api) async fn create_mission_inner(
             .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
         if let (Some(parent), Some(manager)) = (req.parent_mission_id, crate::managed::global()) {
             if let Some(pool) =
-                crate::api::mission_budget::pool_for(&control.mission_store, parent).await
+                crate::api::mission_budget::pool_for(&control.mission_store, parent, &user.id).await
             {
                 if let Some(max) = manager.max_grant("", Some(&pool)).await {
                     if amount > max + 1e-9 {
@@ -2190,7 +2190,9 @@ pub(in crate::api) async fn create_mission_inner(
             .filter(|m| !m.is_empty()),
         crate::managed::global(),
     ) {
-        let pool = crate::api::mission_budget::pool_for(&control.mission_store, mission.id).await;
+        let pool =
+            crate::api::mission_budget::pool_for(&control.mission_store, mission.id, &user.id)
+                .await;
         if pool.is_some() {
             manager.set_machine_pool(machine, pool).await;
         }

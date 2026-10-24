@@ -118,17 +118,13 @@ async fn get_one(Path(id): Path<String>) -> Response {
     }
 }
 
-async fn spawn(
+pub(crate) async fn spawn(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
     Json(mut req): Json<SpawnRequest>,
 ) -> Response {
     // The owner's tenant comes from the authenticated caller, never the body.
     req.owner_user_id = Some(user.id.clone());
-    let m = match manager() {
-        Ok(m) => m,
-        Err(r) => return r,
-    };
     let store = crate::api::control::control_for_user(&state, &user)
         .await
         .mission_store;
@@ -139,8 +135,21 @@ async fn spawn(
         .or(req.requested_by_mission_id.as_deref())
         .and_then(|id| uuid::Uuid::parse_str(id).ok());
     if let Some(mission) = charged {
-        req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission).await;
+        // The mission must be the caller's: never charge (or escape to)
+        // another tenant's pool.
+        if !matches!(store.get_mission(mission).await, Ok(Some(_))) {
+            return err(ManagedError {
+                error: "unknown_mission",
+                message: "Owner mission not found".into(),
+                status: 404,
+            });
+        }
+        req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission, &user.id).await;
     }
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     if req.reuse_idle == Some(true) {
         if let (Some(parent), Ok((spec, _))) = (charged, ManagedManager::plan(&m.settings, &req)) {
             if let Some(machine) = reuse_idle_sibling(&m, &store, &req, parent, spec.size).await {
