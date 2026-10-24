@@ -34,6 +34,9 @@ use super::{
 pub const INCLUDED_SNAPSHOTS: usize = 10;
 pub const SNAPSHOT_USD_PER_MONTH: f64 = 1.70;
 const SNAPSHOT_PREFIX: &str = "orb-snap-";
+/// Deletes every delivered secret file on a VM; non-zero exit on failure.
+pub const SECRETS_WIPE: &str =
+    "sudo find /var/lib/orb-node /home -maxdepth 6 -name .paloma-secrets -prune -exec rm -rf {} + && sync";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedSnapshot {
@@ -240,8 +243,14 @@ impl ManagedManager {
             let mut snaps = self.snapshots.lock().await;
             let snap = snaps
                 .iter_mut()
-                .find(|s| s.name == name || s.label == name)
-                .filter(|s| s.owner_user_id == req.owner_user_id)
+                .find(|s| {
+                    (s.name == name || s.label == name)
+                        && snapshot_visible(
+                            s,
+                            req.owner_user_id.as_deref(),
+                            req.snapshot_project.as_deref(),
+                        )
+                })
                 .ok_or_else(|| {
                     ManagedError::new(
                         "snapshot_not_found",
@@ -323,15 +332,19 @@ impl ManagedManager {
                 "Name the snapshot (letters, digits, dashes)",
             ));
         }
-        // Secrets delivered to missions must not be frozen into the image.
-        if m.state == MachineState::Online {
-            let _ = provider
-                .exec(
-                    &pid,
-                    "sudo find /var/lib/orb-node /home -maxdepth 6 -name .paloma-secrets -prune -exec rm -rf {} + ; sync",
-                    120,
-                )
-                .await;
+        // Secrets delivered to missions must never be frozen into the
+        // image: a running VM is wiped now (failure aborts), a stopped one
+        // only qualifies if its wipe succeeded when it stopped.
+        match m.state {
+            MachineState::Online => self.wipe_secrets(provider.as_ref(), &pid).await?,
+            _ if !m.secrets_wiped => {
+                return Err(ManagedError::new(
+                    "not_snapshottable",
+                    409,
+                    "This stopped machine was not verified free of delivered secrets; resume it and snapshot while running",
+                ))
+            }
+            _ => {}
         }
         let name = snapshot_name(project, &label, &super::random_id()[..4]);
         provider
@@ -503,8 +516,11 @@ impl ManagedManager {
         }
         unregister_node(&m);
         self.relay.close(&m.id).await;
+        let mut secrets_wiped = false;
         if let (Some(provider), Some(pid)) = (&self.provider, &m.provider_id) {
             self.wipe_projection(provider.as_ref(), pid, &m).await;
+            // The kept disk must not hold delivered secrets.
+            secrets_wiped = self.wipe_secrets(provider.as_ref(), pid).await.is_ok();
             provider
                 .stop(pid)
                 .await
@@ -520,6 +536,7 @@ impl ManagedManager {
                 m.state = MachineState::Stopped;
                 m.stopped_at = Some(now);
                 m.stopped_by_reaper = by_reaper;
+                m.secrets_wiped = secrets_wiped;
                 m.destroy_reason = Some(format!("stopped: {reason}"));
                 m.reap_at = None;
                 m.reap_reason = None;
@@ -698,6 +715,29 @@ impl ManagedManager {
                     tracing::info!(machine = %m.id, error = %e, "managed auto-resume refused")
                 }
             }
+        }
+    }
+
+    /// Delete delivered secret files on a VM; an error if that is not proven.
+    pub(super) async fn wipe_secrets(
+        &self,
+        provider: &dyn super::ManagedProvider,
+        pid: &str,
+    ) -> Result<(), ManagedError> {
+        let out = provider.exec(pid, SECRETS_WIPE, 120).await.map_err(|e| {
+            ManagedError::new(
+                "secret_wipe_failed",
+                502,
+                format!("could not remove delivered secrets: {e}"),
+            )
+        })?;
+        match super::exec_exit_code(&out) {
+            Some(code) if code != 0 => Err(ManagedError::new(
+                "secret_wipe_failed",
+                502,
+                format!("could not remove delivered secrets (exit {code})"),
+            )),
+            _ => Ok(()),
         }
     }
 

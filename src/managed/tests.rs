@@ -43,6 +43,7 @@ struct FakeProvider {
     stopped: std::sync::Mutex<Vec<String>>,
     saved: std::sync::Mutex<Vec<(String, String)>>,
     deleted_snapshots: std::sync::Mutex<Vec<String>>,
+    fail_wipe: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -80,6 +81,9 @@ impl ManagedProvider for FakeProvider {
     }
     async fn exec(&self, _: &str, command: &str, _: u64) -> Result<Value, String> {
         self.execs.lock().unwrap().push(command.to_string());
+        if command.contains(".paloma-secrets") && self.fail_wipe.load(Ordering::SeqCst) {
+            return Ok(serde_json::json!({"exitCode": 1}));
+        }
         Ok(Value::Null)
     }
     async fn stop(&self, provider_id: &str) -> Result<(), String> {
@@ -523,6 +527,7 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         resumes: 0,
         run_started_at: None,
         cost_before_resume: 0.0,
+        secrets_wiped: false,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -913,6 +918,7 @@ fn spend_machine(
         resumes: 0,
         run_started_at: None,
         cost_before_resume: 0.0,
+        secrets_wiped: false,
     }
 }
 
@@ -1791,6 +1797,7 @@ async fn snapshot_then_spawn_from_it_is_tenant_and_status_checked() {
         .any(|c| c.contains(".paloma-secrets")));
     let spawn = |tenant: &str| SpawnRequest {
         from_snapshot: Some("lean-warm".into()),
+        snapshot_project: Some("lean".into()),
         owner_user_id: Some(tenant.into()),
         wait: Some(false),
         ttl_minutes: Some(30),
@@ -1984,4 +1991,100 @@ async fn reaper_resumes_a_machine_it_stopped_when_the_owner_works() {
     // Provisioning (the fork) runs in the background.
     wait_provider_id(&m, &vm.id).await;
     assert_eq!(fake.forks.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn snapshot_names_are_project_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = settings();
+    st.max_concurrent = None;
+    let (m, _) = manager(dir.path(), st);
+    let a = online_machine(&m, "owner-a").await;
+    let b = online_machine(&m, "owner-b").await;
+    let sa = m
+        .snapshot_machine(&a.id, "warm", Some("alpha"), None, Some("t1"))
+        .await
+        .unwrap();
+    let sb = m
+        .snapshot_machine(&b.id, "warm", Some("beta"), None, Some("t1"))
+        .await
+        .unwrap();
+    for s in m.snapshots.lock().await.iter_mut() {
+        s.status = "ready".into();
+    }
+    let vm = m
+        .spawn(SpawnRequest {
+            from_snapshot: Some("warm".into()),
+            snapshot_project: Some("beta".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ttl_minutes: Some(30),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(vm.image, sb.name);
+    assert_ne!(vm.image, sa.name);
+    let e = m
+        .spawn(SpawnRequest {
+            from_snapshot: Some("warm".into()),
+            snapshot_project: Some("gamma".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "snapshot_not_found");
+}
+
+#[tokio::test]
+async fn secrets_must_be_wiped_before_any_disk_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = settings();
+    st.max_concurrent = None;
+    let (m, fake) = manager(dir.path(), st);
+    let vm = online_machine(&m, "owner").await;
+    // Snapshot of a running VM: a failed wipe aborts before saving.
+    fake.fail_wipe.store(true, Ordering::SeqCst);
+    let e = m
+        .snapshot_machine(&vm.id, "warm", Some("p"), None, Some("t1"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "secret_wipe_failed");
+    assert!(fake.saved.lock().unwrap().is_empty());
+    // Stopped after a failed wipe: no snapshot of that disk.
+    let stopped = m.stop_inner(&vm.id, "requested", false).await.unwrap();
+    assert!(!stopped.secrets_wiped);
+    let e = m
+        .snapshot_machine(&vm.id, "warm", Some("p"), None, Some("t1"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "not_snapshottable");
+    // A fork whose secret cleanup fails never enrolls: provisioning fails.
+    let src = online_machine(&m, "owner2").await;
+    let fork = m
+        .spawn(SpawnRequest {
+            fork_of: Some(src.id.clone()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(true),
+            ttl_minutes: Some(30),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(fork.error, "provision_failed");
+    // Wipe works: stop records it and the stopped disk may be saved.
+    fake.fail_wipe.store(false, Ordering::SeqCst);
+    let ok = online_machine(&m, "owner3").await;
+    assert!(
+        m.stop_inner(&ok.id, "requested", false)
+            .await
+            .unwrap()
+            .secrets_wiped
+    );
+    assert!(m
+        .snapshot_machine(&ok.id, "warm", Some("p"), None, Some("t1"))
+        .await
+        .is_ok());
 }

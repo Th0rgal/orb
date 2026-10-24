@@ -163,6 +163,12 @@ async fn spawn_for(
             });
         }
         req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission, &user.id).await;
+        req.snapshot_project = store
+            .get_mission(mission)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|m| m.project.project);
     }
     let m = match manager() {
         Ok(m) => m,

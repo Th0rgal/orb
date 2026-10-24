@@ -458,6 +458,9 @@ pub struct ManagedMachine {
     /// metered separately by the provider).
     #[serde(default)]
     pub cost_before_resume: f64,
+    /// Delivered secrets were verified deleted when it stopped.
+    #[serde(default)]
+    pub secrets_wiped: bool,
     /// Times this machine was resumed from `Stopped`.
     #[serde(default)]
     pub resumes: u32,
@@ -548,6 +551,10 @@ pub struct SpawnRequest {
     /// from a body.
     #[serde(skip)]
     pub fork_of: Option<String>,
+    /// Project snapshots are looked up in (the charged mission's); set by
+    /// the API, never from a body.
+    #[serde(skip)]
+    pub snapshot_project: Option<String>,
     /// Prefer an idle machine of the same size whose owner (a child of the
     /// requester) has ended, inside its grace window, over a fresh rent.
     #[serde(default)]
@@ -1603,6 +1610,7 @@ impl ManagedManager {
                 forked_from: fork_source.as_ref().map(|(id, _)| id.clone()),
                 fork_source_provider_id: fork_source.as_ref().map(|(_, pid)| pid.clone()),
                 resumes: 0,
+                secrets_wiped: false,
                 run_started_at: None,
                 cost_before_resume: 0.0,
                 prior_pool_charges: Vec::new(),
@@ -1743,16 +1751,24 @@ impl ManagedManager {
         if let Err(error) = &provisioned {
             tracing::warn!(machine = %id, %error, "managed VM provisioning script failed");
         }
-        provider
+        // A fork or snapshot carries the source node's credential, projected
+        // sign-in and delivered secrets: drop them so this VM enrolls fresh
+        // (its own missions request their secrets again). Any failure fails
+        // provisioning, which destroys the VM.
+        let node_started = provider
             .exec(
                 &provider_id,
-                // A fork or snapshot carries the source node's credential and
-                // projected sign-in: drop them so this VM enrolls fresh.
-                "chmod 600 /home/user/.orb/enroll.env && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && sudo systemctl restart orb-node.service",
-                60,
+                &format!(
+                    "chmod 600 /home/user/.orb/enroll.env && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && sudo systemctl restart orb-node.service",
+                    snapshots::SECRETS_WIPE
+                ),
+                120,
             )
             .await
             .map_err(|e| format!("start orb-node: {e}"))?;
+        if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
+            return Err(format!("start orb-node: exit code {code}"));
+        }
         let enroll_started = tokio::time::Instant::now();
 
         // Wait for the node to enroll and answer a heartbeat over the relay.
