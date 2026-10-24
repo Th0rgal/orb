@@ -169,11 +169,11 @@ fn main() {
                 event
             {
                 use tauri::Emitter;
-                let paths = uploads::allow_drop(paths);
-                let count = paths.len();
+                let (paths, offer) = uploads::allow_drop(paths);
+                let count = paths.len() + offer.len();
                 if let Err(error) = window.emit(
                     "orb-upload-drop",
-                    serde_json::json!({"paths":paths,"x":position.x,"y":position.y}),
+                    serde_json::json!({"paths":paths,"folder":offer,"x":position.x,"y":position.y}),
                 ) {
                     orb_log!(
                         warn,
@@ -240,6 +240,9 @@ fn main() {
             connection_store::desktop_connection_load,
             connection_store::desktop_connection_save,
             uploads::pick_upload_files,
+            uploads::pick_upload_folder,
+            uploads::grant_upload_folder,
+            uploads::revoke_upload_folder,
             uploads::pick_working_directory,
             uploads::read_upload_file,
             uploads::read_upload_file_chunk,

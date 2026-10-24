@@ -6,8 +6,10 @@ import { Popover } from "../Popover";
 import { CyberPicker, draftCyber, setDraftCyber } from "../cyberAccess";
 import {MentionPicker} from "../MentionPicker";
 import { nativeComposerDrop } from "../composerDrop";
-import { backgroundUploads, cancelBackgroundUpload, encoded, formatFileSize, HARD_MAX_BYTES, hasNativePicker, pauseBackgroundUpload, pickNativeFiles, prepareUploads, resumeBackgroundUpload, softLimitForDestination, startBackgroundUpload, statUploadSource, transferFile, uploadToken, type UploadedFile, type UploadSource } from "../uploads";
+import { backgroundUploads, cancelBackgroundUpload, encoded, formatFileSize, HARD_MAX_BYTES, hasNativePicker, pauseBackgroundUpload, pickNativeFiles, pickNativeFolder, grantFolderSources, prepareUploads, resumeBackgroundUpload, softLimitForDestination, startBackgroundUpload, statUploadSource, transferFile, uploadToken, type UploadedFile, type UploadSource } from "../uploads";
 import { readComposerDraft, saveComposerDraft } from "../composerDrafts";
+import { BATCH_MAX_BYTES, BATCH_MAX_FILES, BATCH_WARN_BYTES, BATCH_WARN_FILES, batchTotals, createFolderUpload, localFolderPath, folderPathFromResults, sourcesFromDataTransfer, splitSources, type FolderUpload } from "../uploadBatch";
+import { FolderUploadChip } from "./FolderUploadChip";
 import { readImagePaste, IMAGE_COUNT, type DraftImage } from "../imageAttachments";
 import { ErrorToast } from "../toast";
 import { type RemoteSupport } from "../missionLaunch";
@@ -137,28 +139,100 @@ export function Composer(p: {
     const scope = p.scope;
     const destination = attachmentTarget();
     const softLimit = softLimitForDestination(destination);
-    setUploading(true); setUploadError(null); setCtx(false);
+    const split = splitSources(sources, destination);
+    for (const folder of split.folders) void attachFolder(folder.root, folder.sources, split.skipped);
+    sources = split.files;
+    if (!sources.length) return;
+    setUploading(true); setUploadError(null); setCtx(false); setStaleFiles([]);
     try {
       const largeQueue: Array<{ source: UploadSource; size: number; destination: string }> = [];
+      const ready: UploadSource[] = [];
       for (const source of sources) {
         if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
         const stat = await statUploadSource(source);
         if (stat.size > HARD_MAX_BYTES) {
           throw new Error(`${source.name} (${formatFileSize(stat.size)}) exceeds the 2 GiB maximum.`);
         }
-        if (stat.size > softLimit) {
-          largeQueue.push({ source, size: stat.size, destination });
-          continue;
-        }
-        const file = await transferFile(source, destination);
-        if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
-        insertUploadedFile(file);
+        if (stat.size > softLimit) largeQueue.push({ source, size: stat.size, destination });
+        else ready.push(source);
       }
+      // Up to four transfers at once; mentions are inserted in the order chosen.
+      const results: Array<UploadedFile | Error> = new Array(ready.length);
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(4, ready.length) }, async () => {
+        while (cursor < ready.length) {
+          const index = cursor++;
+          results[index] = await transferFile(ready[index], destination).catch(error => error instanceof Error ? error : new Error(String(error)));
+        }
+      }));
+      if (disposed || scope !== p.scope || destination !== attachmentTarget()) return;
+      const failures: string[] = [];
+      results.forEach((result, index) => { if (result instanceof Error) failures.push(`${ready[index].name}: ${result.message}`); else insertUploadedFile(result); });
+      if (failures.length) throw new Error(failures.length === 1 && ready.length === 1 ? failures[0].slice(ready[0].name.length + 2) : failures.join("\n"));
       if (largeQueue.length) {
         setPendingLargeUploads((prev) => [...prev, ...largeQueue]);
       }
     } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
     finally { setUploading(false); }
+  };
+  // Folder uploads: one chip per folder, one mention once every file landed.
+  const [folderUploads, setFolderUploads] = createSignal<FolderUpload[]>([]);
+  onCleanup(() => folderUploads().forEach(upload => { upload.cancel(); revokes.get(upload)?.(); }));
+  const [pendingFolder, setPendingFolder] = createSignal<{ root: string; files: Array<{ source: UploadSource; size: number }>; skipped: number; destination: string } | null>(null);
+  /** Names of attachments whose original file is gone; their mentions were removed from the draft. */
+  const [staleFiles, setStaleFiles] = createSignal<string[]>([]);
+  const folderBusy = () => folderUploads().some(upload => upload.batch.running);
+  const insertFolder = (root: string, path: string, count: number, bytes: number, files: string[], destination: string) =>
+    insertUploadedFile({ source: { name: root }, path, destination, connection: connectionVersion(), endpoint: getApiUrl(), folder: { name: root, count, bytes, files } });
+  const attachFolder = async (root: string, sources: UploadSource[], skipped: number) => {
+    const destination = attachmentTarget();
+    if (destination === "side") { setUploadError("Side questions take files, not folders. Attach the files you need."); return; }
+    if (sources.length > BATCH_MAX_FILES) { setUploadError(`${root} has more than ${BATCH_MAX_FILES} files. Attach a smaller folder.`); return; }
+    if (destination === "local") {
+      const path = localFolderPath(sources);
+      if (path) { insertFolder(root, path, sources.length, 0, sources.map(source => source.relativePath ?? source.name), destination); return; }
+    }
+    try {
+      const files: Array<{ source: UploadSource; size: number }> = [];
+      for (const source of sources) files.push({ source, size: source.size ?? (await statUploadSource(source)).size });
+      const bytes = files.reduce((sum, file) => sum + file.size, 0);
+      if (bytes > BATCH_MAX_BYTES) { setUploadError(`${root} is ${formatFileSize(bytes)}; folders can be up to ${formatFileSize(BATCH_MAX_BYTES)}.`); return; }
+      const request = { root, files, skipped, destination };
+      if (files.length > BATCH_WARN_FILES || bytes > BATCH_WARN_BYTES) setPendingFolder(request);
+      else await startFolder(request);
+    } catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
+  };
+  const revokes = new Map<FolderUpload, () => void>();
+  const startFolder = async (request: { root: string; files: Array<{ source: UploadSource; size: number }>; skipped: number; destination: string }) => {
+    const scope = p.scope;
+    let revoke: () => void;
+    // Only now, after any confirmation, may the desktop read these files.
+    try { revoke = await grantFolderSources(request.files.map(file => file.source)); }
+    catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); return; }
+    if (disposed || scope !== p.scope) { revoke(); return; }
+    const upload = createFolderUpload({ ...request, transfer: transferFile });
+    revokes.set(upload, revoke);
+    setFolderUploads(list => [...list, upload]);
+    void runFolder(upload, scope);
+  };
+  const dropFolder = (upload: FolderUpload) => {
+    revokes.get(upload)?.(); revokes.delete(upload);
+    setFolderUploads(list => list.filter(item => item !== upload));
+  };
+  const runFolder = async (upload: FolderUpload, scope = p.scope) => {
+    await upload.run();
+    if (disposed || scope !== p.scope || upload.batch.cancelled || upload.batch.destination !== attachmentTarget()) return;
+    const totals = batchTotals(upload.batch);
+    if (totals.failed) return; // The chip offers Retry or Skip.
+    finishFolder(upload);
+  };
+  const finishFolder = (upload: FolderUpload) => {
+    const done = upload.batch.files.filter(file => file.state === "done" && file.result);
+    dropFolder(upload);
+    if (!done.length) return;
+    const path = folderPathFromResults(done.map(file => ({ relativePath: file.source.relativePath!, path: file.result!.path })));
+    if (path) insertFolder(upload.batch.root, path, done.length, done.reduce((sum, file) => sum + file.size, 0), done.map(file => file.source.relativePath!), upload.batch.destination);
+    else for (const file of done) insertUploadedFile(file.result!); // The machine flattened the tree (older node).
   };
   let composerElement:HTMLDivElement|undefined;
   nativeComposerDrop(()=>composerElement, async sources=>{
@@ -199,6 +273,14 @@ export function Composer(p: {
     try { const files = await pickNativeFiles(); if (!disposed && scope === p.scope && selection === uploadTarget()) await attachMixed(files); }
     catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
   };
+  let folderInput!: HTMLInputElement;
+  const chooseFolder = async () => {
+    setCtx(false); setUploadError(null);
+    if (!hasNativePicker()) { folderInput.click(); return; }
+    const scope = p.scope;
+    try { const files = await pickNativeFolder(); if (!disposed && scope === p.scope && files.length) await attachSources(files); }
+    catch (error) { setUploadError(error instanceof Error ? error.message : String(error)); }
+  };
   const [images, setImages] = createSignal<DraftImage[]>([]);
   // Direct uploads (cloud agents) show each file as a removable chip; the
   // draft's token stays the source of truth, as for mentions.
@@ -217,7 +299,7 @@ export function Composer(p: {
   const [mode, setMode] = createSignal<ComposerMode | null>(null);
   const [draftReady, setDraftReady] = createSignal(false);
   createEffect(on(() => p.scope, (scope, previous) => {
-    if (previous !== undefined && previous !== scope) { setText(""); setImages([]); setMode(null); uploaded = []; bumpUploads(n => n + 1); }
+    if (previous !== undefined && previous !== scope) { setText(""); setImages([]); setMode(null); uploaded = []; bumpUploads(n => n + 1); folderUploads().forEach(upload => { upload.cancel(); dropFolder(upload); }); setPendingFolder(null); setStaleFiles([]); }
     setDraftReady(false);
     if (!scope) { setDraftReady(true); return; }
     let current=true;
@@ -500,6 +582,7 @@ export function Composer(p: {
     let payload = draftOf(original);
     if (!payload && !images().length && p.onEmptySubmit && !p.disabled && !sending()) { p.onEmptySubmit(); return; }
     if (p.disabled || (!payload && !images().length) || sendingLocked() || uploading() || readingImages()) return;
+    if (folderBusy()) { setUploadError("Wait for the folder upload to finish, or cancel it. Your draft is kept."); return; }
     if (!p.textOnly && !p.imagesOnly && (mode() === "plan" || /^\/plan(?:\s|$)/.test(payload)) && !modes().some(m => m.id === "plan")) {
       setUploadError("Plan mode is not supported by this harness on this machine. Your draft is kept.");
       return;
@@ -518,11 +601,19 @@ export function Composer(p: {
     setSendingCount(c => c + 1);
     setText(""); setImages([]); ta.value=""; resize();
     let accepted = false;
+    // What a failed send puts back; an unavailable attachment drops only its own mention.
+    let restoreText = original, restoreUploads = originalUploads;
     try {
       await attachmentLoad;
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
-      const resolved = (p.textOnly || p.imagesOnly) ? {text: original, files: []} : await prepareUploads(original, originalUploads, destination);
+      const resolved = (p.textOnly || p.imagesOnly) ? {text: original, files: [], unavailable: []} : await prepareUploads(original, originalUploads, destination);
       if (project !== p.projectSlug || draftScope !== p.scope || destination !== attachmentTarget()) return;
+      if (resolved.unavailable.length) {
+        // Keep the draft and every other attachment; let the user re-attach or just send again.
+        restoreText = resolved.text; restoreUploads = resolved.files;
+        setStaleFiles(resolved.unavailable.map(file => file.folder ? `${file.source.name}/` : file.source.name));
+        return;
+      }
       uploaded = resolved.files; bumpUploads(n => n + 1);
       payload = draftOf(resolved.text);
       p.onAttachments?.(mentionedChips(resolved.text,[...atItems(), ...resolved.files.filter(file => file.destination.startsWith("context:")).map(file => ({id:`upload:${file.path}`,kind:"context" as const,label:file.source.name,path:file.path,project:file.destination.slice("context:".length),section:"Files" as const}))]));
@@ -542,13 +633,14 @@ export function Composer(p: {
         if (draftScope && !text() && !images().length) await saveComposerDraft(draftScope, {text:"",images:[]}).catch(swallow("composer.clearDraft", { scope: draftScope }));
         if (!text()) setMode(null);
       }
-    } catch (error) { const message=error instanceof Error ? error.message : String(error);setUploadError(message);p.onSendError?.(message); }
+    } catch (error) { const message=error instanceof Error ? error.message : String(error); if (p.onSendError) p.onSendError(message); else setUploadError(message); }
     finally {
       setSendingCount(c => Math.max(0, c - 1));
-      if (!accepted && !p.retainFailedMessage && draftScope === p.scope && !text() && !images().length) {
-        uploaded = originalUploads; bumpUploads(n => n + 1);
-        setMode(originalMode);setText(original);setImages(sentImages);
-        ta.value=original;resize();
+      const keep = staleFiles().length > 0 && restoreText !== original;
+      if (!accepted && (!p.retainFailedMessage || keep) && draftScope === p.scope && !text() && !images().length) {
+        uploaded = restoreUploads; bumpUploads(n => n + 1);
+        setMode(originalMode);setText(restoreText);setImages(sentImages);
+        ta.value=restoreText;resize();
       }
       if (sendingCount() === 0) setPendingSend(null);
       if (!accepted && !sideMode) p.onPending?.(null);
@@ -600,12 +692,13 @@ export function Composer(p: {
   const plus = (
     <div class="plus-wrap" onPointerDown={(e) => e.stopPropagation()}>
       <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly || p.directFileUpload ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
+      <input ref={folderInput} type="file" multiple hidden aria-label="Choose a folder" {...{ webkitdirectory: "" }} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachSources(files.map(file => ({ name: file.name, file, relativePath: file.webkitRelativePath || undefined }))); }} />
       <button class="plus" title={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : undefined} disabled={uploading() || sendingLocked()} onClick={() => { if (p.imagesOnly || p.directFileUpload) void chooseFiles(); else { const next = !ctx(); setCtx(next); if (!next) setCtxFolder(""); } }}>
         <Ic.PlusIcon size={14} />
       </button>
       <Show when={ctx() && !p.imagesOnly && !p.directFileUpload}>
         <Menu label="Add context" class="plus-menu slash-menu" width={340} onClose={() => setCtx(false)}>
-          <Show when={ctxFolder()} fallback={<button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span><span class="slash-item-label">Upload file or image…</span></button>}>
+          <Show when={ctxFolder()} fallback={<><button class="menu-item" onClick={chooseFiles}><span class="menu-ico"><Ic.FileIcon size={14} /></span><span class="slash-item-label">Upload file or image…</span></button><button class="menu-item" onClick={chooseFolder}><span class="menu-ico"><Ic.FolderIcon size={14} /></span><span class="slash-item-label">Upload folder…</span></button></>}>
             <div class="slash-folder-bar">
               <button type="button" class="menu-item slash-back" onClick={() => { const cur = ctxFolder(); const slashIdx = cur.lastIndexOf("/"); setCtxFolder(slashIdx >= 0 ? cur.slice(0, slashIdx) : ""); }}>
                 <span class="menu-ico"><Ic.ArrowLeft size={14} /></span>
@@ -809,7 +902,7 @@ export function Composer(p: {
     <div ref={composerElement} class={`composer ${p.tall || images().length || multiline() ? "tall" : ""} ${voiceActive() ? "voice-on" : ""} ${mode() || p.editingQueued ? "has-mode" : ""}`} data-mode={mode() ?? ""}
       onDragOver={e=>{if(Array.from(e.dataTransfer?.types??[]).includes("Files")){e.preventDefault();e.stopPropagation();if(e.dataTransfer)e.dataTransfer.dropEffect="copy";e.currentTarget.classList.add("drop-active");}}}
       onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))e.currentTarget.classList.remove("drop-active");}}
-      onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sendingLocked()||uploading()||readingImages())return;void attachMixed(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})));}}
+      onDrop={e=>{e.preventDefault();e.stopPropagation();e.currentTarget.classList.remove("drop-active");if(sendingLocked()||uploading()||readingImages())return;const data=e.dataTransfer;if(!data)return;void sourcesFromDataTransfer(data).then(sources=>sources.some(source=>source.relativePath)?attachSources(sources):attachMixed(sources)).catch(error=>setUploadError(error instanceof Error?error.message:String(error)));}}
       onClick={() => !voiceActive() && ta.focus()}>
       <Show when={!p.textOnly} fallback={<Show when={p.attachDisabledReason}>{reason => <div class="plus-wrap" title={reason()}><button class="plus" type="button" disabled aria-label="Attach file or image" aria-description={reason()} title={reason()}><Ic.PlusIcon size={14} /></button></div>}</Show>}>{plus}</Show>
       {slashMenu}
@@ -858,6 +951,34 @@ export function Composer(p: {
           }}</For>
         </div>
       </Show>
+      <Show when={pendingFolder()}>{request => (
+        <div class="composer-large-confirm" role="alertdialog" aria-label="Confirm folder upload" onClick={(e) => e.stopPropagation()}>
+          <div class="composer-large-confirm-text">
+            <strong>Large folder</strong>
+            <span>{request().root}/ has {request().files.length} files ({formatFileSize(request().files.reduce((sum, file) => sum + file.size, 0))}). Upload all of them?</span>
+          </div>
+          <div class="composer-large-confirm-actions">
+            <button type="button" class="s-btn" onClick={() => setPendingFolder(null)}>Cancel</button>
+            <button type="button" class="s-btn primary" onClick={() => { const next = request(); setPendingFolder(null); void startFolder(next); }}>Upload folder</button>
+          </div>
+        </div>
+      )}</Show>
+      <Show when={folderUploads().length || fileChips().some(file => file.folder)}>
+        <div class="composer-bg-uploads" aria-label="Attached folders">
+          <For each={folderUploads()}>{upload => <FolderUploadChip batch={upload.batch}
+            onCancel={() => { upload.cancel(); dropFolder(upload); }}
+            onRetry={() => void runFolder(upload)}
+            onSkipFailed={() => finishFolder(upload)} />}</For>
+          <For each={fileChips().filter(file => file.folder)}>{file => <FolderUploadChip folder={file.folder} onRemove={() => removeUploadedFile(file)} />}</For>
+        </div>
+      </Show>
+      <Show when={staleFiles().length}>
+        <div class="composer-stale-attachments" role="status" onClick={(e) => e.stopPropagation()}>
+          <span>File no longer available — re-attach: {staleFiles().join(", ")}. Removed from the message; your text is kept.</span>
+          <Show when={!p.textOnly && !p.imagesOnly}><button type="button" class="bg-upload-btn" onClick={() => { setStaleFiles([]); void chooseFiles(); }}>Re-attach</button></Show>
+          <button type="button" class="bg-upload-btn" aria-label="Dismiss" onClick={() => setStaleFiles([])}>×</button>
+        </div>
+      </Show>
       <ErrorToast error={uploadError()} title="Couldn’t upload the file" onDismiss={() => setUploadError(null)} />
       <Show when={mode()}>{m => <ModeChip mode={m()} onClear={clearMode} />}</Show>
       <Show when={!mode() && p.editingQueued}>{editing => <span class="mode-chip edit-queued" role="status" aria-label="Editing a queued message">
@@ -871,7 +992,11 @@ export function Composer(p: {
         <textarea readOnly={sendingLocked()}
           ref={ta}
           aria-label={p.inputLabel}
-          onPaste={event => void pasteImages(event)}
+          onPaste={event => {
+            const others = Array.from(event.clipboardData?.files ?? []).filter(file => !file.type.startsWith("image/"));
+            if (others.length && !p.textOnly && !p.imagesOnly) { event.preventDefault(); void attachMixed(Array.from(event.clipboardData!.files).map(file => ({ name: file.name, file }))); return; }
+            void pasteImages(event);
+          }}
           rows={1}
           // Keep the placeholder clear of the native caret without shifting typed text.
           placeholder={"\u2009" + (mode() === "btw" ? "Ask without interrupting…" : mode() === "goal" ? "Describe the objective" : mode() === "plan" ? "Plan before making changes…" : p.placeholder)}

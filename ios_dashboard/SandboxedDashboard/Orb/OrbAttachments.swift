@@ -155,10 +155,13 @@ struct OrbAttachments: View {
                 }
             } }
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
+        // Several files at once, as on desktop and Android. Folders are a noted gap.
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             do {
-                let url = try result.get(); let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-                try add(Data(contentsOf: url), name: url.lastPathComponent)
+                for url in try result.get() {
+                    let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
+                    try add(Data(contentsOf: url), name: url.lastPathComponent.precomposedStringWithCanonicalMapping)
+                }
             } catch { self.error = error.localizedDescription }
         }
         .photosPicker(isPresented: $choosingPhoto, selection: $photo, matching: .images)

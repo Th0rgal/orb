@@ -4,8 +4,12 @@ import { createSignal } from "solid-js";
 import { api, connectionVersion, getApiUrl } from "./api";
 import { mentionText, scanMentions } from "./attach";
 
-export interface UploadSource { name: string; localPath?: string; file?: File }
-export interface UploadedFile { source: UploadSource; path: string; destination: string; connection: number; endpoint?: string; dataBase64?: string; confirmedLarge?: boolean }
+/** `relativePath` is set for files that came from a folder ("Folder/sub/a.txt"). */
+/** `grant` names the desktop folder offer a walked file belongs to; it is readable only once granted. */
+export interface UploadSource { name: string; localPath?: string; file?: File; relativePath?: string; size?: number; grant?: string }
+/** A folder upload is one entry whose `path` is the uploaded folder. */
+export interface UploadedFolder { name: string; count: number; bytes: number; files: string[] }
+export interface UploadedFile { source: UploadSource; path: string; destination: string; connection: number; endpoint?: string; dataBase64?: string; confirmedLarge?: boolean; folder?: UploadedFolder }
 export interface UploadReceipt { name: string; path: string; size: number; sha256: string }
 
 export const SOFT_CONTEXT_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -20,6 +24,26 @@ export async function pickNativeFiles(): Promise<UploadSource[]> {
   if (!invoke) throw new Error("Use the desktop app to attach a local file path.");
   const files = await invoke<Array<{ name: string; path: string }>>("pick_upload_files");
   return files.map(file => ({ name: file.name, localPath: file.path }));
+}
+
+/** A whole folder, walked by the desktop app (junk and links skipped); paths stay relative to the folder's parent. */
+export async function pickNativeFolder(): Promise<UploadSource[]> {
+  const invoke = nativeInvoke();
+  if (!invoke) throw new Error("Use the desktop app to attach a folder.");
+  return folderOfferSources(await invoke<FolderOffer>("pick_upload_folder"));
+}
+
+export interface FolderOffer { batch?: string | null; files: Array<{ name: string; path: string; relative_path: string; size: number }> }
+export const folderOfferSources = (offer: FolderOffer | undefined): UploadSource[] =>
+  (offer?.files ?? []).map(file => ({ name: file.name, localPath: file.path, relativePath: file.relative_path, size: file.size, ...(offer?.batch ? { grant: offer.batch } : {}) }));
+
+/** Makes exactly the files about to upload readable by the desktop; returns a revoke. */
+export async function grantFolderSources(sources: UploadSource[]): Promise<() => void> {
+  const invoke = nativeInvoke();
+  const batch = sources.find(source => source.grant)?.grant;
+  if (!invoke || !batch) return () => {};
+  await invoke("grant_upload_folder", { batch, relativePaths: sources.map(source => source.relativePath) });
+  return () => { void invoke("revoke_upload_folder", { batch }).catch(swallow("uploads.revokeFolder", {})); };
 }
 
 export function softLimitForDestination(destination: string): number {
@@ -85,8 +109,33 @@ export async function encoded(source: UploadSource, maxBytes = MAX): Promise<str
 }
 export const uploadToken = (path: string) => mentionText({ kind: "file", path });
 
+/** One path segment as Core accepts it: NFC (macOS hands out NFD), no separators or controls. */
+export function cleanUploadName(name: string): string {
+  const clean = name.normalize("NFC").replace(/[\\/\x00-\x1f\x7f]/g, "_").trim();
+  if (!clean || clean === "." || clean === "..") throw new Error("Invalid attachment name.");
+  return clean;
+}
+
+/** "Folder/sub/a.txt" with each segment cleaned; never absolute, never `..`. */
+export function cleanRelativePath(relative: string): string {
+  const parts = relative.split(/[\\/]+/).filter(part => part && part !== ".");
+  if (!parts.length || parts.length > 32) throw new Error("Invalid folder path.");
+  return parts.map(cleanUploadName).join("/");
+}
+
+export function contextAttachmentPath(source: UploadSource, batchId?: string): string {
+  const id = batchId ?? crypto.randomUUID();
+  return `attachments/${id}/${source.relativePath ? cleanRelativePath(source.relativePath) : cleanUploadName(source.name)}`;
+}
+
+/** The original file is gone from Orb's reach (app restarted, file moved): only the user can choose it again. */
+export function isSourceUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /choose this file again using the file picker|^choose the file again\.?$|reopen this file in the desktop app|os error 2\b|no such file/i.test(message);
+}
+
 function deterministicUploadId(destination: string, source: UploadSource, size: number, modified: number): string {
-  const raw = `${getApiUrl()}|${destination}|${source.localPath ?? source.name}|${size}|${modified}`;
+  const raw = `${getApiUrl()}|${destination}|${source.localPath ?? source.relativePath ?? source.name}|${size}|${modified}`;
   let h1 = 0xdeadbeef ^ raw.length;
   let h2 = 0x41c6ce57 ^ raw.length;
   for (let i = 0; i < raw.length; i++) {
@@ -103,6 +152,10 @@ function deterministicUploadId(destination: string, source: UploadSource, size: 
 
 export interface ResumableTransferOptions {
   confirmedLarge?: boolean;
+  /** Folder uploads share one batch directory and keep `source.relativePath`. */
+  batchId?: string;
+  /** Proves to the machine that later files belong to the batch the first one created. */
+  batchToken?: string;
   chunkSize?: number;
   concurrency?: number;
   signal?: AbortSignal;
@@ -235,6 +288,11 @@ export async function uploadContextBlobResumable(
   return { hash: done.hash, size: done.size, uploadId };
 }
 
+function machineName(source: UploadSource, batchId?: string, batchToken?: string): { name: string; batch_id?: string; relative_path?: string; batch_token?: string } {
+  const name = cleanUploadName(source.name);
+  return batchId && batchToken && source.relativePath ? { name, batch_id: batchId, relative_path: cleanRelativePath(source.relativePath), batch_token: batchToken } : { name };
+}
+
 export async function uploadDirectMachineResumable(
   nodeId: string,
   source: UploadSource,
@@ -242,11 +300,11 @@ export async function uploadDirectMachineResumable(
   modified: number,
   options: ResumableTransferOptions = {},
 ): Promise<{ receipt: UploadReceipt; uploadId: string }> {
-  const uploadId = deterministicUploadId(nodeId, source, size, modified);
+  const uploadId = deterministicUploadId(options.batchId ? `${nodeId}|${options.batchId}` : nodeId, source, size, modified);
   const query = `?node_id=${encodeURIComponent(nodeId)}`;
   const status = await runChunkedSession(
     `/api/uploads/sessions`,
-    { node_id: nodeId, upload_id: uploadId, name: source.name, size },
+    { node_id: nodeId, upload_id: uploadId, ...machineName(source, options.batchId, options.batchToken), size },
     idx => `/api/uploads/sessions/${encodeURIComponent(uploadId)}/chunks/${idx}${query}`,
     source,
     size,
@@ -341,9 +399,7 @@ export async function transferFile(
       hash = blob.hash;
     }
     if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
-    const name = source.name.replace(/[\\/\x00-\x1f]/g, "_");
-    if (!name || name === "." || name === "..") throw new Error("Invalid attachment name.");
-    const path = `attachments/${crypto.randomUUID()}/${name}`;
+    const path = contextAttachmentPath(source, options.batchId);
     const receipt = await api<{ conflict: boolean }>(`${route}/operations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -375,35 +431,61 @@ export async function transferFile(
   const receipt = await api<UploadReceipt>("/api/uploads", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ node_id: destination, name: source.name, data_base64: data }),
+    body: JSON.stringify({ node_id: destination, ...machineName(source, options.batchId, options.batchToken), data_base64: data }),
   });
   if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
   return { source, path: receipt.path, destination, connection, endpoint: getApiUrl() };
 }
 
-/** Resolve only references still in the draft, and never reuse another machine's path. */
+const samePath = (a: string, b: string) => a.normalize("NFC") === b.normalize("NFC");
+
+/** Remove every mention of `path` (and the space after it) from a draft. */
+export function removeMention(text: string, path: string): string {
+  for (const mention of scanMentions(text).filter(mention => samePath(mention.value, path)).reverse()) {
+    const end = mention.index + mention.raw.length;
+    text = text.slice(0, mention.index) + text.slice(text[end] === " " ? end + 1 : end);
+  }
+  return text;
+}
+
+/**
+ * Resolve only references still in the draft, and never reuse another machine's path.
+ *
+ * A file already uploaded to this destination on this backend is reused as-is,
+ * also after a restart restored it from the draft: re-reading the original is
+ * neither needed nor possible then (the desktop only reads files chosen in this
+ * session). A file that must move and whose original is gone is returned in
+ * `unavailable` with its mention removed, so the rest of the draft stays sendable.
+ */
 export async function prepareUploads(
   text: string,
   files: UploadedFile[],
   destination: string,
   transfer: (source: UploadSource, dest: string, opts?: ResumableTransferOptions) => Promise<UploadedFile> = transferFile,
   connection = connectionVersion(),
-): Promise<{ text: string; files: UploadedFile[] }> {
+): Promise<{ text: string; files: UploadedFile[]; unavailable: UploadedFile[] }> {
   const next: UploadedFile[] = [];
+  const unavailable: UploadedFile[] = [];
   for (const file of files) {
-    if (!scanMentions(text).some(mention => mention.value === file.path)) continue;
-    const resolved =
-      file.destination === destination && file.connection === connection
-        ? file
-        : await transfer(file.source, destination, { confirmedLarge: file.confirmedLarge });
-    if (resolved !== file) {
-      for (const mention of scanMentions(text).filter(mention => mention.value === file.path).reverse()) {
-        text = text.slice(0, mention.index) + uploadToken(resolved.path) + text.slice(mention.index + mention.raw.length);
-      }
+    if (!scanMentions(text).some(mention => samePath(mention.value, file.path))) continue;
+    const sameBackend = file.connection === connection || (!!file.endpoint && file.endpoint === getApiUrl());
+    if (file.destination === destination && sameBackend) { next.push(file); continue; }
+    let resolved: UploadedFile;
+    try {
+      if (file.folder) throw new Error("Choose the file again.");
+      resolved = await transfer(file.source, destination, { confirmedLarge: file.confirmedLarge });
+    } catch (error) {
+      if (!isSourceUnavailable(error)) throw error;
+      unavailable.push(file);
+      text = removeMention(text, file.path);
+      continue;
+    }
+    for (const mention of scanMentions(text).filter(mention => samePath(mention.value, file.path)).reverse()) {
+      text = text.slice(0, mention.index) + uploadToken(resolved.path) + text.slice(mention.index + mention.raw.length);
     }
     next.push(resolved);
   }
-  return { text, files: next };
+  return { text, files: next, unavailable };
 }
 
 export type BackgroundUploadState = "uploading" | "paused" | "completed" | "failed";

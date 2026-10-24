@@ -61,3 +61,51 @@ passed byte-exact readback as the node service user. The diagnostic file was
 removed. Babylon is now uncordoned and a subsequent OpenCode mission completed.
 The previous node binary remains backed up. Intermittent network degradation
 was observed earlier; see `archive/HARNESS_PERFORMANCE_AUDIT.md` for the evidence.
+
+## Restored drafts (fixed October 2026)
+
+An uploaded file is reused on Send when its destination matches and it was
+uploaded to the same backend endpoint. The in-memory connection counter is not
+enough on its own: it moves on every app start and reconnect, so a restored
+draft used to re-transfer an already-uploaded `attachments/<id>/…` file, the
+desktop refused to re-read the original (read authorization does not survive a
+restart), and Send failed with two toasts ("Choose this file again using the
+file picker"). Now:
+
+- same destination and endpoint: the uploaded path is sent as is;
+- the file must move and its original is gone: only that mention is removed,
+  an inline "File no longer available — re-attach" notice names it, the rest of
+  the draft is kept and the next Send goes through;
+- other transfer failures still keep the whole draft and show one error.
+
+Upload names are NFC-normalized (macOS hands out NFD) and mention matching
+compares NFC, so `Questões (1).pdf` typed and picked match.
+
+## Folders and many files
+
+Desktop: **+ → Upload folder…** (native folder picker), multi-select in the
+file picker, drag and drop of several files and folders (native drops are
+walked by the desktop; browser drops through `webkitGetAsEntry`), and pasting
+several files. `.DS_Store`, `.git`, `node_modules` and similar junk are skipped;
+for shared context, paths Core would refuse (dotfiles, keys) are skipped up
+front and counted on the chip.
+
+A folder uploads into one batch, `attachments/<batch>/<Folder>/<path>` for
+shared context or `<uploads>/<batch>/<Folder>/<path>` on a machine, with four
+files in flight, three attempts per file, and cancel. One chip shows the file
+count, size and aggregated progress and expands to per-file state; failed files
+offer Retry or Skip failed. When every file landed, the draft gets one folder
+mention (`@"attachments/<batch>/Folder/"`). More than 200 files or 500 MiB
+asks first; more than 2000 files or 2 GiB is refused. A local agent gets the
+folder's own path without copying.
+
+Core accepts `batch_id` (a UUID) and `relative_path` on `POST /api/uploads` and
+upload sessions. The path is NFC-normalized, relative, at most 32 segments and
+1024 bytes, each segment a plain filename; directories are created by Core and
+never followed through links; an existing file is never replaced. A node that
+predates this ignores the fields and stores files flat; Orb then mentions each
+file instead of the folder.
+
+Mobile: iOS's document picker now selects several files at once (Android already
+did). Folder upload (iOS document picker with folders, Android SAF tree) is a
+noted gap on both.
