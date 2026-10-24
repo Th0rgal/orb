@@ -3002,11 +3002,11 @@ fun OrbAgentPickerSheet(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val isCloudService = selectedBackend in setOf("chatgpt", "cursor_cloud", "grok_bot", "hermes")
+    val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
 
     val backendOptions = remember(backends) {
         val fromServer = backends.mapNotNull { it.str("id", "name", "slug") }
-        (fromServer + listOf("claude", "codex", "opencode", "gemini", "hermes", "chatgpt", "cursor_cloud", "grok_bot"))
+        (fromServer + listOf("claude", "codex", "opencode", "gemini", "hermes", "cursor_cloud", "grok_bot"))
             .distinct()
     }
 

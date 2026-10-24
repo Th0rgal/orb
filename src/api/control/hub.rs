@@ -382,7 +382,6 @@ impl ControlHub {
         );
         super::super::cloud_agents::worker::start(
             state.mission_store.clone(),
-            self.config.working_dir.clone(),
             self.config.clone(),
             user.id.clone(),
         );

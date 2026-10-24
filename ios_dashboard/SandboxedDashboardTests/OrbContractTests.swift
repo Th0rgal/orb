@@ -121,7 +121,7 @@ final class OrbContractTests: XCTestCase {
         XCTAssertTrue(client.mobile)
         let btw = OrbRow(.object(["id": .string("side"), "tags": .array([.string("btw-parent:123")])]))
         XCTAssertFalse(btw.mobile)
-        let cloud = OrbRow(.object(["id": .string("cloud"), "backend": .string("cloud_chatgpt")]))
+        let cloud = OrbRow(.object(["id": .string("cloud"), "backend": .string("cloud_grok_bot")]))
         XCTAssertTrue(cloud.mobile)
         XCTAssertTrue(cloud.cloud)
     }

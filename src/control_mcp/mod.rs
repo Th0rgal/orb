@@ -98,7 +98,6 @@ fn policy(name: &str) -> Option<(Role, bool)> {
         | "cancel_workspace_job" => (Executor, true),
         "list_active_missions"
         | "list_missions"
-        | "get_chatgpt_ui_pool_status"
         | "get_compute_fleet"
         | "list_projects"
         | "get_project"

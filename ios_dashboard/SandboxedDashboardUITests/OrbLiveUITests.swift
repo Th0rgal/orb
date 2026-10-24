@@ -32,7 +32,6 @@ final class OrbLiveUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["ORB_IOS_FOLLOWUP_OK"].waitForExistence(timeout: 300))
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "live-\(service)"; shot.lifetime = .keepAlways; add(shot)
     }
-    @MainActor func testChatGPT() throws { try create("ChatGPT", account: "ChatGPT · ben@starknet.id · chatgpt-profile", model: "GPT-6 Instant") }
     @MainActor func testCursor() throws { try create("Cursor Cloud", account: "Cursor Cloud") }
     @MainActor func testGrok() throws { try create("Grok Bot", account: "Grok Bot") }
 

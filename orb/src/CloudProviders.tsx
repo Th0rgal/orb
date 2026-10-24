@@ -8,8 +8,8 @@ import {mergeById,pollWhileVisible} from './poll';
 import './providerUsage.css';
 
 type AccountUsage={windows:{label:string;used_percent:number}[];details:{label:string;used_percent:number}[];reset_at?:string;reset_at_ms?:string;source:string};
-const services:CloudProvider[]=['chatgpt','cursor_cloud','grok_bot','hermes'];
-const dashboards:Partial<Record<CloudProvider,string>>={chatgpt:'https://chatgpt.com/',cursor_cloud:'https://cursor.com/dashboard/usage',grok_bot:'https://grok.com/'};
+const services:CloudProvider[]=['cursor_cloud','grok_bot','hermes'];
+const dashboards:Partial<Record<CloudProvider,string>>={cursor_cloud:'https://cursor.com/dashboard/usage',grok_bot:'https://grok.com/'};
 export function cloudAccountStatus(account:CloudAccount):string {
  if(account.available)return 'Available';
  if(/RequiresLogin|reconnect|login|sign.?in/i.test(account.reason??''))return 'Reconnect';

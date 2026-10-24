@@ -435,7 +435,7 @@ struct OrbCloudAccountsSettings: View {
     @State private var usage: OrbJSON = .null
     @State private var error = ""
     @State private var loaded = false
-    private let dashboards = ["chatgpt": "https://chatgpt.com/", "cursor_cloud": "https://cursor.com/dashboard/usage", "grok_bot": "https://grok.com/"]
+    private let dashboards = ["cursor_cloud": "https://cursor.com/dashboard/usage", "grok_bot": "https://grok.com/"]
     var body: some View {
         Section("Cloud agents") {
             if !error.isEmpty { Text(error).foregroundStyle(.orange) }

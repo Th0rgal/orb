@@ -3754,16 +3754,6 @@ async fn rollback_deployed_binary(destination: &str, backup: &str, rollback: &De
     }
 }
 
-fn chatgpt_ui_driver_install_path(configured_path: Option<&str>) -> std::path::PathBuf {
-    configured_path
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from("/opt/sandboxed-sh/scripts/chatgpt_ui_driver.py")
-        })
-}
-
 /// The actual deploy stream — git checkout (optional), build (optional),
 /// versioned install, then a detached `systemctl restart`. Mirrors
 /// `stream_sandboxed_update` but skips the "stop service first" step so the
@@ -3834,7 +3824,6 @@ fn stream_deploy(
         const MAIN_CARGO_BIN: &str = "sandboxed-sh";
         const MCP_CARGO_BIN: &str = "sandboxed-mcp";
         const PALOMA_CARGO_BIN: &str = "palomactl";
-        const CHATGPT_UI_DRIVER: &str = "chatgpt_ui_driver.py";
         let install_dest_main = current_exe.to_string_lossy().to_string();
         // Production owns the historical unsuffixed companion paths consumed
         // by Hermes. Dev/staging services install suffixed companions so their
@@ -3868,27 +3857,6 @@ fn stream_deploy(
                 }
             })
         };
-        let install_dest_chatgpt_ui_driver = chatgpt_ui_driver_install_path(
-            crate::api::mission_runner::get_backend_string_setting(
-                "chatgpt_ui",
-                "driver_path",
-            )
-            .as_deref(),
-        );
-        if !install_dest_chatgpt_ui_driver.is_absolute() {
-            yield sse(
-                "error",
-                format!(
-                    "Configured ChatGPT UI driver_path must be absolute: {}",
-                    install_dest_chatgpt_ui_driver.display()
-                ),
-                None,
-            );
-            return;
-        }
-        let install_dest_chatgpt_ui_driver =
-            install_dest_chatgpt_ui_driver.to_string_lossy().to_string();
-
         if !req.skip_build {
             yield sse("log", format!("Building {} + {} + {} (cargo build, debug)", MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN), Some(25));
             let build_cmd = format!(
@@ -3926,7 +3894,6 @@ fn stream_deploy(
         let src_main = repo_path.join("target").join("debug").join(MAIN_CARGO_BIN);
         let src_mcp = repo_path.join("target").join("debug").join(MCP_CARGO_BIN);
         let src_paloma = repo_path.join("target").join("debug").join(PALOMA_CARGO_BIN);
-        let src_chatgpt_ui_driver = repo_path.join("scripts").join(CHATGPT_UI_DRIVER);
         if !src_main.exists() {
             yield sse("error", format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_main.display()), None);
             return;
@@ -3939,18 +3906,6 @@ fn stream_deploy(
             yield sse("error", format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_paloma.display()), None);
             return;
         }
-        if !src_chatgpt_ui_driver.is_file() {
-            yield sse(
-                "error",
-                format!(
-                    "ChatGPT UI driver missing: {}. The guarded deploy requires the runtime driver to match the deployed source commit.",
-                    src_chatgpt_ui_driver.display()
-                ),
-                None,
-            );
-            return;
-        }
-
         // Resolve commit sha for the "deployed" event so the agent has
         // something concrete to confirm.
         let sha = match Command::new("git")
@@ -4103,110 +4058,6 @@ fn stream_deploy(
             }
         }
 
-        yield sse(
-            "log",
-            format!(
-                "Installing {} → {}",
-                src_chatgpt_ui_driver.display(),
-                install_dest_chatgpt_ui_driver
-            ),
-            Some(88),
-        );
-        let bkp_chatgpt_ui_driver =
-            format!("{}.pre-deploy-{}", install_dest_chatgpt_ui_driver, sha);
-        let rollback_chatgpt_ui_driver =
-            match prepare_deploy_backup(&install_dest_chatgpt_ui_driver, &bkp_chatgpt_ui_driver)
-                .await
-            {
-                Ok(rollback) => rollback,
-                Err(error) => {
-                    rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
-                        .await;
-                    rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                    rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                    yield sse("error", error, None);
-                    return;
-                }
-            };
-        if let Some(parent) = std::path::Path::new(&install_dest_chatgpt_ui_driver).parent() {
-            if let Err(error) = tokio::fs::create_dir_all(parent).await {
-                rollback_deployed_binary(
-                    &install_dest_chatgpt_ui_driver,
-                    &bkp_chatgpt_ui_driver,
-                    &rollback_chatgpt_ui_driver,
-                )
-                .await;
-                rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
-                    .await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse(
-                    "error",
-                    format!(
-                        "Failed to prepare ChatGPT UI driver directory {} (service binaries rolled back): {}",
-                        parent.display(),
-                        error
-                    ),
-                    None,
-                );
-                return;
-            }
-        }
-        let install_chatgpt_ui_driver = Command::new("install")
-            .args([
-                "-m",
-                "0755",
-                src_chatgpt_ui_driver.to_string_lossy().as_ref(),
-                &install_dest_chatgpt_ui_driver,
-            ])
-            .output()
-            .await;
-        match install_chatgpt_ui_driver {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                rollback_deployed_binary(
-                    &install_dest_chatgpt_ui_driver,
-                    &bkp_chatgpt_ui_driver,
-                    &rollback_chatgpt_ui_driver,
-                )
-                .await;
-                rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
-                    .await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse(
-                    "error",
-                    format!(
-                        "Install of ChatGPT UI driver failed (service binaries rolled back): {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ),
-                    None,
-                );
-                return;
-            }
-            Err(error) => {
-                rollback_deployed_binary(
-                    &install_dest_chatgpt_ui_driver,
-                    &bkp_chatgpt_ui_driver,
-                    &rollback_chatgpt_ui_driver,
-                )
-                .await;
-                rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma)
-                    .await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse(
-                    "error",
-                    format!(
-                        "install command error for ChatGPT UI driver (service binaries rolled back): {}",
-                        error
-                    ),
-                    None,
-                );
-                return;
-            }
-        }
-
         // The first unified rollout must provision a scoped coordinator
         // credential before changing Hermes's command. The operator cutover
         // performs that exchange after this Core version is serving requests.
@@ -4214,11 +4065,10 @@ fn stream_deploy(
         yield sse(
             "log",
             format!(
-                "Backups: {}, {}, {}, {}",
+                "Backups: {}, {}, {}",
                 bkp_main,
                 bkp_mcp,
-                bkp_paloma,
-                bkp_chatgpt_ui_driver
+                bkp_paloma
             ),
             Some(88),
         );
@@ -4234,7 +4084,6 @@ fn stream_deploy(
             &install_dest_main,
             &install_dest_mcp,
             &install_dest_paloma,
-            &install_dest_chatgpt_ui_driver,
         ] {
             let (pruned, freed) = prune_deploy_backups(dest, keep).await;
             pruned_total += pruned.len();
@@ -5640,9 +5489,8 @@ mod tests {
     }
 
     use super::{
-        chatgpt_ui_driver_install_path, evaluate_debounce, evaluate_deploy_request,
-        expand_hermes_env_refs, extract_version_token, hermes_config_base_url,
-        hermes_config_model_label, hermes_config_yaml, hermes_service_unit,
+        evaluate_debounce, evaluate_deploy_request, expand_hermes_env_refs, extract_version_token,
+        hermes_config_base_url, hermes_config_model_label, hermes_config_yaml, hermes_service_unit,
         hermes_uses_native_codex, install_versioned_binary_as, is_safe_repo_path,
         normalize_repo_path, prepare_deploy_backup, prune_deploy_backups, rollback_deployed_binary,
         sandboxed_service_name_from_path, select_repo_path, systemd_service_component_from_states,
@@ -5670,29 +5518,13 @@ mod tests {
         assert!(!yaml.contains("    timeout: 120\n"));
         // The generated allowlist is the canonical one — every assistant-mcp
         // tool, including the ones that had drifted out of it
-        // (get_chatgpt_ui_pool_status, acknowledge_mission, workspace jobs).
+        // (acknowledge_mission, workspace jobs).
         for tool in crate::hermes_tools::coordinator_tools() {
             assert!(
                 yaml.contains(&format!("        - {tool}\n")),
                 "generated Hermes config missing {tool}"
             );
         }
-    }
-
-    #[test]
-    fn guarded_deploy_installs_chatgpt_ui_driver_at_configured_runtime_path() {
-        assert_eq!(
-            chatgpt_ui_driver_install_path(Some(" /srv/runtime/chatgpt_ui_driver.py ")),
-            std::path::PathBuf::from("/srv/runtime/chatgpt_ui_driver.py")
-        );
-        assert_eq!(
-            chatgpt_ui_driver_install_path(None),
-            std::path::PathBuf::from("/opt/sandboxed-sh/scripts/chatgpt_ui_driver.py")
-        );
-        assert_eq!(
-            chatgpt_ui_driver_install_path(Some("  ")),
-            std::path::PathBuf::from("/opt/sandboxed-sh/scripts/chatgpt_ui_driver.py")
-        );
     }
 
     #[tokio::test]

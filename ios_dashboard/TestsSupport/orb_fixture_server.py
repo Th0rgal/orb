@@ -112,10 +112,10 @@ def reset():
         long_rich.append(dict(role='assistant',content=f'## Step {i}\n\nAnswer {i:02d} with a very long URL https://example.com/{"a"*120} and inline `code_{i}`.\n\n```swift\nlet veryLongLineNumber{i} = "{"x"*160}"\n```\n\n| Column A | Column B | Column C | Column D | Column E | Column F |\n| --- | --- | --- | --- | --- | --- |\n| a{i} | b{i} | c{i} | d{i} | e{i} | f{i} |'))
     long_rich.append(dict(role='assistant',content='LONG_RICH_LAST answer at the bottom.'))
     MISSIONS['long-rich']=dict(id='long-rich',title='Long rich conversation',status='awaiting_user',project='orb-test',backend='opencode',tags=[],model_override='test-model',history=long_rich)
-    rich=Path(__file__).with_name('fixtures').joinpath('chatgpt-rich.md').read_text()
-    MISSIONS['rich-chatgpt']=dict(id='rich-chatgpt',title='ChatGPT rich response',status='awaiting_user',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test','model':'test-cloud-model'},'turns':[{'key':'rich-turn','prompt':'Montre le calcul, un tableau et les fichiers.','phase':'response_complete','result':rich,'artifacts':[{'path':'/mnt/data/chart.png'},{'path':'/mnt/data/result.csv'}]}]})
-    MISSIONS['rich-growth']=dict(id='rich-growth',title='Growing rich response',status='active',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'growth-turn','prompt':'Write a long response.','phase':'running','result':'Starting the response…','artifacts':[]}]})
-    MISSIONS['reconnect']=dict(id='reconnect',title='Reconnect ChatGPT',status='blocked',project='orb-test',backend='cloud_chatgpt',tags=[],cloud_execution={'selection':{'provider':'chatgpt','account':'chatgpt-test'},'turns':[{'key':'blocked-turn','prompt':'Continue the analysis.','phase':'reconnect_required','detail':'Reconnect your ChatGPT account in Orb on your Mac.','result':'','artifacts':[]}]})
+    rich=Path(__file__).with_name('fixtures').joinpath('cloud-rich.md').read_text()
+    MISSIONS['rich-cloud']=dict(id='rich-cloud',title='Cloud rich response',status='awaiting_user',project='orb-test',backend='cloud_grok_bot',tags=[],cloud_execution={'selection':{'provider':'grok_bot','account':'grok_bot-test','model':'test-cloud-model'},'turns':[{'key':'rich-turn','prompt':'Montre le calcul, un tableau et les fichiers.','phase':'response_complete','result':rich,'artifacts':[{'path':'/mnt/data/chart.png'},{'path':'/mnt/data/result.csv'}]}]})
+    MISSIONS['rich-growth']=dict(id='rich-growth',title='Growing rich response',status='active',project='orb-test',backend='cloud_grok_bot',tags=[],cloud_execution={'selection':{'provider':'grok_bot','account':'grok_bot-test'},'turns':[{'key':'growth-turn','prompt':'Write a long response.','phase':'running','result':'Starting the response…','artifacts':[]}]})
+    MISSIONS['reconnect']=dict(id='reconnect',title='Reconnect Grok',status='blocked',project='orb-test',backend='cloud_grok_bot',tags=[],cloud_execution={'selection':{'provider':'grok_bot','account':'grok_bot-test'},'turns':[{'key':'blocked-turn','prompt':'Continue the analysis.','phase':'reconnect_required','detail':'Reconnect your Grok account in Orb on your Mac.','result':'','artifacts':[]}]})
     for mission in MISSIONS.values():
         mission.update(created_at='2026-10-09T10:00:00Z', updated_at='2026-10-09T10:01:00Z')
     # A coding agent mid-turn: an earlier finished turn, then the current one with a
@@ -294,10 +294,10 @@ class Handler(BaseHTTPRequestHandler):
         if p.endswith('/events') and p.split('/')[4]=='boat-parent': return self.send(boat_events())
         if p.endswith('/events') and p.split('/')[4] in ('agent-work','agent-done'): return self.send(agent_events(p.split('/')[4]))
         if p=='/api/control/queue' or p.endswith('/events'): return self.send([])
-        if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'},{'id':'chatgpt_ui','name':'ChatGPT UI'}])
+        if p=='/api/backends': return self.send([{'id':'claudecode','name':'Claude Code'},{'id':'codex','name':'Codex'}])
         if p=='/api/providers/backend-models': return self.send({'backends':{b:[{'value':'test-model','label':'Test model'}] for b in ['claudecode','codex']}})
         if p=='/api/remote-nodes': return self.send({'nodes':[{'id':'test-node','name':'Test node','status':'online','cordoned':CORDONED,'active_jobs':2,'mem_total_bytes':8589934592,'mem_available_bytes':4294967296}]})
-        if p=='/api/cloud/accounts': return self.send([{'id':p+'-test','provider':p,'label':p+' account','available':True,'capabilities':{'cancel':True,'follow_up':True,'models':p!='grok_bot','attachments':False}} for p in ['chatgpt','cursor_cloud','grok_bot']])
+        if p=='/api/cloud/accounts': return self.send([{'id':p+'-test','provider':p,'label':p+' account','available':True,'capabilities':{'cancel':True,'follow_up':True,'models':p!='grok_bot','attachments':False}} for p in ['cursor_cloud','grok_bot']])
         if p.endswith('/options'): return self.send({'models':{'items':[{'id':'test-cloud-model','displayName':'Test cloud model'}]},'repositories':{'items':[{'url':'https://github.com/example/orb-test'}]}})
         if p.endswith('/context/manifest'): return self.send({'revision':1,'entries':{'Design':{'directory':True},'Design/Images':{'directory':True}}})
         if p.endswith('/files'): return self.send({'entries':[{'name':'README.md','kind':'file'}]})
@@ -410,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
             INBOX_STATE['seen:' + p.split('/')[-1]] = body['stamp']; return self.send({})
         if p.endswith('/inbox-digest'):
             mid=p.split('/')[4]; mission=MISSIONS[mid]
-            return self.send(dict(schemaVersion=7, context='Restore the interrupted conversation safely.', contextDetails='Keep the original conversation and unsent drafts.', outcome='The account must be reconnected before continuing.', unresolved='Account reconnection is still required.', decision='Reconnect the account, then resume.', suggestions=['The account is reconnected; continue checking.'], sources=[dict(quote='Reconnect your ChatGPT account in Orb on your Mac.',eventSequence=None)], model=body.get('model','builtin/smart'), sourceRevision='fixture-shared-v7', sourceUpdatedAt=mission['updated_at'], generatedAt='2026-10-09T10:02:00Z'))
+            return self.send(dict(schemaVersion=7, context='Restore the interrupted conversation safely.', contextDetails='Keep the original conversation and unsent drafts.', outcome='The account must be reconnected before continuing.', unresolved='Account reconnection is still required.', decision='Reconnect the account, then resume.', suggestions=['The account is reconnected; continue checking.'], sources=[dict(quote='Reconnect your Grok account in Orb on your Mac.',eventSequence=None)], model=body.get('model','builtin/smart'), sourceRevision='fixture-shared-v7', sourceUpdatedAt=mission['updated_at'], generatedAt='2026-10-09T10:02:00Z'))
         if p.startswith('/api/nodes/test-node/'):
             CORDONED = p.endswith('/cordon'); return self.send({'cordoned':CORDONED})
         if p.startswith('/api/ai/providers/'):

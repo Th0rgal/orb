@@ -4,7 +4,6 @@ import { startBubbleSampling, stopBubbleSampling } from './fluidity';
 const MID = 'cccccccc-cccc-4ccc-cccc-cccccccccccc';
 const caps = (attachments: boolean) => ({ models: false, repository: false, follow_up: true, cancel: true, artifacts: false, attachments, detailed_events: false });
 const ACCOUNTS = [
- { id: 'chatgpt-profile-3', provider: 'chatgpt', label: 'ChatGPT · chatgpt-profile-3', available: true, experimental: false, capabilities: caps(false) },
  { id: 'grok', provider: 'grok_bot', label: 'Grok Bot', available: true, experimental: true, capabilities: caps(false) },
  { id: 'cursor-default', provider: 'cursor_cloud', label: 'Cursor Cloud', available: true, experimental: false, capabilities: caps(false) },
  { id: 'paloma', provider: 'hermes', label: 'Paloma', available: true, experimental: false, capabilities: caps(true) },
@@ -80,7 +79,7 @@ test('a removed chip is not sent, and services without attachments disable "+" w
  await form.getByLabel('Choose images').setInputFiles({ name: 'drop.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
  await form.getByRole('button', { name: 'Remove drop.txt' }).click();
  await expect(form.getByRole('button', { name: 'Remove drop.txt' })).toHaveCount(0);
- for (const name of ['ChatGPT', 'Grok Bot', 'Cursor Cloud']) {
+ for (const name of ['Grok Bot', 'Cursor Cloud']) {
   await form.getByLabel('Service', { exact: true }).click();
   await page.getByRole('option', { name, exact: true }).click();
   const plus = form.getByRole('button', { name: 'Attach file or image' });

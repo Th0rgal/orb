@@ -32,7 +32,7 @@ curl -X POST "https://orb.thomas.md/api/auth/login" \
   "remote_node_id": null
 }
 ```
-- `backend`: `"claudecode"`, `"codex"`, `"antigravity"`, `"opencode"`, `"grok"`, `"chatgpt_ui"`, or cloud adapters (`"hermes"`, `"cursor_cloud"`, `"grok_bot"`).
+- `backend`: `"claudecode"`, `"codex"`, `"antigravity"`, `"opencode"`, `"grok"`, or cloud adapters (`"hermes"`, `"cursor_cloud"`, `"grok_bot"`).
 - `placement`: Omit for server/fleet execution, or set `"client"` when Orb Desktop executes the CLI locally.
 - `model_effort`: `"low"`, `"medium"`, `"high"`, or `"xhigh"`.
 
@@ -91,7 +91,7 @@ curl -X POST "https://orb.thomas.md/api/auth/login" \
 | `/api/providers/backend-models` | `GET` | Model catalog across configured backends |
 | `/api/providers/antigravity-models` | `GET` | Workspace-native `agy models` discovery |
 | `/api/model-routing` | `GET` / `POST` | Manage model routing fallback chains and inspect provider health |
-| `/api/cloud/accounts` | `GET` | List connected Cloud Agent accounts (Hermes, ChatGPT, Grok Bot, Cursor Cloud) |
+| `/api/cloud/accounts` | `GET` | List connected Cloud Agent accounts (Hermes, Grok Bot, Cursor Cloud) |
 
 ---
 

@@ -27,14 +27,13 @@
 | --- | --- | --- |
 | **Your computer** | A local coding agent on your desktop | Choose **New Agent → This computer**, then a harness and model. Work with your local files and tools. |
 | **Your private cloud** | Your own servers and remote machines | Add machines to sandboxed.sh, then select one in Orb. Run agents in the configured host or isolated container workspace. |
-| **Cloud agents** | A coordinator or provider-managed assistant | Choose **Cloud agent**, then Hermes, ChatGPT, Grok Bot or Cursor Cloud. Continue durable or provider conversations from Orb. |
+| **Cloud agents** | A coordinator or provider-managed assistant | Choose **Cloud agent**, then Hermes, Grok Bot or Cursor Cloud. Continue durable or provider conversations from Orb. |
 
 Use **Claude Code**, **Codex**, **Antigravity**, **OpenCode** or **Grok** for
 local and remote work, with live model, effort and cyber-access controls where
 supported. Cloud agents have their own connections: **Hermes** binds to durable
-coordinator conversations and router chains; **ChatGPT** uses a signed-in
-browser profile and your available subscription modes; **Grok Bot** uses its
-connected account; **Cursor Cloud** uses its official API with a repository,
+coordinator conversations and router chains; **Grok Bot** uses its connected
+account; **Cursor Cloud** uses its official API with a repository,
 Git reference and model.
 
 ![Creating an agent in Orb on macOS](screenshots/orb-setup.webp)
@@ -79,8 +78,8 @@ across eligible accounts while Orb lets you choose the harness and model.
 - [Credential ownership and proxy configuration](docs/CREDENTIAL_OWNERSHIP.md)
 
 This routes **model inference** for coding agents. Managed cloud agents use
-separate service adapters; connecting a proxy account does not sign in to the
-ChatGPT browser or create a Cursor Cloud API account.
+separate service adapters; connecting a proxy account does not create a
+Cursor Cloud API account.
 
 ## Get started
 

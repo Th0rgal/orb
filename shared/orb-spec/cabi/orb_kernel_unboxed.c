@@ -458,7 +458,7 @@ return v___x_166_;
 }
 }
 
-LEAN_EXPORT uint8_t orb_verify_board_retry(uint32_t v_attempts_178_, uint32_t v_maxAttempts_179_, uint8_t v_requiresExternalRecovery_180_, uint8_t v_preflightMerged_181_, uint8_t v_chatgptUiBlocked_182_){
+LEAN_EXPORT uint8_t orb_verify_board_retry(uint32_t v_attempts_178_, uint32_t v_maxAttempts_179_, uint8_t v_requiresExternalRecovery_180_, uint8_t v_preflightMerged_181_, uint8_t v_retrySuppressed_182_){
 _start:
 {
 uint8_t v___y_184_; uint8_t v___x_191_; uint32_t v___x_192_; uint8_t v___x_193_; 
@@ -503,7 +503,7 @@ return v___x_186_;
 else
 {
 uint8_t v___x_189_; 
-v___x_189_ = lean_uint8_dec_eq(v_chatgptUiBlocked_182_, v___x_186_);
+v___x_189_ = lean_uint8_dec_eq(v_retrySuppressed_182_, v___x_186_);
 if (v___x_189_ == 0)
 {
 return v___x_186_;

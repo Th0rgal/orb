@@ -317,7 +317,6 @@ Compliance at the time of writing:
 |---|---|---|---|
 | cron idle watchdog (600s) | ✓ `last_activity` | ✓ | n/a |
 | degenerate-stream detector | ✓ repeated substring | n/a | ✓ since the adjacency fix |
-| chatgpt_ui auth preflight | ✓ probed selectors + URL | ✓ fails closed loudly | n/a |
 | MCP circuit breaker | ✓ triggering error class (denylist) | ✓ | n/a |
 | skill-body guard | ✓ | ✓ warns with the skill name | n/a |
 | webhook forwarder | ✓ marker divergence is the evidence | ✓ reconcile log | ✓ durable markers |

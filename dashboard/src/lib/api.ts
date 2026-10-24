@@ -3284,68 +3284,6 @@ export async function getBackendConfig(
   );
 }
 
-export interface ChatgptUiProfilePoolSlot {
-  slot: number;
-  profile_name: string;
-  state: "available" | "in_use" | "quarantined" | "unavailable";
-  consecutive_failures: number;
-  quarantine_remaining_secs?: number | null;
-  last_failure?: string | null;
-}
-
-export interface ChatgptUiProfilePoolResponse {
-  slots: ChatgptUiProfilePoolSlot[];
-  backend_circuit?: {
-    open: boolean;
-    retry_after_secs?: number | null;
-    reason?: "compatibility" | "transport" | "rate_limited" | null;
-  };
-  availability?: {
-    state: "available" | "cooldown" | "probing";
-    reason?: "compatibility" | "transport" | "rate_limited" | null;
-    unavailable_since?: string | null;
-    retry_at?: string | null;
-    retry_after_secs?: number | null;
-    transition_id: number;
-    last_probe_at?: string | null;
-    recovered_at?: string | null;
-  };
-}
-
-// Get ChatGPT UI profile pool slot telemetry
-export async function getChatgptUiProfilePool(): Promise<ChatgptUiProfilePoolResponse> {
-  return apiGet(
-    "/api/backends/chatgpt_ui/profile-pool",
-    "Failed to get ChatGPT UI profile pool status",
-  );
-}
-
-// Privacy-reduced durable job record: states, counters, and allowlisted error
-// codes only. Conversation routes and prompt fingerprints are never returned.
-export interface ChatgptUiDurabilityJob {
-  mission_id: string;
-  state: "submitted" | "completed" | "abandoned";
-  attempts: number;
-  profile: string;
-  model?: string | null;
-  age_secs: number;
-  updated_secs_ago: number;
-  resumable: boolean;
-  last_error_code?: string | null;
-}
-
-export interface ChatgptUiDurabilityResponse {
-  jobs: ChatgptUiDurabilityJob[];
-}
-
-// Get ChatGPT UI durable job ledger health
-export async function getChatgptUiDurability(): Promise<ChatgptUiDurabilityResponse> {
-  return apiGet(
-    "/api/backends/chatgpt_ui/durability",
-    "Failed to get ChatGPT UI durability status",
-  );
-}
-
 // Update backend configuration
 export async function updateBackendConfig(
   backendId: string,

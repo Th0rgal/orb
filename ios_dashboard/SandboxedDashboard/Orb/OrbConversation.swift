@@ -117,7 +117,7 @@ struct OrbConversation: View {
 
     func baseStepLabel() -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
-        let provider = ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][execution["selection"]["provider"].text] ?? "the service"
+        let provider = ["cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][execution["selection"]["provider"].text] ?? "the service"
         if let turn {
             switch turn["phase"].text {
             case "cancel_requested": return "Stopping…"
@@ -147,16 +147,10 @@ struct OrbConversation: View {
         return OrbTurnSummary.clock(Int(now.timeIntervalSince(started)))
     }
 
-    /// Only the latest ChatGPT answer becomes an interactive quiz, like the desktop.
-    func quiz(for item: (String, String, String)) -> OrbQuizData? {
-        guard isCloud, execution["selection"]["provider"].text == "chatgpt", let last = turns.last, item.0 == last["key"].text + ":a", !Self.workingPhases.contains(last["phase"].text) else { return nil }
-        return OrbQuizData.parse(item.2)
-    }
-
-    /// Sends quiz answers through the normal, idempotent send path; the typed draft is restored after.
+    /// Sends a canned reply through the normal, idempotent send path; the typed draft is restored after.
     func sendReply(_ reply: String) async -> Bool {
         if let pending = OrbDisk.read(pendingKey, as: OrbPending.self), pending.body["content"].text != reply {
-            error = "Another message is still being confirmed. Send it before answering the quiz."
+            error = "Another message is still being confirmed. Send it first."
             return false
         }
         let draft = text; text = reply

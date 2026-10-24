@@ -29,7 +29,7 @@ it("a previous connection's delayed 401 cannot log out the new connection", asyn
 });
 
 
-it.each(["grok", "codex", "gemini", "chatgpt_ui", "unknown", undefined])("sends remote %s exactly as selected: harness support is server-advertised, not hardcoded here", async backend => {
+it.each(["grok", "codex", "gemini", "unknown", undefined])("sends remote %s exactly as selected: harness support is server-advertised, not hardcoded here", async backend => {
   // The pre-POST refusal lives in remoteLaunchPreflight (launch.test.ts) and
   // reads GET /api/remote-nodes; createMission itself must never carry a
   // client-side harness list that would reject grok once the server allows it.

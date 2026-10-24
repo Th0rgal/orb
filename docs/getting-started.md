@@ -51,7 +51,7 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **sandbo
 2. Choose a **Project** and an execution mode:
    - **This computer (`placement: "client"`)**: Runs a local CLI on your Mac in `~/.orb/local-runs/<mission-id>` while keeping the mission record and `@context` synced to the server.
    - **Core / Fleet machine**: Runs in a host directory or isolated `systemd-nspawn` container on your server or a registered `sandboxed-node` machine.
-   - **Cloud agent**: Connects to **Hermes**, **ChatGPT**, **Grok Bot**, or **Cursor Cloud**.
+   - **Cloud agent**: Connects to **Hermes**, **Grok Bot**, or **Cursor Cloud**.
 3. Choose the **Harness** and **Model Override**:
    - **Claude Code (`claudecode`)**: Raw model ID (e.g., `claude-opus-5-5`, `claude-sonnet-4-20250514`)
    - **Codex (`codex`)**: Raw model ID (e.g., `gpt-5.6-terra`, `gpt-5.5`) plus optional **Cyber Access** (`Standard`, `Daybreak`, `Automatic`)

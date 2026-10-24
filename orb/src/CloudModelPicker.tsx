@@ -25,14 +25,14 @@ export function CloudModelPicker(p:{provider:CloudProvider;model:string;params:M
   if(selectedProvider==='grok_bot')return;
   let current=true; // provider changes discard late discovery replies
   setModels([]);setEfforts([]);setLoading(true);p.onRepositories?.([]);p.onRepositoriesLoading?.(true);
-  void api<{models:{items:CloudModel[]};efforts?:{id:string;name?:string;displayName?:string}[]|{items:{id:string;name?:string;displayName?:string}[]};repositories?:{items:{url:string}[]}}>(`/api/cloud/${selectedProvider==='hermes'?'hermes':selectedProvider==='chatgpt'?'chatgpt':'cursor'}/options`).then(data=>{
+  void api<{models:{items:CloudModel[]};efforts?:{id:string;name?:string;displayName?:string}[]|{items:{id:string;name?:string;displayName?:string}[]};repositories?:{items:{url:string}[]}}>(`/api/cloud/${selectedProvider==='hermes'?'hermes':'cursor'}/options`).then(data=>{
    if(!current)return;
    const effortItems=Array.isArray(data.efforts)?data.efforts:(data.efforts?.items ?? []);
    setModels(data.models.items ?? []);
    setEfforts(effortItems);
    p.onRepositories?.(data.repositories?.items ?? []);
    if(!p.model){
-    const selected=data.models.items?.find(m=>m.id===(selectedProvider==='hermes'?'':selectedProvider==='chatgpt'?'gpt-6-pro':'default')) ?? data.models.items?.[0];
+    const selected=data.models.items?.find(m=>m.id===(selectedProvider==='hermes'?'':'default')) ?? data.models.items?.[0];
     if(selected){
      const baseParams=selected.variants?.find(v=>v.isDefault)?.params ?? selected.variants?.[0]?.params ?? [];
      const existingEffort=p.params.filter(x=>x.id==='effort'||x.id==='reasoning_effort');

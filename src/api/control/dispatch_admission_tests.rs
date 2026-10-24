@@ -13298,3 +13298,28 @@ async fn managed_spawn_refuses_a_mission_of_another_tenant() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn retired_chatgpt_ui_backend_is_rejected_with_the_opencode_alternative() {
+    let h = Harness::new().await;
+    for backend in ["chatgpt_ui", "cloud_chatgpt"] {
+        let request: CreateMissionRequest = serde_json::from_value(json!({
+            "title": "Ask GPT", "backend": backend,
+        }))
+        .unwrap();
+        let error = super::create_mission_inner(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Some(Json(request)),
+            true,
+            Some("retired-backend"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1, crate::backend::CHATGPT_UI_RETIRED);
+        assert!(error
+            .1
+            .contains("backend=opencode with model_override=<provider>/<model>"));
+    }
+}

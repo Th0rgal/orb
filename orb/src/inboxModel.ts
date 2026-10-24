@@ -653,7 +653,6 @@ function resolveMachine(mission: Mission): string | undefined {
   if (mission.backend?.startsWith("cloud_")) {
     return (
       {
-        cloud_chatgpt: "ChatGPT",
         cloud_grok_bot: "Grok Bot",
         cloud_cursor: "Cursor Cloud",
         cloud_hermes: "Paloma",

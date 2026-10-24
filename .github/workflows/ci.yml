@@ -150,38 +150,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Lint ChatGPT UI pool policy
-        run: python3 scripts/policy_lint.py
-
       - name: Test project skill preparation and ownership
         run: |
-          python3 -m pip install --user 'PyYAML>=6,<7' 'ruamel.yaml' playwright
+          python3 -m pip install --user 'PyYAML>=6,<7' 'ruamel.yaml'
           python3 -m unittest discover -s tests -p project_skills_test.py
           python3 -m unittest discover -s tests -p library_skills_test.py
-
-      # One Chromium install, cached; the layout tests skip silently without it.
-      - name: Cache Playwright browsers
-        id: pw-cache
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-py-playwright-${{ hashFiles('scripts/policy_lint.py') }}-v1
-          restore-keys: ${{ runner.os }}-py-playwright-
-      - name: Install Chromium
-        run: |
-          # Downloads only on a cache miss; always installs the apt deps.
-          python3 -m playwright install --with-deps chromium
 
       # Every scripts/test_*.py. None reaches the network: remote-build tests use
       # example.invalid, unified-MCP tests use a 127.0.0.1 server (and skip
       # without the binary). Nothing is excluded.
       - name: Run all script unit tests
         run: |
-          set -o pipefail
-          python3 -m unittest discover -v -s scripts -p 'test_*.py' 2>&1 | tee /tmp/scripts.log
-          if grep -E "^test_.*\(test_chatgpt_message_layout\..*skipped" /tmp/scripts.log; then
-            echo "::error::ChatGPT layout tests skipped (Chromium missing)"; exit 1
-          fi
+          python3 -m unittest discover -v -s scripts -p 'test_*.py'
 
   dashboard-test:
     name: Dashboard Unit Tests

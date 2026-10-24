@@ -14,7 +14,7 @@ it("counts running agents on the machine that runs them", () => {
     mission("c", "awaiting_user", { remote_node_id: "ashur" }),
     mission("d", "active"),
     mission("e", "active", { tags: ["placement:client"] }),
-    mission("f", "active", { backend: "cloud_chatgpt" }),
+    mission("f", "active", { backend: "cloud_cursor" }),
     mission("g", "completed", { remote_node_id: "babylon" }),
     // Waiting for a runner: no agent process yet.
     mission("h", "pending", { remote_node_id: "babylon" }),

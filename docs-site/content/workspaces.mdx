@@ -14,7 +14,7 @@ Orb and sandboxed.sh execute agent missions across three machine tiers while kee
 | **This computer** (`placement: "client"`) | Your macOS desktop running Orb | Orb's Tauri runner spawns your locally installed CLI (`claude`, `codex`, `agy`, `opencode`, `grok`) in `~/.orb/local-runs/<mission-id>` (or a chosen checkout). Uses your local credentials and streams events back to Core. Supports offline starts (`POST /api/control/local-origins`). |
 | **Core** (`core`) | The main `sandboxed-sh` Linux server | Runs in a per-mission directory inside either a **Host workspace** or an isolated **Container workspace** (`systemd-nspawn`). |
 | **Remote Fleet Nodes** (`remote_node_id`) | Dedicated Linux / GPU / ARM servers running `sandboxed-node` | Core dispatches leased jobs over HTTPS (port `3088`) using per-mission lease tokens signed with the node's secret. Nodes stream events back to Core and synchronize `@context` replicas. |
-| **Cloud Agents** | Hermes, ChatGPT, Grok Bot, Cursor Cloud | Core's cloud adapters drive external coordinator or provider sessions and record durable turn receipts in the same project database. |
+| **Cloud Agents** | Hermes, Grok Bot, Cursor Cloud | Core's cloud adapters drive external coordinator or provider sessions and record durable turn receipts in the same project database. |
 
 ## 2. Core & Node Workspace Types
 

@@ -84,14 +84,14 @@ def verifyBoardSlots (maxParallel reservedBossSlots totalRunning : UInt32) : UIn
 /--
   Unboxed C-ABI Task Board Automatic Retry Gate (`orb_verify_board_retry`):
   Verifies that `maxAttempts ≥ 1`, `attempts < maxAttempts`, `requiresExternalRecovery == 0`,
-  `preflightMerged == 0` (already-merged PRs park for boss review), and `chatgptUiBlocked == 0`.
+  `preflightMerged == 0` (already-merged PRs park for boss review), and `retrySuppressed == 0`.
 -/
 @[inline, export orb_verify_board_retry]
 def verifyBoardRetry
     (attempts maxAttempts : UInt32)
-    (requiresExternalRecovery preflightMerged chatgptUiBlocked : UInt8) : UInt8 :=
+    (requiresExternalRecovery preflightMerged retrySuppressed : UInt8) : UInt8 :=
   if maxAttempts ≥ 1 && attempts < maxAttempts &&
-     requiresExternalRecovery == 0 && preflightMerged == 0 && chatgptUiBlocked == 0 then 1 else 0
+     requiresExternalRecovery == 0 && preflightMerged == 0 && retrySuppressed == 0 then 1 else 0
 
 /--
   Unboxed C-ABI Node Job Lifecycle State Machine Gate (`orb_verify_job_transition`):

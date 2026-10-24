@@ -101,13 +101,6 @@ const HARNESS_META: Record<
     projectRel: "Cron skills[]",
     mechanism: "Preloads skills attached to each project controller cron on Core",
   },
-  chatgpt_ui: {
-    name: "ChatGPT UI",
-    globalRel: "—",
-    projectRel: "—",
-    mechanism: "Browser session harness; local filesystem skills are not mounted",
-    warning: "Rejects local project skill launches by design to prevent silent drops",
-  },
 };
 
 const HARNESS_ORDER = [
@@ -118,7 +111,6 @@ const HARNESS_ORDER = [
   "opencode",
   "grok",
   "hermes",
-  "chatgpt_ui",
 ] as const;
 
 
@@ -314,25 +306,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
 
     return HARNESS_ORDER.map((id) => {
       const meta = HARNESS_META[id];
-      if (id === "chatgpt_ui") {
-        return {
-          id,
-          name: meta.name,
-          installed: true,
-          version: "Web session",
-          binPath: null,
-          globalRel: meta.globalRel,
-          projectRel: meta.projectRel,
-          skillCount: 0,
-          syncedCount: 0,
-          canonicalTotal: 0,
-          missingSkills: [],
-          state: "unsupported",
-          statusLabel: "Unsupported",
-          mechanism: meta.mechanism,
-          warning: meta.warning,
-        };
-      }
 
       if (id === "hermes") {
         const connected = isConnected();

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { SWRConfig } from 'swr';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -237,82 +237,5 @@ describe('NewMissionDialog', () => {
     await waitFor(() => expect(select).toHaveValue('claude-opus-6'));
     fireEvent.change(select, { target: { value: '' } });
     await waitFor(() => expect(select).toHaveValue(''));
-  });
-
-  it('uses one host-only canonical Pro option for ChatGPT UI missions', async () => {
-    vi.mocked(listBackends).mockResolvedValue([
-      { id: 'chatgpt_ui', name: 'ChatGPT UI (experimental)' },
-    ]);
-    const onCreate = vi.fn().mockResolvedValue({ id: 'chatgpt-mission' });
-    const unavailableWorkspace: Workspace = {
-      id: 'project-workspace',
-      name: 'Project container',
-      workspace_type: 'container',
-      path: '/containers/project',
-      status: 'building',
-      error_message: null,
-      created_at: '2026-07-25T00:00:00Z',
-      skills: [],
-      plugins: [],
-      env_vars: {},
-      config_profile: 'project',
-    };
-
-    renderDialog(onCreate, [unavailableWorkspace]);
-
-    fireEvent.click(screen.getByRole('button', { name: /new mission/i }));
-    const chatGptOption = await screen.findByRole('option', {
-      name: 'ChatGPT Pro web conversation',
-    });
-    expect(chatGptOption).toHaveValue('chatgpt_ui:');
-    expect(
-      screen.queryByRole('option', {
-        name: 'ChatGPT UI (experimental) default',
-      })
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('option', {
-        name: 'ChatGPT web conversation',
-      })
-    ).not.toBeInTheDocument();
-
-    const agentSelect = chatGptOption.closest('select');
-    expect(agentSelect).not.toBeNull();
-    fireEvent.change(agentSelect!, { target: { value: 'chatgpt_ui:' } });
-
-    await waitFor(() => {
-      expect(agentSelect).toHaveValue('chatgpt_ui:');
-    });
-    const [workspaceSelect] = screen.getAllByRole('combobox');
-    expect(workspaceSelect).toBeDisabled();
-    expect(workspaceSelect).toHaveValue('');
-    expect(within(workspaceSelect).getAllByRole('option')).toHaveLength(1);
-    expect(
-      within(workspaceSelect).getByRole('option', {
-        name: 'Host artifact storage (required)',
-      })
-    ).toBeVisible();
-    expect(
-      screen.queryByText(/workspace\\(s\\) unavailable/i)
-    ).not.toBeInTheDocument();
-    expect(screen.getByText('ChatGPT Pro')).toBeVisible();
-    expect(screen.getByText('gpt-5.6-pro')).toBeVisible();
-    expect(
-      screen.queryByText('Model override (optional)')
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create here' }));
-
-    await waitFor(() => {
-      expect(onCreate).toHaveBeenCalledWith({
-        workspaceId: undefined,
-        agent: undefined,
-        backend: 'chatgpt_ui',
-        modelOverride: 'gpt-5.6-pro',
-        modelEffort: undefined,
-        configProfile: undefined,
-        openInNewTab: false,
-      });
-    });
   });
 });

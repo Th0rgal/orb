@@ -80,7 +80,7 @@
         {"name": "maxAttempts", "type": "uint32_t"},
         {"name": "requiresExternalRecovery", "type": "uint8_t"},
         {"name": "preflightMerged", "type": "uint8_t"},
-        {"name": "chatgptUiBlocked", "type": "uint8_t"}
+        {"name": "retrySuppressed", "type": "uint8_t"}
       ]
     },
     {

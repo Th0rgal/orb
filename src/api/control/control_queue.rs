@@ -7,13 +7,11 @@ use super::*;
 /// writers; this gate still force-aborted Lido `04b0a5d8` after the watchdog
 /// correctly logged NOT auto-killing. Same ownership rule applies here.
 pub(super) fn skip_idle_registered_liveness_interrupt(
-    backend_id: Option<&str>,
     origin: Option<&str>,
     origin_session_id: Option<&str>,
     tags: &[String],
 ) -> bool {
-    backend_id == Some("chatgpt_ui")
-        || watchdog_skips_control_owned_mission(origin, origin_session_id, tags)
+    watchdog_skips_control_owned_mission(origin, origin_session_id, tags)
 }
 
 pub(super) fn parse_durable_job_result(result: &serde_json::Value) -> Option<serde_json::Value> {
@@ -412,17 +410,10 @@ pub(super) fn projected_running_health(
     seconds_since_activity: u64,
     tool_call_in_flight: bool,
     waiting_remote_job: bool,
-    backend: Option<&str>,
 ) -> super::super::mission_runner::MissionHealth {
-    if waiting_remote_job
-        || (backend == Some("chatgpt_ui")
-            && state == super::super::mission_runner::MissionRunState::Running)
-    {
+    if waiting_remote_job {
         // A fresh durable remote-job heartbeat is process-backed liveness, not
         // the provisional unmatched-tool hint that expires after ten minutes.
-        // ChatGPT UI is likewise bounded by its driver's absolute timeout, but
-        // Pro may expose no visible answer events during a long reasoning
-        // phase. Its run heartbeat, rather than DOM text, is execution truth.
         return super::super::mission_runner::MissionHealth::Healthy;
     }
     super::super::mission_runner::running_health(state, seconds_since_activity, tool_call_in_flight)

@@ -337,13 +337,13 @@ structure BoardRetryCheck where
   maxAttempts              : UInt32
   requiresExternalRecovery : UInt8
   preflightMerged          : UInt8
-  chatgptUiBlocked         : UInt8
+  retrySuppressed          : UInt8
   deriving Repr, DecidableEq
 
 def boardRetryMetaGate : MetaGateSpec BoardRetryCheck
     (fun r => (r.maxAttempts ≥ 1 && r.attempts < r.maxAttempts &&
-      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.chatgptUiBlocked == 0) = true) where
-  gate r := verifyBoardRetry r.attempts r.maxAttempts r.requiresExternalRecovery r.preflightMerged r.chatgptUiBlocked == 1
+      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.retrySuppressed == 0) = true) where
+  gate r := verifyBoardRetry r.attempts r.maxAttempts r.requiresExternalRecovery r.preflightMerged r.retrySuppressed == 1
   sound _ h := by unfold verifyBoardRetry at h; repeat (first | split at h | simp_all)
   complete _ h := by unfold verifyBoardRetry; repeat (first | split | simp_all)
   posWitness := ⟨1, 3, 0, 0, 0⟩
@@ -354,9 +354,9 @@ def boardRetryMetaGate : MetaGateSpec BoardRetryCheck
 /-- Corollary 7: `verifyBoardRetry` suppresses retries after `maxAttempts`, on merged PRs, or when external recovery is required. -/
 theorem board_retry_rejects_exhausted_or_merged (r : BoardRetryCheck)
     (h_stop : (r.maxAttempts ≥ 1 && r.attempts < r.maxAttempts &&
-      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.chatgptUiBlocked == 0) = false) :
+      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.retrySuppressed == 0) = false) :
     (verifyBoardRetry r.attempts r.maxAttempts
-      r.requiresExternalRecovery r.preflightMerged r.chatgptUiBlocked == 1) = false :=
+      r.requiresExternalRecovery r.preflightMerged r.retrySuppressed == 1) = false :=
   boardRetryMetaGate.rejects_unsafe r (by simp [h_stop])
 
 structure JobTransitionCheck where

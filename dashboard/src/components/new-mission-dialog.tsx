@@ -11,10 +11,7 @@ import type { Workspace } from '@/lib/api';
 import { isBackendAvailable, useBackendConfigs } from '@/lib/use-backend-configs';
 import { toast } from '@/components/toast';
 
-const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'grok', 'antigravity', 'vibe', 'chatgpt_ui'] as const;
-const CHATGPT_UI_BACKEND_ID = 'chatgpt_ui';
-
-const CHATGPT_UI_CANONICAL_MODEL = 'gpt-5.6-pro';
+const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'codex', 'grok', 'antigravity', 'vibe'] as const;
 
 // Kept in sync with src/api/control.rs `normalize_model_effort_for_backend`.
 // Codex and Claude Code both accept the GPT reasoning-effort ladder. Other
@@ -157,7 +154,6 @@ export function NewMissionDialog({
       { id: 'grok', name: 'Grok Build' },
       { id: 'antigravity', name: 'Antigravity CLI' },
       { id: 'vibe', name: 'Mistral Vibe' },
-      { id: 'chatgpt_ui', name: 'ChatGPT UI (experimental)' },
     ],
     }
   );
@@ -280,12 +276,6 @@ export function NewMissionDialog({
         agents = [{ id: 'build', name: 'Build' }, { id: 'plan', name: 'Plan' }];
       } else if (backend.id === 'antigravity') {
         agents = [{ id: 'build', name: 'Build' }];
-      } else if (backend.id === CHATGPT_UI_BACKEND_ID) {
-        // ChatGPT UI has one web harness, not a selectable agent family. Use
-        // the empty agent ID so mission creation sends only the backend.
-        agents = [
-          { id: '', name: 'ChatGPT Pro web conversation' },
-        ];
       }
 
       // Use agent.id for CLI value, agent.name for display (consistent across all backends)
@@ -355,13 +345,6 @@ export function NewMissionDialog({
   );
   const antigravityReady = !antigravityError && !antigravityLoading && !!antigravityModels?.length
     && !!modelOverride && antigravityModels.some(([id]) => id === modelOverride);
-  const isChatGptUi = selectedBackend === CHATGPT_UI_BACKEND_ID;
-  const chatGptUiModel = useMemo(() => {
-    const configuredModel = backendConfigs[CHATGPT_UI_BACKEND_ID]?.settings?.model;
-    return typeof configuredModel === 'string' && configuredModel.trim()
-      ? configuredModel.trim()
-      : CHATGPT_UI_CANONICAL_MODEL;
-  }, [backendConfigs]);
 
   const providerAllowlist = useMemo(() => {
     if (selectedBackend === 'claudecode') return new Set(['anthropic']);
@@ -373,13 +356,6 @@ export function NewMissionDialog({
 
   const modelOptions = useMemo(() => {
     if (isAntigravity) return (antigravityModels ?? []).map(([value, label]) => ({ value, label }));
-    if (selectedBackend === CHATGPT_UI_BACKEND_ID) {
-      return [{
-        value: chatGptUiModel,
-        label: 'ChatGPT · Pro',
-        description: 'Verified through the ChatGPT web intelligence picker.',
-      }];
-    }
     const backendOptions = backendModelOptions?.backends?.[selectedBackend];
     if (backendOptions && backendOptions.length > 0) {
       return backendOptions as BackendModelOption[];
@@ -401,7 +377,7 @@ export function NewMissionDialog({
       }
     }
     return options;
-  }, [backendModelOptions, providersResponse, providerAllowlist, selectedBackend, chatGptUiModel, isAntigravity, antigravityModels]);
+  }, [backendModelOptions, providersResponse, providerAllowlist, selectedBackend, isAntigravity, antigravityModels]);
 
   // The server orders the newest available Opus first. Preserve explicit
   // choices and edits; a fresh Claude mission starts with that catalog choice.
@@ -529,11 +505,6 @@ export function NewMissionDialog({
 
     // Try to use initialValues for agent/backend (from current mission)
     if (initialValues?.backend) {
-      if (initialValues.backend === CHATGPT_UI_BACKEND_ID) {
-        setSelectedAgentValue(`${CHATGPT_UI_BACKEND_ID}:`);
-        setDefaultSet(true);
-        return;
-      }
       const currentAgentValue = `${initialValues.backend}:${initialValues.agent || ''}`;
       if (!initialValues.agent) {
         setSelectedAgentValue(currentAgentValue);
@@ -604,22 +575,15 @@ export function NewMissionDialog({
     if (modelEffort && !isEffortSupportedByBackend(modelEffort, selectedBackend)) {
       setModelEffort('');
     }
-    if (selectedBackend === CHATGPT_UI_BACKEND_ID) {
-      if (modelOverride !== chatGptUiModel) {
-        setModelOverride(chatGptUiModel);
-      }
-      if (!isEditMode && newMissionWorkspace) {
-        setNewMissionWorkspace('');
-      }
     // When switching backends, clear model override if current value isn't valid for the new backend
-    } else if (prevBackendRef.current !== null && prevBackendRef.current !== selectedBackend && modelOverride) {
+    if (prevBackendRef.current !== null && prevBackendRef.current !== selectedBackend && modelOverride) {
       const isValidForNewBackend = modelOptions.some(opt => opt.value === modelOverride);
       if (!isValidForNewBackend) {
         setModelOverride('');
       }
     }
     prevBackendRef.current = selectedBackend;
-  }, [selectedBackend, modelOverride, modelEffort, modelOptions, isEditMode, newMissionWorkspace, chatGptUiModel]);
+  }, [selectedBackend, modelOverride, modelEffort, modelOptions, isEditMode, newMissionWorkspace]);
 
   const resetForm = () => {
     setNewMissionWorkspace('');
@@ -662,34 +626,26 @@ export function NewMissionDialog({
           ? trimmedModel.split('/').pop() || ''
           : trimmedModel;
     const modelOverrideValue =
-      selectedBackend === CHATGPT_UI_BACKEND_ID
-        ? chatGptUiModel
-        : !normalizedModel ? undefined : normalizedModel;
+      !normalizedModel ? undefined : normalizedModel;
     const modelEffortValue =
       modelEffort && isEffortSupportedByBackend(modelEffort, selectedBackend)
         ? modelEffort
         : undefined;
     return {
-      workspaceId:
-        selectedBackend === CHATGPT_UI_BACKEND_ID
-          ? undefined
-          : newMissionWorkspace || undefined,
+      workspaceId: newMissionWorkspace || undefined,
       agent: agentValue,
       backend: parsed?.backend || 'claudecode',
       modelOverride: modelOverrideValue,
       modelEffort: modelEffortValue,
-      configProfile:
-        selectedBackend === CHATGPT_UI_BACKEND_ID
-          ? undefined
-          : isEditMode
-            ? initialValues?.configProfile ?? null
-            : workspaceProfile || undefined,
+      configProfile: isEditMode
+        ? initialValues?.configProfile ?? null
+        : workspaceProfile || undefined,
     };
   };
 
   const handleCreate = async (openInNewTab: boolean) => {
     if (disabled || submitting || retiredSelection || (isAntigravity && !antigravityReady)) return;
-    if (!isChatGptUi && newMissionWorkspace) {
+    if (newMissionWorkspace) {
       const ws = workspaces.find(w => w.id === newMissionWorkspace);
       if (ws && ws.status !== 'ready') {
         toast.error(`Workspace "${ws.name}" is not ready (status: ${ws.status}). Please wait for it to finish provisioning.`);
@@ -799,7 +755,7 @@ export function NewMissionDialog({
               <select
                 value={newMissionWorkspace}
                 onChange={(e) => { setNewMissionWorkspace(e.target.value); if (isAntigravity) setModelOverride(''); }}
-                disabled={lockWorkspace || isChatGptUi}
+                disabled={lockWorkspace}
                 className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none appearance-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
                 style={{
                   backgroundImage:
@@ -811,9 +767,9 @@ export function NewMissionDialog({
                 }}
               >
                 <option value="" className="bg-[#1a1a1a]">
-                  {isChatGptUi ? 'Host artifact storage (required)' : 'Host (default)'}
+                  Host (default)
                 </option>
-                {!isChatGptUi && workspaces
+                {workspaces
                   .filter(
                     (ws) =>
                       ws.id !== '00000000-0000-0000-0000-000000000000'
@@ -829,16 +785,12 @@ export function NewMissionDialog({
                     </option>
                   ))}
               </select>
-              {!isChatGptUi && workspaces.filter(ws => ws.id !== '00000000-0000-0000-0000-000000000000' && ws.status !== 'ready').length > 0 && (
+              {workspaces.filter(ws => ws.id !== '00000000-0000-0000-0000-000000000000' && ws.status !== 'ready').length > 0 && (
                 <p className="text-xs text-amber-400/60 mt-1.5">
                   {workspaces.filter(ws => ws.id !== '00000000-0000-0000-0000-000000000000' && ws.status !== 'ready').length} workspace(s) unavailable (not ready). Start them first.
                 </p>
               )}
-              {isChatGptUi ? (
-                <p className="text-xs text-white/30 mt-1.5">
-                  The browser runs on the control plane. Host storage is used only for mission metadata and downloaded files.
-                </p>
-              ) : workspaces.filter(ws => ws.id !== '00000000-0000-0000-0000-000000000000' && ws.status !== 'ready').length === 0 && (
+              {workspaces.filter(ws => ws.id !== '00000000-0000-0000-0000-000000000000' && ws.status !== 'ready').length === 0 && (
                 <p className="text-xs text-white/30 mt-1.5">Where the mission will run</p>
               )}
             </div>
@@ -881,16 +833,6 @@ export function NewMissionDialog({
                 {enabledBackends.map((backend) => {
                   const backendAgentsList = agentsByBackend[backend.id] || [];
                   if (backendAgentsList.length === 0) return null;
-                  if (backend.id === CHATGPT_UI_BACKEND_ID) {
-                    return (
-                      <optgroup key={backend.id} label={backend.name} className="bg-[#1a1a1a]">
-                        <option value={`${CHATGPT_UI_BACKEND_ID}:`} className="bg-[#1a1a1a]">
-                          ChatGPT Pro web conversation
-                        </option>
-                      </optgroup>
-                    );
-                  }
-
                   return (
                     <optgroup key={backend.id} label={backend.name} className="bg-[#1a1a1a]">
                       <option value={`${backend.id}:`} className="bg-[#1a1a1a]">
@@ -906,95 +848,80 @@ export function NewMissionDialog({
                 })}
               </select>
               <p className="text-xs text-white/30 mt-1.5">
-                {isChatGptUi
-                  ? 'Uses the authenticated ChatGPT web harness on the control plane.'
-                  : 'Select an agent and backend to power this mission'}
+                Select an agent and backend to power this mission
               </p>
             </div>
 
             {/* Model selection */}
-            {isChatGptUi ? (
-              <div>
-                <label className="block text-xs text-white/50 mb-1.5">Model</label>
-                <div className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm">
-                  <span className="text-white">ChatGPT Pro</span>
-                  <code className="text-xs text-indigo-300">{chatGptUiModel}</code>
-                </div>
-                <p className="text-xs text-white/30 mt-1.5">
-                  Fixed to the canonical Pro model verified by the web intelligence picker.
-                </p>
-              </div>
-            ) : (
-              <div>
-                <label className="block text-xs text-white/50 mb-1.5">Model override (optional)</label>
-                <select
-                  value={modelOverride}
-                  onChange={(e) => setModelOverride(e.target.value)}
-                  className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none disabled:opacity-60 [&>option]:bg-slate-800 [&>option]:text-white [&>optgroup]:bg-slate-900 [&>optgroup]:text-white/70"
-                >
-                  <option value="" disabled={isAntigravity}>
-                    {isAntigravity ? 'Select a workspace-native model' : selectedBackend === 'claudecode'
-                      ? 'No override (configured default)'
-                      : 'No override (use default)'}
-                  </option>
-                  {(() => {
-                    if (isAntigravity ? antigravityLoading : modelOptionsLoading || providersLoading) {
-                      return (
-                        <option value="" disabled>
-                          Loading model options…
-                        </option>
-                      );
+            <div>
+              <label className="block text-xs text-white/50 mb-1.5">Model override (optional)</label>
+              <select
+                value={modelOverride}
+                onChange={(e) => setModelOverride(e.target.value)}
+                className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none disabled:opacity-60 [&>option]:bg-slate-800 [&>option]:text-white [&>optgroup]:bg-slate-900 [&>optgroup]:text-white/70"
+              >
+                <option value="" disabled={isAntigravity}>
+                  {isAntigravity ? 'Select a workspace-native model' : selectedBackend === 'claudecode'
+                    ? 'No override (configured default)'
+                    : 'No override (use default)'}
+                </option>
+                {(() => {
+                  if (isAntigravity ? antigravityLoading : modelOptionsLoading || providersLoading) {
+                    return (
+                      <option value="" disabled>
+                        Loading model options…
+                      </option>
+                    );
+                  }
+                  // Group options by provider
+                  const groupedOptions = new Map<string, Array<{ value: string; label: string; description?: string; provider_id?: string }>>();
+
+                  for (const option of modelOptions) {
+                    // Extract provider from the label (format: "Provider Name · Model Name")
+                    const labelParts = option.label.split(/\s[—·]\s/);
+                    const providerName = labelParts[0] || 'Other';
+                    if (!groupedOptions.has(providerName)) {
+                      groupedOptions.set(providerName, []);
                     }
-                    // Group options by provider
-                    const groupedOptions = new Map<string, Array<{ value: string; label: string; description?: string; provider_id?: string }>>();
+                    groupedOptions.get(providerName)!.push(option);
+                  }
 
-                    for (const option of modelOptions) {
-                      // Extract provider from the label (format: "Provider Name · Model Name")
-                      const labelParts = option.label.split(/\s[—·]\s/);
-                      const providerName = labelParts[0] || 'Other';
-                      if (!groupedOptions.has(providerName)) {
-                        groupedOptions.set(providerName, []);
-                      }
-                      groupedOptions.get(providerName)!.push(option);
-                    }
+                  return Array.from(groupedOptions.entries()).map(([providerName, options]) => {
+                    // For custom providers, include the provider ID in the label
+                    const firstOption = options[0];
+                    const groupLabel = firstOption?.provider_id
+                      ? `${providerName} (ID: ${firstOption.provider_id})`
+                      : providerName;
 
-                    return Array.from(groupedOptions.entries()).map(([providerName, options]) => {
-                      // For custom providers, include the provider ID in the label
-                      const firstOption = options[0];
-                      const groupLabel = firstOption?.provider_id
-                        ? `${providerName} (ID: ${firstOption.provider_id})`
-                        : providerName;
-
-                      return (
-                        <optgroup key={providerName} label={groupLabel}>
-                          {options.map((option) => {
-                            // Extract just the model name from the label
-                            const modelName = option.label.split(/\s[—·]\s/)[1] || option.label;
-                            const displayText = option.description
-                              ? `${modelName} - ${option.description}`
-                              : modelName;
-                            return (
-                              <option key={option.value} value={option.value}>
-                                {displayText}
-                              </option>
-                            );
-                          })}
-                        </optgroup>
-                      );
-                    });
-                  })()}
-                </select>
-                <p className="text-xs text-white/30 mt-1.5">
-                  {isAntigravity
-                    ? 'Models discovered from the selected workspace’s Antigravity account.'
-                    : selectedBackend === 'vibe'
-                    ? 'Use mistral/model format (e.g., mistral/mistral-vibe-cli-latest).'
-                    : selectedBackend === 'opencode'
-                    ? 'Use provider/model format (e.g., openai/gpt-5.6-sol).'
-                    : 'Use the raw model ID (e.g., gpt-6-astra or claude-opus-5).'}
-                </p>
-              </div>
-            )}
+                    return (
+                      <optgroup key={providerName} label={groupLabel}>
+                        {options.map((option) => {
+                          // Extract just the model name from the label
+                          const modelName = option.label.split(/\s[—·]\s/)[1] || option.label;
+                          const displayText = option.description
+                            ? `${modelName} - ${option.description}`
+                            : modelName;
+                          return (
+                            <option key={option.value} value={option.value}>
+                              {displayText}
+                            </option>
+                          );
+                        })}
+                      </optgroup>
+                    );
+                  });
+                })()}
+              </select>
+              <p className="text-xs text-white/30 mt-1.5">
+                {isAntigravity
+                  ? 'Models discovered from the selected workspace’s Antigravity account.'
+                  : selectedBackend === 'vibe'
+                  ? 'Use mistral/model format (e.g., mistral/mistral-vibe-cli-latest).'
+                  : selectedBackend === 'opencode'
+                  ? 'Use provider/model format (e.g., openai/gpt-5.6-sol).'
+                  : 'Use the raw model ID (e.g., gpt-6-astra or claude-opus-5).'}
+              </p>
+            </div>
 
             {isAntigravity && !antigravityLoading && (antigravityError || !antigravityModels?.length) && (
               <p role="alert" className="text-xs text-amber-300">

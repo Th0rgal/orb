@@ -1,7 +1,6 @@
 import { swallow } from "./log";
 import { pollWhileVisible } from "./poll";
 import { ErrorToast } from "./toast";
-import { QuizAnswer } from "./QuizAnswer";
 import * as Ic from "./icons";
 import { For, Show, createSignal, createEffect, on, onMount, onCleanup } from 'solid-js';
 import { createPinnedScroll } from './mission/pinnedScroll';
@@ -261,12 +260,7 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   return <><div class="scroll" ref={pin.ref} onScroll={pin.onScroll}><div class="col">
     <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
     <Show when={execution() || seed()} fallback={<div class="sk-transcript" role="status" aria-label="Loading conversation" aria-busy="true"><div class="sk-lines" aria-hidden="true"><i style={{ width: "58%" }} /><i style={{ width: "86%" }} /><i style={{ width: "72%" }} /></div></div>}>
-      <Transcript sizeKey={`m:${p.id || 'launch'}`} items={items()} pending={launchPending() || (active() && !outgoing().length)} sending={outgoing().at(-1)?.id} working={launchPending() || active() || outgoing().length > 0} workingLabel={progress() ?? (launchPending() ? 'Working…' : 'Sending…')} renderText={(item, fallback) =>
-        <Show when={execution()?.selection.provider === 'chatgpt' && execution()} fallback={fallback}>{e =>
-          <QuizAnswer text={item.text} fallback={fallback}
-            disabled={busy() || !cloudCanSend(e()) || !account()?.capabilities.follow_up || item.key !== `${e().turns.at(-1)?.key}:answer`}
-            onSubmit={text => send(text, [])}/>}
-        </Show>}/>
+      <Transcript sizeKey={`m:${p.id || 'launch'}`} items={items()} pending={launchPending() || (active() && !outgoing().length)} sending={outgoing().at(-1)?.id} working={launchPending() || active() || outgoing().length > 0} workingLabel={progress() ?? (launchPending() ? 'Working…' : 'Sending…')}/>
     </Show>
     <Show when={execution()}>{e => <>
       <Show when={children().length}><div aria-label="Delegated missions"><For each={children()}>{child=><p><button class="na-drop-btn" onClick={()=>void getMission(child.id).then(m=>p.onOpenMission?.(m)).catch(e=>setError(String(e)))}>{child.title || child.id}</button> · {child.status}</p>}</For></div></Show>

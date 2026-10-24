@@ -1591,13 +1591,8 @@ impl AssistantMcp {
                 }),
             },
             ToolDefinition {
-                name: "get_chatgpt_ui_pool_status".to_string(),
-                description: "Get privacy-safe ChatGPT UI slot telemetry and the persistent backend availability gate. Before starting, resuming, or redispatching a chatgpt_ui mission, require availability.state=available; cooldown and probing states must wait for the backend recovery probe.".to_string(),
-                input_schema: json!({"type": "object", "properties": {}}),
-            },
-            ToolDefinition {
                 name: "list_mission_shared_files".to_string(),
-                description: "List files and screenshots shared by assistant messages in a sandboxed.sh mission, including bounded files downloaded from a ChatGPT UI response.".to_string(),
+                description: "List files and screenshots shared by assistant messages in a sandboxed.sh mission.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
@@ -1609,7 +1604,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "download_shared_file".to_string(),
-                description: "Download a mission shared file URL to a local /tmp artifact path suitable for inspection or attachments. Use list_mission_shared_files first, including after ChatGPT UI missions that generated files.".to_string(),
+                description: "Download a mission shared file URL to a local /tmp artifact path suitable for inspection or attachments. Use list_mission_shared_files first.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id", "url"],
@@ -1626,7 +1621,7 @@ impl AssistantMcp {
             ToolDefinition { name: "get_cloud_execution".into(), description: "Read a bounded page of durable hosted turns, external identities and results. Defaults to the latest turn and 4096 characters per result/detail; prompts are omitted. Pass offset=0 to read from the beginning. Follow page.next_offset for subsequent turns. To continue text, select that turn with offset and limit=1, then pass its text_slices field's next_offset as text_offset. Character offsets are Unicode scalar values. Poll the last unfinished turn again until terminal; revision changes as execution advances. Artifact/branch payloads are omitted; counts are included. Transport loss is not completion.".into(), input_schema: json!({"type":"object","required":["mission_id"],"properties":{"mission_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":5},"text_offset":{"type":"integer","minimum":0},"text_limit":{"type":"integer","minimum":1,"maximum":8192},"include_prompt":{"type":"boolean"}}}) },
             ToolDefinition {
                 name: "start_mission".to_string(),
-                description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. Use backend=chatgpt_ui with model_override=gpt-5.6-pro only for exceptionally difficult read-only synthesis, research, or design-conflict questions; keep writer=false, then retrieve any generated files with list_mission_shared_files and download_shared_file. For compatibility, a native agent name (codex/claudecode/antigravity/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
+                description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. To consult another model (review, second opinion, very hard read-only question), use backend=opencode with model_override=<provider>/<model> (e.g. openai/gpt-6-astra, anthropic/claude-fable-5-1) and writer=false. For compatibility, a native agent name (codex/claudecode/antigravity/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
@@ -1635,8 +1630,8 @@ impl AssistantMcp {
                         "prompt": {"type": "string", "description": "Codex native /goal objective: maximum 4000 Unicode characters, including automatic writer promotion. Put supporting detail in referenced artifacts; never rely on truncation."},
                         "cloud": {"type":"object","description":"Hosted execution. Discover availability with list_cloud_accounts. Requires idempotency_key; never pass credentials, machine paths or attachments.","required":["provider","account"],"properties":{"provider":{"type":"string","enum":["chatgpt","grok_bot","cursor_cloud","hermes"]},"account":{"type":"string"},"repository":{"type":"string"},"git_ref":{"type":"string"},"model":{"type":"string"},"model_params":{"type":"array","items":{"type":"object","required":["id","value"],"properties":{"id":{"type":"string"},"value":{"type":"string"}}}}},"additionalProperties":false},
                         "workspace_id": {"type": "string"},
-                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "vibe", "chatgpt_ui"]},
-                        "model_override": {"type": "string", "description": "Exact account-supported model ID. For ChatGPT UI Pro use the canonical ID gpt-5.6-pro; the harness verifies the visible Pro picker option. For Codex Terra use gpt-5.6-terra with medium effort. Never invent variants such as gpt-5.5-sol. Codex on a remote node (remote_node_id, e.g. auto-managed:default / auto-managed:large) runs through the core proxy: pass model_override explicitly (e.g. gpt-6.1-sol); if omitted, the configured Codex default is used and recorded on the mission."},
+                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "vibe"]},
+                        "model_override": {"type": "string", "description": "Exact account-supported model ID. For opencode use <provider>/<model> (e.g. openai/gpt-6-astra). For Codex Terra use gpt-5.6-terra with medium effort. Never invent variants such as gpt-5.5-sol. Codex on a remote node (remote_node_id, e.g. auto-managed:default / auto-managed:large) runs through the core proxy: pass model_override explicitly (e.g. gpt-6.1-sol); if omitted, the configured Codex default is used and recorded on the mission."},
                         "model_effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                         "fast_mode": {"type": "boolean", "description": "Enable Codex fast mode (service tier fast). Requires backend=codex and an explicit GPT-5.6, GPT-5.5, or GPT-5.4 model_override. Uses ChatGPT credits faster."},
                         "config_profile": {"type": "string"},
@@ -2234,13 +2229,13 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "update_mission_settings".to_string(),
-                description: "Change a mission's run settings for its NEXT turn: switch backend (claudecode/codex/opencode/antigravity/grok/chatgpt_ui), model, reasoning effort, fast mode, or agent. On a failed or interrupted mission the server resumes it on the new settings automatically (resume_queued in the response) — a handoff is one call, no separate resume_mission. Applies between turns — the mission must be idle (awaiting_user/acknowledged/interrupted/failed), not actively running. If it is running, cancel_mission first (or wait), then update, then send_message_to_mission or resume_mission to kick the next turn. model_effort applies to claudecode/codex; fast_mode applies only to Codex GPT-5.6/5.5/5.4 and consumes ChatGPT credits faster.".to_string(),
+                description: "Change a mission's run settings for its NEXT turn: switch backend (claudecode/codex/opencode/antigravity/grok/vibe), model, reasoning effort, fast mode, or agent. On a failed or interrupted mission the server resumes it on the new settings automatically (resume_queued in the response) — a handoff is one call, no separate resume_mission. Applies between turns — the mission must be idle (awaiting_user/acknowledged/interrupted/failed), not actively running. If it is running, cancel_mission first (or wait), then update, then send_message_to_mission or resume_mission to kick the next turn. model_effort applies to claudecode/codex; fast_mode applies only to Codex GPT-5.6/5.5/5.4 and consumes ChatGPT credits faster.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["mission_id"],
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "vibe", "chatgpt_ui"]},
+                        "backend": {"type": "string", "enum": ["opencode", "claudecode", "codex", "grok", "antigravity", "vibe"]},
                         "model_override": {"type": "string", "description": "Model id. Empty string clears it. When backend changes this is reset unless set explicitly."},
                         "model_effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                         "fast_mode": {"type": "boolean", "description": "Enable or disable Codex fast mode for future turns. Only backend=codex with GPT-5.6/5.5/5.4."},
@@ -2403,13 +2398,6 @@ impl AssistantMcp {
             .json()
             .await
             .map_err(|error| format!("Failed to parse mission events: {error}"))
-    }
-
-    async fn get_chatgpt_ui_pool_status(&self) -> Result<Value, String> {
-        let response = self
-            .api_get("/api/backends/chatgpt_ui/profile-pool")
-            .await?;
-        Self::response_value(response, "fetch ChatGPT UI pool status").await
     }
 
     async fn list_mission_shared_files(
@@ -4073,7 +4061,6 @@ impl AssistantMcp {
                 let params: MissionEventsParams = parse_params(arguments)?;
                 self.get_mission_events(params).await
             }
-            "get_chatgpt_ui_pool_status" => self.get_chatgpt_ui_pool_status().await,
             "list_mission_shared_files" => {
                 let params: MissionSharedFilesParams = parse_params(arguments)?;
                 self.list_mission_shared_files(params).await
@@ -4971,15 +4958,6 @@ fn build_recommendation(
         return "Queued mission could not acquire its admitted track assignment. Inspect the \
                 recorded reader/writer capability and track lease before retrying; the \
                 queued_assignment_unowned error does not by itself prove the lease was released."
-            .to_string();
-    }
-    if backend == Some("chatgpt_ui") && live_state == Some("running") {
-        return "ChatGPT UI Pro is still generating. The web UI may expose only a generic \
-                `Pro thinking` marker until the final answer begins, so event silence is not \
-                evidence of a stall. The driver has its own absolute timeout and the durable \
-                run heartbeat proves ownership. Do not cancel, resume, or submit another \
-                ChatGPT UI mission while this run is non-terminal; wait for its result or \
-                explicit timeout."
             .to_string();
     }
     if analysis.signals.contains("rate_limited") || analysis.signals.contains("capacity_limited") {
@@ -6361,24 +6339,6 @@ mod tests {
     }
 
     #[test]
-    fn recommendation_does_not_cancel_running_chatgpt_ui_for_event_silence() {
-        let mut analysis = TraceAnalysis::default();
-        // A previous generation's terminal transport error can remain in the
-        // bounded trace window. It must not preempt a healthy replacement run.
-        analysis.signals.insert("network_error");
-        let live = json!({
-            "state": "running",
-            "seconds_since_activity": 686,
-            "heartbeat_at": "2026-07-25T10:45:00Z",
-            "health": {"status": "stalled", "severity": "severe"}
-        });
-        let rec = build_recommendation("active", Some("chatgpt_ui"), &live, &analysis);
-        assert!(rec.contains("Pro thinking"));
-        assert!(rec.contains("Do not cancel"));
-        assert!(rec.contains("explicit timeout"));
-    }
-
-    #[test]
     fn recommendation_does_not_recommend_resume_for_not_feasible() {
         // not_feasible is not resumable server-side (see mission_can_be_resumed
         // in src/api/control.rs). The recommendation must steer the babysitter
@@ -6528,7 +6488,7 @@ mod tests {
     #[test]
     fn mission_tools_expose_codex_fast_mode() {
         let tools = AssistantMcp::tools();
-        assert!(tools
+        assert!(!tools
             .iter()
             .any(|tool| tool.name == "get_chatgpt_ui_pool_status"));
         for name in ["start_mission", "update_mission_settings"] {

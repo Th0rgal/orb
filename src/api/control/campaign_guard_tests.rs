@@ -584,7 +584,7 @@ async fn live_mission_on_workspace_is_the_unique_occupant() {
 async fn cloud_conversations_do_not_occupy_native_workspaces() {
     let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
     let workspace = Uuid::new_v4();
-    for backend in ["cloud_chatgpt", "cloud_grok_bot", "cloud_cursor"] {
+    for backend in ["cloud_grok_bot", "cloud_cursor"] {
         let mission = store
             .create_mission(
                 Some("cloud"),
