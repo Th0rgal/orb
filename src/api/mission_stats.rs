@@ -456,7 +456,67 @@ async fn get_stats(
     Json(compute(id, &tree, &records, &vm, &table, period, since)).into_response()
 }
 
+/// The shadow price table is process-wide: only a single-tenant (or
+/// auth-disabled) Core lets users read or change it.
+fn shadow_prices_forbidden(mode: crate::config::AuthMode) -> bool {
+    matches!(mode, crate::config::AuthMode::MultiUser)
+}
+
+fn forbidden() -> Response {
+    error(
+        StatusCode::FORBIDDEN,
+        "forbidden",
+        "The shadow price table is shared; it is managed by the operator in multi-user mode",
+    )
+}
+
+/// Bounded, well-formed table: non-negative finite prices up to $10,000 per
+/// million tokens, `provider` or `provider/model` keys, short lists.
+pub fn validate_table(t: &ShadowPrices) -> Result<(), String> {
+    let name_ok = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 128
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._:-".contains(c))
+    };
+    for list in [
+        &t.subscription_providers,
+        &t.subscription_accounts,
+        &t.local_providers,
+    ] {
+        if list.len() > 200 || !list.iter().all(|s| name_ok(s)) {
+            return Err(
+                "provider/account lists: at most 200 short names of [A-Za-z0-9._:-]".into(),
+            );
+        }
+    }
+    if t.prices.len() > 1000 {
+        return Err("at most 1000 price entries".into());
+    }
+    for (key, p) in &t.prices {
+        let mut parts = key.splitn(2, '/');
+        let provider = parts.next().unwrap_or_default();
+        if !name_ok(provider) || parts.next().is_some_and(|m| !name_ok(m)) {
+            return Err(format!(
+                "price key '{key}' must be provider or provider/model"
+            ));
+        }
+        if [p.input, p.cache_read, p.cache_write, p.output]
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0 || *v > 10_000.0)
+        {
+            return Err(format!(
+                "prices for '{key}' must be between 0 and 10000 USD per million tokens"
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn get_shadow_prices(State(state): State<Arc<AppState>>) -> Response {
+    if shadow_prices_forbidden(state.config.auth.auth_mode(state.config.dev_mode)) {
+        return forbidden();
+    }
     Json(ShadowPrices::load(&state.config.working_dir)).into_response()
 }
 
@@ -464,20 +524,18 @@ async fn put_shadow_prices(
     State(state): State<Arc<AppState>>,
     Json(table): Json<ShadowPrices>,
 ) -> Response {
-    if table.prices.values().any(|p| {
-        [p.input, p.cache_read, p.cache_write, p.output]
-            .iter()
-            .any(|v| !v.is_finite() || *v < 0.0)
-    }) {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "invalid_price",
-            "Prices must be non-negative numbers",
-        );
+    if shadow_prices_forbidden(state.config.auth.auth_mode(state.config.dev_mode)) {
+        return forbidden();
+    }
+    if let Err(e) = validate_table(&table) {
+        return error(StatusCode::BAD_REQUEST, "invalid_table", e);
     }
     let path = ShadowPrices::path(&state.config.working_dir);
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-    match std::fs::write(&path, serde_json::to_vec_pretty(&table).unwrap_or_default()) {
+    let tmp = path.with_extension("json.tmp");
+    let written = std::fs::write(&tmp, serde_json::to_vec_pretty(&table).unwrap_or_default())
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    match written {
         Ok(()) => Json(table).into_response(),
         Err(e) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -608,6 +666,42 @@ mod tests {
             price_cents(&rec("p", "m", "spark", "q", 9), &table),
             (0, false, true)
         );
+    }
+
+    #[test]
+    fn shadow_table_is_operator_only_in_multi_user_and_validated() {
+        use crate::config::AuthMode;
+        assert!(shadow_prices_forbidden(AuthMode::MultiUser));
+        assert!(!shadow_prices_forbidden(AuthMode::SingleTenant));
+        let mut t = ShadowPrices::default();
+        assert!(validate_table(&t).is_ok());
+        t.prices.insert(
+            "antigravity/gemini-4-argon".into(),
+            TokenPrice {
+                input: 2.0,
+                ..Default::default()
+            },
+        );
+        assert!(validate_table(&t).is_ok());
+        t.prices.insert("bad key/x y".into(), TokenPrice::default());
+        assert!(validate_table(&t).is_err());
+        t.prices.remove("bad key/x y");
+        t.prices.insert(
+            "openai".into(),
+            TokenPrice {
+                output: -1.0,
+                ..Default::default()
+            },
+        );
+        assert!(validate_table(&t).is_err());
+        t.prices.insert(
+            "openai".into(),
+            TokenPrice {
+                output: f64::INFINITY,
+                ..Default::default()
+            },
+        );
+        assert!(validate_table(&t).is_err());
     }
 
     #[test]
