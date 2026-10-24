@@ -2176,11 +2176,39 @@ async fn get_ai_proxy_health(
             tracing::warn!(error = %e, "Failed to read proxy outcomes");
             (StatusCode::INTERNAL_SERVER_ERROR, e)
         })?;
-    Ok(Json(super::proxy_reliability::summarize(
-        &records,
-        &window.label,
-        since,
-    )))
+    let now = chrono::Utc::now();
+    let since_at = since
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc));
+    let mut health = super::proxy_reliability::summarize(&records, &window.label, since);
+    super::proxy_reliability::add_series(&mut health, &records, since_at, now);
+    // Account labels and live cooldowns (quota resets) for each account row.
+    let mut seen = std::collections::HashMap::new();
+    for group in &mut health.groups {
+        let Some(id) = group.account_id else { continue };
+        if let std::collections::hash_map::Entry::Vacant(slot) = seen.entry(id) {
+            let label = state
+                .ai_providers
+                .get(id)
+                .await
+                .map(|p| p.label.filter(|l| !l.is_empty()).unwrap_or(p.name));
+            let snap = state.health_tracker.get_health(id).await;
+            let cooldown = snap
+                .cooldown_remaining_secs
+                .filter(|secs| *secs > 0.0 && snap.account_state != "available")
+                .map(|secs| super::proxy_reliability::GroupCooldown {
+                    state: snap.account_state,
+                    until: (now + chrono::Duration::milliseconds((secs * 1000.0) as i64))
+                        .to_rfc3339(),
+                });
+            slot.insert((label, cooldown));
+        }
+        let (label, cooldown) = seen[&id].clone();
+        group.account_label = label;
+        group.cooldown = cooldown;
+    }
+    Ok(Json(health))
 }
 
 /// List all tasks.

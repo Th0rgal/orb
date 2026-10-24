@@ -8,10 +8,8 @@ import {
   getUsageSummary, hourlyAvailable, totalTokens,
   type ChartBucket, type UsageFilters, type UsageSummary, type UsageTotals,
 } from "./usageApi";
-import {
-  FLAG_LABEL, RELIABILITY_WINDOWS, errorSummary, formatMs, formatRate, getProxyHealth, isRedFlag,
-  type ProxyHealth,
-} from "./proxyHealthApi";
+import { RELIABILITY_WINDOWS, getProxyHealth, type ProxyHealth } from "./proxyHealthApi";
+import { ReliabilityView } from "./ReliabilityView";
 
 type Metric = "tokens" | "cost" | "requests";
 type GroupBy = "caller_kind" | "model" | "provider" | "source" | "mission" | "root_mission" | "api_key" | "backend" | "purpose";
@@ -94,7 +92,7 @@ function Tile(p: { label: string; value: string; title?: string }) {
   return <div class="usage-tile" title={p.title}><span>{p.label}</span><strong>{p.value}</strong></div>;
 }
 
-/** Router reliability: success rate, time to first token and failures per provider/model/account. */
+/** Router reliability: success, first token and failures per provider·model·account, ranked by impact. */
 export function ReliabilitySection() {
   const [window, setWindow] = createSignal("24h");
   const [health, setHealth] = createSignal<ProxyHealth | null>(null);
@@ -111,7 +109,6 @@ export function ReliabilitySection() {
     }
   }
   createEffect(on([connectionVersion, window], () => void load()));
-  const flagged = createMemo(() => health()?.groups.filter(isRedFlag) ?? []);
   return <section class="s-sec" aria-label="Reliability">
     <div class="routing-heading usage-section-head">
       <h3>Reliability</h3>
@@ -121,40 +118,9 @@ export function ReliabilitySection() {
         }</For>
       </div>
     </div>
-    <Show when={error()}><p class="routing-muted">Router reliability is unavailable: {error()}</p></Show>
-    <Show when={health()}>{h => <>
-      <div class="usage-tiles">
-        <Tile label="Router success" value={formatRate(h().totals.success_rate)} title={`${h().totals.ok.toLocaleString()} of ${h().totals.requests.toLocaleString()} requests`} />
-        <Tile label="First token p50" value={formatMs(h().totals.ttft_p50_ms)} />
-        <Tile label="First token p95" value={formatMs(h().totals.ttft_p95_ms)} />
-        <Tile label="Retried · fell back" value={`${h().totals.retried.toLocaleString()} · ${h().totals.fell_back.toLocaleString()}`} title="Requests retried on the same entry before the first byte · answered by a later chain entry" />
-      </div>
-      <Show when={flagged().length}>
-        <ul class="usage-flags" aria-label="Reliability problems">
-          <For each={flagged()}>{g => <li class="usage-flag">
-            <strong>{g.provider ?? "Unknown provider"}{g.model ? ` · ${g.model}` : ""}</strong>
-            <span>{g.flags.length ? g.flags.map(f => FLAG_LABEL[f]).join(", ") : FLAG_LABEL.low_success_rate} — {formatRate(g.success_rate)} of {g.requests.toLocaleString()} attempts{Object.keys(g.errors).length ? ` (${errorSummary(g.errors)})` : ""}</span>
-          </li>}</For>
-        </ul>
-      </Show>
-      <Show when={h().groups.length} fallback={<p class="routing-muted">No router traffic in this window.</p>}>
-        <div class="s-card usage-table" role="table" aria-label="Reliability by provider">
-          <div class="usage-tr usage-rel-tr usage-th" role="row">
-            <span role="columnheader">Provider · model</span><span role="columnheader">Attempts</span><span role="columnheader">Success</span><span role="columnheader">TTFT p50 / p95</span>
-          </div>
-          <For each={h().groups}>{g => <div class="usage-tr usage-rel-tr" role="row" classList={{ "usage-red": isRedFlag(g) }}>
-            <span role="cell" class="usage-name">
-              <strong>{g.provider ?? "Unknown provider"}{g.model ? ` · ${g.model}` : ""}</strong>
-              <Show when={g.account_id}><span>{g.account_id!.slice(0, 8)}</span></Show>
-              <Show when={Object.keys(g.errors).length}><span class="usage-errors">{errorSummary(g.errors)}</span></Show>
-            </span>
-            <span role="cell">{g.requests.toLocaleString()}</span>
-            <span role="cell" class="usage-rate">{formatRate(g.success_rate)}</span>
-            <span role="cell">{formatMs(g.ttft_p50_ms)} / {formatMs(g.ttft_p95_ms)}</span>
-          </div>}</For>
-        </div>
-      </Show>
-    </>}</Show>
+    <Show when={error()} fallback={<ReliabilityView health={isConnected() ? health() : null} />}>
+      <p class="routing-muted">Router reliability is unavailable: {error()}</p>
+    </Show>
   </section>;
 }
 

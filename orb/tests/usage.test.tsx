@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageSettings } from "../src/UsageSettings";
 import { setConnection } from "../src/api";
 import { chartBuckets, formatCost, usageQuery, windowHours, type UsageSummary, type UsageTotals } from "../src/usageApi";
-import { errorSummary, formatMs, formatRate, isRedFlag, type ProxyHealth, type ReliabilityStats } from "../src/proxyHealthApi";
+import { formatMs, formatRate, type ProxyHealth, type ReliabilityStats } from "../src/proxyHealthApi";
 
 const stats = (over: Partial<ReliabilityStats> = {}): ReliabilityStats => ({
   requests: 0, ok: 0, success_rate: null, ttft_p50_ms: null, ttft_p95_ms: null, latency_p50_ms: null, latency_p95_ms: null, retried: 0, fell_back: 0, errors: {}, ...over,
@@ -140,21 +140,22 @@ describe("Usage page", () => {
     await waitFor(() => expect((screen.getByRole("radio", { name: "Hour" }) as HTMLButtonElement).disabled).toBe(true));
   });
 
-  it("shows router reliability with red flags and switches the window", async () => {
+  it("shows router reliability ranked by impact and switches the window", async () => {
     render(() => <UsageSettings />);
     const section = await screen.findByRole("region", { name: "Reliability" });
     await waitFor(() => expect(section.textContent).toContain("95.0%"));
     expect(section.textContent).toContain("1.2 s");
     expect(section.textContent).toContain("8.4 s");
     expect(section.textContent).toContain("12 · 30");
-    const problems = screen.getByRole("list", { name: "Reliability problems" });
-    expect(problems.textContent).toContain("minimax · MiniMax-M3");
-    expect(problems.textContent).toContain("Out of credit");
-    expect(problems.textContent).toContain("402 out of credit ×483");
-    expect(problems.textContent).not.toContain("gemini");
     const rows = screen.getByRole("table", { name: "Reliability by provider" });
-    expect(rows.querySelector(".usage-red")?.textContent).toContain("0%");
+    expect(rows.textContent).toContain("minimax · MiniMax-M3");
+    expect(rows.textContent).toContain("Down");
+    // Healthy rows fold behind a toggle.
+    expect(rows.textContent).not.toContain("gemini");
+    fireEvent.click(within(rows).getByRole("button", { name: "1 healthy · show" }));
     expect(rows.textContent).toContain("97.0%");
+    fireEvent.click(within(rows).getByText("minimax · MiniMax-M3"));
+    expect(rows.textContent).toContain("402 out of credit");
     expect(requests).toContain("/api/ai/proxy/health?window=24h");
     fireEvent.click(screen.getByRole("radio", { name: "1h" }));
     await waitFor(() => expect(requests).toContain("/api/ai/proxy/health?window=1h"));
@@ -173,17 +174,11 @@ describe("Usage page", () => {
 });
 
 describe("reliability helpers", () => {
-  it("formats rates, latencies and the error breakdown", () => {
+  it("formats rates and latencies", () => {
     expect(formatRate(null)).toBe("—");
     expect(formatRate(1)).toBe("100%");
     expect(formatRate(0.8467)).toBe("84.7%");
     expect(formatMs(450)).toBe("450 ms");
     expect(formatMs(45_000)).toBe("45 s");
-    expect(errorSummary({ timeout: 2, "client_error:402": 483, "server_error:503": 1 })).toBe("402 out of credit ×483 · timeout ×2 · server 503 ×1");
-  });
-  it("flags low success only with enough traffic", () => {
-    expect(isRedFlag(stats({ requests: 3, success_rate: 0 }))).toBe(false);
-    expect(isRedFlag(stats({ requests: 20, success_rate: 0.85 }))).toBe(true);
-    expect(isRedFlag({ ...stats({ requests: 1, success_rate: 1 }), flags: ["out_of_credit"] })).toBe(true);
   });
 });
