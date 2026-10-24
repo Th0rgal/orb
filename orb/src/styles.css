@@ -4050,3 +4050,15 @@ select.orb-select-native:disabled { cursor: default; }
 .spend-skel.w1 { width: 110px; } .spend-skel.w2 { width: 70px; } .spend-skel.w4 { width: 150px; } .spend-skel.w3 { width: 22px; height: 8px; }
 .spend-chart.loading .spend-col { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .spend-skel, .spend-bar.skel { animation: none; } .spend-bar { transition: none; } }
+
+/* Folder uploads reuse the background-upload row; the file list wraps below it. */
+.composer-bg-upload-row.folder-upload { flex-wrap: wrap; }
+.folder-upload-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; min-width: 0; }
+.folder-upload-files { flex-basis: 100%; list-style: none; margin: 4px 0 0; padding: 0; max-height: 160px; overflow: auto; }
+.folder-upload-files li { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; color: var(--fg-3); }
+.folder-upload-files li > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }
+.folder-upload-files li.failed .folder-upload-file-state { color: var(--amber); }
+.folder-upload-file-state { white-space: nowrap; flex-shrink: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
+.composer-stale-attachments { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 4px 2px 2px; padding: 6px 8px; border-radius: var(--radius-sm); border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--stroke)); background: var(--bg-inset); font-size: 11.5px; color: var(--fg-2); }
+.composer-stale-attachments > span { margin-right: auto; overflow: hidden; text-overflow: ellipsis; }
+.composer-stale-attachments .bg-upload-btn, .folder-upload .bg-upload-btn { white-space: nowrap; flex-shrink: 0; }

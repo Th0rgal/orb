@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::{
     collections::HashSet,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -80,22 +80,123 @@ pub async fn read_upload_file(path: String, max_bytes: Option<u64>) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
-// Only OS-delivered drop paths enter the same allowlist as file-picker selections.
-pub fn allow_drop(paths: &[PathBuf]) -> Vec<String> {
-    let Ok(mut allowed) = selected().lock() else {
-        return vec![];
-    };
-    paths
-        .iter()
-        .filter_map(|path| {
-            let path = path.canonicalize().ok()?;
-            if !path.is_file() {
-                return None;
+/// Never worth sending to an agent; skipped when walking a folder.
+const SKIP: &[&str] = &[
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "__MACOSX",
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+];
+/// One past the client's folder limit, so it can say the folder is too large.
+pub const MAX_FOLDER_FILES: usize = 2001;
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct FolderFile {
+    name: String,
+    path: String,
+    /// `<folder name>/<path inside the folder>`, always with `/`.
+    relative_path: String,
+}
+
+/// Regular files under `root`, depth first and sorted. Links are not followed,
+/// so a folder can never reach outside itself. Every returned file joins the
+/// allowlist the same way a picked file does.
+fn walk_folder(root: &Path, allowed: &mut HashSet<PathBuf>) -> Result<Vec<FolderFile>, String> {
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    if !root.is_dir() {
+        return Err("Only folders can be attached as folders".into());
+    }
+    let root_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Folder names must be valid text")?
+        .to_string();
+    let mut out = Vec::new();
+    let mut stack = vec![(root.clone(), root_name)];
+    while let Some((dir, prefix)) = stack.pop() {
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        for entry in entries {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if SKIP.contains(&name.as_str()) {
+                continue;
             }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let relative = format!("{prefix}/{name}");
+            if kind.is_dir() {
+                stack.push((entry.path(), relative));
+            } else if kind.is_file() {
+                let path = entry.path();
+                out.push(FolderFile {
+                    name,
+                    path: path.to_string_lossy().into_owned(),
+                    relative_path: relative,
+                });
+                allowed.insert(path);
+                if out.len() >= MAX_FOLDER_FILES {
+                    break;
+                }
+            }
+        }
+        if out.len() >= MAX_FOLDER_FILES {
+            break;
+        }
+    }
+    out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn pick_upload_folder() -> Result<Vec<FolderFile>, String> {
+    let Some(folder) = rfd::AsyncFileDialog::new()
+        .set_title("Attach a folder")
+        .pick_folder()
+        .await
+    else {
+        return Ok(vec![]);
+    };
+    let path = folder.path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut allowed = selected().lock().map_err(|e| e.to_string())?;
+        walk_folder(&path, &mut allowed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// Only OS-delivered drop paths enter the same allowlist as file-picker selections.
+// Dropped folders are walked; their files come back with folder-relative paths.
+pub fn allow_drop(paths: &[PathBuf]) -> (Vec<String>, Vec<FolderFile>) {
+    let Ok(mut allowed) = selected().lock() else {
+        return (vec![], vec![]);
+    };
+    let mut files = Vec::new();
+    let mut entries = Vec::new();
+    for path in paths {
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if path.is_dir() {
+            entries.extend(walk_folder(&path, &mut allowed).unwrap_or_default());
+        } else if path.is_file() {
             allowed.insert(path.clone());
-            Some(path.to_string_lossy().into_owned())
-        })
-        .collect()
+            files.push(path.to_string_lossy().into_owned());
+        }
+    }
+    (files, entries)
 }
 
 #[tauri::command]
@@ -274,8 +375,10 @@ mod tests {
         std::fs::write(&allowed, "ok").unwrap();
         std::fs::write(&other, "secret").unwrap();
         std::fs::create_dir(root.join("folder")).unwrap();
-        let dropped = allow_drop(&[allowed.clone(), root.join("folder"), root.join("missing")]);
+        let (dropped, entries) =
+            allow_drop(&[allowed.clone(), root.join("folder"), root.join("missing")]);
         assert_eq!(dropped, vec![allowed.to_string_lossy().into_owned()]);
+        assert!(entries.is_empty());
         assert_eq!(
             verify_allowed_file(&allowed.to_string_lossy()).unwrap(),
             allowed
@@ -293,5 +396,32 @@ mod tests {
             std::os::unix::fs::symlink(&allowed, &link).unwrap();
             assert!(verify_allowed_file(&link.to_string_lossy()).is_err());
         }
+    }
+
+    #[test]
+    fn dropped_folders_are_walked_without_junk_or_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("Questões (1)");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("sub/b é.pdf"), "b").unwrap();
+        std::fs::write(root.join(".DS_Store"), "junk").unwrap();
+        std::fs::write(root.join("node_modules/x/index.js"), "junk").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "junk").unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
+        let (files, entries) = allow_drop(&[root.clone()]);
+        assert!(files.is_empty());
+        let relative: Vec<_> = entries.iter().map(|e| e.relative_path.as_str()).collect();
+        assert_eq!(
+            relative,
+            vec!["Questões (1)/a.txt", "Questões (1)/sub/b é.pdf"]
+        );
+        assert!(verify_allowed_file(&root.join("sub/b é.pdf").to_string_lossy()).is_ok());
+        assert!(verify_allowed_file(&outside.to_string_lossy()).is_err());
     }
 }

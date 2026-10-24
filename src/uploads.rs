@@ -16,10 +16,22 @@ pub const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 pub static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 pub static CHUNK_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
+/// Where a file lands inside a folder upload: `<root>/<batch_id>/<relative_path>`.
+/// Both are absent for a single file, which lands at `<root>/<uuid>/<name>`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Placement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct Upload {
     pub name: String,
     pub data_base64: String,
+    #[serde(flatten)]
+    pub placement: Placement,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Receipt {
@@ -36,6 +48,8 @@ pub struct SessionInit {
     pub size: u64,
     #[serde(default)]
     pub chunk_size: Option<usize>,
+    #[serde(flatten)]
+    pub placement: Placement,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -59,6 +73,8 @@ struct SessionMeta {
     total_chunks: usize,
     #[serde(default)]
     receipt: Option<Receipt>,
+    #[serde(flatten)]
+    placement: Placement,
 }
 
 pub fn validate_upload_name(name: &str) -> Result<(), String> {
@@ -72,6 +88,62 @@ pub fn validate_upload_name(name: &str) -> Result<(), String> {
         return Err("Choose a file with a plain filename (up to 240 bytes)".into());
     }
     Ok(())
+}
+
+/// NFC, as typed text is: macOS hands out NFD names, and a mention must match the path.
+fn nfc(value: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    value.nfc().collect()
+}
+
+pub const MAX_FOLDER_DEPTH: usize = 32;
+pub const MAX_RELATIVE_PATH_BYTES: usize = 1024;
+
+/// A path inside a folder upload, normalized: relative, `/`-separated, every
+/// segment a plain filename, never `.`/`..`, absolute, or a Windows drive.
+pub fn validate_relative_upload_path(relative: &str) -> Result<String, String> {
+    let relative = nfc(relative);
+    let parts: Vec<&str> = relative.split('/').collect();
+    if relative.is_empty()
+        || relative.len() > MAX_RELATIVE_PATH_BYTES
+        || parts.len() > MAX_FOLDER_DEPTH
+        || relative.contains(':')
+    {
+        return Err("Choose a folder with shorter, plain paths".into());
+    }
+    for part in &parts {
+        validate_upload_name(part)?;
+    }
+    Ok(relative)
+}
+
+/// Creates the parent directory and returns where the file must be created.
+/// The result is always inside `root` (already canonical).
+fn destination(root: &Path, name: &str, placement: &Placement) -> Result<PathBuf, String> {
+    match (&placement.batch_id, &placement.relative_path) {
+        (None, None) => {
+            let directory = root.join(uuid::Uuid::new_v4().to_string());
+            fs::create_dir(&directory).map_err(|e| e.to_string())?;
+            Ok(directory.join(nfc(name)))
+        }
+        (Some(batch), Some(relative)) => {
+            let batch = uuid::Uuid::parse_str(batch)
+                .map_err(|_| "Invalid folder upload ID".to_string())?
+                .hyphenated()
+                .to_string();
+            let relative = validate_relative_upload_path(relative)?;
+            let path = root.join(batch).join(&relative);
+            let parent = path.parent().ok_or("Invalid folder path")?;
+            fs::create_dir_all(parent).map_err(|e| format!("Create upload folder: {e}"))?;
+            // Directories are created here, never followed through a link.
+            let canonical = parent.canonicalize().map_err(|e| e.to_string())?;
+            if !canonical.starts_with(root) || canonical != parent {
+                return Err("Invalid folder path".into());
+            }
+            Ok(path)
+        }
+        _ => Err("Folder uploads need both batch_id and relative_path".into()),
+    }
 }
 
 pub fn validate_upload_id(upload_id: &str) -> Result<(), String> {
@@ -131,6 +203,9 @@ fn mark_bitmap_chunk(dir: &Path, total_chunks: usize, index: usize) -> Result<()
 pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionStatus, String> {
     validate_upload_id(&req.upload_id)?;
     validate_upload_name(&req.name)?;
+    if let Some(relative) = &req.placement.relative_path {
+        validate_relative_upload_path(relative)?;
+    }
     if req.size > MAX_RESUMABLE_BYTES {
         return Err("Files must be 2 GiB or smaller".into());
     }
@@ -152,6 +227,7 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
         )
         .map_err(|e| format!("Parse session metadata: {e}"))?;
         if existing.name != req.name
+            || existing.placement != req.placement
             || existing.size != req.size
             || existing.chunk_size != chunk_size
         {
@@ -191,6 +267,7 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
         chunk_size,
         total_chunks,
         receipt: None,
+        placement: req.placement.clone(),
     };
     fs::write(
         &meta_path,
@@ -319,16 +396,20 @@ pub fn complete_session(root: &Path, upload_id: &str) -> Result<Receipt, String>
     drop(part);
 
     let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
-    let directory = canonical_root.join(uuid::Uuid::new_v4().to_string());
-    fs::create_dir(&directory).map_err(|e| e.to_string())?;
-    let final_path = directory.join(&meta.name);
+    let final_path = destination(&canonical_root, &meta.name, &meta.placement)?;
+    // A folder upload never replaces a file already placed in its batch.
+    if fs::symlink_metadata(&final_path).is_ok() {
+        return Err("A file with this path was already uploaded".into());
+    }
     if let Err(e) = fs::rename(&part_path, &final_path) {
-        let _ = fs::remove_dir(&directory);
+        if meta.placement.batch_id.is_none() {
+            let _ = fs::remove_dir(final_path.parent().unwrap_or(&canonical_root));
+        }
         return Err(format!("Finalize uploaded file: {e}"));
     }
     let _ = fs::remove_file(dir.join("bitmap.bin"));
     let receipt = Receipt {
-        name: meta.name.clone(),
+        name: nfc(&meta.name),
         path: final_path.to_string_lossy().into_owned(),
         size: meta.size as usize,
         sha256,
@@ -359,9 +440,8 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
     }
     std::fs::create_dir_all(root).map_err(|e| format!("Create upload directory: {e}"))?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let directory = root.join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir(&directory).map_err(|e| e.to_string())?;
-    let path = directory.join(&upload.name);
+    let path = destination(&root, &upload.name, &upload.placement)?;
+    let single = upload.placement.batch_id.is_none();
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -373,15 +453,20 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
         file.sync_all()
             .map_err(|e| format!("Persist uploaded file: {e}"))?;
         Ok(Receipt {
-            name: upload.name,
+            name: nfc(&upload.name),
             path: path.to_string_lossy().into_owned(),
             size: bytes.len(),
             sha256: hex::encode(Sha256::digest(&bytes)),
         })
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&directory);
+    if let Err(error) = &result {
+        // Never remove a file this request did not create.
+        if !error.starts_with("Create uploaded file") {
+            let _ = std::fs::remove_file(&path);
+        }
+        if single {
+            let _ = std::fs::remove_dir(path.parent().unwrap_or(&root));
+        }
     }
     result
 }
@@ -389,12 +474,134 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn folder(batch: &str, relative: &str) -> Placement {
+        Placement {
+            batch_id: Some(batch.into()),
+            relative_path: Some(relative.into()),
+        }
+    }
+    const BATCH: &str = "497dfe42-8ff1-44a8-b0f8-6b74a4866833";
+    #[test]
+    fn folder_uploads_keep_their_tree_under_one_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        // NFD "ã" from macOS lands as NFC, so the mention typed by a user matches.
+        let nfd = "Questo\u{0303}es (1)/sub dir/key (1).pdf";
+        let upload = |relative: &str| Upload {
+            name: relative.rsplit('/').next().unwrap().into(),
+            data_base64: "YQ==".into(),
+            placement: folder(BATCH, relative),
+        };
+        let a = store(root.path(), upload(nfd)).unwrap();
+        let b = store(root.path(), upload("Questões (1)/b.txt")).unwrap();
+        assert_eq!(
+            a.path,
+            canonical
+                .join(BATCH)
+                .join("Questões (1)/sub dir/key (1).pdf")
+                .to_string_lossy()
+        );
+        assert!(b.path.ends_with("/Questões (1)/b.txt"));
+        // The same path in the same batch is never overwritten.
+        assert!(store(root.path(), upload("Questões (1)/b.txt")).is_err());
+        assert_eq!(std::fs::read(&b.path).unwrap(), b"a");
+    }
+    #[test]
+    fn folder_uploads_reject_traversal_and_malformed_placements() {
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            "../escape.txt",
+            "a/../../escape.txt",
+            "/etc/passwd",
+            "a//b.txt",
+            "a/./b.txt",
+            "a\\b.txt",
+            "C:/x.txt",
+            "a/b\nc.txt",
+            "",
+        ] {
+            assert!(
+                validate_relative_upload_path(relative).is_err(),
+                "{relative:?} must be refused"
+            );
+            assert!(store(
+                root.path(),
+                Upload {
+                    name: "x.txt".into(),
+                    data_base64: "YQ==".into(),
+                    placement: folder(BATCH, relative),
+                }
+            )
+            .is_err());
+        }
+        let deep = vec!["d"; MAX_FOLDER_DEPTH + 1].join("/");
+        assert!(validate_relative_upload_path(&deep).is_err());
+        for placement in [
+            folder("../x", "a/b.txt"),
+            Placement {
+                batch_id: Some(BATCH.into()),
+                relative_path: None,
+            },
+            Placement {
+                batch_id: None,
+                relative_path: Some("a/b.txt".into()),
+            },
+        ] {
+            assert!(store(
+                root.path(),
+                Upload {
+                    name: "b.txt".into(),
+                    data_base64: "YQ==".into(),
+                    placement,
+                }
+            )
+            .is_err());
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        #[cfg(unix)]
+        {
+            // A link planted inside a batch is never followed.
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join(BATCH)).unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.path().join(BATCH).join("a")).unwrap();
+            assert!(store(
+                root.path(),
+                Upload {
+                    name: "b.txt".into(),
+                    data_base64: "YQ==".into(),
+                    placement: folder(BATCH, "a/b.txt"),
+                }
+            )
+            .is_err());
+            assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        }
+    }
+    #[test]
+    fn resumable_folder_session_places_the_file_in_its_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let init = SessionInit {
+            upload_id: "sess_folder".into(),
+            name: "big.bin".into(),
+            size: 3,
+            chunk_size: Some(4),
+            placement: folder(BATCH, "Data/raw/big.bin"),
+        };
+        init_or_status_session(root.path(), init.clone()).unwrap();
+        // Same id, different placement: refused instead of silently resumed.
+        let mut other = init.clone();
+        other.placement = folder(BATCH, "Data/other.bin");
+        assert!(init_or_status_session(root.path(), other).is_err());
+        write_session_chunk(root.path(), "sess_folder", 0, b"abc").unwrap();
+        let receipt = complete_session(root.path(), "sess_folder").unwrap();
+        assert!(receipt.path.ends_with(&format!("{BATCH}/Data/raw/big.bin")));
+    }
     #[test]
     fn binary_uploads_are_exact_and_never_overwrite() {
         let root = tempfile::tempdir().unwrap();
         let make = || Upload {
             name: "image é.png".into(),
             data_base64: "AP8BAg==".into(),
+            placement: Placement::default(),
         };
         let a = store(root.path(), make()).unwrap();
         let b = store(root.path(), make()).unwrap();
@@ -411,7 +618,8 @@ mod tests {
                 root.path(),
                 Upload {
                     name: name.into(),
-                    data_base64: "YQ==".into()
+                    data_base64: "YQ==".into(),
+                    placement: Placement::default(),
                 }
             )
             .is_err());
@@ -420,7 +628,8 @@ mod tests {
             root.path(),
             Upload {
                 name: "a".into(),
-                data_base64: "!".into()
+                data_base64: "!".into(),
+                placement: Placement::default(),
             }
         )
         .is_err());
@@ -434,6 +643,7 @@ mod tests {
             name: "video.mp4".into(),
             size: 10,
             chunk_size: Some(4),
+            placement: Placement::default(),
         };
         let status = init_or_status_session(root.path(), init.clone()).unwrap();
         assert_eq!(status.total_chunks, 3);

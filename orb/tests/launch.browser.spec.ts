@@ -395,7 +395,7 @@ test("connected empty context never substitutes demo attachment items",async({pa
  await expect.poll(()=>state.attachmentReads.filter(path=>path.endsWith("/files")).length).toBeGreaterThan(0);
  await expect(page.getByRole("listbox",{name:"Context"}).getByRole("option")).toHaveCount(0);
  await page.getByTitle("Add context").click();
- await expect(page.locator(".plus-menu .menu-item")).toHaveText(["Upload file or image…"]);
+ await expect(page.locator(".plus-menu .menu-item")).toHaveText(["Upload file or image…","Upload folder…"]);
  const box=await page.locator(".plus-menu").boundingBox();
  expect(box?.height).toBeGreaterThan(28);
  // Nothing was offered, so nothing was written into the draft either.
