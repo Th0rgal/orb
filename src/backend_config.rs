@@ -54,6 +54,12 @@ impl BackendConfigStore {
             needs_save = true;
         }
 
+        // Retired backends (e.g. chatgpt_ui and its browser proxy settings)
+        // must not linger in persisted config.
+        let before = configs.len();
+        configs.retain(|id, _| crate::backend::retired_backend_error(id).is_none());
+        needs_save |= configs.len() != before;
+
         for default in defaults {
             match configs.get_mut(&default.id) {
                 Some(existing) => {
@@ -167,3 +173,25 @@ impl BackendConfigStore {
 }
 
 pub type SharedBackendConfigStore = Arc<BackendConfigStore>;
+
+#[cfg(test)]
+mod retired_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retired_chatgpt_ui_config_is_dropped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backend_config.json");
+        std::fs::write(
+            &path,
+            r#"[{"id":"chatgpt_ui","name":"ChatGPT UI","settings":{"proxy_server":"socks5://127.0.0.1:10880"}},{"id":"codex","name":"Codex","settings":{}}]"#,
+        )
+        .unwrap();
+        let store = BackendConfigStore::new(path.clone(), vec![]).await;
+        assert!(store.get("chatgpt_ui").await.is_none());
+        assert!(store.get("codex").await.is_some());
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(!persisted.contains("chatgpt_ui"));
+        assert!(!persisted.contains("proxy_server"));
+    }
+}

@@ -150,8 +150,11 @@ internal fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> 
     add("Weekly", "muse_weekly_used_percent")
     add("Monthly", "mistral_monthly_used_percent")
     for (w in OrbJSON.dictList(detail["antigravity_windows"])) {
-        val pct = OrbJSON.double(w, "used_percent") ?: continue
-        if (pct.isFinite()) result.add((OrbJSON.str(w, "label") ?: "Window") to (pct / 100.0).coerceIn(0.0, 1.0))
+        val label = OrbJSON.str(w, "label") ?: "Window"
+        val pct = OrbJSON.double(w, "used_percent")
+        // Google omits a zero remaining fraction: a reset without a figure is spent.
+        if (pct == null) { if (w["used_percent"] == null && w["reset_at"] != null) result.add(label to 1.0); continue }
+        if (pct.isFinite()) result.add(label to (pct / 100.0).coerceIn(0.0, 1.0))
     }
     return result
 }
@@ -159,17 +162,62 @@ internal fun providerQuotaWindows(detail: OrbDict?): List<Pair<String, Double>> 
 /** "Gemini · 5h" belongs to the Gemini pool; a plain "5h" to the whole account (""). */
 internal fun quotaPool(label: String): String = label.indexOf(" · ").let { if (it < 0) "" else label.substring(0, it) }
 
-/** Same as orb/src/providerUsage.ts quotaExhaustedLabel; spec: shared/orb-spec/fixtures/quota-exhausted.json. */
-internal fun quotaExhaustedLabel(windows: List<Pair<String, Double>>): String? {
-    val pools = LinkedHashMap<String, Boolean>()
+/** Same as orb/src/providerUsage.ts quotaLevel; spec: shared/orb-spec/fixtures/quota-level.json.
+ *  < 80% normal, 80-99% warning, 100% (rounded, as shown) exhausted. */
+internal enum class OrbQuotaLevel(val wire: String) {
+    Normal("normal"), Warning("warning"), Exhausted("exhausted");
+
+    /** Neutral text for normal; the shared warning / error tokens otherwise. */
+    fun color(neutral: Color): Color = when (this) { Exhausted -> OrbStyle.error; Warning -> OrbStyle.warning; Normal -> neutral }
+
+    companion object {
+        const val WARNING_PERCENT = 80
+        fun of(used: Double?, hasReset: Boolean = false): OrbQuotaLevel {
+            if (used == null || !used.isFinite()) return if (hasReset) Exhausted else Normal
+            val pct = (used * 100.0).roundToInt()
+            return if (pct >= 100) Exhausted else if (pct >= WARNING_PERCENT) Warning else Normal
+        }
+    }
+}
+
+internal data class OrbQuotaStatus(val level: OrbQuotaLevel, val label: String, val accountWide: Boolean)
+
+/** "Gemini", "Claude & GPT and Gemini", "A, B and C". */
+private fun joinNames(names: List<String>): String =
+    if (names.size < 2) names.joinToString("") else names.dropLast(1).joinToString(", ") + " and " + names.last()
+
+/** Same as orb/src/providerUsage.ts quotaStatus; spec: shared/orb-spec/fixtures/quota-exhausted.json. */
+internal fun quotaStatus(windows: List<Pair<String, Double>>): OrbQuotaStatus? {
+    val levels = LinkedHashMap<String, OrbQuotaLevel>()
+    val pcts = HashMap<String, Int>()
     for ((label, used) in windows) {
         val pool = quotaPool(label)
-        pools[pool] = (pools[pool] ?: false) || used >= 1.0
+        val level = OrbQuotaLevel.of(used)
+        val prev = levels[pool]
+        if (prev == null || level.ordinal > prev.ordinal) levels[pool] = level
+        pcts[pool] = maxOf(pcts[pool] ?: 0, (used.coerceIn(0.0, 1.0) * 100.0).roundToInt())
     }
-    val spent = pools.filterValues { it }.keys
-    if (spent.isEmpty()) return null
-    if ("" in spent || spent.size == pools.size) return "Quota exhausted"
-    return spent.joinToString(", ") + " quota exhausted"
+    for (level in listOf(OrbQuotaLevel.Exhausted, OrbQuotaLevel.Warning)) {
+        val hit = levels.filterValues { it == level }.keys.toList()
+        if (hit.isEmpty()) continue
+        val accountWindow = "" in hit
+        val names = joinNames(hit.filter { it.isNotEmpty() })
+        val subject = if (accountWindow || names.isEmpty()) "Quota" else "$names quota"
+        val pct = hit.maxOf { pcts[it] ?: 0 }
+        return if (level == OrbQuotaLevel.Exhausted) OrbQuotaStatus(level, "$subject exhausted", accountWindow || hit.size == levels.size)
+        else OrbQuotaStatus(level, "$subject at $pct%", accountWindow)
+    }
+    return null
+}
+
+internal fun quotaExhaustedLabel(windows: List<Pair<String, Double>>): String? =
+    quotaStatus(windows)?.takeIf { it.level == OrbQuotaLevel.Exhausted }?.label
+
+/** Quota severity of a provider row; null when another state (disabled, reconnect, error) wins or all is below 80%. */
+internal fun providerQuotaStatus(provider: OrbRow, detail: OrbDict?): OrbQuotaStatus? {
+    val statusType = OrbJSON.str(provider.dict("status"), "type") ?: provider.str("status", "state")
+    if (provider.bool("enabled") == false || statusType == "needs_reauth" || OrbJSON.str(detail, "status") == "needs_reauth" || !OrbJSON.str(detail, "error").isNullOrEmpty()) return null
+    return quotaStatus(providerQuotaWindows(detail))
 }
 
 internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String {
@@ -182,7 +230,7 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
         provider.bool("enabled") == false -> "Disabled"
         statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Reconnect"
         detailError.isNotEmpty() -> "Usage unavailable"
-        else -> quotaExhaustedLabel(providerQuotaWindows(detail)) ?: statusType.replace("_", " ")
+        else -> quotaStatus(providerQuotaWindows(detail))?.label ?: statusType.replace("_", " ")
     }
     return if (providerType.isNotEmpty()) "$providerType · $state" else state
 }
@@ -615,6 +663,7 @@ fun OrbProvidersSettingsPage(
                                 val providerType = provider.str("provider_type", "type") ?: ""
                                 val detail = usageEntries[pid]
                                 val subtitle = providerStatusSubtitle(provider, detail)
+                                val quotaLevel = providerQuotaStatus(provider, detail)?.level ?: OrbQuotaLevel.Normal
                                 val expanded = expandedIds.contains(pid)
                                 val windows = providerQuotaWindows(detail)
                                 val usesOauth = provider.bool("uses_oauth") == true
@@ -652,8 +701,10 @@ fun OrbProvidersSettingsPage(
                                             )
                                             Text(
                                                 text = subtitle,
-                                                color = OrbStyle.textSecondary,
-                                                fontSize = 12.sp
+                                                color = quotaLevel.color(OrbStyle.textSecondary),
+                                                fontSize = 12.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                         }
                                         Icon(
@@ -687,6 +738,7 @@ fun OrbProvidersSettingsPage(
                                             } else {
                                                 windows.forEach { (wLabel, ratio) ->
                                                     val pctInt = (ratio * 100.0).roundToInt()
+                                                    val level = OrbQuotaLevel.of(ratio)
                                                     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                                         Row(
                                                             modifier = Modifier.fillMaxWidth(),
@@ -703,7 +755,8 @@ fun OrbProvidersSettingsPage(
                                                             )
                                                             Text(
                                                                 text = "$pctInt% used",
-                                                                color = OrbStyle.textSecondary,
+                                                                color = level.color(OrbStyle.textSecondary),
+                                                                fontWeight = if (level == OrbQuotaLevel.Normal) null else FontWeight.SemiBold,
                                                                 fontSize = 13.sp,
                                                                 maxLines = 1,
                                                                 softWrap = false
@@ -722,7 +775,7 @@ fun OrbProvidersSettingsPage(
                                                                     .height(4.dp)
                                                                     .clip(CircleShape)
                                                                     .background(
-                                                                        if (ratio >= 0.9) OrbStyle.warning else OrbStyle.inboxBlue
+                                                                        level.color(OrbStyle.inboxBlue)
                                                                     )
                                                             )
                                                         }
@@ -968,7 +1021,7 @@ fun OrbProvidersSettingsPage(
                                                     )
                                                     Text(
                                                         text = "${pct.roundToInt()}% used",
-                                                        color = OrbStyle.textSecondary,
+                                                        color = OrbQuotaLevel.of(pct / 100.0).color(OrbStyle.textSecondary),
                                                         fontSize = 12.sp,
                                                         maxLines = 1,
                                                         softWrap = false
@@ -986,7 +1039,7 @@ fun OrbProvidersSettingsPage(
                                                             .fillMaxWidth(ratio.toFloat())
                                                             .height(4.dp)
                                                             .clip(CircleShape)
-                                                            .background(OrbStyle.inboxBlue)
+                                                            .background(OrbQuotaLevel.of(ratio.toDouble()).color(OrbStyle.inboxBlue))
                                                     )
                                                 }
                                             }

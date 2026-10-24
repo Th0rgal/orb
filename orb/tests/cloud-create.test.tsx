@@ -18,11 +18,11 @@ vi.mock('../src/api', () => ({api:vi.fn(async () => ({models:{items:[]},reposito
 afterEach(() => {cleanup();vi.clearAllMocks();});
 const capabilities = {models:false,repository:false,follow_up:false,cancel:false,artifacts:false,attachments:false,detailed_events:false};
 describe('cloud creation', () => {
- it('keeps unvalidated providers disabled and offers exactly the four services', async () => {
+ it('keeps unvalidated providers disabled and offers exactly the three services', async () => {
   fakes.accounts.mockResolvedValue([{id:'grok',provider:'grok_bot',label:'Grok Bot',available:false,experimental:true,reason:'Protocol not validated',capabilities}]);
   render(() => <CloudAgentPage project="demo" path="notes" onCreated={() => {}} />);
   fireEvent.click(screen.getByLabelText('Service'));
-  expect(screen.getAllByRole('option').map(e => e.textContent?.replace('✓','').trim())).toEqual(['ChatGPT','Grok Bot','Cursor Cloud','Hermes']);
+  expect(screen.getAllByRole('option').map(e => e.textContent?.replace('✓','').trim())).toEqual(['Grok Bot','Cursor Cloud','Hermes']);
   fireEvent.click(screen.getByRole('option',{name:'Grok Bot'}));
   await screen.findByText('Protocol not validated');
   expect((screen.getByRole('button',{name:'Attach file or image'}) as HTMLButtonElement).disabled).toBe(true);
@@ -34,7 +34,7 @@ describe('cloud creation', () => {
   expect(screen.getByRole('region', {name:'Cloud agent'}).classList.contains('new-agent')).toBe(true);
  });
  it('reuses the launch key after an uncertain response and preserves the folder', async () => {
-  fakes.accounts.mockResolvedValue([{id:'profile',provider:'chatgpt',label:'Pro account',available:true,experimental:true,capabilities}]);
+  fakes.accounts.mockResolvedValue([{id:'profile',provider:'cursor_cloud',label:'Pro account',available:true,experimental:true,capabilities}]);
   fakes.launch.mockRejectedValue(new Error('Transport timeout'));
   render(() => <CloudAgentPage project="demo" path="notes" onCreated={() => {}} />);
   await screen.findByText(/Pro account/);
@@ -48,7 +48,7 @@ describe('cloud creation', () => {
   expect(fakes.launch.mock.calls[0][0]).not.toHaveProperty('working_directory');
  });
  it('shows the provider mark once, in the account chip, not inside the composer', async () => {
-  fakes.accounts.mockResolvedValue([{id:'profile',provider:'chatgpt',label:'Pro account',available:true,experimental:false,capabilities}]);
+  fakes.accounts.mockResolvedValue([{id:'profile',provider:'cursor_cloud',label:'Pro account',available:true,experimental:false,capabilities}]);
   const { container } = render(() => <CloudAgentPage project="demo" onCreated={() => {}} />);
   await screen.findByText(/Pro account/);
   expect(container.querySelectorAll('.provider-logo')).toHaveLength(1);
@@ -59,26 +59,26 @@ describe('cloud creation', () => {
 describe('default cloud provider', () => {
  const acct = (provider: string, available = true) => ({id:provider, provider, label:provider, available, experimental:false, capabilities}) as any;
  it('prefers Hermes when it is available', () => {
-  expect(defaultCloudProvider([acct('chatgpt'), acct('cursor_cloud'), acct('hermes')])).toBe('hermes');
+  expect(defaultCloudProvider([acct('grok_bot'), acct('cursor_cloud'), acct('hermes')])).toBe('hermes');
  });
  it('falls back to the first available provider', () => {
-  expect(defaultCloudProvider([acct('chatgpt', false), acct('hermes', false), acct('cursor_cloud')])).toBe('cursor_cloud');
+  expect(defaultCloudProvider([acct('grok_bot', false), acct('hermes', false), acct('cursor_cloud')])).toBe('cursor_cloud');
   expect(defaultCloudProvider([acct('grok_bot', false)])).toBe('grok_bot');
   expect(defaultCloudProvider([])).toBe('hermes');
  });
  it('keeps the last explicit choice while that provider has an account', () => {
-  expect(defaultCloudProvider([acct('chatgpt'), acct('hermes')], 'chatgpt')).toBe('chatgpt');
+  expect(defaultCloudProvider([acct('cursor_cloud'), acct('hermes')], 'cursor_cloud')).toBe('cursor_cloud');
   expect(defaultCloudProvider([acct('hermes')], 'cursor_cloud')).toBe('hermes');
   expect(defaultCloudProvider([acct('hermes')], 'not-a-provider')).toBe('hermes');
  });
  it('opens the new-task page on Hermes, and on a persisted choice', async () => {
-  fakes.accounts.mockResolvedValue([acct('chatgpt'), {...acct('hermes'), label:'Paloma'}]);
+  fakes.accounts.mockResolvedValue([acct('cursor_cloud'), {...acct('hermes'), label:'Paloma'}]);
   const first = render(() => <CloudAgentPage project="demo" onCreated={() => {}} />);
   await screen.findByText('Paloma');
   first.unmount();
-  localStorage.setItem(CLOUD_PROVIDER_KEY, 'chatgpt');
+  localStorage.setItem(CLOUD_PROVIDER_KEY, 'cursor_cloud');
   render(() => <CloudAgentPage project="demo" onCreated={() => {}} />);
-  await waitFor(() => expect(screen.getByLabelText('Service').textContent).toContain('ChatGPT'));
+  await waitFor(() => expect(screen.getByLabelText('Service').textContent).toContain('Cursor Cloud'));
   localStorage.removeItem(CLOUD_PROVIDER_KEY);
  });
 });

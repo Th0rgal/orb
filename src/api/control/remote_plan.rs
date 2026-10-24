@@ -262,7 +262,7 @@ pub(crate) fn plan_remote_harness(
                 .filter(|m| !m.is_empty())
                 .ok_or_else(|| {
                     format!(
-                        "{REMOTE_MODEL_REQUIRED}: an OpenCode remote launch needs model_override (provider/model, e.g. xai/grok-4.6); nodes have no authenticated default model"
+                        "{REMOTE_MODEL_REQUIRED}: an OpenCode remote launch needs model_override (provider/model, e.g. xai/grok-4.6); nodes have no authenticated default model, so no default would be used. Pass model_override=<provider>/<model> (list them with GET /api/providers/backend-models), or use consult_model with a short alias"
                     )
                 })?;
             Ok(RemoteHarnessPlan::OpenCode {

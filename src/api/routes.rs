@@ -173,7 +173,7 @@ pub struct AppState {
 fn backend_enabled_by_default(id: &str, host_detected: bool) -> bool {
     // Antigravity may be installed only in the selected workspace. Native model
     // discovery and launch preflight check readiness there, not on the host.
-    id == "antigravity" || (host_detected && id != "chatgpt_ui")
+    id == "antigravity" || host_detected
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
@@ -329,7 +329,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         Box::new(crate::backend::grok::GrokBackend::new()),
         Box::new(crate::backend::antigravity::AntigravityBackend::new()),
         Box::new(crate::backend::vibe::VibeBackend::new()),
-        Box::new(crate::backend::chatgpt_ui::ChatGptUiBackend::new()),
     ];
     struct BackendProbe {
         id: String,
@@ -358,16 +357,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                     "base_url": config.opencode_base_url,
                     "default_agent": config.opencode_agent,
                     "permissive": config.opencode_permissive,
-                }),
-                "chatgpt_ui" => serde_json::json!({
-                    "profile_dir": null,
-                    "profile_dirs": [],
-                    "driver_path": null,
-                    "python_path": "python3",
-                    "browser": "chromium",
-                    "headless": true,
-                    "timeout_secs": 14400,
-                    "model": null
                 }),
                 _ => serde_json::json!({}),
             };
@@ -462,9 +451,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     backend_registry.register(crate::backend::grok::registry_entry());
     backend_registry.register(crate::backend::antigravity::registry_entry());
     backend_registry.register(crate::backend::vibe::registry_entry());
-    backend_registry.register(crate::backend::chatgpt_ui::registry_entry());
     let backend_registry = Arc::new(RwLock::new(backend_registry));
-    tracing::info!("Backend registry initialized with {} backends", 7);
+    tracing::info!("Backend registry initialized with {} backends", 6);
 
     // Note: No central OpenCode server cleanup needed - missions use per-workspace CLI execution
 
@@ -695,11 +683,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // crossings, recovery notice on the way back down.
     super::disk_watch::spawn(Arc::clone(&state));
 
-    // ChatGPT UI allowance recovery is backend-owned and single-flight. A
-    // cooldown never reopens mission traffic until this non-submitting probe
-    // proves the authenticated Pro composer is usable again.
-    super::runners::chatgpt_ui::spawn_recovery_probe(config.working_dir.clone());
-
     // Zombie-scope reaper: stops leftover sandboxed-exec-*.scope units whose
     // mission no longer needs a live harness (see scope_reaper docs).
     super::scope_reaper::spawn(Arc::clone(&state));
@@ -738,11 +721,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             let default_user = super::auth::implicit_single_tenant_user(&state_clone.config);
             let _ = state_clone.control.get_or_spawn(&default_user).await;
             // Hosted observers resume even when their Orb windows remain closed.
-            for key in [
-                "CURSOR_CLOUD_OWNER",
-                "CHATGPT_CLOUD_OWNER",
-                "GROK_BOT_OWNER",
-            ] {
+            for key in ["CURSOR_CLOUD_OWNER", "GROK_BOT_OWNER"] {
                 if let Ok(owner) = std::env::var(key) {
                     if !owner.trim().is_empty() && owner != default_user.id {
                         let cloud_user = super::auth::AuthUser {
@@ -983,10 +962,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/cloud/accounts",
             get(super::cloud_agents::http::accounts),
-        )
-        .route(
-            "/api/cloud/chatgpt/options",
-            get(super::cloud_agents::http::chatgpt_options),
         )
         .route(
             "/api/cloud/cursor/options",
@@ -1578,14 +1553,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(backends_api::get_backend_quota),
         )
         .route(
-            "/api/backends/chatgpt_ui/profile-pool",
-            get(backends_api::chatgpt_ui_profile_pool),
-        )
-        .route(
-            "/api/backends/chatgpt_ui/durability",
-            get(backends_api::chatgpt_ui_durability),
-        )
-        .route(
             "/api/backends/:id/agents",
             get(backends_api::list_backend_agents),
         )
@@ -2081,7 +2048,7 @@ pub struct UsageSummaryQuery {
 /// Query params:
 /// - `window`: "all" (default), or `Nh` / `Nd` / `Nw`. Invalid values are a
 ///   400, never a silent all-time fall back.
-/// - `backend`, `provider`, `mission`, `source` ("harness" | "router"),
+/// - `backend`, `provider`, `mission`, `source` ("harness" | "router"), `caller_kind`,
 ///   `api_key`, `model`: optional comma-separated filters.
 ///
 /// Rows carry a `source` so router and harness usage of one model stay
@@ -2209,11 +2176,39 @@ async fn get_ai_proxy_health(
             tracing::warn!(error = %e, "Failed to read proxy outcomes");
             (StatusCode::INTERNAL_SERVER_ERROR, e)
         })?;
-    Ok(Json(super::proxy_reliability::summarize(
-        &records,
-        &window.label,
-        since,
-    )))
+    let now = chrono::Utc::now();
+    let since_at = since
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc));
+    let mut health = super::proxy_reliability::summarize(&records, &window.label, since);
+    super::proxy_reliability::add_series(&mut health, &records, since_at, now);
+    // Account labels and live cooldowns (quota resets) for each account row.
+    let mut seen = std::collections::HashMap::new();
+    for group in &mut health.groups {
+        let Some(id) = group.account_id else { continue };
+        if let std::collections::hash_map::Entry::Vacant(slot) = seen.entry(id) {
+            let label = state
+                .ai_providers
+                .get(id)
+                .await
+                .map(|p| p.label.filter(|l| !l.is_empty()).unwrap_or(p.name));
+            let snap = state.health_tracker.get_health(id).await;
+            let cooldown = snap
+                .cooldown_remaining_secs
+                .filter(|secs| *secs > 0.0 && snap.account_state != "available")
+                .map(|secs| super::proxy_reliability::GroupCooldown {
+                    state: snap.account_state,
+                    until: (now + chrono::Duration::milliseconds((secs * 1000.0) as i64))
+                        .to_rfc3339(),
+                });
+            slot.insert((label, cooldown));
+        }
+        let (label, cooldown) = seen[&id].clone();
+        group.account_label = label;
+        group.cooldown = cooldown;
+    }
+    Ok(Json(health))
 }
 
 /// List all tasks.
@@ -3424,7 +3419,6 @@ mod tests {
         store.set_enabled("antigravity", false).await.unwrap();
         let reloaded = crate::backend_config::BackendConfigStore::new(path, defaults()).await;
         assert!(!reloaded.get("antigravity").await.unwrap().enabled);
-        assert!(!super::backend_enabled_by_default("chatgpt_ui", true));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { api, ApiError, createMission, type Mission } from './api';
-export type CloudProvider = 'chatgpt' | 'grok_bot' | 'cursor_cloud' | 'hermes';
-export const cloudNames: Record<CloudProvider, string> = { chatgpt: 'ChatGPT', grok_bot: 'Grok Bot', cursor_cloud: 'Cursor Cloud', hermes: 'Hermes' };
+export type CloudProvider = 'grok_bot' | 'cursor_cloud' | 'hermes';
+export const cloudNames: Record<CloudProvider, string> = { grok_bot: 'Grok Bot', cursor_cloud: 'Cursor Cloud', hermes: 'Hermes' };
 export interface ModelParam {id:string;value:string}
 export interface CloudSelection { model_params?: ModelParam[]; provider: CloudProvider; account: string; repository?: string; git_ref?: string; model?: string }
 export interface CloudAccount { id: string; provider: CloudProvider; label: string; available: boolean; experimental: boolean; reason?: string; capabilities: { models: boolean; repository: boolean; attachments: boolean; follow_up: boolean; cancel: boolean; artifacts: boolean; detailed_events: boolean } }
@@ -76,7 +76,7 @@ export function cloudCanSend(e: CloudExecution): boolean { return !e.turns.some(
 export function safeCloudUrl(value?: string): string | undefined { try { const u = new URL(value ?? ''); return u.protocol === 'https:' && !u.username && !u.password ? u.href : undefined; } catch { return undefined; } }
 export function launchCloud(body: {title: string; prompt: string; project: string; tags: string[]; idempotency_key: string; cloud: CloudSelection}): Promise<Mission> { return createMission(body); }
 
-export function cloudAccountLabel(a: CloudAccount): string { const match = /^chatgpt-profile(?:-(\d+))?$/.exec(a.id); return match ? `Profile ${match[1] ?? 1}` : a.label.replace(/^(ChatGPT|Cursor Cloud|Grok Bot) · /, ""); }
+export function cloudAccountLabel(a: CloudAccount): string { return a.label.replace(/^(Cursor Cloud|Grok Bot) · /, ""); }
 
 export const CLOUD_PROVIDER_KEY = 'orb.cloud.provider';
 const isProvider = (value: unknown): value is CloudProvider => typeof value === 'string' && value in cloudNames;

@@ -2515,7 +2515,6 @@ fun serviceName(value: String): String = when (value.lowercase()) {
     "gemini" -> "Gemini"
     "antigravity" -> "Antigravity"
     "amp" -> "Amp"
-    "cloud_chatgpt", "chatgpt" -> "ChatGPT"
     "cloud_cursor", "cloud_cursor_cloud", "cursor_cloud" -> "Cursor Cloud"
     "cloud_grok_bot", "grok_bot" -> "Grok Bot"
     "cloud_hermes", "hermes" -> "Hermes"

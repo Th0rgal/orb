@@ -137,11 +137,11 @@ Security choices from the dev smoke:
 - Detailed mission/event access requires explicit tool calls.
 
 For exceptional read-only research or design-conflict questions, Hermes may
-start `backend=chatgpt_ui` with `model_override=gpt-5.6-pro` and `writer=false`.
-The mission is asynchronous like every other Sandboxed mission. Generated
-ChatGPT files are available through `list_mission_shared_files` followed by
-`download_shared_file`; repository work remains owned by normal coding
-backends.
+consult another model: start an opencode mission with
+`model_override=<provider>/<model>` (e.g. `openai/gpt-6-astra`,
+`anthropic/claude-fable-5-1`) and `writer=false`. The mission is asynchronous
+like every other Sandboxed mission; repository work remains owned by normal
+coding backends.
 
 ## Readiness Checks
 

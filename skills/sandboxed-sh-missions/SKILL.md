@@ -1,6 +1,6 @@
 ---
 name: sandboxed-sh-missions
-description: "Delegate coding/automation tasks to sandboxed.sh missions via the mcp_sandboxed_assistant_* MCP. Each mission runs in an isolated container (workspace) with a chosen agent profile and a self-contained prompt. Use this skill whenever the user wants to 'launch a mission', 'sandboxed', 'spawn a worker', or delegate a multi-step coding/research task that should run in a clean environment."
+description: "Delegate coding/automation tasks to sandboxed.sh missions via the mcp_sandboxed_assistant_* MCP. Each mission runs in an isolated container (workspace) with a chosen agent profile and a self-contained prompt. Use this skill whenever the user wants to 'launch a mission', 'sandboxed', 'spawn a worker', or delegate a multi-step coding/research task that should run in a clean environment. To consult another model (review, second opinion), call consult_model(model=..., question=...): it starts the read-only opencode child for you."
 license: MIT
 metadata:
   hermes:
@@ -144,6 +144,32 @@ Recovery pattern:
 4. Relaunch a fresh mission with the shortened `/goal`; do not keep retrying the same oversized objective.
 
 This limit is separate from model context size. A model can handle the information, but the Codex goal API rejects overlong goal objectives before execution starts.
+
+### Consulting another model: `consult_model`
+
+For a review, second opinion or very hard read-only question, call
+`consult_model` instead of hand-building a `start_mission`:
+
+```
+consult_model(model="gpt-6-astra",        # or "fable-5.1", "opus-5.5", or a full "openai/gpt-6-astra"
+              question="<self-contained question + expected decision/artifact>",
+              files=["docs/plan.md"],      # optional: paths the consultant must read
+              idempotency_key="<stable key>")
+```
+
+It creates a child mission in the caller's project (inherited from the
+parent), on the parent's machine and workspace, with backend=opencode,
+model_override=<provider>/<model> and writer=false (pr-readonly). Pass
+`read_only=false` only if the consultant must write. Short aliases resolve
+against the live opencode catalog; an unknown or ambiguous name is rejected
+with the valid ids. It returns {mission_id} immediately and never waits:
+poll get_consult_result(mission_id) until done=true, which returns the
+answer; send follow-ups to the same mission.
+
+Launch rejections name their fix: a child with a different project is told to
+use the parent's project (omit `project` to inherit it), and a cloud launch
+carrying placement/harness fields is told which field to remove or to launch
+natively with backend=opencode.
 
 ### Backend tiering for cost optimisation (multi-provider routing)
 
@@ -832,7 +858,7 @@ these stops. Native completion still requires the usual delivery evidence.
 Call `list_cloud_accounts` for accounts, availability and capabilities. To create
 an available hosted attempt, pass `cloud: {provider, account, repository?, git_ref?,
 model?}` and `idempotency_key` to `start_mission`. The supported provider names are
-`chatgpt`, `grok_bot`, and `cursor_cloud`. Unvalidated services reject creation.
+`grok_bot` and `cursor_cloud`. Unvalidated services reject creation.
 Read `get_cloud_execution` for persisted turns/results. Use the same mission and
 a stable `client_message_id` UUID with `send_message_to_mission` for follow-ups.
 Never repeat an ambiguous submission with a different key. Orb folders classify
@@ -843,7 +869,7 @@ is distinct from archiving and acceptance. Accounts never launch work on connect
 
 ### Cloud model selection and verified Grok Bot
 
-Use `list_cloud_models` with `provider: chatgpt | cursor_cloud` before selecting a model. Creation accepts `cloud.model` and Cursor `cloud.model_params: [{id,value}]`. Follow-ups accept `cloud_model` and `cloud_model_params` in `send_message_to_mission`; these settings belong to that turn, not earlier turns. Keep the same `client_message_id` on retries, including the same model parameters. Grok Bot has no model selector or attachment capability. Its dedicated Bots share the account computer: archiving an Orb mission must not delete provider files. Never replace an uncertain submission with a new mission.
+Use `list_cloud_models` with `provider: cursor_cloud` before selecting a model. Creation accepts `cloud.model` and Cursor `cloud.model_params: [{id,value}]`. Follow-ups accept `cloud_model` and `cloud_model_params` in `send_message_to_mission`; these settings belong to that turn, not earlier turns. Keep the same `client_message_id` on retries, including the same model parameters. Grok Bot has no model selector or attachment capability. Its dedicated Bots share the account computer: archiving an Orb mission must not delete provider files. Never replace an uncertain submission with a new mission.
 
 
 Workspace Git operations (`create_worktree`, `remove_worktree`, `merge_branch`)

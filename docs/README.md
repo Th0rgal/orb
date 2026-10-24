@@ -57,7 +57,7 @@
 - **[Agent Control Plane Constitution](AGENT_CONTROL_PLANE.md)** & **[Roadmap](AGENT_NATIVE_ROADMAP.md)** — The canonical abstraction tower: portfolio → project → track → attempt → action → receipt → evidence.
 - **[Hermes Orchestration](HERMES_ORCHESTRATION.md)** & **[Autonomous Controllers](CONTROLLERS.md)** — How Hermes crons drive projects through control conversations and MCP.
 - **[Hermes Cloud Conversations in Orb](ORB_HERMES.md)** — Launching durable Hermes conversations directly from **Orb → Cloud agent**.
-- **[Cloud Agents (`cloud-agents/STATUS.md`)](cloud-agents/STATUS.md)** & **[ChatGPT UI Harness](CHATGPT_UI_HARNESS.md)** — Cursor Cloud, Grok Bot, and pooled ChatGPT web sessions (with versioned policy in [`policy/CHATGPT_UI_POOL_POLICY.md`](policy/CHATGPT_UI_POOL_POLICY.md)).
+- **[Cloud Agents (`cloud-agents/STATUS.md`)](cloud-agents/STATUS.md)**** — Cursor Cloud and Grok Bot hosted sessions.
 - **[Unified MCP (`sandboxed-mcp`)](MCP_UNIFICATION.md)** — Scoped `mcp1.` sessions, executor/coordinator/operator profiles, and idempotent action receipts.
 - **[Writer Dispatch Admission](writer-dispatch-admission.md)**, **[Codex Native Continuity](codex-native-continuity.md)**, **[Codex Goal Lifecycle](codex-goal-lifecycle.md)**, & **[Validation Campaigns](validation-campaigns.md)**.
 - **[`palomactl`](PALOMACTL.md)** — CLI for project-state reconciliation.

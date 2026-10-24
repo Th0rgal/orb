@@ -33,17 +33,6 @@ pub async fn accounts(
     let grok_connected = grok::Grok::from_account("grok-default").is_ok();
     let mut accounts = vec![
         Account {
-            id: "chatgpt-pool".into(),
-            provider: Provider::Chatgpt,
-            label: "ChatGPT".into(),
-            available: false,
-            experimental: true,
-            reason: Some(
-                "Dedicated browser account binding and cloud canary have not been validated".into(),
-            ),
-            capabilities: Capabilities::default(),
-        },
-        Account {
             id: "grok-default".into(),
             provider: Provider::GrokBot,
             label: "Grok Bot".into(),
@@ -84,34 +73,6 @@ pub async fn accounts(
             },
         },
     ];
-    if std::env::var("CHATGPT_CLOUD_OWNER").as_deref() == Ok(user.id.as_str()) {
-        if let Ok(profiles) =
-            crate::api::runners::chatgpt_ui::configured_profile_dirs(&state.config.working_dir)
-        {
-            for slot in crate::api::runners::chatgpt_ui::profile_pool::pool_snapshot(&profiles) {
-                accounts.retain(|a| a.id != "chatgpt-pool");
-                let validated = std::env::var("CHATGPT_CLOUD_VALIDATED").as_deref() == Ok("1");
-                accounts.push(Account {
-                    id: slot.profile_name.clone(),
-                    provider: Provider::Chatgpt,
-                    label: chatgpt_account_label(&slot.profile_name),
-                    available: validated && matches!(slot.state, crate::api::runners::chatgpt_ui::profile_pool::ProfileSlotState::Available | crate::api::runners::chatgpt_ui::profile_pool::ProfileSlotState::InUse),
-                    experimental: true,
-                    reason: if validated {
-                        Some(format!("Browser pool: {:?}", slot.state))
-                    } else {
-                        Some("Browser cloud canary has not passed".into())
-                    },
-                    capabilities: Capabilities {
-                        models: true,
-                        follow_up: true,
-                        artifacts: true,
-                        ..Default::default()
-                    },
-                });
-            }
-        }
-    }
     accounts.push(hermes::account(&state, &user.id).await);
     Json(accounts)
 }
@@ -165,13 +126,6 @@ pub async fn create(
     {
         return Err(bad("This service does not accept repositories"));
     }
-    if selection.provider == Provider::Chatgpt {
-        if let Some(model) = selection.model.as_deref() {
-            validate_chatgpt_model(model).map_err(bad)?;
-        } else {
-            selection.model = Some("gpt-6-pro".into());
-        }
-    }
     if req.track.is_some()
         || req.supersedes_mission_id.is_some()
         || req.writer == Some(true)
@@ -192,7 +146,7 @@ pub async fn create(
         || req.fast_mode
     {
         return Err(bad(
-            "Cloud execution accepts only service capabilities, not harness settings",
+            "Cloud execution accepts only service capabilities, not harness settings: remove backend/agent/config_profile/model_override/model_effort/fast_mode (pick a hosted model with cloud.model, see list_cloud_models), or drop `cloud` and launch natively with backend=opencode and model_override=<provider>/<model>",
         ));
     }
     if req.remote_node_id.is_some()
@@ -202,7 +156,7 @@ pub async fn create(
         || req.attachments.as_ref().is_some_and(|a| !a.is_empty())
     {
         return Err(bad(
-            "Cloud missions do not expose Orb folders, machines or attachments",
+            "Cloud missions do not expose Orb folders, machines or attachments: remove remote_node_id/placement/working_directory/workspace_id/attachments, or drop `cloud` and launch natively with backend=opencode",
         ));
     }
     let prompt = req
@@ -390,7 +344,6 @@ pub async fn follow_up(
     }
     if let Some(value) = &model {
         match execution.selection.provider {
-            Provider::Chatgpt => validate_chatgpt_model(value).map_err(bad)?,
             Provider::Hermes if value.len() <= 200 => {}
             Provider::CursorCloud | Provider::Hermes => {
                 if value.is_empty() || value.len() > 200 {
@@ -546,37 +499,6 @@ pub async fn artifact(
     }) {
         return Err(bad("Artifact is not in this mission's results"));
     }
-    if e.selection.provider == Provider::Chatgpt {
-        use base64::Engine;
-        let root = state
-            .config
-            .working_dir
-            .join(".sandboxed-sh/cloud-artifacts")
-            .join(id.to_string())
-            .canonicalize()
-            .map_err(|_| bad("Artifact directory unavailable"))?;
-        let path = root
-            .join(&query.path)
-            .canonicalize()
-            .map_err(|_| bad("Artifact unavailable"))?;
-        if !path.starts_with(&root) || !path.is_file() {
-            return Err(bad("Artifact path is outside this mission"));
-        }
-        if tokio::fs::metadata(&path)
-            .await
-            .map_err(|_| bad("Artifact unavailable"))?
-            .len()
-            > 50 * 1024 * 1024
-        {
-            return Err(bad("Artifact exceeds the 50 MiB limit"));
-        }
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|_| bad("Artifact unavailable"))?;
-        return Ok(Json(
-            json!({"name":path.file_name().and_then(|n|n.to_str()).unwrap_or("artifact"),"content_base64":base64::engine::general_purpose::STANDARD.encode(bytes)}),
-        ));
-    }
     let agent = e
         .external_id
         .ok_or_else(|| bad("Missing external identity"))?;
@@ -612,43 +534,6 @@ fn validate_hermes_model_params(params: &[ModelParam]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_chatgpt_model(model: &str) -> Result<(), String> {
-    if [
-        "gpt-6-instant",
-        "gpt-6-medium",
-        "gpt-6-high",
-        "gpt-6-extra-high",
-        "gpt-6-pro",
-        "gpt-5.6-pro",
-    ]
-    .contains(&model)
-    {
-        Ok(())
-    } else {
-        Err("This ChatGPT model has not been verified in the browser".into())
-    }
-}
-pub async fn chatgpt_options(Extension(user): Extension<AuthUser>) -> Result<Json<Value>, Error> {
-    if std::env::var("CHATGPT_CLOUD_OWNER").as_deref() != Ok(user.id.as_str()) {
-        return Err((StatusCode::FORBIDDEN, "No connected ChatGPT account".into()));
-    }
-    Ok(Json(
-        json!({"models":{"items":[{"id":"gpt-6-instant","displayName":"GPT-6 Instant"},{"id":"gpt-6-medium","displayName":"GPT-6 Medium"},{"id":"gpt-6-high","displayName":"GPT-6 High"},{"id":"gpt-6-extra-high","displayName":"GPT-6 Extra High"},{"id":"gpt-6-pro","displayName":"GPT-6 Pro"}]}}),
-    ))
-}
-
-fn chatgpt_account_label(profile: &str) -> String {
-    let identity = std::env::var("CHATGPT_CLOUD_IDENTITIES_FILE")
-        .ok()
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|data| data.get(profile).and_then(Value::as_str).map(str::to_owned));
-    match identity {
-        Some(email) => format!("ChatGPT · {email} · {profile}"),
-        None => format!("ChatGPT · {profile}"),
-    }
-}
-
 #[cfg(test)]
 mod follow_up_tests {
     use super::*;
@@ -670,8 +555,8 @@ mod follow_up_tests {
             request_signature: "launch".into(),
             revision: 0,
             selection: Selection {
-                provider: Provider::Chatgpt,
-                account: "chatgpt-profile".into(),
+                provider: Provider::GrokBot,
+                account: "grok-default".into(),
                 repository: None,
                 git_ref: None,
                 model: None,

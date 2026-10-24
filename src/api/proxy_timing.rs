@@ -102,6 +102,11 @@ pub struct TimingRecord {
     pub mission_id: Option<uuid::Uuid>,
     /// Name of the authenticated proxy key (`internal` for the core secret).
     pub caller: Option<String>,
+    /// Closed-enum caller kind (`usage_attribution::CallerKind`); empty only
+    /// before attribution ran.
+    pub caller_kind: &'static str,
+    /// `core` calls only: the purpose (`mission_title`, `unspecified`, ...).
+    pub purpose: Option<String>,
     pub hedge: Option<HedgeRole>,
     pub shape: RequestShape,
     pub queue_wait_ms: u64,
@@ -228,10 +233,17 @@ impl TimingCell {
     }
 
     /// Authenticated attribution only (see `proxy::attribution_from`).
-    pub fn set_attribution(&self, mission_id: Option<uuid::Uuid>, caller: Option<String>) {
+    pub fn set_attribution(&self, attribution: &crate::api::proxy::UsageAttribution) {
+        let caller = match (&attribution.api_key_name, attribution.caller_kind) {
+            (Some(name), _) => Some(log_safe(name)),
+            (None, crate::api::usage_attribution::CallerKind::Unknown) => None,
+            (None, _) => Some("internal".to_string()),
+        };
         self.with(|s| {
-            s.record.mission_id = mission_id;
-            s.record.caller = caller.as_deref().map(log_safe);
+            s.record.mission_id = attribution.mission_id;
+            s.record.caller = caller;
+            s.record.caller_kind = attribution.caller_kind.as_str();
+            s.record.purpose = attribution.purpose.as_deref().map(log_safe);
         });
     }
 
@@ -529,6 +541,8 @@ fn emit(record: &TimingRecord) {
         stream = record.stream,
         mission_id = %record.mission_id.map(|m| m.to_string()).unwrap_or_default(),
         caller = %record.caller.as_deref().unwrap_or(""),
+        caller_kind = %record.caller_kind,
+        purpose = %record.purpose.as_deref().unwrap_or(""),
         hedge = %record.hedge.map(HedgeRole::as_str).unwrap_or(""),
         provider = %deciding.map(|a| a.provider.as_str()).unwrap_or(""),
         model = %deciding.map(|a| a.model.as_str()).unwrap_or(""),
@@ -1010,7 +1024,10 @@ mod tests {
     fn keepalives_and_upstream_bytes_keep_mission_liveness_fresh() {
         let mission = uuid::Uuid::new_v4();
         let cell = TimingCell::new("c", true);
-        cell.set_attribution(Some(mission), None);
+        cell.set_attribution(&crate::api::proxy::UsageAttribution {
+            mission_id: Some(mission),
+            ..Default::default()
+        });
         assert!(crate::api::proxy_liveness::time_since_activity(mission).is_none());
         cell.client_gap(Duration::from_secs(15), true);
         assert!(
@@ -1019,7 +1036,10 @@ mod tests {
         );
         let other = uuid::Uuid::new_v4();
         let cell = TimingCell::new("c", true);
-        cell.set_attribution(Some(other), None);
+        cell.set_attribution(&crate::api::proxy::UsageAttribution {
+            mission_id: Some(other),
+            ..Default::default()
+        });
         cell.upstream_activity();
         assert!(crate::api::proxy_liveness::time_since_activity(other).is_some());
     }

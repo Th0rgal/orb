@@ -303,7 +303,6 @@ async fn authorize(
         if matches!(
             tool.definition.name.as_str(),
             "get_compute_fleet"
-                | "get_chatgpt_ui_pool_status"
                 | "list_workspaces"
                 | "get_workspace"
                 | "create_workspace"
@@ -327,7 +326,9 @@ async fn authorize(
         for field in ["slug", "project"] {
             if let Some(requested) = args.get(field).and_then(Value::as_str) {
                 if requested != project {
-                    return Err(ToolError::denied("Project is outside this session's scope"));
+                    return Err(ToolError::denied(&format!(
+                        "Project '{requested}' is outside this session's scope. Use {field}=\"{project}\" (or omit it to default to this session's project)."
+                    )));
                 }
             }
         }
@@ -338,7 +339,7 @@ async fn authorize(
         }
         if matches!(
             tool.definition.name.as_str(),
-            "list_missions" | "list_active_missions" | "start_mission"
+            "list_missions" | "list_active_missions" | "start_mission" | "consult_model"
         ) {
             args["project"] = json!(project);
         }
@@ -388,7 +389,7 @@ async fn authorize(
             }
         }
     }
-    if tool.definition.name == "start_mission" && args.get("cloud").is_some_and(|v| !v.is_null()) {
+    if launches_child(&tool.definition.name) && args.get("cloud").is_some_and(|v| !v.is_null()) {
         for field in [
             "workspace_id",
             "remote_node_id",
@@ -399,9 +400,7 @@ async fn authorize(
             "config_profile",
         ] {
             if args.get(field).is_some_and(|v| !v.is_null()) {
-                return Err(ToolError::invalid(
-                    "Cloud launches must not include native placement or harness settings",
-                ));
+                return Err(ToolError::invalid(&cloud_launch_field_message(field)));
             }
         }
     }
@@ -473,7 +472,7 @@ async fn authorize(
     }
     // Managed machines may be targeted by name ("small-a"); resolve to the
     // immutable node id before any check or persistence.
-    if tool.definition.name == "start_mission" {
+    if launches_child(&tool.definition.name) {
         if let Some(r) = args.get("remote_node_id").and_then(Value::as_str) {
             let resolved = crate::managed::resolve_node_alias(r);
             if resolved != r {
@@ -483,7 +482,21 @@ async fn authorize(
     }
     // Managed machines belong to the mission tree that rented them.
     match tool.definition.name.as_str() {
-        "spawn_managed_machine" => {
+        "spawn_managed_machine" | "list_managed_snapshots" | "delete_managed_snapshot" => {
+            args["owner_mission_id"] = json!(own.to_string());
+        }
+        // Machine-level actions: the machine must belong to the caller's
+        // tree; a fork or snapshot is attributed to the caller.
+        "snapshot_managed_machine"
+        | "fork_managed_machine"
+        | "stop_managed_machine"
+        | "resume_managed_machine" => {
+            let id = args
+                .get("machine_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            managed_owner_check(&store, own, &id).await?;
             args["owner_mission_id"] = json!(own.to_string());
         }
         // A mission reads its own budget only.
@@ -515,7 +528,7 @@ async fn authorize(
                 }
             }
         }
-        "start_mission" => {
+        "start_mission" | "consult_model" => {
             if let Some(r) = args.get("remote_node_id").and_then(Value::as_str) {
                 if crate::managed::is_managed_node(r) {
                     managed_owner_check(&store, own, r).await?;
@@ -527,7 +540,7 @@ async fn authorize(
     // A native child may leave its parent's machine: `remote_node_id` set to
     // "auto" (fleet scheduler) or to another registered node. It then starts
     // in that node's default workspace, never in the parent's.
-    let elsewhere = tool.definition.name == "start_mission"
+    let elsewhere = launches_child(&tool.definition.name)
         && args.get("cloud").is_none_or(Value::is_null)
         && match args.get("remote_node_id").and_then(Value::as_str) {
             Some(r) if r.eq_ignore_ascii_case("auto") => true,
@@ -548,13 +561,13 @@ async fn authorize(
         }
     }
     if tool.definition.name == "start_workspace_job"
-        || (tool.definition.name == "start_mission"
+        || (launches_child(&tool.definition.name)
             && args.get("cloud").is_none_or(Value::is_null)
             && !elsewhere)
     {
         args["workspace_id"] = json!(owner.workspace_id);
     }
-    if tool.definition.name == "start_mission" && args.get("cloud").is_none_or(Value::is_null) {
+    if launches_child(&tool.definition.name) && args.get("cloud").is_none_or(Value::is_null) {
         crate::api::control::machine_transfer::guard(&store, own)
             .await
             .map_err(|_| {
@@ -586,12 +599,13 @@ async fn authorize(
             }
         }
     }
-    if tool.definition.name == "start_mission" {
+    if launches_child(&tool.definition.name) {
         if let Some(project) = args.get("project").and_then(Value::as_str) {
             if owner.project.project.as_deref() != Some(project) {
-                return Err(ToolError::denied(
-                    "Child mission project must match its parent",
-                ));
+                return Err(ToolError::denied(&project_mismatch_message(
+                    project,
+                    owner.project.project.as_deref(),
+                )));
             }
         } else if let Some(project) = owner.project.project.as_deref() {
             args["project"] = json!(project);
@@ -605,6 +619,31 @@ async fn authorize(
         args["caller"] = json!("mission");
     }
     Ok(())
+}
+
+/// Rejection for a child whose explicit project differs from its parent's.
+fn project_mismatch_message(requested: &str, parent: Option<&str>) -> String {
+    match parent {
+        Some(parent) => format!(
+            "Child mission project '{requested}' must match its parent's. Use the parent's project: {parent} (pass project=\"{parent}\" or omit project to inherit it)."
+        ),
+        None => format!(
+            "Child mission project '{requested}' must match its parent, which has no project. Omit project so the child inherits the parent's (empty) project."
+        ),
+    }
+}
+
+/// Rejection for a cloud launch that also carries native settings.
+fn cloud_launch_field_message(field: &str) -> String {
+    format!(
+        "Cloud launches must not include native placement or harness settings (got `{field}`). Remove {field} (and any of workspace_id, remote_node_id, backend, model_override, model_effort, agent, config_profile), or drop `cloud` and launch natively with backend=opencode and model_override=<provider>/<model>."
+    )
+}
+
+/// Tools that create a child mission and therefore get the same placement,
+/// project and lineage treatment as `start_mission`.
+fn launches_child(name: &str) -> bool {
+    matches!(name, "start_mission" | "consult_model")
 }
 
 /// Live read grant of the calling mission on `target`, for read-only tools.
@@ -1212,6 +1251,20 @@ mod managed_owner_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launch_rejections_name_the_exact_fix() {
+        assert!(launches_child("start_mission") && launches_child("consult_model"));
+        assert!(!launches_child("send_message_to_mission"));
+        let mismatch = project_mismatch_message("other", Some("verity"));
+        assert!(
+            mismatch.contains("Use the parent's project: verity"),
+            "{mismatch}"
+        );
+        assert!(project_mismatch_message("other", None).contains("Omit project"));
+        let cloud = cloud_launch_field_message("remote_node_id");
+        assert!(cloud.contains("got `remote_node_id`"), "{cloud}");
+        assert!(cloud.contains("backend=opencode"), "{cloud}");
+    }
     #[test]
     fn btw_side_agent_reads_only_its_parent_and_cannot_mint_the_tag() {
         let parent = Uuid::new_v4();

@@ -12,12 +12,18 @@ const iso = (offsetMin: number) => new Date(Date.now() + offsetMin * 60_000).toI
 const view = (o: Record<string, unknown>) => ({ provider: "boat", provider_id: "bx_7f3k2", image: "sandboxed-node:2026.10", size: "medium", cpu: 4, ram_gb: 8,
   state: "online", created_at: iso(-50), expires_at: iso(70), cost_usd: 0.1, usd_per_hour: 0.12, ledger_closed: false, ...o });
 
-type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light"; spend?: unknown[] };
+type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light"; spend?: unknown[]; stopped?: boolean };
 async function mock(page: Page, opts: Opts = {}) {
   const machines: Record<string, unknown>[] = [
     view({ id: "mm1", name: "medium-a", node_id: "managed-mm1", owner_mission_id: "4f2a9c1e-0000-4000-8000-000000000001", reason: "Lean build" }),
     view({ id: "mm0", name: "medium-b", node_id: "managed-mm0", state: "destroyed", destroyed_at: iso(-120), cost_usd: 0.37, ledger_closed: true }),
   ];
+  if (opts.stopped) machines.push(view({ id: "mm9", name: "large-a", node_id: "managed-mm9", size: "large", state: "stopped", stopped_at: iso(-20), cost_usd: 0.42,
+    owner_mission_id: "4f2a9c1e-0000-4000-8000-000000000001" }));
+  const snapshots = opts.stopped ? [
+    { name: "orb-snap-lean-warm-ab12", label: "lean-native-warm", project: "lean", source_machine_id: "mm9", source_size: "large", created_at: iso(-180), last_used_at: iso(-30), status: "ready", size_bytes: 4.1e9, monthly_usd: 0 },
+    { name: "orb-snap-lean-ci-cd34", label: "ci-cache", project: "lean", source_machine_id: "mm1", source_size: "medium", created_at: iso(-2), status: "saving", monthly_usd: 0 },
+  ] : [];
   const budget = { spent_today_usd: 1.24, daily_cap_usd: 20, active: 1, max_concurrent: 3, default_ttl_minutes: 60, max_ttl_minutes: 240, default_size: "medium", max_size: "large" } as Record<string, unknown> & { active: number };
   if (opts.unlimited) Object.assign(budget, { daily_cap_usd: null, max_concurrent: null, spent_today_usd: 0.11 });
   const state = { calls: [] as string[], settings: opts.settings ?? true, releaseCreate: () => {}, releaseDelete: () => {}, advance: (_id: string, _s: Record<string, unknown>) => {} };
@@ -36,6 +42,7 @@ async function mock(page: Page, opts: Opts = {}) {
       if (method === "PUT") state.settings = JSON.parse(req.postData()!).antigravity_on_managed;
       return route.fulfill({ json: { antigravity_on_managed: state.settings } });
     }
+    if (path === "/api/managed-machines/snapshots") return route.fulfill({ json: { snapshots } });
     if (path.startsWith("/api/managed-machines")) {
       state.calls.push(`${method} ${path}${req.postData() ? ` ${req.postData()}` : ""}`);
       if (opts.managed === "404") return route.fulfill({ status: 404, body: "" });
@@ -54,13 +61,14 @@ async function mock(page: Page, opts: Opts = {}) {
         if (opts.holdDelete) await new Promise<void>(r => { state.releaseDelete = r; });
         m.state = "destroyed"; m.destroyed_at = iso(0); budget.active--;
       }
+      if (path.endsWith("/resume")) { m.state = "provisioning"; budget.active++; return route.fulfill({ status: 202, json: m }); }
       if (path.endsWith("/extend")) m.expires_at = new Date(Date.parse(m.expires_at as string) + 60 * 60_000).toISOString();
       return route.fulfill({ json: m });
     }
     if (path.startsWith("/api/control/missions/")) return route.fulfill({ json: { id: path.split("/").pop(), title: "LeanSys Wave 1 — formalise the scheduler invariants and port the proofs", status: "active" } });
     if (path === "/api/model-routing/chains") return route.fulfill({ json: [{ id: "builtin/smart", name: "Smart (Default)" }] });
     if (path === "/api/providers/antigravity-models") return route.fulfill({ json: [["flash", "Gemini Flash"]] });
-    const live = machines.filter(m => m.state !== "destroyed" && m.state !== "failed");
+    const live = machines.filter(m => m.state !== "destroyed" && m.state !== "failed" && m.state !== "stopped");
     const json = path === "/api/remote-nodes" ? { enabled: true, remote_launch: { typed: true, harnesses: ["claudecode"], proxy_url_configured: true }, nodes: [
         { id: "spark", status: "online", labels: [], base_url: "", cpu_total: 20 },
         ...live.map(m => ({ id: m.node_id, display_name: m.name, status: "online", labels: ["managed", "boat"], base_url: "", cpu_total: m.cpu, mem_total_bytes: (m.ram_gb as number) * 1024 ** 3 })),
@@ -341,4 +349,19 @@ for (const theme of ["dark", "light"] as const) test.describe(`spend chart (${th
     if (weekHeight) expect((await chart.boundingBox())!.height).toBeCloseTo(weekHeight, 0);
     await chart.screenshot({ path: `${shots}/spend-empty-${theme}.png` });
   });
+});
+
+test("stopped machines resume optimistically and snapshots are listed", async ({ page }) => {
+  const state = await mock(page, { stopped: true });
+  await openMachines(page);
+  const stopped = page.locator(".managed-stopped .managed-row", { hasText: "large-a" });
+  await expect(stopped).toContainText("Stopped");
+  const snaps = page.getByLabel("Managed snapshots");
+  await expect(snaps).toContainText("lean-native-warm");
+  await expect(snaps).toContainText("Saving…");
+  await expect(snaps).toContainText("4.1 GB");
+  if (process.env.ORB_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.ORB_SCREENSHOT_DIR}/machines-stopped-snapshots.png`, fullPage: true });
+  await stopped.getByRole("button", { name: "Resume" }).click();
+  await expect(page.locator(".managed-row", { hasText: "large-a" }).first()).toContainText("Starting…");
+  expect(state.calls.some(c => c.startsWith("POST /api/managed-machines/mm9/resume"))).toBe(true);
 });

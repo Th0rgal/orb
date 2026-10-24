@@ -50,6 +50,9 @@
   --red: #e0707d;
   --purple: #a08ce0;
   --amber: #c9a227;
+  /* Quota levels: warning = 80-99% used, danger = exhausted. >= 4.5:1 on --bg/--bg-elev. */
+  --warning: #d9b23a;
+  --danger: #ef7f8b;
   --placeholder: #676767;
   --plus-bg: #2c2c2c;
   --scroll-thumb: #e4e4e411;
@@ -106,6 +109,8 @@
   --red: #cf3a4b;
   --purple: #7a5cd6;
   --amber: #8a6d0b;
+  --warning: #876a0a;
+  --danger: #c0283a;
   --placeholder: #a3a29c;
   --plus-bg: #e8e7e3;
   --scroll-thumb: #00000018;
@@ -973,7 +978,8 @@ button.under-model { color: inherit; }
   border: 1px solid var(--stroke); border-radius: var(--radius-xs); padding: 1px 6px;
 }
 .p-st.connected { color: var(--toggle); }
-.p-st.needs_reauth { color: var(--amber); }
+.p-st.needs_reauth, .p-st.warning { color: var(--warning); }
+.p-st.exhausted { color: var(--danger); }
 .p-st.not_configured { color: var(--fg-4); }
 .p-dot { margin: 0 5px; color: var(--fg-4); }
 .p-acc .icon-btn { opacity: .35; }
@@ -2842,22 +2848,38 @@ select.orb-select-native:disabled { cursor: default; }
 .p-usage-grid .p-bar { flex:none;width:100%;height:4px; }
 .p-usage.compact .p-usage-chip { flex-direction:row;gap:5px; }
 .p-usage.compact .p-usage-pct { font-size:11px;min-width:0; }
-/* Account rows: the email gives way (ellipsis) before any quota number does.
-   Chips never shrink; under 520px the row keeps only the most-used chip + "+N". */
+/* Account rows: logo | name + email / status · plan | quota chips | chevron.
+   Chips sit in fixed-width columns so they line up across rows; the email
+   truncates in the middle (local part) before any number does; the status
+   stays on one line, the plan (secondary) giving way first. Under 520px the
+   chips move under the status instead of competing with it. */
 .p-account-header { container-type:inline-size; }
-.p-acc > .s-row-text { flex:1 1 0;min-width:0; }
-.p-acc > .p-usage.compact { flex:none;overflow:visible; }
-.p-account-header .s-row-title { display:flex;align-items:baseline;gap:10px;min-width:0;white-space:nowrap; }
+.p-acc { display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;column-gap:12px;padding:10px 14px; }
+.p-acc > .provider-logo { grid-row:1 / span 2; }
+.p-acc > .s-row-text { min-width:0; }
+.p-acc > .p-acc-chev { grid-column:4;grid-row:1 / span 2; }
+.p-account-header .s-row-title { display:flex;align-items:baseline;gap:8px;min-width:0;white-space:nowrap;font-size:13px;font-weight:500; }
 .p-account-name { flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis; }
-.p-account-email { flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:12px;font-weight:400;color:var(--fg-3); }
-.p-usage.compact .p-usage-pct, .p-usage-more { font-variant-numeric:tabular-nums;color:var(--fg-3); }
-.p-usage.compact .p-usage-chip.exhausted .p-usage-pct, .p-usage.compact .p-usage-chip.exhausted .p-usage-label { color:var(--amber);font-weight:600; }
-.p-usage-more { display:none;font-size:11px; }
-.p-acc .s-row-desc .p-st { white-space:nowrap; }
+.p-account-email { display:flex;flex:0 1 auto;min-width:0;font-size:12px;font-weight:400;color:var(--fg-3); }
+.p-email-local { min-width:2ch;overflow:hidden;text-overflow:ellipsis; }
+.p-email-domain { flex:none; }
+.p-acc .s-row-desc { display:flex;align-items:baseline;min-width:0;white-space:nowrap;font-size:12px;line-height:16px; }
+.p-acc .s-row-desc .p-st { flex:0 0 auto;max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis; }
+.p-acc .s-row-desc .p-plan { flex:1 1 0;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--fg-3); }
+.p-acc > .p-usage.compact { grid-column:3;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,max-content);column-gap:8px;margin:0;overflow:visible; }
+.p-usage.compact .p-usage-chip { display:flex;justify-content:space-between;align-items:baseline;gap:6px;min-width:120px; }
+.p-usage.compact .p-usage-label { width:auto;white-space:nowrap;font-size:11px;color:var(--fg-4); }
+.p-usage.compact .p-usage-pct, .p-usage-more { font-variant-numeric:tabular-nums;font-size:11px;color:var(--fg-3);min-width:3.5ch;text-align:right; }
+.p-usage.compact .p-usage-chip.warning :is(.p-usage-pct,.p-usage-label) { color:var(--warning);font-weight:500; }
+.p-usage.compact .p-usage-chip.exhausted :is(.p-usage-pct,.p-usage-label) { color:var(--danger);font-weight:500; }
+.p-usage.compact .p-usage-chip:is(.warning,.exhausted) .p-usage-pct { font-weight:600; }
+.p-usage-more { display:none; }
 @container (max-width:520px) {
-  .p-usage.compact .p-usage-chip:not(.top) { display:none; }
-  .p-usage-more { display:inline; }
-  .p-account-email { font-size:11px; }
+  .p-acc { column-gap:12px; }
+  .p-acc > .p-usage.compact { grid-column:2;grid-row:2;justify-content:start;margin-top:4px; }
+  .p-acc > .provider-logo { grid-row:1; }
+  .p-usage.compact .p-usage-chip { width:auto;min-width:0;justify-content:flex-start; }
+  .p-account-email { font-size:11.5px; }
 }
 @media(max-width:600px){.p-acc-body{padding-left:14px}}
 
@@ -4050,6 +4072,7 @@ select.orb-select-native:disabled { cursor: default; }
 .spend-skel.w1 { width: 110px; } .spend-skel.w2 { width: 70px; } .spend-skel.w4 { width: 150px; } .spend-skel.w3 { width: 22px; height: 8px; }
 .spend-chart.loading .spend-col { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .spend-skel, .spend-bar.skel { animation: none; } .spend-bar { transition: none; } }
+.managed-stopped-head { margin: 14px 0 6px; }
 
 /* Folder uploads reuse the background-upload row; the file list wraps below it. */
 .composer-bg-upload-row.folder-upload { flex-wrap: wrap; }

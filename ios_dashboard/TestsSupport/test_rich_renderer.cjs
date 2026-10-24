@@ -27,7 +27,7 @@ $$`),/katex-error/)],
  ['latex cannot make javascript link',()=>assert.doesNotMatch(render(String.raw`$$\href{javascript:alert(1)}{x}$$`),/href="javascript/)],
  ['long transcript',()=>assert.equal((render(Array(200).fill('## Heading\n\nText with **bold**.').join('\n\n')).match(/<h2>/g)||[]).length,200)]
 ];
-for (const name of ['chatgpt-rich.md','cursor-live.md','grok-live.md']) {
+for (const name of ['cloud-rich.md','cursor-live.md','grok-live.md']) {
  checks.push(['provider corpus '+name,()=>{
   const out=render(fs.readFileSync(path.join(__dirname,'fixtures',name),'utf8'));
   assert.match(out,/<table>/);assert.match(out,/class="katex"/);assert.match(out,/<ul>\n<li>[^]*<ul>/);

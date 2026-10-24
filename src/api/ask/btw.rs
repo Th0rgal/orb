@@ -245,7 +245,11 @@ pub async fn send(
         "Configure an Ask assistant model to use side questions".into(),
     ))?;
     let model = cfg.model.clone();
-    let client = AskClient::new(state.http_client.clone(), cfg);
+    let client = AskClient::new(
+        state.http_client.clone(),
+        cfg,
+        crate::api::usage_attribution::CorePurpose::Btw,
+    );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     tokio::spawn(async move {
         let _ = tx.send(json!({"type":"start","model":model}));
@@ -402,6 +406,7 @@ mod tests {
                 api_format: ApiFormat::OpenAI,
                 reasoning_effort: None,
             },
+            crate::api::usage_attribution::CorePurpose::Btw,
         );
         let request = Request {
             question: "Status?".into(),

@@ -50,7 +50,7 @@ app (`TEST_RUNNER_ORB_UX_LIVE_MISSION=<uuid>`); it never sends.
 The loopback fixture has no provider credentials. UI tests use a DEBUG-only
 local cache reset; it is refused for non-loopback API endpoints. They create
 classic agents and each cloud type, send follow-ups, navigate expanded folders,
-exclude local Mac missions, open context, edit Markdown, reopen a rich ChatGPT
+exclude local Mac missions, open context, edit Markdown, reopen a rich cloud
 conversation and open its image artifact and read its CSV artifact. The provider fixtures are test data,
 not evidence that a remote provider is healthy.
 
@@ -62,7 +62,7 @@ text size. XCTest UI attachments include screenshots; reviewed examples are kept
 `screenshots/`. These are evidence, not pixel-diff baselines. MathML exists for assistive
 technology; this does not replace a manual VoiceOver pass on a device.
 
-`fixtures/chatgpt-rich.md` is synthetic. `cursor-live.md` and `grok-live.md` are
+`fixtures/cloud-rich.md` is synthetic. `cursor-live.md` and `grok-live.md` are
 unmodified responses to bounded, dedicated test prompts on 2026-09-27. No user
 conversation or account metadata is included.
 
@@ -84,20 +84,17 @@ Retain the request identity and reconcile on Core.
   model/contract tests; UI coverage: 9 Simulator scenarios.
 - iPhone 17e / iOS 26.5: Markdown and KaTeX rendered visually; native artifact
   preview and reopen test passed. Creation/follow-up tests passed for classical,
-  ChatGPT, Cursor and Grok using the deterministic service.
+  Cursor and Grok using the deterministic service.
 - Real Grok Bot: first response and follow-up completed on mission
   `5fff0532-8193-4d07-85f2-2bcb7593086f`.
 - Real Cursor: response and follow-up completed on
   `89d44961-7b06-4083-8a35-1593470d9de9`. An earlier request without a Git ref
   failed with `invalid_request`; iOS now requires a ref at creation.
-- Real ChatGPT: `e3f3a008-dd20-4405-9fc0-ac4125dafedc` stayed in
-  `submission_uncertain`, with no confirmed external conversation. It was not
-  recreated. The pool's `available` value is not proof of current authentication.
 
 ## Remaining acceptance work
 
 Do not call the entire redesign production-ready from these tests alone.
-ChatGPT's live submission/reconciliation still needs resolution. The complete
+The complete
 network-loss/receipt-replay matrix, Core restart, real approval prompts, Markdown
 conflict comparison, pixel-diff baselines, physical-device VoiceOver and APNs
 provisioning/delivery have not all been validated. Images use a native pinch/drag viewer; small Markdown/text/CSV artifacts use
@@ -157,7 +154,7 @@ are not exposed when the provider does not support them.
 Validation: 5 model/cache tests and 7 native WebKit tests passed. Simulator
 checks passed for delayed loading, cached return navigation, latest-first history,
 loading earlier messages without losing the reading position, the @ mode picker
-and /plan submission, compact keyboard/settings layout, and ChatGPT reopening
+and /plan submission, compact keyboard/settings layout, and rich cloud reopening
 with image/CSV previews. Screenshots `composer-mode-picker.png` and
 `conversation-latest-messages.png` show the final navigation/composer behavior.
 
@@ -179,7 +176,7 @@ that the final marker and file button are both visible above the composer withou
 a scroll gesture. This test and all seven native renderer tests passed; the
 existing loading/cache/earlier-history test also passed with the new scroll logic.
 
-## Saved login and cloud-only ChatGPT
+## Saved login
 
 Tokens and login credentials use separate endpoint-scoped Keychain services.
 Login reports storage failures; explicit logout clears both. An expired token
@@ -190,11 +187,9 @@ so one successful sign-in is needed to enable renewal.
 
 The saved-login UI scenario terminates/relaunches the app, rotates the fixture's
 token, then checks that renewal returns to projects without requesting a password.
-The regular-agent fixture deliberately advertises chatgpt_ui: the harness picker
-must exclude it while the separate ChatGPT cloud creation scenario remains valid.
 Existing mission records are unchanged.
 
-Verified on iPhone 17e / iOS 26.5: regular-agent and ChatGPT-cloud creation
+Verified on iPhone 17e / iOS 26.5: regular-agent and cloud creation
 passed; expired-token recovery performed exactly one new login. Installing the
 built app over the existing Simulator app (without uninstalling or clearing its
 container/Keychain) reopened Projects without entering a password.

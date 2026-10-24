@@ -22,7 +22,7 @@ struct OrbSelection {
     }
     var primaryPillLabel: String {
         if cloud {
-            let service = ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor", "grok_bot": "Grok", "hermes": "Hermes"][provider] ?? provider
+            let service = ["cursor_cloud": "Cursor", "grok_bot": "Grok", "hermes": "Hermes"][provider] ?? provider
             return model.isEmpty ? service : Self.shortModelName(model, harness: service)
         }
         if backend.isEmpty {
@@ -63,7 +63,7 @@ struct OrbSelection {
         }
         return s
     }
-    var label: String { [cloud ? ["chatgpt": "ChatGPT", "cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][provider] ?? provider : backend.isEmpty ? "Select agent" : OrbStyle.serviceName(backend), model].filter { !$0.isEmpty }.joined(separator: " · ") }
+    var label: String { [cloud ? ["cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][provider] ?? provider : backend.isEmpty ? "Select agent" : OrbStyle.serviceName(backend), model].filter { !$0.isEmpty }.joined(separator: " · ") }
     var compactLabel: String {
         if let machine = machinePillLabel {
             return "\(primaryPillLabel) · \(machine)"
@@ -129,7 +129,7 @@ struct OrbAgentPicker: View {
                 if !error.isEmpty { OrbNotice(message: error) }
                 if !existing {
                     Picker("Service", selection: $selection.provider) {
-                        Text("Agent").tag("agent"); Text("Hermes").tag("hermes"); Text("ChatGPT").tag("chatgpt"); Text("Cursor Cloud").tag("cursor_cloud"); Text("Grok Bot").tag("grok_bot")
+                        Text("Agent").tag("agent"); Text("Hermes").tag("hermes"); Text("Cursor Cloud").tag("cursor_cloud"); Text("Grok Bot").tag("grok_bot")
                     }.accessibilityIdentifier("picker.service")
                 }
                 if selection.cloud {
@@ -186,11 +186,7 @@ struct OrbAgentPicker: View {
     }
     private func applyAgentCatalog(_ catalog: OrbJSON) {
         let response = catalog["backends"]
-        backends = (response.items.isEmpty ? response["backends"].items : response.items)
-            .filter { $0["id"].text != "chatgpt_ui" }
-        if !existing && selection.backend == "chatgpt_ui" {
-            selection.backend = ""; selection.model = ""; selection.params = .array([])
-        }
+        backends = response.items.isEmpty ? response["backends"].items : response.items
         nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
         if !existing && selection.node.isEmpty {
             selection.node = OrbSelection.firstAvailableNodeID(nodes) ?? "core"
@@ -208,7 +204,7 @@ struct OrbAgentPicker: View {
                 }
                 let provider = selection.provider
                 if provider != "grok_bot" {
-                    let endpoint = provider == "hermes" ? "hermes" : (provider == "chatgpt" ? "chatgpt" : "cursor")
+                    let endpoint = provider == "hermes" ? "hermes" : "cursor"
                     if let cachedOpts = OrbReadCache.read("catalog:cloud:\(endpoint)") {
                         models = cachedOpts["models"]["items"].items
                         repos = cachedOpts["repositories"]["items"].items
@@ -244,7 +240,7 @@ struct OrbAgentPicker: View {
         do {
             if selection.cloud {
                 guard provider != "grok_bot" else { models = []; return }
-                let endpoint = provider == "hermes" ? "hermes" : (provider == "chatgpt" ? "chatgpt" : "cursor")
+                let endpoint = provider == "hermes" ? "hermes" : "cursor"
                 if let cachedOpts = OrbReadCache.read("catalog:cloud:\(endpoint)") {
                     models = cachedOpts["models"]["items"].items
                     repos = cachedOpts["repositories"]["items"].items

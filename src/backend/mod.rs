@@ -1,5 +1,4 @@
 pub mod antigravity;
-pub mod chatgpt_ui;
 pub mod claudecode;
 pub mod codex;
 pub mod events;
@@ -76,4 +75,12 @@ pub trait Backend: Send + Sync {
         session: &Session,
         message: &str,
     ) -> Result<(mpsc::Receiver<ExecutionEvent>, JoinHandle<()>), Error>;
+}
+
+/// Error returned when a caller asks for a backend that has been removed.
+pub const CHATGPT_UI_RETIRED: &str = "chatgpt_ui is no longer supported; to consult a model use backend=opencode with model_override=<provider>/<model> (e.g. openai/gpt-6-astra, anthropic/claude-fable-5-1)";
+
+/// The actionable error for a retired backend id, if `backend` is one.
+pub fn retired_backend_error(backend: &str) -> Option<&'static str> {
+    matches!(backend.trim(), "chatgpt_ui" | "cloud_chatgpt").then_some(CHATGPT_UI_RETIRED)
 }

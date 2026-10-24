@@ -9,6 +9,7 @@ export interface UsageTotals {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  reasoning_tokens?: number;
   cost_cents: number;
   unknown_cost_requests: number;
 }
@@ -26,8 +27,14 @@ export interface UsageGroup extends UsageTotals {
   cost_status: CostStatus;
 }
 
-export interface DayUsage extends UsageTotals { day: string; router_requests: number }
-export interface HourUsage extends UsageTotals { hour: string; router_requests: number }
+export interface DayUsage extends UsageTotals { day: string; router_requests: number; by_caller_kind?: Record<string, number> }
+export interface HourUsage extends UsageTotals { hour: string; router_requests: number; by_caller_kind?: Record<string, number> }
+
+/** Closed caller-kind enum from Core (`docs/specs/usage-attribution.md`). */
+export const CALLER_KINDS = ["mission", "subagent", "hermes", "orb_ui", "core", "script", "unknown"] as const;
+export const CALLER_KIND_LABEL: Record<string, string> = {
+  mission: "Mission", subagent: "Subagent", hermes: "Hermes", orb_ui: "Orb UI", core: "Core", script: "Script / API key", unknown: "Unknown",
+};
 
 export interface UsageSummary {
   window: string;
@@ -37,8 +44,12 @@ export interface UsageSummary {
   by_model: ModelUsage[];
   by_provider: UsageGroup[];
   by_source: UsageGroup[];
+  by_route?: UsageGroup[];
+  by_caller_kind?: UsageGroup[];
+  by_purpose?: UsageGroup[];
   by_backend: UsageGroup[];
   by_mission: UsageGroup[];
+  by_root_mission?: UsageGroup[];
   by_api_key: UsageGroup[];
   by_account: UsageGroup[];
   by_day: DayUsage[];
@@ -52,6 +63,7 @@ export interface UsageFilters {
   mission?: string;
   api_key?: string;
   model?: string;
+  caller_kind?: string;
 }
 
 export const USAGE_WINDOWS = [
@@ -115,9 +127,15 @@ const dayKey = (d: Date) => hourKey(d).slice(0, 10);
  * Contiguous chart buckets for the window: hourly up to 7 days, daily beyond.
  * Missing buckets are zero so quiet hours are visible, not skipped.
  */
-export function chartBuckets(s: UsageSummary, now = new Date()): { granularity: "hour" | "day"; buckets: ChartBucket[] } {
+/** Hourly buckets are available for windows up to 7 days. */
+export function hourlyAvailable(window: string) {
+  const hours = windowHours(window);
+  return hours !== null && hours <= 168;
+}
+
+export function chartBuckets(s: UsageSummary, now = new Date(), prefer: "hour" | "day" = "hour"): { granularity: "hour" | "day"; buckets: ChartBucket[] } {
   const hours = windowHours(s.window);
-  const hourly = hours !== null && hours <= 168;
+  const hourly = prefer === "hour" && hourlyAvailable(s.window);
   const rows = new Map<string, UsageTotals & { router_requests: number }>();
   for (const r of hourly ? s.by_hour : s.by_day) rows.set("hour" in r ? r.hour : r.day, r);
   const keys: string[] = [];
@@ -126,7 +144,7 @@ export function chartBuckets(s: UsageSummary, now = new Date()): { granularity: 
     for (let i = hours! - 1; i >= 0; i--) keys.push(hourKey(new Date(end.getTime() - i * 3_600_000)));
   } else {
     const first = s.by_day[0]?.day;
-    const days = hours !== null ? Math.ceil(hours / 24) : first ? Math.max(1, Math.round((Date.parse(dayKey(now)) - Date.parse(first)) / 86_400_000) + 1) : 0;
+    const days = hours !== null ? Math.max(1, Math.ceil(hours / 24)) : first ? Math.max(1, Math.round((Date.parse(dayKey(now)) - Date.parse(first)) / 86_400_000) + 1) : 0;
     const end = Date.parse(dayKey(now));
     for (let i = days - 1; i >= 0; i--) keys.push(dayKey(new Date(end - i * 86_400_000)));
   }

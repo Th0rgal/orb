@@ -22,13 +22,4 @@ echo "== Harness contract tests: native Vibe ACP =="
 cargo test --locked --workspace --lib vibe::tests
 python3 -m unittest discover -s tests -p test_vibe_bridge.py
 
-echo "== Harness contract tests: ChatGPT UI protocol and smoke wrapper =="
-bash -n scripts/chatgpt_ui_smoke.sh
-python3 -m unittest \
-  scripts/test_chatgpt_ui_driver.py \
-  scripts/test_chatgpt_ui_mock_driver.py \
-  scripts/test_chatgpt_ui_smoke.py \
-  scripts/test_chatgpt_ui_relogin.py \
-  scripts/test_chatgpt_ui_login_steps.py
-
 echo "Harness contract tests passed."

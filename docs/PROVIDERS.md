@@ -6,7 +6,7 @@ This guide explains how to configure and use alternative AI providers with Sandb
 
 ### Tested & Recommended
 - **Anthropic** (Claude models) — CLIProxyAPI OAuth (`claude-login`) or API key
-- **OpenAI** (GPT / Codex models) — CLIProxyAPI OAuth (`codex-login`), API key, or ChatGPT UI pool
+- **OpenAI** (GPT / Codex models) — CLIProxyAPI OAuth (`codex-login`), or API key
 - **Google / Antigravity** (`agy` models) — CLIProxyAPI OAuth (`antigravity-login`) or API key
 - **xAI** (Grok models) — API key (`XAI_API_KEY`) or Grok CLI login
 - **Cerebras** (Llama models) — API key

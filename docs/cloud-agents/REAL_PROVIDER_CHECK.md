@@ -1,5 +1,9 @@
 # Orb cloud agents — real-provider check (2026-09-26)
 
+> Historical record. The ChatGPT web-UI cloud agent and `chatgpt_ui` harness
+> described here have since been removed; ChatGPT entries are kept only as
+> rollout evidence.
+
 ChatGPT and Cursor Cloud are installed and enabled on the production Core.
 Orb is running in Tauri dev from `sandboxed_sh-orb-client`; Cloud agent opens a
 full page in the New agent style. Creation, response retrieval and reload were

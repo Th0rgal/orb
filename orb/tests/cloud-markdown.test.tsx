@@ -26,7 +26,7 @@ it('renders safe shared images and ordered steps',()=>{
  expect(container.querySelectorAll('ol li')).toHaveLength(2);
 });
 
-it('displays escaped text from ChatGPT as literal text',()=>{
+it('displays escaped cloud text as literal text',()=>{
  const {container}=render(()=><MdView text={'ORB\\_MODEL\\_CHECK and \\*literal\\*'}/>);
  expect(container.textContent).toBe('ORB_MODEL_CHECK and *literal*');
  expect(container.querySelector('em')).toBeNull();

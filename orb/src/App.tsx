@@ -471,7 +471,7 @@ export default function App() {
     const id = currentMissionId() ?? "";
     const found = openMission()?.id === id ? openMission() : missions().find(m => m.id === id);
     const mission = found ? movedMission(found) : found;
-    if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(renamedTitle("mission", id, mission.title)) || "Cloud agent", local: false, destination: ({cloud_chatgpt:"ChatGPT",cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
+    if (mission?.backend?.startsWith("cloud_")) return { id, title: displayTitle(renamedTitle("mission", id, mission.title)) || "Cloud agent", local: false, destination: ({cloud_grok_bot:"Grok Bot",cloud_cursor:"Cursor Cloud",cloud_hermes:"Paloma"} as Record<string,string>)[mission.backend], project: mission.project, context: null };
     const binding = localBinding(id);
     const local = !!binding || !!mission?.tags?.includes("placement:client");
     const backend = mission?.backend || binding?.harness;

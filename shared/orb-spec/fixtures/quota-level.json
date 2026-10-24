@@ -1,0 +1,17 @@
+{
+  "description": "quotaLevel(used, hasReset): the single quota severity rule shared by chips, status text and bars on desktop, iOS and Android. used is a 0..1 ratio (null = no figure). pct = round(used * 100) (the percent the UI shows): pct >= 100 -> exhausted, pct >= 80 -> warning, else normal. No figure: exhausted when the window still has a reset time (Google omits a zero remaining fraction), else normal. Colors: normal = neutral text, warning = --warning (amber), exhausted = --danger (red); the percent and wording always stay visible.",
+  "cases": [
+    { "name": "0%", "used": 0, "expected": "normal" },
+    { "name": "79%", "used": 0.79, "expected": "normal" },
+    { "name": "79.4% rounds to 79", "used": 0.794, "expected": "normal" },
+    { "name": "79.5% rounds to 80", "used": 0.795, "expected": "warning" },
+    { "name": "80%", "used": 0.8, "expected": "warning" },
+    { "name": "99%", "used": 0.99, "expected": "warning" },
+    { "name": "99.4% shows 99", "used": 0.994, "expected": "warning" },
+    { "name": "99.6% shows 100", "used": 0.996, "expected": "exhausted" },
+    { "name": "100%", "used": 1, "expected": "exhausted" },
+    { "name": "over 100%", "used": 1.3, "expected": "exhausted" },
+    { "name": "missing remaining with reset", "used": null, "hasReset": true, "expected": "exhausted" },
+    { "name": "missing without reset", "used": null, "expected": "normal" }
+  ]
+}

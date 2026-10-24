@@ -80,7 +80,7 @@
         {"name": "maxAttempts", "type": "uint32_t"},
         {"name": "requiresExternalRecovery", "type": "uint8_t"},
         {"name": "preflightMerged", "type": "uint8_t"},
-        {"name": "chatgptUiBlocked", "type": "uint8_t"}
+        {"name": "retrySuppressed", "type": "uint8_t"}
       ]
     },
     {
@@ -438,6 +438,17 @@
         "method": "orbTranscriptPatchStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_attribution_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "principalKind", "type": "uint8_t"},
+        {"name": "claimedKind", "type": "uint8_t"},
+        {"name": "sameMission", "type": "uint8_t"},
+        {"name": "isDescendant", "type": "uint8_t"}
+      ],
+      "internal": true
     },
     {
       "name": "leansys_verify_slice_bounds",

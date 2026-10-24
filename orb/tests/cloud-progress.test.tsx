@@ -6,14 +6,14 @@ vi.mock('../src/cloudAgentApi', async original => ({...await original<object>(),
 vi.mock('../src/composer/Composer', () => ({Composer: () => null, floatingDock: () => {}}));
 vi.mock('../src/api', () => ({api: vi.fn(), getMission: vi.fn(async () => null), openExternalUrl: vi.fn()}));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
-const turn = (phase: string, extra = {}) => ({key: 't1', prompt: 'Refais-moi un quiz', phase, artifacts: [], branches: [], model_params: [], ...extra});
-const execution = (t: object) => ({mission_id: 'm', revision: 1, selection: {provider: 'chatgpt', account: 'chatgpt-profile'}, turns: [t]});
+const turn = (phase: string, extra = {}) => ({key: 't1', prompt: 'Refais-moi un résumé', phase, artifacts: [], branches: [], model_params: [], ...extra});
+const execution = (t: object) => ({mission_id: 'm', revision: 1, selection: {provider: 'cursor_cloud', account: 'cursor-default'}, turns: [t]});
 
-it('shows that a ChatGPT turn is starting, then thinking, with elapsed time', async () => {
+it('shows that a Cursor Cloud turn is starting, then thinking, with elapsed time', async () => {
   fakes.execution.mockResolvedValue(execution(turn('submitting')));
   render(() => <CloudConversation id="m" />);
   // The mission Working row: the step in a status, the elapsed time beside it.
-  const status = await screen.findByText('Opening ChatGPT…');
+  const status = await screen.findByText('Opening Cursor Cloud…');
   expect(status.getAttribute('role')).toBe('status');
   expect(status.closest('.st-working')?.querySelector('.st-working-time')).toBeTruthy();
 });

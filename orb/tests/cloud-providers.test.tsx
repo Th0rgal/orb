@@ -8,15 +8,15 @@ import {ProviderUsageMeter} from '../src/ProviderUsageMeter';
 afterEach(()=>{cleanup();vi.clearAllMocks();});
 it('groups cloud profiles, shows reconnect and never invents quotas',async()=>{
  mocks.accounts.mockResolvedValue([
- {id:'chatgpt-profile',provider:'chatgpt',label:'ChatGPT · account@example.com',available:true},
- {id:'chatgpt-profile-2',provider:'chatgpt',label:'ChatGPT · chatgpt-profile-2',available:false,reason:'Browser pool: RequiresLogin'},
+ {id:'grok-1',provider:'grok_bot',label:'Grok Bot · account@example.com',available:true},
+ {id:'grok-2',provider:'grok_bot',label:'Grok Bot · second',available:false,reason:'RequiresLogin'},
  {id:'cursor-default',provider:'cursor_cloud',label:'Cursor Cloud',available:true}]);
  render(()=><CloudProviders/>);
  expect(screen.getByRole('status').textContent).toContain('Loading');
  await screen.findByText('1 of 2 profiles available');
- fireEvent.click(screen.getByRole('button',{name:/ChatGPT/}));
+ fireEvent.click(screen.getByRole('button',{name:/Grok Bot/}));
  expect(screen.getByText('Reconnect')).toBeTruthy();
- expect(screen.getByText('Profile 2')).toBeTruthy();
+ expect(screen.getByText('second')).toBeTruthy();
  fireEvent.click(screen.getByRole('button',{name:/Cursor Cloud/}));
  expect(screen.queryByRole('progressbar')).toBeNull();
  fireEvent.click(screen.getByRole('button',{name:/View usage in Cursor/}));

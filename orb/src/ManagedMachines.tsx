@@ -12,7 +12,7 @@ import {
   allowedSizes, budgetFull, budgetLeft, budgetLine, costLine, sizeLabel, specLine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
-  machineOwner, reapLine, usd, usdPerHour, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
+  machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
 } from "./managedMachineModel";
 
 const openMission = (id: string) => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: `m:${id}` }));
@@ -23,7 +23,7 @@ export function ttlChoices(defaultMinutes: number, maxMinutes: number): number[]
   return [...set].sort((a, b) => a - b);
 }
 
-export type RowActions = { busy?: boolean; onDestroy?: () => void; onExtend?: () => void; onRetry?: () => void; onDismiss?: () => void };
+export type RowActions = { busy?: boolean; onDestroy?: () => void; onExtend?: () => void; onRetry?: () => void; onDismiss?: () => void; onResume?: () => void };
 
 // Mission titles for owner chips: fetched once per id and shared by every row.
 const [titles, setTitles] = createSignal<ReadonlyMap<string, string>>(new Map());
@@ -132,6 +132,12 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
       <Show when={failed() && (p.onRetry || p.onDismiss)}>
         <Show when={p.onRetry}><button class="s-btn sm" disabled={p.busy} onClick={p.onRetry}>Retry</button></Show>
         <Show when={p.onDismiss}><button class="s-btn sm quiet" onClick={p.onDismiss}>Dismiss</button></Show>
+      </Show>
+      <Show when={p.m.state === "stopped" && p.onResume}>
+        <span class="managed-inline-actions">
+          <button class="s-btn sm" disabled={p.busy} onClick={p.onResume}>Resume</button>
+          <button class="s-btn sm quiet danger" disabled={p.busy} onClick={p.onDestroy}>Destroy</button>
+        </span>
       </Show>
       <Show when={canAct()}>
         <span class="managed-inline-actions">
@@ -245,6 +251,15 @@ export function ManagedMachines(p: { onDestroyed?: (nodeIds: string[]) => void }
       setDestroying(s => { const n = new Set(s); n.delete(m.id); return n; });
     }
   };
+  const stopped = createMemo(() => machines().filter(isStopped));
+  /** Optimistic: the row shows Starting… at once; a refusal restores it. */
+  const resume = async (m: ManagedMachine) => {
+    setBusy(m.id); setActionError(null);
+    replace({ ...m, state: "provisioning" });
+    try { replace(await resumeManagedMachine(m.id)); setFetchedAt(Date.now()); void refresh(); }
+    catch (e) { replace(m); setActionError(`Couldn’t resume ${machineName(m)}: ${managedError(e)}`); }
+    finally { setBusy(null); }
+  };
   const failedHere = createMemo(() => machines().filter(m => m.state === "failed" && watched().has(m.id)));
   const live = createMemo(() => [...pending().map(x => placeholder(x)), ...machines().filter(isLive), ...failedHere()]);
   const recent = createMemo(() => recentMachines(machines()).filter(m => !failedHere().includes(m)));
@@ -272,6 +287,14 @@ export function ManagedMachines(p: { onDestroyed?: (nodeIds: string[]) => void }
         <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m().size)} {...actions(m())} /></Show>; }}</For>
       <Show when={live().length === 0}><div class="m-note" style={{ padding: "10px 14px" }}>No managed machines running.</div></Show>
     </div>
+    <Show when={stopped().length}>
+      <div class="m-note managed-stopped-head">Stopped · disk kept, nothing billed, resumable for 24 h</div>
+      <div class="m-list s-card managed-list managed-stopped">
+        <For each={stopped().map(m => m.id)}>{id => { const m = () => stopped().find(x => x.id === id)!; return <Show when={stopped().some(x => x.id === id)}>
+          <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m().size)} busy={busy() === id} onResume={() => void resume(m())} onDestroy={() => setConfirm(m())} /></Show>; }}</For>
+      </div>
+    </Show>
+    <ManagedSnapshots />
     <Show when={recent().length}>
       <button class="s-btn sm quiet managed-recent-toggle" aria-expanded={showRecent()} onClick={() => setShowRecent(!showRecent())}>
         <span class={`chev p-acc-chev ${showRecent() ? "open" : ""}`}>›</span>Recent · last 24 h ({recent().length})
@@ -296,4 +319,49 @@ export function placeholder(x: Pending, now = Date.now()): ManagedMachine {
   return { id: x.key, name: "New machine", provider: "boat", provider_id: "", node_id: "", image: x.request.image ?? "", size: x.size.size, cpu: x.size.cpu, ram_gb: x.size.ram_gb,
     state: x.error ? "failed" : "provisioning", created_at: new Date(now).toISOString(), expires_at: "", cost_usd: 0, usd_per_hour: x.size.usd_per_hour,
     error: x.error ?? null, ledger_closed: false };
+}
+
+/** Settings > Machines: the project snapshots Core keeps (newest 2 per
+ * project, unused ones deleted after 14 days). Delete is confirmed, then
+ * optimistic with rollback. */
+export function ManagedSnapshots(p: { load?: typeof listManagedSnapshots; remove?: typeof deleteManagedSnapshot } = {}) {
+  const [snaps, setSnaps] = createSignal<ManagedSnapshot[] | null>(null);
+  const [error, setError] = createSignal<string | null>(null);
+  const [confirm, setConfirm] = createSignal<ManagedSnapshot | null>(null);
+  const load = async () => {
+    try { setSnaps((await (p.load ?? listManagedSnapshots)()).snapshots); setError(null); }
+    catch (e) {
+      // A Core without snapshot support answers 404: nothing to show.
+      const message = managedError(e);
+      if (/\b404\b|not found/i.test(message)) setSnaps([]); else setError(message);
+    }
+  };
+  onMount(() => void load());
+  const remove = async (s: ManagedSnapshot) => {
+    setConfirm(null);
+    const before = snaps();
+    setSnaps(l => (l ?? []).filter(x => x.name !== s.name));
+    try { await (p.remove ?? deleteManagedSnapshot)(s); }
+    catch (e) { setSnaps(before); setError(`Couldn’t delete ${s.label}: ${managedError(e)}`); }
+  };
+  return <Show when={(snaps()?.length ?? 0) > 0 || error()}>
+    <div class="m-note managed-stopped-head">Snapshots · warm images agents start children from</div>
+    <Show when={error()}><ErrorNotice error={error()!} onDismiss={() => setError(null)}><button class="s-btn sm" onClick={() => void load()}>Retry</button></ErrorNotice></Show>
+    <div class="m-list s-card managed-list managed-snapshots" aria-label="Managed snapshots">
+      <For each={snaps() ?? []}>{s => <div class="managed-row" data-state={s.status}>
+        <div class="managed-main">
+          <div class="managed-line1">
+            <span class="managed-status-icon"><Show when={s.status === "saving"} fallback={<span class={`m-dot ${s.status === "ready" ? "on" : "off"}`} />}><Ic.Spinner size={12} class="managed-spinner" /></Show></span>
+            <span class="managed-name">{s.label}</span>
+            <span class="managed-size-label">{sizeLabel(s.source_size)}</span>
+            <span class="managed-state" classList={{ "managed-error": s.status === "failed" }}>{s.status === "ready" ? "Ready" : s.status === "saving" ? "Saving…" : "Failed"}</span>
+          </div>
+          <div class="managed-line2"><span class="managed-spec">{snapshotLine(s)}</span></div>
+        </div>
+        <div class="managed-actions"><button class="s-btn sm quiet danger" aria-label={`Delete snapshot ${s.label}`} onClick={() => setConfirm(s)}>Delete</button></div>
+      </div>}</For>
+    </div>
+    <Show when={confirm()}>{s => <ConfirmDialog title={`Delete snapshot ${s().label}?`} destructive action="Delete snapshot"
+      description="Agents can no longer start machines from it. This cannot be undone." onClose={() => setConfirm(null)} onConfirm={() => void remove(s())} />}</Show>
+  </Show>;
 }

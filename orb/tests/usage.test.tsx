@@ -1,9 +1,9 @@
-import { render, screen, fireEvent, waitFor } from "@solidjs/testing-library";
+import { render, screen, fireEvent, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageSettings } from "../src/UsageSettings";
 import { setConnection } from "../src/api";
 import { chartBuckets, formatCost, usageQuery, windowHours, type UsageSummary, type UsageTotals } from "../src/usageApi";
-import { errorSummary, formatMs, formatRate, isRedFlag, type ProxyHealth, type ReliabilityStats } from "../src/proxyHealthApi";
+import { formatMs, formatRate, type ProxyHealth, type ReliabilityStats } from "../src/proxyHealthApi";
 
 const stats = (over: Partial<ReliabilityStats> = {}): ReliabilityStats => ({
   requests: 0, ok: 0, success_rate: null, ttft_p50_ms: null, ttft_p95_ms: null, latency_p50_ms: null, latency_p95_ms: null, retried: 0, fell_back: 0, errors: {}, ...over,
@@ -43,6 +43,11 @@ export function summary(window = "24h"): UsageSummary {
     by_mission: [{ key: "m-1", label: "Fix login", cost_status: "known", ...harness }],
     by_api_key: [{ key: "key-argon", label: "Nightly bot", cost_status: "known", ...argon }],
     by_account: [],
+    by_caller_kind: [
+      { key: "script", label: null, cost_status: "partial", ...totals({ requests: 254, input_tokens: 2_000_400, output_tokens: 100_000, cost_cents: 520, unknown_cost_requests: 4 }) },
+      { key: "subagent", label: null, cost_status: "known", ...harness },
+    ],
+    by_purpose: [],
     by_day: [{ day: "2026-10-20", router_requests: 254, ...all }],
     by_hour: [{ hour: "2026-10-20T09", router_requests: 250, ...argon }, { hour: "2026-10-20T11", router_requests: 4, ...harness }],
   };
@@ -71,6 +76,9 @@ describe("usage helpers", () => {
     expect(daily.granularity).toBe("day");
     expect(daily.buckets).toHaveLength(30);
     expect(daily.buckets.at(-1)!.key).toBe("2026-10-20");
+    const forcedDaily = chartBuckets(summary("24h"), now, "day");
+    expect(forcedDaily.granularity).toBe("day");
+    expect(forcedDaily.buckets.map(b => b.key)).toEqual(["2026-10-20"]);
   });
 });
 
@@ -94,7 +102,7 @@ describe("Usage page", () => {
     await screen.findByText("gemini-4-argon");
     expect(screen.getByText("$6.10+")).toBeTruthy();
     expect(screen.getByText("96%")).toBeTruthy();
-    expect(screen.getByText("Unknown")).toBeTruthy();
+    expect(within(screen.getByRole("table", { name: "Usage by model" })).getByText("Unknown")).toBeTruthy();
     expect(screen.getByText("Router · google")).toBeTruthy();
     expect(requests.find(r => r.startsWith("/api/ai/usage/"))).toBe("/api/ai/usage/summary?window=24h");
 
@@ -111,21 +119,43 @@ describe("Usage page", () => {
     await waitFor(() => expect(requests).toContain("/api/ai/usage/summary?window=5h&api_key=key-argon"));
   });
 
-  it("shows router reliability with red flags and switches the window", async () => {
+  it("breaks usage down by caller kind, filters by caller and toggles day/hour", async () => {
+    render(() => <UsageSettings />);
+    await screen.findByText("gemini-4-argon");
+    const groupBy = screen.getByLabelText("Group by") as HTMLSelectElement;
+    groupBy.value = "caller_kind";
+    fireEvent.change(groupBy);
+    expect(await screen.findByRole("button", { name: "Script / API key" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Subagent" }));
+    await waitFor(() => expect(requests).toContain("/api/ai/usage/summary?window=24h&caller_kind=subagent"));
+    await waitFor(() => expect((screen.getByLabelText("Caller") as HTMLSelectElement).value).toBe("subagent"));
+
+    const chart = () => screen.getByRole("figure");
+    expect(chart().getAttribute("aria-label")).toBe("tokens per hour");
+    fireEvent.click(screen.getByRole("radio", { name: "Day" }));
+    await waitFor(() => expect(chart().getAttribute("aria-label")).toBe("tokens per day"));
+    const window = screen.getByLabelText("Time window") as HTMLSelectElement;
+    window.value = "30d";
+    fireEvent.change(window);
+    await waitFor(() => expect((screen.getByRole("radio", { name: "Hour" }) as HTMLButtonElement).disabled).toBe(true));
+  });
+
+  it("shows router reliability ranked by impact and switches the window", async () => {
     render(() => <UsageSettings />);
     const section = await screen.findByRole("region", { name: "Reliability" });
     await waitFor(() => expect(section.textContent).toContain("95.0%"));
     expect(section.textContent).toContain("1.2 s");
     expect(section.textContent).toContain("8.4 s");
     expect(section.textContent).toContain("12 · 30");
-    const problems = screen.getByRole("list", { name: "Reliability problems" });
-    expect(problems.textContent).toContain("minimax · MiniMax-M3");
-    expect(problems.textContent).toContain("Out of credit");
-    expect(problems.textContent).toContain("402 out of credit ×483");
-    expect(problems.textContent).not.toContain("gemini");
     const rows = screen.getByRole("table", { name: "Reliability by provider" });
-    expect(rows.querySelector(".usage-red")?.textContent).toContain("0%");
+    expect(rows.textContent).toContain("minimax · MiniMax-M3");
+    expect(rows.textContent).toContain("Down");
+    // Healthy rows fold behind a toggle.
+    expect(rows.textContent).not.toContain("gemini");
+    fireEvent.click(within(rows).getByRole("button", { name: "1 healthy · show" }));
     expect(rows.textContent).toContain("97.0%");
+    fireEvent.click(within(rows).getByText("minimax · MiniMax-M3"));
+    expect(rows.textContent).toContain("402 out of credit");
     expect(requests).toContain("/api/ai/proxy/health?window=24h");
     fireEvent.click(screen.getByRole("radio", { name: "1h" }));
     await waitFor(() => expect(requests).toContain("/api/ai/proxy/health?window=1h"));
@@ -144,17 +174,11 @@ describe("Usage page", () => {
 });
 
 describe("reliability helpers", () => {
-  it("formats rates, latencies and the error breakdown", () => {
+  it("formats rates and latencies", () => {
     expect(formatRate(null)).toBe("—");
     expect(formatRate(1)).toBe("100%");
     expect(formatRate(0.8467)).toBe("84.7%");
     expect(formatMs(450)).toBe("450 ms");
     expect(formatMs(45_000)).toBe("45 s");
-    expect(errorSummary({ timeout: 2, "client_error:402": 483, "server_error:503": 1 })).toBe("402 out of credit ×483 · timeout ×2 · server 503 ×1");
-  });
-  it("flags low success only with enough traffic", () => {
-    expect(isRedFlag(stats({ requests: 3, success_rate: 0 }))).toBe(false);
-    expect(isRedFlag(stats({ requests: 20, success_rate: 0.85 }))).toBe(true);
-    expect(isRedFlag({ ...stats({ requests: 1, success_rate: 1 }), flags: ["out_of_credit"] })).toBe(true);
   });
 });

@@ -241,3 +241,16 @@ it('allows dismissing a failed side question turn',async()=>{
 
 
 
+it('keeps a question that was not sent as a pending bubble whose Retry resends it',async()=>{
+ const notSent=Object.assign(new Error('Connection interrupted — your question was not sent. Retry to send it.'),{notSent:true});
+ const fetch=vi.fn().mockRejectedValueOnce(notSent).mockResolvedValue(response([{type:'done',answer:'Sent at last.'}]));
+ vi.stubGlobal('fetch',fetch);let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="not-sent" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Via tailscale?');
+ await screen.findByText('Question not sent');
+ expect(screen.getByText('Via tailscale?')).toBeTruthy();
+ fireEvent.click(screen.getByText('Retry'));
+ await screen.findByText('Sent at last.');
+ expect(fetch).toHaveBeenCalledTimes(2);
+ expect(screen.queryByText('Question not sent')).toBeNull();
+});

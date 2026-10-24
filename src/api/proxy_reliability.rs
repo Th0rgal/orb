@@ -412,6 +412,47 @@ pub struct ReliabilityGroup {
     /// Red flags for the UI: `low_success_rate`, `out_of_credit`,
     /// `auth_failed`, `slow_first_token`, `stalls`.
     pub flags: Vec<&'static str>,
+    /// Display label of the account (`label`, else `name`), so two rows of
+    /// the same provider/model can be told apart. Set by the route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
+    /// Active account cooldown right now (quota reset, rate limit, …), so the
+    /// UI can show an expected quota wait instead of a failure. Set by the route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown: Option<GroupCooldown>,
+    /// Up to [`RECENT_ERRORS`] latest failures, newest first.
+    pub recent_errors: Vec<RecentError>,
+}
+
+/// Number of latest failures kept per group.
+pub const RECENT_ERRORS: usize = 5;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RecentError {
+    /// RFC3339 start of the failed attempt.
+    pub at: String,
+    /// [`error_key`] of the failure.
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct GroupCooldown {
+    /// [`crate::provider_health::account_state`]: `quota_exhausted`,
+    /// `rate_limited`, `out_of_credit`, `auth_failed` or `cooldown`.
+    pub state: &'static str,
+    /// RFC3339 time the cooldown ends.
+    pub until: String,
+}
+
+/// One time bucket of the window, oldest first (for sparklines).
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct SeriesBucket {
+    pub requests: u64,
+    pub ok: u64,
+    pub ttft_p50_ms: Option<u64>,
+    pub ttft_p95_ms: Option<u64>,
+    pub retried: u64,
+    pub fell_back: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -423,6 +464,11 @@ pub struct ProxyHealthResponse {
     pub groups: Vec<ReliabilityGroup>,
     /// Per chain (e.g. `builtin/smart`), worst success rate first.
     pub chains: Vec<ChainReliability>,
+    /// Request totals per equal time bucket across the window, oldest first.
+    /// Empty for the all-time window.
+    pub series: Vec<SeriesBucket>,
+    /// Length of one `series` bucket in seconds.
+    pub bucket_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -530,6 +576,16 @@ pub fn summarize(
     let mut groups: Vec<ReliabilityGroup> = by_group
         .into_iter()
         .map(|((provider, model, account_id), rows)| {
+            let mut recent_errors: Vec<RecentError> = rows
+                .iter()
+                .filter(|r| r.status != "ok")
+                .map(|r| RecentError {
+                    at: r.timestamp.clone(),
+                    error: error_key(r),
+                })
+                .collect();
+            recent_errors.sort_by(|a, b| b.at.cmp(&a.at));
+            recent_errors.truncate(RECENT_ERRORS);
             let stats = stats(rows.into_iter());
             ReliabilityGroup {
                 provider,
@@ -537,6 +593,9 @@ pub fn summarize(
                 account_id,
                 flags: flags(&stats),
                 stats,
+                account_label: None,
+                cooldown: None,
+                recent_errors,
             }
         })
         .collect();
@@ -561,7 +620,52 @@ pub fn summarize(
         totals: stats(records.iter().filter(|r| !r.superseded)),
         groups,
         chains,
+        series: Vec::new(),
+        bucket_secs: 0,
     }
+}
+
+/// Buckets per sparkline.
+pub const SERIES_BUCKETS: usize = 24;
+
+/// Fill `series` with [`SERIES_BUCKETS`] equal buckets between `since` and
+/// `now` (request rows only, like the totals). No-op without `since`.
+pub fn add_series(
+    health: &mut ProxyHealthResponse,
+    records: &[ProxyOutcomeRecord],
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(since) = since else { return };
+    let span = (now - since).num_seconds().max(SERIES_BUCKETS as i64);
+    let bucket = (span + SERIES_BUCKETS as i64 - 1) / SERIES_BUCKETS as i64;
+    let mut rows: Vec<Vec<&ProxyOutcomeRecord>> = vec![Vec::new(); SERIES_BUCKETS];
+    for r in records.iter().filter(|r| !r.superseded) {
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(&r.timestamp) else {
+            continue;
+        };
+        let offset = (at.with_timezone(&chrono::Utc) - since).num_seconds();
+        if offset < 0 {
+            continue;
+        }
+        let i = ((offset / bucket) as usize).min(SERIES_BUCKETS - 1);
+        rows[i].push(r);
+    }
+    health.bucket_secs = bucket as u64;
+    health.series = rows
+        .into_iter()
+        .map(|rows| {
+            let s = stats(rows.into_iter());
+            SeriesBucket {
+                requests: s.requests,
+                ok: s.ok,
+                ttft_p50_ms: s.ttft_p50_ms,
+                ttft_p95_ms: s.ttft_p95_ms,
+                retried: s.retried,
+                fell_back: s.fell_back,
+            }
+        })
+        .collect();
 }
 
 #[cfg(test)]
@@ -681,6 +785,31 @@ mod tests {
         assert!(google.flags.contains(&"stalls"));
         assert!(google.flags.contains(&"slow_first_token"));
         assert_eq!(health.chains[0].chain_id, "builtin/smart");
+    }
+
+    #[test]
+    fn series_buckets_requests_and_groups_keep_recent_errors() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-20T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now = since + chrono::Duration::hours(24);
+        let mut rows = Vec::new();
+        for (h, status) in [(0, "ok"), (0, "timeout"), (5, "ok"), (23, "client_error")] {
+            let mut r = rec("google", status, Some(429), Some(100));
+            r.timestamp = (since + chrono::Duration::minutes(h * 60 + 10)).to_rfc3339();
+            rows.push(r);
+        }
+        let mut health = summarize(&rows, "24h", Some(since.to_rfc3339()));
+        add_series(&mut health, &rows, Some(since), now);
+        assert_eq!(health.series.len(), SERIES_BUCKETS);
+        assert_eq!(health.bucket_secs, 3600);
+        assert_eq!((health.series[0].requests, health.series[0].ok), (2, 1));
+        assert_eq!(health.series[5].ok, 1);
+        assert_eq!(health.series[23].requests, 1);
+        let errors = &health.groups[0].recent_errors;
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].error, "client_error:429");
+        assert_eq!(errors[1].error, "timeout");
     }
 
     #[test]

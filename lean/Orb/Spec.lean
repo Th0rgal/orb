@@ -5,7 +5,7 @@
     `ScopedAuthority`, `ConservedResource`, `ProjectionStability`) + compatibility combinators
     (`LinearLeaseSpec`, `IdempotentOutboxSpec`, `DagScheduleSpec`, `QuotaCircuitSpec`)
   - Layer II: Declarative Corollaries (≤ 3 lines each, Mathlib4 algebraic proof style)
-  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 34 exports):
+  - Direct Unboxed C-ABI (`@[inline, export]` in `Orb.Kernel`, 35 exports):
     `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`,
     `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`,
     `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word`,
@@ -13,7 +13,8 @@
     `orb_queue_step`, `orb_vm_step`, `orb_access_step`, `orb_workfold_step`, `orb_taskcard_step`,
     `orb_sidebar_visibility`, `orb_admission_step`, `orb_account_cooldown_secs`, `orb_cost_cents_step`,
     `orb_stream_loop_step`, `orb_job_ledger_step`, `orb_proc_liveness_step`, `orb_pr_gate_step`,
-    `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`
+    `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`,
+    `orb_attribution_step`
 -/
 
 import Orb.Kernel
@@ -337,13 +338,13 @@ structure BoardRetryCheck where
   maxAttempts              : UInt32
   requiresExternalRecovery : UInt8
   preflightMerged          : UInt8
-  chatgptUiBlocked         : UInt8
+  retrySuppressed          : UInt8
   deriving Repr, DecidableEq
 
 def boardRetryMetaGate : MetaGateSpec BoardRetryCheck
     (fun r => (r.maxAttempts ≥ 1 && r.attempts < r.maxAttempts &&
-      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.chatgptUiBlocked == 0) = true) where
-  gate r := verifyBoardRetry r.attempts r.maxAttempts r.requiresExternalRecovery r.preflightMerged r.chatgptUiBlocked == 1
+      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.retrySuppressed == 0) = true) where
+  gate r := verifyBoardRetry r.attempts r.maxAttempts r.requiresExternalRecovery r.preflightMerged r.retrySuppressed == 1
   sound _ h := by unfold verifyBoardRetry at h; repeat (first | split at h | simp_all)
   complete _ h := by unfold verifyBoardRetry; repeat (first | split | simp_all)
   posWitness := ⟨1, 3, 0, 0, 0⟩
@@ -354,9 +355,9 @@ def boardRetryMetaGate : MetaGateSpec BoardRetryCheck
 /-- Corollary 7: `verifyBoardRetry` suppresses retries after `maxAttempts`, on merged PRs, or when external recovery is required. -/
 theorem board_retry_rejects_exhausted_or_merged (r : BoardRetryCheck)
     (h_stop : (r.maxAttempts ≥ 1 && r.attempts < r.maxAttempts &&
-      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.chatgptUiBlocked == 0) = false) :
+      r.requiresExternalRecovery == 0 && r.preflightMerged == 0 && r.retrySuppressed == 0) = false) :
     (verifyBoardRetry r.attempts r.maxAttempts
-      r.requiresExternalRecovery r.preflightMerged r.chatgptUiBlocked == 1) = false :=
+      r.requiresExternalRecovery r.preflightMerged r.retrySuppressed == 1) = false :=
   boardRetryMetaGate.rejects_unsafe r (by simp [h_stop])
 
 structure JobTransitionCheck where
@@ -699,5 +700,115 @@ theorem transcript_patch_step_unknown_kind_identity_and_saturates (l s d : UInt3
     transcriptPatchStep l s 3 d = (l.toUInt64 ||| (s.toUInt64 <<< 32)) ∧
     (transcriptPatchStep 0xFFFFFFF0 7 0 0x20 &&& 0xFFFFFFFF) = 0xFFFFFFFF := by
   constructor <;> simp [transcriptPatchStep] <;> decide
+
+/-! ## Layer II: Usage Attribution (`orb_attribution_step`, `ScopedAuthority` + `ProjectionStability`) -/
+
+/-- The clamped principal is always inside the closed caller-kind enum. -/
+theorem attributionPrincipal_le_six (p : UInt8) : attributionPrincipal p ≤ 6 := by
+  unfold attributionPrincipal; split
+  · assumption
+  · decide
+
+/-- A non-empty in-scope claim is a valid kind and requires a credential binding. -/
+theorem attributionInScope_claim (p c s d : UInt8)
+    (h : attributionInScope (attributionPrincipal p) c s d = true) (hc : c ≠ 0) :
+    c ≤ 6 ∧ attributionPrincipal p ≠ 0 := by
+  have hp := attributionPrincipal_le_six p
+  generalize attributionPrincipal p = q at h hp ⊢
+  simp only [attributionInScope, Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at h
+  simp only [UInt8.le_iff_toNat_le, ← UInt8.toNat_inj, UInt8.reduceToNat, ne_eq] at *
+  omega
+
+/-- Totality: every usage event maps to exactly one kind of the closed enum `0..6`. -/
+theorem attribution_kind_le_six (p c s d : UInt8) : attributionKind p c s d ≤ 6 := by
+  unfold attributionKind; split
+  · split
+    · exact attributionPrincipal_le_six p
+    · next h hc => exact (attributionInScope_claim p c s d h (by simpa using hc)).1
+  · exact attributionPrincipal_le_six p
+
+/-- `unknown` (`0`) is returned iff no credential binding exists, whatever the client claims. -/
+theorem attribution_kind_unknown_iff (p c s d : UInt8) :
+    attributionKind p c s d = 0 ↔ attributionPrincipal p = 0 := by
+  unfold attributionKind; split
+  · split
+    · exact Iff.rfl
+    · next h hc =>
+      have := attributionInScope_claim p c s d h (by simpa using hc)
+      exact ⟨fun h0 => absurd h0 (by simpa using hc), fun h0 => absurd h0 this.2⟩
+  · exact Iff.rfl
+
+/-- The packed C-ABI word decodes to `(kind, accepted)` exactly as `src/api/usage_attribution.rs` reads it. -/
+theorem attribution_step_decodes (p c s d : UInt8) :
+    (attributionStep p c s d &&& 0xFF) = (attributionKind p c s d).toUInt32 ∧
+    ((attributionStep p c s d >>> 8) &&& 1) =
+      (if attributionInScope (attributionPrincipal p) c s d then 1 else 0) := by
+  have hk := attribution_kind_le_six p c s d
+  unfold attributionStep
+  generalize attributionKind p c s d = k at hk ⊢
+  have hn : k.toNat ≤ 6 := by simpa [UInt8.le_iff_toNat_le] using hk
+  have hk' : k = k.toNat.toUInt8 := by simp
+  rw [hk']
+  generalize k.toNat = n at hn
+  split <;> (match n, hn with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ => decide)
+
+structure AttributionClaim where
+  principalKind : UInt8
+  claimedKind   : UInt8
+  sameMission   : UInt8
+  isDescendant  : UInt8
+  deriving Repr, DecidableEq
+
+/-- Semantic scope of a client attribution hint, stated independently of the kernel's boolean formula. -/
+def AttributionClaim.InScope (x : AttributionClaim) : Prop :=
+  let p := attributionPrincipal x.principalKind
+  x.claimedKind = 0 ∨
+  (p = 5 ∧ (x.claimedKind = 1 ∨ x.claimedKind = 2 ∨ x.claimedKind = 5)) ∨
+  ((p = 1 ∨ p = 2) ∧ ((x.claimedKind = 1 ∧ x.sameMission = 1) ∨ (x.claimedKind = 2 ∧ x.isDescendant = 1))) ∨
+  ((p = 3 ∨ p = 4 ∨ p = 6) ∧ x.claimedKind = p)
+
+theorem attributionInScope_iff (x : AttributionClaim) :
+    attributionInScope (attributionPrincipal x.principalKind) x.claimedKind x.sameMission x.isDescendant = true ↔
+      x.InScope := by
+  simp [attributionInScope, AttributionClaim.InScope, or_assoc]
+
+/-- `MetaGateSpec` for the acceptance bit: a hint is accepted iff it stays inside the principal's scope. -/
+def attributionMetaGate : MetaGateSpec AttributionClaim AttributionClaim.InScope where
+  gate x := ((attributionStep x.principalKind x.claimedKind x.sameMission x.isDescendant >>> 8) &&& 1) == 1
+  sound x h := by
+    rw [(attribution_step_decodes _ _ _ _).2] at h
+    exact (attributionInScope_iff x).mp (by split at h <;> simp_all)
+  complete x h := by
+    rw [(attribution_step_decodes _ _ _ _).2, if_pos ((attributionInScope_iff x).mpr h)]; rfl
+  posWitness := ⟨1, 2, 0, 1⟩
+  negWitness := ⟨6, 1, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- `ScopedAuthority` instance: an accepted attribution hint never escapes the credential's scope. -/
+def attributionScopedAuthority : ScopedAuthority AttributionClaim where
+  admit x := attributionMetaGate.gate x
+  scopeValid x := attributionInScope (attributionPrincipal x.principalKind) x.claimedKind x.sameMission x.isDescendant
+  sound x h := (attributionInScope_iff x).mpr (attributionMetaGate.sound x h)
+
+/-- `ProjectionStability` instance (`TotalAttribution`): the projected kind is in the closed enum and is
+    `unknown` exactly when the credential has no binding. -/
+def attributionTotal : ProjectionStability AttributionClaim UInt8 where
+  project x := attributionKind x.principalKind x.claimedKind x.sameMission x.isDescendant
+  validIn _ := true
+  stable x k := decide (k ≤ 6) && (k == 0) == (attributionPrincipal x.principalKind == 0)
+  preserves x _ := by
+    have h1 := attribution_kind_le_six x.principalKind x.claimedKind x.sameMission x.isDescendant
+    have h2 := attribution_kind_unknown_iff x.principalKind x.claimedKind x.sameMission x.isDescendant
+    cases hk : (attributionKind x.principalKind x.claimedKind x.sameMission x.isDescendant == 0) <;>
+      cases hp : (attributionPrincipal x.principalKind == 0) <;> simp_all
+
+/-- Corollary 36 (`ScopedAuthority` — `orb_attribution_step`): forged hints are rejected and keep the
+    principal's kind (a script key cannot claim a mission, a mission key cannot claim a foreign subagent,
+    no binding stays `unknown`), while in-scope hints refine it. -/
+theorem attribution_forged_hint_rejected_keeps_principal :
+    attributionStep 6 1 0 0 = 6 ∧ attributionStep 1 2 0 0 = 1 ∧ attributionStep 0 5 0 0 = 0 ∧
+    attributionStep 1 2 0 1 = 258 ∧ attributionStep 5 0 0 0 = 261 := by decide
 
 end Orb.Spec

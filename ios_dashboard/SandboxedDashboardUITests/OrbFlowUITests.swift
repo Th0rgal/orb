@@ -321,7 +321,7 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["Done"].tap()
         app.buttons["project.orb-test"].tap()
         capture(app, "compact-project-folders")
-        app.buttons["mission.rich-chatgpt"].tap()
+        app.buttons["mission.rich-cloud"].tap()
         XCTAssertTrue(app.webViews.staticTexts["Rendement annualisé"].waitForExistence(timeout: 15))
         XCTAssertFalse(app.staticTexts["response complete"].exists)
         let composer = app.otherElements["conversation-composer"]
@@ -425,7 +425,7 @@ final class OrbFlowUITests: XCTestCase {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
         app.buttons["project.orb-test"].tap(); app.buttons["mission.reconnect"].tap()
-        XCTAssertTrue(app.staticTexts["Reconnect your ChatGPT account in Orb on your Mac."].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Reconnect your Grok account in Orb on your Mac."].waitForExistence(timeout: 15))
         let input = app.textFields["composer"].exists ? app.textFields["composer"] : app.textViews["composer"]
         input.tap(); input.typeText("Continue")
         XCTAssertFalse(app.buttons["Send message"].isEnabled)
@@ -500,17 +500,17 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Default"].isSelected)
         app.buttons["Default"].tap()
     }
-    @MainActor func testRichChatGPTConversationAndReopen() throws {
+    @MainActor func testRichCloudConversationAndReopen() throws {
         let app = launch()
         XCTAssertTrue(app.buttons["project.orb-test"].waitForExistence(timeout: 20))
         app.buttons["project.orb-test"].tap()
-        let row = app.buttons["mission.rich-chatgpt"]
+        let row = app.buttons["mission.rich-cloud"]
         for _ in 0..<12 { if row.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(row.exists); row.tap()
         XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 15))
         let title = app.webViews.staticTexts["Rendement annualisé"]
         XCTAssertTrue(title.waitForExistence(timeout: 15))
-        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "chatgpt-rich-conversation"; shot.lifetime = .keepAlways; add(shot)
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "cloud-rich-conversation"; shot.lifetime = .keepAlways; add(shot)
         // Rendering stays available after the app process is stopped and restarted.
         app.terminate(); app.launch()
         app.buttons["project.orb-test"].tap()
@@ -529,7 +529,7 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(artifact.exists); artifact.tap()
         XCTAssertTrue(app.buttons["Close preview"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.images["artifact-image"].waitForExistence(timeout: 15))
-        let previewShot = XCTAttachment(screenshot: app.screenshot()); previewShot.name = "chatgpt-image-preview"; previewShot.lifetime = .keepAlways; add(previewShot)
+        let previewShot = XCTAttachment(screenshot: app.screenshot()); previewShot.name = "cloud-image-preview"; previewShot.lifetime = .keepAlways; add(previewShot)
         app.buttons["Close preview"].tap()
         let dataFile = app.webViews.links["Télécharger les données"]
         for _ in 0..<6 {
@@ -541,7 +541,6 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["artifact-text"].label.contains("1999,243"))
         app.buttons["Close preview"].tap()
     }
-    @MainActor func testCreateChatGPT() throws { try createCloud("ChatGPT", account: "chatgpt account") }
     @MainActor func testCreateCursorCloud() throws { try createCloud("Cursor Cloud", account: "cursor_cloud account") }
     @MainActor func testCreateGrokBot() throws { try createCloud("Grok Bot", account: "grok_bot account") }
     @MainActor private func createCloud(_ service: String, account: String) throws {
@@ -567,8 +566,6 @@ final class OrbFlowUITests: XCTestCase {
         app.buttons["new-agent"].tap()
         app.buttons["agent-selection"].tap()
         app.buttons["picker.harness"].tap()
-        XCTAssertFalse(app.buttons["ChatGPT UI"].exists)
-        XCTAssertFalse(app.buttons["chatgpt_ui"].exists)
         app.buttons["Claude Code"].tap()
         app.buttons["Done"].tap()
         let input = app.textFields["composer"].exists ? app.textFields["composer"] : app.textViews["composer"]

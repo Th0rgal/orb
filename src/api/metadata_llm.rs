@@ -183,6 +183,10 @@ impl MetadataLlmClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .header(&auth_header.0, &auth_header.1)
+            .header(
+                crate::api::usage_attribution::CALLER_HEADER,
+                crate::api::usage_attribution::CorePurpose::MissionTitle.header_value(),
+            )
             .timeout(std::time::Duration::from_secs(10));
 
         if cfg.api_format == ApiFormat::Anthropic {

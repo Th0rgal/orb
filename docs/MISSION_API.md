@@ -20,7 +20,7 @@ POST /api/control/missions
 ```
 
 `backend` can be `"opencode"`, `"claudecode"`, `"codex"`, `"antigravity"`,
-`"grok"`, or `"chatgpt_ui"`. If omitted, the server uses `DEFAULT_BACKEND` or the
+or `"grok"`. If omitted, the server uses `DEFAULT_BACKEND` or the
 first detected CLI in priority order: Claude Code, OpenCode, Grok, Codex, then
 Antigravity. You can also pass `"mode"` (`"build"`, `"plan"`, or `"goal"`),
 `"model_effort"`, `"project_id"`, and `"track"`.

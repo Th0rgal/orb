@@ -33,19 +33,15 @@ test(`Antigravity quota chips never clip: ${theme} ${size}`, async ({ page }, in
   const chips = row.locator('.p-usage.compact');
   await expect(chips).toBeVisible();
   const header = page.locator('.p-account-header', { has: row });
-  if (size === 'normal') {
-    await expect(chips.locator('.p-usage-chip')).toHaveText(['Gemini100%', 'Claude & GPT0%']);
-  } else {
-    await expect(chips.locator('.p-usage-chip:visible')).toHaveText(['Gemini100%']);
-    await expect(chips.locator('.p-usage-more')).toHaveText('+1');
-  }
+  // Narrow rows move the chips under the status line instead of hiding them.
+  await expect(chips.locator('.p-usage-chip:visible')).toHaveText(['Gemini100%', 'Claude & GPT0%']);
   await expect(chips.locator('.p-usage-chip.exhausted')).toHaveText('Gemini100%');
   // Nothing in the chip area is clipped or overlaps the chevron.
   const geometry = await header.evaluate(h => {
     const area = h.querySelector('.p-usage.compact')!.getBoundingClientRect();
     const chev = h.querySelector('.p-acc-chev')!.getBoundingClientRect();
     const clipped = [...h.querySelectorAll<HTMLElement>('.p-usage.compact *')].filter(e => e.offsetParent && e.scrollWidth > e.clientWidth + 1).length;
-    const email = h.querySelector<HTMLElement>('.p-account-email')!;
+    const email = h.querySelector<HTMLElement>('.p-email-local')!;
     return { gap: chev.left - area.right, clipped, emailEllipsis: email.scrollWidth > email.clientWidth };
   });
   expect(geometry.clipped).toBe(0);

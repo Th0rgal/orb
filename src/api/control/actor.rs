@@ -1143,13 +1143,11 @@ pub(super) async fn control_actor_loop(
                             {
                                 let owned = match mission_store.get_mission(run.mission_id).await {
                                     Ok(Some(mission)) => skip_idle_registered_liveness_interrupt(
-                                        backend_id.as_deref(),
                                         mission.origin.as_deref(),
                                         mission.origin_session_id.as_deref(),
                                         &mission.project.tags,
                                     ),
                                     _ => skip_idle_registered_liveness_interrupt(
-                                        backend_id.as_deref(),
                                         None,
                                         None,
                                         &[],
@@ -3838,7 +3836,6 @@ pub(super) async fn control_actor_loop(
                                                 seconds_since_activity,
                                                 tool_call_in_flight,
                                                 waiting_remote_job,
-                                                running_backend_id.as_deref(),
                                             ),
                                             expected_deliverables: 0,
                                             current_activity: main_runner_activity.clone(),
@@ -5247,11 +5244,7 @@ pub(super) async fn control_actor_loop(
                                         completed_cancellation_requested,
                                     ).await
                                 {
-                                    let resume_message = transport_auto_resume_message_for_mission(
-                                        mission_store.as_ref(),
-                                        mission_id,
-                                    )
-                                    .await;
+                                    let resume_message = TRANSPORT_AUTO_RESUME_PROMPT.to_string();
                                     let activation = activate_mission_id_for_message(
                                         &control_hub,
                                         &mission_store,
@@ -6012,11 +6005,7 @@ pub(super) async fn control_actor_loop(
                                             mission_id = %mission_id,
                                             "Auto-resuming parallel mission after structured transport failure"
                                         );
-                                        let resume_message = transport_auto_resume_message_for_mission(
-                                            mission_store.as_ref(),
-                                            *mission_id,
-                                        )
-                                        .await;
+                                        let resume_message = TRANSPORT_AUTO_RESUME_PROMPT.to_string();
                                         transport_requeued = true;
                                         runner.queue_message(
                                             completed_message_id.unwrap_or_else(Uuid::new_v4),
@@ -7384,11 +7373,6 @@ pub(super) async fn run_single_control_turn(
             && requested_model.is_none())
     {
         config.default_model = None;
-    } else if backend_id.as_deref() == Some("chatgpt_ui") && requested_model.is_none() {
-        // Web model labels are account-specific. Never invent or inherit a
-        // CLI/API model slug for the browser harness.
-        config.default_model =
-            super::super::mission_runner::get_backend_string_setting("chatgpt_ui", "model");
     }
     if let Some(ref agent) = agent_override {
         config.opencode_agent = Some(agent.clone());
@@ -7734,45 +7718,16 @@ pub(super) async fn run_single_control_turn(
             ))
             .await
         }
-        Some("chatgpt_ui") => {
-            let mid = match require_mission_id(mission_id, "ChatGPT UI", &events_tx) {
-                Ok(id) => id,
-                Err(r) => return r,
-            };
-            use crate::api::runners::HarnessRunner as _;
-            Box::pin(
-                crate::api::runners::ChatGptUiRunner.run_turn(crate::api::runners::TurnContext {
-                    mission_store: Some(mission_store.clone()),
-                    workspace: exec_workspace,
-                    work_dir: &ctx.working_dir,
-                    // The browser always starts a fresh chat, so include the
-                    // bounded conversation frame on follow-up turns.
-                    message: &convo,
-                    model: requested_model
-                        .as_deref()
-                        .or(config.default_model.as_deref()),
-                    model_effort: None,
-                    fast_mode: false,
-                    service_tier: None,
-                    agent: None,
-                    mission_id: mid,
-                    events_tx: events_tx.clone(),
-                    cancel,
-                    app_working_dir: &config.working_dir,
-                    session_id: None,
-                    is_continuation: false,
-                    extras: crate::api::runners::TurnExtras::None,
-                }),
-            )
-            .await
-        }
         Some(backend) if backend != "opencode" => {
+            let message = crate::backend::retired_backend_error(backend)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Unsupported backend: {}", backend));
             let _ = events_tx.send(AgentEvent::Error {
-                message: format!("Unsupported backend: {}", backend),
+                message: message.clone(),
                 mission_id,
                 resumable: mission_id.is_some(),
             });
-            crate::agents::AgentResult::failure(format!("Unsupported backend: {}", backend), 0)
+            crate::agents::AgentResult::failure(message, 0)
                 .with_terminal_reason(TerminalReason::LlmError)
         }
         _ => {

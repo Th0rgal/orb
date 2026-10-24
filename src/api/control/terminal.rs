@@ -32,7 +32,7 @@ pub(super) fn maybe_recover_soft_llm_error(result: &mut crate::agents::AgentResu
     // A backend that supplied an explicit failure class has already made a
     // structured terminal decision. Its human-readable error text must never
     // be reinterpreted as substantive assistant output by this legacy
-    // heuristic (for example, a ChatGPT UI selector compatibility failure).
+    // heuristic.
     let has_structured_failure = result.data.as_ref().is_some_and(|data| {
         data.get("failure_class")
             .is_some_and(|failure_class| !failure_class.is_null())
@@ -279,45 +279,6 @@ pub(super) async fn reserve_transport_auto_resume(
 }
 
 pub(super) const TRANSPORT_AUTO_RESUME_PROMPT: &str = "The previous turn ended because its provider transport disconnected. Reconcile the current workspace, remote jobs, and repository head, then resume the same task. Do not duplicate an accepted job or create a replacement writer.";
-
-pub(super) const CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT: &str = "The previous ChatGPT UI turn failed to start. Repeat the original user request exactly. Do not reconcile git, PRs, Lean, remote jobs, or repository head.";
-
-/// ChatGPT UI turns send only the queued message as the prompt. Replaying the
-/// coding-worker reconcilation stub after a profile lock made Pro lane A on
-/// eip-8282 return a Lean campaign verdict instead of the original rewrite.
-pub(super) fn transport_auto_resume_message(
-    backend: Option<&str>,
-    original_user_message: Option<&str>,
-) -> String {
-    if backend == Some("chatgpt_ui") {
-        if let Some(original) = original_user_message
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return original.to_string();
-        }
-        return CHATGPT_UI_TRANSPORT_FALLBACK_PROMPT.to_string();
-    }
-    TRANSPORT_AUTO_RESUME_PROMPT.to_string()
-}
-
-pub(super) async fn transport_auto_resume_message_for_mission(
-    store: &dyn MissionStore,
-    mission_id: Uuid,
-) -> String {
-    let backend = store
-        .get_mission(mission_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|mission| mission.backend);
-    let original = store
-        .get_initial_user_message(mission_id)
-        .await
-        .ok()
-        .flatten();
-    transport_auto_resume_message(backend.as_deref(), original.as_deref())
-}
 
 pub(super) fn is_bare_llm_error_output(output: &str) -> bool {
     if looks_like_structured_provider_error(output) {

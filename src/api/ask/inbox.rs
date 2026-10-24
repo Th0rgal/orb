@@ -438,7 +438,11 @@ pub async fn generate(
         "Configure a summary model".into(),
     ))?;
     let resolved_model = cfg.model.clone();
-    let client = AskClient::new(state.http_client.clone(), cfg);
+    let client = AskClient::new(
+        state.http_client.clone(),
+        cfg,
+        crate::api::usage_attribution::CorePurpose::InboxSummary,
+    );
     let messages = vec![
         json!({"role":"system","content":PROMPT}),
         json!({"role":"user","content":text}),

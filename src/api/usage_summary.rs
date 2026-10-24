@@ -91,6 +91,9 @@ pub struct UsageFilter {
     pub api_key: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Caller kind (mission, subagent, hermes, orb_ui, core, script, unknown).
+    #[serde(default)]
+    pub caller_kind: Option<String>,
 }
 
 fn matches(filter: &Option<String>, value: Option<&str>) -> bool {
@@ -115,6 +118,7 @@ impl UsageFilter {
             && matches(&self.source, Some(r.source.as_str()))
             && matches(&self.api_key, r.api_key_id.as_deref())
             && matches(&self.model, Some(&r.model))
+            && matches(&self.caller_kind, Some(&r.caller_kind))
     }
 }
 
@@ -166,6 +170,8 @@ pub struct UsageTotals {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Reasoning tokens (part of `output_tokens`; router only).
+    pub reasoning_tokens: u64,
     /// Sum over records with a known cost.
     pub cost_cents: u64,
     /// Records whose model has no price: their cost is not in `cost_cents`.
@@ -181,6 +187,7 @@ impl UsageTotals {
             .cache_creation_tokens
             .saturating_add(r.cache_creation_tokens);
         self.cache_read_tokens = self.cache_read_tokens.saturating_add(r.cache_read_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(r.reasoning_tokens);
         if r.cost_known {
             self.cost_cents = self.cost_cents.saturating_add(r.cost_cents);
         } else {
@@ -225,6 +232,33 @@ pub struct UsageGroup {
     pub totals: UsageTotals,
 }
 
+/// Total tokens (input + output + cache) of one record.
+fn record_tokens(r: &UsageRecord) -> u64 {
+    r.input_tokens
+        .saturating_add(r.output_tokens)
+        .saturating_add(r.cache_creation_tokens)
+        .saturating_add(r.cache_read_tokens)
+}
+
+#[derive(Debug, Clone, Default)]
+struct Bucket {
+    totals: UsageTotals,
+    router_requests: u64,
+    by_caller_kind: BTreeMap<String, u64>,
+}
+
+impl Bucket {
+    fn add(&mut self, r: &UsageRecord) {
+        self.totals.add(r);
+        self.router_requests += u64::from(r.source == UsageSource::Router);
+        let tokens = self
+            .by_caller_kind
+            .entry(r.caller_kind.clone())
+            .or_default();
+        *tokens = tokens.saturating_add(record_tokens(r));
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DailyUsageResponse {
     /// `YYYY-MM-DD` (UTC).
@@ -232,6 +266,8 @@ pub struct DailyUsageResponse {
     #[serde(flatten)]
     pub totals: UsageTotals,
     pub router_requests: u64,
+    /// Total tokens per caller kind in this bucket.
+    pub by_caller_kind: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -241,6 +277,8 @@ pub struct HourlyUsageResponse {
     #[serde(flatten)]
     pub totals: UsageTotals,
     pub router_requests: u64,
+    /// Total tokens per caller kind in this bucket.
+    pub by_caller_kind: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,8 +290,15 @@ pub struct UsageSummaryResponse {
     pub by_model: Vec<ModelUsageResponse>,
     pub by_provider: Vec<UsageGroup>,
     pub by_source: Vec<UsageGroup>,
+    /// `proxy` or `harness_direct`.
+    pub by_route: Vec<UsageGroup>,
+    pub by_caller_kind: Vec<UsageGroup>,
+    /// `core` usage per purpose (`mission_title`, `unspecified`, ...).
+    pub by_purpose: Vec<UsageGroup>,
     pub by_backend: Vec<UsageGroup>,
     pub by_mission: Vec<UsageGroup>,
+    /// Usage rolled up to top-level missions (subagents included).
+    pub by_root_mission: Vec<UsageGroup>,
     pub by_api_key: Vec<UsageGroup>,
     pub by_account: Vec<UsageGroup>,
     pub by_day: Vec<DailyUsageResponse>,
@@ -313,13 +358,23 @@ pub fn summarize(
         BTreeMap::new();
     let mut providers = BTreeMap::new();
     let mut sources = BTreeMap::new();
+    let mut routes = BTreeMap::new();
+    let mut caller_kinds = BTreeMap::new();
+    let mut purposes = BTreeMap::new();
     let mut backends = BTreeMap::new();
     let mut missions = BTreeMap::new();
+    let mut root_missions = BTreeMap::new();
+    let mut titles: BTreeMap<&str, &str> = BTreeMap::new();
     let mut keys = BTreeMap::new();
     let mut accounts = BTreeMap::new();
-    let mut days: BTreeMap<String, (UsageTotals, u64)> = BTreeMap::new();
-    let mut hours: BTreeMap<String, (UsageTotals, u64)> = BTreeMap::new();
+    let mut days: BTreeMap<String, Bucket> = BTreeMap::new();
+    let mut hours: BTreeMap<String, Bucket> = BTreeMap::new();
 
+    for r in records {
+        if let (Some(id), Some(title)) = (r.mission_id.as_deref(), r.mission_title.as_deref()) {
+            titles.insert(id, title);
+        }
+    }
     for r in records {
         let provider = r
             .provider
@@ -329,7 +384,6 @@ pub fn summarize(
         if !filter.matches(r, provider.as_deref()) {
             continue;
         }
-        let router = u64::from(r.source == UsageSource::Router);
         totals.add(r);
         let model = models
             .entry((r.model.clone(), r.source))
@@ -337,7 +391,19 @@ pub fn summarize(
         model.1.add(r);
         add_group(&mut providers, provider.as_deref(), None, r);
         add_group(&mut sources, Some(r.source.as_str()), None, r);
+        add_group(&mut routes, Some(r.source.route()), None, r);
+        add_group(&mut caller_kinds, Some(&r.caller_kind), None, r);
+        if r.purpose.is_some() {
+            add_group(&mut purposes, r.purpose.as_deref(), None, r);
+        }
         add_group(&mut backends, r.backend.as_deref(), None, r);
+        let root = r.root_mission_id.as_deref().or(r.mission_id.as_deref());
+        add_group(
+            &mut root_missions,
+            root,
+            root.and_then(|id| titles.get(id).copied()),
+            r,
+        );
         add_group(
             &mut missions,
             r.mission_id.as_deref(),
@@ -354,15 +420,11 @@ pub fn summarize(
             add_group(&mut accounts, r.account_id.as_deref(), None, r);
         }
         if let Some(day) = r.timestamp.get(..10) {
-            let entry = days.entry(day.to_string()).or_default();
-            entry.0.add(r);
-            entry.1 += router;
+            days.entry(day.to_string()).or_default().add(r);
         }
         if hourly {
             if let Some(hour) = r.timestamp.get(..13) {
-                let entry = hours.entry(hour.to_string()).or_default();
-                entry.0.add(r);
-                entry.1 += router;
+                hours.entry(hour.to_string()).or_default().add(r);
             }
         }
     }
@@ -387,24 +449,30 @@ pub fn summarize(
         by_model,
         by_provider: groups(providers),
         by_source: groups(sources),
+        by_route: groups(routes),
+        by_caller_kind: groups(caller_kinds),
+        by_purpose: groups(purposes),
         by_backend: groups(backends),
         by_mission: groups(missions),
+        by_root_mission: groups(root_missions),
         by_api_key: groups(keys),
         by_account: groups(accounts),
         by_day: days
             .into_iter()
-            .map(|(day, (totals, router_requests))| DailyUsageResponse {
+            .map(|(day, b)| DailyUsageResponse {
                 day,
-                totals,
-                router_requests,
+                totals: b.totals,
+                router_requests: b.router_requests,
+                by_caller_kind: b.by_caller_kind,
             })
             .collect(),
         by_hour: hours
             .into_iter()
-            .map(|(hour, (totals, router_requests))| HourlyUsageResponse {
+            .map(|(hour, b)| HourlyUsageResponse {
                 hour,
-                totals,
-                router_requests,
+                totals: b.totals,
+                router_requests: b.router_requests,
+                by_caller_kind: b.by_caller_kind,
             })
             .collect(),
     }
@@ -423,6 +491,12 @@ mod tests {
             backend: None,
             mission_id: None,
             mission_title: None,
+            root_mission_id: None,
+            caller_kind: match source {
+                UsageSource::Harness => "mission".into(),
+                UsageSource::Router => "script".into(),
+            },
+            purpose: None,
             api_key_id: None,
             api_key_name: None,
             account_id: None,
@@ -430,6 +504,7 @@ mod tests {
             output_tokens: 10,
             cache_creation_tokens: 0,
             cache_read_tokens: 50,
+            reasoning_tokens: 0,
             cost_cents: 3,
             cost_known: true,
         }
@@ -634,5 +709,61 @@ mod tests {
             Some("muse-code")
         );
         assert_eq!(infer_provider_for_model("unknown"), None);
+    }
+
+    #[test]
+    fn caller_kind_purpose_and_root_mission_breakdowns() {
+        let mut sub = record(UsageSource::Harness, "m", "10");
+        sub.caller_kind = "subagent".into();
+        sub.mission_id = Some("child".into());
+        sub.root_mission_id = Some("root".into());
+        let mut root = record(UsageSource::Harness, "m", "10");
+        root.mission_id = Some("root".into());
+        root.root_mission_id = Some("root".into());
+        root.mission_title = Some("Root mission".into());
+        let mut core = record(UsageSource::Router, "m", "11");
+        core.caller_kind = "core".into();
+        core.purpose = Some("mission_title".into());
+        let s = summarize(
+            &[sub, root, core],
+            &parse_window(Some("24h")).unwrap(),
+            None,
+            &UsageFilter::default(),
+        );
+        let kinds: Vec<_> = s
+            .by_caller_kind
+            .iter()
+            .map(|g| g.key.clone().unwrap())
+            .collect();
+        assert_eq!(kinds.len(), 3);
+        assert!(kinds.contains(&"subagent".to_string()));
+        assert_eq!(s.by_purpose.len(), 1);
+        assert_eq!(s.by_purpose[0].key.as_deref(), Some("mission_title"));
+        let root_group = s
+            .by_root_mission
+            .iter()
+            .find(|g| g.key.as_deref() == Some("root"))
+            .unwrap();
+        assert_eq!(root_group.totals.requests, 2);
+        assert_eq!(root_group.label.as_deref(), Some("Root mission"));
+        assert_eq!(s.by_hour[0].by_caller_kind.get("subagent"), Some(&160));
+        let routes: Vec<_> = s.by_route.iter().map(|g| g.key.clone().unwrap()).collect();
+        assert!(
+            routes.contains(&"proxy".to_string()) && routes.contains(&"harness_direct".to_string())
+        );
+        let core_only = summarize(
+            &s_records(),
+            &parse_window(Some("24h")).unwrap(),
+            None,
+            &UsageFilter {
+                caller_kind: Some("core".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(core_only.totals.requests, 0);
+    }
+
+    fn s_records() -> Vec<UsageRecord> {
+        vec![record(UsageSource::Harness, "m", "10")]
     }
 }
