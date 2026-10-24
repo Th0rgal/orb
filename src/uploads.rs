@@ -33,9 +33,8 @@ pub struct Placement {
 /// A batch accepts files for this long after its first file; then it is sealed.
 pub const BATCH_OPEN_SECS: u64 = 6 * 60 * 60;
 
-/// Claims `batch` for `token`, or checks that `token` owns it. The claim is an
-/// atomic `create_new` of `<root>/.batches/<batch>`, holding SHA-256(token).
-fn claim_batch(root: &Path, batch: &str, token: &str) -> Result<(), String> {
+/// SHA-256 of a well-formed batch token. Only this digest is ever written to disk.
+fn token_digest(token: &str) -> Result<String, String> {
     if token.len() < 32
         || token.len() > 128
         || !token
@@ -44,17 +43,40 @@ fn claim_batch(root: &Path, batch: &str, token: &str) -> Result<(), String> {
     {
         return Err("Invalid folder upload token".into());
     }
+    Ok(hex::encode(Sha256::digest(token.as_bytes())))
+}
+
+/// The placement as persisted in session metadata: the raw token replaced by its digest.
+fn stored_placement(placement: &Placement) -> Result<(Placement, Option<String>), String> {
+    let digest = placement
+        .batch_token
+        .as_deref()
+        .map(token_digest)
+        .transpose()?;
+    Ok((
+        Placement {
+            batch_token: None,
+            ..placement.clone()
+        },
+        digest,
+    ))
+}
+
+/// Claims `batch` for a token digest, or checks that the digest owns it. The
+/// claim is an atomic `create_new` of `<root>/.batches/<batch>`.
+fn claim_batch(root: &Path, batch: &str, digest: &str) -> Result<(), String> {
     let owners = root.join(".batches");
     fs::create_dir_all(&owners).map_err(|e| format!("Create batch registry: {e}"))?;
     let owner = owners.join(batch);
-    let digest = hex::encode(Sha256::digest(token.as_bytes()));
-    match OpenOptions::new().write(true).create_new(true).open(&owner) {
-        Ok(mut file) => {
-            file.write_all(digest.as_bytes())
-                .and_then(|_| file.sync_all())
-                .map_err(|e| format!("Record batch owner: {e}"))?;
-            return Ok(());
-        }
+    let digest = digest.to_string();
+    // Write the digest beside the registry entry, then link it into place:
+    // link() is atomic and never replaces, so a reader sees all or nothing.
+    let staged = owners.join(format!(".{batch}.{}", uuid::Uuid::new_v4()));
+    fs::write(&staged, digest.as_bytes()).map_err(|e| format!("Record batch owner: {e}"))?;
+    let linked = fs::hard_link(&staged, &owner);
+    let _ = fs::remove_file(&staged);
+    match linked {
+        Ok(()) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(format!("Record batch owner: {e}")),
     }
@@ -127,8 +149,11 @@ struct SessionMeta {
     total_chunks: usize,
     #[serde(default)]
     receipt: Option<Receipt>,
+    /// Never holds `batch_token`; see `batch_token_digest`.
     #[serde(flatten)]
     placement: Placement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    batch_token_digest: Option<String>,
 }
 
 pub fn validate_upload_name(name: &str) -> Result<(), String> {
@@ -173,7 +198,12 @@ pub fn validate_relative_upload_path(relative: &str) -> Result<String, String> {
 
 /// Creates the parent directory and returns where the file must be created.
 /// The result is always inside `root` (already canonical).
-fn destination(root: &Path, name: &str, placement: &Placement) -> Result<PathBuf, String> {
+fn destination(
+    root: &Path,
+    name: &str,
+    placement: &Placement,
+    digest: Option<&str>,
+) -> Result<PathBuf, String> {
     match (&placement.batch_id, &placement.relative_path) {
         (None, None) => {
             let directory = root.join(uuid::Uuid::new_v4().to_string());
@@ -186,11 +216,8 @@ fn destination(root: &Path, name: &str, placement: &Placement) -> Result<PathBuf
                 .hyphenated()
                 .to_string();
             let relative = validate_relative_upload_path(relative)?;
-            let token = placement
-                .batch_token
-                .as_deref()
-                .ok_or("Folder uploads need a batch token")?;
-            claim_batch(root, &batch, token)?;
+            let digest = digest.ok_or("Folder uploads need a batch token")?;
+            claim_batch(root, &batch, digest)?;
             let path = root.join(batch).join(&relative);
             let parent = path.parent().ok_or("Invalid folder path")?;
             fs::create_dir_all(parent).map_err(|e| format!("Create upload folder: {e}"))?;
@@ -264,9 +291,18 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
     validate_upload_name(&req.name)?;
     if let Some(relative) = &req.placement.relative_path {
         validate_relative_upload_path(relative)?;
-        if req.placement.batch_token.is_none() {
-            return Err("Folder uploads need a batch token".into());
-        }
+        let (_, digest) = stored_placement(&req.placement)?;
+        let digest = digest.ok_or("Folder uploads need a batch token")?;
+        let batch = uuid::Uuid::parse_str(req.placement.batch_id.as_deref().unwrap_or(""))
+            .map_err(|_| "Invalid folder upload ID".to_string())?
+            .hyphenated()
+            .to_string();
+        fs::create_dir_all(root).map_err(|e| format!("Create upload directory: {e}"))?;
+        claim_batch(
+            &root.canonicalize().map_err(|e| e.to_string())?,
+            &batch,
+            &digest,
+        )?;
     }
     if req.size > MAX_RESUMABLE_BYTES {
         return Err("Files must be 2 GiB or smaller".into());
@@ -289,7 +325,10 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
         )
         .map_err(|e| format!("Parse session metadata: {e}"))?;
         if existing.name != req.name
-            || existing.placement != req.placement
+            || (
+                existing.placement.clone(),
+                existing.batch_token_digest.clone(),
+            ) != stored_placement(&req.placement)?
             || existing.size != req.size
             || existing.chunk_size != chunk_size
         {
@@ -329,7 +368,8 @@ pub fn init_or_status_session(root: &Path, req: SessionInit) -> Result<SessionSt
         chunk_size,
         total_chunks,
         receipt: None,
-        placement: req.placement.clone(),
+        placement: stored_placement(&req.placement)?.0,
+        batch_token_digest: stored_placement(&req.placement)?.1,
     };
     fs::write(
         &meta_path,
@@ -458,7 +498,12 @@ pub fn complete_session(root: &Path, upload_id: &str) -> Result<Receipt, String>
     drop(part);
 
     let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
-    let final_path = destination(&canonical_root, &meta.name, &meta.placement)?;
+    let final_path = destination(
+        &canonical_root,
+        &meta.name,
+        &meta.placement,
+        meta.batch_token_digest.as_deref(),
+    )?;
     // link() fails if the target exists: an atomic no-replace placement, so a
     // concurrent upload of the same path can never overwrite the other.
     if let Err(e) = fs::hard_link(&part_path, &final_path) {
@@ -505,7 +550,8 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
     }
     std::fs::create_dir_all(root).map_err(|e| format!("Create upload directory: {e}"))?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let path = destination(&root, &upload.name, &upload.placement)?;
+    let (_, digest) = stored_placement(&upload.placement)?;
+    let path = destination(&root, &upload.name, &upload.placement, digest.as_deref())?;
     let single = upload.placement.batch_id.is_none();
     let result: Result<Receipt, String> = (|| {
         let mut file = OpenOptions::new()
@@ -578,6 +624,30 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["a.txt", "e.txt"]);
+    }
+    #[test]
+    fn session_metadata_never_stores_the_batch_token() {
+        let root = tempfile::tempdir().unwrap();
+        let init = SessionInit {
+            upload_id: "sess_secret".into(),
+            name: "a.bin".into(),
+            size: 1,
+            chunk_size: Some(4),
+            placement: folder(BATCH, "F/a.bin"),
+        };
+        init_or_status_session(root.path(), init.clone()).unwrap();
+        let meta = root.path().join(".sessions/sess_secret/meta.json");
+        assert!(!fs::read_to_string(&meta).unwrap().contains(TOKEN));
+        // Resuming with the same token works; another token does not.
+        init_or_status_session(root.path(), init.clone()).unwrap();
+        let mut foreign = init.clone();
+        foreign.placement.batch_token = Some("ffffffffffffffffffffffffffffffffffffffff".into());
+        assert!(init_or_status_session(root.path(), foreign).is_err());
+        write_session_chunk(root.path(), "sess_secret", 0, b"z").unwrap();
+        complete_session(root.path(), "sess_secret").unwrap();
+        let meta = fs::read_to_string(&meta).unwrap();
+        assert!(!meta.contains(TOKEN));
+        assert!(meta.contains(&hex::encode(Sha256::digest(TOKEN.as_bytes()))));
     }
     #[test]
     fn concurrent_uploads_of_one_path_never_overwrite() {
