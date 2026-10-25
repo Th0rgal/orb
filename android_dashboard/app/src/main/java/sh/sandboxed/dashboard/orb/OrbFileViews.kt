@@ -116,13 +116,13 @@ fun OrbMarkdownWithFiles(text: String, streaming: Boolean = false) {
     val files = LocalOrbFiles.current
     val segments = remember(text, streaming) { OrbFileRefs.segments(text, streaming) }
     if (segments.size == 1 && segments[0] is OrbFileSegment.Text) {
-        OrbRichText(markdown = (segments[0] as OrbFileSegment.Text).text, tone = OrbRichTextTone.Primary)
+        OrbRichText(markdown = (segments[0] as OrbFileSegment.Text).text, tone = OrbRichTextTone.Primary, streaming = streaming)
         return
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         segments.forEach { segment ->
             when (segment) {
-                is OrbFileSegment.Text -> OrbRichText(markdown = segment.text, tone = OrbRichTextTone.Primary)
+                is OrbFileSegment.Text -> OrbRichText(markdown = segment.text, tone = OrbRichTextTone.Primary, streaming = streaming && segment == segments.last())
                 is OrbFileSegment.File -> {
                     val ref = OrbFileRefs.enrich(segment.ref, files?.shared ?: emptyList())
                     val core = files?.core

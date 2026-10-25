@@ -5,7 +5,13 @@ import SwiftUI
 /// Working clock and streaming re-renders stay cheap on long transcripts.
 @MainActor @Observable
 final class OrbTranscriptModel {
-    var events: [StoredEvent] = []
+    /// Large tool results are kept bounded (`StoredEvent.compacted`): a long mission held
+    /// tens of MB of build output that the work fold never shows.
+    var events: [StoredEvent] {
+        get { storedEvents }
+        set { storedEvents = newValue.map(\.compacted) }
+    }
+    private var storedEvents: [StoredEvent] = []
     private(set) var workModel = OrbWorkModel()
     private(set) var changedFiles: [OrbTurnSummary.FileChange] = []
     /// Subagents and machines this mission started, lifted out of the work fold.
@@ -113,5 +119,22 @@ final class OrbTranscriptModel {
             }
         }
         return rows
+    }
+}
+
+extension StoredEvent {
+    /// Tool output kept per event: more than the work fold shows (1,200 characters after
+    /// trimming), so its display is unchanged.
+    nonisolated static let resultKeepUTF8 = 4096
+
+    /// The event as the client keeps it: a tool result longer than `resultKeepUTF8` bytes is
+    /// cut to its head, except for orchestration tools, whose JSON results are parsed whole.
+    nonisolated var compacted: StoredEvent {
+        guard eventType == "tool_result", content.utf8.count > Self.resultKeepUTF8,
+              !OrbOrchestration.needsFullResult(toolName ?? "") else { return self }
+        return StoredEvent(id: id, missionId: missionId, sequence: sequence, eventType: eventType, timestamp: timestamp,
+                           eventId: eventId, toolCallId: toolCallId, toolName: toolName,
+                           content: String(content.utf8.prefix(Self.resultKeepUTF8)) ?? String(content.prefix(Self.resultKeepUTF8 / 4)),
+                           metadata: metadata)
     }
 }

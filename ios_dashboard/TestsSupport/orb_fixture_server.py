@@ -126,6 +126,19 @@ def synthetic_finished_antigravity():
     REPLAY[mid]=(rows, history)
     REPLAY_MISSION[mid]=dict(title='Finished antigravity mission',status='completed',backend='antigravity',model_override='gemini-4-argon-medium',track='mission-finished',updated_at='2026-10-08T10:00:00Z')
 
+STREAM_LONG_HEAD='STREAM_LONG_OK: '
+def stream_long_answer():
+    """An 8 KB Markdown answer (headings, lists, code, a table) streamed as 4-character
+    deltas: the cost of re-rendering a growing reply (OrbPerformanceUITests). Synthetic."""
+    body=STREAM_LONG_HEAD+'here is the full report.'
+    k=0
+    while len(body) < 8000:
+        body+=(f'\n\n## Section {k}\n\nThe pass rewrote `Module{k}.lean`, kept every **invariant**, and re-ran the suite.\n\n'
+               f'- step {k}.1 checked\n- step {k}.2 proved\n\n| Case | Before | After |\n| --- | ---: | ---: |\n| {k} | {k*3} ms | {k} ms |\n\n'
+               f'```lean\ntheorem pass{k} : {k} + 0 = {k} := by simp\n```')
+        k+=1
+    return body+'\n\nSTREAM_LONG_END'
+
 RESET_AT = 0
 def reset():
     global CORDONED, HEALTH_DELAY, FAIL_MISSIONS, RESET_AT
@@ -370,7 +383,9 @@ class Handler(BaseHTTPRequestHandler):
                 for e in rows:
                     seen=e['sequence']; kind=e['event_type']
                     if kind=='assistant_message':
-                        for i in range(0,len(e['content']),4): emit('text_delta', {'delta':e['content'][i:i+4],'mission_id':mid}); time.sleep(0.03)
+                        # ~100 tokens/s for the long streamed answer (performance tests), slower otherwise.
+                        pause=0.01 if e['content'].startswith(STREAM_LONG_HEAD) else 0.03
+                        for i in range(0,len(e['content']),4): emit('text_delta', {'delta':e['content'][i:i+4],'mission_id':mid}); time.sleep(pause)
                     emit(kind, {'mission_id':mid,'sequence':e['sequence'],'content':e['content'],'tool_call_id':e['tool_call_id'],'name':e['tool_name'],'result':e['content']})
                 if not rows: self.wfile.write(b': ping\n\n'); self.wfile.flush()
                 time.sleep(0.5)
@@ -507,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
                 m['status']='running'; later(mid,6,'mission_status_changed','completed',status='completed')
             for i in range(3):
                 later(mid,1+i,'tool_call',json.dumps({'command':f'lake build Step{i}'}))
-            later(mid,5,'assistant_message','REPLAY_REPLY_OK: still building.')
+            later(mid,5,'assistant_message',stream_long_answer() if 'STREAM_LONG' in body['content'] else 'REPLAY_REPLY_OK: still building.')
             RECEIPTS[key]={'id':key,'queued':False}; return self.send(RECEIPTS[key])
         if p=='/api/control/message':
             m=MISSIONS[body['mission_id']]; m['history'] += [{'role':'user','content':body['content']},{'role':'assistant','content':'FOLLOWUP_OK'}]

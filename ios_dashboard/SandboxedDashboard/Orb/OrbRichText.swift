@@ -114,6 +114,8 @@ final class OrbWebViewPool {
 /// of standard prose, headings, lists, blockquotes, and copyable code fences.
 struct OrbNativeMarkdownView: View {
     let source: String
+    /// A reply still arriving: parsed incrementally (`streamingBlocks`), not cached by content.
+    var streaming = false
     var onArtifact: (String) -> Void = { _ in }
     @State private var copiedBlockIndex: Int?
 
@@ -300,29 +302,26 @@ struct OrbNativeMarkdownView: View {
         return blocks
     }
 
-    @MainActor private static var blockCache: [Int: [Block]] = [:]
-    @MainActor private static var inlineCache: [Int: AttributedString] = [:]
+    // Keyed by the text itself: a hash collision must not show another message's blocks.
+    @MainActor static let blockCache = OrbTextCache<[Block]>(capacity: 256)
+    @MainActor private static let inlineCache = OrbTextCache<AttributedString>(capacity: 1024)
 
     @MainActor static func trimCaches() { blockCache.removeAll(); inlineCache.removeAll() }
 
     @MainActor static func cachedBlocks(_ source: String) -> [Block] {
-        let key = source.hashValue
-        if let cached = blockCache[key] { return cached }
+        if let cached = blockCache.get(source) { return cached }
         let parsed = parseBlocks(source)
-        if blockCache.count > 256 { blockCache.removeAll(keepingCapacity: true) }
-        blockCache[key] = parsed
+        blockCache.put(source, parsed)
         return parsed
     }
 
     @MainActor private static func cachedInline(_ raw: String) -> AttributedString? {
         guard raw.count <= 4000 else { return nil }
-        let key = raw.hashValue
-        if let cached = inlineCache[key] { return cached }
+        if let cached = inlineCache.get(raw) { return cached }
         guard let attr = try? AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return nil
         }
-        if inlineCache.count > 1024 { inlineCache.removeAll(keepingCapacity: true) }
-        inlineCache[key] = attr
+        inlineCache.put(raw, attr)
         return attr
     }
 
@@ -332,7 +331,7 @@ struct OrbNativeMarkdownView: View {
     var body: some View {
         let truncated = !showFullSource && source.count > Self.maxInlineSourceChars
         let effectiveSource = truncated ? OrbNativeMarkdownView.inlinePreview(source, limit: Self.maxInlineSourceChars) : source
-        let blocks = Self.cachedBlocks(effectiveSource)
+        let blocks = streaming ? Self.streamingBlocks(effectiveSource) : Self.cachedBlocks(effectiveSource)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 switch block {
@@ -493,6 +492,8 @@ struct OrbNativeMarkdownView: View {
 
 struct OrbRichText: View {
     let source: String
+    /// A reply still arriving (see `OrbNativeMarkdownView.streaming`).
+    var streaming = false
     var onArtifact: (String) -> Void = { _ in }
     /// Render standard Markdown natively in SwiftUI for instant 0ms layout and scroll-to-bottom;
     /// only fall back to WKWebView when LaTeX math or HTML images are present.
@@ -504,7 +505,7 @@ struct OrbRichText: View {
     }
     var body: some View {
         if Self.preferNativeWhenSimple && !OrbNativeMarkdownView.requiresWebRenderer(source) {
-            OrbNativeMarkdownView(source: source, onArtifact: onArtifact)
+            OrbNativeMarkdownView(source: source, streaming: streaming, onArtifact: onArtifact)
         } else {
             RichWeb(source: source, height: Binding(
                 get: { resolvedHeight },
