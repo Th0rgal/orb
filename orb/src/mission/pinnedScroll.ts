@@ -47,8 +47,16 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     if (!el || pinned() || typeof document.elementFromPoint !== "function") { anchor = undefined; return; }
     const box = el.getBoundingClientRect();
     const hit = document.elementFromPoint(box.left + box.width / 2, box.top + 8);
-    const row = hit?.closest("[data-turn-key]") ?? null;
-    anchor = hit && hit !== el && el.contains(hit) ? { el: hit, top: hit.getBoundingClientRect().top, row, rowTop: row?.getBoundingClientRect().top ?? 0 } : undefined;
+    let row = hit?.closest("[data-turn-key]") ?? null;
+    let target: Element | null | undefined = hit;
+    // A container (the column, the list, a gap spacer) does not move with what
+    // is inserted inside it, e.g. older turns paged in above: anchor on the
+    // first turn the reader sees instead.
+    if (!row) {
+      row = [...el.querySelectorAll("[data-turn-key]")].find(r => r.getBoundingClientRect().bottom > box.top) ?? null;
+      target = row;
+    }
+    anchor = target && target !== el && el.contains(target) ? { el: target, top: target.getBoundingClientRect().top, row, rowTop: row?.getBoundingClientRect().top ?? 0 } : undefined;
   };
   /** Put the anchor back where the reader saw it. A folded-away anchor falls back to its turn. */
   const restore = () => {
