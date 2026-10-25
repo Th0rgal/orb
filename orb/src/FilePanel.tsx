@@ -133,6 +133,8 @@ export function FilePanelProvider(p: {
   const [tree, setTree] = createSignal(true),
     [sourceMode, setSourceMode] = createSignal(false),
     [maximized, setMaximized] = createSignal(false),
+    // Split: the panel takes the window's right half at full height, the sidebar steps aside.
+    [split, setSplit] = createSignal(false),
     [search, setSearch] = createSignal<string | null>(null),
     [results, setResults] = createSignal<FileRef[]>([]),
     [choices, setChoices] = createSignal<FileRef[]>([]),
@@ -157,11 +159,11 @@ export function FilePanelProvider(p: {
   });
   createEffect(() => {
     const app = layout();
-    if (app) { app.dataset.filesOpen = String((opened() || sideVisible()) && available()); app.dataset.editorExpanded=String((opened() || sideVisible())&&available()&&maximized()); }
+    if (app) { app.dataset.filesOpen = String((opened() || sideVisible()) && available()); app.dataset.editorExpanded=String((opened() || sideVisible())&&available()&&maximized()); app.dataset.filesSplit=String((opened() || sideVisible())&&available()&&split()); }
   });
   onCleanup(() => {
     const app = layout();
-    if (app) { delete app.dataset.filesOpen; delete app.dataset.editorExpanded; }
+    if (app) { delete app.dataset.filesOpen; delete app.dataset.editorExpanded; delete app.dataset.filesSplit; }
   });
   const selected = createMemo(() =>
     tabs().find((t) => identity(t) === active()),
@@ -521,7 +523,13 @@ export function FilePanelProvider(p: {
     if ((opened() || sideVisible()) && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "f" && !e.isComposing) {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (!e.repeat) setMaximized(v => !v);
+      if (!e.repeat) { setSplit(false); setMaximized(v => !v); }
+      return;
+    }
+    if ((opened() || sideVisible()) && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "e" && !e.isComposing) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!e.repeat) { setMaximized(false); setSplit(v => !v); }
       return;
     }
     if (openSide() && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "j" && !e.isComposing) {
@@ -556,11 +564,12 @@ export function FilePanelProvider(p: {
       setSourceMode((v) => !v);
     }
     if (e.key === "Escape" && document.querySelector(".find-bar")) return;
-    if (e.key === "Escape" && (maximized() || panel?.contains(document.activeElement))) {
+    if (e.key === "Escape" && (maximized() || split() || panel?.contains(document.activeElement))) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (search() !== null) setSearch(null);
       else if (maximized()) setMaximized(false);
+      else if (split()) setSplit(false);
       else setOpened(false);
     }
   }
@@ -882,8 +891,11 @@ export function FilePanelProvider(p: {
             />
             <div class="file-tabs file-header" data-tauri-drag-region>
               
-              <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?"Restore conversation (⌘⇧F)":"Expand file editor (⌘⇧F)"} aria-keyshortcuts="Meta+Shift+F" aria-pressed={maximized()} onClick={()=>setMaximized(v=>!v)}>
+              <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?"Restore conversation (⌘⇧F)":"Expand file editor (⌘⇧F)"} aria-keyshortcuts="Meta+Shift+F" aria-pressed={maximized()} onClick={()=>{setSplit(false);setMaximized(v=>!v);}}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d={maximized()?"M4 9h5V4m6 0v5h5M4 15h5v5m6 0v-5h5":"M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"}/></svg>
+              </button>
+              <button aria-label={split()?"Exit side-by-side view":"Side by side, full height"} title={split()?"Exit side-by-side view (⌘⇧E or Esc)":"Side by side, full height (⌘⇧E)"} aria-keyshortcuts="Meta+Shift+E" aria-pressed={split()} onClick={()=>{setMaximized(false);setSplit(v=>!v);}}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/>{split()?<path d="M15 10l-2 2 2 2"/>:<path d="M16 10l2 2-2 2"/>}</svg>
               </button>
               <button
                 aria-label="Toggle file explorer"
