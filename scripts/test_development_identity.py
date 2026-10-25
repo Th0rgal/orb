@@ -25,6 +25,17 @@ class IdentityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             identity.validate_bundle(b)
 
+    def test_proxy_jump_must_name_an_earlier_host(self):
+        b = self.bundle()
+        core = {"alias": "agent-core", "hostname": "203.0.113.1", "user": "root"}
+        mac = {"alias": "air", "hostname": "100.64.0.2", "user": "thomas", "proxy_jump": "agent-core"}
+        b["ssh_hosts"] = [core, mac]
+        identity.validate_bundle(b)
+        for hosts in ([mac, core], [core, {**mac, "proxy_jump": "nowhere"}], [core, {**mac, "port": "22"}]):
+            b["ssh_hosts"] = hosts
+            with self.assertRaises(ValueError):
+                identity.validate_bundle(b)
+
     def test_private_key_named_public_is_rejected(self):
         b = self.bundle()
         b["secrets"]["GITHUB_SSH_PUBLIC_KEY"] = "-----BEGIN OPENSSH PRIVATE KEY-----"

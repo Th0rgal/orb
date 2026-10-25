@@ -82,11 +82,16 @@ def validate_bundle(bundle):
     for public in ["GITHUB_SSH_PUBLIC_KEY", "PALOMA_SSH_PUBLIC_KEY"]:
         if "PRIVATE KEY" in secrets[public] or not secrets[public].startswith("ssh-ed25519 "):
             raise ValueError("expected an Ed25519 public key")
+    aliases = set()
     for host in bundle["ssh_hosts"]:
-        if set(host) != {"alias", "hostname", "user"}:
+        # `proxy_jump` names an earlier host, e.g. a tailnet-only Mac behind agent-core.
+        if not {"alias", "hostname", "user"} <= set(host) <= {"alias", "hostname", "user", "proxy_jump"}:
             raise ValueError("invalid SSH host")
         if any(not v or any(c.isspace() for c in v) for v in host.values()):
             raise ValueError("invalid SSH host value")
+        if "proxy_jump" in host and host["proxy_jump"] not in aliases:
+            raise ValueError("SSH proxy_jump must name an earlier host")
+        aliases.add(host["alias"])
 
 
 def github_login(token):
@@ -326,6 +331,8 @@ def prepare_generation(root, bundle):
         ssh = f"Host github.com\n  User git\n  IdentityFile {stage}/ssh/github\n"
         for host in bundle["ssh_hosts"]:
             ssh += f"Host {host['alias']} {host['hostname']}\n  HostName {host['hostname']}\n  User {host['user']}\n  IdentityFile {stage}/ssh/paloma\n"
+            if "proxy_jump" in host:
+                ssh += f"  ProxyJump {host['proxy_jump']}\n"
         ssh += f"Host *\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile {stage}/ssh/known_hosts\n  GlobalKnownHostsFile /dev/null\n  ConnectTimeout 10\n"
         write(stage / "ssh/config", ssh)
         gpg = stage / "gnupg"
