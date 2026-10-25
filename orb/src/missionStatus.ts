@@ -39,6 +39,7 @@ export const isQueued = has(QUEUED_STATUSES);
 export const isLive = has(LIVE_STATUSES);
 export const isWorking = has(WORKING_STATUSES);
 export const isArchivable = has(ARCHIVABLE_STATUSES);
+export const isArchived = has(ARCHIVED_STATUSES);
 export const isReopenable = has(REOPENABLE_STATUSES);
 export const isFailedStatus = has(FAILED_STATUSES);
 export const isReady = has(READY_STATUSES);

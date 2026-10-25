@@ -196,6 +196,19 @@ pub(super) async fn automation_scheduler_loop(
                 }
             };
 
+            // An archived mission keeps no reminders: drop, record, never fire.
+            if mission.status == MissionStatus::Acknowledged
+                && automation.variables.contains_key("__wakeup_source")
+            {
+                if let Err(error) =
+                    continuations::drop_for_archived(&mission_store, mission.id, Some(&automation))
+                        .await
+                {
+                    tracing::warn!(automation_id = %automation.id, %error, "Could not drop reminder of an archived mission");
+                }
+                continue;
+            }
+
             if matches!(automation.trigger, TriggerType::AgentFinished)
                 && mission_is_terminal_for_goal_loop(mission.status)
             {
@@ -852,7 +865,7 @@ fn native_schedule_tick(
 }
 
 /// An agent-created schedule outlives neither its TTL nor a finished mission.
-/// Acknowledged/AwaitingUser missions keep it: reading a mission is not an end.
+/// AwaitingUser keeps it; an archived (Acknowledged) mission is dropped earlier.
 fn native_schedule_owner_ended(
     automation: &mission_store::Automation,
     status: MissionStatus,
