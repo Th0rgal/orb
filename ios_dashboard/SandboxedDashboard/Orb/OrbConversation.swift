@@ -55,7 +55,8 @@ struct OrbConversation: View {
     @State var draftSaveTask: Task<Void, Never>?
     @State var eventRefreshTask: Task<Void, Never>?
     @State var optimisticPrompt: String?
-    @State var liveText = ""
+    /// Streamed reply text, one update per frame; only the streaming bubble reads `text`.
+    @State var live = OrbLiveText()
     @State var answered: Set<String> = []
     @State var expandedLogIDs: Set<String> = []
     @State var expandedUserMessageIDs: Set<String> = []
@@ -110,10 +111,8 @@ struct OrbConversation: View {
         OrbTranscriptModel.computeHistory(isCloud: isCloud, turns: turns, mission: mission, events: events, optimisticPrompt: optimisticPrompt)
     }
 
-    /// Live text minus what stored history already holds (no doubled reply after a reload).
-    var visibleLiveText: String {
-        OrbSendFlow.dedupeLiveText(liveText, stored: history.filter { $0.1 == "assistant" }.map(\.2))
-    }
+    /// The last stored assistant texts, which the live text is deduplicated against.
+    var storedAnswers: [String] { Array(history.lazy.filter { $0.1 == "assistant" }.suffix(3).map(\.2)) }
 
     func baseStepLabel() -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
@@ -127,7 +126,7 @@ struct OrbConversation: View {
             }
         }
         if handoffActive { return "Sending…" }
-        return !liveText.isEmpty ? "Writing…" : "Working…"
+        return live.hasText ? "Writing…" : "Working…"
     }
 
     /// Same wording as the desktop: the step, then how long the turn has been running.

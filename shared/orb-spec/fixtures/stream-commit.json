@@ -1,0 +1,14 @@
+{
+  "description": "Generated from lean/Orb/Stream.lean by scripts/gen_stream_fixtures.py; do not edit. For each doc (split on newlines), commits[k] is the committed line count after its first k lines: the end of the last blank line outside every code fence (block-parser backtick toggle and pipe-table normalizer marker).",
+  "cases": [
+    {"doc": "Intro paragraph.\n\nSecond paragraph\ncontinues here.\n\n## Heading\n\n- a\n- b\n\nDone.", "commits": [0, 0, 2, 2, 2, 5, 5, 7, 7, 7, 10, 10]},
+    {"doc": "Before code.\n\n```swift\nlet a = 1\n\nlet b = 2\n```\n\nAfter code.\n\n", "commits": [0, 0, 2, 2, 2, 2, 2, 2, 8, 8, 10, 11]},
+    {"doc": "~~~\nnot closed by backticks\n\n```\n\nstill inside tilde\n~~~\n\nout", "commits": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]},
+    {"doc": "````md\n```\ninner\n```\n\n````\n\nafter four-tick fence", "commits": [0, 0, 0, 0, 0, 0, 0, 7, 7]},
+    {"doc": "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n> quote\n> more\n\n1. one\n2. two\n\n", "commits": [0, 0, 0, 0, 4, 4, 4, 7, 7, 7, 10, 11]},
+    {"doc": "  ```\n  indented fence\n\n  ```\n\t\ntail", "commits": [0, 0, 0, 0, 0, 5, 5]},
+    {"doc": "```mermaid\ngraph TD; A-->B;\n\nstill streaming", "commits": [0, 0, 0, 0, 0]},
+    {"doc": "no blank lines at all\njust\nlines", "commits": [0, 0, 0, 0]},
+    {"doc": "\n\n\nleading blanks", "commits": [0, 1, 2, 3, 3]}
+  ]
+}

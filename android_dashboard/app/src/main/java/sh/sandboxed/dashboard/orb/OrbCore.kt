@@ -572,33 +572,50 @@ object OrbDisk {
 }
 
 object OrbReadCache {
-    private val rowsByKey = ConcurrentHashMap<String, List<OrbRow>>()
+    /** Missions' rows kept in memory, least recently used dropped first (disk keeps them). */
+    const val MAX_ROW_KEYS = 64
+    /** Tool output kept per event, as on iOS (`StoredEvent.resultKeepUTF8`); the timeline never shows it. */
+    const val RESULT_KEEP_CHARS = 4096
+
+    private val rowsByKey = object : LinkedHashMap<String, List<OrbRow>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<OrbRow>>?) = size > MAX_ROW_KEYS
+    }
     private val dictByKey = ConcurrentHashMap<String, OrbDict>()
 
     fun clearMemory() {
-        rowsByKey.clear()
+        synchronized(rowsByKey) { rowsByKey.clear() }
         dictByKey.clear()
     }
 
+    /** Event rows as the client keeps them: long tool results cut to their head. */
+    fun compactEvents(rows: List<OrbRow>): List<OrbRow> = rows.map { row ->
+        val content = row.raw["content"] as? String
+        if (row.raw["event_type"] != "tool_result" || content == null || content.length <= RESULT_KEEP_CHARS) row
+        else row.copy(raw = row.raw + ("content" to content.take(RESULT_KEEP_CHARS)))
+    }
+
+    private fun bounded(key: String, rows: List<OrbRow>) = if (key.startsWith("mission_events_")) compactEvents(rows) else rows
+
     fun loadRows(key: String): List<OrbRow> {
-        rowsByKey[key]?.let { return it }
+        synchronized(rowsByKey) { rowsByKey[key] }?.let { return it }
         val raw = OrbDisk.read(key)
-        val rows = OrbJSON.dictList(raw).map { OrbRow(it) }
+        val rows = bounded(key, OrbJSON.dictList(raw).map { OrbRow(it) })
         if (rows.isNotEmpty()) {
-            rowsByKey[key] = rows
+            synchronized(rowsByKey) { rowsByKey[key] = rows }
         }
         return rows
     }
 
-    fun hasRowsInMemory(key: String): Boolean = rowsByKey.containsKey(key)
+    fun hasRowsInMemory(key: String): Boolean = synchronized(rowsByKey) { rowsByKey.containsKey(key) }
 
     fun saveRowsMemoryOnly(key: String, rows: List<OrbRow>) {
-        rowsByKey[key] = rows
+        synchronized(rowsByKey) { rowsByKey[key] = bounded(key, rows) }
     }
 
     fun saveRows(key: String, rows: List<OrbRow>) {
-        rowsByKey[key] = rows
-        val raw = rows.map { it.raw }
+        val kept = bounded(key, rows)
+        synchronized(rowsByKey) { rowsByKey[key] = kept }
+        val raw = kept.map { it.raw }
         CoroutineScope(Dispatchers.IO).launch {
             OrbDisk.write(key, raw)
         }

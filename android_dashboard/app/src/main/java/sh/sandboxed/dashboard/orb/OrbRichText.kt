@@ -423,13 +423,16 @@ class OrbRichWebViewHolder(context: Context) {
 fun OrbRichText(
     markdown: String,
     tone: OrbRichTextTone = OrbRichTextTone.Primary,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** A reply still arriving: its committed prefix is parsed once (OrbStreamBlocks). */
+    streaming: Boolean = false
 ) {
     val cleaned = remember(markdown) { cleanText(markdown) }
     if (!needsWebRenderer(cleaned)) {
         OrbNativeMarkdown(
             markdown = cleaned,
             tone = tone,
+            streaming = streaming,
             modifier = modifier.fillMaxWidth()
         )
         return
@@ -490,10 +493,12 @@ internal sealed class OrbMdBlock {
 private fun OrbNativeMarkdown(
     markdown: String,
     tone: OrbRichTextTone,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    streaming: Boolean = false
 ) {
     val context = LocalContext.current
-    val blocks = remember(markdown) { parseMdBlocks(markdown) }
+    val streamBlocks = remember { OrbStreamBlocks() }
+    val blocks = remember(markdown, streaming) { if (streaming) streamBlocks.blocks(markdown) else OrbMdCache.parse(markdown) }
     val baseColor = if (tone == OrbRichTextTone.Primary) Color(0xFFE5E5E5) else OrbStyle.textSecondary
     var copiedBlockIdx by remember { androidx.compose.runtime.mutableIntStateOf(-1) }
 

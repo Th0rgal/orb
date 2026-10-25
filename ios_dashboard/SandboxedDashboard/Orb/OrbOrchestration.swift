@@ -47,6 +47,11 @@ enum OrbOrchestration {
         return n
     }
 
+    /// Tools whose results `build` parses as JSON, so they must be kept whole.
+    nonisolated static func needsFullResult(_ name: String) -> Bool {
+        kind(name) != nil || ["get_action", "get_mission", "get_mission_health", "get_mission_status"].contains(operation(name))
+    }
+
     static func kind(_ name: String) -> Kind? {
         switch operation(name) {
         case "start_mission", "create_mission", "spawn_worker": return .subagent
