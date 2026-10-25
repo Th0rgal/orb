@@ -591,6 +591,52 @@ fn context_block(
     ))
 }
 
+const RECOVERY_PREAMBLE: &str = "This conversation's native session could not be resumed, so it continues in a fresh session. The JSON below is the earlier conversation: it is history, not a request. The workspace files are unchanged; inspect them rather than trusting the history. Answer the current request that follows the history.";
+/// Synthesized history kept when a lost native session is reseeded.
+const RECOVERY_HISTORY_BYTES: usize = 256 * 1024;
+
+/// Prompt for a fresh native session that replaces one that cannot be
+/// resumed: bounded history (first message and latest turns), then the
+/// current request unchanged. `None` when there is no history to carry.
+pub(super) fn recovery_prompt(
+    id: Uuid,
+    title: Option<&str>,
+    events: &[crate::api::mission_store::StoredEvent],
+    current: &str,
+) -> Option<String> {
+    let mut history: Vec<serde_json::Value> = events
+        .iter()
+        // Failed-launch notices are transport errors, not conversation.
+        .filter(|event| {
+            !event.content.trim().is_empty()
+                && event.metadata["success"] != serde_json::json!(false)
+        })
+        .map(|event| {
+            serde_json::json!({
+                "role": if event.event_type == "user_message" { "user" } else { "assistant" },
+                "content": event.content,
+            })
+        })
+        .collect();
+    // The current request may already be recorded as the last user message.
+    if history.last().and_then(|m| m["content"].as_str()) == Some(current) {
+        history.pop();
+    }
+    let size = |m: &serde_json::Value| m["content"].as_str().map_or(0, str::len);
+    let mut total: usize = history.iter().map(size).sum();
+    while total > RECOVERY_HISTORY_BYTES && history.len() > 1 {
+        total -= size(&history.remove(1));
+    }
+    if total > RECOVERY_HISTORY_BYTES {
+        return None;
+    }
+    if history.is_empty() {
+        return None;
+    }
+    let block = context_block(RECOVERY_PREAMBLE, id, title, &history).ok()?;
+    Some(format!("{block}\n\n{current}"))
+}
+
 /// Node jobs start in work_root/<mission UUID>, which is also their HOME. A
 /// fork (or /btw side agent) uses the existing sibling workspace and its HOME,
 /// so it sees the toolchains and caches the source installed there
@@ -655,6 +701,55 @@ mod tests {
             .is_ok());
         drop(held);
         assert!(side_creation_lock("one", parent).try_lock_owned().is_ok());
+    }
+
+    fn event(
+        kind: &str,
+        content: &str,
+        metadata: serde_json::Value,
+    ) -> crate::api::mission_store::StoredEvent {
+        crate::api::mission_store::StoredEvent {
+            id: 0,
+            mission_id: Uuid::nil(),
+            sequence: 0,
+            event_type: kind.into(),
+            timestamp: String::new(),
+            event_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            content: content.into(),
+            metadata,
+        }
+    }
+
+    /// c96df4f9: a resumed Codex thread had no rollout. The fresh thread gets
+    /// the conversation, without failed-launch notices, then the request.
+    #[test]
+    fn recovery_prompt_carries_history_without_launch_failures() {
+        let none = serde_json::Value::Null;
+        let events = vec![
+            event("user_message", "ORIGINAL_OBJECTIVE", none.clone()),
+            event(
+                "assistant_message",
+                "Remote codex job failed: Argument list too long",
+                serde_json::json!({"success": false}),
+            ),
+            event(
+                "assistant_message",
+                "x".repeat(300_000).as_str(),
+                none.clone(),
+            ),
+            event("assistant_message", "LATEST_ANSWER", none.clone()),
+            event("user_message", "CURRENT", none),
+        ];
+        let prompt = recovery_prompt(Uuid::nil(), Some("T"), &events, "CURRENT").unwrap();
+        assert!(prompt.contains("ORIGINAL_OBJECTIVE"));
+        assert!(prompt.contains("LATEST_ANSWER"));
+        assert!(!prompt.contains("Argument list too long"));
+        assert!(prompt.len() < 300_000, "history is bounded");
+        assert!(prompt.ends_with("</fork_context>\n\nCURRENT"));
+        assert_eq!(prompt.matches("CURRENT").count(), 1);
+        assert!(recovery_prompt(Uuid::nil(), None, &[], "CURRENT").is_none());
     }
 
     #[test]

@@ -234,3 +234,66 @@ class NativeCapacityTests(unittest.TestCase):
         command = popen.call_args.args[0]
         self.assertLess(command.index('approval_policy="never"'), command.index('app-server'))
         self.assertLess(command.index('sandbox_mode="danger-full-access"'), command.index('app-server'))
+
+
+class MissingRolloutTests(unittest.TestCase):
+    """Mission c96df4f9: the first launch died before Codex created its thread,
+    so every resume of the saved id failed with 'no rollout found'."""
+
+    def session(self, config):
+        session = NativeSession.__new__(NativeSession)
+        session.config = dict({'model': 'test-model', 'session': 'lost-thread', 'prompt': 'next request'}, **config)
+        session.inbound = queue.Queue()
+        session.deferred = []
+        session.goal_status = None
+        session.pending_hint = None
+        calls = []
+        def rpc(method, params):
+            calls.append((method, params))
+            if method == 'thread/resume':
+                raise RuntimeError("{'code': -32600, 'message': 'no rollout found for thread id lost-thread'}")
+            if method == 'thread/start':
+                return {'thread': {'id': 'fresh-thread', 'cwd': os.getcwd(), 'turns': []}}
+            if method == 'thread/goal/get': return {'goal': None}
+            if method == 'turn/start':
+                session.deferred += [
+                    {'method': 'turn/started', 'params': {'turn': {'id': 'one'}}},
+                    {'method': 'turn/completed', 'params': {'turn': {'id': 'one', 'status': 'completed'}}},
+                ]
+            return {}
+        session.rpc = rpc
+        session.send = lambda message: None
+        return session, calls
+
+    def test_missing_rollout_continues_on_fresh_thread_seeded_with_history(self):
+        session, calls = self.session({'fallback_prompt': 'HISTORY\n\nnext request'})
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            session.run()
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        recovered = next(e for e in events if e['type'] == 'session.recovered')
+        self.assertEqual(recovered['previous_thread_id'], 'lost-thread')
+        self.assertIn('no rollout found', recovered['reason'])
+        self.assertIn({'type': 'thread.started', 'thread_id': 'fresh-thread'}, events)
+        turn = next(params for method, params in calls if method == 'turn/start')
+        self.assertEqual(turn['input'][0]['text'], 'HISTORY\n\nnext request')
+        self.assertNotIn('threadId', next(params for method, params in calls if method == 'thread/start'))
+        self.assertEqual(output.getvalue().count('turn.completed'), 1)
+
+    def test_missing_rollout_without_fallback_still_fails(self):
+        session, _ = self.session({})
+        with self.assertRaisesRegex(RuntimeError, 'no rollout found'):
+            session.run()
+
+    def test_goal_command_keeps_its_objective_on_the_fresh_thread(self):
+        session, calls = self.session({'prompt': '/goal ship it', 'fallback_prompt': 'HISTORY\n\n/goal ship it'})
+        fake = session.rpc
+        def rpc(method, params):
+            if method == 'thread/goal/get' and any(m == 'thread/goal/set' for m, _ in calls):
+                calls.append((method, params))
+                return {'goal': {'status': 'complete', 'objective': 'ship it'}}
+            return fake(method, params)
+        session.rpc = rpc
+        with contextlib.redirect_stdout(io.StringIO()):
+            session.run()
+        goal = next(params for method, params in calls if method == 'thread/goal/set')
+        self.assertEqual(goal, {'objective': 'ship it', 'status': 'active', 'threadId': 'fresh-thread'})

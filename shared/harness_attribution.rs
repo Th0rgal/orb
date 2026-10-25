@@ -31,34 +31,9 @@ pub fn claude_settings_arg() -> String {
 }
 
 /// Codex `-c` override: an empty `commit_attribution` disables the
-/// `Co-authored-by: Codex` trailer.
+/// `Co-authored-by: Codex` trailer on Codex before 0.164. Codex 0.164 ignores
+/// the key with a startup warning, so Core no longer sends it.
 pub const CODEX_CONFIG_OVERRIDE: &str = "commit_attribution=\"\"";
-
-/// Pin `commit_attribution = ""` at the top level of a Codex config.toml,
-/// replacing any value a profile or operator set. TOML top-level keys must
-/// precede the first `[section]`, so the key is prepended.
-pub fn apply_codex_config(config: &str) -> String {
-    let mut in_prelude = true;
-    let kept: Vec<&str> = config
-        .lines()
-        .filter(|line| {
-            if line.trim_start().starts_with('[') {
-                in_prelude = false;
-            }
-            !(in_prelude
-                && line
-                    .split('=')
-                    .next()
-                    .is_some_and(|key| key.trim() == "commit_attribution"))
-        })
-        .collect();
-    let rest = kept.join("\n");
-    format!(
-        "commit_attribution = \"\"\n{}{}",
-        if rest.is_empty() { "" } else { "\n" },
-        rest
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -76,26 +51,5 @@ mod tests {
         assert_eq!(settings["attribution"]["pr"], "");
         assert_eq!(settings["includeCoAuthoredBy"], false);
         assert_eq!(settings["permissions"]["allow"][0], "Bash");
-    }
-
-    #[test]
-    fn codex_config_pins_empty_attribution_once() {
-        let config = "model = \"gpt\"\ncommit_attribution = \"Me <me@x>\"\n\n[mcp_servers.a]\ncommit_attribution = \"kept in section\"\n";
-        let out = apply_codex_config(config);
-        let prelude: Vec<_> = out.lines().take_while(|l| !l.starts_with('[')).collect();
-        assert_eq!(
-            prelude
-                .iter()
-                .filter(|l| l.starts_with("commit_attribution"))
-                .count(),
-            1
-        );
-        assert!(out.starts_with("commit_attribution = \"\"\n"));
-        assert!(out.contains("model = \"gpt\""));
-        assert!(
-            out.contains("kept in section"),
-            "section keys are untouched"
-        );
-        assert_eq!(apply_codex_config(""), "commit_attribution = \"\"\n");
     }
 }

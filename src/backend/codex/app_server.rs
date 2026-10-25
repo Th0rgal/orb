@@ -297,8 +297,6 @@ impl AppServerSession {
             "approval_policy=\"never\"",
             "-c",
             "sandbox_mode=\"danger-full-access\"",
-            "-c",
-            crate::harness_attribution::CODEX_CONFIG_OVERRIDE,
             "app-server",
         ]
         .into_iter()

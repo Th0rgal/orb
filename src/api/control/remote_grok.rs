@@ -623,6 +623,25 @@ impl GrokStream {
             }
             return;
         }
+        if kind == "session.recovered" {
+            // The saved thread had no rollout; the driver continues on a fresh
+            // thread seeded with history. Keep the reason in the transcript.
+            tracing::warn!(previous = ?value["previous_thread_id"], reason = ?value["reason"], "remote codex thread could not be resumed; continuing on a fresh seeded thread");
+            updates.push(StreamUpdate::Tool {
+                update: serde_json::json!({
+                    "toolCallId": "session-recovered",
+                    "name": "session_recovered",
+                    "rawInput": {"previous_thread_id": value["previous_thread_id"]},
+                    "output": format!(
+                        "Previous Codex session could not be resumed ({}); continuing in a fresh session seeded with the conversation history.",
+                        value["reason"].as_str().unwrap_or("unknown reason")
+                    ),
+                    "status": "completed",
+                }),
+                completed: true,
+            });
+            return;
+        }
         if kind == "goal.iteration" {
             if let Some(iteration) = value["iteration"].as_u64() {
                 updates.push(StreamUpdate::GoalIteration(iteration));
@@ -2988,6 +3007,7 @@ async fn continue_inner(
             })?,
             prompt: prompt.clone(),
             resume_session_id: session_id.clone(),
+            fallback_prompt: None,
         }
     } else if mission.backend == "claudecode" {
         RemoteHarnessPlan::ClaudeCode {
@@ -4595,6 +4615,30 @@ mod tests {
         assert_eq!(stream.diagnostics.len(), 1);
         assert_eq!(stream.json_events, 4);
         assert!(stream.finish().is_empty());
+    }
+
+    /// c96df4f9: the saved thread had no rollout. The replacement thread
+    /// becomes the session and the reason is kept as a transcript card.
+    #[test]
+    fn codex_stream_records_recovery_and_binds_the_fresh_thread() {
+        let mut stream = GrokStream::default();
+        let updates = stream.feed(concat!(
+            "{\"type\":\"session.recovered\",\"previous_thread_id\":\"lost\",\"reason\":\"no rollout found for thread id lost\"}\n",
+            "{\"type\":\"thread.started\",\"thread_id\":\"fresh\"}\n",
+        ));
+        match &updates[0] {
+            StreamUpdate::Tool { update, completed } => {
+                assert!(completed);
+                assert_eq!(update["name"], "session_recovered");
+                assert!(update["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no rollout found"));
+            }
+            other => panic!("unexpected update {other:?}"),
+        }
+        assert!(matches!(&updates[1], StreamUpdate::SessionId(id) if id == "fresh"));
+        assert!(stream.error.is_none());
     }
 
     #[test]

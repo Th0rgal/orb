@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Node-side native Codex transport. Codex, not this process, owns goal iteration.
 
-One JSON configuration argument; inherited proxy credentials stay in the env.
+One JSON configuration on fd 3 (or argv[1]); proxy credentials stay in the env.
 Output uses the existing remote JSON stream plus explicit native goal receipts.
 """
 import json
@@ -50,6 +50,11 @@ def goal_action(goal, prompt):
             raise RuntimeError('No native goal exists to resume')
         return {'objective': objective, 'status': 'active'}
     return None
+
+
+def is_missing_rollout(error):
+    """Codex has no rollout for the saved thread: it never started, or its home was lost."""
+    return 'no rollout found' in str(error)
 
 
 def strip_plan_prefix(prompt):
@@ -212,8 +217,21 @@ class NativeSession:
         params = {'model': self.config['model'], 'cwd': os.getcwd(), 'approvalPolicy': 'never', 'sandbox': 'danger-full-access'}
         resume = self.config.get('session')
         if resume:
-            params['threadId'] = resume
-        result = self.rpc('thread/resume' if resume else 'thread/start', params)
+            try:
+                result = self.rpc('thread/resume', dict(params, threadId=resume))
+            except RuntimeError as error:
+                fallback = self.config.get('fallback_prompt')
+                if not fallback or not is_missing_rollout(error):
+                    raise
+                # Continue on a fresh thread seeded with the conversation, and say why.
+                emit('session.recovered', previous_thread_id=resume, reason=str(error))
+                if not self.config['prompt'].startswith('/goal '):
+                    # A /goal command keeps its objective syntax.
+                    self.config['prompt'] = fallback
+                resume = None
+                result = self.rpc('thread/start', params)
+        else:
+            result = self.rpc('thread/start', params)
         thread = result['thread']
         self.thread_id = thread['id']
         if (resume and self.thread_id != resume) or thread.get('cwd') != os.getcwd():
@@ -301,7 +319,12 @@ class NativeSession:
 
 
 def main():
-    session = NativeSession(json.loads(sys.argv[1]))
+    if len(sys.argv) > 1:
+        config = json.loads(sys.argv[1])
+    else:
+        with os.fdopen(3, encoding='utf-8') as staged:
+            config = json.load(staged)
+    session = NativeSession(config)
     def stop(signum, frame):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, stop)

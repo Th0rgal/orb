@@ -117,6 +117,9 @@ pub(crate) enum RemoteHarnessPlan {
         model: String,
         prompt: String,
         resume_session_id: Option<String>,
+        /// History-seeded prompt for a fresh thread when the saved one has no
+        /// rollout on the node (never started, or its Codex home was lost).
+        fallback_prompt: Option<String>,
     },
     Grok {
         model: Option<String>,
@@ -235,6 +238,7 @@ pub(crate) fn plan_remote_harness(
             model: model.unwrap_or_else(resolve_codex_default_model),
             prompt,
             resume_session_id: None,
+            fallback_prompt: None,
         }),
         "grok" => Ok(remote_grok::plan(model, prompt)),
         "antigravity" => {
@@ -314,6 +318,9 @@ pub(crate) const REMOTE_OPENCODE_CONFIG_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 pub(super) const INLINE_PROMPT_LIMIT: usize = 96 * 1024;
 pub(super) const STDIN_PROMPT_CHUNK: usize = 96 * 1024;
 pub(super) const STDIN_PROMPT_LIMIT: usize = 1024 * 1024;
+/// Per-prompt bound inside the staged Codex configuration (prompt and
+/// fallback together stay well under ARG_MAX once split into env parts).
+pub(super) const CODEX_PROMPT_LIMIT: usize = 640 * 1024;
 pub(super) const STDIN_PROMPT_ENV: &str = "SANDBOXED_PROMPT_PART_";
 
 pub(super) struct StdinPrompt {
@@ -334,25 +341,31 @@ pub(super) fn stdin_prompt(prompt: &str) -> Option<StdinPrompt> {
 
 /// Stage `prompt` on fd 3 whatever its size.
 pub(super) fn staged_prompt(prompt: &str) -> StdinPrompt {
-    let prompt = prompt.replace('\0', "");
-    let prompt = if prompt.len() > STDIN_PROMPT_LIMIT {
-        // Keep the objective at the head and the latest turns at the tail.
-        let marker = "\n\n[Middle of this prompt omitted: it exceeded the remote launch limit. Inspect workspace evidence as needed.]\n\n";
-        let mut head = STDIN_PROMPT_LIMIT / 4;
-        while !prompt.is_char_boundary(head) {
-            head -= 1;
-        }
-        let mut tail = prompt.len() - (STDIN_PROMPT_LIMIT - head - marker.len());
-        while !prompt.is_char_boundary(tail) {
-            tail += 1;
-        }
-        format!("{}{marker}{}", &prompt[..head], &prompt[tail..])
-    } else {
-        prompt
-    };
+    stage_on_fd3(&omit_middle(&prompt.replace('\0', ""), STDIN_PROMPT_LIMIT))
+}
+
+/// Keep the objective at the head and the latest turns at the tail.
+pub(super) fn omit_middle(prompt: &str, limit: usize) -> String {
+    if prompt.len() <= limit {
+        return prompt.to_string();
+    }
+    let marker = "\n\n[Middle of this prompt omitted: it exceeded the remote launch limit. Inspect workspace evidence as needed.]\n\n";
+    let mut head = limit / 4;
+    while !prompt.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = prompt.len() - (limit - head - marker.len());
+    while !prompt.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}{marker}{}", &prompt[..head], &prompt[tail..])
+}
+
+/// Deliver `text` verbatim on fd 3 through chunked env parts.
+fn stage_on_fd3(prompt: &str) -> StdinPrompt {
     let mut env = HashMap::new();
     let mut names = Vec::new();
-    let mut rest = prompt.as_str();
+    let mut rest = prompt;
     while !rest.is_empty() {
         let mut end = rest.len().min(STDIN_PROMPT_CHUNK);
         while !rest.is_char_boundary(end) {
@@ -510,6 +523,7 @@ pub(crate) fn remote_execution_for_plan(
             model,
             prompt,
             resume_session_id,
+            fallback_prompt,
         } => {
             let mut settings = vec![
                 "model_provider=\"sandboxed\"".to_string(),
@@ -521,7 +535,6 @@ pub(crate) fn remote_execution_for_plan(
                 ),
                 "model_providers.sandboxed.wire_api=\"responses\"".to_string(),
                 format!("model_providers.sandboxed.env_key=\"{REMOTE_PROXY_KEY_ENV}\""),
-                crate::harness_attribution::CODEX_CONFIG_OVERRIDE.to_string(),
             ];
             if let Some(effort) = effort {
                 settings.push(format!(
@@ -535,22 +548,34 @@ pub(crate) fn remote_execution_for_plan(
                 "model_providers.sandboxed.http_headers.x-sandboxed-codex-speed=\"{}\"",
                 tier.wire()
             ));
-            let configuration = serde_json::json!({"model": model, "prompt": prompt, "session": resume_session_id, "settings": settings});
+            // Prompts are bounded so the JSON is never cut when staged.
+            let configuration = serde_json::json!({
+                "model": model,
+                "prompt": omit_middle(prompt, CODEX_PROMPT_LIMIT),
+                "session": resume_session_id,
+                "fallback_prompt": fallback_prompt.as_deref().map(|p| omit_middle(p, CODEX_PROMPT_LIMIT)),
+                "settings": settings,
+            });
             // Embed the versioned driver in the job; no node install race, no
-            // secret in argv. Native app-server owns the goal continuation loop.
+            // secret in argv. The configuration goes on fd 3: inline, a large
+            // first prompt failed with "Argument list too long" before Codex
+            // created its thread (mission c96df4f9).
+            let staged = stage_on_fd3(&configuration.to_string());
             let command = format!(
-                "exec python3 -c {} {}",
+                "{}exec python3 -c {}",
+                staged.prelude,
                 shell_single_quote(include_str!("../../../scripts/remote_codex_app_server.py")),
-                shell_single_quote(&configuration.to_string())
             );
+            let mut env = HashMap::from([
+                (REMOTE_PROXY_KEY_ENV.to_string(), proxy_key.to_string()),
+                ("NO_COLOR".to_string(), "1".to_string()),
+            ]);
+            env.extend(staged.env);
             RemoteExecution {
                 managed_auth: Vec::new(),
                 command,
                 label,
-                env: Some(HashMap::from([
-                    (REMOTE_PROXY_KEY_ENV.to_string(), proxy_key.to_string()),
-                    ("NO_COLOR".to_string(), "1".to_string()),
-                ])),
+                env: Some(env),
             }
         }
         RemoteHarnessPlan::Grok {
