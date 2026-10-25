@@ -151,6 +151,12 @@ pub(crate) fn schedule_mission_scope_teardown(
         // purpose between turns (a detached run, a build daemon). It ends
         // with the mission, not with each turn.
         let keep_host = !status_ends_host_scope(&status);
+        if !keep_host {
+            let reaped = super::privilege_broker::reap_if_initialized(mission_id, &reason).await;
+            if reaped > 0 {
+                tracing::info!(%mission_id, reaped, "reaped session-scoped privilege grants");
+            }
+        }
         for unit in list_exec_scope_units().await {
             if !crate::workspace_exec::exec_unit_belongs_to_mission(&unit, mission_id) {
                 continue;
@@ -204,6 +210,8 @@ pub(crate) async fn try_list_exec_scope_units() -> Result<Vec<String>, String> {
             "--no-legend",
             "--all",
             "sandboxed-exec-*.scope",
+            "orb-exec-*.scope",
+            "orb-jit-*.scope",
         ])
         .output()
         .await
@@ -219,7 +227,12 @@ pub(crate) async fn try_list_exec_scope_units() -> Result<Vec<String>, String> {
     let units: Vec<String> = stdout
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-        .filter(|unit| unit.starts_with("sandboxed-exec-") && unit.ends_with(".scope"))
+        .filter(|unit| {
+            (unit.starts_with("sandboxed-exec-")
+                || unit.starts_with("orb-exec-")
+                || unit.starts_with("orb-jit-"))
+                && unit.ends_with(".scope")
+        })
         .map(|s| s.to_string())
         .collect();
     if !stdout.trim().is_empty() && units.is_empty() {

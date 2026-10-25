@@ -671,6 +671,35 @@ unsafe extern "C" {
         now: u64,
     ) -> u8;
     fn orb_stats_settle_step(acc: u64, cost: u64, seen: u8) -> u64;
+    fn orb_privilege_step(
+        same_owner: u8,
+        mission_active: u8,
+        biometric_signed: u8,
+        scope_rank: u8,
+        max_granted_scope: u8,
+        bunker_state: u8,
+        revoked: u8,
+        now_epoch: u64,
+        grant_expires_at: u64,
+        session_expires_at: u64,
+    ) -> u32;
+    fn orb_bunker_step(
+        current_state: u8,
+        canary_tripped: u8,
+        auth_failure_burst: u8,
+        manual_trigger: u8,
+        biometric_unbunker: u8,
+    ) -> u32;
+    fn orb_deploy_gate_step(
+        is_prod_service: u8,
+        service_matches: u8,
+        calling_on_self: u8,
+        debounce_ok: u8,
+        force_flag: u8,
+        biometric_approved: u8,
+        bunker_state: u8,
+        live_writers: u32,
+    ) -> u8;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1853,6 +1882,275 @@ pub fn schedule_tick(input: ScheduleTickInput) -> ScheduleAction {
 /// `lean/Orb/Spec.lean` (`statBuckets_conserve`, `statsOutbox`).
 pub fn stats_settle_step(acc: u64, cost: u64, seen: bool) -> u64 {
     unsafe { orb_stats_settle_step(acc, cost, u8::from(seen)) }
+}
+
+/// Scope ranks for the Biometric JIT Privilege Broker (`orb_privilege_step`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum PrivilegeScopeRank {
+    OpsRead = 0,
+    ServiceDeploy = 1,
+    RootExec = 2,
+}
+
+impl PrivilegeScopeRank {
+    pub fn from_u8(raw: u8) -> Self {
+        match raw {
+            0 => Self::OpsRead,
+            1 => Self::ServiceDeploy,
+            _ => Self::RootExec,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpsRead => "ops_read",
+            Self::ServiceDeploy => "service_deploy",
+            Self::RootExec => "root_exec",
+        }
+    }
+}
+
+/// Fleet/Node Bunker Mode states (`orb_bunker_step`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum BunkerState {
+    #[default]
+    Normal = 0,
+    SoftQuarantine = 1,
+    HardLockdown = 2,
+}
+
+impl BunkerState {
+    pub fn from_u8(raw: u8) -> Self {
+        match raw {
+            0 => Self::Normal,
+            1 => Self::SoftQuarantine,
+            _ => Self::HardLockdown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivilegeStepInput {
+    pub same_owner: bool,
+    pub mission_active: bool,
+    pub biometric_signed: bool,
+    pub requested_scope: PrivilegeScopeRank,
+    pub max_granted_scope: PrivilegeScopeRank,
+    pub bunker_state: BunkerState,
+    pub revoked: bool,
+    pub now_epoch: u64,
+    pub grant_expires_at: u64,
+    pub session_expires_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivilegeStepVerdict {
+    pub allow_exec: bool,
+    pub require_force_cmd: bool,
+    pub reap_grant: bool,
+}
+
+/// Verified Biometric JIT Privilege Broker gate (`orb_privilege_step`):
+/// admits execution iff hardware biometric signature is valid, owner matches,
+/// mission is active, bunker state is normal, and neither the grant TTL nor
+/// the mission session clock has expired (`privilege_bounded_by_session_clock`).
+pub fn privilege_step(input: PrivilegeStepInput) -> PrivilegeStepVerdict {
+    let raw = unsafe {
+        orb_privilege_step(
+            u8::from(input.same_owner),
+            u8::from(input.mission_active),
+            u8::from(input.biometric_signed),
+            input.requested_scope as u8,
+            input.max_granted_scope as u8,
+            input.bunker_state as u8,
+            u8::from(input.revoked),
+            input.now_epoch,
+            input.grant_expires_at,
+            input.session_expires_at,
+        )
+    };
+    PrivilegeStepVerdict {
+        allow_exec: (raw & 1) == 1,
+        require_force_cmd: ((raw >> 8) & 1) == 1,
+        reap_grant: ((raw >> 16) & 1) == 1,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BunkerStepVerdict {
+    pub next_state: BunkerState,
+    pub revoke_all_jit_grants: bool,
+    pub isolate_node_mesh: bool,
+}
+
+/// Verified Bunker Mode & Canary Tripwire stepper (`orb_bunker_step`):
+/// sticky fence that revokes all active JIT privilege grants and never returns
+/// to `Normal` without a hardware biometric operator reset (`bunker_sticky_without_biometric_reset`).
+pub fn bunker_step(
+    current_state: BunkerState,
+    canary_tripped: bool,
+    auth_failure_burst: bool,
+    manual_trigger: u8,
+    biometric_unbunker: bool,
+) -> BunkerStepVerdict {
+    let raw = unsafe {
+        orb_bunker_step(
+            current_state as u8,
+            u8::from(canary_tripped),
+            u8::from(auth_failure_burst),
+            manual_trigger,
+            u8::from(biometric_unbunker),
+        )
+    };
+    BunkerStepVerdict {
+        next_state: BunkerState::from_u8((raw & 0xFF) as u8),
+        revoke_all_jit_grants: ((raw >> 8) & 1) == 1,
+        isolate_node_mesh: ((raw >> 16) & 1) == 1,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeployGateInput {
+    pub is_prod_service: bool,
+    pub service_matches: bool,
+    pub calling_on_self: bool,
+    pub debounce_ok: bool,
+    pub force_flag: bool,
+    pub biometric_approved: bool,
+    pub bunker_state: BunkerState,
+    pub live_writers: u32,
+}
+
+/// Verified Guarded Deploy Gate (`orb_deploy_gate_step`):
+/// dev/staging deploys remain zero-touch for agents, while production deploys
+/// require an active session-scoped `service_deploy` grant or direct biometric signature.
+pub fn deploy_gate_step(input: DeployGateInput) -> bool {
+    let raw = unsafe {
+        orb_deploy_gate_step(
+            u8::from(input.is_prod_service),
+            u8::from(input.service_matches),
+            u8::from(input.calling_on_self),
+            u8::from(input.debounce_ok),
+            u8::from(input.force_flag),
+            u8::from(input.biometric_approved),
+            input.bunker_state as u8,
+            input.live_writers,
+        )
+    };
+    raw == 1
+}
+
+#[cfg(test)]
+mod privilege_bunker_deploy_tests {
+    use super::*;
+
+    #[test]
+    fn privilege_step_enforces_biometric_session_clock_and_bunker_fence() {
+        let base = PrivilegeStepInput {
+            same_owner: true,
+            mission_active: true,
+            biometric_signed: true,
+            requested_scope: PrivilegeScopeRank::RootExec,
+            max_granted_scope: PrivilegeScopeRank::RootExec,
+            bunker_state: BunkerState::Normal,
+            revoked: false,
+            now_epoch: 1_000,
+            grant_expires_at: 2_000,
+            session_expires_at: 1_500,
+        };
+        assert_eq!(
+            privilege_step(base),
+            PrivilegeStepVerdict {
+                allow_exec: true,
+                require_force_cmd: false,
+                reap_grant: false,
+            }
+        );
+        // Scoped service_deploy sets require_force_cmd = true
+        assert_eq!(
+            privilege_step(PrivilegeStepInput {
+                requested_scope: PrivilegeScopeRank::ServiceDeploy,
+                max_granted_scope: PrivilegeScopeRank::ServiceDeploy,
+                ..base
+            }),
+            PrivilegeStepVerdict {
+                allow_exec: true,
+                require_force_cmd: true,
+                reap_grant: false,
+            }
+        );
+        // Session clock bounds grant clock (now = 1_500 == session_expires_at < grant_expires_at)
+        assert_eq!(
+            privilege_step(PrivilegeStepInput {
+                now_epoch: 1_500,
+                ..base
+            }),
+            PrivilegeStepVerdict {
+                allow_exec: false,
+                require_force_cmd: false,
+                reap_grant: true,
+            }
+        );
+        // Bunker state blocks execution and reaps grant
+        assert_eq!(
+            privilege_step(PrivilegeStepInput {
+                bunker_state: BunkerState::SoftQuarantine,
+                ..base
+            }),
+            PrivilegeStepVerdict {
+                allow_exec: false,
+                require_force_cmd: false,
+                reap_grant: true,
+            }
+        );
+    }
+
+    #[test]
+    fn bunker_step_is_sticky_until_biometric_unbunker() {
+        let tripped = bunker_step(BunkerState::Normal, true, false, 0, false);
+        assert_eq!(
+            tripped,
+            BunkerStepVerdict {
+                next_state: BunkerState::HardLockdown,
+                revoke_all_jit_grants: true,
+                isolate_node_mesh: true,
+            }
+        );
+        // Stays in HardLockdown without biometric_unbunker
+        let still_locked = bunker_step(BunkerState::HardLockdown, false, false, 0, false);
+        assert_eq!(still_locked.next_state, BunkerState::HardLockdown);
+        assert!(still_locked.revoke_all_jit_grants);
+        // Biometric reset when canary is cleared returns to Normal
+        let reset = bunker_step(BunkerState::HardLockdown, false, false, 0, true);
+        assert_eq!(reset.next_state, BunkerState::Normal);
+        assert!(!reset.revoke_all_jit_grants);
+    }
+
+    #[test]
+    fn deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod() {
+        let dev = DeployGateInput {
+            is_prod_service: false,
+            service_matches: true,
+            calling_on_self: false,
+            debounce_ok: true,
+            force_flag: false,
+            biometric_approved: false,
+            bunker_state: BunkerState::Normal,
+            live_writers: 0,
+        };
+        assert!(deploy_gate_step(dev));
+        assert!(!deploy_gate_step(DeployGateInput {
+            is_prod_service: true,
+            ..dev
+        }));
+        assert!(deploy_gate_step(DeployGateInput {
+            is_prod_service: true,
+            biometric_approved: true,
+            ..dev
+        }));
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""`orb-sudo` CLI: zero-SSH local root execution & harness update client over `/run/orb-privd.sock`.
+
+Usage for agents (after Touch ID / Face ID approval via `request_privileged_access`):
+  ORB_JIT_LEASE=<lease_token> orb-sudo <command> [args...]
+
+Usage for unprivileged fleet harness updates (`shared/agent_software.rs`):
+  orb-sudo --update-harness {claude|codex|opencode|grok} MAJOR.MINOR.PATCH
+"""
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+
+SOCKET_PATH = os.environ.get("ORB_PRIVD_SOCKET", "/run/orb-privd.sock")
+
+
+def send_request(payload: dict) -> dict:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(610)
+    sock.connect(SOCKET_PATH)
+    sock.sendall(json.dumps(payload).encode("utf-8"))
+    sock.shutdown(socket.SHUT_WR)
+    chunks = []
+    while True:
+        buf = sock.recv(65536)
+        if not buf:
+            break
+        chunks.append(buf)
+    sock.close()
+    return json.loads(b"".join(chunks).decode("utf-8"))
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if not argv or argv[0] in {"-h", "--help"}:
+        sys.stderr.write(__doc__ + "\n")
+        return 0 if argv else 2
+
+    if argv[0] == "--ping":
+        resp = send_request({"action": "ping"})
+        print(json.dumps(resp))
+        return 0 if resp.get("ok") else 1
+
+    if argv[0] == "--update-harness":
+        if len(argv) != 3:
+            sys.stderr.write("Usage: orb-sudo --update-harness {claude|codex|opencode|grok} VERSION\n")
+            return 2
+        resp = send_request({"action": "update_harness", "name": argv[1], "version": argv[2]})
+        if resp.get("stdout"):
+            sys.stdout.write(resp["stdout"])
+        if resp.get("stderr"):
+            sys.stderr.write(resp["stderr"])
+        return int(resp.get("exit_code", 0 if resp.get("ok") else 1))
+
+    if argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        sys.stderr.write("orb-sudo: command required\n")
+        return 2
+
+    mission_id = (
+        os.environ.get("ORB_MISSION_ID")
+        or os.environ.get("SANDBOXED_SH_MISSION_ID")
+        or ""
+    ).strip()
+    lease_token = (
+        os.environ.get("ORB_JIT_LEASE")
+        or os.environ.get("ORB_PRIVILEGE_LEASE_TOKEN")
+        or ""
+    ).strip()
+    api_url = (
+        os.environ.get("ORB_MCP_API_URL")
+        or os.environ.get("SANDBOXED_MCP_API_URL")
+        or "https://agent-backend.thomas.md"
+    ).strip()
+    api_token = (
+        os.environ.get("ORB_API_TOKEN")
+        or os.environ.get("SANDBOXED_SH_TOKEN")
+        or os.environ.get("SANDBOXED_MCP_API_TOKEN")
+        or ""
+    ).strip()
+
+    if not mission_id or not lease_token:
+        sys.stderr.write(
+            "orb-sudo: ORB_JIT_LEASE (and ORB_MISSION_ID / SANDBOXED_SH_MISSION_ID) required.\n"
+            "Request temporary root access first via MCP tool:\n"
+            '  request_privileged_access(target_host="self", scope="root_exec", reason="...")\n'
+        )
+        return 126
+
+    resp = send_request(
+        {
+            "action": "exec",
+            "mission_id": mission_id,
+            "lease_token": lease_token,
+            "api_url": api_url,
+            "api_token": api_token,
+            "target_host": os.environ.get("ORB_TARGET_HOST", "self"),
+            "cwd": os.getcwd(),
+            "argv": argv,
+        }
+    )
+    if resp.get("stdout"):
+        sys.stdout.write(resp["stdout"])
+    if resp.get("stderr"):
+        sys.stderr.write(resp["stderr"])
+    return int(resp.get("exit_code", 0 if resp.get("ok") else 1))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

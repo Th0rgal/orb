@@ -3848,6 +3848,387 @@ return v_acc_1748_;
 }
 }
 
+LEAN_EXPORT uint32_t orb_privilege_step(uint8_t v_sameOwner_1765_, uint8_t v_missionActive_1766_, uint8_t v_biometricSigned_1767_, uint8_t v_scopeRank_1768_, uint8_t v_maxGrantedScope_1769_, uint8_t v_bunkerState_1770_, uint8_t v_revoked_1771_, uint64_t v_nowEpoch_1772_, uint64_t v_grantExpiresAt_1773_, uint64_t v_sessionExpiresAt_1774_){
+_start:
+{
+uint8_t v___x_1775_; uint8_t v___x_1776_; 
+v___x_1775_ = 0;
+v___x_1776_ = lean_uint8_dec_eq(v_missionActive_1766_, v___x_1775_);
+if (v___x_1776_ == 0)
+{
+uint8_t v___x_1777_; uint8_t v___x_1778_; 
+v___x_1777_ = 1;
+v___x_1778_ = lean_uint8_dec_eq(v_revoked_1771_, v___x_1777_);
+if (v___x_1778_ == 0)
+{
+uint8_t v___x_1779_; 
+v___x_1779_ = lean_uint8_dec_eq(v_bunkerState_1770_, v___x_1775_);
+if (v___x_1779_ == 0)
+{
+uint32_t v___x_1780_; 
+v___x_1780_ = 65536;
+return v___x_1780_;
+}
+else
+{
+uint8_t v___x_1781_; 
+v___x_1781_ = lean_uint64_dec_le(v_grantExpiresAt_1773_, v_nowEpoch_1772_);
+if (v___x_1781_ == 0)
+{
+uint8_t v___x_1782_; 
+v___x_1782_ = lean_uint64_dec_le(v_sessionExpiresAt_1774_, v_nowEpoch_1772_);
+if (v___x_1782_ == 0)
+{
+uint8_t v___x_1783_; 
+v___x_1783_ = lean_uint8_dec_eq(v_sameOwner_1765_, v___x_1777_);
+if (v___x_1783_ == 0)
+{
+uint32_t v___x_1784_; 
+v___x_1784_ = 0;
+return v___x_1784_;
+}
+else
+{
+uint8_t v___x_1785_; 
+v___x_1785_ = lean_uint8_dec_eq(v_biometricSigned_1767_, v___x_1777_);
+if (v___x_1785_ == 0)
+{
+uint32_t v___x_1786_; 
+v___x_1786_ = 0;
+return v___x_1786_;
+}
+else
+{
+uint8_t v___x_1787_; 
+v___x_1787_ = lean_uint8_dec_le(v_scopeRank_1768_, v_maxGrantedScope_1769_);
+if (v___x_1787_ == 0)
+{
+uint32_t v___x_1788_; 
+v___x_1788_ = 0;
+return v___x_1788_;
+}
+else
+{
+uint8_t v___x_1789_; uint8_t v___x_1790_; 
+v___x_1789_ = 2;
+v___x_1790_ = lean_uint8_dec_lt(v_scopeRank_1768_, v___x_1789_);
+if (v___x_1790_ == 0)
+{
+uint32_t v___x_1791_; 
+v___x_1791_ = 1;
+return v___x_1791_;
+}
+else
+{
+uint32_t v___x_1792_; 
+v___x_1792_ = 257;
+return v___x_1792_;
+}
+}
+}
+}
+}
+else
+{
+uint32_t v___x_1793_; 
+v___x_1793_ = 65536;
+return v___x_1793_;
+}
+}
+else
+{
+uint32_t v___x_1794_; 
+v___x_1794_ = 65536;
+return v___x_1794_;
+}
+}
+}
+else
+{
+uint32_t v___x_1795_; 
+v___x_1795_ = 65536;
+return v___x_1795_;
+}
+}
+else
+{
+uint32_t v___x_1796_; 
+v___x_1796_ = 65536;
+return v___x_1796_;
+}
+}
+}
+
+LEAN_EXPORT uint32_t orb_bunker_step(uint8_t v_currentState_1819_, uint8_t v_canaryTripped_1820_, uint8_t v_authFailureBurst_1821_, uint8_t v_manualTrigger_1822_, uint8_t v_biometricUnbunker_1823_){
+_start:
+{
+uint8_t v___x_1824_; uint8_t v___y_1826_; uint32_t v___y_1827_; uint32_t v___y_1828_; uint8_t v___y_1834_; uint8_t v___y_1835_; uint8_t v___y_1841_; uint8_t v___x_1854_; 
+v___x_1824_ = 2;
+v___x_1854_ = lean_uint8_dec_le(v_currentState_1819_, v___x_1824_);
+if (v___x_1854_ == 0)
+{
+v___y_1841_ = v___x_1824_;
+goto v___jp_1840_;
+}
+else
+{
+v___y_1841_ = v_currentState_1819_;
+goto v___jp_1840_;
+}
+v___jp_1825_:
+{
+uint32_t v___x_1829_; uint8_t v___x_1830_; 
+v___x_1829_ = lean_uint32_lor(v___y_1827_, v___y_1828_);
+v___x_1830_ = lean_uint8_dec_eq(v___y_1826_, v___x_1824_);
+if (v___x_1830_ == 0)
+{
+return v___x_1829_;
+}
+else
+{
+uint32_t v___x_1831_; uint32_t v___x_1832_; 
+v___x_1831_ = 65536;
+v___x_1832_ = lean_uint32_lor(v___x_1829_, v___x_1831_);
+return v___x_1832_;
+}
+}
+v___jp_1833_:
+{
+uint32_t v___x_1836_; uint8_t v___x_1837_; 
+v___x_1836_ = lean_uint8_to_uint32(v___y_1835_);
+v___x_1837_ = lean_uint8_dec_le(v___y_1834_, v___y_1835_);
+if (v___x_1837_ == 0)
+{
+uint32_t v___x_1838_; 
+v___x_1838_ = 0;
+v___y_1826_ = v___y_1835_;
+v___y_1827_ = v___x_1836_;
+v___y_1828_ = v___x_1838_;
+goto v___jp_1825_;
+}
+else
+{
+uint32_t v___x_1839_; 
+v___x_1839_ = 256;
+v___y_1826_ = v___y_1835_;
+v___y_1827_ = v___x_1836_;
+v___y_1828_ = v___x_1839_;
+goto v___jp_1825_;
+}
+}
+v___jp_1840_:
+{
+uint8_t v___x_1842_; uint8_t v___x_1843_; 
+v___x_1842_ = 1;
+v___x_1843_ = lean_uint8_dec_eq(v_canaryTripped_1820_, v___x_1842_);
+if (v___x_1843_ == 0)
+{
+uint8_t v___x_1844_; 
+v___x_1844_ = lean_uint8_dec_eq(v_manualTrigger_1822_, v___x_1824_);
+if (v___x_1844_ == 0)
+{
+uint8_t v___x_1845_; 
+v___x_1845_ = lean_uint8_dec_eq(v___y_1841_, v___x_1824_);
+if (v___x_1845_ == 0)
+{
+uint8_t v___x_1846_; 
+v___x_1846_ = lean_uint8_dec_eq(v_authFailureBurst_1821_, v___x_1842_);
+if (v___x_1846_ == 0)
+{
+uint8_t v___x_1847_; 
+v___x_1847_ = lean_uint8_dec_eq(v_manualTrigger_1822_, v___x_1842_);
+if (v___x_1847_ == 0)
+{
+uint8_t v___x_1848_; 
+v___x_1848_ = lean_uint8_dec_eq(v___y_1841_, v___x_1842_);
+if (v___x_1848_ == 0)
+{
+uint8_t v___x_1849_; 
+v___x_1849_ = 0;
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1849_;
+goto v___jp_1833_;
+}
+else
+{
+uint8_t v___x_1850_; 
+v___x_1850_ = lean_uint8_dec_eq(v_biometricUnbunker_1823_, v___x_1842_);
+if (v___x_1850_ == 0)
+{
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1842_;
+goto v___jp_1833_;
+}
+else
+{
+uint8_t v___x_1851_; 
+v___x_1851_ = 0;
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1851_;
+goto v___jp_1833_;
+}
+}
+}
+else
+{
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1842_;
+goto v___jp_1833_;
+}
+}
+else
+{
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1842_;
+goto v___jp_1833_;
+}
+}
+else
+{
+uint8_t v___x_1852_; 
+v___x_1852_ = lean_uint8_dec_eq(v_biometricUnbunker_1823_, v___x_1842_);
+if (v___x_1852_ == 0)
+{
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1824_;
+goto v___jp_1833_;
+}
+else
+{
+uint8_t v___x_1853_; 
+v___x_1853_ = 0;
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1853_;
+goto v___jp_1833_;
+}
+}
+}
+else
+{
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1824_;
+goto v___jp_1833_;
+}
+}
+else
+{
+v___y_1834_ = v___x_1842_;
+v___y_1835_ = v___x_1824_;
+goto v___jp_1833_;
+}
+}
+}
+}
+
+LEAN_EXPORT uint8_t orb_deploy_gate_step(uint8_t v_isProdService_1867_, uint8_t v_serviceMatches_1868_, uint8_t v_callingOnSelf_1869_, uint8_t v_debounceOk_1870_, uint8_t v_forceFlag_1871_, uint8_t v_biometricApproved_1872_, uint8_t v_bunkerState_1873_, uint32_t v_liveWriters_1874_){
+_start:
+{
+uint8_t v___x_1875_; uint8_t v___y_1877_; uint8_t v___x_1886_; 
+v___x_1875_ = 1;
+v___x_1886_ = lean_uint8_dec_eq(v_serviceMatches_1868_, v___x_1875_);
+if (v___x_1886_ == 0)
+{
+v___y_1877_ = v___x_1886_;
+goto v___jp_1876_;
+}
+else
+{
+uint8_t v___x_1887_; uint8_t v___x_1888_; 
+v___x_1887_ = 0;
+v___x_1888_ = lean_uint8_dec_eq(v_callingOnSelf_1869_, v___x_1887_);
+if (v___x_1888_ == 0)
+{
+v___y_1877_ = v___x_1888_;
+goto v___jp_1876_;
+}
+else
+{
+uint8_t v___x_1889_; 
+v___x_1889_ = lean_uint8_dec_eq(v_debounceOk_1870_, v___x_1875_);
+if (v___x_1889_ == 0)
+{
+v___y_1877_ = v___x_1889_;
+goto v___jp_1876_;
+}
+else
+{
+uint32_t v___x_1890_; uint8_t v___x_1891_; 
+v___x_1890_ = 0;
+v___x_1891_ = lean_uint32_dec_eq(v_liveWriters_1874_, v___x_1890_);
+if (v___x_1891_ == 0)
+{
+uint8_t v___x_1892_; 
+v___x_1892_ = lean_uint8_dec_eq(v_forceFlag_1871_, v___x_1875_);
+if (v___x_1892_ == 0)
+{
+v___y_1877_ = v___x_1892_;
+goto v___jp_1876_;
+}
+else
+{
+goto v___jp_1883_;
+}
+}
+else
+{
+goto v___jp_1883_;
+}
+}
+}
+}
+v___jp_1876_:
+{
+uint8_t v___x_1878_; 
+v___x_1878_ = lean_uint8_dec_eq(v_isProdService_1867_, v___x_1875_);
+if (v___x_1878_ == 0)
+{
+if (v___y_1877_ == 0)
+{
+uint8_t v___x_1879_; 
+v___x_1879_ = 0;
+return v___x_1879_;
+}
+else
+{
+return v___x_1875_;
+}
+}
+else
+{
+if (v___y_1877_ == 0)
+{
+uint8_t v___x_1880_; 
+v___x_1880_ = 0;
+return v___x_1880_;
+}
+else
+{
+uint8_t v___x_1881_; 
+v___x_1881_ = lean_uint8_dec_eq(v_biometricApproved_1872_, v___x_1875_);
+if (v___x_1881_ == 0)
+{
+uint8_t v___x_1882_; 
+v___x_1882_ = 0;
+return v___x_1882_;
+}
+else
+{
+return v___x_1875_;
+}
+}
+}
+}
+v___jp_1883_:
+{
+uint8_t v___x_1884_; uint8_t v___x_1885_; 
+v___x_1884_ = 0;
+v___x_1885_ = lean_uint8_dec_eq(v_bunkerState_1873_, v___x_1884_);
+v___y_1877_ = v___x_1885_;
+goto v___jp_1876_;
+}
+}
+}
+
 LEAN_EXPORT uint8_t leansys_verify_slice_bounds(uint64_t v_off_143_, uint64_t v_len_144_, uint64_t v_cap_145_){
 _start:
 {

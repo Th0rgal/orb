@@ -1,0 +1,16 @@
+[Unit]
+Description=Orb Local Privileged Execution & Harness Broker (orb-privd)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0007
+NoNewPrivileges=false
+ExecStart=/usr/bin/python3 /usr/local/sbin/orb-privd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

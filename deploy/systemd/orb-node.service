@@ -1,0 +1,26 @@
+[Unit]
+Description=Orb Remote Execution Node (formerly sandboxed-node)
+After=network-online.target orb-privd.service
+Wants=network-online.target orb-privd.service
+
+[Service]
+Type=simple
+User=sandboxed-node
+Group=sandboxed-node
+WorkingDirectory=/var/lib/sandboxed-node
+EnvironmentFile=-/etc/orb/node.env
+EnvironmentFile=-/etc/sandboxed-node.env
+Environment="AGENT_SOFTWARE_STATE_DIR=/var/lib/orb-software"
+Environment="ORB_PRIVD_SOCKET=/run/orb-privd.sock"
+Environment="PATH=/opt/orb-tools/bin:/opt/sandboxed-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+NoNewPrivileges=true
+ReadOnlyPaths=/usr/local/bin
+ReadWritePaths=/var/lib/sandboxed-node /var/lib/orb-software /opt/sandboxed-tools /tmp /run
+ExecStart=/usr/local/bin/sandboxed-node
+Restart=always
+RestartSec=3
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+Alias=sandboxed-node.service

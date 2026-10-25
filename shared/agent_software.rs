@@ -393,12 +393,16 @@ fn owner(path: &Path) -> String {
 fn fleet_component(path: &Path) -> Option<&'static str> {
     let name = TOOLS
         .iter()
-        .find(|t| path == Path::new("/usr/local/bin").join(t.2))?
+        .find(|t| {
+            path == Path::new("/usr/local/bin").join(t.2)
+                || path == Path::new("/opt/orb-tools/bin").join(t.2)
+                || path == Path::new("/opt/sandboxed-tools/bin").join(t.2)
+        })?
         .2;
     let resolved = std::fs::canonicalize(path).ok()?;
-    resolved
-        .starts_with(Path::new("/opt/sandboxed-tools").join(name))
-        .then_some(name)
+    (resolved.starts_with(Path::new("/opt/sandboxed-tools").join(name))
+        || resolved.starts_with(Path::new("/opt/orb-tools").join(name)))
+    .then_some(name)
 }
 /// Infer the package from its manifest, not merely a bin directory name.
 fn native_update(path: &Path, component: &str, target: &str) -> Option<(PathBuf, Vec<String>)> {
@@ -412,6 +416,13 @@ fn native_update(path: &Path, component: &str, target: &str) -> Option<(PathBuf,
         let mut args = vec![name.into(), target.into()];
         if unsafe { libc::geteuid() } == 0 {
             return Some((helper.into(), args));
+        }
+        let privd_client = Path::new("/usr/local/bin/orb-sudo");
+        if Path::new("/run/orb-privd.sock").exists() && privd_client.is_file() {
+            return Some((
+                privd_client.into(),
+                vec!["--update-harness".into(), name.into(), target.into()],
+            ));
         }
         args.splice(0..0, ["-n".into(), helper.to_string_lossy().into_owned()]);
         return Some((PathBuf::from("/usr/bin/sudo"), args));

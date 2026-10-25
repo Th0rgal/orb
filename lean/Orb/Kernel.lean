@@ -698,4 +698,70 @@ def scheduleStep (op known cancelled ownerTerminal authorized busy : UInt8)
 def statsSettleStep (acc cost : UInt64) (seen : UInt8) : UInt64 :=
   statsSettle acc cost seen
 
+/--
+  Unboxed C-ABI Biometric JIT Privilege Broker & Session-Scoped Root Stepper (`orb_privilege_step`):
+  Packs `(allowExec : UInt8, requireForceCmd : UInt8, reapGrant : UInt8)` into a 32-bit word:
+  `bit 0 = allowExec`, `bit 8 = requireForceCmd`, `bit 16 = reapGrant`.
+  - `scopeRank`: `0 = ops_read`, `1 = service_deploy`, `2 = root_exec`.
+  - `bunkerState`: `0 = normal`, `1 = soft_quarantine`, `2 = hard_lockdown`.
+  - Admits execution (`bit 0 == 1`) iff `sameOwner == 1`, `missionActive == 1`,
+    `biometricSigned == 1`, `revoked == 0`, `bunkerState == 0`, `scopeRank ≤ maxGrantedScope`,
+    `nowEpoch < grantExpiresAt`, and `nowEpoch < sessionExpiresAt`.
+  - Sets `requireForceCmd` (`bit 8 == 1`) whenever execution is admitted with `scopeRank < 2`.
+  - Sets `reapGrant` (`bit 16 == 1`) whenever `missionActive == 0 || revoked == 1 ||
+    bunkerState != 0 || grantExpiresAt ≤ nowEpoch || sessionExpiresAt ≤ nowEpoch`.
+-/
+@[inline, export orb_privilege_step]
+def privilegeStep
+    (sameOwner missionActive biometricSigned scopeRank maxGrantedScope bunkerState revoked : UInt8)
+    (nowEpoch grantExpiresAt sessionExpiresAt : UInt64) : UInt32 :=
+  if missionActive == 0 || revoked == 1 || bunkerState != 0 ||
+     grantExpiresAt ≤ nowEpoch || sessionExpiresAt ≤ nowEpoch then
+    65536
+  else if sameOwner == 1 && biometricSigned == 1 && scopeRank ≤ maxGrantedScope then
+    if scopeRank < 2 then 257 else 1
+  else
+    0
+
+/--
+  Unboxed C-ABI Bunker Mode & Canary Tripwire Fence Stepper (`orb_bunker_step`):
+  `currentState`: `0 = normal`, `1 = soft_quarantine`, `2 = hard_lockdown`.
+  Packs `bits 0..7 = nextState`, `bit 8 = revokeAllJitGrants`, `bit 16 = isolateNodeMesh`.
+  - Any `canaryTripped == 1` or `manualTrigger == 2` transitions immediately to `2 (hard_lockdown)`.
+  - `authFailureBurst == 1` or `manualTrigger == 1` transitions at least to `1 (soft_quarantine)`.
+  - Once `currentState ≥ 1`, the system never returns to `0` unless `biometricUnbunker == 1`
+    and `canaryTripped == 0` (`StickyFence`).
+-/
+@[inline, export orb_bunker_step]
+def bunkerStep
+    (currentState canaryTripped authFailureBurst manualTrigger biometricUnbunker : UInt8) : UInt32 :=
+  let clamped : UInt8 := if currentState ≤ 2 then currentState else 2
+  let next : UInt8 :=
+    if canaryTripped == 1 || manualTrigger == 2 then 2
+    else if clamped == 2 then (if biometricUnbunker == 1 then 0 else 2)
+    else if authFailureBurst == 1 || manualTrigger == 1 then 1
+    else if clamped == 1 then (if biometricUnbunker == 1 then 0 else 1)
+    else 0
+  next.toUInt32 |||
+    (if next ≥ 1 then 256 else 0) |||
+    (if next == 2 then 65536 else 0)
+
+/--
+  Unboxed C-ABI Guarded Production Deploy Gate (`orb_deploy_gate_step`):
+  - Dev/staging deploys (`isProdService == 0`) require `serviceMatches == 1 && callingOnSelf == 0 &&
+    debounceOk == 1 && (liveWriters == 0 || forceFlag == 1) && bunkerState == 0`.
+  - Production deploys (`isProdService == 1`) additionally require `biometricApproved == 1`
+    (satisfied by an active session-scoped `service_deploy` grant or direct `X-Paloma-Approval`).
+-/
+@[inline, export orb_deploy_gate_step]
+def deployGateStep
+    (isProdService serviceMatches callingOnSelf debounceOk forceFlag biometricApproved bunkerState : UInt8)
+    (liveWriters : UInt32) : UInt8 :=
+  let baseOk := serviceMatches == 1 && callingOnSelf == 0 && debounceOk == 1 &&
+                (liveWriters == 0 || forceFlag == 1) && bunkerState == 0
+  if isProdService == 1 then
+    if baseOk && biometricApproved == 1 then 1 else 0
+  else
+    if baseOk then 1 else 0
+
 end Orb.Kernel

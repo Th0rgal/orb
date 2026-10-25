@@ -1,0 +1,12 @@
+[Unit]
+Description=Reconcile Orb / Paloma development credentials every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=orb-development-identity.service
+
+[Install]
+WantedBy=timers.target
+Alias=sandboxed-development-identity.timer

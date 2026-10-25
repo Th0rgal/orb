@@ -3367,6 +3367,9 @@ enum DeployRefusal {
     /// Live writers are mid-turn. Restarting SIGTERMs their Codex/Grok
     /// bash and produces the pending-tool-not-replayed inspect loop.
     WritersLive { count: usize },
+    /// Production deploy requires an active session-scoped `service_deploy`
+    /// biometric grant (or operator override).
+    MissingPrivilegeGrant { service: String },
 }
 
 impl DeployRefusal {
@@ -3376,6 +3379,7 @@ impl DeployRefusal {
             DeployRefusal::SelfTarget => StatusCode::CONFLICT,
             DeployRefusal::Debounced { .. } => StatusCode::TOO_MANY_REQUESTS,
             DeployRefusal::WritersLive { .. } => StatusCode::CONFLICT,
+            DeployRefusal::MissingPrivilegeGrant { .. } => StatusCode::FORBIDDEN,
         }
     }
 
@@ -3402,8 +3406,41 @@ impl DeployRefusal {
                  Restarting now SIGTERMs in-flight Codex/Grok tools (pending-tool-not-replayed). \
                  Wait for them to finish, or pass force=true if you accept killing those turns."
             ),
+            DeployRefusal::MissingPrivilegeGrant { service } => format!(
+                "Deploying to production service {service} requires an active session-scoped \
+                 `service_deploy` grant. Call `request_privileged_access(target_host=\"agent-core\", \
+                 scope=\"service_deploy\", session_scoped=true, reason=\"...\")` so Thomas can approve \
+                 with one Touch ID / Face ID tap for this session."
+            ),
         }
     }
+}
+
+/// Normalize `orb*` and `sandboxed-sh*` service names so `orb-core.service`,
+/// `orb-prod.service`, `assistant-mcp.service`, and `sandboxed-sh-prod.service`
+/// match as the production tier, and `*-dev.service` match as the dev tier.
+fn services_equivalent(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    fn norm(s: &str) -> &str {
+        let base = s.trim_end_matches(".service");
+        match base {
+            "orb" | "orb-core" | "orb-prod" | "assistant-mcp" | "sandboxed-sh"
+            | "sandboxed-sh-prod" => "orb-prod",
+            "orb-dev" | "orb-core-dev" | "assistant-mcp-dev" | "sandboxed-sh-dev" => "orb-dev",
+            other => other,
+        }
+    }
+    norm(a) == norm(b)
+}
+
+fn is_production_orb_service(service: &str) -> bool {
+    let base = service.trim_end_matches(".service");
+    matches!(
+        base,
+        "orb" | "orb-core" | "orb-prod" | "assistant-mcp" | "sandboxed-sh" | "sandboxed-sh-prod"
+    )
 }
 
 /// Pure helper exercised by tests. Returns the refusal that should fire (if
@@ -3417,7 +3454,7 @@ fn evaluate_deploy_request(
     live_writer_count: usize,
 ) -> Option<DeployRefusal> {
     if let (Some(actual), Some(expected)) = (actual_service, expected_service) {
-        if actual != expected {
+        if !services_equivalent(actual, expected) {
             return Some(DeployRefusal::WrongService {
                 expected: expected.to_string(),
                 actual: actual.to_string(),
@@ -3511,6 +3548,41 @@ pub async fn deploy_sandboxed_sh(
         return Err((refusal.http_status(), refusal.message()));
     }
 
+    // Production deploy gate (`orb_deploy_gate_step`): when a mission deploys
+    // to production (`orb-core` / `assistant-mcp` / `sandboxed-sh-prod`), check
+    // Bunker Mode and active session-scoped `service_deploy` grant.
+    let broker = super::privilege_broker::store(&state);
+    let bunker_state = broker.bunker_state().await;
+    let is_prod = is_production_orb_service(&actual_service);
+    let require_grant = std::env::var("ORB_REQUIRE_PROD_DEPLOY_GRANT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let has_grant = match req.calling_mission_id {
+        Some(mid) if is_prod => {
+            broker
+                .has_active_deploy_grant(mid, &actual_service)
+                .await
+                .is_some()
+                || !require_grant
+        }
+        _ => true,
+    };
+    if !crate::orb_spec::deploy_gate_step(crate::orb_spec::DeployGateInput {
+        is_prod_service: is_prod,
+        service_matches: true,
+        calling_on_self: calling_on_self && !req.force,
+        debounce_ok: true,
+        force_flag: req.force,
+        biometric_approved: has_grant,
+        bunker_state,
+        live_writers: live_writer_count as u32,
+    }) {
+        let refusal = DeployRefusal::MissingPrivilegeGrant {
+            service: actual_service,
+        };
+        return Err((refusal.http_status(), refusal.message()));
+    }
+
     // Record the deploy intent BEFORE the actual work so a crash mid-build
     // still counts as "recently attempted" for debounce purposes. The mtime
     // is what matters; content is unused.
@@ -3529,9 +3601,19 @@ pub async fn deploy_sandboxed_sh(
     ))))
 }
 
+fn is_orb_or_sandboxed_unit_prefix(name: &str) -> bool {
+    name.starts_with("sandboxed-sh")
+        || name == "orb"
+        || name == "orb.service"
+        || name.starts_with("orb-core")
+        || name.starts_with("orb-prod")
+        || name.starts_with("orb-dev")
+        || name.starts_with("assistant-mcp")
+}
+
 fn sandboxed_service_name_from_path(path: &std::path::Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy();
-    if !name.starts_with("sandboxed-sh") {
+    if !is_orb_or_sandboxed_unit_prefix(&name) {
         return None;
     }
     Some(format!("{}.service", name.trim_end_matches(".service")))
@@ -3539,8 +3621,8 @@ fn sandboxed_service_name_from_path(path: &std::path::Path) -> Option<String> {
 
 fn current_sandboxed_service_name() -> Result<String, String> {
     // argv[0] preserves the systemd ExecStart symlink name
-    // (`sandboxed-sh-prod`) while current_exe() resolves that symlink to the
-    // versioned artifact's generic `sandboxed-sh` filename.
+    // (`orb-core` / `sandboxed-sh-prod`) while current_exe() resolves that symlink to the
+    // versioned artifact's generic `orb` / `sandboxed-sh` filename.
     if let Some(service) = std::env::args_os()
         .next()
         .as_deref()
@@ -3551,13 +3633,13 @@ fn current_sandboxed_service_name() -> Result<String, String> {
     }
 
     // Fall back to the systemd cgroup for launchers that replace argv[0].
-    // A v2 entry looks like `0::/system.slice/sandboxed-sh-prod.service`.
+    // A v2 entry looks like `0::/system.slice/orb-core.service` or `sandboxed-sh-prod.service`.
     if let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") {
         if let Some(service) = cgroup
             .lines()
             .flat_map(|line| line.rsplit('/'))
             .find(|component| {
-                component.starts_with("sandboxed-sh") && component.ends_with(".service")
+                is_orb_or_sandboxed_unit_prefix(component) && component.ends_with(".service")
             })
         {
             return Ok(service.to_string());
@@ -3568,7 +3650,7 @@ fn current_sandboxed_service_name() -> Result<String, String> {
         .map_err(|e| format!("Failed to detect current binary path: {}", e))?;
     sandboxed_service_name_from_path(&current_exe).ok_or_else(|| {
         format!(
-            "Cannot derive a sandboxed.sh service from executable path {}",
+            "Cannot derive an orb / sandboxed.sh service from executable path {}",
             current_exe.display()
         )
     })
@@ -6247,5 +6329,19 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let c = redeploy_unit_name("sandboxed-sh-prod.service");
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers() {
+        use super::{is_production_orb_service, services_equivalent};
+        assert!(services_equivalent("orb-core.service", "assistant-mcp.service"));
+        assert!(services_equivalent("orb.service", "sandboxed-sh.service"));
+        assert!(services_equivalent("orb-core-dev.service", "assistant-mcp-dev.service"));
+        assert!(services_equivalent("orb-dev", "sandboxed-sh-dev.service"));
+        assert!(!services_equivalent("orb-core.service", "orb-core-dev.service"));
+        assert!(is_production_orb_service("orb-core.service"));
+        assert!(is_production_orb_service("assistant-mcp.service"));
+        assert!(!is_production_orb_service("orb-core-dev.service"));
+        assert!(!is_production_orb_service("assistant-mcp-dev.service"));
     }
 }
