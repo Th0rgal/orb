@@ -320,7 +320,7 @@ pub struct PrivilegeBroker {
     data: Mutex<Persisted>,
     /// Ephemeral plaintext lease tokens kept only in memory so the requesting
     /// mission can read its own token once approved, while disk only stores SHA-256.
-    live_tokens: Mutex< std::collections::HashMap<Uuid, String> >,
+    live_tokens: Mutex<std::collections::HashMap<Uuid, String>>,
     changed: tokio::sync::Notify,
 }
 
@@ -534,7 +534,11 @@ impl PrivilegeBroker {
                 r.expires_at = Some(exp);
                 r.session_expires_at = Some(exp);
                 r.decided_at = Some(now);
-                let token = format!("orb-jit-{}-{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+                let token = format!(
+                    "orb-jit-{}-{}",
+                    Uuid::new_v4().simple(),
+                    Uuid::new_v4().simple()
+                );
                 r.lease_token_sha256 = Some(sha256_hex(&token));
                 minted_token = Some(token);
                 Some(if sess {
@@ -591,8 +595,14 @@ impl PrivilegeBroker {
         ttl_minutes: Option<i64>,
         session_scoped: Option<bool>,
     ) -> Result<PrivilegeRequest, String> {
-        self.transition(owner, id, ApprovalEvent::Approve, ttl_minutes, session_scoped)
-            .await
+        self.transition(
+            owner,
+            id,
+            ApprovalEvent::Approve,
+            ttl_minutes,
+            session_scoped,
+        )
+        .await
     }
 
     pub async fn deny(&self, owner: &str, id: Uuid) -> Result<PrivilegeRequest, String> {
@@ -795,7 +805,7 @@ impl PrivilegeBroker {
                         || r.target_host == "self"
                         || r.target_host == "agent-core"
                         || r.target_host == "orb-core")
-                    && r. evaluate(now, true, PrivilegeScope::ServiceDeploy, bunker)
+                    && r.evaluate(now, true, PrivilegeScope::ServiceDeploy, bunker)
                         .allow_exec
             })
             .map(|r| r.id)
@@ -999,9 +1009,8 @@ pub async fn handle_tool(
                 .get("scope")
                 .and_then(Value::as_str)
                 .unwrap_or("root_exec");
-            let scope = PrivilegeScope::from_str_opt(scope_str).ok_or(
-                "scope must be one of \"ops_read\", \"service_deploy\", or \"root_exec\"",
-            )?;
+            let scope = PrivilegeScope::from_str_opt(scope_str)
+                .ok_or("scope must be one of \"ops_read\", \"service_deploy\", or \"root_exec\"")?;
             let reason = args
                 .get("reason")
                 .and_then(Value::as_str)
@@ -1397,7 +1406,9 @@ mod tests {
                 cwd: Some("/root".into()),
                 exit_code: Some(0),
                 duration_ms: Some(1420),
-                stdout_sha256: Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()),
+                stdout_sha256: Some(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                ),
             })
             .await
             .unwrap();
@@ -1412,7 +1423,9 @@ mod tests {
         );
 
         // Session reap immediately revokes the lease token
-        let reaped = broker.reap_mission_grants(mission_id, "mission_completed").await;
+        let reaped = broker
+            .reap_mission_grants(mission_id, "mission_completed")
+            .await;
         assert_eq!(reaped, 1);
         assert!(broker.lease_token_for(req.id).await.is_none());
         assert!(broker

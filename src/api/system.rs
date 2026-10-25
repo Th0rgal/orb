@@ -6334,11 +6334,20 @@ mod tests {
     #[test]
     fn orb_and_sandboxed_service_aliases_map_to_same_deploy_tiers() {
         use super::{is_production_orb_service, services_equivalent};
-        assert!(services_equivalent("orb-core.service", "assistant-mcp.service"));
+        assert!(services_equivalent(
+            "orb-core.service",
+            "assistant-mcp.service"
+        ));
         assert!(services_equivalent("orb.service", "sandboxed-sh.service"));
-        assert!(services_equivalent("orb-core-dev.service", "assistant-mcp-dev.service"));
+        assert!(services_equivalent(
+            "orb-core-dev.service",
+            "assistant-mcp-dev.service"
+        ));
         assert!(services_equivalent("orb-dev", "sandboxed-sh-dev.service"));
-        assert!(!services_equivalent("orb-core.service", "orb-core-dev.service"));
+        assert!(!services_equivalent(
+            "orb-core.service",
+            "orb-core-dev.service"
+        ));
         assert!(is_production_orb_service("orb-core.service"));
         assert!(is_production_orb_service("assistant-mcp.service"));
         assert!(!is_production_orb_service("orb-core-dev.service"));
