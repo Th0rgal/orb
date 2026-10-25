@@ -4,10 +4,9 @@ import { CloseIcon } from "./icons";
 import {
   approvePrivilegeAccess,
   denyPrivilegeAccess,
-  hostLabel,
   lifetimeLabel,
   requesterLabel,
-  scopeLabel,
+  requestTitle,
   scopeUnlocks,
   type PrivilegeRequest,
 } from "./privilegeAccessApi";
@@ -60,7 +59,7 @@ function act(r: PrivilegeRequest, approve: boolean) {
   })();
 }
 
-const what = (r: PrivilegeRequest) => `${scopeLabel(r.scope)} on ${hostLabel(r.target_host)}`;
+const what = requestTitle;
 
 function PrivilegeAccessCard() {
   const list = visible;

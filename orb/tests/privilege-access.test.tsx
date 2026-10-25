@@ -4,7 +4,8 @@ vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
 vi.mock('../src/deviceApproval',()=>({signedApi:vi.fn(),ApprovalCancelled:class extends Error{}}));
 import {api} from '../src/api';
 import {signedApi} from '../src/deviceApproval';
-import {approvePrivilegeAccess,denyPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,revokePrivilegeAccess,scopeUnlocks,type PrivilegeRequest} from '../src/privilegeAccessApi';
+import fixture from '../../shared/orb-spec/fixtures/privilege-access.json';
+import {requestTitle,requesterLabel,approvePrivilegeAccess,denyPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,revokePrivilegeAccess,scopeUnlocks,type PrivilegeRequest} from '../src/privilegeAccessApi';
 import {PrivilegeAccessPanel} from '../src/PrivilegeAccessPanel';
 const now=Date.now();
 const iso=(ms:number)=>new Date(now+ms).toISOString();
@@ -17,6 +18,12 @@ describe('privilege access',()=>{
   expect(scopeUnlocks(req({scope:'root_exec'}))).toBe('any command as root');
   expect(lifetimeLabel(req())).toBe('for this session (max 4 h)');
   expect(lifetimeLabel(req({session_scoped:false,ttl_minutes:30}))).toBe('for 30 min');
+ });
+ it('matches the shared fixture used by iOS and Android',()=>{
+  for(const c of fixture.cases){
+   const r=req(c.request as Partial<PrivilegeRequest>);
+   expect([requestTitle(r),scopeUnlocks(r),lifetimeLabel(r),requesterLabel(r)]).toEqual([c.title,c.unlocks,c.lifetime,c.requester]);
+  }
  });
  it('treats only approved, unexpired, unrevoked grants as live',()=>{
   expect(livePrivilegeGrant(req())).toBe(false);

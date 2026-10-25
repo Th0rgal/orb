@@ -214,6 +214,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var requests by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var grants by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var access by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var privilege by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var mode by remember { mutableStateOf("") }
     var projects by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -226,6 +227,10 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         // Mission access requests do not depend on Bitwarden being configured.
         try {
             access = OrbJSON.dictList(dictOf(core.request("/api/mission-access"))["requests"])
+        } catch (_: Throwable) {
+        }
+        try {
+            privilege = OrbJSON.dictList(dictOf(core.request("/api/privilege-access"))["requests"])
         } catch (_: Throwable) {
         }
         try {
@@ -349,6 +354,64 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 }
                             }) { Text("Decline", color = Color(0xFFFF6B6B)) }
                         }
+                    }
+                }
+            }
+
+            Card("Privileged access") {
+                val pendingPrivilege = privilege.filter { it["state"] == "pending" }
+                val livePrivilege = privilege.filter { OrbPrivilegeAccess.isLive(it) }
+                Text(
+                    "Root, service deploy or read-only ops on a host. A grant lasts at most the mission session; Core checks and logs every command. Approving needs your fingerprint or face.",
+                    color = OrbStyle.textMuted, fontSize = 12.sp
+                )
+                if (pendingPrivilege.isEmpty() && livePrivilege.isEmpty()) Text("No requests or grants.", color = OrbStyle.textMuted, fontSize = 13.sp)
+                pendingPrivilege.forEach { r ->
+                    val id = r["id"] as String
+                    val who = OrbPrivilegeAccess.requester(r)
+                    val what = OrbPrivilegeAccess.title(r)
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(what, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("asked by $who", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
+                            Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
+                        Text("Allows ${OrbPrivilegeAccess.unlocks(r)} · ${OrbPrivilegeAccess.lifetime(r)}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST",
+                                        "/api/privilege-access/${core.encodeComponent(id)}/approve",
+                                        OrbPrivilegeAccess.approveBody(r),
+                                        "Grant $what to $who"
+                                    )
+                                }
+                            }) { Text("Allow") }
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST",
+                                        "/api/privilege-access/${core.encodeComponent(id)}/deny",
+                                        null, "Decline: $who asks for $what"
+                                    )
+                                }
+                            }) { Text("Deny", color = Color(0xFFFF6B6B)) }
+                        }
+                    }
+                }
+                livePrivilege.forEach { g ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("${OrbPrivilegeAccess.requester(g)} · ${OrbPrivilegeAccess.title(g)}", color = Color.White, fontSize = 14.sp)
+                            Text(
+                                "${if (g["session_scoped"] == true) "Ends with the session" else "Fixed lifetime"} · until ${g["expires_at"]}",
+                                color = OrbStyle.textMuted, fontSize = 12.sp
+                            )
+                        }
+                        TextButton(enabled = !busy, onClick = {
+                            act { core.request("/api/privilege-access/${core.encodeComponent(g["id"] as String)}", "DELETE") }
+                        }) { Text("Revoke") }
                     }
                 }
             }

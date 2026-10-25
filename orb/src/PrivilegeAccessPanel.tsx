@@ -6,12 +6,11 @@ import {
   denyPrivilegeAccess,
   emptyPrivilegeSnapshot,
   getPrivilegeAccess,
-  hostLabel,
   lifetimeLabel,
   livePrivilegeGrant,
   requesterLabel,
+  requestTitle,
   revokePrivilegeAccess,
-  scopeLabel,
   scopeUnlocks,
   type PrivilegeSnapshot,
 } from "./privilegeAccessApi";
@@ -82,7 +81,7 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
               <div class="secret-row bw-request-row" data-testid="privilege-access-request">
                 <div class="bw-request-body">
                   <div class="bw-request-line">
-                    <strong class="secret-row-key">{scopeLabel(r.scope)} on {hostLabel(r.target_host)}</strong>
+                    <strong class="secret-row-key">{requestTitle(r)}</strong>
                     <span class="bw-request-meta">{requesterLabel(r)} · {since(r.created_at)}</span>
                   </div>
                   <span class="secret-row-reason" title={r.reason}>{r.reason}</span>
@@ -103,7 +102,7 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
           {(g) => (
             <div class="s-row" data-testid="privilege-access-grant">
               <div class="s-row-text">
-                <div class="s-row-title">{requesterLabel(g)} · {scopeLabel(g.scope)} on {hostLabel(g.target_host)}</div>
+                <div class="s-row-title">{requesterLabel(g)} · {requestTitle(g)}</div>
                 <div class="s-row-desc">{g.session_scoped ? "Ends with the session" : "Fixed lifetime"} · {until(g.expires_at, now())}</div>
               </div>
               <div class="s-row-ctrl">
@@ -125,7 +124,7 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
               {(r) => (
                 <div class="bw-log-row">
                   <span class={`bw-log-status ${r.state}`}>{r.state}</span>
-                  <span>{requesterLabel(r)} · {scopeLabel(r.scope)} on {hostLabel(r.target_host)}</span>
+                  <span>{requesterLabel(r)} · {requestTitle(r)}</span>
                   <span class="s-row-desc">{since(r.revoked_at || r.decided_at || r.created_at)}</span>
                 </div>
               )}

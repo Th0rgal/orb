@@ -79,6 +79,7 @@ export const scopeLabel = (s: PrivilegeScope) => SCOPE_LABEL[s] ?? s;
 export const scopeUnlocks = (r: Pick<PrivilegeRequest, "scope" | "allowed_unit">) =>
   r.scope === "service_deploy" && r.allowed_unit ? `restart and deploy ${r.allowed_unit} only` : SCOPE_UNLOCKS[r.scope] ?? "";
 export const hostLabel = (h: string) => (h === "self" ? "its own node" : h);
+export const requestTitle = (r: Pick<PrivilegeRequest, "scope" | "target_host">) => `${scopeLabel(r.scope)} on ${hostLabel(r.target_host)}`;
 export const requesterLabel = (r: Pick<PrivilegeRequest, "requester_title" | "requester_mission_id">) =>
   missionLabel(r.requester_title, r.requester_mission_id);
 /** "for this session (max 4 h)" or "for 30 min". */
