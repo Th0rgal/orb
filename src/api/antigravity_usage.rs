@@ -18,6 +18,17 @@ use super::subscription_usage::Quota;
 
 const CLOUD_CODE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 
+/// The allowance a model draws from: Google meters "Claude and GPT models"
+/// and the Gemini models from separate weekly and 5-hour pools.
+pub fn quota_pool(model: &str) -> &'static str {
+    let m = model.to_ascii_lowercase();
+    if m.contains("claude") || m.contains("gpt") {
+        "claude-gpt"
+    } else {
+        "gemini"
+    }
+}
+
 /// Display family of a metered model, or `None` for models Google does not
 /// meter separately (tab completion, internal chat ids).
 fn family(model: &str) -> Option<&'static str> {

@@ -19,3 +19,12 @@ it("leaves a filesystem quota error alone", () => {
   expect(providerLimit("Disk quota exceeded (os error 122)")).toBeUndefined();
   expect(providerLimit("Gemini: quota exceeded for this project")?.kind).toBe("quota");
 });
+
+it("reads an Antigravity individual quota refusal as an exhausted quota with its reset", () => {
+  const raw = "CLI error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 129h43m31s. (RESOURCE_EXHAUSTED (code 429)) AGY_ERROR";
+  const limit = providerLimit(raw);
+  expect(limit?.kind).toBe("quota");
+  expect(limit?.provider).toBe("Antigravity");
+  expect(limit?.resets).toBeTruthy();
+  expect(limit?.resets).not.toMatch(/^in /);
+});

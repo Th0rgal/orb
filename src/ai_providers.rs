@@ -712,6 +712,55 @@ impl AIProviderStore {
         Some(provider)
     }
 
+    /// Set the routing order of one provider's accounts: `ids[0]` is tried
+    /// first. Every id must exist and share one provider type. Accounts of
+    /// that type left out keep their relative order after the listed ones.
+    pub async fn reorder(&self, ids: &[Uuid]) -> Result<Vec<AIProvider>, String> {
+        let ordered = {
+            let mut providers = self.providers.write().await;
+            let mut kind = None;
+            if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+                return Err("An account is listed twice".into());
+            }
+            for id in ids {
+                let p = providers
+                    .get(id)
+                    .ok_or_else(|| format!("Unknown account {id}"))?;
+                if *kind.get_or_insert(p.provider_type) != p.provider_type {
+                    return Err("Accounts belong to different providers".into());
+                }
+            }
+            let Some(kind) = kind else {
+                return Ok(vec![]);
+            };
+            let mut rest: Vec<&AIProvider> = providers
+                .values()
+                .filter(|p| p.provider_type == kind && !ids.contains(&p.id))
+                .collect();
+            rest.sort_by_key(|p| (p.priority, p.id));
+            let order: Vec<Uuid> = ids
+                .iter()
+                .copied()
+                .chain(rest.iter().map(|p| p.id))
+                .collect();
+            let now = chrono::Utc::now();
+            order
+                .iter()
+                .enumerate()
+                .filter_map(|(rank, id)| {
+                    let p = providers.get_mut(id)?;
+                    p.priority = rank as u32;
+                    p.updated_at = now;
+                    Some(p.clone())
+                })
+                .collect()
+        };
+        if let Err(e) = self.save_to_disk().await {
+            tracing::error!("Failed to save AI providers to disk: {}", e);
+        }
+        Ok(ordered)
+    }
+
     pub async fn delete(&self, id: Uuid) -> bool {
         let existed = {
             let mut providers = self.providers.write().await;

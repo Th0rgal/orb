@@ -264,6 +264,8 @@ export interface AIProvider {
   /** "cli_proxy" when CLIProxyAPI owns the OAuth credential (reconnect via proxy login). */
   credential_owner?: "cli_proxy" | "sandboxed_sh";
   account_email?: string | null;
+  /** Order among the provider's accounts: lower is tried first. */
+  priority?: number;
   status: { type: string; reason?: string; message?: string };
 }
 
@@ -457,6 +459,13 @@ export async function getRemoteNodes(): Promise<RemoteNodesResponse> {
 export async function setProviderEnabled(id: string, enabled: boolean): Promise<AIProvider> {
   return api<AIProvider>(`/api/ai/providers/${encodeURIComponent(id)}`, {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  });
+}
+
+/** Set the order in which one provider's accounts are tried, first id first. */
+export async function reorderProviders(ids: string[]): Promise<AIProvider[]> {
+  return api<AIProvider[]>("/api/ai/providers/reorder", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
   });
 }
 
