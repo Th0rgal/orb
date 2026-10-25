@@ -29,6 +29,7 @@ import {
 } from "./bitwardenApi";
 import { SecretAccessPanel } from "./SecretAccessPanel";
 import { MissionAccessPanel } from "./MissionAccessPanel";
+import { PrivilegeAccessPanel } from "./PrivilegeAccessPanel";
 import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
 import { enrolledDeviceId } from "./deviceApproval";
 import { copyText } from "./clipboard";
@@ -624,6 +625,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
             />
           </Show>
 
+          <PrivilegeAccessPanel onError={(m) => setToastError(m)} />
           <MissionAccessPanel onError={(m) => setToastError(m)} />
           {/* Mission access approvals always need an enrolled device, Bitwarden or not. */}
           <ApprovalDevicesPanel onError={(m) => setToastError(m)} />

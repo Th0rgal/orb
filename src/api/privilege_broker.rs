@@ -1510,4 +1510,99 @@ mod tests {
             .unwrap();
         assert_eq!(unbunkered.bunker_state, 0);
     }
+
+    fn deploy_request(mission: Uuid, scope: PrivilegeScope) -> NewPrivilegeRequest {
+        NewPrivilegeRequest {
+            owner: "thomas".into(),
+            owner_username: "thomas".into(),
+            requester: mission,
+            requester_title: None,
+            target_host: "agent-core".into(),
+            scope,
+            allowed_unit: None,
+            reason: "deploy".into(),
+            session_scoped: true,
+            ttl_minutes: Some(60),
+        }
+    }
+
+    fn verify(mission_id: Uuid, lease_token: String) -> VerifyLeaseRequest {
+        VerifyLeaseRequest {
+            mission_id,
+            lease_token,
+            target_host: "agent-core".into(),
+            requested_scope: None,
+            command: "systemctl status orb-core".into(),
+            argv: vec![],
+            cwd: None,
+            exit_code: None,
+            duration_ms: None,
+            stdout_sha256: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn unapproved_expired_and_other_session_grants_are_refused() {
+        let broker = temp_broker();
+        let mission = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let svc = "orb-core.service";
+
+        // Pending: no deploy, no lease.
+        let req = broker
+            .request(deploy_request(mission, PrivilegeScope::ServiceDeploy))
+            .await
+            .unwrap();
+        assert!(broker.has_active_deploy_grant(mission, svc).await.is_none());
+        assert!(broker.lease_token_for(req.id).await.is_none());
+
+        // Approved: covers this session's deploy loop, not another session's.
+        broker.approve("thomas", req.id, None, None).await.unwrap();
+        let token = broker.lease_token_for(req.id).await.unwrap();
+        assert_eq!(
+            broker.has_active_deploy_grant(mission, svc).await,
+            Some(req.id)
+        );
+        assert_eq!(
+            broker.has_active_deploy_grant(mission, svc).await,
+            Some(req.id)
+        );
+        assert!(broker.has_active_deploy_grant(other, svc).await.is_none());
+        assert!(broker
+            .verify_and_log_command(verify(mission, token.clone()))
+            .await
+            .is_ok());
+        assert!(broker
+            .verify_and_log_command(verify(other, token.clone()))
+            .await
+            .is_err());
+        assert!(broker
+            .verify_and_log_command(verify(mission, "orb-jit-guess".into()))
+            .await
+            .is_err());
+
+        // A read-only grant never satisfies the deploy gate.
+        let ro = broker
+            .request(deploy_request(other, PrivilegeScope::OpsRead))
+            .await
+            .unwrap();
+        broker.approve("thomas", ro.id, None, None).await.unwrap();
+        assert!(broker.has_active_deploy_grant(other, svc).await.is_none());
+
+        // Expired: refused and pruned.
+        {
+            let mut data = broker.data.lock().await;
+            let r = data.requests.iter_mut().find(|r| r.id == req.id).unwrap();
+            r.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        }
+        assert!(broker.has_active_deploy_grant(mission, svc).await.is_none());
+        assert!(broker
+            .verify_and_log_command(verify(mission, token))
+            .await
+            .is_err());
+        assert_eq!(
+            broker.get("thomas", req.id).await.unwrap().state,
+            ApprovalState::Expired
+        );
+    }
 }
