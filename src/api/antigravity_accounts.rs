@@ -484,7 +484,8 @@ pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option
         crate::account_limits::Zone::system(),
     )
     .unwrap_or(now + chrono::Duration::hours(1))
-    .timestamp();
+    .timestamp()
+    .min(now.timestamp() + MAX_REFUSAL_SECS);
     {
         let mut map = HEALTH.write().ok()?;
         let health = map.entry(spent.clone()).or_insert(Health {
@@ -514,12 +515,18 @@ pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option
     Some((identity(&spent), switched))
 }
 
-/// Google's per-login allowance refusal, as `agy` reports it.
+/// Google's per-login allowance refusal, as `agy` reports it: the message
+/// inside its RESOURCE_EXHAUSTED (429) envelope. The words alone may come
+/// from model output, which must not move the shared machine sign-in.
 pub(crate) fn is_individual_quota_refusal(failure: &str) -> bool {
-    failure
-        .to_ascii_lowercase()
-        .contains("individual quota reached")
+    let lower = failure.to_ascii_lowercase();
+    lower.contains("individual quota reached")
+        && lower.contains("resource_exhausted")
+        && lower.contains("429")
 }
+
+/// Longest real Antigravity quota window (weekly), plus margin.
+const MAX_REFUSAL_SECS: i64 = 8 * 24 * 3600;
 
 /// Periodic eligibility/quota check; pushes the new sign-in to every static
 /// node when the choice changes (managed VMs pick it up at their next run).
@@ -825,6 +832,10 @@ mod tests {
         assert!(crate::account_limits::is_usage_limit_message(raw));
         assert!(!is_individual_quota_refusal(
             "RESOURCE_EXHAUSTED: please retry in 12s"
+        ));
+        // The words alone, e.g. echoed by the model, are not a refusal.
+        assert!(!is_individual_quota_refusal(
+            "The docs say: Individual quota reached. Resets in 2h."
         ));
         let now = chrono::Utc::now();
         let reset =
