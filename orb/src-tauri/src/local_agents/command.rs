@@ -228,7 +228,15 @@ pub(crate) trait SpawnLogged {
 impl SpawnLogged for Command {
     fn spawn_logged(&mut self, ctx: &RunCtx) -> std::io::Result<Child> {
         let shape = argv_shape(self);
-        let spawned = self.spawn();
+        let mut spawned = self.spawn();
+        for _ in 0..10 {
+            if matches!(&spawned, Err(e) if e.raw_os_error() == Some(26)) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                spawned = self.spawn();
+            } else {
+                break;
+            }
+        }
         match &spawned {
             Ok(child) => crate::orb_log!(
                 info,

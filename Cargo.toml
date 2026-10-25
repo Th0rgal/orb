@@ -132,3 +132,9 @@ tokio-test = "0.4"
 [[bin]]
 name = "sandboxed-mcp"
 path = "src/bin/sandboxed_mcp.rs"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
