@@ -10,6 +10,12 @@
   --nextra-navbar-height: 56px;
 }
 
+/* App-style shell: sidebar and navbar run flush to the window edges.
+   html:root outranks the :root block Nextra injects after this sheet. */
+html:root {
+  --nextra-content-width: 100%;
+}
+
 .dark {
   --nextra-primary-hue: 214deg;
   --nextra-primary-saturation: 64%;
