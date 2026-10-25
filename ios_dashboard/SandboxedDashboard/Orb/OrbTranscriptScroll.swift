@@ -134,8 +134,10 @@ struct OrbTranscriptScrollView<Content: View>: View {
 
     var body: some View {
         ScrollView(.vertical) {
+            // Not containerRelativeFrame: after a rotation it kept the conversation at its
+            // portrait width, a narrow column with bare bands beside it in landscape.
             content
-                .containerRelativeFrame(.horizontal)
+                .frame(maxWidth: .infinity)
         }
         .scrollPosition($scroller.position)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
