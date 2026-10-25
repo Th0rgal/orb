@@ -3879,8 +3879,10 @@ select.orb-select-native:disabled { cursor: default; }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent);
 }
 /* Fields that are deliberately borderless keep their own look. */
-.composer textarea:focus, .composer textarea:focus-visible, .cs-prompt:focus, .project-search:focus, .picker-search:focus, .picker-search:focus-visible { box-shadow: none; }
+.composer textarea:focus, .composer textarea:focus-visible, .prompt-editor:focus, .prompt-editor:focus-visible, .cs-prompt:focus, .project-search:focus, .picker-search:focus, .picker-search:focus-visible { box-shadow: none; }
 .project-search:focus, .project-search:focus-visible { box-shadow: inset 0 -1px var(--stroke-strong); }
+/* An edited message focuses as one field (like Cursor): the bubble, never a box inside it. */
+.user.editing:focus-within { border-color: var(--focus-border); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent); }
 
 /* End-of-turn recap. */
 .turn-recap { margin: 14px 0 6px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--stroke-soft); background: color-mix(in srgb, var(--fg) 2.5%, transparent); font-size: 13px; }
