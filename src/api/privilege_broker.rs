@@ -786,12 +786,33 @@ impl PrivilegeBroker {
     }
 
     /// Check if `mission_id` holds an active `ServiceDeploy` or `RootExec`
-    /// grant covering `target_host` (used by `deploy_sandboxed_sh` on `:3000`).
+    /// grant covering `target_service` on `agent-core` / `orb-core` (used by
+    /// `deploy_sandboxed_sh` on `:3000`), enforcing `allowed_unit` when set.
     pub async fn has_active_deploy_grant(
         &self,
         mission_id: Uuid,
-        target_host: &str,
+        target_service: &str,
     ) -> Option<Uuid> {
+        fn unit_matches_deploy_service(allowed_unit: &str, target_service: &str) -> bool {
+            let a = allowed_unit.trim().trim_end_matches(".service");
+            let b = target_service.trim().trim_end_matches(".service");
+            if a == b {
+                return true;
+            }
+            let is_prod_orb = |s: &str| {
+                matches!(
+                    s,
+                    "orb"
+                        | "orb-core"
+                        | "orb-prod"
+                        | "assistant-mcp"
+                        | "sandboxed-sh"
+                        | "sandboxed-sh-prod"
+                )
+            };
+            is_prod_orb(a) && is_prod_orb(b)
+        }
+
         let now = Utc::now();
         let mut data = self.data.lock().await;
         data.prune(now);
@@ -801,9 +822,14 @@ impl PrivilegeBroker {
             .rev()
             .find(|r| {
                 r.requester_mission_id == mission_id
-                    && (r.target_host == target_host
+                    && (r.target_host == target_service
                         || r.target_host == "agent-core"
                         || r.target_host == "orb-core")
+                    && (r.scope == PrivilegeScope::RootExec
+                        || r.allowed_unit
+                            .as_deref()
+                            .map(|u| unit_matches_deploy_service(u, target_service))
+                            .unwrap_or(true))
                     && r.evaluate(now, true, PrivilegeScope::ServiceDeploy, bunker)
                         .allow_exec
             })
