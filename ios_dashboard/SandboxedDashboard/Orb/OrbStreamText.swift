@@ -130,30 +130,76 @@ struct OrbStreamCommit: Equatable {
     }
 }
 
-extension OrbNativeMarkdownView {
-    /// The reply being streamed: blocks of its committed prefix, parsed once.
-    @MainActor private static var streamPrefix = ""
-    @MainActor private static var streamPrefixBlocks: [Block] = []
+/// `parseBlocks` for text that grows by appending (Orb.Stream §3): the committed prefix is
+/// parsed once (`resume_at_commit`), only the open tail on each update, so a stream re-parses
+/// its final committed length plus its tails (`incCost_eq`) instead of every prefix in full.
+@MainActor
+final class OrbStreamBlocks {
+    private var prefix = ""
+    private var prefixBlocks: [OrbNativeMarkdownView.Block] = []
+    /// UTF-8 bytes handed to `parseBlocks` so far (`incCost`; checked against stream-cost.json).
+    private(set) var parsedBytes = 0
 
-    /// `parseBlocks(source)` for text that grows by appending: the committed prefix is parsed
-    /// once (Orb.Stream `resume_at_commit`), only the open tail on each update. Streaming text
-    /// stays out of `cachedBlocks`, whose entries it would otherwise evict on every delta.
-    @MainActor static func streamingBlocks(_ source: String) -> [Block] {
-        if !source.hasPrefix(streamPrefix) {
-            streamPrefix = ""; streamPrefixBlocks = []
-        }
-        let start = source.utf8.index(source.utf8.startIndex, offsetBy: streamPrefix.utf8.count)
+    func blocks(_ source: String) -> [OrbNativeMarkdownView.Block] {
+        if !source.hasPrefix(prefix) { prefix = ""; prefixBlocks = [] }
+        let start = source.utf8.index(source.utf8.startIndex, offsetBy: prefix.utf8.count)
         let rest = Substring(source.utf8[start...])
         let advance = OrbStreamCommit.committedOffset(rest)
+        let end = rest.utf8.index(rest.utf8.startIndex, offsetBy: advance)
         if advance > 0 {
-            let end = rest.utf8.index(rest.utf8.startIndex, offsetBy: advance)
             let chunk = String(Substring(rest.utf8[..<end]))
-            streamPrefixBlocks += parseBlocks(chunk)
-            streamPrefix += chunk
-            return streamPrefixBlocks + parseBlocks(String(Substring(rest.utf8[end...])))
+            prefixBlocks += OrbNativeMarkdownView.parseBlocks(chunk)
+            prefix += chunk
         }
-        return streamPrefixBlocks + parseBlocks(String(rest))
+        let tail = String(Substring(rest.utf8[end...]))
+        parsedBytes += advance + tail.utf8.count
+        return prefixBlocks + OrbNativeMarkdownView.parseBlocks(tail)
     }
+}
+
+/// Orb.Stream §4: a parse cache keyed by the text itself (no hash collisions), bounded, and
+/// evicting only its least recently used entry (never everything at once, which re-parsed the
+/// whole transcript after each long reply). A hit moves the key to the front.
+@MainActor
+final class OrbTextCache<Value> {
+    let capacity: Int
+    private var entries: [String: (value: Value, stamp: Int)] = [:]
+    private var clock = 0
+    private(set) var hits = 0
+    private(set) var misses = 0
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    var count: Int { entries.count }
+    /// Keys, most recently used first (the Lean model's order).
+    var keys: [String] { entries.sorted { $0.value.stamp > $1.value.stamp }.map(\.key) }
+
+    func get(_ key: String) -> Value? {
+        guard let entry = entries[key] else { misses += 1; return nil }
+        hits += 1
+        clock += 1
+        entries[key] = (entry.value, clock)
+        return entry.value
+    }
+
+    func put(_ key: String, _ value: Value) {
+        clock += 1
+        if entries[key] == nil, entries.count >= capacity,
+           let oldest = entries.min(by: { $0.value.stamp < $1.value.stamp })?.key {
+            entries[oldest] = nil
+        }
+        entries[key] = (value, clock)
+    }
+
+    /// Memory warning only: an explicit event, not a capacity policy.
+    func removeAll() { entries.removeAll() }
+}
+
+extension OrbNativeMarkdownView {
+    /// The reply being streamed.
+    @MainActor static let streamParser = OrbStreamBlocks()
+
+    @MainActor static func streamingBlocks(_ source: String) -> [Block] { streamParser.blocks(source) }
 }
 
 /// The streaming bubble. The only view that reads `OrbLiveText.text`, so a frame of deltas
@@ -165,9 +211,20 @@ struct OrbLiveReply: View {
     let onArtifact: (String) -> Void
 
     var body: some View {
+        #if DEBUG
+        let _ = OrbRenderProbe.hit("liveReply")
+        #endif
         let text = OrbSendFlow.dedupeLiveText(live.text, stored: stored)
         if !text.isEmpty {
             OrbMessageWithFiles(text: text, streaming: true, onArtifact: onArtifact)
         }
     }
 }
+
+#if DEBUG
+/// Counts view body evaluations in tests (which views a stream re-renders).
+@MainActor enum OrbRenderProbe {
+    static var counts: [String: Int] = [:]
+    static func hit(_ name: String) { counts[name, default: 0] += 1 }
+}
+#endif

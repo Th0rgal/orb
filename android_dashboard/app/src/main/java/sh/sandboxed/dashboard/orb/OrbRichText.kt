@@ -498,7 +498,7 @@ private fun OrbNativeMarkdown(
 ) {
     val context = LocalContext.current
     val streamBlocks = remember { OrbStreamBlocks() }
-    val blocks = remember(markdown, streaming) { if (streaming) streamBlocks.blocks(markdown) else parseMdBlocks(markdown) }
+    val blocks = remember(markdown, streaming) { if (streaming) streamBlocks.blocks(markdown) else OrbMdCache.parse(markdown) }
     val baseColor = if (tone == OrbRichTextTone.Primary) Color(0xFFE5E5E5) else OrbStyle.textSecondary
     var copiedBlockIdx by remember { androidx.compose.runtime.mutableIntStateOf(-1) }
 

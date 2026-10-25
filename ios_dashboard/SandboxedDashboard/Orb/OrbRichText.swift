@@ -303,29 +303,25 @@ struct OrbNativeMarkdownView: View {
     }
 
     // Keyed by the text itself: a hash collision must not show another message's blocks.
-    @MainActor private static var blockCache: [String: [Block]] = [:]
-    @MainActor private static var inlineCache: [String: AttributedString] = [:]
+    @MainActor static let blockCache = OrbTextCache<[Block]>(capacity: 256)
+    @MainActor private static let inlineCache = OrbTextCache<AttributedString>(capacity: 1024)
 
     @MainActor static func trimCaches() { blockCache.removeAll(); inlineCache.removeAll() }
 
     @MainActor static func cachedBlocks(_ source: String) -> [Block] {
-        let key = source
-        if let cached = blockCache[key] { return cached }
+        if let cached = blockCache.get(source) { return cached }
         let parsed = parseBlocks(source)
-        if blockCache.count > 256 { blockCache.removeAll(keepingCapacity: true) }
-        blockCache[key] = parsed
+        blockCache.put(source, parsed)
         return parsed
     }
 
     @MainActor private static func cachedInline(_ raw: String) -> AttributedString? {
         guard raw.count <= 4000 else { return nil }
-        let key = raw
-        if let cached = inlineCache[key] { return cached }
+        if let cached = inlineCache.get(raw) { return cached }
         guard let attr = try? AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return nil
         }
-        if inlineCache.count > 1024 { inlineCache.removeAll(keepingCapacity: true) }
-        inlineCache[key] = attr
+        inlineCache.put(raw, attr)
         return attr
     }
 

@@ -1,8 +1,11 @@
 package sh.sandboxed.dashboard.orb
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,10 +22,17 @@ import kotlinx.coroutines.launch
  */
 
 /** `Orb.Stream.Coalescer`: deltas collect in `pending`; a frame moves them to [text]. */
-class OrbLiveText(private val scope: CoroutineScope, private val frameMs: Long = 16) {
+class OrbLiveText(
+    private val scope: CoroutineScope,
+    private val frameMs: Long = 16,
+    private val frameDispatcher: CoroutineDispatcher = Dispatchers.Main
+) {
     /** What the streaming bubble shows. */
     var text by mutableStateOf("")
         private set
+
+    /** Whether there is any text: read by the screen, changes on the first delta and on clear. */
+    val hasText by derivedStateOf { text.isNotEmpty() }
     private val pending = StringBuilder()
     private var flushJob: Job? = null
 
@@ -39,7 +49,7 @@ class OrbLiveText(private val scope: CoroutineScope, private val frameMs: Long =
         synchronized(pending) {
             pending.append(delta)
             if (flushJob != null) return
-            flushJob = scope.launch(Dispatchers.Main) {
+            flushJob = scope.launch(frameDispatcher) {
                 delay(frameMs)
                 flush()
             }
@@ -126,6 +136,10 @@ internal class OrbStreamBlocks {
     private var prefix = ""
     private var prefixBlocks: List<OrbMdBlock> = emptyList()
 
+    /** UTF-8 bytes handed to [parseMdBlocks] so far (Lean `incCost`; checked against stream-cost.json). */
+    var parsedBytes = 0
+        private set
+
     fun blocks(source: String): List<OrbMdBlock> {
         if (!source.startsWith(prefix)) { prefix = ""; prefixBlocks = emptyList() }
         val rest = source.substring(prefix.length)
@@ -134,8 +148,73 @@ internal class OrbStreamBlocks {
             val chunk = rest.substring(0, advance)
             prefixBlocks = prefixBlocks + parseMdBlocks(chunk)
             prefix += chunk
-            return prefixBlocks + parseMdBlocks(rest.substring(advance))
         }
-        return prefixBlocks + parseMdBlocks(rest)
+        val tail = rest.substring(advance)
+        parsedBytes += utf8Length(rest)
+        return prefixBlocks + parseMdBlocks(tail)
     }
+
+    private fun utf8Length(s: CharSequence): Int {
+        var n = 0
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            n += when {
+                c.code < 0x80 -> 1
+                c.code < 0x800 -> 2
+                Character.isHighSurrogate(c) -> { i++; 4 }
+                else -> 3
+            }
+            i++
+        }
+        return n
+    }
+}
+
+/**
+ * Orb.Stream §4: a cache keyed by the text itself, bounded, evicting only its least recently
+ * used entry (never everything at once). A hit moves the key to the front. iOS: OrbTextCache.
+ */
+class OrbTextCache<V>(val capacity: Int) {
+    private val entries = object : LinkedHashMap<String, V>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?) = size > capacity
+    }
+    var hits = 0
+        private set
+    var misses = 0
+        private set
+
+    val size: Int get() = synchronized(entries) { entries.size }
+    /** Keys, most recently used first (the Lean model's order). */
+    val keys: List<String> get() = synchronized(entries) { entries.keys.reversed() }
+
+    fun get(key: String): V? = synchronized(entries) {
+        entries[key].also { if (it != null) hits++ else misses++ }
+    }
+
+    fun put(key: String, value: V) { synchronized(entries) { entries[key] = value } }
+}
+
+/** Parsed Markdown blocks of finished messages, shared by every row (items leave and re-enter the list). */
+internal object OrbMdCache {
+    val blocks = OrbTextCache<List<OrbMdBlock>>(256)
+    fun parse(source: String): List<OrbMdBlock> = blocks.get(source) ?: parseMdBlocks(source).also { blocks.put(source, it) }
+}
+
+/** Counts recompositions in tests (which composables a stream recomposes). */
+object OrbRenderProbe {
+    val counts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    fun hit(name: String) { counts.merge(name, 1, Int::plus) }
+}
+
+/**
+ * The streaming bubble: the only composable that reads [OrbLiveText.text], so a frame of
+ * deltas recomposes this item, not the conversation screen. Live text the stored answers
+ * already hold is not shown twice.
+ */
+@Composable
+fun OrbLiveReply(live: OrbLiveText, storedAnswers: List<String>, content: @Composable (String) -> Unit) {
+    OrbRenderProbe.hit("liveReply")
+    val text = OrbSendFlow.dedupeLiveText(live.text, storedAnswers)
+    if (text.trim().isNotEmpty()) content(text)
 }

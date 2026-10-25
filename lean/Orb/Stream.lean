@@ -256,4 +256,151 @@ example : commitOf [ln false true (some (true, 3)), ln true false, ln false fals
 /-- A blank line inside a tilde fence (the normalizer's fence) commits nothing either. -/
 example : commitOf [ln false false (some (false, 3)), ln true false, ln false false] = 0 := by decide
 
+/-! ## 3. Cost: bytes re-parsed over a stream
+
+Each update of a reply of `len` bytes, committed up to `commit`, parses the newly
+committed chunk once and re-parses only the open tail. The total is the final committed
+length plus the sum of the tails: linear when tails are bounded, where a full re-parse per
+update costs the sum of all lengths (quadratic in the number of deltas). -/
+
+structure Upd where
+  len : Nat
+  commit : Nat
+  deriving Repr, DecidableEq
+
+/-- Commit points only move forward and never pass the text (`commit_monotone`, `commit_le_length`). -/
+def Mono : Nat → List Upd → Prop
+  | _, [] => True
+  | prev, u :: us => prev ≤ u.commit ∧ u.commit ≤ u.len ∧ Mono u.commit us
+
+/-- Bytes parsed by the incremental parser: the new chunk, then the tail. -/
+def incCost : Nat → List Upd → Nat
+  | _, [] => 0
+  | prev, u :: us => (u.commit - prev) + (u.len - u.commit) + incCost u.commit us
+
+/-- Bytes parsed by a full re-parse per update. -/
+def fullCost : List Upd → Nat
+  | [] => 0
+  | u :: us => u.len + fullCost us
+
+def tails : List Upd → Nat
+  | [] => 0
+  | u :: us => (u.len - u.commit) + tails us
+
+def lastCommit : Nat → List Upd → Nat
+  | prev, [] => prev
+  | _, u :: us => lastCommit u.commit us
+
+theorem lastCommit_ge (prev : Nat) (us : List Upd) (h : Mono prev us) : prev ≤ lastCommit prev us := by
+  induction us generalizing prev with
+  | nil => simp [lastCommit]
+  | cons u us ih =>
+    have := ih u.commit h.2.2
+    have := h.1
+    simp only [lastCommit]; omega
+
+/-- The cost identity: the committed text is parsed once, plus every tail. -/
+theorem incCost_eq (prev : Nat) (us : List Upd) (h : Mono prev us) :
+    incCost prev us + prev = lastCommit prev us + tails us := by
+  induction us generalizing prev with
+  | nil => simp [incCost, lastCommit, tails]
+  | cons u us ih =>
+    have := ih u.commit h.2.2
+    have := h.1
+    simp only [incCost, lastCommit, tails]; omega
+
+/-- Linear: with tails of at most `t` bytes, `n` updates of a reply ending at `last` bytes
+    re-parse at most `last + n * t` bytes. -/
+theorem incCost_linear (us : List Upd) (h : Mono 0 us) (t last : Nat)
+    (ht : ∀ u ∈ us, u.len - u.commit ≤ t) (hl : lastCommit 0 us ≤ last) :
+    incCost 0 us ≤ last + us.length * t := by
+  have e := incCost_eq 0 us h
+  have : tails us ≤ us.length * t := by
+    clear e h hl
+    induction us with
+    | nil => simp [tails]
+    | cons u us ih =>
+      have h1 := ht u (by simp)
+      have h2 := ih (fun v hv => ht v (by simp [hv]))
+      simp only [tails, List.length_cons, Nat.succ_mul]; omega
+  omega
+
+/-- Never worse than re-parsing everything on every update. -/
+theorem incCost_le_full (prev : Nat) (us : List Upd) (h : Mono prev us) : incCost prev us ≤ fullCost us := by
+  induction us generalizing prev with
+  | nil => simp [incCost, fullCost]
+  | cons u us ih =>
+    have := ih u.commit h.2.2
+    have := h.2.1
+    simp only [incCost, fullCost]
+    -- Each later update's length is at least its commit, which is at least this commit.
+    have hf : incCost u.commit us + u.commit ≤ fullCost us + u.commit := by omega
+    omega
+
+/-- Tightness: three updates of a two-paragraph reply cost 13 bytes incrementally, 18 in full. -/
+example : incCost 0 [⟨4, 0⟩, ⟨6, 5⟩, ⟨8, 5⟩] = 13 ∧ fullCost [⟨4, 0⟩, ⟨6, 5⟩, ⟨8, 5⟩] = 18 := by decide
+
+/-! ## 4. The parse cache: keyed by text, bounded, evicts only its oldest entry
+
+Entries are most recent first. A lookup compares the text itself (no hash collisions); an
+insert moves its key to the front and drops at most one entry, the oldest. The old policy,
+clearing everything once full, re-parsed the whole transcript after each long reply. -/
+
+structure Cache (V : Type) where
+  entries : List (String × V)
+  deriving Repr
+
+def lookup {V : Type} (c : Cache V) (k : String) : Option V := (c.entries.find? (·.1 == k)).map (·.2)
+
+def insert {V : Type} (cap : Nat) (c : Cache V) (k : String) (v : V) : Cache V :=
+  { entries := ((k, v) :: c.entries.filter (·.1 != k)).take cap }
+
+/-- Bounded. -/
+theorem insert_size {V : Type} (cap : Nat) (c : Cache V) (k : String) (v : V) :
+    (insert cap c k v).entries.length ≤ cap := by
+  simp [insert, List.length_take]; omega
+
+/-- What was inserted is found, under exactly that text. -/
+theorem insert_lookup {V : Type} (cap : Nat) (c : Cache V) (k : String) (v : V) (h : 0 < cap) :
+    lookup (insert cap c k v) k = some v := by
+  obtain ⟨n, rfl⟩ : ∃ n, cap = n + 1 := ⟨cap - 1, by omega⟩
+  simp [lookup, insert, List.take_succ_cons]
+
+/-- Keyed by the text: a hit is an entry stored under an equal text. -/
+theorem lookup_mem {V : Type} (c : Cache V) (k : String) (v : V) (h : lookup c k = some v) :
+    (k, v) ∈ c.entries := by
+  simp only [lookup, Option.map_eq_some_iff] at h
+  obtain ⟨e, he, rfl⟩ := h
+  have hk := List.find?_some he
+  have hm := List.mem_of_find?_eq_some he
+  simp at hk; rw [← hk]; exact hm
+
+/-- Eviction only drops a suffix (the oldest entries) of the recency order. -/
+theorem insert_evicts_oldest {V : Type} (cap : Nat) (c : Cache V) (k : String) (v : V) :
+    ∃ dropped, (k, v) :: c.entries.filter (·.1 != k) = (insert cap c k v).entries ++ dropped := by
+  exact ⟨_, (List.take_append_drop cap _).symm⟩
+
+/-- Never wholesale: an insert into a cache within capacity drops at most one entry. -/
+theorem insert_drops_at_most_one {V : Type} (cap : Nat) (c : Cache V) (k : String) (v : V)
+    (h : c.entries.length ≤ cap) : ((k, v) :: c.entries.filter (·.1 != k)).length - cap ≤ 1 := by
+  have := List.length_filter_le (·.1 != k) c.entries
+  simp only [List.length_cons]; omega
+
+/-- The old policy: clear everything once over capacity. -/
+def clearWhenFull {V : Type} (cap : Nat) (c : Cache V) (k : String) (v : V) : Cache V :=
+  if c.entries.length ≥ cap then { entries := [(k, v)] } else { entries := (k, v) :: c.entries }
+
+/-- Tightness: with three entries and capacity 3, the old policy keeps one; the LRU keeps three. -/
+example : (clearWhenFull 3 ⟨[("a", 1), ("b", 2), ("c", 3)]⟩ "d" 4).entries.length = 1 ∧
+    (insert 3 ⟨[("a", 1), ("b", 2), ("c", 3)]⟩ "d" 4).entries.length = 3 := by decide
+
+/-! ## 5. Committed bytes of a streamed string (fixture generation)
+
+Only newline-terminated lines can commit: the last line is still growing. -/
+
+def committedLen (s : String) : Nat :=
+  let lines := (s.splitOn "\n").dropLast
+  let k := commitOf (lines.map classify)
+  ((lines.take k).map (fun l => l.utf8ByteSize + 1)).sum
+
 end Orb.Stream

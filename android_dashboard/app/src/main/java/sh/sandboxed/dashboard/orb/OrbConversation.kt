@@ -207,7 +207,16 @@ object OrbTimelineBuilder {
         startedAt: String?
     ): List<OrbTurn> = withStreaming(buildBase(messages, events, streamingText.isNotEmpty(), isLive, startedAt), streamingText)
 
-    /** The streaming reply on top of [base]: per frame, this is all that runs (not [buildBase]). */
+    /**
+     * The screen's timeline: [base] plus an empty streaming placeholder while text streams.
+     * The placeholder's item reads the live text itself ([OrbLiveReply]), so a frame of deltas
+     * recomposes that item only.
+     */
+    fun withLiveBubble(base: Base, hasStreamingText: Boolean): List<OrbTurn> =
+        if (!hasStreamingText) base.turns
+        else base.turns + OrbTurn.Assistant(id = "streaming-assistant", text = "", timestamp = null, isStreaming = true)
+
+    /** The streaming reply on top of [base] (tests, one-off snapshots). */
     fun withStreaming(base: Base, streamingText: String): List<OrbTurn> {
         // Live text the stored history already holds is not shown twice (reloads, SSE replays).
         val liveText = OrbSendFlow.dedupeLiveText(streamingText, base.storedAnswers)
@@ -528,7 +537,6 @@ fun OrbConversationPage(
     }
     // Streamed reply: deltas coalesce to one state change per frame (OrbStreamText.kt).
     val live = remember(missionId) { OrbLiveText(scope) }
-    val streamingText = live.text
     // False until the first history fetch for this mission settles, so an existing
     // conversation shows a loading row instead of the "Start a conversation" empty state.
     var historySettled by remember(missionId) { mutableStateOf(missionId == null) }
@@ -1108,7 +1116,8 @@ fun OrbConversationPage(
     }
 
     // The transcript is rebuilt when history changes; a streaming frame only adds its bubble.
-    val hasStreamingText = streamingText.isNotEmpty()
+    // Changes on the first delta and on clear only; the text itself is read by the bubble.
+    val hasStreamingText = live.hasText
     val baseTurns = remember(messages, events, hasStreamingText, isLive, liveRow) {
         OrbTimelineBuilder.buildBase(
             messages = messages,
@@ -1118,7 +1127,7 @@ fun OrbConversationPage(
             startedAt = liveRow?.str("root_started_at", "started_at", "created_at")
         )
     }
-    val allTurns = remember(baseTurns, streamingText) { OrbTimelineBuilder.withStreaming(baseTurns, streamingText) }
+    val allTurns = remember(baseTurns, hasStreamingText) { OrbTimelineBuilder.withLiveBubble(baseTurns, hasStreamingText) }
 
     LaunchedEffect(allTurns) { latestTurns = allTurns }
 
@@ -1345,7 +1354,14 @@ fun OrbConversationPage(
         }
     }
 
-    LaunchedEffect(turns.size, turns.lastOrNull()?.id, workStepCount, streamingText.length, completedPlanTurnKey) {
+    // Streaming growth follows the bottom without recomposing the screen.
+    LaunchedEffect(live) {
+        androidx.compose.runtime.snapshotFlow { live.text.length }.collect { length ->
+            if (length > 0 && hasAnchoredInitial && transcriptFollow.shouldFollow(true)) scrollToAbsoluteBottom()
+        }
+    }
+
+    LaunchedEffect(turns.size, turns.lastOrNull()?.id, workStepCount, completedPlanTurnKey) {
         if (turns.isNotEmpty()) {
             // Not "the last few items are visible": one tall turn is several screens,
             // and a reader scrolled up into it was pulled to the bottom on every delta.
@@ -1649,13 +1665,17 @@ fun OrbConversationPage(
                         androidx.compose.runtime.CompositionLocalProvider(
                             LocalOrbFiles provides OrbFileContext(fileScope, sharedFiles, core) { fileRef = it }
                         ) {
-                            OrbAssistantTurnView(
-                                turn = turn,
-                                core = core,
-                                missionId = missionId,
-                                workspaceId = selectedWorkspaceId.takeIf { it.isNotEmpty() },
-                                onSendAnswer = { ans -> sendTurn(ans) }
-                            )
+                            val showTurn: @Composable (OrbTurn.Assistant) -> Unit = { shown ->
+                                OrbAssistantTurnView(
+                                    turn = shown,
+                                    core = core,
+                                    missionId = missionId,
+                                    workspaceId = selectedWorkspaceId.takeIf { it.isNotEmpty() },
+                                    onSendAnswer = { ans -> sendTurn(ans) }
+                                )
+                            }
+                            if (turn.isStreaming) OrbLiveReply(live, baseTurns.storedAnswers) { text -> showTurn(turn.copy(text = text)) }
+                            else showTurn(turn)
                         }
                     }
                     is OrbTurn.WorkFold -> {
