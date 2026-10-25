@@ -7,28 +7,32 @@ initializer removed, and the lean.h scalar primitives replaced by plain C
 macros so it compiles without the Lean runtime.
 
 The file holds two kernels: Orb.Kernel (lean/, this repo) followed by
-LeanSys.Spec (the `leansys_*` gates from the lean-sys crate at the revision
-pinned in crates/orb-spec/Cargo.toml, compiled with its own lean-toolchain).
+LeanSys.Spec (the `leansys_*` gates from the lean-sys repository at the pinned
+revision `LEANSYS_REV`, compiled with Lean 4.35.0).
 
 Usage:
   scripts/gen_orb_kernel_unboxed.py [--check] [--lean-c PATH] [--leansys-c PATH]
 
-Without --lean-c the script runs `lake build Orb.Kernel` in lean/ and reads
-lean/.lake/build/ir/Orb/Kernel.c (lake names private helpers with the
-package prefix). Without --leansys-c it locates the lean-sys checkout via
-`cargo metadata` and compiles LeanSys/Spec.lean the same way lean-sys's
-build.rs does.
+Without --lean-c the script runs `turbo-lean build --project-dir lean` when
+`turbo-lean` is available on PATH (or `TURBO_LEAN_BIN`), falling back to direct
+`lean --setup` compilation of `lean/Orb/Kernel.lean` without invoking `lake`.
+Without --leansys-c it locates `lean-sys` via `LEAN_SYS_DIR`, `../lean-sys`,
+cargo's git cache, or a shallow fetch of `Th0rgal/lean-sys` at `LEANSYS_REV`.
 """
 import argparse
+import os
 import pathlib
 import re
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
+LEANSYS_REPO = "https://github.com/Th0rgal/lean-sys.git"
+LEANSYS_REV = "c51f7f331e84c96f4207b91b606ec27b423f5a98"
 
 # Only scalar primitives with obvious C semantics are allowed; anything else
 # means the kernel started depending on the Lean runtime and must fail.
@@ -63,21 +67,65 @@ def macro(width, op):
     return f"#define lean_{width}_{op}(a, b) " + BIN[op].replace("T", f"{width}_t")
 
 
+def orb_c(out_dir):
+    turbo_bin = os.environ.get("TURBO_LEAN_BIN") or shutil.which("turbo-lean")
+    if turbo_bin:
+        subprocess.run([turbo_bin, "build", "--project-dir", str(ROOT / "lean"), "Orb.Kernel"],
+                       cwd=ROOT, check=True)
+        ir_c = ROOT / "lean/.lake/build/ir/Orb/Kernel.c"
+        if ir_c.is_file():
+            return ir_c
+    setup_file = out_dir / "Orb_Kernel.setup.json"
+    setup_file.write_text(json.dumps({
+        "name": "Orb.Kernel",
+        "isModule": False,
+        "importArts": {},
+        "dynlibs": [],
+        "plugins": [],
+        "options": {"autoImplicit": False, "warningAsError": True},
+        "package": "orb-spec",
+    }))
+    c = out_dir / "Orb_Kernel.c"
+    subprocess.run([
+        "lean", "-DwarningAsError=true", "-DautoImplicit=false",
+        f"--setup={setup_file}", str(ROOT / "lean/Orb/Kernel.lean"), "-c", str(c),
+    ], check=True)
+    return c
+
+
+def resolve_leansys_root(out_dir):
+    env_dir = os.environ.get("LEAN_SYS_DIR")
+    if env_dir and (pathlib.Path(env_dir) / "LeanSys/Spec.lean").is_file():
+        return pathlib.Path(env_dir)
+    sibling = ROOT.parent / "lean-sys"
+    if (sibling / "LeanSys/Spec.lean").is_file():
+        return sibling
+    cargo_home = pathlib.Path(os.environ.get("CARGO_HOME", pathlib.Path.home() / ".cargo"))
+    checkouts = cargo_home / "git/checkouts"
+    if checkouts.is_dir():
+        for cand in checkouts.glob(f"lean-sys-*/{LEANSYS_REV[:7]}*"):
+            if (cand / "LeanSys/Spec.lean").is_file():
+                return cand
+    clone_dir = out_dir / "lean-sys"
+    subprocess.run(["git", "init", "-q", str(clone_dir)], check=True)
+    subprocess.run(["git", "-C", str(clone_dir), "fetch", "-q", "--depth", "1",
+                    LEANSYS_REPO, LEANSYS_REV], check=True)
+    subprocess.run(["git", "-C", str(clone_dir), "checkout", "-q", "FETCH_HEAD"], check=True)
+    return clone_dir
+
+
 def leansys_c(out_dir):
-    meta = json.loads(subprocess.run(
-        ["cargo", "metadata", "--format-version", "1",
-         "--manifest-path", str(ROOT / "crates/orb-spec/Cargo.toml")],
-        cwd=ROOT, check=True, capture_output=True, text=True).stdout)
-    root = next(pathlib.Path(p["manifest_path"]).parent
-                for p in meta["packages"] if p["name"] == "lean-sys-cabi")
-    env = {**__import__("os").environ, "LEAN_PATH": str(out_dir)}
+    root = resolve_leansys_root(out_dir)
+    env = {**os.environ, "LEAN_PATH": str(out_dir)}
     for mod in ["LeanSys/Contracts/MetaGate", "LeanSys/Contracts/SpeculativeGate", "LeanSys/Gate"]:
         olean = out_dir / f"{mod}.olean"
         olean.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["lean", f"{mod}.lean", "-o", str(olean)], cwd=root, env=env, check=True)
+        subprocess.run(["lean", "-DwarningAsError=true", f"{mod}.lean", "-o", str(olean)],
+                       cwd=root, env=env, check=True)
     c = out_dir / "LeanSys_Spec.c"
-    subprocess.run(["lean", "LeanSys/Spec.lean", "-o", str(out_dir / "LeanSys/Spec.olean"),
-                    "-c", str(c)], cwd=root, env=env, check=True)
+    subprocess.run(["lean", "-DwarningAsError=true", "LeanSys/Spec.lean",
+                    "-o", str(out_dir / "LeanSys/Spec.olean"), "-c", str(c)],
+                   cwd=root, env=env, check=True)
     return c
 
 
@@ -110,7 +158,8 @@ def transform(*sources):
     # Keep every symbol kernel_abi.json declares plus the helpers they reach.
     texts = dict(funcs)
     manifest = json.loads((ROOT / "shared/orb-spec/kernel_abi.json").read_text())
-    keep = {f["name"] for f in manifest["functions"]}
+    manifest_names = {f["name"] for f in manifest["functions"]}
+    keep = set(manifest_names)
     missing = sorted(keep - texts.keys())
     if missing:
         sys.exit(f"kernel_abi.json symbols not produced by Lean: {missing}")
@@ -120,7 +169,14 @@ def transform(*sources):
             if callee in texts and callee not in keep:
                 keep.add(callee)
                 todo.append(callee)
-    funcs = [f for f in funcs if f[0] in keep]
+    funcs = [
+        (
+            name,
+            text if name in manifest_names else text.replace("LEAN_EXPORT ", "static inline ", 1),
+        )
+        for name, text in funcs
+        if name in keep
+    ]
     body = "\n\n".join(text for _, text in funcs)
     defined = {name for name, _ in funcs}
     called = set(re.findall(r"\b(l_\w+|lp_\w+)\(", body))
@@ -145,12 +201,10 @@ def main():
     ap.add_argument("--lean-c", type=pathlib.Path)
     ap.add_argument("--leansys-c", type=pathlib.Path)
     args = ap.parse_args()
-    lean_c = args.lean_c
-    if lean_c is None:
-        subprocess.run(["lake", "build", "Orb.Kernel"], cwd=ROOT / "lean", check=True)
-        lean_c = ROOT / "lean/.lake/build/ir/Orb/Kernel.c"
     with tempfile.TemporaryDirectory() as tmp:
-        ls_c = args.leansys_c or leansys_c(pathlib.Path(tmp))
+        tmp_path = pathlib.Path(tmp)
+        lean_c = args.lean_c or orb_c(tmp_path)
+        ls_c = args.leansys_c or leansys_c(tmp_path)
         new = transform(lean_c.read_text(), ls_c.read_text())
     if args.check:
         if OUT.read_text() != new:

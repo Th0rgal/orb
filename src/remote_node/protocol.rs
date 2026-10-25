@@ -147,7 +147,7 @@ impl SourceBundleRequirement {
             decoded_bytes: self.bytes,
             overlay_cap: cap.overlay_bytes,
             complete_cap: cap.complete_bytes,
-            max_bytes: MAX_SOURCE_REQUEST_BODY_BYTES as u64,
+            max_bytes: limit,
         }) {
             let legacy = if heartbeat.source_bundle_capacity.is_none() {
                 " (legacy, unadvertised)"

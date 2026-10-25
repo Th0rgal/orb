@@ -41,11 +41,10 @@ parameter names, unsupported types, and `sat_u8` on anything other than `uint8_t
 
 ## Changing a kernel signature
 
-1. Change the Lean spec and regenerate `cabi/orb_kernel_unboxed.c` with
-   `scripts/gen_orb_kernel_unboxed.py` (CI runs it with `--check`).
-2. Update the entry in `kernel_abi.json` and run the generator.
-3. Update the matching `external fun` in `OrbKernel.kt`. The lint compares its
-   arity and Kotlin types with the manifest.
+1. Change the Lean spec (`lean/Orb/Kernel.lean` and `lean/Orb/Spec.lean`, pinned to `leanprover/lean4:v4.35.0`) and regenerate `cabi/orb_kernel_unboxed.c` with
+   `scripts/gen_orb_kernel_unboxed.py` (which uses `turbo-lean build --project-dir lean` or direct `lean` compilation with zero `lake`/`elan` dependency; CI runs it with `--check`).
+2. Update the entry in `kernel_abi.json` and run `python3 scripts/gen_kernel_bindings.py`.
+3. Update the matching Rust signature in `crates/orb-spec/src/lib.rs` (`crates/orb-spec/build.rs` compiles `cabi/orb_kernel_unboxed.c` directly into `liborb_spec_cabi.a` and verifies via `nm` that all 37 `orb_*` and 21 `leansys_*` symbols are defined with zero undefined runtime references) and the matching `external fun` in `OrbKernel.kt`. The lint compares its arity and Kotlin types with the manifest.
 4. Rebuild the host test library
    `android_dashboard/app/src/test/resources/jni/liborb_kernel.so` and the
    Android `jniLibs` with `scripts/build_android_kernel_so.sh` (NDK; CI checks

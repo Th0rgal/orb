@@ -11,3 +11,4 @@ package «orb-spec» where
 @[default_target]
 lean_lib «Orb» where
   globs := #[.submodules `Orb]
+  precompileModules := true
