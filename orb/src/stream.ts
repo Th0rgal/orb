@@ -93,7 +93,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
   const d = (obj: Record<string, unknown>): StreamEvent => ({ type: ev.event_type, data: obj, eventId: ev.event_id ?? undefined, sequence: ev.sequence, storedId: ev.id });
   switch (ev.event_type) {
     case "text_delta":
-      return d({ content: ev.content });
+      return d({ content: ev.content, at: ev.timestamp });
     case "thinking":
       return d({ content: ev.content, done: ev.metadata?.done === true });
     case "user_message":
@@ -112,7 +112,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       } catch {
         ops = [];
       }
-      return d({ bubble_id: ev.metadata?.bubble_id, ops });
+      return d({ bubble_id: ev.metadata?.bubble_id, ops, at: ev.timestamp });
     }
     case "tool_call": {
       let args: unknown = null;

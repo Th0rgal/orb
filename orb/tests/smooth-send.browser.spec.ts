@@ -188,7 +188,7 @@ test('a follow-up refused with "turn still running" is queued, never an error',a
  });
  await input.press('Enter');
  await expect(queue).toContainText('3 Queued',{timeout:15000});
- const seen=await page.evaluate(()=>{cancelAnimationFrame((window as any).conflictRaf);return (window as any).conflictFrames as any[];});
+ const seen=await page.evaluate(async()=>{await new Promise(r=>requestAnimationFrame(r));cancelAnimationFrame((window as any).conflictRaf);return (window as any).conflictFrames as any[];});
  const from=seen.findIndex(f=>f.shown);
  expect(from).toBeGreaterThanOrEqual(0);
  expect(seen.slice(from).every(f=>f.shown)).toBe(true);
