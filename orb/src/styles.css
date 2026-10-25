@@ -2843,12 +2843,11 @@ select.orb-select-native:disabled { cursor: default; }
 .p-account-header > .p-acc { flex:1;min-width:0; }
 .p-account-menu { flex:none;color:var(--fg-3);font-size:18px; }
 .p-rank { flex:none;font-size:11px;font-weight:400;color:var(--fg-3);font-variant-numeric:tabular-nums; }
-.p-rank-actions { flex:none;display:flex;align-items:center;gap:1px;color:var(--fg-3);opacity:0;transition:opacity 120ms; }
+.p-rank-row { display:flex;align-items:center;justify-content:space-between;gap:12px; }
+.p-rank-actions { flex:none;display:flex;align-items:center;gap:1px;color:var(--fg-3); }
 .p-rank-actions .icon-btn { width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center; }
 .p-rank-actions .icon-btn:disabled { opacity:.35; }
 .p-rank-grip { cursor:grab;user-select:none;padding:0 4px; }
-.p-account-header:hover .p-rank-actions, .p-account-header:focus-within .p-rank-actions { opacity:1; }
-@media (hover: none) { .p-rank-actions { opacity:1; } }
 .p-acc-wrap.p-drop { box-shadow:inset 0 2px 0 var(--focus-border); }
 .p-acc-body { display:flex;flex-direction:column;align-items:stretch;gap:8px; }
 .p-acc-actions { align-self:flex-end; }

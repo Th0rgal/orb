@@ -926,12 +926,16 @@ type AccountRank = { index: number; count: number; move: (to: number) => void };
 const ORDINALS = ["1st", "2nd", "3rd"];
 const ordinal = (n: number) => ORDINALS[n - 1] ?? `${n}th`;
 
-/** Drag handle and up/down buttons that set the order of a provider's accounts. */
-function RankControls(p: { rank: AccountRank; name: string }) {
+/** The account's place among its provider's accounts, with up/down buttons
+ * and a drag handle (drop on another account row). Lives in the row body so
+ * the header keeps its columns. */
+function RankControls(p: { rank: AccountRank; name: string; title: string }) {
   const r = () => p.rank;
   return (
-    <div class="p-rank-actions">
-      <span class="p-rank-grip" draggable="true" title="Drag to change the order" aria-hidden="true"
+    <div class="p-rank-row">
+      <span class="s-row-desc">Tried {ordinal(r().index + 1)} of {r().count} {p.title} accounts</span>
+      <div class="p-rank-actions">
+      <span class="p-rank-grip" draggable="true" title="Drag onto another account to change the order" aria-hidden="true"
         onDragStart={e => { e.dataTransfer?.setData(RANK_DRAG_TYPE, String(r().index)); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}>⠿</span>
       <button type="button" class="icon-btn" aria-label={`Try ${p.name} earlier`} disabled={r().index === 0} onClick={() => r().move(r().index - 1)}>
         <Ic.ArrowUpIcon size={13} />
@@ -939,6 +943,7 @@ function RankControls(p: { rank: AccountRank; name: string }) {
       <button type="button" class="icon-btn" aria-label={`Try ${p.name} later`} disabled={r().index === r().count - 1} onClick={() => r().move(r().index + 1)}>
         <span class="routing-down"><Ic.ArrowUpIcon size={13} /></span>
       </button>
+      </div>
     </div>
   );
 }
@@ -954,7 +959,7 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
   const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Needs Google verification", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
-  const expandable = () => status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
   const [open, setOpen] = createSignal(a.provider_type === "antigravity");
   const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
   const [dropping, setDropping] = createSignal(false);
@@ -993,16 +998,18 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
       <Show when={mistralSubscription() && !open() && p.usage?.mistral_usage_session !== "connected"}>
         <button class="s-btn quiet" aria-label="View Mistral monthly usage" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>Monthly usage ↗</button>
       </Show>
-      <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} />}</Show>
       <Show when={true}><button class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={!!menu()} onClick={e => { const r=e.currentTarget.getBoundingClientRect(); setMenu({x:r.right-170,y:r.bottom+4}); }}><span aria-hidden="true">···</span></button></Show>
       </div>
       <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
         ...(p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
+        ...(p.rank && p.rank.index > 0 ? [{kind:"item" as const,label:"Try earlier",onClick:()=>p.rank!.move(p.rank!.index - 1)}] : []),
+        ...(p.rank && p.rank.index < p.rank.count - 1 ? [{kind:"item" as const,label:"Try later",onClick:()=>p.rank!.move(p.rank!.index + 1)}] : []),
         {kind:"item" as const,label:a.enabled===false?"Enable":"Disable",onClick:()=>p.onToggle(a.enabled===false)},
         ...(p.onRemove ? [{kind:"item" as const,label:"Remove provider…",onClick:p.onRemove}] : []),
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
+          <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={a.provider_type === "antigravity"}><AntigravityProvider /></Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
