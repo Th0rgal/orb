@@ -9,7 +9,7 @@ import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLab
 import { PopupMenu } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import {
@@ -25,6 +25,7 @@ import {
   isConnected,
   listProviders,
   setProviderEnabled,
+  reorderProviders,
   openExternalUrl,
   startSubscriptionLogin,
   cancelSubscriptionLogin,
@@ -34,6 +35,7 @@ import {
 } from "./api";
 import { nativeInvoke } from "./clientRuns";
 import { listHealth, type AccountHealthSnapshot } from "./routingApi";
+import { applyOrder, moveAccount, orderAccounts } from "./accountOrder";
 
 type AuthKind = "oauth" | "api";
 
@@ -225,10 +227,31 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   // set by the backend's subscription marker, not by the stored secret type.
   const isKey = (a: AIProvider) => !(a.provider_type === "mistral" && a.uses_oauth)
     && ((a.has_api_key === true && a.has_oauth === false) || !a.uses_oauth);
-  const oauth = () => p.list.filter(a => !isKey(a) && a.provider_type !== "google");
-  const modelConnections = () => p.list.filter(a => !isKey(a) && a.provider_type === "google");
-  const keys = () => p.list.filter(isKey);
+  // A reorder shows at once; the next server list replaces it.
+  const [ordered, setOrdered] = createSignal<AIProvider[] | null>(null);
+  createEffect(on(() => p.list, () => setOrdered(null), { defer: true }));
+  const list = () => ordered() ?? p.list;
+  const oauth = () => orderAccounts(list().filter(a => !isKey(a) && a.provider_type !== "google"));
+  const modelConnections = () => list().filter(a => !isKey(a) && a.provider_type === "google");
+  const keys = () => orderAccounts(list().filter(isKey));
   const [toggleError, setToggleError] = createSignal<string | null>(null);
+  const reorder = (group: AIProvider[], a: AIProvider, to: number) => {
+    const ids = moveAccount(group, a.id, to);
+    if (!ids) return;
+    const previous = ordered();
+    setToggleError(null);
+    setOrdered(applyOrder(list(), ids));
+    void reorderProviders(ids).then(p.onRefresh, () => {
+      setOrdered(previous);
+      setToggleError(`Could not change the order of ${a.provider_type_name || a.provider_type} accounts. The previous order is kept.`);
+    });
+  };
+  /** Position of `a` among its provider's accounts in `group`, when there are several. */
+  const rankIn = (group: () => AIProvider[], a: AIProvider): AccountRank | undefined => {
+    const peers = group().filter(x => x.provider_type === a.provider_type);
+    if (peers.length < 2) return undefined;
+    return { index: peers.findIndex(x => x.id === a.id), count: peers.length, move: to => reorder(group(), a, to) };
+  };
   const toggle = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
     void setProviderEnabled(a.id, enabled).then(p.onRefresh, () => setToggleError(`Could not ${enabled ? "enable" : "disable"} ${a.name}. Nothing changed.`));
@@ -291,7 +314,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No OAuth providers configured.</div></div>
@@ -315,7 +338,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API key providers configured.</div></div>
@@ -898,7 +921,36 @@ function EmailLabel(p: { email: string }) {
   );
 }
 
-function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
+type AccountRank = { index: number; count: number; move: (to: number) => void };
+
+const ORDINALS = ["1st", "2nd", "3rd"];
+const ordinal = (n: number) => ORDINALS[n - 1] ?? `${n}th`;
+
+/** The account's place among its provider's accounts, with up/down buttons
+ * and a drag handle (drop on another account row). Lives in the row body so
+ * the header keeps its columns. */
+function RankControls(p: { rank: AccountRank; name: string; title: string }) {
+  const r = () => p.rank;
+  return (
+    <div class="p-rank-row">
+      <span class="s-row-desc">Tried {ordinal(r().index + 1)} of {r().count} {p.title} accounts</span>
+      <div class="p-rank-actions">
+      <span class="p-rank-grip" draggable="true" title="Drag onto another account to change the order" aria-hidden="true"
+        onDragStart={e => { e.dataTransfer?.setData(RANK_DRAG_TYPE, String(r().index)); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}>⠿</span>
+      <button type="button" class="icon-btn" aria-label={`Try ${p.name} earlier`} disabled={r().index === 0} onClick={() => r().move(r().index - 1)}>
+        <Ic.ArrowUpIcon size={13} />
+      </button>
+      <button type="button" class="icon-btn" aria-label={`Try ${p.name} later`} disabled={r().index === r().count - 1} onClick={() => r().move(r().index + 1)}>
+        <span class="routing-down"><Ic.ArrowUpIcon size={13} /></span>
+      </button>
+      </div>
+    </div>
+  );
+}
+
+const RANK_DRAG_TYPE = "application/x-orb-account-rank";
+
+function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
   const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
@@ -907,9 +959,10 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<str
   const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Needs Google verification", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
-  const expandable = () => status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
   const [open, setOpen] = createSignal(a.provider_type === "antigravity");
   const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
+  const [dropping, setDropping] = createSignal(false);
   const needsAuth = () => ["needs_reauth", "needs_auth"].includes(status());
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
@@ -918,7 +971,10 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<str
     : p.usage?.muse_plan || p.usage?.mistral_plan || undefined;
   const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
   return (
-    <div class="p-acc-wrap">
+    <div class="p-acc-wrap" classList={{ "p-drop": dropping() }}
+      onDragOver={e => { if (p.rank && e.dataTransfer?.types.includes(RANK_DRAG_TYPE)) { e.preventDefault(); setDropping(true); } }}
+      onDragLeave={() => setDropping(false)}
+      onDrop={e => { setDropping(false); const from = e.dataTransfer?.getData(RANK_DRAG_TYPE); if (p.rank && from) { e.preventDefault(); if (Number(from) !== p.rank.index) p.rank.move(p.rank.index); } }}>
       <div class="p-account-header">
       <Dynamic component={expandable() ? "button" : "div"} class={`s-row p-acc ${expandable() ? "p-acc-btn" : ""}`} aria-expanded={expandable() ? open() : undefined} onClick={expandable() ? () => setOpen(!open()) : undefined}>
         <ProviderLogo type={a.provider_type} name={a.name} />
@@ -926,6 +982,7 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<str
           <div class="s-row-title">
             <span class="p-account-name">{title()}</span>
             <Show when={email()}>{e => <EmailLabel email={e()} />}</Show>
+            <Show when={p.rank}>{r => <span class="p-rank" title={`Tried ${ordinal(r().index + 1)} of ${r().count} ${title()} accounts`}>{ordinal(r().index + 1)}</span>}</Show>
           </div>
           <div class="s-row-desc">
             <span class={`p-st ${stClass()}`} title={stLabel()}>{stLabel()}</span>
@@ -945,11 +1002,14 @@ function LiveRow(p: { a: AIProvider; usage?: ProviderUsage; sharedOrgs?: Set<str
       </div>
       <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
         ...(p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
+        ...(p.rank && p.rank.index > 0 ? [{kind:"item" as const,label:"Try earlier",onClick:()=>p.rank!.move(p.rank!.index - 1)}] : []),
+        ...(p.rank && p.rank.index < p.rank.count - 1 ? [{kind:"item" as const,label:"Try later",onClick:()=>p.rank!.move(p.rank!.index + 1)}] : []),
         {kind:"item" as const,label:a.enabled===false?"Enable":"Disable",onClick:()=>p.onToggle(a.enabled===false)},
         ...(p.onRemove ? [{kind:"item" as const,label:"Remove provider…",onClick:p.onRemove}] : []),
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
+          <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={a.provider_type === "antigravity"}><AntigravityProvider /></Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />

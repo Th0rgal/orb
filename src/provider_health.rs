@@ -950,14 +950,41 @@ impl ProviderHealthTracker {
     }
 
     /// Convenience wrapper over [`Self::record_usage_limit`] for a resolved
-    /// chain entry.
+    /// chain entry. A provider metering pools separately parks only the pool.
     pub async fn record_entry_usage_limit(
         &self,
         entry: &ResolvedEntry,
         cooldown: crate::account_limits::LimitCooldown,
     ) -> std::time::Duration {
+        if let Some(key) = pool_limit_key(&entry.provider_id, entry.account_id, &entry.model_id) {
+            return self.park_pool(&key, cooldown);
+        }
         self.record_usage_limit(entry.account_id, entry.subscription_key.as_ref(), cooldown)
             .await
+    }
+
+    /// Whether `account_id`'s quota pool for `model_id` is parked.
+    pub fn pool_is_cooling(&self, provider_id: &str, account_id: Uuid, model_id: &str) -> bool {
+        pool_limit_key(provider_id, account_id, model_id)
+            .is_some_and(|key| self.limits.is_cooling(&key))
+    }
+
+    fn park_pool(
+        &self,
+        key: &str,
+        cooldown: crate::account_limits::LimitCooldown,
+    ) -> std::time::Duration {
+        let remaining = (cooldown.until - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tracing::info!(
+            pool = %key,
+            limit = %cooldown.limit,
+            until = %cooldown.until,
+            "Account quota pool parked until its usage limit resets"
+        );
+        self.limits.set(key, cooldown);
+        remaining
     }
 
     /// Convenience wrapper: record a failure for a resolved chain entry,
@@ -970,6 +997,23 @@ impl ProviderHealthTracker {
     ) -> std::time::Duration {
         if let Some(cell) = crate::api::proxy_timing::current() {
             cell.attempt_failure(&reason.to_string());
+        }
+        if let (CooldownReason::QuotaExhausted, Some(key)) = (
+            reason,
+            pool_limit_key(&entry.provider_id, entry.account_id, &entry.model_id),
+        ) {
+            let base = std::time::Duration::from_secs(quota_cooldown_secs());
+            let cooldown = retry_after.map(|r| r.max(base)).unwrap_or(base);
+            let reset = crate::account_limits::LimitReset {
+                at: chrono::Utc::now()
+                    + chrono::Duration::from_std(cooldown)
+                        .unwrap_or_else(|_| chrono::Duration::hours(1)),
+                announced: retry_after.is_some(),
+            };
+            return self.park_pool(
+                &key,
+                crate::account_limits::LimitCooldown::new(&entry.provider_id, "usage limit", reset),
+            );
         }
         self.record_failure_with_subscription(
             entry.account_id,
@@ -1342,6 +1386,20 @@ pub fn store_account_subscription_key(
         }
     }
     None
+}
+
+/// Registry key of the quota pool `model_id` draws from on `account_id`, for
+/// providers that meter pools separately. Antigravity bills Claude & GPT and
+/// Gemini from separate allowances, and CLIProxyAPI picks the login itself,
+/// so an exhausted pool parks that pool only, never the whole account.
+pub fn pool_limit_key(provider_id: &str, account_id: Uuid, model_id: &str) -> Option<String> {
+    (provider_id == crate::ai_providers::ProviderType::Antigravity.id()).then(|| {
+        format!(
+            "{}:{}",
+            crate::account_limits::account_key(account_id),
+            crate::api::antigravity_usage::quota_pool(model_id)
+        )
+    })
 }
 
 /// A resolved chain entry: a specific account + model ready for routing.
@@ -2052,10 +2110,15 @@ impl ModelChainStore {
             }
             // Among the accounts of a provider, the one with the most quota
             // left goes first. Cached usage only: no usage data, no change.
-            let store_accounts =
-                crate::account_limits::prefer_most_remaining_quota(store_accounts, |account| {
-                    health_tracker.remaining_quota(account.id)
-                });
+            // An order the user set (distinct priorities) wins over quota.
+            let store_accounts = store_accounts
+                .chunk_by(|a, b| a.priority == b.priority)
+                .flat_map(|tier| {
+                    crate::account_limits::prefer_most_remaining_quota(tier.to_vec(), |account| {
+                        health_tracker.remaining_quota(account.id)
+                    })
+                })
+                .collect::<Vec<_>>();
             // The proxy selects from its own pool. If that pool contains a direct
             // key, its synthetic identity must not bypass the key's cooldown.
             let duplicate_google_proxy_key = provider_type
@@ -2109,6 +2172,20 @@ impl ModelChainStore {
                         .as_deref()
                         .is_some_and(crate::api::antigravity_accounts::needs_verification)
                 {
+                    continue;
+                }
+                // An Antigravity login is skipped for a model it does not list
+                // itself, or whose quota pool it has spent: its other pool and
+                // its sibling logins stay in rotation.
+                if crate::api::antigravity_accounts::account_lacks_model(
+                    &self.storage_path,
+                    account,
+                    &entry.model_id,
+                ) || health_tracker.pool_is_cooling(
+                    &entry.provider_id,
+                    account.id,
+                    &entry.model_id,
+                ) {
                     continue;
                 }
                 // Custom providers are a shared type, so an entry must be tied to
@@ -3224,6 +3301,159 @@ mod tests {
             .resolve_chain("argon", &store, &standard, &health)
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn antigravity_exhausted_pool_keeps_sibling_login_and_other_pool() {
+        // CLIProxyAPI picks the Antigravity login, so a 429 cannot name the
+        // account that spent its quota: it must park one pool of one
+        // account, never the sibling login or the account's Gemini models.
+        const CHILD: &str = "SANDBOXED_TEST_ANTIGRAVITY_POOLS";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = TempDir::new().unwrap();
+            for name in ["first", "second"] {
+                std::fs::write(
+                    dir.path().join(format!("antigravity-{name}.json")),
+                    serde_json::json!({
+                        "type":"antigravity", "prefix":"antigravity",
+                        "email": format!("{name}@example.invalid"),
+                        "access_token":"fixture-access", "refresh_token":"fixture-refresh",
+                        "expired":"2099-01-01T00:00:00Z"
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider_health::tests::antigravity_exhausted_pool_keeps_sibling_login_and_other_pool",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("CLI_PROXY_AUTH_DIR", dir.path())
+                .env("CLI_PROXY_MANAGEMENT_KEY", "fixture-management")
+                .env("SANDBOXED_OAUTH_OWNER", "cli-proxy")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let login = |name: &str, priority: u32| {
+            let mut account = AIProvider::new(ProviderType::Antigravity, name.into());
+            account.cli_proxy_auth_file = Some(format!("antigravity-{name}.json"));
+            account.priority = priority;
+            account.oauth = Some(OAuthCredentials {
+                access_token: "fixture-access".into(),
+                refresh_token: "fixture-refresh".into(),
+                expires_at: future_ms(6),
+            });
+            account
+        };
+        let (first, second) = (login("first", 0), login("second", 1));
+        let (first_id, second_id) = (first.id, second.id);
+        let store = store_with(vec![second, first]).await;
+        let entry = |model: &str| ChainEntry {
+            provider_id: "antigravity".into(),
+            model_id: model.into(),
+        };
+        let chains = store_with_chain("smart", vec![entry("claude-opus-5-5-high")]).await;
+        chains
+            .upsert(ModelChain {
+                id: "gemini".into(),
+                name: "gemini".into(),
+                entries: vec![entry("gemini-4-argon-high")],
+                is_default: false,
+                strip_thinking: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await;
+        let health = ProviderHealthTracker::new();
+        let ids = |entries: Vec<ResolvedEntry>| -> Vec<Uuid> {
+            entries.into_iter().map(|e| e.account_id).collect()
+        };
+
+        let resolved = chains.resolve_chain("smart", &store, &[], &health).await;
+        assert_eq!(
+            ids(resolved.clone()),
+            vec![first_id, second_id],
+            "user order"
+        );
+
+        // The first login's Claude & GPT pool is spent.
+        health
+            .record_entry_failure(&resolved[0], CooldownReason::QuotaExhausted, None)
+            .await;
+        assert_eq!(
+            ids(chains.resolve_chain("smart", &store, &[], &health).await),
+            vec![second_id],
+            "the sibling login with quota is still tried"
+        );
+        assert_eq!(
+            ids(chains.resolve_chain("gemini", &store, &[], &health).await),
+            vec![first_id, second_id],
+            "the spent account keeps serving its Gemini pool"
+        );
+        assert!(health.is_healthy(first_id).await);
+        assert_eq!(health.get_health(first_id).await.account_state, "available");
+
+        // An announced reset parks the pool the same way.
+        let resolved = chains.resolve_chain("smart", &store, &[], &health).await;
+        let limit = crate::account_limits::LimitCooldown::new(
+            "antigravity",
+            "usage limit",
+            crate::account_limits::LimitReset {
+                at: chrono::Utc::now() + chrono::Duration::hours(3),
+                announced: true,
+            },
+        );
+        health.record_entry_usage_limit(&resolved[0], limit).await;
+        assert!(chains
+            .resolve_chain("smart", &store, &[], &health)
+            .await
+            .is_empty());
+        assert!(health.is_healthy(second_id).await);
+    }
+
+    #[tokio::test]
+    async fn reorder_sets_one_providers_account_order() {
+        let a = AIProvider::new(ProviderType::Anthropic, "a".into());
+        let b = AIProvider::new(ProviderType::Anthropic, "b".into());
+        let c = AIProvider::new(ProviderType::Anthropic, "c".into());
+        let other = AIProvider::new(ProviderType::OpenAI, "o".into());
+        let (a_id, b_id, c_id, other_id) = (a.id, b.id, c.id, other.id);
+        let store = store_with(vec![a, b, c, other]).await;
+        store.reorder(&[c_id, a_id]).await.unwrap();
+        let order: Vec<Uuid> = store
+            .get_all_by_type(ProviderType::Anthropic)
+            .await
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(order, vec![c_id, a_id, b_id]);
+        assert!(store.reorder(&[a_id, other_id]).await.is_err());
+        assert!(store.reorder(&[a_id, a_id]).await.is_err());
+        assert!(store.reorder(&[Uuid::new_v4()]).await.is_err());
+    }
+
+    #[test]
+    fn pool_limit_key_scopes_antigravity_only() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            pool_limit_key("antigravity", id, "claude-opus-5-5-high"),
+            pool_limit_key("antigravity", id, "gpt-oss-120b-medium"),
+        );
+        assert_ne!(
+            pool_limit_key("antigravity", id, "claude-opus-5-5-high"),
+            pool_limit_key("antigravity", id, "gemini-4-argon-high"),
+        );
+        assert_eq!(pool_limit_key("anthropic", id, "claude-opus-5-5"), None);
     }
 
     #[tokio::test]
@@ -4357,13 +4587,13 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_prefers_the_account_with_the_most_remaining_quota() {
-        let mut first = anth_oauth_account("a@example.com", Some("org-a"), future_ms(4));
-        first.priority = 0;
-        let mut second = anth_oauth_account("b@example.com", Some("org-b"), future_ms(4));
-        second.priority = 1;
-        let mut third = anth_oauth_account("c@example.com", Some("org-c"), future_ms(4));
-        third.priority = 2;
-        let (a, b, c) = (first.id, second.id, third.id);
+        // Equal priorities: no order set by the user, so quota decides.
+        let first = anth_oauth_account("a@example.com", Some("org-a"), future_ms(4));
+        let second = anth_oauth_account("b@example.com", Some("org-b"), future_ms(4));
+        let third = anth_oauth_account("c@example.com", Some("org-c"), future_ms(4));
+        let mut ids = [first.id, second.id, third.id];
+        ids.sort();
+        let [a, b, c] = ids;
         let store = store_with(vec![first, second, third]).await;
         let tracker = ProviderHealthTracker::new();
 
@@ -4385,16 +4615,18 @@ mod tests {
         );
 
         // The account with the most quota is skipped while it is parked.
-        tracker
-            .record_usage_limit(
-                b,
-                Some(&SubscriptionKey::new("anthropic", "org-b")),
-                limit_cooldown(2),
-            )
-            .await;
+        tracker.record_usage_limit(b, None, limit_cooldown(2)).await;
         assert_eq!(
             resolved_anthropic_accounts(&store, &tracker).await,
             vec![a, c]
+        );
+
+        // An order the user set wins over remaining quota.
+        store.reorder(&[c, a, b]).await.unwrap();
+        tracker.record_remaining_quota(c, 10.0);
+        assert_eq!(
+            resolved_anthropic_accounts(&store, &tracker).await,
+            vec![c, a]
         );
     }
 

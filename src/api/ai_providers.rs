@@ -2663,6 +2663,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         // Bulk usage snapshot for the dashboard — returns the entire cache map
         // and triggers async background refreshes for any stale entries.
         .route("/usage", get(list_all_provider_usage))
+        .route("/reorder", post(reorder_providers))
         .route("/:id", get(get_provider))
         .route("/:id", put(update_provider))
         .route("/:id", delete(delete_provider))
@@ -10482,6 +10483,39 @@ async fn get_provider(
 ///
 /// All providers are now in AIProviderStore. The `:id` can be a UUID or
 /// a provider type ID (for backwards compat, finds the first matching).
+#[derive(Debug, Deserialize)]
+pub struct ReorderProvidersRequest {
+    /// Accounts of one provider, the first tried first.
+    pub ids: Vec<uuid::Uuid>,
+}
+
+/// Set the order in which one provider's accounts are tried.
+async fn reorder_providers(
+    State(state): State<Arc<super::routes::AppState>>,
+    Json(req): Json<ReorderProvidersRequest>,
+) -> Result<Json<Vec<ProviderResponse>>, (StatusCode, String)> {
+    let ordered = state
+        .ai_providers
+        .reorder(&req.ids)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if ordered.first().is_some_and(|p| {
+        matches!(
+            p.provider_type,
+            ProviderType::Antigravity | ProviderType::MuseCode
+        )
+    }) {
+        let accounts = ordered.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            super::antigravity_accounts::sync_cli_proxy_priorities(&accounts)
+        })
+        .await;
+    }
+    Ok(Json(
+        ordered.iter().map(build_response_from_store).collect(),
+    ))
+}
+
 async fn update_provider(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,

@@ -50,7 +50,7 @@ fn accounts_of_backend(backend: &str) -> Option<(&'static str, &'static str)> {
     match backend {
         "claudecode" => Some(("anthropic", "Claude")),
         "codex" => Some(("openai", "Codex")),
-        "antigravity" => Some(("google", "Antigravity")),
+        "antigravity" => Some(("antigravity", "Antigravity")),
         // OpenCode may route through multiple providers. Do not borrow an
         // unrelated subscription account cooldown; use the reported reset.
         "opencode" => Some(("opencode", "Provider")),
@@ -577,6 +577,17 @@ pub(crate) fn provider_has_available_account(
     })
 }
 
+/// What the mission shows while it replays on the next Antigravity login.
+pub(crate) fn antigravity_switch_label(spent: &str, next: &str) -> String {
+    format!("{ACCOUNT_SWITCH_PREFIX}{spent}, switching to {next}")
+}
+
+const ACCOUNT_SWITCH_PREFIX: &str = "Antigravity quota exhausted on ";
+
+fn is_account_switch(limit: &str) -> bool {
+    limit.starts_with(ACCOUNT_SWITCH_PREFIX)
+}
+
 /// Recovery label of an Antigravity turn cut while its root agent idle-waited
 /// for background tasks or subagents.
 pub(crate) const IDLE_WAIT_INTERRUPTED: &str = "Antigravity background-task wait interrupted";
@@ -689,7 +700,9 @@ const STREAM_STALL_RESUME_SECS: i64 = 10;
 fn is_transient_wait(limit: &str) -> bool {
     limit == "Inference connection interrupted"
         || limit == STARTUP_STALL_WAIT
-        || (limit.starts_with("Antigravity ") && !limit.ends_with("limit"))
+        || (limit.starts_with("Antigravity ")
+            && !limit.ends_with("limit")
+            && !is_account_switch(limit))
 }
 
 fn recovery_delay_secs(replays: u32, mission_id: Uuid) -> i64 {
@@ -749,6 +762,19 @@ pub(crate) async fn plan_remote(
             previous.as_ref().map_or(0, |wait| wait.replays)
         };
         let now = Utc::now();
+        // One Google login is the sign-in of every machine: when it refuses
+        // on its quota, the next login takes over and the replay goes out now.
+        if mission.backend == "antigravity" && replays < MAX_REMOTE_REPLAYS {
+            if let Some((spent, Some(next))) =
+                crate::api::antigravity_accounts::note_native_quota_refusal(failure)
+            {
+                return Some(UsageLimitWait {
+                    limit: antigravity_switch_label(&spent, &next),
+                    resume_at: now + Duration::seconds(IMMEDIATE_REPLAY_SECS),
+                    announced: false,
+                });
+            }
+        }
         let classified = super::remote_failure::classify(failure);
         if matches!(
             classified.kind,
@@ -922,6 +948,15 @@ pub(crate) fn annotate_remote_output(output: &str, wait: &UsageLimitWait) -> Str
             resume_time(wait),
         );
     }
+    if is_account_switch(&wait.limit) {
+        return format!(
+            "{}\n\n{}. This mission's job will be replayed on the node with the other account \
+             at {}.",
+            output.trim_end(),
+            wait.limit,
+            resume_time(wait),
+        );
+    }
     if is_transient_wait(&wait.limit) {
         return format!(
             "{}\n\n{} detected. This mission is waiting and its conversation will be resumed \
@@ -964,6 +999,13 @@ pub(crate) fn remote_resume_prompt(limit: &str) -> String {
              Check existing work and background tasks, then continue from where you stopped. \
              Keep responses short, write large outputs to workspace files, and split remaining work \
              into smaller steps. Do not restart completed work or duplicate running tasks."
+        );
+    }
+    if is_account_switch(limit) {
+        return format!(
+            "{RESUME_PROMPT_MARKER} Your previous turn stopped because the Google account's quota \
+             ran out; you now run on another account. Resume your work where it stopped, and \
+             check the state of anything you had started."
         );
     }
     if is_transient_wait(limit) {
@@ -1049,6 +1091,21 @@ pub(crate) fn after_replay_failure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn antigravity_account_switch_is_a_quota_recovery_with_its_own_wording() {
+        let label = antigravity_switch_label("a@example.com", "b@example.com");
+        assert_eq!(
+            label,
+            "Antigravity quota exhausted on a@example.com, switching to b@example.com"
+        );
+        assert!(!is_transient_wait(&label));
+        assert!(remote_resume_prompt(&label).contains("another account"));
+        assert_eq!(
+            accounts_of_backend("antigravity"),
+            Some(("antigravity", "Antigravity"))
+        );
+    }
+
     use super::*;
     use crate::account_limits::LimitCooldown;
     use crate::api::mission_store::{select_next_runnable_mission, SqliteMissionStore};

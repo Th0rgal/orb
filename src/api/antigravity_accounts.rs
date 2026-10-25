@@ -46,7 +46,18 @@ pub(crate) struct Health {
     pub gemini_remaining: Option<f64>,
     /// When that Gemini window resets (Unix seconds).
     pub gemini_reset: Option<i64>,
+    /// Same for the "Claude and GPT models" pool.
+    pub claude_remaining: Option<f64>,
+    pub claude_reset: Option<i64>,
+    /// A native run was refused with "Individual quota reached" on this
+    /// login: unusable until then (Unix seconds), whatever the figures say.
+    pub refused_until: Option<i64>,
 }
+
+/// Below this remaining fraction Google refuses requests ("Individual quota
+/// reached"): quota is charged per request cost, so a login at 0.5 % left is
+/// spent in practice.
+const SPENT_FRACTION: f64 = 0.02;
 
 static HEALTH: LazyLock<RwLock<HashMap<String, Health>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -103,11 +114,20 @@ fn is_gemini(model: &str) -> bool {
     m.contains("gemini") || m.starts_with("agy-")
 }
 
+fn is_claude_or_gpt(model: &str) -> bool {
+    super::antigravity_usage::quota_pool(model) == "claude-gpt"
+}
+
 /// Lowest remaining Gemini fraction and its earliest reset, from either
 /// `retrieveUserQuota` (`buckets[]`) or `fetchAvailableModels`
 /// (`models{id: {quotaInfo}}`). Google omits `remainingFraction` when it is
 /// zero (proto3 default), so a bucket with a reset and no fraction is empty.
 pub(crate) fn gemini_quota(payload: &Value) -> (Option<f64>, Option<i64>) {
+    pool_quota(payload, is_gemini)
+}
+
+/// [`gemini_quota`] for the models `in_pool` selects.
+pub(crate) fn pool_quota(payload: &Value, in_pool: fn(&str) -> bool) -> (Option<f64>, Option<i64>) {
     let mut entries: Vec<(&str, &Value)> = Vec::new();
     for bucket in payload["buckets"].as_array().into_iter().flatten() {
         if let Some(id) = bucket["modelId"].as_str() {
@@ -120,7 +140,7 @@ pub(crate) fn gemini_quota(payload: &Value) -> (Option<f64>, Option<i64>) {
     let mut remaining: Option<f64> = None;
     let mut reset: Option<i64> = None;
     for (id, info) in entries {
-        if !is_gemini(id) {
+        if !in_pool(id) {
             continue;
         }
         let at = info["resetTime"]
@@ -153,20 +173,40 @@ pub(crate) struct Candidate {
     pub expires_at: i64,
 }
 
-fn has_gemini_quota(health: Option<&Health>, now: i64) -> bool {
-    match health {
-        Some(Health {
-            gemini_remaining: Some(r),
-            gemini_reset,
-            ..
-        }) if *r <= 0.0 => gemini_reset.is_some_and(|at| at <= now),
-        _ => true,
-    }
+fn pool_spent(remaining: Option<f64>, reset: Option<i64>, now: i64) -> bool {
+    remaining.is_some_and(|r| r < SPENT_FRACTION) && reset.is_none_or(|at| at > now)
+}
+
+/// Every pool has quota and no native run was refused recently. A machine
+/// holds one sign-in for every model, so a login spent on one pool gives way
+/// to a sibling that can serve them all.
+fn has_quota(health: Option<&Health>, now: i64) -> bool {
+    health.is_none_or(|h| {
+        !pool_spent(h.gemini_remaining, h.gemini_reset, now)
+            && !pool_spent(h.claude_remaining, h.claude_reset, now)
+            && h.refused_until.is_none_or(|at| at <= now)
+    })
+}
+
+/// When a spent login is expected back (its latest blocking reset).
+fn usable_again(health: Option<&Health>, now: i64) -> i64 {
+    let Some(h) = health else { return now };
+    [
+        pool_spent(h.gemini_remaining, h.gemini_reset, now)
+            .then(|| h.gemini_reset.unwrap_or(i64::MAX)),
+        pool_spent(h.claude_remaining, h.claude_reset, now)
+            .then(|| h.claude_reset.unwrap_or(i64::MAX)),
+        h.refused_until.filter(|at| *at > now),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(now)
 }
 
 /// The login that should serve native runs: highest priority among eligible
-/// accounts with Gemini quota left; failing that, the eligible one whose
-/// quota resets first; never an account Google refuses to serve.
+/// accounts with quota left in every pool; failing that, the eligible one
+/// that comes back first; never an account Google refuses to serve.
 pub(crate) fn choose<'a>(
     candidates: &'a [Candidate],
     health: &HashMap<String, Health>,
@@ -189,14 +229,12 @@ pub(crate) fn choose<'a>(
     eligible
         .iter()
         .copied()
-        .find(|c| has_gemini_quota(health.get(&c.file), now))
+        .find(|c| has_quota(health.get(&c.file), now))
         .or_else(|| {
-            eligible.iter().copied().min_by_key(|c| {
-                health
-                    .get(&c.file)
-                    .and_then(|h| h.gemini_reset)
-                    .unwrap_or(i64::MAX)
-            })
+            eligible
+                .iter()
+                .copied()
+                .min_by_key(|c| usable_again(health.get(&c.file), now))
         })
 }
 
@@ -272,6 +310,53 @@ pub(crate) fn reconcile_file(
     (next != *value).then_some(next)
 }
 
+/// CLIProxyAPI priority for the account ranked `rank` of `count` in the
+/// user's order: CLIProxyAPI tries higher values first.
+pub(crate) fn ranked_priority(rank: usize, count: usize) -> i64 {
+    (count.saturating_sub(rank) as i64) * 10
+}
+
+/// Desired auth file for a new configured priority; `None` when unchanged.
+/// A demoted (unverified) login keeps its demotion and stores the priority
+/// as the base it is restored to.
+pub(crate) fn with_priority(value: &Value, priority: i64) -> Option<Value> {
+    let mut next = value.clone();
+    let obj = next.as_object_mut()?;
+    let key = if obj.contains_key(BASE_PRIORITY_KEY) {
+        BASE_PRIORITY_KEY
+    } else {
+        "priority"
+    };
+    obj.insert(key.into(), json!(priority));
+    (next != *value).then_some(next)
+}
+
+/// Mirror the user's account order into the CLIProxyAPI auth files, which
+/// pick the login for pooled providers (Antigravity, Muse Code).
+pub(crate) fn sync_cli_proxy_priorities(accounts: &[crate::ai_providers::AIProvider]) {
+    let Some(dir) = super::cli_proxy_accounts::auth_dir() else {
+        return;
+    };
+    let files: Vec<&str> = accounts
+        .iter()
+        .filter_map(|a| a.cli_proxy_auth_file.as_deref())
+        .collect();
+    for (rank, file) in files.iter().enumerate() {
+        if file.contains('/') || file.contains("..") {
+            continue;
+        }
+        let path = dir.join(file);
+        let Some(value) = read_json(&path) else {
+            continue;
+        };
+        if let Some(next) = with_priority(&value, ranked_priority(rank, files.len())) {
+            if let Err(error) = write_auth_file(&path, &next) {
+                tracing::warn!(file, %error, "Could not update CLIProxyAPI login priority");
+            }
+        }
+    }
+}
+
 /// Rewrite an auth file atomically, keeping its owner and 0600 mode.
 fn write_auth_file(path: &Path, value: &Value) -> std::io::Result<()> {
     use std::io::Write;
@@ -335,18 +420,23 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
                 }
             }
         }
-        let (gemini_remaining, gemini_reset) = if eligibility == Eligibility::Eligible {
+        let ((gemini_remaining, gemini_reset), (claude_remaining, claude_reset)) = if eligibility
+            == Eligibility::Eligible
+        {
             let body = project
                 .as_deref()
                 .map_or_else(|| json!({}), |p| json!({"project": p}));
             match super::antigravity_usage::call(client, token, "retrieveUserQuota", body).await {
-                Ok(quota) => gemini_quota(&quota),
-                Err(_) => previous
-                    .as_ref()
-                    .map_or((None, None), |h| (h.gemini_remaining, h.gemini_reset)),
+                Ok(quota) => (gemini_quota(&quota), pool_quota(&quota, is_claude_or_gpt)),
+                Err(_) => previous.as_ref().map_or(((None, None), (None, None)), |h| {
+                    (
+                        (h.gemini_remaining, h.gemini_reset),
+                        (h.claude_remaining, h.claude_reset),
+                    )
+                }),
             }
         } else {
-            (None, None)
+            ((None, None), (None, None))
         };
         set_health(
             &account.file,
@@ -358,6 +448,9 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
                 },
                 gemini_remaining,
                 gemini_reset,
+                claude_remaining,
+                claude_reset,
+                refused_until: previous.as_ref().and_then(|h| h.refused_until),
             },
         );
     }
@@ -373,6 +466,67 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
     }
     None
 }
+
+/// A native run was refused with "Individual quota reached": the machine
+/// sign-in at that moment is spent until the announced reset, whatever its
+/// quota figures say. Returns the (spent, next) logins' identities when the
+/// choice moves to another login; the next dispatch pushes it to its node.
+pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option<String>)> {
+    if !is_individual_quota_refusal(failure) {
+        return None;
+    }
+    let dir = super::cli_proxy_accounts::auth_dir()?;
+    let spent = chosen_file(&dir)?;
+    let now = chrono::Utc::now();
+    let until = crate::account_limits::parse_limit_reset(
+        failure,
+        now,
+        crate::account_limits::Zone::system(),
+    )
+    .unwrap_or(now + chrono::Duration::hours(1))
+    .timestamp()
+    .min(now.timestamp() + MAX_REFUSAL_SECS);
+    {
+        let mut map = HEALTH.write().ok()?;
+        let health = map.entry(spent.clone()).or_insert(Health {
+            eligibility: Eligibility::Unknown,
+            gemini_remaining: None,
+            gemini_reset: None,
+            claude_remaining: None,
+            claude_reset: None,
+            refused_until: None,
+        });
+        health.refused_until = Some(until);
+    }
+    let next = chosen_file(&dir).filter(|next| *next != spent);
+    let identity = |file: &str| {
+        super::cli_proxy_accounts::accounts_in(&dir)
+            .into_iter()
+            .find(|a| a.file == file)
+            .map_or_else(|| file.to_string(), |a| a.identity)
+    };
+    let switched = next.as_deref().map(identity);
+    tracing::warn!(
+        spent = %identity(&spent),
+        next = ?switched,
+        until,
+        "Antigravity login refused a native run on its quota; machine sign-in moves on"
+    );
+    Some((identity(&spent), switched))
+}
+
+/// Google's per-login allowance refusal, as `agy` reports it: the message
+/// inside its RESOURCE_EXHAUSTED (429) envelope. The words alone may come
+/// from model output, which must not move the shared machine sign-in.
+pub(crate) fn is_individual_quota_refusal(failure: &str) -> bool {
+    let lower = failure.to_ascii_lowercase();
+    lower.contains("individual quota reached")
+        && lower.contains("resource_exhausted")
+        && lower.contains("429")
+}
+
+/// Longest real Antigravity quota window (weekly), plus margin.
+const MAX_REFUSAL_SECS: i64 = 8 * 24 * 3600;
 
 /// Periodic eligibility/quota check; pushes the new sign-in to every static
 /// node when the choice changes (managed VMs pick it up at their next run).
@@ -438,6 +592,67 @@ pub(crate) fn unoffered_in(
     judged.then_some(true)
 }
 
+/// Pure check: `true` when `connection`'s own complete catalog lacks `model`.
+/// Google rolls models out per account (one Ultra login may list Opus 5.5
+/// while another still lists only Opus 4.6), and CLIProxyAPI routes a model
+/// only to the logins that list it.
+pub(crate) fn connection_lacks(
+    state: &crate::model_catalog::DiscoveryState,
+    connection: &str,
+    model: &str,
+) -> bool {
+    state
+        .connections
+        .iter()
+        .find(|o| o.connection == connection)
+        .and_then(|o| o.last_success.as_ref())
+        .is_some_and(|s| {
+            s.completeness == crate::model_catalog::Completeness::Complete
+                && !s.models.iter().any(|m| m.id == model)
+        })
+}
+
+/// True when this account's own discovered catalog lacks the model. Its
+/// requests would land on a sibling login, and that login's 429 would be
+/// charged to this account.
+pub(crate) fn account_lacks_model(
+    chains_path: &Path,
+    account: &crate::ai_providers::AIProvider,
+    model: &str,
+) -> bool {
+    if !CATALOG_SCOPED.contains(&account.provider_type.id()) {
+        return false;
+    }
+    let route = crate::model_discovery::route(account);
+    let connection =
+        crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
+    with_catalog(chains_path, |state| {
+        connection_lacks(state, &connection, model)
+    })
+    .unwrap_or(false)
+}
+
+fn with_catalog<T>(
+    chains_path: &Path,
+    f: impl Fn(&crate::model_catalog::DiscoveryState) -> T,
+) -> Option<T> {
+    let fresh = CATALOG.read().ok().and_then(|c| {
+        c.as_ref()
+            .filter(|(at, _)| at.elapsed().as_secs() < 60)
+            .map(|(_, s)| f(s))
+    });
+    if fresh.is_some() {
+        return fresh;
+    }
+    let root = chains_path.parent().and_then(Path::parent)?;
+    let state = crate::model_catalog::read_state(root);
+    let v = f(&state);
+    if let Ok(mut c) = CATALOG.write() {
+        *c = Some((std::time::Instant::now(), state));
+    }
+    Some(v)
+}
+
 type CatalogCache = Option<(std::time::Instant, crate::model_catalog::DiscoveryState)>;
 static CATALOG: LazyLock<RwLock<CatalogCache>> = LazyLock::new(|| RwLock::new(None));
 static LOGGED_UNOFFERED: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -450,26 +665,8 @@ pub(crate) fn model_unoffered(chains_path: &Path, provider: &str, model: &str) -
     if !CATALOG_SCOPED.contains(&provider) {
         return false;
     }
-    let fresh = CATALOG.read().ok().and_then(|c| {
-        c.as_ref()
-            .filter(|(at, _)| at.elapsed().as_secs() < 60)
-            .map(|(_, s)| unoffered_in(s, provider, model))
-    });
-    let verdict = match fresh {
-        Some(v) => v,
-        None => {
-            let Some(root) = chains_path.parent().and_then(Path::parent) else {
-                return false;
-            };
-            let state = crate::model_catalog::read_state(root);
-            let v = unoffered_in(&state, provider, model);
-            if let Ok(mut c) = CATALOG.write() {
-                *c = Some((std::time::Instant::now(), state));
-            }
-            v
-        }
-    };
-    let unoffered = verdict == Some(true);
+    let verdict = with_catalog(chains_path, |state| unoffered_in(state, provider, model));
+    let unoffered = verdict == Some(Some(true));
     if unoffered {
         if let Ok(mut logged) = LOGGED_UNOFFERED.lock() {
             if logged.insert(format!("{provider}/{model}")) {
@@ -501,7 +698,68 @@ mod tests {
             eligibility: e,
             gemini_remaining: remaining,
             gemini_reset: reset,
+            claude_remaining: None,
+            claude_reset: None,
+            refused_until: None,
         }
+    }
+
+    #[test]
+    fn login_without_the_model_in_its_own_catalog_lacks_it() {
+        use crate::model_catalog::{Completeness, DiscoveryState, Observation, Success};
+        let obs = |connection: &str, models: &[&str], completeness| Observation {
+            connection: connection.into(),
+            provider_id: "antigravity".into(),
+            access_profile: "oauth".into(),
+            exportable: false,
+            checked_at: chrono::Utc::now(),
+            status: "discovered".into(),
+            diagnostic: None,
+            last_success: Some(Success {
+                observed_at: chrono::Utc::now(),
+                completeness,
+                models: models
+                    .iter()
+                    .map(|id| crate::api::providers::ProviderModel {
+                        id: (*id).into(),
+                        name: (*id).into(),
+                        description: None,
+                    })
+                    .collect(),
+            }),
+            fallback_models: vec![],
+        };
+        let state = DiscoveryState {
+            connections: vec![
+                obs("new", &["claude-opus-5-5-high"], Completeness::Complete),
+                obs("old", &["claude-opus-4-6-thinking"], Completeness::Complete),
+                obs("partial", &[], Completeness::Partial),
+            ],
+            ..Default::default()
+        };
+        assert!(!connection_lacks(&state, "new", "claude-opus-5-5-high"));
+        assert!(connection_lacks(&state, "old", "claude-opus-5-5-high"));
+        assert!(!connection_lacks(&state, "partial", "claude-opus-5-5-high"));
+        assert!(!connection_lacks(&state, "unknown", "claude-opus-5-5-high"));
+        assert_eq!(
+            unoffered_in(&state, "antigravity", "claude-opus-5-5-high"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn user_order_becomes_descending_cli_proxy_priority() {
+        assert_eq!(
+            (0..3).map(|r| ranked_priority(r, 3)).collect::<Vec<_>>(),
+            vec![30, 20, 10]
+        );
+        let plain = json!({"priority": 100, "email": "a"});
+        assert_eq!(with_priority(&plain, 10).unwrap()["priority"], 10);
+        assert_eq!(with_priority(&plain, 100), None);
+        let demoted = json!({"priority": DEMOTED_PRIORITY, BASE_PRIORITY_KEY: 100});
+        let next = with_priority(&demoted, 20).unwrap();
+        assert_eq!(next["priority"], DEMOTED_PRIORITY, "demotion is kept");
+        assert_eq!(next[BASE_PRIORITY_KEY], 20);
     }
 
     #[test]
@@ -527,6 +785,63 @@ mod tests {
         m.insert("old".into(), h(Eligibility::Eligible, Some(0.4), None));
         assert_eq!(choose(&c, &m, 100).unwrap().file, "old");
         assert_eq!(choose(&c, &m, 500).unwrap().file, "new", "window reset");
+    }
+
+    #[test]
+    fn a_nearly_spent_or_refused_pool_hands_the_machine_to_the_sibling() {
+        // Production 2026-10-25: her3sy kept 0.53 % of its Gemini week and
+        // Google refused every native run with "Individual quota reached".
+        let c = [cand("her3sy", 100), cand("marchand", 10)];
+        let mut m = HashMap::new();
+        m.insert(
+            "her3sy".into(),
+            h(Eligibility::Eligible, Some(0.0053), Some(900)),
+        );
+        m.insert(
+            "marchand".into(),
+            h(Eligibility::Eligible, Some(0.98), Some(400)),
+        );
+        assert_eq!(choose(&c, &m, 0).unwrap().file, "marchand");
+
+        // A spent Claude & GPT pool also gives the sign-in away.
+        let mut claude_spent = h(Eligibility::Eligible, Some(1.0), None);
+        claude_spent.claude_remaining = Some(0.002);
+        claude_spent.claude_reset = Some(900);
+        m.insert("her3sy".into(), claude_spent);
+        assert_eq!(choose(&c, &m, 0).unwrap().file, "marchand");
+        assert_eq!(choose(&c, &m, 900).unwrap().file, "her3sy", "pool reset");
+
+        // A refusal counts whatever the figures say, until its reset.
+        let mut refused = h(Eligibility::Eligible, Some(0.6), None);
+        refused.refused_until = Some(500);
+        m.insert("her3sy".into(), refused);
+        assert_eq!(choose(&c, &m, 0).unwrap().file, "marchand");
+        assert_eq!(choose(&c, &m, 500).unwrap().file, "her3sy");
+
+        // Both spent: the login back first.
+        let mut both = h(Eligibility::Eligible, Some(0.0), Some(300));
+        both.refused_until = Some(800);
+        m.insert("marchand".into(), both);
+        assert_eq!(choose(&c, &m, 0).unwrap().file, "her3sy");
+    }
+
+    #[test]
+    fn individual_quota_refusal_is_recognized() {
+        let raw = "CLI error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 129h43m31s. (RESOURCE_EXHAUSTED (code 429))";
+        assert!(is_individual_quota_refusal(raw));
+        assert!(crate::account_limits::is_usage_limit_message(raw));
+        assert!(!is_individual_quota_refusal(
+            "RESOURCE_EXHAUSTED: please retry in 12s"
+        ));
+        // The words alone, e.g. echoed by the model, are not a refusal.
+        assert!(!is_individual_quota_refusal(
+            "The docs say: Individual quota reached. Resets in 2h."
+        ));
+        let now = chrono::Utc::now();
+        let reset =
+            crate::account_limits::parse_limit_reset(raw, now, crate::account_limits::Zone::UTC)
+                .unwrap();
+        assert_eq!((reset - now).num_minutes(), 129 * 60 + 43);
     }
 
     #[test]

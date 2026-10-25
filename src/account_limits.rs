@@ -140,6 +140,9 @@ static ABSOLUTE_RESET: LazyLock<regex::Regex> = LazyLock::new(|| {
     .expect("valid reset regex")
 });
 
+static GLUED_UNIT: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)(\d[a-z]+)(\d)").expect("valid unit regex"));
+
 static RELATIVE_PART: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
         r"(?i)^[\s,]*(?:and\s+)?(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
@@ -148,7 +151,9 @@ static RELATIVE_PART: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 fn parse_relative(window: &str) -> Option<Duration> {
-    let mut rest = window;
+    // Google writes "129h43m31s": separate a unit from the next amount.
+    let spaced = GLUED_UNIT.replace_all(window, "$1 $2");
+    let mut rest = spaced.as_ref();
     let mut total = Duration::zero();
     let mut matched = false;
     while let Some(caps) = RELATIVE_PART.captures(rest) {
@@ -311,8 +316,10 @@ pub fn parse_limit_reset_from_body(body: &[u8], now: DateTime<Utc>) -> Option<Da
 /// provider, which recover within a retry budget.
 pub fn is_usage_limit_message(message: &str) -> bool {
     let lower = message.replace('\u{2019}', "'").to_ascii_lowercase();
-    const USAGE_LIMIT_MARKERS: [&str; 16] = [
+    const USAGE_LIMIT_MARKERS: [&str; 17] = [
         "hit your limit",
+        // Google Antigravity's per-login allowance.
+        "individual quota reached",
         "hit your usage limit",
         "usage limit",
         "usage_limit",
@@ -512,7 +519,7 @@ impl AccountCooldowns {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let stored = loaded.len();
         for (key, cooldown) in loaded {
-            if cooldown.until > now {
+            if cooldown.until > now && !legacy_account_wide_pool_limit(&key, &cooldown) {
                 entries.entry(key).or_insert(cooldown);
             }
         }
@@ -607,6 +614,15 @@ impl AccountCooldowns {
             );
         }
     }
+}
+
+/// An Antigravity usage limit parked on the whole account by older builds.
+/// Its quota is per pool (`provider_health::pool_limit_key`), and CLIProxyAPI
+/// picks the login, so such a park could blame the wrong account.
+fn legacy_account_wide_pool_limit(key: &str, cooldown: &LimitCooldown) -> bool {
+    cooldown.provider == crate::ai_providers::ProviderType::Antigravity.id()
+        && cooldown.limit != crate::provider_health::OUT_OF_CREDIT_LIMIT
+        && Uuid::parse_str(key).is_ok()
 }
 
 fn read_cooldowns(path: &Path) -> HashMap<String, LimitCooldown> {
@@ -779,6 +795,47 @@ mod tests {
 
     fn berlin() -> Zone {
         Zone::Named(chrono_tz::Europe::Berlin)
+    }
+
+    #[test]
+    fn account_wide_antigravity_usage_limits_are_dropped_on_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(COOLDOWNS_FILE);
+        let until = Utc::now() + Duration::days(5);
+        let park = |provider: &str, limit: &str| LimitCooldown {
+            until,
+            provider: provider.into(),
+            limit: limit.into(),
+            announced: false,
+            recorded_at: Utc::now(),
+        };
+        let account = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let unpaid = Uuid::new_v4();
+        let pool = format!("{account}:claude-gpt");
+        let mut cooldowns = HashMap::new();
+        cooldowns.insert(account.to_string(), park("antigravity", "usage limit"));
+        cooldowns.insert(pool.clone(), park("antigravity", "usage limit"));
+        cooldowns.insert(other.to_string(), park("anthropic", "usage limit"));
+        cooldowns.insert(
+            unpaid.to_string(),
+            park("antigravity", crate::provider_health::OUT_OF_CREDIT_LIMIT),
+        );
+        write_cooldowns(
+            &path,
+            &CooldownsFile {
+                version: 1,
+                cooldowns,
+            },
+        )
+        .unwrap();
+
+        let registry = AccountCooldowns::load(path.clone());
+        assert!(!registry.is_cooling(&account.to_string()));
+        assert!(registry.is_cooling(&pool));
+        assert!(registry.is_cooling(&other.to_string()));
+        assert!(registry.is_cooling(&unpaid.to_string()));
+        assert!(!read_cooldowns(&path).contains_key(&account.to_string()));
     }
 
     #[test]
