@@ -3555,8 +3555,8 @@ pub async fn deploy_sandboxed_sh(
     let bunker_state = broker.bunker_state().await;
     let is_prod = is_production_orb_service(&actual_service);
     let require_grant = std::env::var("ORB_REQUIRE_PROD_DEPLOY_GRANT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
     let has_grant = match req.calling_mission_id {
         Some(mid) if is_prod => {
             broker
@@ -3565,6 +3565,7 @@ pub async fn deploy_sandboxed_sh(
                 .is_some()
                 || !require_grant
         }
+        None if is_prod => !require_grant,
         _ => true,
     };
     if !crate::orb_spec::deploy_gate_step(crate::orb_spec::DeployGateInput {
