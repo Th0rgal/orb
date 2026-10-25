@@ -3,7 +3,8 @@ import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { imageMime } from "./imageTypes";
 
 /** Decode once; only the image's compositor transform changes during gestures. */
-export default function ImagePreview(p: { name: string; load: (signal: AbortSignal) => Promise<Uint8Array>; close: () => void }) {
+/** `src` shows an already-available URL (the lightbox); `load` fetches bytes (the Files pane). */
+export default function ImagePreview(p: { name: string; load?: (signal: AbortSignal) => Promise<Uint8Array>; src?: string; close?: () => void }) {
   const [ready, setReady] = createSignal(false), [error, setError] = createSignal("");
   const [percent, setPercent] = createSignal(100);
   let root!: HTMLElement, viewport!: HTMLDivElement, img!: HTMLImageElement;
@@ -69,10 +70,13 @@ export default function ImagePreview(p: { name: string; load: (signal: AbortSign
     onCleanup(() => { observer.disconnect(); viewport.removeEventListener("wheel", wheel); });
     void (async () => {
       try {
-        const bytes = await p.load(abort.signal);
-        if (abort.signal.aborted) return;
-        url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: imageMime(p.name) }));
-        img.src = url;
+        if (p.src) img.src = p.src;
+        else {
+          const bytes = await p.load!(abort.signal);
+          if (abort.signal.aborted) return;
+          url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: imageMime(p.name) }));
+          img.src = url;
+        }
         await img.decode();
         if (abort.signal.aborted) return;
         setReady(true); fit();
@@ -81,9 +85,12 @@ export default function ImagePreview(p: { name: string; load: (signal: AbortSign
   });
   onCleanup(() => { abort.abort(); cancelAnimationFrame(frame); if (url) URL.revokeObjectURL(url); });
   const endDrag = () => { drag = undefined; viewport.classList.remove("is-dragging"); };
-  return <section class="pdf-viewer image-viewer" ref={root} tabIndex={0} aria-label={`Image: ${p.name}`} onKeyDown={e => {
-    if (e.altKey || e.metaKey || e.ctrlKey || (e.target as HTMLElement).closest("input,textarea,select")) return;
-    if (!["+", "=", "-", "0", "1", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+  return <section class="pdf-viewer image-viewer" ref={root} tabIndex={0} aria-label={`Image: ${p.name}`} aria-keyshortcuts="Meta+= Meta+- Meta+0 + - 0 1" onKeyDown={e => {
+    if (e.altKey || e.ctrlKey || e.isComposing || (e.target as HTMLElement).closest("input,textarea,select")) return;
+    // ⌘ +/−/0 match the browser zoom keys; bare keys stay for quick use. Arrows pan
+    // only when zoomed in, so an enclosing lightbox keeps ←/→ to change image.
+    const pan = !fitting && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key);
+    if (e.metaKey ? !["+", "=", "-", "0"].includes(e.key) : !["+", "=", "-", "0", "1"].includes(e.key) && !pan) return;
     e.preventDefault(); e.stopPropagation();
     if (e.key === "0") fit();
     else if (e.key === "1") zoom(1);
@@ -100,11 +107,11 @@ export default function ImagePreview(p: { name: string; load: (signal: AbortSign
     <Show when={!ready() && !error()}><p class="file-muted image-status">Loading image…</p></Show>
     <Show when={error()}><p class="file-muted image-status" role="alert">Couldn’t display this image. {error()}</p></Show>
     <div class="pdf-toolbar image-toolbar" role="toolbar" aria-label="Image controls">
-      <button class="s-btn pdf-back" title="Back to file details" aria-label="Back" onClick={p.close}>‹</button>
-      <button class="s-btn" title="Zoom out (−)" aria-label="Zoom out" disabled={!ready() || percent() <= 1} onClick={() => zoom(scale / 1.25)}>−</button>
-      <button class="s-btn image-percent" title="Actual size (1)" aria-label="Actual size" disabled={!ready()} onClick={() => zoom(1)}>{percent()}%</button>
-      <button class="s-btn" title="Zoom in (+)" aria-label="Zoom in" disabled={!ready() || percent() >= 1600} onClick={() => zoom(scale * 1.25)}>+</button>
-      <button class="s-btn" title="Fit to window (0)" disabled={!ready()} onClick={fit}>Fit</button>
+      <Show when={p.close}><button class="s-btn pdf-back" title="Back to file details" aria-label="Back" onClick={() => p.close?.()}>‹</button></Show>
+      <button class="s-btn" title="Zoom out (⌘−)" aria-label="Zoom out" disabled={!ready() || percent() <= 1} onClick={() => zoom(scale / 1.25)}>−</button>
+      <button class="s-btn image-percent" title="Actual size (1) · double-click toggles" aria-label="Actual size" disabled={!ready()} onClick={() => zoom(1)}>{percent()}%</button>
+      <button class="s-btn" title="Zoom in (⌘+)" aria-label="Zoom in" disabled={!ready() || percent() >= 1600} onClick={() => zoom(scale * 1.25)}>+</button>
+      <button class="s-btn" title="Fit to window (⌘0)" disabled={!ready()} onClick={fit}>Fit</button>
     </div>
   </section>;
 }

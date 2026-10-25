@@ -2818,14 +2818,17 @@ select.orb-select-native:disabled { cursor: default; }
 .file-preview:has(.pdf-viewer) { padding:8px;overflow:hidden; }
 .pdf-viewer { position:relative;display:flex;flex-direction:column;flex:1;min-height:0;outline:none; }
 .pdf-viewer:focus-visible { box-shadow:inset 0 0 0 1px var(--stroke);border-radius:8px; }
-.pdf-toolbar { position:absolute;z-index:2;bottom:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;padding:5px;border:1px solid var(--stroke);border-radius:12px;background:var(--bg-elev);box-shadow:0 4px 18px #0003;opacity:.75;transition:opacity .15s; }
+.pdf-toolbar { white-space:nowrap;position:absolute;z-index:2;bottom:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;padding:5px;border:1px solid var(--stroke);border-radius:12px;background:var(--bg-elev);box-shadow:0 4px 18px #0003;opacity:.75;transition:opacity .15s; }
 .pdf-toolbar:hover,.pdf-toolbar:focus-within,.pdf-viewer:focus-visible .pdf-toolbar { opacity:1; }
 .pdf-toolbar .s-btn { background:transparent;border:0;min-width:30px;height:30px;padding:3px 8px; }
 .pdf-toolbar .s-btn:hover:not(:disabled) { background:var(--bg-hover); }
 .pdf-toolbar .pdf-back { border-right:1px solid var(--stroke);border-radius:6px 0 0 6px; }
 .pdf-pagination { display:flex;align-items:center;gap:4px;color:var(--fg-2);font-size:12px; }
 .pdf-pagination span { min-width:48px;text-align:center;font-variant-numeric:tabular-nums; }
-.pdf-pages { flex:1;min-height:0;overflow:auto;text-align:center;padding:4px 4px 72px; }
+.pdf-pages { position:relative;flex:1;min-height:0;overflow:auto;text-align:center;padding:4px 4px 72px; }
+.pdf-pages.is-zoomed { cursor:grab; } .pdf-pages.is-dragging { cursor:grabbing;user-select:none; }
+.pdf-zoom { display:flex;align-items:center;gap:2px;padding-left:6px;border-left:1px solid var(--stroke);color:var(--fg-2);font-size:12px; }
+.pdf-zoom .pdf-zoom-level { min-width:52px;font-variant-numeric:tabular-nums; }
 .pdf-pages canvas { display:block;margin:0 auto;background:white;box-shadow:0 2px 12px #0002; }
 @media(prefers-reduced-motion:reduce) { .pdf-toolbar { transition:none; } }
 
@@ -4085,3 +4088,11 @@ select.orb-select-native:disabled { cursor: default; }
 .composer-stale-attachments { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 4px 2px 2px; padding: 6px 8px; border-radius: var(--radius-sm); border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--stroke)); background: var(--bg-inset); font-size: 11.5px; color: var(--fg-2); }
 .composer-stale-attachments > span { margin-right: auto; overflow: hidden; text-overflow: ellipsis; }
 .composer-stale-attachments .bg-upload-btn, .folder-upload .bg-upload-btn { white-space: nowrap; flex-shrink: 0; }
+
+/* Side by side (⌘⇧E): the sidebar steps aside and the panel takes the right half at full height. */
+.app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); }
+.app[data-files-split="true"] > .sidebar, .app[data-files-split="true"] > .sidebar-backdrop, .app[data-files-split="true"] .sb-resize { display:none; }
+.app[data-files-split="true"] .tb-left { position:static; width:auto; margin-left:70px; }
+.app[data-files-split="true"] > .file-panel:not(.maximized) { position:relative; inset:auto; width:auto; box-shadow:none; }
+.app[data-files-split="true"] > .file-panel > .file-panel-resize { display:none; }
+@media(max-width:1150px) { .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); } }
