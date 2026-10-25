@@ -66,6 +66,25 @@ OPS_READ_BINARIES = {
 }
 
 
+# Allowlists, not denylists: anything not listed (abbreviated long options,
+# --cursor-file, --stop, -t ...) is refused.
+READ_ONLY_OPTIONS = {
+    "journalctl": {"-u", "--unit", "-n", "--lines", "--since", "--until", "-p", "--priority",
+                   "-b", "--boot", "--no-pager", "-o", "--output", "-k", "--dmesg", "-r", "--reverse",
+                   "-x", "--catalog", "-e", "--pager-end", "--list-boots", "--disk-usage", "-g", "--grep"},
+    "mdadm": {"--detail", "-D", "--examine", "-E", "--query", "-Q", "--scan", "-s", "--verbose", "-v", "--brief", "-b"},
+    "smartctl": {"-a", "--all", "-x", "--xall", "-i", "--info", "-H", "--health", "-A", "--attributes",
+                 "-l", "--log", "-d", "--device", "-j", "--json"},
+}
+
+
+def _read_only_arg(prog: str, arg: str) -> bool:
+    if not arg.startswith("-"):
+        # journalctl values (unit names, times, counts); mdadm/smartctl device paths or option values.
+        return prog == "journalctl" or arg.startswith("/dev/") or re.fullmatch(r"[A-Za-z0-9_.,=-]+", arg) is not None
+    return arg.split("=", 1)[0] in READ_ONLY_OPTIONS[prog]
+
+
 def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[str]) -> None:
     if not argv:
         raise ValueError("Empty command argv")
@@ -79,15 +98,8 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
             raise ValueError("ops_read grant only allows read-only docker subcommands")
         if prog == "nft" and argv[1:] != ["list", "ruleset"]:
             raise ValueError("ops_read grant only allows 'nft list ruleset'")
-        if prog == "journalctl" and any(
-            a.startswith(("--vacuum", "--rotate", "--flush", "--relinquish", "--setup-keys", "--update-catalog", "--sync"))
-            for a in argv[1:]
-        ):
-            raise ValueError("ops_read grant only allows read-only journalctl options")
-        if prog == "mdadm" and argv[1:2] not in (["--detail"], ["-D"], ["--examine"], ["-E"], ["--query"], ["-Q"]):
-            raise ValueError("ops_read grant only allows 'mdadm --detail/--examine/--query'")
-        if prog == "smartctl" and any(a.startswith(("-t", "--test", "-s", "--smart", "-o", "--offlineauto", "-S", "--saveauto", "-X", "--abort")) for a in argv[1:]):
-            raise ValueError("ops_read grant only allows read-only smartctl options")
+        if prog in READ_ONLY_OPTIONS and not all(_read_only_arg(prog, a) for a in argv[1:]):
+            raise ValueError(f"ops_read grant only allows read-only {prog} options")
     elif scope == "service_deploy":
         if prog == "systemctl":
             if len(argv) < 2 or argv[1] not in {"restart", "reload", "status", "start", "stop", "daemon-reload"}:
