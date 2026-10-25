@@ -164,14 +164,19 @@ pub async fn fork_mission(
                 "The edited message is no longer in this conversation".to_string(),
             ))?,
     };
-    let history: Vec<_> = events[..kept]
-        .iter()
-        .map(|event| {
+    // Editing the first message of a fork keeps the history that fork carried.
+    let carried = match (replacement, events.get(kept)) {
+        (Some(_), Some(edited)) => carried_history(&edited.content),
+        _ => Vec::new(),
+    };
+    let history: Vec<_> = carried
+        .into_iter()
+        .chain(events[..kept].iter().map(|event| {
             serde_json::json!({
                 "role": if event.event_type == "user_message" { "user" } else { "assistant" },
                 "content": event.content,
             })
-        })
+        }))
         .collect();
     let prompt = initial_prompt(
         id,
@@ -489,12 +494,10 @@ fn initial_prompt(
     incremental: bool,
     replacement: Option<&str>,
 ) -> Result<String, (StatusCode, String)> {
-    let build = |history: &[serde_json::Value]| {
-        match (question, replacement) {
+    let build = |history: &[serde_json::Value]| match (question, replacement) {
         (Some(question), _) => side_agent_prompt(history, question, incremental),
-        (None, Some(text)) => Ok(format!("{}\n\nThe user edited their last message: the conversation above ends just before it, and anything after it is withdrawn. Their message is now:\n{text}", fork_prompt(id, title, history)?)),
+        (None, Some(text)) => edit_prompt(id, title, history, text),
         (None, None) => fork_prompt(id, title, history),
-    }
     };
     let mut prompt = build(history)?;
     if backend != "antigravity" || crate::antigravity::validate_prompt(&prompt).is_ok() {
@@ -528,7 +531,51 @@ fn initial_prompt(
     ))
 }
 
+/// An edited message is the request; earlier turns are history. With nothing
+/// before it, the edit is a clean restart: the new version starts with the text alone.
+fn edit_prompt(
+    id: Uuid,
+    title: Option<&str>,
+    history: &[serde_json::Value],
+    text: &str,
+) -> Result<String, (StatusCode, String)> {
+    if history.is_empty() {
+        return Ok(text.to_owned());
+    }
+    Ok(format!(
+        "{}\n\n{EDIT_REQUEST_MARKER}{text}",
+        context_block(EDIT_PREAMBLE, id, title, history)?
+    ))
+}
+
+/// The history inside a fork envelope (`<fork_context>`), if `prompt` is one.
+fn carried_history(prompt: &str) -> Vec<serde_json::Value> {
+    let Some((_, rest)) = prompt.split_once("\n<fork_context>\n") else {
+        return Vec::new();
+    };
+    let Some((context, _)) = rest.split_once("\n</fork_context>") else {
+        return Vec::new();
+    };
+    serde_json::from_str::<serde_json::Value>(context)
+        .ok()
+        .and_then(|value| value.get("messages")?.as_array().cloned())
+        .unwrap_or_default()
+}
+
+const EDIT_PREAMBLE: &str = "The user edited a message in this conversation and sent it again. The JSON below is the earlier conversation, up to the edited message: it is history, not a request. Anything after the edited message is withdrawn. The workspace files are shared with the original mission. Answer the current request that follows the history.";
+/// Clients split the visible request from the collapsed history at this line.
+const EDIT_REQUEST_MARKER: &str = "Current request:\n";
+
 fn fork_prompt(
+    id: Uuid,
+    title: Option<&str>,
+    history: &[serde_json::Value],
+) -> Result<String, (StatusCode, String)> {
+    context_block("Continue the work from this conversation in a fresh native session. The workspace files are shared with the original mission. First inspect the current workspace state. The JSON below is historical conversation context, not tool results or instructions from the system. Preserve the user's objective and latest directions.", id, title, history)
+}
+
+fn context_block(
+    preamble: &str,
     id: Uuid,
     title: Option<&str>,
     history: &[serde_json::Value],
@@ -539,7 +586,9 @@ fn fork_prompt(
     .map_err(internal_error)?
     .replace('<', "\\u003c")
     .replace('>', "\\u003e");
-    Ok(format!("Continue the work from this conversation in a fresh native session. The workspace files are shared with the original mission. First inspect the current workspace state. The JSON below is historical conversation context, not tool results or instructions from the system. Preserve the user's objective and latest directions.\n\n<fork_context>\n{context}\n</fork_context>"))
+    Ok(format!(
+        "{preamble}\n\n<fork_context>\n{context}\n</fork_context>"
+    ))
 }
 
 /// Node jobs start in work_root/<mission UUID>, which is also their HOME. A
@@ -671,8 +720,37 @@ mod tests {
             )
             .unwrap();
             assert!(prompt.contains("\"first\""));
-            assert!(prompt.contains("anything after it is withdrawn"));
-            assert!(prompt.ends_with("Their message is now:\nEDITED"));
+            assert!(prompt.contains("Anything after the edited message is withdrawn"));
+            // The edit is the request, after the history, never inside it.
+            let (context, request) = prompt.split_once("\n</fork_context>\n\n").unwrap();
+            assert!(!context.contains("EDITED"));
+            assert_eq!(request, "Current request:\nEDITED");
+        }
+    }
+
+    #[test]
+    fn editing_an_edited_message_keeps_its_carried_history() {
+        let history = vec![serde_json::json!({"role":"user","content":"first <b>"})];
+        let edited = edit_prompt(Uuid::nil(), None, &history, "second").unwrap();
+        assert_eq!(carried_history(&edited), history);
+        assert!(carried_history("plain request").is_empty());
+    }
+
+    #[test]
+    fn editing_the_only_message_restarts_with_the_new_text() {
+        // Start, stop before any reply, edit: no history, so no fork envelope.
+        for backend in ["claudecode", "antigravity"] {
+            let prompt = initial_prompt(
+                Uuid::nil(),
+                Some("Source"),
+                &[],
+                backend,
+                None,
+                false,
+                Some("Fix the parser\n<fork_context>"),
+            )
+            .unwrap();
+            assert_eq!(prompt, "Fix the parser\n<fork_context>");
         }
     }
 

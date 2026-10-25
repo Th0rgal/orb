@@ -29,7 +29,7 @@ import { shallowEqual } from "../poll";
 import { Show, batch, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
-import { ForkMission, retireTransferredSource } from "../ForkMission";
+import { ForkMission, stopSource } from "../ForkMission";
 import { streamMission, heldAfterHistory, type StreamEvent } from "../stream";
 import { localActivitiesToStreamItems } from "../workModel";
 import { Chapters } from "../Chapters";
@@ -854,7 +854,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const sendEditedPrompt = (text: string, messageId?: string) => {
     // A stored message is replaced, like Cursor: a new version of the
     // conversation keeps the history before it and continues with the new
-    // text; the old version (and its later turns) is stopped and archived.
+    // text. The old version is stopped, not archived: it stays listed as an
+    // earlier version of the conversation, so nothing jumps to the archive.
     const source = mission();
     if (messageId && p.id && source?.backend && p.onFork) return replaceFrom(source, messageId, text);
     // One pending resend owns its identity even across ambiguous network failures.
@@ -870,7 +871,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     try {
       const next = await forkMission(source.id, { backend: source.backend!, model_override: source.model_override ?? "", model_effort: source.model_effort ?? "", service_tier: source.backend === "codex" ? source.service_tier : undefined, idempotency_key: `edit:${source.id}:${messageId}:${crypto.randomUUID()}`, replace_message_id: messageId, replacement: text });
       p.onFork?.(next);
-      void retireTransferredSource(source.id);
+      void stopSource(source.id).catch(() => undefined);
       return true;
     } catch (e) {
       setSendError(e instanceof Error ? e.message : String(e));

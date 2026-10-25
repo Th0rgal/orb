@@ -20,3 +20,31 @@ test("an edited message is resent as a replacement from that message, focused as
   expect(fork).toMatchObject({ backend: "opencode", replace_message_id: "e79", replacement: "Question 39, rewritten" });
   await expect.poll(() => page.evaluate(() => (window as any).opened)).toEqual(["22222222-0000-4000-8000-000000000002"]);
 });
+
+test("start, stop before any reply, then edit: the old version is stopped, never archived", async ({ page }) => {
+  await page.goto("/tests/scroll-mission.html?flow=stopped");
+  const bubble = page.locator(".user").filter({ hasText: "Start the parser work" });
+  await expect(bubble).toBeVisible({ timeout: 30000 });
+  await bubble.dblclick();
+  const editor = page.getByRole("textbox", { name: "Edit prompt text" });
+  await editor.fill("Start the lexer work");
+  await page.locator(".user.editing").getByRole("button", { name: "Send again" }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).forks.length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).forks[0])).toMatchObject({ replace_message_id: "e1", replacement: "Start the lexer work" });
+  await expect.poll(() => page.evaluate(() => (window as any).opened)).toEqual(["22222222-0000-4000-8000-000000000002"]);
+  // The source is already stopped: nothing cancels or archives it.
+  await page.waitForTimeout(300);
+  const calls: string[] = await page.evaluate(() => (window as any).calls);
+  expect(calls.filter(c => /archive|cancel/.test(c))).toEqual([]);
+});
+
+test("an edited version shows the edited text as the message, with the history collapsed", async ({ page }) => {
+  await page.goto("/tests/scroll-mission.html?flow=edited");
+  await expect(page.locator("main .scroll")).toContainText("Reply to the rewritten request", { timeout: 30000 });
+  const bubble = page.locator(".user").first();
+  await expect(bubble.locator(":scope > span")).toHaveText("Rewritten request");
+  await expect(bubble).not.toContainText("fork_context");
+  await expect(bubble).not.toContainText("source_mission_id");
+  await expect(bubble.locator("summary")).toHaveText("Earlier conversation · 2 messages");
+  await expect(bubble.getByRole("button", { name: "Edit prompt" })).toBeAttached();
+});

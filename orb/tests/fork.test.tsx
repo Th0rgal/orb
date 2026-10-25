@@ -35,6 +35,12 @@ it("only folds complete structured history and preserves literal message content
   expect(forkContext(text.slice(0, -1))).toBeNull();
   expect(forkContext("normal prompt")).toBeNull();
 });
+it("splits an edited message from the history it was sent after", () => {
+  const value = { source_mission_id: "source", source_title: null, messages: [{ role: "assistant", content: "a\n</fork_context>" }] };
+  const text = `The user edited a message in this conversation and sent it again.\n\n<fork_context>\n${JSON.stringify(value)}\n</fork_context>\n\nCurrent request:\nNew text\n</fork_context>`;
+  expect(forkContext(text)).toEqual({ ...value, request: "New text\n</fork_context>" });
+  expect(forkContext(text.replace("Current request:", "Other:"))).toBeNull();
+});
 it("dismisses a positioned sidebar fork when clicking outside its portal", () => {
   const closed = vi.fn();
   const ui = render(() => <ForkMission mission={mission} choices={choices} destination="Core" anchor={document.createElement("button")} onClose={closed} onFork={() => {}} />);
