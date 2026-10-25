@@ -39,7 +39,6 @@ OPS_READ_BINARIES = {
     "docker",
     "nft",
     "ss",
-    "ip",
     "ps",
     "df",
     "du",
@@ -51,7 +50,6 @@ OPS_READ_BINARIES = {
     "tail",
     "ls",
     "stat",
-    "find",
     "grep",
     "mdadm",
     "lsblk",
@@ -72,6 +70,15 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
             raise ValueError("ops_read grant only allows read-only docker subcommands")
         if prog == "nft" and argv[1:] != ["list", "ruleset"]:
             raise ValueError("ops_read grant only allows 'nft list ruleset'")
+        if prog == "journalctl" and any(
+            a.startswith(("--vacuum", "--rotate", "--flush", "--relinquish", "--setup-keys", "--update-catalog", "--sync"))
+            for a in argv[1:]
+        ):
+            raise ValueError("ops_read grant only allows read-only journalctl options")
+        if prog == "mdadm" and argv[1:2] not in (["--detail"], ["-D"], ["--examine"], ["-E"], ["--query"], ["-Q"]):
+            raise ValueError("ops_read grant only allows 'mdadm --detail/--examine/--query'")
+        if prog == "smartctl" and any(a.startswith(("-t", "--test", "-s", "--smart", "-o", "--offlineauto", "-S", "--saveauto", "-X", "--abort")) for a in argv[1:]):
+            raise ValueError("ops_read grant only allows read-only smartctl options")
     elif scope == "service_deploy":
         if prog == "systemctl":
             if len(argv) < 3 or argv[1] not in {"restart", "reload", "status", "start", "stop", "daemon-reload"}:
@@ -134,7 +141,9 @@ def handle_exec(req: dict) -> dict:
     lease_token = str(req.get("lease_token", "")).strip()
     argv = [str(x) for x in req.get("argv", [])]
     cwd = str(req.get("cwd") or "/root")
-    api_url = str(req.get("api_url") or DEFAULT_API_URL)
+    # Never take the Core URL from the peer: whoever answers verify-and-log
+    # decides whether a root command runs.
+    api_url = DEFAULT_API_URL
     api_token = str(req.get("api_token") or "")
     target_host = str(req.get("target_host") or "self")
 
@@ -160,7 +169,7 @@ def handle_exec(req: dict) -> dict:
 
     scope = str(verdict.get("scope", "root_exec"))
     allowed_unit = verdict.get("allowed_unit")
-    if verdict.get("require_force_cmd"):
+    if scope != "root_exec" or verdict.get("require_force_cmd"):
         check_scope_restrictions(scope, allowed_unit, argv)
 
     # 2. Execute command in clean root environment

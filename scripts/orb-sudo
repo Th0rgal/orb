@@ -71,11 +71,6 @@ def main() -> int:
         or os.environ.get("ORB_PRIVILEGE_LEASE_TOKEN")
         or ""
     ).strip()
-    api_url = (
-        os.environ.get("ORB_MCP_API_URL")
-        or os.environ.get("SANDBOXED_MCP_API_URL")
-        or "https://agent-backend.thomas.md"
-    ).strip()
     api_token = (
         os.environ.get("ORB_API_TOKEN")
         or os.environ.get("SANDBOXED_SH_TOKEN")
@@ -96,7 +91,6 @@ def main() -> int:
             "action": "exec",
             "mission_id": mission_id,
             "lease_token": lease_token,
-            "api_url": api_url,
             "api_token": api_token,
             "target_host": os.environ.get("ORB_TARGET_HOST", "self"),
             "cwd": os.getcwd(),

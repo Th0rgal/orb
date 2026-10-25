@@ -576,6 +576,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     state.control.bind_admission_state(&state);
+    // Open the privilege broker now so a mission that ends before anyone
+    // touches it still has its session-scoped grants reaped.
+    super::privilege_broker::store(&state);
 
     // Persisted node state (operator cordons) survives restarts.
     state
