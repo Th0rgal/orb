@@ -71,12 +71,6 @@ def main() -> int:
         or os.environ.get("ORB_PRIVILEGE_LEASE_TOKEN")
         or ""
     ).strip()
-    api_token = (
-        os.environ.get("ORB_API_TOKEN")
-        or os.environ.get("SANDBOXED_SH_TOKEN")
-        or os.environ.get("SANDBOXED_MCP_API_TOKEN")
-        or ""
-    ).strip()
 
     if not mission_id or not lease_token:
         sys.stderr.write(
@@ -91,7 +85,6 @@ def main() -> int:
             "action": "exec",
             "mission_id": mission_id,
             "lease_token": lease_token,
-            "api_token": api_token,
             "target_host": os.environ.get("ORB_TARGET_HOST", "self"),
             "cwd": os.getcwd(),
             "argv": argv,

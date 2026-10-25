@@ -28,9 +28,18 @@ import urllib.error
 import urllib.request
 
 SOCKET_PATH = Path(os.environ.get("ORB_PRIVD_SOCKET", "/run/orb-privd.sock"))
-DEFAULT_API_URL = os.environ.get("ORB_MCP_API_URL") or os.environ.get(
-    "SANDBOXED_MCP_API_URL", "https://agent-backend.thomas.md"
-)
+TRUSTED_API_URL = (
+    os.environ.get("ORB_CORE_API_URL")
+    or os.environ.get("ORB_MCP_API_URL")
+    or os.environ.get("SANDBOXED_MCP_API_URL")
+    or "https://agent-backend.thomas.md"
+).strip()
+TRUSTED_API_TOKEN = (
+    os.environ.get("ORB_CORE_API_TOKEN")
+    or os.environ.get("ORB_API_TOKEN")
+    or os.environ.get("SANDBOXED_SH_TOKEN")
+    or ""
+).strip()
 HOST_LABEL = os.environ.get("ORB_NODE_NAME") or socket.gethostname()
 
 OPS_READ_BINARIES = {
@@ -81,10 +90,24 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
             raise ValueError("ops_read grant only allows read-only smartctl options")
     elif scope == "service_deploy":
         if prog == "systemctl":
-            if len(argv) < 3 or argv[1] not in {"restart", "reload", "status", "start", "stop", "daemon-reload"}:
+            if len(argv) < 2 or argv[1] not in {"restart", "reload", "status", "start", "stop", "daemon-reload"}:
                 raise ValueError("service_deploy grant only allows systemctl service lifecycle subcommands")
-            if allowed_unit and len(argv) >= 3 and argv[2] != allowed_unit and argv[2] != f"{allowed_unit}.service":
-                raise ValueError(f"service_deploy grant is restricted to unit '{allowed_unit}'")
+            if any(arg.startswith("-") for arg in argv[1:]):
+                raise ValueError("service_deploy grant does not allow systemctl option flags")
+            if argv[1] == "daemon-reload":
+                if len(argv) != 2:
+                    raise ValueError("systemctl daemon-reload does not take target unit arguments")
+            else:
+                targets = argv[2:]
+                if not targets:
+                    raise ValueError(f"systemctl {argv[1]} requires a target unit")
+                if allowed_unit:
+                    allowed_names = {allowed_unit, f"{allowed_unit}.service"}
+                    for target in targets:
+                        if target not in allowed_names:
+                            raise ValueError(
+                                f"service_deploy grant is restricted to unit '{allowed_unit}' (rejected '{target}')"
+                            )
         elif prog == "nginx":
             if argv[1:] not in (["-t"], ["-s", "reload"]):
                 raise ValueError("service_deploy grant only allows 'nginx -t' or 'nginx -s reload'")
@@ -92,13 +115,12 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
             raise ValueError(f"service_deploy grant does not allow arbitrary binary '{prog}'; request root_exec if needed")
 
 
-def call_core_verify(api_url: str, payload: dict, api_token: str = "") -> dict:
-    url = api_url.rstrip("/") + "/api/privilege-access/verify-and-log"
+def call_core_verify(payload: dict) -> dict:
+    url = TRUSTED_API_URL.rstrip("/") + "/api/privilege-access/verify-and-log"
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "orb-privd/1.0"}
-    token = api_token or os.environ.get("ORB_API_TOKEN") or os.environ.get("SANDBOXED_SH_TOKEN") or ""
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if TRUSTED_API_TOKEN:
+        headers["Authorization"] = f"Bearer {TRUSTED_API_TOKEN}"
     req = urllib.request.Request(
         url,
         data=data,
@@ -137,23 +159,24 @@ def handle_update_harness(req: dict) -> dict:
 
 
 def handle_exec(req: dict) -> dict:
+    if "api_url" in req or "api_token" in req:
+        return {
+            "ok": False,
+            "exit_code": 2,
+            "stderr": "Client-supplied api_url/api_token are forbidden; orb-privd uses its pinned Core endpoint",
+        }
     mission_id = str(req.get("mission_id", "")).strip()
     lease_token = str(req.get("lease_token", "")).strip()
     argv = [str(x) for x in req.get("argv", [])]
     cwd = str(req.get("cwd") or "/root")
-    # Never take the Core URL from the peer: whoever answers verify-and-log
-    # decides whether a root command runs.
-    api_url = DEFAULT_API_URL
-    api_token = str(req.get("api_token") or "")
     target_host = str(req.get("target_host") or "self")
 
     if not mission_id or not lease_token or not argv:
         return {"ok": False, "exit_code": 2, "stderr": "mission_id, lease_token, and argv are required"}
 
     command_str = " ".join(argv)
-    # 1. Pre-execution admission check via Core's `orb_privilege_step`
+    # 1. Pre-execution admission check via Core's pinned `orb_privilege_step` endpoint
     verdict = call_core_verify(
-        api_url,
         {
             "mission_id": mission_id,
             "lease_token": lease_token,
@@ -161,8 +184,7 @@ def handle_exec(req: dict) -> dict:
             "command": f"[pre-exec] {command_str}",
             "argv": argv,
             "cwd": cwd,
-        },
-        api_token=api_token,
+        }
     )
     if not verdict.get("allow_exec"):
         return {"ok": False, "exit_code": 126, "stderr": "Lease denied by Core"}
@@ -195,7 +217,6 @@ def handle_exec(req: dict) -> dict:
     # 3. Record structured completion audit entry in Core
     try:
         call_core_verify(
-            api_url,
             {
                 "mission_id": mission_id,
                 "lease_token": lease_token,
@@ -206,8 +227,7 @@ def handle_exec(req: dict) -> dict:
                 "exit_code": proc.returncode,
                 "duration_ms": duration_ms,
                 "stdout_sha256": stdout_sha256,
-            },
-            api_token=api_token,
+            }
         )
     except Exception as audit_err:
         sys.stderr.write(f"orb-privd: audit completion post warning: {audit_err}\n")
