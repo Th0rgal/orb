@@ -55,6 +55,6 @@ describe("completion time in the transcript", () => {
     ]);
     const text = items.find(i => i.kind === "text");
     expect(text).toMatchObject({ text: "Done", live: false, at: "2026-10-16T05:30:00Z" });
-    expect(buildTranscript([row(1, "user_message", "Go", "x"), row(2, "text_delta", "Working", "y")]).find(i => i.kind === "text")).not.toHaveProperty("at");
+    expect(buildTranscript([row(1, "user_message", "Go", "x"), row(2, "text_delta", "Working", "y")]).find(i => i.kind === "text")).toMatchObject({ live: true });
   });
 });

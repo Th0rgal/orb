@@ -37,4 +37,18 @@ for (const theme of ["dark", "light"]) test(`completed turns show when they fini
   await expect(live.locator(".response-time")).toHaveText("just now");
   await live.locator(".response-time").hover();
   await expect(page.getByRole("tooltip")).toContainText(/Worked for 3m( \d+s)?/);
+
+  // A remote OpenCode/Antigravity turn: the answer streams in a native bubble
+  // and the turn's receipt only stamps it. The time must still show.
+  await page.evaluate(() => {
+    const h = (window as any).turnTimeHarness;
+    h.apply({ type: "user_message", data: { id: "u3", content: "Check the job.", at: new Date(Date.now() - 2 * 60_000).toISOString() } });
+    h.apply({ type: "text_op", data: { bubble_id: "opencode:ses:msg:prt_a", ops: [{ type: "insert", pos: 0, text: "The job is still waiting." }, { type: "finalize" }] } });
+    h.apply({ type: "assistant_message", data: { content: "The job is still waiting.", at: new Date().toISOString() } });
+  });
+  const remote = page.locator(".st-text", { hasText: "The job is still waiting." });
+  await remote.hover();
+  await expect(remote.locator(".response-time")).toHaveText("just now");
+  await remote.locator(".response-time").hover();
+  await expect(page.getByRole("tooltip")).toContainText(/Worked for 2m( \d+s)?/);
 });

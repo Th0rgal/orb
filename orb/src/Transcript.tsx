@@ -1,6 +1,6 @@
 import { swallow } from "./log";
 import { seenTurnStart, turnStartedAt } from "./TurnStatus";
-import { turnAgo, turnDate, turnTiming, workedFor, type TurnTiming } from "./turnTiming";
+import { toMs, turnAgo, turnDate, turnTiming, workedFor, type TurnTiming } from "./turnTiming";
 import { useTooltip } from "./Tooltip";
 import { formatElapsed, useNow } from "./time";
 import {AutomaticReminder, reminderMessages} from "./AutomaticReminder";
@@ -694,7 +694,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
             case "think":
               return <ThoughtSequence items={[item]} />;
             case "text": {
-              const timing = createMemo(() => item.live ? undefined : turnTiming(userStart(turn.items[0]), item.at), undefined, { equals: (a, b) => a?.completedAt === b?.completedAt && a?.workedMs === b?.workedMs });
+              const timing = createMemo(() => item.live ? undefined : answerTiming(item.at, turn.items), undefined, { equals: (a, b) => a?.completedAt === b?.completedAt && a?.workedMs === b?.workedMs });
               return (
                 <div class={`st-text ${item.live ? "live" : ""}`}>
                   {p.renderText ? p.renderText(item, <AssistantText text={item.text} live={item.live} timing={timing()} />) : <AssistantText text={item.text} live={item.live} timing={timing()} />}
@@ -728,6 +728,25 @@ function TurnTime(p: { timing: TurnTiming }) {
   const tip = useContext(TurnTipContext);
   const label = createMemo(() => turnAgo(p.timing.completedAt, now()));
   return <span class="response-time" tabindex="0" {...(tip?.bind(p.timing) ?? {})}><time datetime={new Date(p.timing.completedAt).toISOString()} aria-label={`Completed ${turnDate(p.timing.completedAt)}`}>{label()}</time></span>;
+}
+/** Latest known time in a turn, for an answer that carries none itself (a
+ * harness receipt that stamped another bubble, narration-folded text, a
+ * history seed): its assistant rows, folded narration, then the turn's own
+ * start, so every finished answer still shows when it happened. */
+const turnEnd = (items: Grouped[]): string | undefined => {
+  let best: string | undefined, bestMs = -Infinity;
+  const see = (at: string | undefined) => { const ms = toMs(at); if (ms !== undefined && ms > bestMs) { bestMs = ms; best = at; } };
+  for (const item of items) {
+    if (item.kind === "text") see(item.at);
+    else if (item.kind === "work") for (const t of item.items) if (t.kind === "text") see(t.at);
+  }
+  return best;
+};
+/** The answer's own time, else the turn's latest; duration only from a known
+ * start. With neither, the turn's start dates it (no "worked for"). */
+function answerTiming(at: string | undefined, items: Grouped[]): TurnTiming | undefined {
+  const start = userStart(items[0]);
+  return turnTiming(start, at ?? turnEnd(items)) ?? turnTiming(undefined, start);
 }
 const userStart = (item: Grouped | undefined) => item?.kind === "user" ? item.at ?? seenTurnStart(item.messageId ?? item.key) : undefined;
 

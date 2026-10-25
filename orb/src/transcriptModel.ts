@@ -135,7 +135,8 @@ export class TranscriptReducer {
   /** Core's durable copy of a cut turn's streamed text. It finalizes the
    * bubble that turn already shows (live or from its stored snapshot), even
    * when the Send now message that cut it is already placed below. */
-  private settlePartial(text: string) {
+  private settlePartial(text: string, when?: string) {
+    const stamp = when ? { at: when } : {};
     const want = text.trim();
     if (!want) return;
     for (let i = this.items.length - 1; i >= 0; i--) {
@@ -143,7 +144,7 @@ export class TranscriptReducer {
       if (item.kind === "user") { if (item.receipt || item.queued) continue; break; }
       if (item.kind !== "text") continue;
       const have = item.text.trim();
-      if (have === want || want.startsWith(have) || have.startsWith(want)) { this.put(i, { ...item, text, live: false }); return; }
+      if (have === want || want.startsWith(have) || have.startsWith(want)) { this.put(i, { ...item, text, live: false, ...stamp }); return; }
     }
     // Not shown yet: it precedes the optimistic message that cut it.
     let at = this.items.length;
@@ -153,7 +154,7 @@ export class TranscriptReducer {
       if (this.lastFinal != null && this.lastFinal >= at) this.lastFinal++;
       if (this.lastUser >= at) this.lastUser++;
     }
-    this.items.splice(at, 0, { kind: "text", key: this.key("text"), text, live: false });
+    this.items.splice(at, 0, { kind: "text", key: this.key("text"), text, live: false, ...stamp });
   }
   apply(ev: StreamEvent) {
     this.identity=ev.eventId??(ev.storedId!==undefined?`stored:${ev.storedId}`:ev.sequence!==undefined?`seq:${ev.sequence}`:undefined);this.nextForEvent=0;
@@ -293,8 +294,8 @@ export class TranscriptReducer {
         }
         if (index == null) {
           if (!text) return;
-          index=this.placeText(bubble,{kind:"text",key:this.key("text"),text,live,...(bubble==="text_delta_latest"?{cumulative:true}:{})});
-        } else if (previous?.kind === "text" && (previous.text !== text || previous.live !== live)) this.put(index,{...previous,text,live});
+          index=this.placeText(bubble,{kind:"text",key:this.key("text"),text,live,...(bubble==="text_delta_latest"?{cumulative:true}:{}),...(typeof d.at==="string"?{at:d.at}:{})});
+        } else if (previous?.kind === "text" && (previous.text !== text || previous.live !== live)) this.put(index,{...previous,text,live,...(typeof d.at==="string"?{at:d.at}:{})});
         return;
       }
       case "assistant_message": {
@@ -309,23 +310,26 @@ export class TranscriptReducer {
           // must remain distinct. Keep it available for the turn's final event.
           const index=this.bubbles.get(finalBubble) ?? (finalBubble==="text_delta_latest" ? this.lastFinal : undefined);
           const previous=index==null ? undefined : this.items[index];
-          if(previous?.kind==="text"&&index!=null){this.put(index,{...previous,text:text||previous.text,live:false});this.bubbles.set(finalBubble,index);}
-          else if(text){this.placeText(finalBubble,{kind:"text",key:this.key("text"),text,live:false});}
+          const stamp=typeof d.at==="string"?{at:d.at}:{};
+          if(previous?.kind==="text"&&index!=null){this.put(index,{...previous,text:text||previous.text,live:false,...stamp});this.bubbles.set(finalBubble,index);}
+          else if(text){this.placeText(finalBubble,{kind:"text",key:this.key("text"),text,live:false,...stamp});}
           return;
         }
-        if(d.partial===true&&d.success!==false){this.settlePartial(text);return;}
+        if(d.partial===true&&d.success!==false){this.settlePartial(text,typeof d.at==="string"?d.at:undefined);return;}
         const index=this.bubbles.get(finalBubble);
         const previous=index == null ? undefined : this.items[index];
         const native = this.native.map(id=>this.items[this.bubbles.get(id) ?? -1]).filter((i):i is Extract<StreamItem,{kind:'text'}>=>i?.kind==='text');
         const trimmed = text.trim();
         const isNativeReceipt = native.length > 0 && (trimmed === native.map(i=>i.text).join('').trim() || trimmed === native.at(-1)!.text.trim());
+        // close() forgets the native bubbles, so find the receipt's row first.
+        const nativeLast = isNativeReceipt ? this.bubbles.get(this.native.at(-1)!) : undefined;
         this.close();
         if(d.success===false){this.items.push({kind:"error",key:this.key("error"),text:text||"Mission failed",terminal:true,cancelled:text.trim().toLowerCase()==="cancelled"});return;}
         const at=typeof d.at==="string"?{at:d.at}:{};
         if(!isNativeReceipt){
           if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;}
           else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false,...at});}
-        }else if(d.at){const i=this.bubbles.get(this.native.at(-1)!),row=i==null?undefined:this.items[i];if(row?.kind==="text")this.put(i!,{...row,...at});}
+        }else if(d.at){const row=nativeLast==null?undefined:this.items[nativeLast];if(row?.kind==="text")this.put(nativeLast!,{...row,...at});}
         // Settle the turn's shape only after the final text is in place.
         this.hoistTrailingThoughts();
         return;
