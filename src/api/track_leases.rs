@@ -234,6 +234,46 @@ mod tests {
 
     use super::*;
 
+    /// Precedence: explicit reader (flag or tag) > explicit writer > intent.
+    #[test]
+    fn lease_mode_precedence_table() {
+        let intents = [
+            (None, false),
+            (Some("review"), true),
+            (Some(" Review_pass "), true),
+            (Some("audit-2"), true),
+            (Some("reviewer"), false),
+            (Some("fix"), false),
+        ];
+        for flag in [None, Some(false), Some(true)] {
+            for readonly_tag in [false, true] {
+                for writer_tag in [false, true] {
+                    let mut tags = Vec::new();
+                    if readonly_tag {
+                        tags.push("pr-readonly".to_string());
+                    }
+                    if writer_tag {
+                        tags.push("pr-writer".to_string());
+                    }
+                    for (intent, readonly_intent) in intents {
+                        let expected = if flag == Some(false) || readonly_tag {
+                            "reader"
+                        } else if flag == Some(true) || writer_tag || !readonly_intent {
+                            "writer"
+                        } else {
+                            "reader"
+                        };
+                        assert_eq!(
+                            lease_mode(flag, &tags, intent),
+                            expected,
+                            "flag={flag:?} tags={tags:?} intent={intent:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn readonly_intents_take_reader_leases_unless_forced() {
         assert_eq!(lease_mode(None, &[], Some("review_merge_pr")), "reader");

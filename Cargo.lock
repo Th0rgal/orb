@@ -1184,11 +1184,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "lean-sys-cabi"
-version = "0.2.0"
-source = "git+https://github.com/Th0rgal/lean-sys.git?rev=c51f7f331e84c96f4207b91b606ec27b423f5a98#c51f7f331e84c96f4207b91b606ec27b423f5a98"
-
-[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1464,7 +1459,6 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "orb-spec"
 version = "1.3.0"
 dependencies = [
- "lean-sys-cabi",
  "serde_json",
 ]
 

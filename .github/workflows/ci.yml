@@ -40,15 +40,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Elan & Lean 4 toolchain
-        run: |
-          if [ ! -x "$HOME/.elan/bin/elan" ]; then
-            curl --retry 5 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
-              | sh -s -- -y --default-toolchain "$(cat lean/lean-toolchain | tr -d '[:space:]')"
-          fi
-          echo "$HOME/.elan/bin" >> $GITHUB_PATH
-          (cd lean && "$HOME/.elan/bin/lean" --version)
-
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
@@ -69,15 +60,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
-      - name: Install Elan & Lean 4 toolchain
-        run: |
-          if [ ! -x "$HOME/.elan/bin/elan" ]; then
-            curl --retry 5 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
-              | sh -s -- -y --default-toolchain "$(cat lean/lean-toolchain | tr -d '[:space:]')"
-          fi
-          echo "$HOME/.elan/bin" >> $GITHUB_PATH
-          (cd lean && "$HOME/.elan/bin/lean" --version)
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -113,15 +95,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Elan & Lean 4 toolchain
-        run: |
-          if [ ! -x "$HOME/.elan/bin/elan" ]; then
-            curl --retry 5 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
-              | sh -s -- -y --default-toolchain "$(cat lean/lean-toolchain | tr -d '[:space:]')"
-          fi
-          echo "$HOME/.elan/bin" >> $GITHUB_PATH
-          (cd lean && "$HOME/.elan/bin/lean" --version)
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -311,14 +284,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Install Elan & Lean 4 toolchain
-        run: |
-          if [ ! -x "$HOME/.elan/bin/elan" ]; then
-            curl --retry 5 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
-              | sh -s -- -y --default-toolchain "$(cat ../../lean/lean-toolchain | tr -d '[:space:]')"
-          fi
-          echo "$HOME/.elan/bin" >> $GITHUB_PATH
-          (cd ../../lean && "$HOME/.elan/bin/lean" --version)
       - name: Install WebKitGTK build deps
         run: |
           sudo apt-get update

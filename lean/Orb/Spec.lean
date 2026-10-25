@@ -780,7 +780,8 @@ def attributionMetaGate : MetaGateSpec AttributionClaim AttributionClaim.InScope
     rw [(attribution_step_decodes _ _ _ _).2] at h
     exact (attributionInScope_iff x).mp (by split at h <;> simp_all)
   complete x h := by
-    rw [(attribution_step_decodes _ _ _ _).2, if_pos ((attributionInScope_iff x).mpr h)]; rfl
+    have hin := (attributionInScope_iff x).mpr h
+    simp [(attribution_step_decodes _ _ _ _).2, hin]
   posWitness := ⟨1, 2, 0, 1⟩
   negWitness := ⟨6, 1, 0, 0⟩
   nonVacuous := rfl
@@ -835,7 +836,10 @@ def ScheduleInput.action (x : ScheduleInput) : UInt8 :=
 theorem schedule_register_iff (k c t a b : UInt8) (l d n : UInt64) :
     scheduleStep 0 k c t a b l d n = 1 ↔ a = 1 ∧ k ≠ 1 ∧ t ≠ 1 := by
   unfold scheduleStep scheduleAction
-  by_cases ha : a = 1 <;> by_cases hk : k = 1 <;> by_cases ht : t = 1 <;> simp [ha, hk, ht]
+  by_cases ha : a = 1 <;>
+    by_cases hk : k = 1 <;>
+    by_cases ht : t = 1 <;>
+    simp [ha, hk, ht]
 
 /-- `IdempotentOutboxSpec` instance: the outbox row is the `known` bit of the key. Replaying a
     registration (same mission, cron and prompt, e.g. after a restart) is never admitted again. -/
@@ -850,15 +854,21 @@ def scheduleOutbox : IdempotentOutboxSpec UInt8 ScheduleInput where
     for an authorized caller and is dropped otherwise, whatever the other inputs. -/
 theorem schedule_reregister_is_noop (c t a b : UInt8) (l d n : UInt64) :
     scheduleStep 0 1 c t a b l d n = (if a = 1 then 2 else 0) := by
-  unfold scheduleStep scheduleAction; by_cases ha : a = 1 <;> simp [ha]
+  unfold scheduleStep scheduleAction
+  by_cases ha : a = 1 <;> simp [ha]
 
 /-- A tick fires exactly when the next slot is due, not yet consumed and the mission is idle. -/
 theorem schedule_fire_iff (c t a b : UInt8) (l d n : UInt64) :
     scheduleStep 1 0 c t a b l d n = 3 ↔
       a = 1 ∧ c ≠ 1 ∧ t ≠ 1 ∧ l < d ∧ d ≤ n ∧ b ≠ 1 := by
   unfold scheduleStep scheduleAction
-  by_cases ha : a = 1 <;> by_cases hc : c = 1 <;> by_cases ht : t = 1 <;>
-    by_cases hl : l < d <;> by_cases hd : d ≤ n <;> by_cases hb : b = 1 <;> simp [ha, hc, ht, hl, hd, hb]
+  by_cases ha : a = 1 <;>
+    by_cases hc : c = 1 <;>
+    by_cases ht : t = 1 <;>
+    by_cases hl : l < d <;>
+    by_cases hd : d ≤ n <;>
+    by_cases hb : b = 1 <;>
+    simp [ha, hc, ht, hl, hd, hb]
 
 /-- `ClockDiscipline` instance: the fire bit is only ever set by the schedule's own due-slot guard. -/
 def scheduleClock : ClockDiscipline ScheduleInput where
@@ -878,7 +888,7 @@ theorem schedule_fires_once_per_slot (c t a b c' t' a' b' : UInt8) (l d n n' : U
     (h : scheduleStep 1 0 c t a b l d n = 3) :
     l < scheduleNextRef 3 l n ∧ scheduleStep 1 0 c' t' a' b' (scheduleNextRef 3 l n) d n' ≠ 3 := by
   have ⟨_, _, _, hl, hd, _⟩ := (schedule_fire_iff _ _ _ _ _ _ _).mp h
-  simp only [scheduleNextRef, beq_self_eq_true, if_true]
+  simp only [scheduleNextRef, beq_self_eq_true, ite_true]
   refine ⟨?_, fun h' => ?_⟩
   · simp only [UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le] at *; omega
   · have := ((schedule_fire_iff _ _ _ _ _ _ _).mp h').2.2.2.1
@@ -1017,7 +1027,7 @@ theorem statSettle_fresh (seen : List Nat) (rows : List StatRow)
   | cons r rs ih =>
     have hr : r.id ∉ seen := h r (List.mem_cons_self ..)
     have hd' := List.nodup_cons.mp (by simpa only [List.map_cons] using hd)
-    simp only [statSettle, if_neg hr, statTotal]
+    simp only [statSettle, hr, ite_false, statTotal]
     congr 1
     apply ih
     · intro x hx hmem

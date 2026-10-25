@@ -25,10 +25,6 @@ COPY shared/ shared/
 COPY catalog/ catalog/
 COPY scripts/ scripts/
 
-RUN curl --retry 5 --retry-all-errors -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-    | sh -s -- -y --default-toolchain "$(cat lean/lean-toolchain | tr -d '[:space:]')"
-ENV PATH="/root/.elan/bin:${PATH}"
-
 ARG BINARIES="sandboxed-sh desktop-mcp workspace-mcp automation-manager-mcp sandboxed-mcp"
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
