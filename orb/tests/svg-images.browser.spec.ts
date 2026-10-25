@@ -40,7 +40,21 @@ test("workspace SVG images render as <img> and a hostile SVG neither runs nor fe
  // The markup is never inlined: no script, foreignObject or iframe reached the DOM.
  expect(await page.locator('main script, main foreignObject, main iframe, main image').count()).toBe(0);
  await hostile.click();await expect(page.getByRole('dialog',{name:'Hostile'})).toBeVisible();
- await expect(page.locator('.lightbox-image')).toBeVisible();
+ await expect(page.locator('.lightbox-stage img')).toBeVisible();
+ // The title starts past the macOS traffic lights (≈ 70px) on their row, and keeps a tooltip.
+ const title=page.locator('.dlg-lightbox .dlg-head h3');
+ expect((await title.boundingBox())!.x).toBeGreaterThanOrEqual(80);
+ expect((await title.boundingBox())!.y).toBeLessThan(20);
+ await expect(title).toHaveAttribute('title','Hostile');
+ // The lightbox zooms like the Files image viewer.
+ await page.locator('.lightbox-stage .image-viewer').focus();
+ const percent=page.locator('.lightbox-stage .image-percent');
+ const before=parseInt(await percent.innerText());
+ await page.keyboard.press('Meta+=');
+ await expect.poll(async()=>parseInt(await percent.innerText())).toBeGreaterThan(before);
+ await page.emulateMedia({colorScheme:'dark'});await page.screenshot({path:'test-results/orb-lightbox-dark.png'});await page.emulateMedia({colorScheme:'light'});
+ await page.keyboard.press('Meta+0');
+ await expect.poll(async()=>parseInt(await percent.innerText())).toBe(before);
  await page.waitForTimeout(500);
  expect(await page.evaluate(()=>(window as any).__pwned)).toBeUndefined();
  expect(evil).toEqual([]);

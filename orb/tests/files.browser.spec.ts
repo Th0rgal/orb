@@ -123,6 +123,23 @@ test("Cursor-style files preserve chat, resolve references and navigate Markdown
   await page.keyboard.press('Meta+j');
   await expect(page.locator('.file-panel')).toBeVisible();
   await expect(page.locator('.file-panel')).not.toHaveClass(/maximized/);
+  // Side by side: the panel takes the right half at full height, Escape restores the layout.
+  const docked=await page.locator('.file-panel').boundingBox();
+  await page.keyboard.press('Meta+Shift+e');
+  await expect(page.locator('.app')).toHaveAttribute('data-files-split','true');
+  await expect.poll(async()=>(await page.locator('.file-panel').boundingBox())!.x).toBe(page.viewportSize()!.width/2);
+  const half=(await page.locator('.file-panel').boundingBox())!;
+  expect(half.y).toBe(0);expect(half.width).toBe(page.viewportSize()!.width/2);expect(half.height).toBe(page.viewportSize()!.height);
+  await expect(page.locator('.sidebar')).not.toBeVisible();
+  await expect(page.locator('.main')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Exit side-by-side view'})).toHaveAttribute('aria-pressed','true');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.app')).toHaveAttribute('data-files-split','false');
+  await expect.poll(async()=>(await page.locator('.file-panel').boundingBox())!.x).toBe(docked!.x);
+  await page.getByRole('button',{name:'Side by side, full height'}).click();
+  await expect(page.locator('.app')).toHaveAttribute('data-files-split','true');
+  await page.getByRole('button',{name:'Exit side-by-side view'}).click();
+  await expect(page.locator('.app')).toHaveAttribute('data-files-split','false');
 
 
   await expect(page.locator(".file-toolbar")).toHaveCount(0);

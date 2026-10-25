@@ -320,7 +320,7 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
           <button class="icon-btn" aria-label="Cancel" title="Cancel (Esc)" disabled={sending()} onClick={() => setEditing(false)}><Ic.CloseIcon size={13} /></button>
           <button class="icon-btn" aria-label="Copy prompt" title="Copy prompt" onClick={() => { void copyText(draft()).then(() => setCopyState("Copied"), e => setCopyState(String(e))); }}><Ic.CopyIcon size={13} /></button>
           <span role="status">{copyState()}</span>
-          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Adds a new message at the end of this conversation (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}><Ic.ArrowUpIcon size={14}/></button></Show>
+          <Show when={p.onSend}><button class="send" aria-label={sending() ? "Sending follow-up" : "Send again"} title="Replaces this message and what came after it (⌘/Ctrl+Enter)" disabled={sending() || !draft().trim()} onClick={() => void submit()}><Ic.ArrowUpIcon size={14}/></button></Show>
         </div>
         <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError("")} />
       </Show>
@@ -635,7 +635,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   );
 }
 
-export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; onSend?: (text: string) => boolean | Promise<boolean>; onResume?: () => void }) {
+export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -688,7 +688,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
             case "user":
               // Only the turn still waiting for a reply animates: once anything
               // has been said or done after it, the work is visible on its own.
-              return <Show when={backgroundWake(item.text, item.source)} fallback={<Show when={reminders().get(item.key)} fallback={<UserTurn text={item.text} images={item.images} source={item.source} attached={item.attached} onSend={p.onSend} pending={p.pending && item.key === lastUserKey()} sending={!!p.sending && item.messageId === p.sending} />}>{reminder => <AutomaticReminder text={item.text} reminder={reminder()} />}</Show>}>
+              return <Show when={backgroundWake(item.text, item.source)} fallback={<Show when={reminders().get(item.key)} fallback={<UserTurn text={item.text} images={item.images} source={item.source} attached={item.attached} onSend={p.onSend ? text => p.onSend!(text, item.messageId) : undefined} pending={p.pending && item.key === lastUserKey()} sending={!!p.sending && item.messageId === p.sending} />}>{reminder => <AutomaticReminder text={item.text} reminder={reminder()} />}</Show>}>
                 {wake => <BackgroundWakeRow wake={wake()} />}
               </Show>;
             case "think":

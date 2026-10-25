@@ -14,6 +14,12 @@ pub struct ForkRequest {
     pub side_question: Option<String>,
     #[serde(default)]
     pub side_context_mode: Option<String>,
+    /// Edit-and-resend: the new version keeps the history before this user
+    /// message (`event_id`) and continues with `replacement` in its place.
+    #[serde(default)]
+    pub replace_message_id: Option<String>,
+    #[serde(default)]
+    pub replacement: Option<String>,
 }
 
 pub async fn fork_mission(
@@ -136,7 +142,29 @@ pub async fn fork_mission(
             "Conversation is too large to fork without truncation".into(),
         ));
     }
-    let history: Vec<_> = events
+    let replacement = match (&req.replace_message_id, &req.replacement) {
+        (None, None) => None,
+        (Some(message), Some(text)) if req.side_question.is_none() && !text.trim().is_empty() => {
+            Some((message.as_str(), text.as_str()))
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "An edited message needs its id and non-empty text".into(),
+            ))
+        }
+    };
+    let kept = match replacement {
+        None => events.len(),
+        Some((message, _)) => events
+            .iter()
+            .position(|e| e.event_type == "user_message" && e.event_id.as_deref() == Some(message))
+            .ok_or((
+                StatusCode::CONFLICT,
+                "The edited message is no longer in this conversation".to_string(),
+            ))?,
+    };
+    let history: Vec<_> = events[..kept]
         .iter()
         .map(|event| {
             serde_json::json!({
@@ -152,6 +180,7 @@ pub async fn fork_mission(
         &req.backend,
         req.side_question.as_deref(),
         incremental,
+        replacement.map(|(_, text)| text),
     )?;
     crate::api::mission_payload::validate_user_content(&prompt)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -458,10 +487,14 @@ fn initial_prompt(
     backend: &str,
     question: Option<&str>,
     incremental: bool,
+    replacement: Option<&str>,
 ) -> Result<String, (StatusCode, String)> {
-    let build = |history: &[serde_json::Value]| match question {
-        Some(question) => side_agent_prompt(history, question, incremental),
-        None => fork_prompt(id, title, history),
+    let build = |history: &[serde_json::Value]| {
+        match (question, replacement) {
+        (Some(question), _) => side_agent_prompt(history, question, incremental),
+        (None, Some(text)) => Ok(format!("{}\n\nThe user edited their last message: the conversation above ends just before it, and anything after it is withdrawn. Their message is now:\n{text}", fork_prompt(id, title, history)?)),
+        (None, None) => fork_prompt(id, title, history),
+    }
     };
     let mut prompt = build(history)?;
     if backend != "antigravity" || crate::antigravity::validate_prompt(&prompt).is_ok() {
@@ -594,6 +627,7 @@ mod tests {
                 "antigravity",
                 question,
                 false,
+                None,
             )
             .unwrap();
             assert!(crate::antigravity::validate_prompt(&prompt).is_ok());
@@ -616,9 +650,30 @@ mod tests {
             &history,
             "antigravity",
             Some(&"x".repeat(crate::antigravity::MAX_PROMPT_BYTES + 1)),
-            true
+            true,
+            None
         )
         .is_err());
+    }
+
+    #[test]
+    fn an_edited_message_replaces_the_rest_of_the_conversation() {
+        let history = vec![serde_json::json!({"role":"user","content":"first"})];
+        for backend in ["claudecode", "antigravity"] {
+            let prompt = initial_prompt(
+                Uuid::nil(),
+                Some("Source"),
+                &history,
+                backend,
+                None,
+                false,
+                Some("EDITED"),
+            )
+            .unwrap();
+            assert!(prompt.contains("\"first\""));
+            assert!(prompt.contains("anything after it is withdrawn"));
+            assert!(prompt.ends_with("Their message is now:\nEDITED"));
+        }
     }
 
     #[test]

@@ -44,7 +44,7 @@ export function Dialog(p: {
       <div ref={root} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={p.description || p.hint ? descriptionId : undefined}
         aria-busy={p.busy || undefined} inert={overlayHasModalAbove(layer)} tabIndex={-1} onKeyDown={p.onKeyDown}
         class={`dlg dlg-${p.size ?? "standard"} ${p.class ?? ""}`}>
-        <header class="dlg-head"><h3 id={titleId}>{p.title}</h3><button type="button" class="dlg-close" aria-label="Close" disabled={p.busy} onClick={requestClose}><CloseIcon size={16}/></button></header>
+        <header class="dlg-head" data-tauri-drag-region={p.size === "fullscreen" || undefined}><h3 id={titleId} title={p.size === "fullscreen" ? p.title : undefined}>{p.title}</h3><button type="button" class="dlg-close" aria-label="Close" disabled={p.busy} onClick={requestClose}><CloseIcon size={16}/></button></header>
         <Show when={p.description || p.hint}><p class="dlg-description" id={descriptionId}>{p.description ?? p.hint}</p></Show>
         <div class="dlg-body">{p.children}</div>
         <Show when={p.footer || actionCount()}><footer ref={setFooterTarget} class="dlg-foot">{typeof p.footer === "function" ? p.footer(requestClose) : p.footer}</footer></Show>
