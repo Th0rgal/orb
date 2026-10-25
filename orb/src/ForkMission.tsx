@@ -74,18 +74,22 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
 export async function retireTransferredSource(id: string): Promise<void> {
   window.dispatchEvent(new CustomEvent("orb:mission-archived", { detail: { id } }));
   try {
-    const current = await getMission(id);
-    if (!isArchivable(current.status) || current.execution?.state === "running") {
-      await cancelMission(id);
-      for (let i = 0; i < 20; i++) {
-        const m = await getMission(id);
-        if (m.execution?.state !== "running" && ["cancelled", "interrupted", "failed", "completed", "awaiting_user"].includes(m.status)) break;
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
+    await stopSource(id);
     await archiveMission(id);
   } catch {
     // The original stays listed (Core refused or is unreachable); the transfer itself succeeded.
     window.dispatchEvent(new CustomEvent("orb:mission-archive-failed", { detail: { id } }));
+  }
+}
+
+/** Stops a conversation that another version replaces, if it is still running. */
+export async function stopSource(id: string): Promise<void> {
+  const current = await getMission(id);
+  if (isArchivable(current.status) && current.execution?.state !== "running") return;
+  await cancelMission(id);
+  for (let i = 0; i < 20; i++) {
+    const m = await getMission(id);
+    if (m.execution?.state !== "running" && ["cancelled", "interrupted", "failed", "completed", "awaiting_user"].includes(m.status)) break;
+    await new Promise((r) => setTimeout(r, 500));
   }
 }

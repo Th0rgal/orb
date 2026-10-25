@@ -1685,6 +1685,7 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 .fork-harnesses [aria-expanded="true"] { background: var(--bg-active); }
 
 .fork-context { width: 100%; }
+.fork-context + span { display: block; margin-top: 8px; }
 .fork-context summary { cursor: pointer; color: var(--fg-2); }
 .fork-context-message { margin-top: 14px; border-top: 1px solid var(--stroke-soft); padding-top: 10px; }
 .fork-context-message small { color: var(--fg-3); }
