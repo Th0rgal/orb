@@ -64,6 +64,29 @@ pub(super) async fn submit_leased_remote_job(
         *prompt = crate::util::with_task_list_guidance(prompt);
     }
 
+    if let RemoteHarnessPlan::Codex {
+        prompt,
+        resume_session_id: Some(_),
+        fallback_prompt,
+        ..
+    } = &mut resolved_plan
+    {
+        // A saved thread may have no rollout on the node: its first launch
+        // died before Codex started, or its Codex home was lost. The driver
+        // then continues on a fresh thread seeded with this history.
+        let events = control
+            .mission_store
+            .get_events(
+                mission.id,
+                Some(&["user_message", "assistant_message"]),
+                None,
+                None,
+            )
+            .await?;
+        *fallback_prompt =
+            fork::recovery_prompt(mission.id, mission.title.as_deref(), &events, prompt)
+                .or_else(|| Some(prompt.clone()));
+    }
     let plan = &resolved_plan;
     let mut workspace_prefix =
         if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {

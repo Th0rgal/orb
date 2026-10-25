@@ -6498,9 +6498,16 @@ fn remote_codex_uses_native_cli_and_secret_env_for_launch_and_resume() {
     let execution = remote_execution_for_plan(&plan, "https://core.example/", "secret-test-key");
     assert!(!execution.command.contains("secret-test-key"));
     assert!(execution.command.contains("exec python3 -c"));
-    assert!(execution.command.contains("wire_api"));
-    assert!(execution.command.contains("https://core.example/v1"));
-    assert!(execution.command.contains("$(false)"));
+    // The configuration (prompt, session) is staged on fd 3, never in argv.
+    assert!(!execution.command.contains("$(false)"));
+    assert!(!execution.command.contains("commit_attribution"));
+    let config = staged_codex_config(&execution);
+    assert_eq!(config["prompt"], "say 'hi'; $(false)");
+    assert!(config["session"].is_null());
+    let settings = config["settings"].to_string();
+    assert!(settings.contains("wire_api"));
+    assert!(settings.contains("https://core.example/v1"));
+    assert!(!settings.contains("commit_attribution"));
     assert_eq!(
         execution.env.unwrap()[REMOTE_PROXY_KEY_ENV],
         "secret-test-key"
@@ -6512,19 +6519,50 @@ fn remote_codex_uses_native_cli_and_secret_env_for_launch_and_resume() {
         model: "openai/gpt-5.4".into(),
         prompt: "continue".into(),
         resume_session_id: Some("thread-123".into()),
+        fallback_prompt: Some("HISTORY\n\ncontinue".into()),
     };
     let execution = remote_execution_for_plan(&resume, "https://core.example", "secret-test-key");
     assert!(execution.command.contains("thread/resume"));
-    assert!(execution.command.contains("model_reasoning_effort"));
-    assert!(execution.command.contains("service_tier"));
+    let config = staged_codex_config(&execution);
+    assert_eq!(config["session"], "thread-123");
+    assert_eq!(config["fallback_prompt"], "HISTORY\n\ncontinue");
+    let settings = config["settings"].to_string();
+    assert!(settings.contains("model_reasoning_effort"));
+    assert!(settings.contains("service_tier"));
     assert!(plan_remote_harness(None, "codex", Some("gpt-6-astra"), Some("/goal test")).is_ok());
-    assert!(execution.command.contains("thread-123"));
     match plan_remote_harness(None, "codex", None, Some("do it")).unwrap() {
         RemoteHarnessPlan::Codex { model, .. } => {
             assert_eq!(model, resolve_codex_default_model())
         }
         other => panic!("unexpected plan {other:?}"),
     }
+}
+
+/// Run the job's fd-3 staging prelude in bash and parse what the driver reads.
+fn staged_codex_config(execution: &RemoteExecution) -> serde_json::Value {
+    let prelude = execution.command.split("exec python3").next().unwrap();
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!("{prelude}cat <&3"))
+        .env_clear()
+        .envs(execution.env.clone().unwrap_or_default())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Mission c96df4f9: a large first prompt inlined in argv failed with
+/// "Argument list too long" before Codex created its thread.
+#[test]
+fn remote_codex_large_prompt_stays_out_of_argv() {
+    let prompt = format!("{}TAIL", "x'y ".repeat(150_000));
+    let plan = plan_remote_harness(None, "codex", Some("openai/gpt-5.4"), Some(&prompt)).unwrap();
+    let execution = remote_execution_for_plan(&plan, "https://core.example", "k");
+    assert!(execution.command.len() < INLINE_PROMPT_LIMIT);
+    let env = execution.env.clone().unwrap();
+    assert!(env.values().all(|value| value.len() <= STDIN_PROMPT_CHUNK));
+    assert_eq!(staged_codex_config(&execution)["prompt"], prompt);
 }
 
 #[test]
