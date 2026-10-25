@@ -887,7 +887,7 @@ export default function App() {
                     </>
                   }
                 >
-                  <div data-project-navigation tabindex="-1" aria-label="Projects" title={`Projects (${shortcutLabel('projects')})`} onKeyDown={event => {
+                  <div data-project-navigation tabindex="-1" aria-label="Projects" aria-keyshortcuts="Meta+5" onKeyDown={event => {
                     if (event.defaultPrevented || !['ArrowDown','ArrowUp','Home','End'].includes(event.key) || (event.target as HTMLElement).matches('input,textarea,[contenteditable]')) return;
                     const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button.row-main, button.row.agent:not(:disabled)')).filter(row => row.getClientRects().length > 0);
                     if (!rows.length) return;
