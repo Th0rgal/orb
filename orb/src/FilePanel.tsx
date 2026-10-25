@@ -41,6 +41,7 @@ import * as Ic from "./icons";
 
 import ImagePreview from "./ImagePreview";
 import { imageByteLimit, imageMime } from "./imageTypes";
+import { scrollKeeper } from "./mission/scrollPolicy";
 
 const PdfPreview = lazy(() => import("./PdfPreview"));
 
@@ -594,6 +595,9 @@ export function FilePanelProvider(p: {
     const initialScroll = conversation?.scrollTop ?? 0;
     const restoreAnchor = () => {
       if (!conversation) return;
+      // The conversation's own keeper follows the bottom or keeps its anchor.
+      const keeper = scrollKeeper(conversation);
+      if (keeper) return keeper();
       if (anchor?.isConnected && anchorTop !== undefined) conversation.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
       else conversation.scrollTop = initialScroll;
     };

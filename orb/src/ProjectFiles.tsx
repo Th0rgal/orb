@@ -824,6 +824,7 @@ export function LiveProjectsSection(p: {
   });
 
   const listMisses = new Map<string, Misses>();
+  const newerThan = (a: Mission, b: Mission) => (Date.parse(a.updated_at || "") || 0) > (Date.parse(b.updated_at || "") || 0);
   const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
@@ -838,7 +839,15 @@ export function LiveProjectsSection(p: {
         const misses = listMisses.get(slug) ?? new Map() as Misses; listMisses.set(slug, misses);
         const reconciled = reconcileMissionList((missions[slug] ?? []).filter(m => !deletedInSession.has(m.id) && !archivedInSession.has(m.id)), visibleList.map(m => archiving.has(m.id) ? {...m, status: archiving.get(m.id)!} : m), misses, partial);
         const merged = mergeById(missions[slug] ?? [], reconciled);
-        if (merged !== missions[slug]) setMissions(slug, merged);
+        batch(() => {
+          if (merged !== missions[slug]) setMissions(slug, merged);
+          // A mission lives in one project. One moved here (from another window,
+          // an agent, a rename-and-move) leaves the copy that the other project's
+          // reconciled listing still holds, unless that copy is newer.
+          const listed = new Map(visibleList.filter(m => !m.project || m.project === slug).map(m => [m.id, m]));
+          for (const other of Object.keys(missions)) if (other !== slug && missions[other]?.some(m => listed.has(m.id) && !newerThan(m, listed.get(m.id)!)))
+            setMissions(other, rows => rows.filter(m => !listed.has(m.id) || newerThan(m, listed.get(m.id)!)));
+        });
         p.onProjectMissions?.(slug, merged);
         if (opts?.transcripts === false) return;
         const deleting = deletingIds();

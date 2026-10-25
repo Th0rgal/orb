@@ -29,6 +29,18 @@ function appendTurn(rows:SideExchange[],turn:SideExchange):SideExchange[]{
 }
 export type SideQuestionsHandle={ask:(question:string,images?:DraftImage[],files?:UploadedFile[])=>Promise<boolean>;open:()=>void};
 // Local side history stays separate from mission events and the main draft.
+/** A conversation moved to another harness keeps its /btw tab: a new version
+ * with no tab of its own starts from the nearest earlier version's. */
+async function inheritSideQuestion(mission:string){
+ let chain=[mission];
+ try{if('btwThreadChain' in btwMod&&typeof btwMod.btwThreadChain==='function')chain=await btwMod.btwThreadChain(mission);}catch{}
+ for(const id of chain.slice(1)){
+  const saved=await readSideQuestion(sideQuestionKey(id));
+  // Its pending turn belongs to that version's side agent.
+  if(saved)return {...saved,pending:undefined};
+ }
+ return undefined;
+}
 export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:SideQuestionsHandle)=>void;onTransfer:(text:string)=>void;onOpenSession?:(id:string)=>void|Promise<void>}) {
  const side=useSidePanel();
  const key=()=>{connectionVersion();return sideQuestionKey(p.mission);};
@@ -108,6 +120,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   setQueue(saved?.queue??[]);
   setLoadedKey(current);
+  // Never delay the tab for it: a fork's earlier history fills an empty tab when it arrives.
+  if(!saved)void inheritSideQuestion(missionId).then(earlier=>{if(!stale&&key()===current&&earlier&&!history().length&&!busy())setHistory(earlier.history.filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()})));});
   const agent=btwSession(missionId);
   const lastSaved=saved?.history.at(-1);
   const lastAnswer=lastSaved?.answer;

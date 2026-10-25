@@ -1,4 +1,5 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
+import { NEAR, correct, setScrollKeeper, userScroll } from "./scrollPolicy";
 
 /** Scroll anchoring shared by every conversation view (missions, cloud agents).
  *
@@ -16,8 +17,11 @@ import { createSignal, onCleanup, onMount } from "solid-js";
  * - Not pinned, the column never shrinks: when content below the reader
  *   folds away (narration joining the Worked fold), its height is held as a
  *   reserve so the browser does not clamp the scroll up into what they read.
- *   The reserve goes as soon as they follow the bottom again. */
-const NEAR = 24;
+ *   The reserve goes as soon as they follow the bottom again.
+ * - This is the only owner of the position: other code that changes the
+ *   layout (virtual rows, panel resizes) calls the keeper instead of moving
+ *   scrollTop, so a change is never corrected twice. The decisions are
+ *   `scrollPolicy.ts`, proven in lean/Orb/Scroll.lean. */
 /** Input within this window of a scroll event makes it the reader's. */
 const INTENT_MS = 300;
 const NAV_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
@@ -55,10 +59,17 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     if (!anchor) return remember();
     const [target, top] = anchor.el.isConnected ? [anchor.el, anchor.top] : anchor.row?.isConnected ? [anchor.row, anchor.rowTop] : [null, 0];
     if (target) {
-      const delta = target.getBoundingClientRect().top - top;
-      if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
+      // Idempotent: measured from where the anchor is now, so a second settle is a no-op.
+      const next = correct(el.scrollHeight, el.clientHeight, el.scrollTop, el.scrollTop + target.getBoundingClientRect().top, top);
+      if (Math.abs(next - el.scrollTop) >= 0.5) el.scrollTop = next;
     }
     remember();
+  };
+  /** Bring the position back in line with the contract after any layout change. */
+  const settle = () => {
+    if (!scroller) return;
+    if (pinned()) { if (held) reserve(0); if (!scroller.querySelector(".user.editing")) toBottom(scroller); }
+    else restore();
   };
   const scrollIfPinned = () => {
     if (pinned() && held) reserve(0);
@@ -89,7 +100,8 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     });
   };
   return {
-    ref: (el: HTMLDivElement) => { scroller = el; },
+    ref: (el: HTMLDivElement) => { scroller = el; setScrollKeeper(el, settle); },
+    settle,
     el: () => scroller,
     /** Reactive: false while the reader is somewhere above the bottom. */
     pinned,
@@ -101,8 +113,10 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
       if (!el || el.dataset.panelResizing) return;
       const top = el.scrollTop, gap = gapOf(el);
       if (intent()) {
-        if (top < lastTop - 0.5) setPinned(false);
-        else if (gap < NEAR) { setPinned(true); if (held) { reserve(0); toBottom(el); } }
+        // Sub-pixel jitter is not a move up.
+        const next = userScroll({ pinned: pinned(), top: lastTop }, el.scrollHeight, el.clientHeight, top > lastTop - 0.5 ? Math.max(top, lastTop) : top);
+        if (next.pinned !== pinned()) setPinned(next.pinned);
+        if (next.pinned && held) { reserve(0); toBottom(el); }
       } else if (pinned() && gap >= NEAR) {
         // Moved away by the app itself (a chapter, a search hit). Layout never
         // does this: growth fires no scroll event, and a shrink clamps to the bottom.
@@ -141,9 +155,22 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
       content = scroller.querySelector<HTMLElement>(":scope > .col") ?? undefined;
       // Border box: the dock height is bottom padding, which a content-box observer misses.
       if (content) observer.observe(content, { box: "border-box" });
+      // A block above the reader can appear, go or grow while another below
+      // shrinks by as much (a launch banner hidden by a send): the column keeps
+      // its height and its own observer never fires. Watch every block in it.
+      const blocks = new MutationObserver(records => {
+        for (const r of records) r.addedNodes.forEach(n => { if (n instanceof Element) observer.observe(n, { box: "border-box" }); });
+        if (pinned()) scrollIfPinned();
+        else if (!scroller?.dataset.panelResizing) restore();
+      });
+      if (content) {
+        for (const child of content.children) observer.observe(child, { box: "border-box" });
+        blocks.observe(content, { childList: true });
+      }
       const dock = scroller.nextElementSibling;
       if (dock) observer.observe(dock);
-      onCleanup(() => observer.disconnect());
+      const el = scroller;
+      onCleanup(() => { observer.disconnect(); blocks.disconnect(); setScrollKeeper(el, undefined); });
     }),
   };
 }
