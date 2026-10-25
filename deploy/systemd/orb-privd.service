@@ -8,6 +8,10 @@ User=root
 Group=root
 UMask=0007
 NoNewPrivileges=false
+Environment=ORB_PRIVD_SOCKET_GROUP=sandboxed-node
+EnvironmentFile=-/etc/orb-privd.env
+EnvironmentFile=-/etc/orb-node.env
+EnvironmentFile=-/etc/sandboxed-node.env
 ExecStart=/usr/bin/python3 /usr/local/sbin/orb-privd
 Restart=always
 RestartSec=2

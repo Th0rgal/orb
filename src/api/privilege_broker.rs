@@ -1207,9 +1207,16 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/:id/approve", post(approve))
         .route("/:id/deny", post(deny))
         .route("/:id", delete(revoke))
-        .route("/verify-and-log", post(verify_and_log))
         .route("/bunker", post(trigger_bunker))
         .route("/unbunker", post(unbunker))
+}
+
+/// Lease-authenticated endpoint called by `orb-privd` on worker nodes.
+/// Like `/api/spark` and `/api/remote-build`, authentication is enforced inside
+/// `verify_and_log` via the 256-bit random `lease_token` (`orb-jit-<uuid>-<uuid>`)
+/// minted on Touch ID / Face ID approval, rather than a browser dashboard JWT.
+pub fn public_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/api/privilege-access/verify-and-log", post(verify_and_log))
 }
 
 fn parse_id(raw: &str) -> Result<Uuid, ApiError> {

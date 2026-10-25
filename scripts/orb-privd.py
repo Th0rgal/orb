@@ -38,8 +38,11 @@ TRUSTED_API_TOKEN = (
     os.environ.get("ORB_CORE_API_TOKEN")
     or os.environ.get("ORB_API_TOKEN")
     or os.environ.get("SANDBOXED_SH_TOKEN")
+    or os.environ.get("ORB_NODE_TOKEN")
+    or os.environ.get("SANDBOXED_NODE_TOKEN")
     or ""
 ).strip()
+SOCKET_GROUP = (os.environ.get("ORB_PRIVD_SOCKET_GROUP") or "").strip()
 HOST_LABEL = os.environ.get("ORB_NODE_NAME") or socket.gethostname()
 
 OPS_READ_BINARIES = {
@@ -297,7 +300,12 @@ def main() -> None:
     os.chmod(SOCKET_PATH, 0o660)
     try:
         import grp
-        for group_name in ("orb-node", "sandboxed-node"):
+        candidates = (
+            (SOCKET_GROUP, "sandboxed-node", "orb-node")
+            if SOCKET_GROUP
+            else ("sandboxed-node", "orb-node")
+        )
+        for group_name in candidates:
             try:
                 gid = grp.getgrnam(group_name).gr_gid
                 os.chown(SOCKET_PATH, 0, gid)

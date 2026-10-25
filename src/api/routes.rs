@@ -814,6 +814,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // bypass require_auth like the /v1 proxy, otherwise the in-workspace
         // spark-build wrapper's token is rejected at the auth layer.
         .nest("/api/spark", super::spark::routes())
+        .merge(super::privilege_broker::public_routes())
         // Remote lean-build dispatch: same per-mission HMAC capability-token
         // model as spark (domain-separated), verified inside the handlers,
         // so it also bypasses require_auth. Source payloads are bounded before
