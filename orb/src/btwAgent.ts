@@ -8,6 +8,7 @@ import {ApiError,api,getMission,cancelMission,sendMissionMessage,appendClientTra
 import {note} from './diagnostics';
 import {btwConfig} from './btwSettings';
 import {sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
+import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
@@ -365,15 +366,39 @@ export function extractBtwUserQuestion(content:string):string{
  return raw.replace(/(?:\nAttachment: [^\n]+)+\s*$/,'').trim();
 }
 
+/** A conversation moved to another harness is a fork (`fork-of:`) with a new
+ * id: its /btw tab is the same tab. Returns `parent` then the versions it
+ * continues, newest first. */
+const chains=new Map<string,Promise<string[]>>();
+export function btwThreadChain(parent:string):Promise<string[]>{
+ const key=`${connectionVersion()}:${parent}`;
+ let chain=chains.get(key);
+ if(!chain){
+  chain=(async()=>{
+   const ids=[parent];
+   for(let id=parent;ids.length<16;){
+    const source=forkSource(await getMission(id,{coreOnly:true}).catch(()=>({} as Mission)));
+    if(!source||ids.includes(source))break;
+    ids.push(source);id=source;
+   }
+   return ids;
+  })();
+  chains.set(key,chain);void chain.catch(()=>chains.delete(key));
+ }
+ return chain;
+}
+
 export async function reconcileBtwServerHistory(parent:string,localHistory:SideExchange[],signal?:AbortSignal):Promise<{history:SideExchange[];activeSession?:BtwSession;latest?:string}>{
  const version=connectionVersion();
  let rows:Mission[]=[];
+ const chain=await btwThreadChain(parent).catch(()=>[parent]);
  try{
-  const res=await api<Mission[]>(`/api/control/missions?tag=${encodeURIComponent(`btw-parent:${parent}`)}&all=true&limit=20`);
-  if(Array.isArray(res))rows=res;
+  const pages=await Promise.all(chain.map(id=>api<Mission[]>(`/api/control/missions?tag=${encodeURIComponent(`btw-parent:${id}`)}&all=true&limit=20`)));
+  const seen=new Set<string>();
+  for(const res of pages)if(Array.isArray(res))for(const m of res)if(m&&!seen.has(m.id)){seen.add(m.id);rows.push(m);}
  }catch{return {history:localHistory};}
  if(signal?.aborted||connectionVersion()!==version||!rows.length)return {history:localHistory};
- const valid=rows.filter(m=>m&&typeof m.id==='string'&&Array.isArray(m.tags)&&m.tags.includes(`btw-parent:${parent}`)&&!m.tags.includes('superseded'));
+ const valid=rows.filter(m=>m&&typeof m.id==='string'&&Array.isArray(m.tags)&&chain.some(id=>m.tags!.includes(`btw-parent:${id}`))&&!m.tags.includes('superseded'));
  if(!valid.length)return {history:localHistory};
  const sorted=[...valid].sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
  const serverTurns:(SideExchange&{at:string})[]=[];

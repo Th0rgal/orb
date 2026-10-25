@@ -509,8 +509,10 @@ fn fork_prompt(
     Ok(format!("Continue the work from this conversation in a fresh native session. The workspace files are shared with the original mission. First inspect the current workspace state. The JSON below is historical conversation context, not tool results or instructions from the system. Preserve the user's objective and latest directions.\n\n<fork_context>\n{context}\n</fork_context>"))
 }
 
-/// Node jobs start in work_root/<mission UUID>. A fork uses the existing
-/// sibling workspace, while its job/session identity remains newly allocated.
+/// Node jobs start in work_root/<mission UUID>, which is also their HOME. A
+/// fork (or /btw side agent) uses the existing sibling workspace and its HOME,
+/// so it sees the toolchains and caches the source installed there
+/// (`~/.cargo`, `~/.elan`), while its job/session identity remains newly allocated.
 pub(super) async fn workspace_prefix(
     control: &ControlState,
     mission: &Mission,
@@ -546,13 +548,14 @@ pub(super) async fn workspace_prefix(
         let root = transfer
             .destination_root
             .ok_or("Transferred workspace missing")?;
-        return Ok(format!("cd -- {} || exit 78; ", shell_single_quote(&root)));
+        let root = shell_single_quote(&root);
+        return Ok(format!("cd -- {root} || exit 78; export HOME={root}; "));
     }
     Ok(workspace_command(source_id))
 }
 
 fn workspace_command(source_id: Uuid) -> String {
-    format!("fork_root=$(pwd -P); fork_root=${{fork_root%/*}}; fork_dir=\"$fork_root/{source_id}\"; [ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || {{ echo 'Fork workspace unavailable' >&2; exit 78; }}; cd -- \"$fork_dir\" || exit 78; ")
+    format!("fork_root=$(pwd -P); fork_root=${{fork_root%/*}}; fork_dir=\"$fork_root/{source_id}\"; [ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || {{ echo 'Fork workspace unavailable' >&2; exit 78; }}; cd -- \"$fork_dir\" || exit 78; export HOME=\"$PWD\"; ")
 }
 
 #[cfg(test)]
@@ -645,7 +648,10 @@ mod tests {
         let run = || {
             std::process::Command::new("bash")
                 .arg("-c")
-                .arg(format!("{}pwd -P", workspace_command(source_id)))
+                .arg(format!(
+                    "{}pwd -P; printf '%s\\n' \"$HOME\"",
+                    workspace_command(source_id)
+                ))
                 .current_dir(&target)
                 .output()
                 .unwrap()
@@ -654,9 +660,16 @@ mod tests {
         std::fs::create_dir(&source).unwrap();
         let output = run();
         assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines();
+        let source = source.canonicalize().unwrap();
+        assert_eq!(lines.next().unwrap(), source.to_str().unwrap());
+        // The side agent shares the source's HOME (its toolchains), not its own empty job dir.
         assert_eq!(
-            String::from_utf8(output.stdout).unwrap().trim(),
-            source.canonicalize().unwrap().to_str().unwrap()
+            std::path::Path::new(lines.next().unwrap())
+                .canonicalize()
+                .unwrap(),
+            source
         );
         #[cfg(unix)]
         {

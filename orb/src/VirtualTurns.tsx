@@ -1,6 +1,7 @@
 import {For,createEffect,createMemo,createSignal,onCleanup,onMount,type JSX} from 'solid-js';
 import {matchOffsets} from './searchIndex';
 import { timed } from "./diagnostics";
+import { scrollKeeper } from "./mission/scrollPolicy";
 export type SearchHit={key:string;occurrence:number};
 export interface TranscriptSearch {
  search(query:string,sensitive:boolean,whole:boolean):SearchHit[];
@@ -99,7 +100,13 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   // At the bottom the pinned scroll owns the position. A row above that shrank
  // has already been absorbed by the browser clamping scrollTop; subtracting
  // the delta again moved a pinned reader up by that amount (and unpinned it).
- if(delta&&scroller&&!atBottom)scroller.scrollTop+=delta;
+ if(delta&&scroller&&!atBottom){
+  scroller.scrollTop+=delta;
+  // When the pinned scroll already put its anchor back for this same change
+  // (its observer ran first), the delta above is applied twice: its keeper
+  // measures where the anchor is and settles to the one correct position.
+  scrollKeeper(scroller)?.();
+ }
   if(changed){setRevision(n=>n+1);settle();}
  });
  const queueMeasure=(key:string,node:HTMLElement)=>{measureQueue.set(key,node);if(!measureQueued){measureQueued=true;queueMicrotask(flushMeasure);}};

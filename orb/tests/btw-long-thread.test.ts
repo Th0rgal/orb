@@ -58,3 +58,11 @@ it('watching a finished long thread reports its latest answer, not an older one'
  expect(seen.at(-1)).toMatchObject({type:'done'});
  expect(seen.at(-1).answer).toContain('evm.fast-dev');
 });
+
+it('a conversation moved to another harness (a fork) keeps the /btw threads of the version it continues',async()=>{
+ const moved='99999999-0000-4000-8000-000000000009';
+ vi.mocked(getMission).mockImplementation(async(id:string)=>(id===moved?{id:moved,tags:[`fork-of:${LONG_PARENT_ID}`]}:{id,tags:[]}) as any);
+ vi.mocked(api).mockImplementation(async(path:string)=>path.includes(encodeURIComponent(`btw-parent:${LONG_PARENT_ID}`))?[longThreadMission()] as any:[] as any);
+ const {history}=await reconcileBtwServerHistory(moved,[]);
+ expect(history.map(h=>h.question)).toEqual(LONG_TURNS.map(t=>t.q.trim()));
+});
