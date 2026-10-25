@@ -74,7 +74,7 @@ READ_ONLY_OPTIONS = {
                    "-x", "--catalog", "-e", "--pager-end", "--list-boots", "--disk-usage", "-g", "--grep"},
     "mdadm": {"--detail", "-D", "--examine", "-E", "--query", "-Q", "--scan", "-s", "--verbose", "-v", "--brief", "-b"},
     "smartctl": {"-a", "--all", "-x", "--xall", "-i", "--info", "-H", "--health", "-A", "--attributes",
-                 "-l", "--log", "-d", "--device", "-j", "--json"},
+                 "-d", "--device", "-j", "--json"},
 }
 
 
@@ -98,6 +98,8 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
             raise ValueError("ops_read grant only allows read-only docker subcommands")
         if prog == "nft" and argv[1:] != ["list", "ruleset"]:
             raise ValueError("ops_read grant only allows 'nft list ruleset'")
+        if prog == "mdadm" and argv[1:2] not in (["--detail"], ["-D"], ["--examine"], ["-E"], ["--query"], ["-Q"]):
+            raise ValueError("ops_read grant only allows 'mdadm --detail/--examine/--query'")
         if prog in READ_ONLY_OPTIONS and not all(_read_only_arg(prog, a) for a in argv[1:]):
             raise ValueError(f"ops_read grant only allows read-only {prog} options")
     elif scope == "service_deploy":
