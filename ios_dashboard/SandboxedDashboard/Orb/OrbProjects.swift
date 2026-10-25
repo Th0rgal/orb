@@ -549,6 +549,8 @@ struct OrbHome: View {
     @State private var secretSheet = false
     @State private var accessRequests = OrbMissionAccessMonitor.shared
     @State private var accessSheet = false
+    @State private var privilegeRequests = OrbPrivilegeAccessMonitor.shared
+    @State private var privilegeSheet = false
     @State private var deepLinks = OrbDeepLinks.shared
     @State private var homeReady = false
     @Environment(\.scenePhase) private var scenePhase
@@ -596,17 +598,23 @@ struct OrbHome: View {
         .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
         .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
         .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet() }
+        .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet() }
         .onChange(of: accessRequests.openRequested, initial: true) { _, open in
             if open { accessRequests.openRequested = false; accessSheet = true }
         }
+        .onChange(of: privilegeRequests.openRequested, initial: true) { _, open in
+            if open { privilegeRequests.openRequested = false; privilegeSheet = true }
+        }
         .task(id: scenePhase) { if scenePhase == .active { await secretRequests.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await accessRequests.poll() } }
+        .task(id: scenePhase) { if scenePhase == .active { await privilegeRequests.poll() } }
     }
 
     private var secretBanner: some View {
         VStack(spacing: 0) {
             OrbSecretRequestBanner(count: secretRequests.pending.count) { secretSheet = true }
             OrbMissionAccessBanner(count: accessRequests.pending.count) { accessSheet = true }
+            OrbPrivilegeAccessBanner(count: privilegeRequests.pending.count) { privilegeSheet = true }
         }
     }
 

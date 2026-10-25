@@ -1,0 +1,21 @@
+[Unit]
+Description=Orb Control Plane (Production, formerly sandboxed-sh-prod / assistant-mcp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+WatchdogSec=90
+TimeoutStartSec=300
+WorkingDirectory=/var/lib/sandboxed-sh
+EnvironmentFile=-/etc/orb/core.env
+EnvironmentFile=-/etc/sandboxed-sh/prod.env
+ExecStart=/usr/local/bin/sandboxed-sh-prod
+Restart=always
+RestartSec=3
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+Alias=sandboxed-sh-prod.service assistant-mcp.service

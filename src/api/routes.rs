@@ -576,6 +576,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     state.control.bind_admission_state(&state);
+    // Open the privilege broker now so a mission that ends before anyone
+    // touches it still has its session-scoped grants reaped.
+    super::privilege_broker::store(&state);
 
     // Persisted node state (operator cordons) survives restarts.
     state
@@ -811,6 +814,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // bypass require_auth like the /v1 proxy, otherwise the in-workspace
         // spark-build wrapper's token is rejected at the auth layer.
         .nest("/api/spark", super::spark::routes())
+        .merge(super::privilege_broker::public_routes())
         // Remote lean-build dispatch: same per-mission HMAC capability-token
         // model as spark (domain-separated), verified inside the handlers,
         // so it also bypasses require_auth. Source payloads are bounded before
@@ -1530,6 +1534,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // Device-signed approvals (Secure Enclave / Android Keystore keys)
         .nest("/api/approvals", super::approvals::routes())
         .nest("/api/mission-access", super::mission_access::routes())
+        .nest("/api/privilege-access", super::privilege_broker::routes())
         // Global settings endpoints
         .nest("/api/settings", settings_api::routes())
         // Desktop session management endpoints

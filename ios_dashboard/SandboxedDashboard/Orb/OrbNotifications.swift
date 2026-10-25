@@ -530,6 +530,14 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
             }
             return
         }
+        if userInfo["orb_privilege_access"] is String {
+            nonisolated(unsafe) let finish = completionHandler
+            Task { @MainActor in
+                OrbPrivilegeAccessMonitor.shared.openRequested = true
+                finish()
+            }
+            return
+        }
         let missionID = (userInfo["mission_id"] as? String) ?? ""
         let callID = userInfo["call_id"] as? String
         let toolName = userInfo["tool_name"] as? String

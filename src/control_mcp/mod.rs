@@ -199,6 +199,17 @@ pub fn registry() -> Vec<Tool> {
                 mutation: false,
             }),
     );
+    // Biometric JIT root / host / deploy privilege broker; Touch ID / Face ID gated.
+    entries.extend(
+        crate::api::privilege_broker::tool_definitions()
+            .into_iter()
+            .map(|definition| Tool {
+                definition,
+                handler: Handler::Capabilities,
+                minimum_role: Role::Executor,
+                mutation: false,
+            }),
+    );
     for (handler, definitions) in [
         (Handler::Assistant, assistant::AssistantMcp::tools()),
         (

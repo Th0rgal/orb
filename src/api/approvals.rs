@@ -460,6 +460,22 @@ async fn describe(
             };
             super::mission_access::describe_for_approval(state, owner, id, action, ttl).await?
         }
+        (&Method::POST, ["", "api", "privilege-access", id, action @ ("approve" | "deny")]) => {
+            let ttl = if *action == "approve" {
+                typed::<super::privilege_broker::ApprovePrivilegeBody>(body)?.ttl_minutes
+            } else {
+                no_body(body)?;
+                None
+            };
+            super::privilege_broker::describe_for_approval(state, owner, id, action, ttl).await?
+        }
+        (&Method::POST, ["", "api", "privilege-access", "bunker"]) => {
+            "Trigger Fleet Bunker Mode lockdown and revoke active privileged leases".into()
+        }
+        (&Method::POST, ["", "api", "privilege-access", "unbunker"]) => {
+            no_body(body)?;
+            "Exit Fleet Bunker Mode and restore normal privileged access policy".into()
+        }
         (&Method::PUT, ["", "api", "bitwarden", "default-access", slug]) => {
             let req: DefaultAccessRequest = typed(body)?;
             let names = project_names(state, &req.project_ids).await;
@@ -610,6 +626,8 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
     match (method, seg.as_slice()) {
         (&Method::POST, ["", "api", "bitwarden", "requests", _, "approve" | "reject"]) => true,
         (&Method::POST, ["", "api", "mission-access", _, "approve" | "deny"]) => true,
+        (&Method::POST, ["", "api", "privilege-access", "bunker" | "unbunker"]) => true,
+        (&Method::POST, ["", "api", "privilege-access", _, "approve" | "deny"]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "default-access", _]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => true,
         (&Method::GET, ["", "api", "bitwarden", "secrets", _, "reveal"]) => true,
@@ -633,6 +651,11 @@ pub fn always_signed(method: &Method, path: &str) -> bool {
     matches!(
         (method, seg.as_slice()),
         (&Method::POST, ["", "api", "mission-access", _, "approve"])
+            | (
+                &Method::POST,
+                ["", "api", "privilege-access", "bunker" | "unbunker"]
+            )
+            | (&Method::POST, ["", "api", "privilege-access", _, "approve"])
     )
 }
 
@@ -646,7 +669,8 @@ pub async fn require_device_approval(
     let path = req.uri().path().to_string();
     let guarded_prefix = path.starts_with("/api/bitwarden")
         || path.starts_with("/api/approvals")
-        || path.starts_with("/api/mission-access");
+        || path.starts_with("/api/mission-access")
+        || path.starts_with("/api/privilege-access");
     if guarded_prefix
         && (path.contains("//")
             || path.contains('%')

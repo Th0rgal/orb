@@ -25,12 +25,14 @@ import urllib.error
 import uuid
 
 GENERATION_SCHEMA = 2
-REQUIRED_PROFILE_FILES = ("github-token", "gitconfig", "gitignore", "git-credential", "gpg-sign",
-                          "ssh/config", "ssh/known_hosts", "ssh/github", "ssh/github.pub",
-                          "ssh/paloma", "ssh/paloma.pub", "gh/hosts.yml", "skill/SKILL.md", "gnupg/gpg.conf")
+BASE_PROFILE_FILES = ("github-token", "gitconfig", "gitignore", "git-credential", "gpg-sign",
+                      "ssh/config", "ssh/known_hosts", "ssh/github", "ssh/github.pub",
+                      "gh/hosts.yml", "skill/SKILL.md", "gnupg/gpg.conf")
+REQUIRED_PROFILE_FILES = BASE_PROFILE_FILES + ("ssh/paloma", "ssh/paloma.pub")
 
-FIELDS = ("GITHUB_TOKEN", "GITHUB_SSH_PRIVATE_KEY", "GITHUB_SSH_PUBLIC_KEY",
-          "GIT_SIGNING_PRIVATE_KEY", "PALOMA_SSH_PRIVATE_KEY", "PALOMA_SSH_PUBLIC_KEY")
+BASE_FIELDS = ("GITHUB_TOKEN", "GITHUB_SSH_PRIVATE_KEY", "GITHUB_SSH_PUBLIC_KEY",
+               "GIT_SIGNING_PRIVATE_KEY")
+FIELDS = BASE_FIELDS + ("PALOMA_SSH_PRIVATE_KEY", "PALOMA_SSH_PUBLIC_KEY")
 FINGERPRINT = "30EAE29B6766A7A70A4DEB4BF480B9A3F84BE648"
 SSH_FINGERPRINT = "SHA256:sjqEzn4AF7dPpBvNPK5bfJ0sAsIk7qKxrp4PbF5Ekd0"
 ADMIN_FINGERPRINT = "SHA256:DudUQO4SLLQgsBYmLgkd8aUNSWg7jeLqG/TUiO7/E10"
@@ -75,11 +77,14 @@ def validate_bundle(bundle):
     if set(bundle) != {"secrets", "known_hosts", "ssh_hosts", "library_revision", "skill"}:
         raise ValueError("unexpected bundle fields")
     secrets = bundle["secrets"]
-    if set(secrets) != set(FIELDS) or any(not isinstance(secrets[k], str) or not secrets[k].strip() for k in FIELDS):
+    has_paloma = "PALOMA_SSH_PRIVATE_KEY" in secrets or "PALOMA_SSH_PUBLIC_KEY" in secrets
+    expected_fields = set(FIELDS) if has_paloma else set(BASE_FIELDS)
+    if set(secrets) != expected_fields or any(not isinstance(secrets[k], str) or not secrets[k].strip() for k in expected_fields):
         raise ValueError("development secrets missing or unexpected")
     if not bundle["known_hosts"].strip():
         raise ValueError("verified known_hosts required")
-    for public in ["GITHUB_SSH_PUBLIC_KEY", "PALOMA_SSH_PUBLIC_KEY"]:
+    pub_keys = ["GITHUB_SSH_PUBLIC_KEY", "PALOMA_SSH_PUBLIC_KEY"] if has_paloma else ["GITHUB_SSH_PUBLIC_KEY"]
+    for public in pub_keys:
         if "PRIVATE KEY" in secrets[public] or not secrets[public].startswith("ssh-ed25519 "):
             raise ValueError("expected an Ed25519 public key")
     aliases = set()
@@ -123,7 +128,8 @@ def profile_env(root, parent=None):
     env.update(GH_TOKEN=token, GITHUB_TOKEN=token, GH_CONFIG_DIR=str(generation / "gh"),
                GNUPGHOME=str(generation / "gnupg"),
                GIT_SSH_COMMAND="ssh -F " + shlex.quote(str(generation / "ssh/config")),
-               SANDBOXED_DEVELOPMENT_IDENTITY=str(root))
+               SANDBOXED_DEVELOPMENT_IDENTITY=str(root),
+               ORB_DEVELOPMENT_IDENTITY=str(root))
     # Append after existing credentials/read-only policy, without deleting it.
     n = int(env.get("GIT_CONFIG_COUNT", "0"))
     env[f"GIT_CONFIG_KEY_{n}"] = "include.path"
@@ -155,6 +161,7 @@ if [ -r "$_sdi_current/github-token" ]; then
   export "GIT_CONFIG_VALUE_$_sdi_n=$_sdi_current/gitconfig"
   export GIT_CONFIG_COUNT=$((_sdi_n + 1))
   export SANDBOXED_DEVELOPMENT_IDENTITY={shlex.quote(str(root.resolve()))}
+  export ORB_DEVELOPMENT_IDENTITY={shlex.quote(str(root.resolve()))}
 fi
 unset _sdi_current _sdi_n
 '''
@@ -317,7 +324,11 @@ def prepare_generation(root, bundle):
     try:
         validate_signing_payload(s["GIT_SIGNING_PRIVATE_KEY"])
         write(stage / "github-token", s["GITHUB_TOKEN"])
-        for private, name in [("GITHUB_SSH_PRIVATE_KEY", "github"), ("PALOMA_SSH_PRIVATE_KEY", "paloma")]:
+        has_paloma = "PALOMA_SSH_PRIVATE_KEY" in s
+        key_pairs = [("GITHUB_SSH_PRIVATE_KEY", "github")]
+        if has_paloma:
+            key_pairs.append(("PALOMA_SSH_PRIVATE_KEY", "paloma"))
+        for private, name in key_pairs:
             write(stage / "ssh" / name, s[private].rstrip() + "\n")
             public = run(["ssh-keygen", "-y", "-P", "", "-f", str(stage / "ssh" / name)])
             expected = s[private.replace("PRIVATE", "PUBLIC")].split()[:2]
@@ -329,10 +340,11 @@ def prepare_generation(root, bundle):
                 raise RuntimeError("unexpected SSH fingerprint")
         write(stage / "ssh/known_hosts", bundle["known_hosts"])
         ssh = f"Host github.com\n  User git\n  IdentityFile {stage}/ssh/github\n"
-        for host in bundle["ssh_hosts"]:
-            ssh += f"Host {host['alias']} {host['hostname']}\n  HostName {host['hostname']}\n  User {host['user']}\n  IdentityFile {stage}/ssh/paloma\n"
-            if "proxy_jump" in host:
-                ssh += f"  ProxyJump {host['proxy_jump']}\n"
+        if has_paloma:
+            for host in bundle["ssh_hosts"]:
+                ssh += f"Host {host['alias']} {host['hostname']}\n  HostName {host['hostname']}\n  User {host['user']}\n  IdentityFile {stage}/ssh/paloma\n"
+                if "proxy_jump" in host:
+                    ssh += f"  ProxyJump {host['proxy_jump']}\n"
         ssh += f"Host *\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile {stage}/ssh/known_hosts\n  GlobalKnownHostsFile /dev/null\n  ConnectTimeout 10\n"
         write(stage / "ssh/config", ssh)
         gpg = stage / "gnupg"
@@ -365,7 +377,7 @@ def prepare_generation(root, bundle):
         write(stage / "gitignore", "\n".join([f"/{d}/development-identity" for d in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills", ".grok/skills"]]) + "\n/.paloma/development-identity.json\n")
         write(stage / "gh/hosts.yml", "github.com:\n    user: Th0rgal\n    git_protocol: ssh\n    oauth_token: " + json.dumps(s["GITHUB_TOKEN"]) + "\n")
         write(stage / "skill/SKILL.md", bundle["skill"])
-        atomic_json(stage / "receipt.json", {"created_at": int(time.time()), "library_revision": bundle["library_revision"], "signing_fingerprint": FINGERPRINT})
+        atomic_json(stage / "receipt.json", {"created_at": int(time.time()), "library_revision": bundle["library_revision"], "signing_fingerprint": FINGERPRINT, "coding_only": not has_paloma})
         return stage
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
@@ -376,8 +388,9 @@ def active_profile_exists(root):
     try:
         generation = (root / "current").resolve(strict=True)
         receipt = json.loads((generation / "receipt.json").read_text())
+        req_files = BASE_PROFILE_FILES if receipt.get("coding_only") else REQUIRED_PROFILE_FILES
         return (generation.parent == root.resolve() and receipt.get("signing_fingerprint") == FINGERPRINT
-                and all((generation / name).is_file() for name in REQUIRED_PROFILE_FILES)
+                and all((generation / name).is_file() for name in req_files)
                 and any(path.is_file() for path in (generation / "gnupg/private-keys-v1.d").glob("*.key"))
                 and any((generation / "gnupg" / name).is_file() for name in
                         ("pubring.kbx", "pubring.gpg", "public-keys.d/pubring.db")))

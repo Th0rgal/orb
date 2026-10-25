@@ -42,6 +42,9 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_attribution_step",
     "orb_schedule_step",
     "orb_stats_settle_step",
+    "orb_privilege_step",
+    "orb_bunker_step",
+    "orb_deploy_gate_step",
 ];
 
 const LEANSYS_EXPORTS: &[&str] = &[

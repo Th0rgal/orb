@@ -32,6 +32,8 @@ struct OrbSettingsHome: View {
                     .accessibilityIdentifier("settings.secrets")
                 NavigationLink { OrbMissionAccessList().navigationTitle("Mission access").navigationBarTitleDisplayMode(.inline) } label: { Label("Mission access", systemImage: "eye") }
                     .accessibilityIdentifier("settings.mission-access")
+                NavigationLink { OrbPrivilegeAccessList().navigationTitle("Privileged access").navigationBarTitleDisplayMode(.inline) } label: { Label("Privileged access", systemImage: "lock.shield") }
+                    .accessibilityIdentifier("settings.privilege-access")
                 NavigationLink { OrbRoutingSettings() } label: { Label("Models & Routing", systemImage: "arrow.triangle.swap") }
                     .accessibilityIdentifier("settings.routing")
                 NavigationLink { OrbProxyKeysSettings() } label: { Label("Proxy API keys", systemImage: "key") }

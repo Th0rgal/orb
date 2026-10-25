@@ -72,6 +72,7 @@ pub mod oauth_reconcile;
 pub mod opencode;
 pub(crate) mod operator_attention;
 pub mod paloma;
+pub mod privilege_broker;
 pub mod project_controller;
 pub mod project_crons;
 pub mod project_files;

@@ -1042,4 +1042,52 @@ theorem stats_settle_fresh_replay_saturate :
     statsSettleStep 10 5 0 = 15 ∧ statsSettleStep 10 5 1 = 10 ∧
     statsSettleStep 18446744073709551610 10 0 = 18446744073709551615 := by decide
 
+/-! ## Layer II: Biometric JIT Privilege Broker, Bunker Mode & Production Deploy Gate
+    (`orb_privilege_step`, `orb_bunker_step`, `orb_deploy_gate_step`) -/
+
+/-- Corollary 41 (`ScopedAuthority` — `orb_privilege_step`): Without a hardware biometric signature
+    (`biometricSigned == 0`) or outside normal Bunker state (`bunkerState != 0`), privileged execution
+    (`bit 0`) is strictly `0`. -/
+theorem privilege_requires_biometric_and_unbunkered
+    (owner active scope maxScope revoked : UInt8) (now gExp sExp : UInt64) :
+    (privilegeStep owner active 0 scope maxScope 0 revoked now gExp sExp &&& 1) = 0 ∧
+    (privilegeStep owner active 1 scope maxScope 1 revoked now gExp sExp &&& 1) = 0 ∧
+    (privilegeStep owner active 1 scope maxScope 2 revoked now gExp sExp &&& 1) = 0 := by
+  unfold privilegeStep; repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 42 (`ClockDiscipline` — `orb_privilege_step`): Session termination or session expiry strictly
+    bounds the grant clock: when `missionActive == 0` or `sessionExpiresAt ≤ nowEpoch`, execution (`bit 0`)
+    is `0` and `reapGrant` (`bit 16`) is `65536` even if `nowEpoch < grantExpiresAt`. -/
+theorem privilege_bounded_by_session_clock
+    (owner bio scope maxScope bunker rev : UInt8) (now gExp sExp : UInt64) :
+    (privilegeStep owner 0 bio scope maxScope bunker rev now gExp sExp &&& 1) = 0 ∧
+    (privilegeStep owner 0 bio scope maxScope bunker rev now gExp sExp &&& 65536) = 65536 ∧
+    (privilegeStep owner 1 bio scope maxScope bunker rev now gExp now &&& 1) = 0 ∧
+    (privilegeStep owner 1 bio scope maxScope bunker rev now gExp now &&& 65536) = 65536 := by
+  unfold privilegeStep; repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 43 (`StickyFence` — `orb_bunker_step`): Once in Bunker Mode (`currentState == 1` or `2`),
+    without a hardware-signed operator reset (`biometricUnbunker == 0`), the node never returns to normal
+    (`nextState != 0`) and always revokes all JIT root grants (`bit 8 == 256`), and any canary trip
+    (`canaryTripped == 1`) forces hard lockdown (`2`, `bit 16 == 65536`). -/
+theorem bunker_sticky_without_biometric_reset
+    (canary burst manual unbunker : UInt8) :
+    (bunkerStep 1 canary burst manual 0 &&& 255) ≥ 1 ∧
+    (bunkerStep 1 canary burst manual 0 &&& 256) = 256 ∧
+    (bunkerStep 2 canary burst manual 0 &&& 255) = 2 ∧
+    (bunkerStep 0 1 burst manual unbunker &&& 65536) = 65536 := by
+  unfold bunkerStep; repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 44 (`ScopedAuthority` & `ConservedResource` — `orb_deploy_gate_step`): Production deploys
+    (`isProdService == 1`) always reject unapproved requests (`biometricApproved == 0`) or bunkered states
+    (`bunkerState != 0`), while dev/staging deploys (`isProdService == 0`) succeed without biometric prompt
+    when base safety invariants hold. -/
+theorem prod_deploy_requires_biometric_approval
+    (svcMatch selfCall debounce force bunker : UInt8) (writers : UInt32) :
+    deployGateStep 1 svcMatch selfCall debounce force 0 bunker writers = 0 ∧
+    deployGateStep 1 svcMatch selfCall debounce force 1 1 writers = 0 ∧
+    deployGateStep 0 1 0 1 0 0 0 0 = 1 ∧
+    deployGateStep 1 1 0 1 0 1 0 0 = 1 := by
+  unfold deployGateStep; repeat (first | constructor | split | decide | simp_all)
+
 end Orb.Spec

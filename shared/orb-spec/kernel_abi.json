@@ -477,6 +477,50 @@
       "internal": true
     },
     {
+      "name": "orb_privilege_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "sameOwner", "type": "uint8_t"},
+        {"name": "missionActive", "type": "uint8_t"},
+        {"name": "biometricSigned", "type": "uint8_t"},
+        {"name": "scopeRank", "type": "uint8_t"},
+        {"name": "maxGrantedScope", "type": "uint8_t"},
+        {"name": "bunkerState", "type": "uint8_t"},
+        {"name": "revoked", "type": "uint8_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "grantExpiresAt", "type": "uint64_t"},
+        {"name": "sessionExpiresAt", "type": "uint64_t"}
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_bunker_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "currentState", "type": "uint8_t"},
+        {"name": "canaryTripped", "type": "uint8_t"},
+        {"name": "authFailureBurst", "type": "uint8_t"},
+        {"name": "manualTrigger", "type": "uint8_t"},
+        {"name": "biometricUnbunker", "type": "uint8_t"}
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_deploy_gate_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "isProdService", "type": "uint8_t"},
+        {"name": "serviceMatches", "type": "uint8_t"},
+        {"name": "callingOnSelf", "type": "uint8_t"},
+        {"name": "debounceOk", "type": "uint8_t"},
+        {"name": "forceFlag", "type": "uint8_t"},
+        {"name": "biometricApproved", "type": "uint8_t"},
+        {"name": "bunkerState", "type": "uint8_t"},
+        {"name": "liveWriters", "type": "uint32_t"}
+      ],
+      "internal": true
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [
