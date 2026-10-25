@@ -1416,7 +1416,7 @@ export function holdsCapSlot(status: string | null | undefined): boolean {
 }
 
 /** A conversation fork preserves the source workspace and never switches the source harness. */
-export async function forkMission(id: string, body: { backend: string; model_override: string; model_effort: string; service_tier?: CodexServiceTier; idempotency_key: string }): Promise<Mission> {
+export async function forkMission(id: string, body: { backend: string; model_override: string; model_effort: string; service_tier?: CodexServiceTier; idempotency_key: string; /** Edit-and-resend: keep the history before this message and continue with `replacement`. */ replace_message_id?: string; replacement?: string }): Promise<Mission> {
   try {
     return await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/fork`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),

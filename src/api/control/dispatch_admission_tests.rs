@@ -11557,6 +11557,10 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
             idempotency_key: "untrusted-tag-check".into(),
             side_question: Some("New question".into()),
             side_context_mode: Some("invalid-new-launch-mode".into()),
+
+            replace_message_id: None,
+
+            replacement: None,
         }),
     )
     .await
@@ -11588,6 +11592,10 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
             idempotency_key: Uuid::new_v4().to_string(),
             side_question: Some("New question".into()),
             side_context_mode: Some("incremental".into()),
+
+            replace_message_id: None,
+
+            replacement: None,
         }),
     )
     .await
@@ -11609,6 +11617,10 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
             idempotency_key: "btw-original".into(),
             side_question: Some("Original question".into()),
             side_context_mode: Some("incremental".into()),
+
+            replace_message_id: None,
+
+            replacement: None,
         }),
     )
     .await
@@ -11634,6 +11646,10 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
             idempotency_key: "btw-original".into(),
             side_question: Some("Original question".into()),
             side_context_mode: Some("incremental".into()),
+
+            replace_message_id: None,
+
+            replacement: None,
         }),
     )
     .await
@@ -11651,6 +11667,10 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
             idempotency_key: "btw-original".into(),
             side_question: Some("A different question".into()),
             side_context_mode: Some("incremental".into()),
+
+            replace_message_id: None,
+
+            replacement: None,
         }),
     )
     .await
@@ -11677,6 +11697,10 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
                 idempotency_key: "btw-original".into(),
                 side_question: Some("Original question".into()),
                 side_context_mode: Some("incremental".into()),
+
+                replace_message_id: None,
+
+                replacement: None,
             }),
         )
         .await
@@ -11715,6 +11739,10 @@ async fn btw_creation_refuses_an_existing_queued_session_from_another_window() {
                 idempotency_key: "btw-original".into(),
                 side_question: Some("Retry failed work".into()),
                 side_context_mode: Some("invalid-new-launch-mode".into()),
+
+                replace_message_id: None,
+
+                replacement: None,
             }),
         )
         .await
