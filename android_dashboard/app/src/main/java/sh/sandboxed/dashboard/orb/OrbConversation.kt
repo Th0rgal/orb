@@ -196,13 +196,32 @@ sealed class OrbTurn(open val id: String) {
 }
 
 object OrbTimelineBuilder {
+    /** The transcript without the streaming reply, and the stored answers it dedupes against. */
+    data class Base(val turns: List<OrbTurn>, val storedAnswers: List<String>)
+
     fun build(
         messages: List<OrbRow>,
         events: List<OrbRow>,
         streamingText: String,
         isLive: Boolean,
         startedAt: String?
-    ): List<OrbTurn> {
+    ): List<OrbTurn> = withStreaming(buildBase(messages, events, streamingText.isNotEmpty(), isLive, startedAt), streamingText)
+
+    /** The streaming reply on top of [base]: per frame, this is all that runs (not [buildBase]). */
+    fun withStreaming(base: Base, streamingText: String): List<OrbTurn> {
+        // Live text the stored history already holds is not shown twice (reloads, SSE replays).
+        val liveText = OrbSendFlow.dedupeLiveText(streamingText, base.storedAnswers)
+        if (liveText.trim().isEmpty()) return base.turns
+        return base.turns + OrbTurn.Assistant(id = "streaming-assistant", text = liveText, timestamp = null, isStreaming = true)
+    }
+
+    fun buildBase(
+        messages: List<OrbRow>,
+        events: List<OrbRow>,
+        hasStreamingText: Boolean,
+        isLive: Boolean,
+        startedAt: String?
+    ): Base {
         val turns = mutableListOf<OrbTurn>()
         val pendingWork = mutableListOf<OrbWorkStep>()
 
@@ -347,7 +366,7 @@ object OrbTimelineBuilder {
             val fold = OrbTurn.WorkFold(
                 id = "work-fold-main",
                 steps = cappedWork,
-                isLive = isLive && streamingText.isEmpty(),
+                isLive = isLive && !hasStreamingText,
                 startedAt = startedAt,
                 narration = narrationTexts
             )
@@ -358,7 +377,7 @@ object OrbTimelineBuilder {
                 turns.add(fold)
             }
             pendingWork.clear()
-        } else if (isLive && streamingText.isEmpty() && turns.none { it is OrbTurn.WorkFold && it.isLive }) {
+        } else if (isLive && !hasStreamingText && turns.none { it is OrbTurn.WorkFold && it.isLive }) {
             turns.add(
                 OrbTurn.WorkFold(
                     id = "work-live-placeholder",
@@ -369,24 +388,9 @@ object OrbTimelineBuilder {
             )
         }
 
-        // Live text the stored history already holds is not shown twice (reloads, SSE replays).
-        val liveText = OrbSendFlow.dedupeLiveText(
-            streamingText,
-            deduplicatedMessages.filter { (it.str("role", "sender", "author") ?: "assistant").lowercase() in setOf("assistant", "agent") }
-                .map { it.str("content", "text", "message") ?: "" }
-        )
-        if (liveText.trim().isNotEmpty()) {
-            turns.add(
-                OrbTurn.Assistant(
-                    id = "streaming-assistant",
-                    text = liveText,
-                    timestamp = null,
-                    isStreaming = true
-                )
-            )
-        }
-
-        return turns
+        val storedAnswers = deduplicatedMessages.filter { (it.str("role", "sender", "author") ?: "assistant").lowercase() in setOf("assistant", "agent") }
+            .map { it.str("content", "text", "message") ?: "" }
+        return Base(turns, storedAnswers)
     }
 
     private fun isControllerWake(text: String): Boolean {
@@ -522,7 +526,9 @@ fun OrbConversationPage(
     var events by remember(missionId) {
         mutableStateOf(if (missionId != null) OrbReadCache.loadRows(eventsCacheKey) else emptyList())
     }
-    var streamingText by remember(missionId) { mutableStateOf("") }
+    // Streamed reply: deltas coalesce to one state change per frame (OrbStreamText.kt).
+    val live = remember(missionId) { OrbLiveText(scope) }
+    val streamingText = live.text
     // False until the first history fetch for this mission settles, so an existing
     // conversation shows a loading row instead of the "Start a conversation" empty state.
     var historySettled by remember(missionId) { mutableStateOf(missionId == null) }
@@ -701,8 +707,8 @@ fun OrbConversationPage(
                 OrbReadCache.saveRows(messagesCacheKey, allMsgs)
             }
             if (allEvs.isNotEmpty()) {
-                events = allEvs
-                OrbReadCache.saveRows(eventsCacheKey, allEvs)
+                events = OrbReadCache.compactEvents(allEvs)
+                OrbReadCache.saveRows(eventsCacheKey, events)
             }
             liveRow?.let { OrbMissionUnreadStore.markSeen(it) }
         } catch (t: Throwable) {
@@ -731,15 +737,11 @@ fun OrbConversationPage(
                         when {
                             evType == "text_delta" || evType == "delta" -> {
                                 val delta = OrbJSON.rawStr(parsed, "delta", "text", "content") ?: ""
-                                if (delta.isNotEmpty()) {
-                                    scope.launch(Dispatchers.Main) {
-                                        streamingText += delta
-                                    }
-                                }
+                                live.append(delta)
                             }
                             evType == "assistant_message" || evType == "mission_completed" || evType == "turn_complete" -> {
                                 scope.launch(Dispatchers.Main) {
-                                    streamingText = ""
+                                    live.clear()
                                     loadHistory(missionId)
                                     core.refreshMissionsQuietly()
                                 }
@@ -1105,15 +1107,18 @@ fun OrbConversationPage(
         }
     }
 
-    val allTurns = remember(messages, events, streamingText, isLive, liveRow) {
-        OrbTimelineBuilder.build(
+    // The transcript is rebuilt when history changes; a streaming frame only adds its bubble.
+    val hasStreamingText = streamingText.isNotEmpty()
+    val baseTurns = remember(messages, events, hasStreamingText, isLive, liveRow) {
+        OrbTimelineBuilder.buildBase(
             messages = messages,
             events = events,
-            streamingText = streamingText,
+            hasStreamingText = hasStreamingText,
             isLive = isLive,
             startedAt = liveRow?.str("root_started_at", "started_at", "created_at")
         )
     }
+    val allTurns = remember(baseTurns, streamingText) { OrbTimelineBuilder.withStreaming(baseTurns, streamingText) }
 
     LaunchedEffect(allTurns) { latestTurns = allTurns }
 
@@ -1122,11 +1127,11 @@ fun OrbConversationPage(
         if (allTurns.size > visibleTurnLimit) allTurns.takeLast(visibleTurnLimit) else allTurns
     }
 
-    val changedFiles = remember(allTurns) { OrbTurnRecap.changedFiles(allTurns) }
+    val changedFiles = remember(baseTurns) { OrbTurnRecap.changedFiles(baseTurns.turns) }
 
     // shared_files metadata for chips: refreshed when a message with a file tag lands.
-    val fileTagTurns = remember(allTurns) {
-        allTurns.count { it is OrbTurn.Assistant && !it.isStreaming && (it.text.contains("<file", true) || it.text.contains("<image", true)) }
+    val fileTagTurns = remember(baseTurns) {
+        baseTurns.turns.count { it is OrbTurn.Assistant && !it.isStreaming && (it.text.contains("<file", true) || it.text.contains("<image", true)) }
     }
     val fileContext = LocalContext.current
     LaunchedEffect(missionId, fileTagTurns) {

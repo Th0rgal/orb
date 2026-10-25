@@ -103,12 +103,12 @@ extension OrbConversation {
                     let inner = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
                         if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data); return }
                         if type == "text_delta", let delta = data["delta"] as? String ?? data["content"] as? String {
-                            liveText += delta
+                            live.append(delta)
                         } else if type == "text_op" {
                             let op = data["op"] as? String ?? ""
                             let content = data["content"] as? String ?? ""
-                            if op == "append" { liveText += content }
-                            else if op == "replace" { liveText = content }
+                            if op == "append" { live.append(content) }
+                            else if op == "replace" { live.replace(content) }
                         }
                         if ["assistant_message", "mission_status_changed", "user_message"].contains(type) {
                             Task { await refresh(force: true) }
@@ -127,7 +127,7 @@ extension OrbConversation {
                         if phase == .active { await refresh(force: true) }
                     }
                 }
-                if !working { liveText = "" }
+                if !working { live.clear() }
                 selection.backend = value["backend"].text
                 selection.node = value["remote_node_id"].text
                 if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }

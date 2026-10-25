@@ -34,12 +34,12 @@ struct OrbMessageWithFiles: View {
     var body: some View {
         let segments = OrbFileRefs.segments(text, streaming: streaming)
         if segments.count == 1, case .text(let only) = segments[0] {
-            OrbRichText(source: only, onArtifact: onArtifact)
+            OrbRichText(source: only, streaming: streaming, onArtifact: onArtifact)
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                     switch segment {
-                    case .text(let prose): OrbRichText(source: prose, onArtifact: onArtifact)
+                    case .text(let prose): OrbRichText(source: prose, streaming: streaming && segment == segments.last, onArtifact: onArtifact)
                     case .file(let ref):
                         let enriched = OrbFileRefs.enrich(ref, shared: files?.shared ?? [])
                         if enriched.unavailable {

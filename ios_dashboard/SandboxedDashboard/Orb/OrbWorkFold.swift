@@ -145,7 +145,7 @@ struct OrbWorkModel: Equatable {
 
             case "tool_result":
                 guard let callID = event.toolCallId, let toolIdx = toolIndexByCallID[callID] else { continue }
-                let isError = event.metadata["is_error"]?.value as? Bool == true || event.content.lowercased().hasPrefix("error:")
+                let isError = event.metadata["is_error"]?.value as? Bool == true || event.content.prefix(6).lowercased() == "error:"
                 let output = formatCompactOutput(event.content)
                 let old = model.tools[toolIdx]
                 model.tools[toolIdx] = ToolItem(

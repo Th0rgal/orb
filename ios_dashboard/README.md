@@ -17,6 +17,12 @@ Native SwiftUI iOS client for **Orb**, located in `SandboxedDashboard/Orb`.
 - **Shared Project Context & Files** (`OrbDocuments.swift`, `OrbAttachments.swift`, `OrbMessageImages.swift`) — Read and edit synchronized Markdown `@context` files, preview images, and upload attachments.
 - **Unified Settings** (`OrbSettings.swift`, `OrbMachinesSettings.swift`, `OrbProvidersSettings.swift`) — Configure your **Backend** connection, manage **Providers** (including CLIProxyAPI OAuth logins and quota inspection), and view **Machines** (registered remote nodes plus the shared `/api/settings/ssh-hosts` address book).
 
+## Performance
+
+- **Streaming replies** (`OrbStreamText.swift`, spec `lean/Orb/Stream.lean`) — text deltas are coalesced to one update per frame, only the streaming bubble observes them, and the Markdown parser re-parses only the open tail after the committed prefix (checked against `shared/orb-spec/fixtures/stream-commit.json`).
+- **Bounded memory** — tool results are kept to their first 4 KB (`StoredEvent.compacted`; the work fold shows 1,200 characters), orchestration results stay whole.
+- **Measuring** — `OrbPerformanceUITests` (open, scroll, stream, browse memory) against `TestsSupport/orb_fixture_server.py`. XCUITest queries snapshot the app's whole accessibility tree on its main thread, so compare instructions retired or a Time Profiler trace of a query-free window, not raw CPU time; and measure on an idle machine.
+
 ## Presentation
 
 Native surfaces, Inbox density and device checks follow the [mobile UI contract](../docs/ui/mobile.md).

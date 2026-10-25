@@ -417,7 +417,7 @@ enum OrbReadCache {
         let cacheName = "events:\(missionID)"
         let scope = key(cacheName)
         if let cached = eventValues[scope] { return cached }
-        if let disk = OrbDisk.read(cacheName, as: [StoredEvent].self) {
+        if let disk = OrbDisk.read(cacheName, as: [StoredEvent].self)?.map(\.compacted) {
             eventValues[scope] = disk
             return disk
         }
@@ -429,7 +429,7 @@ enum OrbReadCache {
         if eventValues.count >= 48, let firstKey = eventValues.keys.first {
             eventValues.removeValue(forKey: firstKey)
         }
-        let capped = events.count > 250 ? Array(events.suffix(250)) : events
+        let capped = (events.count > 250 ? events.suffix(250) : events[...]).map(\.compacted)
         eventValues[scope] = capped
         OrbDisk.saveAsync(capped, key: cacheName)
     }
@@ -449,7 +449,7 @@ enum OrbReadCache {
         guard scope == key("events:\(missionID)") else { throw CancellationError() }
         saveEvents(missionID, events: events)
         eventFetchedAt[scope] = now()
-        return events
+        return events.map(\.compacted)
     }
     static func load(_ name: String, ttl: TimeInterval = 30, force: Bool = false, fetch: @escaping @MainActor () async throws -> OrbJSON) async throws -> OrbJSON {
         let scope = key(name)

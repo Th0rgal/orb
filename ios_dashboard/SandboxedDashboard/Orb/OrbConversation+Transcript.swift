@@ -156,10 +156,10 @@ extension OrbConversation {
         if !working && !isCloud {
             turnChangesCard
         }
-        if working && !visibleLiveText.isEmpty {
-            OrbMessageWithFiles(text: visibleLiveText, streaming: true, onArtifact: { path in
+        if working && live.hasText {
+            OrbLiveReply(live: live, stored: storedAnswers) { path in
                 Task { await openWorkspaceOrArtifact(path) }
-            })
+            }
             .transition(.opacity)
         }
         ForEach(pendingQuestions) { question in
