@@ -2350,9 +2350,14 @@ select.orb-select-native:disabled { cursor: default; }
 .row.mission-cut { opacity: .45; }
 .row.folder.active { background: var(--bg-active); color: var(--fg-strong); }
 
+/* Sidebar chrome is never text-selectable and the Projects region never draws a focus box; focus shows on rows only. */
+#orb-sidebar { user-select: none; -webkit-user-select: none; }
+#orb-sidebar input, #orb-sidebar textarea, #orb-sidebar [contenteditable="true"] { user-select: text; -webkit-user-select: text; }
+[data-project-navigation]:focus { outline: none; }
+
 /* Keep pointer selection quiet; keyboard focus follows the whole tree row. */
 .sidebar-tree .tree-entry button:focus-visible { outline: none; }
-.sidebar-tree:not([data-pointer-focus="true"]) .tree-entry:has(button:focus-visible) {
+.sidebar-tree:not([data-pointer-focus="true"]) .tree-entry:has(button:focus) {
   box-shadow: inset 0 0 0 1px var(--stroke-strong);
   border-radius: var(--radius-sm);
 }
