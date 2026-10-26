@@ -2,28 +2,60 @@
   "description": "How Orb clients label a privileged access request (/api/privilege-access). Desktop (orb/src/privilegeAccessApi.ts), iOS (OrbPrivilegeAccess.swift) and Android (OrbPrivilegeAccess.kt) must produce the same strings.",
   "cases": [
     {
-      "request": {"scope": "service_deploy", "target_host": "agent-core", "allowed_unit": null, "session_scoped": true, "ttl_minutes": 240, "requester_title": "Ship usage fix", "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001"},
+      "request": {
+        "scope": "service_deploy",
+        "target_host": "agent-core",
+        "allowed_unit": null,
+        "session_scoped": true,
+        "ttl_minutes": 240,
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001"
+      },
       "title": "Service deploy on agent-core",
       "unlocks": "restart and deploy services, including production",
       "lifetime": "for this session (max 4 h)",
       "requester": "Ship usage fix"
     },
     {
-      "request": {"scope": "service_deploy", "target_host": "agent-core", "allowed_unit": "orb-core.service", "session_scoped": false, "ttl_minutes": 30, "requester_title": "", "requester_mission_id": "9a8b7c6d-0000-4000-8000-000000000002"},
+      "request": {
+        "scope": "service_deploy",
+        "target_host": "agent-core",
+        "allowed_unit": "orb-core.service",
+        "session_scoped": false,
+        "ttl_minutes": 30,
+        "requester_title": "",
+        "requester_mission_id": "9a8b7c6d-0000-4000-8000-000000000002"
+      },
       "title": "Service deploy on agent-core",
       "unlocks": "restart and deploy orb-core.service only",
       "lifetime": "for 30 min",
       "requester": "Mission 9a8b7c6d"
     },
     {
-      "request": {"scope": "root_exec", "target_host": "self", "allowed_unit": null, "session_scoped": true, "ttl_minutes": 90, "requester_title": "Disk cleanup", "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000003"},
+      "request": {
+        "scope": "root_exec",
+        "target_host": "self",
+        "allowed_unit": null,
+        "session_scoped": true,
+        "ttl_minutes": 90,
+        "requester_title": "Disk cleanup",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000003"
+      },
       "title": "Root on its own node",
       "unlocks": "any command as root",
       "lifetime": "for this session (max 90 min)",
       "requester": "Disk cleanup"
     },
     {
-      "request": {"scope": "ops_read", "target_host": "ashur", "allowed_unit": null, "session_scoped": true, "ttl_minutes": 60, "requester_title": "Fleet health", "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000004"},
+      "request": {
+        "scope": "ops_read",
+        "target_host": "ashur",
+        "allowed_unit": null,
+        "session_scoped": true,
+        "ttl_minutes": 60,
+        "requester_title": "Fleet health",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000004"
+      },
       "title": "Read-only ops on ashur",
       "unlocks": "logs, status and disk checks as root; no changes",
       "lifetime": "for this session (max 1 h)",

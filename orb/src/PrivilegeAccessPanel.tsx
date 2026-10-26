@@ -20,7 +20,7 @@ import {
   type PrivilegeSnapshot,
 } from "./privilegeAccessApi";
 import { pollWhileVisible } from "./poll";
-import { FingerprintIcon } from "./secretRequestNotices";
+import { FingerprintIcon } from "./approvalIcons";
 import { ago, useNow } from "./time";
 
 const POLL_MS = 5000;
@@ -132,7 +132,7 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
         <div class="bw-requests" role="region" aria-label="Pending privileged access requests">
           <For each={pending()}>
             {(r) => (
-              <div class="secret-row bw-request-row" data-testid="privilege-access-request">
+              <div class="secret-row bw-request-row" classList={{ "approval-critical": r.scope === "root_exec" }} data-testid="privilege-access-request">
                 <div class="bw-request-body">
                   <div class="bw-request-line">
                     <strong class="secret-row-key">{requestTitle(r)}</strong>

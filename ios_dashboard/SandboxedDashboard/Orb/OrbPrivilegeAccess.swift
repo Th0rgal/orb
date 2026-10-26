@@ -161,37 +161,6 @@ final class OrbPrivilegeAccessMonitor {
     }
 }
 
-struct OrbPrivilegeAccessBanner: View {
-    let count: Int
-    let open: () -> Void
-    var body: some View {
-        if count > 0 {
-            Button(action: open) {
-                HStack(spacing: 10) {
-                    Image(systemName: "lock.trianglebadge.exclamationmark")
-                        .foregroundStyle(OrbStyle.warning)
-                    Text(count == 1 ? "A mission asks for privileged access" : "\(count) missions ask for privileged access")
-                        .font(.footnote.weight(.semibold))
-                    Spacer()
-                    if count > 0 {
-                        Text("\(count)")
-                            .font(.system(.caption, weight: .bold)).monospacedDigit()
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(OrbStyle.warning.opacity(0.25), in: Capsule())
-                    }
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(OrbStyle.textSecondary)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
-                .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.borderStrong))
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .accessibilityIdentifier("home.privilege-requests")
-        }
-    }
-}
-
 /// Pending requests (approve with Face ID / Touch ID, or deny), live grants
 /// (revoke), history and Core's per-command audit. Home sheet and Settings.
 struct OrbPrivilegeAccessList: View {
@@ -293,6 +262,7 @@ struct OrbPrivilegeAccessList: View {
     private func pendingRow(_ r: OrbJSON) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(OrbPrivilegeAccessMonitor.title(r)).font(.subheadline.weight(.medium))
+                .foregroundStyle(r["scope"].text == "root_exec" ? OrbStyle.error : Color.primary)
             Text("asked by \(OrbPrivilegeAccessMonitor.requester(r)) · \(OrbStyle.relativeTime(r["created_at"].text))").font(.caption).foregroundStyle(.secondary)
             if !r["reason"].text.isEmpty { Text("“\(r["reason"].text)”").font(.caption).italic() }
             Text("Allows \(OrbPrivilegeAccessMonitor.unlocks(r)) · \(OrbPrivilegeAccessMonitor.lifetime(r))").font(.caption).foregroundStyle(.secondary)

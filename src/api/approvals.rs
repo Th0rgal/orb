@@ -469,6 +469,14 @@ async fn describe(
             };
             super::privilege_broker::describe_for_approval(state, owner, id, action, ttl).await?
         }
+        (&Method::POST, ["", "api", "privilege-access", "approve-all"]) => {
+            let legacy: super::approval_queue::LegacyPrivilegeBatch = typed(body)?;
+            super::approval_queue::describe(state, owner, &legacy.into_batch()).await?
+        }
+        (&Method::POST, ["", "api", "approvals", "approve-all"]) => {
+            let batch: super::approval_queue::BatchBody = typed(body)?;
+            super::approval_queue::describe(state, owner, &batch).await?
+        }
         (&Method::POST, ["", "api", "privilege-access", "bunker"]) => {
             "Trigger Fleet Bunker Mode lockdown and revoke active privileged leases".into()
         }
@@ -626,7 +634,9 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
     match (method, seg.as_slice()) {
         (&Method::POST, ["", "api", "bitwarden", "requests", _, "approve" | "reject"]) => true,
         (&Method::POST, ["", "api", "mission-access", _, "approve" | "deny"]) => true,
-        (&Method::POST, ["", "api", "privilege-access", "bunker" | "unbunker"]) => true,
+        (&Method::POST, ["", "api", "privilege-access", "bunker" | "unbunker" | "approve-all"]) => {
+            true
+        }
         (&Method::POST, ["", "api", "privilege-access", _, "approve" | "deny"]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "default-access", _]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => true,
@@ -634,6 +644,7 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
         (&Method::POST, ["", "api", "bitwarden", "projects", _, "secrets"]) => true,
         (&Method::PUT | &Method::DELETE, ["", "api", "bitwarden", "secrets", _]) => true,
         (&Method::DELETE, ["", "api", "approvals", "devices", _]) => true,
+        (&Method::POST, ["", "api", "approvals", "approve-all"]) => true,
         (&Method::PUT, ["", "api", "approvals", "mode"]) => true,
         // A backup restore can rewrite device, grant and access state on disk.
         (&Method::POST, ["", "api", "settings", "restore"]) => true,
@@ -653,9 +664,15 @@ pub fn always_signed(method: &Method, path: &str) -> bool {
         (&Method::POST, ["", "api", "mission-access", _, "approve"])
             | (
                 &Method::POST,
-                ["", "api", "privilege-access", "bunker" | "unbunker"]
+                [
+                    "",
+                    "api",
+                    "privilege-access",
+                    "bunker" | "unbunker" | "approve-all"
+                ]
             )
             | (&Method::POST, ["", "api", "privilege-access", _, "approve"])
+            | (&Method::POST, ["", "api", "approvals", "approve-all"])
     )
 }
 
@@ -757,6 +774,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/devices", get(list_devices).post(enroll_device))
         .route("/devices/:id", delete(revoke_device))
         .route("/challenge", post(challenge))
+        .route("/queue", get(super::approval_queue::queue))
+        .route("/approve-all", post(super::approval_queue::approve_all))
         .route("/mode", put(set_mode))
 }
 
@@ -1062,6 +1081,57 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn approve_all_signature_covers_exactly_the_listed_requests() {
+        let (kp, spki) = keypair();
+        let s = store();
+        let device = Uuid::new_v4();
+        s.data.lock().await.devices.push(Device {
+            id: device,
+            name: "test".into(),
+            platform: "macos".into(),
+            public_key: spki,
+            created_at: Utc::now(),
+            last_used_at: None,
+            revoked_at: None,
+        });
+        let path = "/api/approvals/approve-all";
+        let item = |id: &str| {
+            format!(
+                r#"{{"kind":"privilege","id":"{id}","digest":"{}"}}"#,
+                "a".repeat(64)
+            )
+        };
+        let a = "00000000-0000-4000-8000-00000000000a";
+        let b = "00000000-0000-4000-8000-00000000000b";
+        let signed = format!(r#"{{"items":[{}]}}"#, item(a));
+        let sign = |c: &Challenge| {
+            let sig = kp.sign(&SystemRandom::new(), c.payload.as_bytes()).unwrap();
+            base64::engine::general_purpose::STANDARD.encode(sig.as_ref())
+        };
+        // A request added after the challenge, or a tier changed, breaks the signature.
+        let added = format!(r#"{{"items":[{},{}]}}"#, item(a), item(b));
+        let tampered = signed.replace(r#""privilege""#, r#""secret""#);
+        for body in [added.as_str(), tampered.as_str()] {
+            let (id, c) = s
+                .issue("POST", path, &sha256_hex(signed.as_bytes()), "approve all")
+                .await;
+            let header = format!("{id}.{device}.{}", sign(&c));
+            assert!(s
+                .verify(&header, "POST", path, body.as_bytes())
+                .await
+                .is_err());
+        }
+        let (id, c) = s
+            .issue("POST", path, &sha256_hex(signed.as_bytes()), "approve all")
+            .await;
+        let header = format!("{id}.{device}.{}", sign(&c));
+        assert!(s
+            .verify(&header, "POST", path, signed.as_bytes())
+            .await
+            .is_ok());
+    }
+
     #[test]
     fn protected_routes() {
         assert!(is_protected(
@@ -1093,6 +1163,13 @@ mod tests {
             "/api/bitwarden/requests/abc/approve"
         ));
         assert!(!is_protected(&Method::GET, "/api/mission-access"));
+        for path in [
+            "/api/approvals/approve-all",
+            "/api/privilege-access/approve-all",
+        ] {
+            assert!(is_protected(&Method::POST, path), "{path}");
+            assert!(always_signed(&Method::POST, path), "{path}");
+        }
     }
 
     #[test]

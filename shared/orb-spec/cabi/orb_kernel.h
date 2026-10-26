@@ -14,6 +14,7 @@ uint8_t orb_verify_board_retry(uint32_t, uint32_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_job_transition(uint8_t, uint8_t);
 uint8_t orb_verify_bundle_budget(uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t orb_verify_token_rotation(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint8_t orb_verify_approval(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_log_window(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t orb_mix64_word(uint64_t, uint64_t);
 uint32_t orb_proxy_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);

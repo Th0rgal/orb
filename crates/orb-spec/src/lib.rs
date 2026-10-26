@@ -608,6 +608,15 @@ unsafe extern "C" {
         max_bytes: u64,
     ) -> u8;
     fn orb_verify_token_rotation(pres: u8, cur: u8, prev_ne: u8, prev: u8, scope: u8) -> u8;
+    fn orb_verify_approval(
+        signed: u8,
+        owned: u8,
+        pending: u8,
+        unexpired: u8,
+        unchanged: u8,
+        risk: u8,
+        confirmed: u8,
+    ) -> u8;
     fn orb_verify_log_window(
         off: u64,
         req: u64,
@@ -1188,6 +1197,43 @@ pub fn token_rotation_allowed(input: TokenRotation) -> bool {
             u8::from(input.prev_nonempty),
             u8::from(input.match_prev),
             u8::from(input.scope_and_expiry_ok),
+        ) != 0
+    }
+}
+
+/// Risk tier of an approval request: what one fingerprint may grant in a batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ApprovalRisk {
+    Routine = 0,
+    Elevated = 1,
+    /// Root, secret delete or move: never approved without explicit confirmation.
+    Critical = 2,
+}
+
+/// One request at approval time, as Core checks it (`orb_verify_approval`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalAdmission {
+    pub signed: bool,
+    pub owned: bool,
+    pub pending: bool,
+    pub unexpired: bool,
+    pub unchanged: bool,
+    pub risk: ApprovalRisk,
+    pub confirmed: bool,
+}
+
+/// Verified approval gate shared by every approval kind and by batches
+/// (a batch is admitted only when every item is).
+pub fn approval_admitted(input: ApprovalAdmission) -> bool {
+    unsafe {
+        orb_verify_approval(
+            u8::from(input.signed),
+            u8::from(input.owned),
+            u8::from(input.pending),
+            u8::from(input.unexpired),
+            u8::from(input.unchanged),
+            input.risk as u8,
+            u8::from(input.confirmed),
         ) != 0
     }
 }
@@ -4126,6 +4172,50 @@ mod stats_settle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_gate_needs_every_condition_and_confirms_critical() {
+        let ok = ApprovalAdmission {
+            signed: true,
+            owned: true,
+            pending: true,
+            unexpired: true,
+            unchanged: true,
+            risk: ApprovalRisk::Elevated,
+            confirmed: false,
+        };
+        assert!(approval_admitted(ok));
+        for bad in [
+            ApprovalAdmission {
+                signed: false,
+                ..ok
+            },
+            ApprovalAdmission { owned: false, ..ok },
+            ApprovalAdmission {
+                pending: false,
+                ..ok
+            },
+            ApprovalAdmission {
+                unexpired: false,
+                ..ok
+            },
+            ApprovalAdmission {
+                unchanged: false,
+                ..ok
+            },
+            ApprovalAdmission {
+                risk: ApprovalRisk::Critical,
+                ..ok
+            },
+        ] {
+            assert!(!approval_admitted(bad), "{bad:?}");
+        }
+        assert!(approval_admitted(ApprovalAdmission {
+            risk: ApprovalRisk::Critical,
+            confirmed: true,
+            ..ok
+        }));
+    }
 
     #[test]
     fn schedule_step_dedupes_fences_and_fires_once_per_slot() {
