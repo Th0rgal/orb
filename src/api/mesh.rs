@@ -50,9 +50,9 @@ use super::approval_flow::ApprovalState;
 use super::auth::AuthUser;
 use super::routes::AppState;
 use crate::orb_spec::{
-    canary_tripwire_step, classify_actor_trust, classify_canary_class, ActorTrust,
-    BunkerState as OrbBunkerState, CanaryClass, CanaryTripwireAction, CanaryTripwireStepInput,
-    CanaryTripwireStepVerdict,
+    bunker_enforcer_step, canary_tripwire_step, classify_actor_trust, classify_canary_class,
+    ActorTrust, BunkerEnforcerStepInput, BunkerEnforcerStepVerdict, BunkerState as OrbBunkerState,
+    CanaryClass, CanaryTripwireAction, CanaryTripwireStepInput, CanaryTripwireStepVerdict,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -818,11 +818,77 @@ pub async fn current_effective_bunker_and_epoch(app_state: &AppState) -> (u8, u6
     (bunker.next_state as u8, guard.manifest.epoch)
 }
 
+/// Pure helper computing `(node_quarantined, BunkerEnforcerStepVerdict)` for a fleet node
+/// via `Orb.Kernel.bunkerEnforcerStep` (`bunker_enforcer_converges_on_unbunker`).
+pub fn compute_node_enforcer_verdict(
+    state: &PersistedMeshState,
+    effective_bunker_u8: u8,
+    node: Option<&str>,
+    local_trip_epoch: Option<u64>,
+) -> (bool, BunkerEnforcerStepVerdict) {
+    let node_quarantined = node
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|n| is_node_quarantined(state, n))
+        .unwrap_or(false);
+    let trip_epoch = local_trip_epoch.unwrap_or(0);
+    let verdict = bunker_enforcer_step(BunkerEnforcerStepInput {
+        status_reachable: !state.corrupted_state,
+        fleet_bunker: effective_bunker_u8,
+        node_quarantined_by_core: node_quarantined,
+        has_local_trip_marker: trip_epoch > 0,
+        local_trip_epoch: trip_epoch,
+        last_unbunker_epoch: state.last_unbunker_at,
+    });
+    (node_quarantined, verdict)
+}
+
+/// Public read-only convergence snapshot polled by `orb-bunker-enforcer` on every fleet node
+/// (`ashur`, `babylon`, `nippur`, `old-agent`, `dgx-spark`, `thomas-md`, `polymath`, `maven-repo`, `watchtower`).
+pub async fn bunker_convergence_snapshot(
+    app_state: &AppState,
+    node: Option<&str>,
+    local_trip_epoch: Option<u64>,
+) -> Value {
+    let store = store(app_state);
+    let now = unix_now();
+    let guard = store.inner.lock().await;
+    let bunker = effective_mesh_bunker(app_state, &guard, now).await;
+    let effective_u8 = bunker.next_state as u8;
+    let (node_quarantined, enforcer) =
+        compute_node_enforcer_verdict(&guard, effective_u8, node, local_trip_epoch);
+
+    json!({
+        "bunker_state": effective_u8,
+        "bunker": {
+            "next_state": bunker.next_state,
+            "revoke_jit_grants": bunker.revoke_jit_grants,
+            "prune_non_admin_wg_peers": bunker.prune_non_admin_wg_peers,
+            "prune_compute_workers": bunker.prune_non_admin_wg_peers,
+            "lock_sovereign_vault": bunker.lock_sovereign_vault,
+            "last_unbunker_at": guard.last_unbunker_at,
+        },
+        "epoch": guard.manifest.epoch,
+        "last_unbunker_at": guard.last_unbunker_at,
+        "last_heartbeat_at": guard.last_heartbeat_at,
+        "quarantined_nodes": guard.quarantined_nodes,
+        "node": node.map(str::trim).filter(|s| !s.is_empty()),
+        "node_quarantined": node_quarantined,
+        "enforcer_action": if enforcer.apply_or_keep_quarantine { "quarantine" } else { "release" },
+        "clear_local_marker": enforcer.clear_local_marker,
+    })
+}
+
 /// Synchronizes `MeshStore.bunker_state` when an operator triggers or clears Bunker Mode
 /// via `PrivilegeBroker` (`POST /api/privilege-access/bunker` or `/unbunker`).
 ///
-/// Preserves `last_heartbeat_at` untouched (never fabricates a sovereign heartbeat timestamp).
-/// Commits in-memory state only after durable persistence succeeds.
+/// When `biometric_unbunker == true` (operator authenticated via enrolled device or breakglass SSH):
+/// - Clears all node-scoped quarantines (`candidate.quarantined_nodes.clear()`).
+/// - Records `candidate.last_unbunker_at = now` so node `orb-bunker-enforcer` daemons
+///   observe `last_unbunker_at >= local_trip_at` and release local nftables quarantine.
+/// - Resets the sovereign dead-man grace window (`candidate.last_heartbeat_at = now`) if
+///   `last_heartbeat_at` fell stale during Bunker Mode isolation, preventing a catch-22
+///   where `dgx-spark` is blocked from heartbeating until unbunkered.
 pub async fn sync_orb_bunker_transition(
     app_state: &AppState,
     canary_tripped: bool,
@@ -837,8 +903,14 @@ pub async fn sync_orb_bunker_transition(
         return Err("mesh store is in fail-closed corrupted state".into());
     }
     let prev = guard.bunker_state;
-    let hb_fresh = guard.last_heartbeat_at <= now
-        && now.saturating_sub(guard.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let effective_last_hb = if biometric_unbunker {
+        now
+    } else {
+        guard.last_heartbeat_at
+    };
+    let hb_fresh = biometric_unbunker
+        || (effective_last_hb <= now
+            && now.saturating_sub(effective_last_hb) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS);
     let transition = step_bunker_isolate(
         prev,
         guard.is_sovereign_node,
@@ -848,11 +920,16 @@ pub async fn sync_orb_bunker_transition(
         biometric_unbunker,
         hb_fresh,
         now,
-        guard.last_heartbeat_at,
+        effective_last_hb,
         LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
     );
     let mut candidate = guard.clone();
     candidate.bunker_state = transition.next_state;
+    if biometric_unbunker {
+        candidate.quarantined_nodes.clear();
+        candidate.last_unbunker_at = now;
+        candidate.last_heartbeat_at = effective_last_hb;
+    }
     store.save(&candidate).await?;
     *guard = candidate;
     Ok((prev, transition, guard.manifest.epoch))
@@ -1093,6 +1170,8 @@ async fn get_mesh_status(
         "bunker_state": bunker.next_state as u8,
         "formal_verified": formal_verified,
         "persisted_bunker_state": guard.bunker_state,
+        "last_unbunker_at": guard.last_unbunker_at,
+        "quarantined_nodes": guard.quarantined_nodes,
         "last_heartbeat_at": guard.last_heartbeat_at,
         "sovereign_deadman_timeout_secs": LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
         "corrupted_state": guard.corrupted_state,
@@ -2444,6 +2523,25 @@ mod tests {
             assert_eq!(btc_trans.next_state, MeshBunkerState::HardLockdown);
             assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
             assert!(is_node_quarantined(&guard, "ashur"));
+
+            // 4. Node bunker enforcer convergence (`compute_node_enforcer_verdict`):
+            //    While `ashur` is quarantined / fleet is in `HardLockdown`, enforcer keeps quarantine;
+            //    once operator unbunkers (`last_unbunker_at >= trip_epoch`, `quarantined_nodes.clear()`,
+            //    `bunker_state == Normal`), enforcer converges to `ReleaseQuarantine` and clears local marker!
+            let (q_before, enf_before) =
+                compute_node_enforcer_verdict(&guard, 2, Some("ashur"), Some(now));
+            assert!(q_before);
+            assert!(enf_before.apply_or_keep_quarantine);
+            assert!(!enf_before.clear_local_marker);
+
+            guard.quarantined_nodes.clear();
+            guard.bunker_state = MeshBunkerState::Normal;
+            guard.last_unbunker_at = now + 5;
+            let (q_after, enf_after) =
+                compute_node_enforcer_verdict(&guard, 0, Some("ashur"), Some(now));
+            assert!(!q_after);
+            assert!(!enf_after.apply_or_keep_quarantine);
+            assert!(enf_after.clear_local_marker);
         });
     }
 

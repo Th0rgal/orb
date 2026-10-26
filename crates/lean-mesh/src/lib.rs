@@ -1687,7 +1687,7 @@ impl MeshManifest {
         });
         // 3. Control-Plane JIT Privileged Broker SSH (`agent-core -> <peer>:22`) & Operator Breakglass SSH (`macbook-air -> <peer>:22`):
         for peer in &peers {
-            if peer.name != "macbook-air" && peer.name != "agent-core" {
+            if peer.name != "agent-core" {
                 rules.push(CapabilityRule {
                     src_peer: "agent-core".into(),
                     dst_peer: peer.name.clone(),
