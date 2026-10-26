@@ -173,6 +173,30 @@ internal func orb_machine_action_admitted(_ stateKind: UInt8, _ isBusy: UInt8, _
 @_silgen_name("orb_send_flow_step")
 internal func orb_send_flow_step(_ isBusy: UInt8, _ hasNonEmptyText: UInt8, _ canQueue: UInt8, _ awaitingAck: UInt8, _ isDraining: UInt8, _ pendingCount: UInt8, _ httpStatus: UInt32) -> UInt32
 
+@_silgen_name("orb_wire_validate_frame")
+internal func orb_wire_validate_frame(_ magic: UInt32, _ abiVersion: UInt32, _ schemaId: UInt32, _ expectedSchemaId: UInt32, _ totalLen: UInt32, _ payloadLen: UInt32, _ arenaOff: UInt32, _ arenaLen: UInt32, _ maxBudgetBytes: UInt32, _ outCap: UInt32, _ requiredOutBytes: UInt32) -> UInt8
+
+@_silgen_name("orb_wire_pack_record")
+internal func orb_wire_pack_record(_ tag: UInt8, _ flags: UInt8, _ len16: UInt32, _ payload32: UInt32) -> UInt64
+
+@_silgen_name("orb_wire_schema_migrate_step")
+internal func orb_wire_schema_migrate_step(_ fromSchema: UInt32, _ toSchema: UInt32, _ currentSchema: UInt32, _ payloadBytes: UInt64, _ maxBytes: UInt64) -> UInt8
+
+@_silgen_name("orb_effect_admissible")
+internal func orb_effect_admissible(_ effectKind: UInt8, _ hasValidLease: UInt8, _ sessionCreated: UInt8, _ lineageVerified: UInt8, _ isArchived: UInt8, _ idempotencyFresh: UInt8, _ accountBound: UInt8, _ accountRejected: UInt8, _ firstByteLocked: UInt8, _ grammarAllowed: UInt8, _ envScrubbed: UInt8, _ budgetOk: UInt8) -> UInt8
+
+@_silgen_name("orb_provider_pool_step")
+internal func orb_provider_pool_step(_ hasBoundAccount: UInt8, _ boundAccountId: UInt32, _ candidateAccountId: UInt32, _ isRejected: UInt8, _ firstByteSent: UInt8, _ isFailoverAttempt: UInt8, _ attempts: UInt32, _ maxAttempts: UInt32, _ nowEpoch: UInt64, _ resetEpoch: UInt64) -> UInt64
+
+@_silgen_name("orb_route_argmin_step")
+internal func orb_route_argmin_step(_ hasBest: UInt8, _ bestId: UInt32, _ bestScore: UInt64, _ candId: UInt32, _ candScore: UInt64, _ candAdmissible: UInt8) -> UInt64
+
+@_silgen_name("orb_mission_control_step")
+internal func orb_mission_control_step(_ isArchived: UInt8, _ activeTrackWriters: UInt32, _ hasLease: UInt8, _ msgAlreadyDelivered: UInt8, _ isResume: UInt8, _ sessionCreated: UInt8, _ lineageVerified: UInt8, _ rolloutExists: UInt8, _ hasFallbackPrompt: UInt8) -> UInt64
+
+@_silgen_name("orb_fork_home_step")
+internal func orb_fork_home_step(_ isForkOrSide: UInt8, _ sourceExists: UInt8, _ sourceIsSymlink: UInt8, _ sameWorkspace: UInt8, _ sameNode: UInt8, _ hasCommittedTransfer: UInt8, _ requestedOverrideHome: UInt8) -> UInt64
+
 @_silgen_name("leansys_verify_slice_bounds")
 internal func leansys_verify_slice_bounds(_ off: UInt64, _ len: UInt64, _ cap: UInt64) -> UInt8
 
@@ -258,7 +282,16 @@ internal func leansys_verify_dag_wave_step(_ inDegreeSum: UInt64, _ waveSize: UI
 internal func leansys_verify_ios_jetsam_budget(_ dirtyRssBytes: UInt64, _ allocBytes: UInt64, _ maxJetsamBytes: UInt64, _ pageAlignMask: UInt64, _ isAppExtension: UInt8) -> UInt8
 
 @_silgen_name("leansys_verify_worker_budget")
-internal func leansys_verify_worker_budget(_ activeWorkers: UInt64, _ maxWorkers: UInt64, _ microChunks: UInt64, _ totalLen: UInt64, _ isMobileHetero: UInt8) -> UInt8
+internal func leansys_verify_worker_budget(_ activeWorkers: UInt64, _ maxWorkers: UInt64, _ microChunks: UInt64, _ totalLen: UInt64, _ topologyKind: UInt8) -> UInt8
+
+@_silgen_name("leansys_verify_page_aligned_buffer")
+internal func leansys_verify_page_aligned_buffer(_ addr: UInt64, _ allocBytes: UInt64, _ capacityBytes: UInt64, _ dirtyRssBytes: UInt64, _ maxBudgetBytes: UInt64, _ pageAlignMask: UInt64) -> UInt8
+
+@_silgen_name("leansys_select_isa")
+internal func leansys_select_isa(_ detectedHwCaps: UInt64, _ requiredMask: UInt64, _ requestedVariantId: UInt8, _ maxVariantId: UInt8) -> UInt8
+
+@_silgen_name("leansys_verify_isa_selection")
+internal func leansys_verify_isa_selection(_ detectedHwCaps: UInt64, _ requiredMask: UInt64, _ selectedVariantId: UInt8, _ maxVariantId: UInt8) -> UInt8
 
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
@@ -275,8 +308,16 @@ enum OrbKernel {
     }
 
     @inline(__always)
-    private static func satU32(_ v: Int) -> UInt32 {
+    static func satU32(_ v: Int) -> UInt32 {
         v < 0 ? 0 : (v > Int(UInt32.max) ? UInt32.max : UInt32(v))
+    }
+
+    @inline(__always)
+    static func satU32(_ v: Double) -> UInt32 {
+        guard v.isFinite, v > 0 else { return 0 }
+        let r = v.rounded()
+        if r >= Double(UInt32.max) { return UInt32.max }
+        return UInt32(r)
     }
 
     @inline(__always)
@@ -615,5 +656,21 @@ enum OrbKernel {
 
     static func verifyWorkerBudget(activeWorkers: Int, maxWorkers: Int, microChunks: Int, totalLen: Int, isMobileHetero: Bool = true) -> Bool {
         leansys_verify_worker_budget(satU64(activeWorkers), satU64(maxWorkers), satU64(microChunks), satU64(totalLen), b8(isMobileHetero)) != 0
+    }
+
+    static func verifyWorkerBudget(activeWorkers: Int, maxWorkers: Int, microChunks: Int, totalLen: Int, topologyKind: Int) -> Bool {
+        leansys_verify_worker_budget(satU64(activeWorkers), satU64(maxWorkers), satU64(microChunks), satU64(totalLen), satU8(topologyKind)) != 0
+    }
+
+    static func verifyPageAlignedBuffer(addr: UInt64, allocBytes: UInt64, capacityBytes: UInt64, dirtyRssBytes: UInt64, maxBudgetBytes: UInt64, pageAlignMask: UInt64 = 16383) -> Bool {
+        leansys_verify_page_aligned_buffer(addr, allocBytes, capacityBytes, dirtyRssBytes, maxBudgetBytes, pageAlignMask) != 0
+    }
+
+    static func selectIsa(detectedHwCaps: UInt64, requiredMask: UInt64, requestedVariantId: Int, maxVariantId: Int = 4) -> Int {
+        Int(leansys_select_isa(detectedHwCaps, requiredMask, satU8(requestedVariantId), satU8(maxVariantId)))
+    }
+
+    static func verifyIsaSelection(detectedHwCaps: UInt64, requiredMask: UInt64, selectedVariantId: Int, maxVariantId: Int = 4) -> Bool {
+        leansys_verify_isa_selection(detectedHwCaps, requiredMask, satU8(selectedVariantId), satU8(maxVariantId)) != 0
     }
 }

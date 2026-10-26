@@ -2,6 +2,152 @@
 
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn evaluate_mission_control_gate(
+    working_dir: &std::path::Path,
+    mission_store: &dyn MissionStore,
+    mission: &Mission,
+    expected_lease_owner: &str,
+    resume_session_id: Option<&str>,
+    events: &[crate::api::mission_store::StoredEvent],
+    fallback_prompt: Option<&str>,
+    host_admits: bool,
+) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
+    let stored_mission = mission_store.get_mission(mission.id).await?;
+    let effective_status = stored_mission
+        .as_ref()
+        .map(|m| m.status)
+        .unwrap_or(mission.status);
+    let is_archived = matches!(
+        mission.status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) || matches!(
+        effective_status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) || crate::api::mission_horizon::superseded_by(mission).is_some()
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let active_run = mission_store.get_active_mission_run(mission.id).await?;
+    let has_lease = active_run
+        .as_ref()
+        .is_some_and(|run| run.owner_actor_id == expected_lease_owner);
+    let active_track_writers = match &active_run {
+        Some(run)
+            if !run.owner_actor_id.is_empty() && run.owner_actor_id != expected_lease_owner =>
+        {
+            1
+        }
+        _ => 0,
+    };
+    let msg_already_delivered = resume_session_id.is_none()
+        && fork::side_launch_receipt(working_dir, mission.id)
+            .ok()
+            .flatten()
+            .is_some_and(|receipt| receipt.accepted);
+    let is_resume = resume_session_id.is_some();
+    let stored_sid = stored_mission
+        .as_ref()
+        .and_then(|m| m.session_id.as_deref())
+        .or(mission.session_id.as_deref());
+    let session_created = stored_sid.is_some_and(|sid| !sid.trim().is_empty());
+    let lineage_verified = match (resume_session_id, stored_sid) {
+        (Some(req_sid), Some(sid)) => {
+            req_sid == sid || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
+        }
+        (None, _) => session_created,
+        (Some(_), None) => false,
+    };
+    let rollout_exists = events.iter().any(|event| {
+        event.event_type == "assistant_message"
+            && !event.content.trim().is_empty()
+            && event.metadata["success"] != serde_json::json!(false)
+    });
+    let has_fallback_prompt =
+        (!is_resume || lineage_verified) && fallback_prompt.is_some_and(|p| !p.trim().is_empty());
+    Ok(fork::observe_mission_control_shadow(
+        crate::orb_spec::MissionControlStepInput {
+            is_archived,
+            active_track_writers,
+            has_lease,
+            msg_already_delivered,
+            is_resume,
+            session_created,
+            lineage_verified,
+            rollout_exists,
+            has_fallback_prompt,
+        },
+        host_admits,
+    ))
+}
+
+pub(super) async fn evaluate_usage_limit_replay_gate(
+    working_dir: &std::path::Path,
+    mission_store: &dyn MissionStore,
+    mission: &Mission,
+    wait_limit: &str,
+    replay_prompt: Option<&str>,
+) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
+    let is_archived = matches!(
+        mission.status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) || crate::api::mission_horizon::superseded_by(mission).is_some()
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let active_run = mission_store.get_active_mission_run(mission.id).await?;
+    let has_lease = active_run.is_none();
+    let active_track_writers = if active_run.is_some() { 1 } else { 0 };
+    let msg_already_delivered = mission.session_id.is_none()
+        && fork::side_launch_receipt(working_dir, mission.id)
+            .ok()
+            .flatten()
+            .is_some_and(|receipt| receipt.accepted);
+    let session_created = mission
+        .session_id
+        .as_deref()
+        .is_some_and(|sid| !sid.trim().is_empty());
+    let lineage_verified = session_created;
+    let events = mission_store
+        .get_events(
+            mission.id,
+            Some(&["user_message", "assistant_message"]),
+            None,
+            None,
+        )
+        .await?;
+    let rollout_exists = wait_limit != usage_limit_wait::FRESH_SESSION_FALLBACK
+        && events.iter().any(|event| {
+            event.event_type == "assistant_message"
+                && !event.content.trim().is_empty()
+                && event.metadata["success"] != serde_json::json!(false)
+        });
+    let has_fallback_prompt = replay_prompt.is_some_and(|p| !p.trim().is_empty());
+    let host_admits = !is_archived
+        && has_lease
+        && active_track_writers == 0
+        && !msg_already_delivered
+        && ((session_created && lineage_verified && rollout_exists) || has_fallback_prompt);
+    Ok(fork::observe_mission_control_shadow(
+        crate::orb_spec::MissionControlStepInput {
+            is_archived,
+            active_track_writers,
+            has_lease,
+            msg_already_delivered,
+            is_resume: true,
+            session_created,
+            lineage_verified,
+            rollout_exists,
+            has_fallback_prompt,
+        },
+        host_admits,
+    ))
+}
+
 pub(super) async fn submit_leased_remote_job(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -87,6 +233,118 @@ pub(super) async fn submit_leased_remote_job(
             fork::recovery_prompt(mission.id, mission.title.as_deref(), &events, prompt)
                 .or_else(|| Some(prompt.clone()));
     }
+    let (resume_sid_opt, fallback_prompt_opt) = match &resolved_plan {
+        RemoteHarnessPlan::Codex {
+            resume_session_id,
+            fallback_prompt,
+            ..
+        } => (resume_session_id.as_deref(), fallback_prompt.as_deref()),
+        RemoteHarnessPlan::ClaudeCode {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::OpenCode {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::Grok {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::Antigravity {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::Vibe {
+            resume_session_id,
+            prompt,
+            ..
+        } => (resume_session_id.as_deref(), Some(prompt.as_str())),
+        RemoteHarnessPlan::Raw { .. } => (None, None),
+    };
+    let resume_events = if resume_sid_opt.is_some() {
+        control
+            .mission_store
+            .get_events(
+                mission.id,
+                Some(&["user_message", "assistant_message"]),
+                None,
+                None,
+            )
+            .await?
+    } else {
+        Vec::new()
+    };
+    let expected_owner = remote_job_lease_owner(job_id);
+    let active_run = control
+        .mission_store
+        .get_active_mission_run(mission.id)
+        .await?;
+    let stored_mission = control.mission_store.get_mission(mission.id).await?;
+    let effective_status = stored_mission
+        .as_ref()
+        .map(|m| m.status)
+        .unwrap_or(mission.status);
+    let stored_sid = stored_mission
+        .as_ref()
+        .and_then(|m| m.session_id.as_deref())
+        .or(mission.session_id.as_deref());
+    let host_admits_submission = !matches!(
+        mission.status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) && !matches!(
+        effective_status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) && crate::api::mission_horizon::superseded_by(mission).is_none()
+        && !mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+        && active_run
+            .as_ref()
+            .is_some_and(|run| run.owner_actor_id == expected_owner)
+        && !(resume_sid_opt.is_none()
+            && fork::side_launch_receipt(&state.config.working_dir, mission.id)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.accepted))
+        && match resume_sid_opt {
+            Some(req_sid) => {
+                let lineage_ok = stored_sid.is_some_and(|sid| {
+                    req_sid == sid
+                        || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
+                });
+                let rollout_ok = resume_events.iter().any(|event| {
+                    event.event_type == "assistant_message"
+                        && !event.content.trim().is_empty()
+                        && event.metadata["success"] != serde_json::json!(false)
+                });
+                lineage_ok && (rollout_ok || fallback_prompt_opt.is_some_and(|p| !p.trim().is_empty()))
+            }
+            None => true,
+        };
+    let submission_verdict = evaluate_mission_control_gate(
+        &state.config.working_dir,
+        control.mission_store.as_ref(),
+        mission,
+        &expected_owner,
+        resume_sid_opt,
+        &resume_events,
+        fallback_prompt_opt,
+        host_admits_submission,
+    )
+    .await?;
+    if !submission_verdict.emit_dispatch_effect || submission_verdict.archived_next {
+        return Err(format!(
+            "Remote job submission rejected by mission control kernel gate ({:?})",
+            submission_verdict.action
+        ));
+    }
     let plan = &resolved_plan;
     let mut workspace_prefix =
         if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {
@@ -98,7 +356,13 @@ pub(super) async fn submit_leased_remote_job(
             }
             format!("cd -- {} || exit 78; ", shell_single_quote(directory))
         } else {
-            fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
+            fork::workspace_prefix(
+                &control.mission_store,
+                mission,
+                &node.id,
+                &state.config.working_dir,
+            )
+            .await?
         };
     // Run in the final execution cwd, before any harness command. A failed
     // preparation exits the job clearly rather than starting without skills.
@@ -959,17 +1223,40 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
         Ok(Some(placement)) => {
             // A goal resumes natively (`/goal resume`).
             let content = usage_limit_wait::remote_replay_content(&mission, &wait.limit);
-            remote_grok::continue_on_node(
-                state,
-                &control,
-                "usage-limit-replay",
-                mission_id,
-                placement,
-                content,
-                None,
+            let replay_prompt = content
+                .as_deref()
+                .unwrap_or(super::INTERRUPTED_RESUME_PROMPT);
+            match evaluate_usage_limit_replay_gate(
+                &working_dir,
+                control.mission_store.as_ref(),
+                &mission,
+                &wait.limit,
+                Some(replay_prompt),
             )
             .await
-            .map(|_| ())
+            {
+                Ok(verdict) if verdict.emit_dispatch_effect && !verdict.archived_next => {
+                    remote_grok::continue_on_node(
+                        state,
+                        &control,
+                        "usage-limit-replay",
+                        mission_id,
+                        placement,
+                        content,
+                        None,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+                Ok(verdict) => Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Usage-limit replay rejected by mission control kernel gate ({:?})",
+                        verdict.action
+                    ),
+                )),
+                Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
+            }
         }
         Ok(None) => Err((
             StatusCode::CONFLICT,
@@ -1073,6 +1360,27 @@ pub(super) async fn replace_remote_mission_with_fresh_session(
         mission,
         state.config.context.max_history_total_chars,
     );
+    let replay_verdict = evaluate_usage_limit_replay_gate(
+        &state.config.working_dir,
+        control.mission_store.as_ref(),
+        mission,
+        usage_limit_wait::FRESH_SESSION_FALLBACK,
+        Some(prompt.as_str()),
+    )
+    .await
+    .map_err(internal_error)?;
+    if !replay_verdict.emit_dispatch_effect
+        || !replay_verdict.seed_fallback_session
+        || replay_verdict.archived_next
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Fresh-session fallback rejected by mission control kernel gate ({:?})",
+                replay_verdict.action
+            ),
+        ));
+    }
     let title = mission
         .title
         .as_deref()

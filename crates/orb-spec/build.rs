@@ -45,6 +45,12 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_privilege_step",
     "orb_bunker_step",
     "orb_deploy_gate_step",
+    "orb_wire_validate_frame",
+    "orb_wire_pack_record",
+    "orb_wire_schema_migrate_step",
+    "orb_effect_admissible",
+    "orb_provider_pool_step",
+    "orb_route_argmin_step",
 ];
 
 const LEANSYS_EXPORTS: &[&str] = &[
@@ -69,6 +75,11 @@ const LEANSYS_EXPORTS: &[&str] = &[
     "leansys_gfm_pipe_scan",
     "leansys_tag_scan",
     "leansys_transcript_index",
+    "leansys_verify_ios_jetsam_budget",
+    "leansys_verify_worker_budget",
+    "leansys_verify_page_aligned_buffer",
+    "leansys_select_isa",
+    "leansys_verify_isa_selection",
 ];
 
 fn verify_lean_sources_if_requested(root: &Path, out_dir: &Path) {

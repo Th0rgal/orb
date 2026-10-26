@@ -68,6 +68,14 @@ uint8_t orb_numeric_cell_scan(uint8_t, uint8_t, uint8_t, uint8_t);
 uint64_t orb_file_ref_line_span(uint32_t, uint32_t, uint32_t);
 uint32_t orb_machine_action_admitted(uint8_t, uint8_t, uint8_t);
 uint32_t orb_send_flow_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t);
+uint8_t orb_wire_validate_frame(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_wire_pack_record(uint8_t, uint8_t, uint32_t, uint32_t);
+uint8_t orb_wire_schema_migrate_step(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t);
+uint8_t orb_effect_admissible(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_provider_pool_step(uint8_t, uint32_t, uint32_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint64_t, uint64_t);
+uint64_t orb_route_argmin_step(uint8_t, uint32_t, uint64_t, uint32_t, uint64_t, uint8_t);
+uint64_t orb_mission_control_step(uint8_t, uint32_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_fork_home_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint8_t leansys_verify_slice_bounds(uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_wal_frame(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_cas_digest(uint64_t, uint64_t, uint8_t);
@@ -97,6 +105,9 @@ uint8_t leansys_verify_counterexample_triage(uint8_t, uint8_t, uint8_t, uint8_t)
 uint8_t leansys_verify_dag_wave_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_ios_jetsam_budget(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 uint8_t leansys_verify_worker_budget(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
+uint8_t leansys_verify_page_aligned_buffer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t leansys_select_isa(uint64_t, uint64_t, uint8_t, uint8_t);
+uint8_t leansys_verify_isa_selection(uint64_t, uint64_t, uint8_t, uint8_t);
 #ifdef __cplusplus
 }
 #endif

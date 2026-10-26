@@ -149,4 +149,27 @@ class OrbKernelTest {
         assertEquals(1, OrbKernel.leansysVerifyIosJetsamBudget(100_000_000L, 16_384L, 1_400_000_000L, 16_383L, 0))
         assertEquals(1, OrbKernel.leansysVerifyWorkerBudget(4L, 6L, 8L, 4096L, 1))
     }
+
+    @Test
+    fun wave8PageAlignedBufferTopologyAndIsaGatesMatchLeanSpec() {
+        // 4 KB (mask 4095) and 16 KB (mask 16383) page-aligned buffer gate (Android 15 / Pixel 8 4 KB & 16 KB kernels)
+        assertTrue(OrbKernel.verifyPageAlignedBuffer(0x10000L, 12_000L, 16_384L, 100_000_000L, 1_400_000_000L, 16_383L))
+        assertTrue(OrbKernel.verifyPageAlignedBuffer(0x10000L, 6_000L, 8_192L, 100_000_000L, 1_400_000_000L, 4_095L))
+        assertFalse(OrbKernel.verifyPageAlignedBuffer(0x10000L, 6_000L, 8_192L, 100_000_000L, 1_400_000_000L, 16_383L))
+        assertFalse(OrbKernel.verifyPageAlignedBuffer(0x10004L, 12_000L, 16_384L, 100_000_000L, 1_400_000_000L, 16_383L))
+        assertFalse(OrbKernel.verifyPageAlignedBuffer(0x10000L, 12_000L, 16_384L, 100_000_000L, 1_400_000_000L, 8_191L))
+
+        // 3-tier mobile topology (topologyKind = 2, e.g. Pixel 8 Tensor G3 1+4+4 -> maxWorkers <= 9)
+        assertTrue(OrbKernel.verifyWorkerBudget(5L, 9L, 10L, 4096L, 2))
+        assertTrue(OrbKernel.verifyWorkerBudget(9L, 9L, 18L, 4096L, 2))
+        assertFalse(OrbKernel.verifyWorkerBudget(9L, 10L, 18L, 4096L, 2))
+        assertFalse(OrbKernel.verifyWorkerBudget(5L, 7L, 10L, 4096L, 1))
+
+        // ISA runtime dispatch selection & verification (0=Baseline[263], 1=AppleSilicon[775], 2=ApplePro16[799], 3=Armv82Server[895], 4=Armv9Sve2[927])
+        assertEquals(4, OrbKernel.selectIsa(927L, 927L, 4, 4))
+        assertEquals(0, OrbKernel.selectIsa(775L, 927L, 4, 4))
+        assertTrue(OrbKernel.verifyIsaSelection(927L, 927L, 4, 4))
+        assertTrue(OrbKernel.verifyIsaSelection(775L, 263L, 0, 4))
+        assertFalse(OrbKernel.verifyIsaSelection(775L, 927L, 4, 4))
+    }
 }

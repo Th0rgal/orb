@@ -262,7 +262,11 @@ fn verify_peer_keystore_on_disk(
         if seed_bytes == [0u8; 32] {
             return Err(format!("peer `{}` seed in keystore is all-zero", peer.name));
         }
-        let derived_pub = hex::encode(SigningKey::from_bytes(&seed_bytes).verifying_key().to_bytes());
+        let derived_pub = hex::encode(
+            SigningKey::from_bytes(&seed_bytes)
+                .verifying_key()
+                .to_bytes(),
+        );
         if derived_pub != peer.sign_pubkey_hex {
             return Err(format!(
                 "peer `{}` keystore public key mismatch against manifest sign_pubkey_hex",
@@ -327,7 +331,8 @@ impl MeshStore {
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let mut coord_seed = [0u8; 32];
-                    let coord_ok = rng.read_exact(&mut coord_seed).is_ok() && coord_seed != [0u8; 32];
+                    let coord_ok =
+                        rng.read_exact(&mut coord_seed).is_ok() && coord_seed != [0u8; 32];
                     if !coord_ok {
                         PersistedMeshState::lockdown_store_without_signing_key(now)
                     } else {
@@ -419,10 +424,15 @@ async fn effective_mesh_bunker(
     mesh_state: &PersistedMeshState,
     now_epoch: u64,
 ) -> BunkerTransition {
-    let orb_bunker = super::privilege_broker::store(app_state).bunker_state().await;
-    let base = mesh_state.bunker_state.max(map_orb_bunker_to_mesh(orb_bunker));
+    let orb_bunker = super::privilege_broker::store(app_state)
+        .bunker_state()
+        .await;
+    let base = mesh_state
+        .bunker_state
+        .max(map_orb_bunker_to_mesh(orb_bunker));
     let hb_fresh = mesh_state.last_heartbeat_at <= now_epoch
-        && now_epoch.saturating_sub(mesh_state.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+        && now_epoch.saturating_sub(mesh_state.last_heartbeat_at)
+            <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
     step_bunker_isolate(
         base,
         mesh_state.is_sovereign_node,
@@ -467,9 +477,10 @@ pub fn process_heartbeat_step(
         ));
     }
 
-    let peer = state.manifest.find_peer(&req.peer_name).map_err(|e| {
-        (StatusCode::NOT_FOUND, e.to_string(), None)
-    })?;
+    let peer = state
+        .manifest
+        .find_peer(&req.peer_name)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string(), None))?;
     let peer_active = !peer.revoked && now_epoch < peer.expires_at;
     let is_sovereign_peer = peer.node_class == NodeClass::SovereignVault;
     let effective_sovereign = state.is_sovereign_node || is_sovereign_peer;
@@ -506,7 +517,8 @@ pub fn process_heartbeat_step(
         // purely from the persisted `state.last_heartbeat_at` freshness (`hb_fresh`),
         // with `biometric_unbunker = false`.
         let hb_fresh = state.last_heartbeat_at <= now_epoch
-            && now_epoch.saturating_sub(state.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+            && now_epoch.saturating_sub(state.last_heartbeat_at)
+                <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
         let transition = step_bunker_isolate(
             base,
             effective_sovereign,
@@ -1119,10 +1131,7 @@ pub fn process_endpoint_roam_step(
             &req.signature_hex,
         );
 
-    let roam_state = state
-        .peer_roam
-        .entry(req.peer_name.clone())
-        .or_default();
+    let roam_state = state.peer_roam.entry(req.peer_name.clone()).or_default();
 
     // 1. Verify server-derived `aead_auth_ok`, static pinning, bogon/overlay IP classification,
     //    bunker state, and roam rate-limit BEFORE mutating the anti-replay window!
@@ -1229,10 +1238,13 @@ async fn authorize_node_render(
             Json(json!({ "error": "mesh store is in fail-closed corrupted state" })),
         ));
     }
-    if let (Some(seq), Some(ts), Some(sig)) = (auth.seq, auth.timestamp, auth.signature_hex.as_deref()) {
+    if let (Some(seq), Some(ts), Some(sig)) =
+        (auth.seq, auth.timestamp, auth.signature_hex.as_deref())
+    {
         if let Ok(peer) = mesh_state.manifest.find_peer(node) {
             let peer_active = !peer.revoked && now_epoch < peer.expires_at;
-            let ts_fresh = ts <= now_epoch.saturating_add(30) && now_epoch.saturating_sub(ts) <= 120;
+            let ts_fresh =
+                ts <= now_epoch.saturating_add(30) && now_epoch.saturating_sub(ts) <= 120;
             if peer_active
                 && ts_fresh
                 && verify_render_auth_signature(&peer.sign_pubkey_hex, node, seq, ts, sig)
@@ -1242,7 +1254,9 @@ async fn authorize_node_render(
         }
     }
     if let Some(grant_id) = auth.grant_id {
-        let orb_bunker = super::privilege_broker::store(app_state).bunker_state().await;
+        let orb_bunker = super::privilege_broker::store(app_state)
+            .bunker_state()
+            .await;
         if let Some(grant) = super::privilege_broker::store(app_state)
             .get(&user.id, grant_id)
             .await
@@ -1317,7 +1331,9 @@ async fn post_heartbeat(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let store = store(&app_state);
     let now = unix_now();
-    let orb_bunker = super::privilege_broker::store(&app_state).bunker_state().await;
+    let orb_bunker = super::privilege_broker::store(&app_state)
+        .bunker_state()
+        .await;
 
     // Verify optional `unbunker_grant_id` server-side via `PrivilegeBroker` (`RootExec` scope).
     let biometric_unbunker_verified = if let Some(grant_id) = req.unbunker_grant_id {
@@ -1444,7 +1460,11 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
 
-    fn enroll_test_peer_key(state: &mut PersistedMeshState, peer_name: &str, seed_byte: u8) -> SigningKey {
+    fn enroll_test_peer_key(
+        state: &mut PersistedMeshState,
+        peer_name: &str,
+        seed_byte: u8,
+    ) -> SigningKey {
         let coord_sk = state.signing_key().expect("valid coordinator signing key");
         let peer_sk = SigningKey::from_bytes(&[seed_byte; 32]);
         let pub_hex = hex::encode(peer_sk.verifying_key().to_bytes());
@@ -1574,13 +1594,9 @@ mod tests {
                 signature_hex: coord_roam_sig,
                 allow_private_roam: false,
             };
-            let err_unauth = process_endpoint_roam_step(
-                &mut guard,
-                &forged_roam,
-                MeshBunkerState::Normal,
-                now,
-            )
-            .unwrap_err();
+            let err_unauth =
+                process_endpoint_roam_step(&mut guard, &forged_roam, MeshBunkerState::Normal, now)
+                    .unwrap_err();
             assert_eq!(err_unauth.0, StatusCode::FORBIDDEN);
 
             // 2. Legitimate Ed25519 roam frame signed by `macbook-air`'s own node signing key
@@ -1602,13 +1618,9 @@ mod tests {
                 signature_hex: valid_sig,
                 allow_private_roam: false,
             };
-            let new_ep = process_endpoint_roam_step(
-                &mut guard,
-                &valid_roam,
-                MeshBunkerState::Normal,
-                now,
-            )
-            .expect("signed roam frame must succeed");
+            let new_ep =
+                process_endpoint_roam_step(&mut guard, &valid_roam, MeshBunkerState::Normal, now)
+                    .expect("signed roam frame must succeed");
             assert_eq!(new_ep, "95.216.173.237:51888");
             assert_eq!(guard.manifest.epoch, initial_epoch + 1);
             assert!(guard.manifest.verify_ed25519());
@@ -1758,27 +1770,17 @@ mod tests {
                 signature_hex: sig1.clone(),
                 unbunker_grant_id: None,
             };
-            let tr1 = process_heartbeat_step(
-                &mut guard,
-                &req1,
-                OrbBunkerState::Normal,
-                false,
-                t0 + 10,
-            )
-            .expect("valid node-signed heartbeat must succeed");
+            let tr1 =
+                process_heartbeat_step(&mut guard, &req1, OrbBunkerState::Normal, false, t0 + 10)
+                    .expect("valid node-signed heartbeat must succeed");
             assert_eq!(tr1.next_state, MeshBunkerState::Normal);
             assert_eq!(guard.last_heartbeat_at, t0 + 10);
 
             // 2. Replaying the same heartbeat (`heartbeat_seq = 1`) is rejected by `ReplayWindow64`
             // and does NOT advance `last_heartbeat_at` or trip dead-man while `t0 + 10` is fresh.
-            let replay_err = process_heartbeat_step(
-                &mut guard,
-                &req1,
-                OrbBunkerState::Normal,
-                false,
-                t0 + 15,
-            )
-            .unwrap_err();
+            let replay_err =
+                process_heartbeat_step(&mut guard, &req1, OrbBunkerState::Normal, false, t0 + 15)
+                    .unwrap_err();
             assert_eq!(replay_err.0, StatusCode::UNAUTHORIZED);
             assert_eq!(guard.last_heartbeat_at, t0 + 10);
             assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
@@ -1803,10 +1805,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(forged_err.0, StatusCode::UNAUTHORIZED);
             assert_eq!(guard.last_heartbeat_at, t0 + 10);
-            assert_eq!(
-                guard.bunker_state,
-                MeshBunkerState::SovereignDeadManTripped
-            );
+            assert_eq!(guard.bunker_state, MeshBunkerState::SovereignDeadManTripped);
 
             // 4. Even a valid node-signed heartbeat WITHOUT a verified server-side biometric unbunker grant
             // cannot exit `SovereignDeadManTripped` (sticky fence).
@@ -1818,14 +1817,9 @@ mod tests {
                 signature_hex: sig2,
                 unbunker_grant_id: None,
             };
-            let tr2 = process_heartbeat_step(
-                &mut guard,
-                &req2,
-                OrbBunkerState::Normal,
-                false,
-                t0 + 220,
-            )
-            .expect("valid heartbeat accepted");
+            let tr2 =
+                process_heartbeat_step(&mut guard, &req2, OrbBunkerState::Normal, false, t0 + 220)
+                    .expect("valid heartbeat accepted");
             assert_eq!(tr2.next_state, MeshBunkerState::SovereignDeadManTripped);
 
             // 5. Valid node-signed heartbeat WITH verified server-side biometric `RootExec` grant unbunkers back to Normal.
@@ -1837,14 +1831,9 @@ mod tests {
                 signature_hex: sig3,
                 unbunker_grant_id: None,
             };
-            let tr3 = process_heartbeat_step(
-                &mut guard,
-                &req3,
-                OrbBunkerState::Normal,
-                true,
-                t0 + 225,
-            )
-            .expect("biometric unbunker with valid heartbeat must succeed");
+            let tr3 =
+                process_heartbeat_step(&mut guard, &req3, OrbBunkerState::Normal, true, t0 + 225)
+                    .expect("biometric unbunker with valid heartbeat must succeed");
             assert_eq!(tr3.next_state, MeshBunkerState::Normal);
             assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
         });
@@ -1936,18 +1925,20 @@ mod tests {
                 g1.pinned_coordinator_pubkey_hex,
                 g1_re.pinned_coordinator_pubkey_hex
             );
-            let keystore_raw = std::fs::read_to_string(
-                tmp1.path().join(".sandboxed-sh/lean_mesh_peer_keys.json"),
-            )
-            .expect("peer keystore must be persisted");
+            let keystore_raw =
+                std::fs::read_to_string(tmp1.path().join(".sandboxed-sh/lean_mesh_peer_keys.json"))
+                    .expect("peer keystore must be persisted");
             let peer_keys: BTreeMap<String, String> =
                 serde_json::from_str(&keystore_raw).expect("valid peer keystore JSON");
             assert_eq!(peer_keys.len(), g1.manifest.peers.len());
             for peer in &g1.manifest.peers {
                 let seed_hex = peer_keys.get(&peer.name).expect("peer seed present");
                 let seed_bytes: [u8; 32] = hex::decode(seed_hex).unwrap().try_into().unwrap();
-                let derived_pub =
-                    hex::encode(SigningKey::from_bytes(&seed_bytes).verifying_key().to_bytes());
+                let derived_pub = hex::encode(
+                    SigningKey::from_bytes(&seed_bytes)
+                        .verifying_key()
+                        .to_bytes(),
+                );
                 assert_eq!(derived_pub, peer.sign_pubkey_hex);
             }
             #[cfg(unix)]
@@ -1968,21 +1959,22 @@ mod tests {
 
         // 3. Reopen peer-keystore integrity checks: missing, malformed, symlinked, wrong-permission,
         // extra-entry, missing-entry, wrong-seed, and mismatched-public-key keystores all enter HardLockdown!
-        let check_reopen_lockdown = |mutate: &dyn Fn(&std::path::Path, &mut BTreeMap<String, String>)| {
-            let t = tempfile::tempdir().expect("tempdir");
-            let _ = MeshStore::open(t.path().to_path_buf());
-            let ks_path = t.path().join(".sandboxed-sh/lean_mesh_peer_keys.json");
-            let raw = std::fs::read_to_string(&ks_path).unwrap();
-            let mut map: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap();
-            mutate(&ks_path, &mut map);
-            let reopened = MeshStore::open(t.path().to_path_buf());
-            rt.block_on(async {
-                let g = reopened.inner.lock().await;
-                assert!(g.corrupted_state);
-                assert_eq!(g.bunker_state, MeshBunkerState::HardLockdown);
-                assert!(g.signing_key().is_err());
-            });
-        };
+        let check_reopen_lockdown =
+            |mutate: &dyn Fn(&std::path::Path, &mut BTreeMap<String, String>)| {
+                let t = tempfile::tempdir().expect("tempdir");
+                let _ = MeshStore::open(t.path().to_path_buf());
+                let ks_path = t.path().join(".sandboxed-sh/lean_mesh_peer_keys.json");
+                let raw = std::fs::read_to_string(&ks_path).unwrap();
+                let mut map: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap();
+                mutate(&ks_path, &mut map);
+                let reopened = MeshStore::open(t.path().to_path_buf());
+                rt.block_on(async {
+                    let g = reopened.inner.lock().await;
+                    assert!(g.corrupted_state);
+                    assert_eq!(g.bunker_state, MeshBunkerState::HardLockdown);
+                    assert!(g.signing_key().is_err());
+                });
+            };
 
         // (a) Missing keystore
         check_reopen_lockdown(&|ks_path, _| {

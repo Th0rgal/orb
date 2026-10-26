@@ -334,10 +334,29 @@ pub struct MissionActivity {
     pub idle_for: Option<String>,
     /// Server-computed staleness verdict for non-terminal missions
     /// (`working`, `quiet`, `stalled`, `parked`, `stalled_parked`, `queued`,
-    /// `stuck_queued`, `waiting_background`, `stalled_background`, `paused`).
+    /// `stuck_queued`, `waiting_for_slot`, `waiting_background`,
+    /// `stalled_background`, `paused`).
     /// Absent for terminal missions. See `mission_health_verdict`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_verdict: Option<String>,
+    /// Why a pending mission has not started yet, computed at read time.
+    /// Set when every parallel slot is taken, so a mission waiting its turn
+    /// does not look identical to one whose dispatch was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_wait: Option<QueueWait>,
+}
+
+/// A pending mission waiting for the scheduler to free a parallel slot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueWait {
+    /// Always `waiting_for_slot` today.
+    pub reason: String,
+    /// Slots in use when the scheduler last looked.
+    pub slots_used: usize,
+    /// `max_parallel_missions`.
+    pub slots_max: usize,
+    /// Missions holding the slots.
+    pub running_mission_ids: Vec<Uuid>,
 }
 
 /// Durable execution truth for one mission runner generation. Mission status

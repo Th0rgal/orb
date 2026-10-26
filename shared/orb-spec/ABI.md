@@ -14,6 +14,8 @@ and in `lean-sys` (`leansys_*`). The vendored C is
 | --- | --- |
 | `shared/orb-spec/cabi/orb_kernel.h` | one prototype per manifest entry, in manifest order |
 | `android_dashboard/app/src/main/jni/orb_kernel_jni.c` | a `Java_sh_sandboxed_dashboard_orb_OrbKernel_<method>` thunk for every entry with a `jni` block |
+| `android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbKernel.kt` | Kotlin `external fun` declarations and typed JNI wrappers (zero fallback duplication) |
+| `ios_dashboard/SandboxedDashboard/Orb/OrbKernelGenerated.swift` | Swift `@_silgen_name` C-ABI declarations and typed `OrbKernel` wrappers |
 
 ```sh
 python3 scripts/gen_kernel_bindings.py          # regenerate

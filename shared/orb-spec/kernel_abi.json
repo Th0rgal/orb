@@ -9,6 +9,9 @@
   "swift": {
     "path": "ios_dashboard/SandboxedDashboard/Orb/OrbKernelGenerated.swift"
   },
+  "kotlin": {
+    "path": "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbKernel.kt"
+  },
   "functions": [
     {
       "name": "orb_verify_writer_reuse",
@@ -1783,6 +1786,342 @@
       }
     },
     {
+      "name": "orb_wire_validate_frame",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "magic",
+          "type": "uint32_t"
+        },
+        {
+          "name": "abiVersion",
+          "type": "uint32_t"
+        },
+        {
+          "name": "schemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "expectedSchemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "totalLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payloadLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "arenaOff",
+          "type": "uint32_t"
+        },
+        {
+          "name": "arenaLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxBudgetBytes",
+          "type": "uint32_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint32_t"
+        },
+        {
+          "name": "requiredOutBytes",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireValidateFrame",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_wire_pack_record",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "tag",
+          "type": "uint8_t"
+        },
+        {
+          "name": "flags",
+          "type": "uint8_t"
+        },
+        {
+          "name": "len16",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payload32",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWirePackRecord",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_wire_schema_migrate_step",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "fromSchema",
+          "type": "uint32_t"
+        },
+        {
+          "name": "toSchema",
+          "type": "uint32_t"
+        },
+        {
+          "name": "currentSchema",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payloadBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "maxBytes",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireSchemaMigrateStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_effect_admissible",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "effectKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasValidLease",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sessionCreated",
+          "type": "uint8_t"
+        },
+        {
+          "name": "lineageVerified",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isArchived",
+          "type": "uint8_t"
+        },
+        {
+          "name": "idempotencyFresh",
+          "type": "uint8_t"
+        },
+        {
+          "name": "accountBound",
+          "type": "uint8_t"
+        },
+        {
+          "name": "accountRejected",
+          "type": "uint8_t"
+        },
+        {
+          "name": "firstByteLocked",
+          "type": "uint8_t"
+        },
+        {
+          "name": "grammarAllowed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "envScrubbed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "budgetOk",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbEffectAdmissible",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_provider_pool_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "hasBoundAccount",
+          "type": "uint8_t"
+        },
+        {
+          "name": "boundAccountId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "candidateAccountId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "isRejected",
+          "type": "uint8_t"
+        },
+        {
+          "name": "firstByteSent",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isFailoverAttempt",
+          "type": "uint8_t"
+        },
+        {
+          "name": "attempts",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxAttempts",
+          "type": "uint32_t"
+        },
+        {
+          "name": "nowEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "resetEpoch",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbProviderPoolStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_route_argmin_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "hasBest",
+          "type": "uint8_t"
+        },
+        {
+          "name": "bestId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "bestScore",
+          "type": "uint64_t"
+        },
+        {
+          "name": "candId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "candScore",
+          "type": "uint64_t"
+        },
+        {
+          "name": "candAdmissible",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbRouteArgminStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_mission_control_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "isArchived",
+          "type": "uint8_t"
+        },
+        {
+          "name": "activeTrackWriters",
+          "type": "uint32_t"
+        },
+        {
+          "name": "hasLease",
+          "type": "uint8_t"
+        },
+        {
+          "name": "msgAlreadyDelivered",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isResume",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sessionCreated",
+          "type": "uint8_t"
+        },
+        {
+          "name": "lineageVerified",
+          "type": "uint8_t"
+        },
+        {
+          "name": "rolloutExists",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasFallbackPrompt",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbMissionControlStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_fork_home_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "isForkOrSide",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sourceExists",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sourceIsSymlink",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameWorkspace",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameNode",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasCommittedTransfer",
+          "type": "uint8_t"
+        },
+        {
+          "name": "requestedOverrideHome",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbForkHomeStep",
+        "ret": "jlong"
+      }
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [
@@ -2535,12 +2874,98 @@
           "type": "uint64_t"
         },
         {
-          "name": "isMobileHetero",
+          "name": "topologyKind",
           "type": "uint8_t"
         }
       ],
       "jni": {
         "method": "leansysVerifyWorkerBudget",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "leansys_verify_page_aligned_buffer",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "addr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "allocBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "capacityBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "dirtyRssBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "maxBudgetBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "pageAlignMask",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysVerifyPageAlignedBuffer",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "leansys_select_isa",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "detectedHwCaps",
+          "type": "uint64_t"
+        },
+        {
+          "name": "requiredMask",
+          "type": "uint64_t"
+        },
+        {
+          "name": "requestedVariantId",
+          "type": "uint8_t"
+        },
+        {
+          "name": "maxVariantId",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysSelectIsa",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "leansys_verify_isa_selection",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "detectedHwCaps",
+          "type": "uint64_t"
+        },
+        {
+          "name": "requiredMask",
+          "type": "uint64_t"
+        },
+        {
+          "name": "selectedVariantId",
+          "type": "uint8_t"
+        },
+        {
+          "name": "maxVariantId",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysVerifyIsaSelection",
         "ret": "jint"
       }
     }

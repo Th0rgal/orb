@@ -1,6 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 //! Typed bindings to `lean/Orb/Kernel.lean` and `LeanSys/Spec.lean` (`liborb_spec_cabi.a`).
 
+pub mod shadow;
+
 pub mod lean_sys_cabi {
     //! Zero-dependency typed Rust bindings to the 21 formally verified unboxed C-ABI
     //! safety gates in `LeanSys/Spec.lean` (`0 import Lean`, `0 sorryAx`), linked from
@@ -138,6 +140,40 @@ pub mod lean_sys_cabi {
             prev_digest: u64,
             block_hash: u64,
         ) -> u64;
+        pub fn leansys_verify_ios_jetsam_budget(
+            dirty_rss_bytes: u64,
+            alloc_bytes: u64,
+            max_jetsam_bytes: u64,
+            page_align_mask: u64,
+            is_app_extension: u8,
+        ) -> u8;
+        pub fn leansys_verify_worker_budget(
+            active_workers: u64,
+            max_workers: u64,
+            micro_chunks: u64,
+            total_len: u64,
+            topology_kind: u8,
+        ) -> u8;
+        pub fn leansys_verify_page_aligned_buffer(
+            addr: u64,
+            alloc_bytes: u64,
+            capacity_bytes: u64,
+            dirty_rss_bytes: u64,
+            max_budget_bytes: u64,
+            page_align_mask: u64,
+        ) -> u8;
+        pub fn leansys_select_isa(
+            detected_hw_caps: u64,
+            required_mask: u64,
+            requested_variant_id: u8,
+            max_variant_id: u8,
+        ) -> u8;
+        pub fn leansys_verify_isa_selection(
+            detected_hw_caps: u64,
+            required_mask: u64,
+            selected_variant_id: u8,
+            max_variant_id: u8,
+        ) -> u8;
     }
 
     pub const WAL_MAGIC: u32 = 0x4C53_5953;
@@ -450,6 +486,99 @@ pub mod lean_sys_cabi {
     ) -> u64 {
         unsafe { leansys_transcript_index(turn_off, turn_len, buf_len, prev_digest, block_hash) }
     }
+
+    #[inline]
+    pub fn verify_ios_jetsam_budget(
+        dirty_rss_bytes: u64,
+        alloc_bytes: u64,
+        max_jetsam_bytes: u64,
+        page_align_mask: u64,
+        is_app_extension: bool,
+    ) -> bool {
+        unsafe {
+            leansys_verify_ios_jetsam_budget(
+                dirty_rss_bytes,
+                alloc_bytes,
+                max_jetsam_bytes,
+                page_align_mask,
+                u8::from(is_app_extension),
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_worker_budget(
+        active_workers: u64,
+        max_workers: u64,
+        micro_chunks: u64,
+        total_len: u64,
+        topology_kind: u8,
+    ) -> bool {
+        unsafe {
+            leansys_verify_worker_budget(
+                active_workers,
+                max_workers,
+                micro_chunks,
+                total_len,
+                topology_kind,
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_page_aligned_buffer(
+        addr: u64,
+        alloc_bytes: u64,
+        capacity_bytes: u64,
+        dirty_rss_bytes: u64,
+        max_budget_bytes: u64,
+        page_align_mask: u64,
+    ) -> bool {
+        unsafe {
+            leansys_verify_page_aligned_buffer(
+                addr,
+                alloc_bytes,
+                capacity_bytes,
+                dirty_rss_bytes,
+                max_budget_bytes,
+                page_align_mask,
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn select_isa(
+        detected_hw_caps: u64,
+        required_mask: u64,
+        requested_variant_id: u8,
+        max_variant_id: u8,
+    ) -> u8 {
+        unsafe {
+            leansys_select_isa(
+                detected_hw_caps,
+                required_mask,
+                requested_variant_id,
+                max_variant_id,
+            )
+        }
+    }
+
+    #[inline]
+    pub fn verify_isa_selection(
+        detected_hw_caps: u64,
+        required_mask: u64,
+        selected_variant_id: u8,
+        max_variant_id: u8,
+    ) -> bool {
+        unsafe {
+            leansys_verify_isa_selection(
+                detected_hw_caps,
+                required_mask,
+                selected_variant_id,
+                max_variant_id,
+            ) == 1
+        }
+    }
 }
 
 unsafe extern "C" {
@@ -700,6 +829,81 @@ unsafe extern "C" {
         bunker_state: u8,
         live_writers: u32,
     ) -> u8;
+    fn orb_wire_validate_frame(
+        magic: u32,
+        abi_version: u32,
+        schema_id: u32,
+        expected_schema_id: u32,
+        total_len: u32,
+        payload_len: u32,
+        arena_off: u32,
+        arena_len: u32,
+        max_budget_bytes: u32,
+        out_cap: u32,
+        required_out_bytes: u32,
+    ) -> u8;
+    fn orb_wire_pack_record(tag: u8, flags: u8, len16: u32, payload32: u32) -> u64;
+    fn orb_wire_schema_migrate_step(
+        from_schema: u32,
+        to_schema: u32,
+        current_schema: u32,
+        payload_bytes: u64,
+        max_bytes: u64,
+    ) -> u8;
+    fn orb_effect_admissible(
+        effect_kind: u8,
+        has_valid_lease: u8,
+        session_created: u8,
+        lineage_verified: u8,
+        is_archived: u8,
+        idempotency_fresh: u8,
+        account_bound: u8,
+        account_rejected: u8,
+        first_byte_locked: u8,
+        grammar_allowed: u8,
+        env_scrubbed: u8,
+        budget_ok: u8,
+    ) -> u8;
+    fn orb_provider_pool_step(
+        has_bound_account: u8,
+        bound_account_id: u32,
+        candidate_account_id: u32,
+        is_rejected: u8,
+        first_byte_sent: u8,
+        is_failover_attempt: u8,
+        attempts: u32,
+        max_attempts: u32,
+        now_epoch: u64,
+        reset_epoch: u64,
+    ) -> u64;
+    fn orb_route_argmin_step(
+        has_best: u8,
+        best_id: u32,
+        best_score: u64,
+        cand_id: u32,
+        cand_score: u64,
+        cand_admissible: u8,
+    ) -> u64;
+    fn orb_mission_control_step(
+        is_archived: u8,
+        active_track_writers: u32,
+        has_lease: u8,
+        msg_already_delivered: u8,
+        is_resume: u8,
+        session_created: u8,
+        lineage_verified: u8,
+        rollout_exists: u8,
+        has_fallback_prompt: u8,
+    ) -> u64;
+    fn orb_fork_home_step(
+        is_fork_or_side: u8,
+        source_exists: u8,
+        source_is_symlink: u8,
+        same_workspace: u8,
+        same_node: u8,
+        has_committed_transfer: u8,
+        requested_override_home: u8,
+    ) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2042,6 +2246,428 @@ pub fn deploy_gate_step(input: DeployGateInput) -> bool {
     raw == 1
 }
 
+/// Status code returned by `orb_wire_validate_frame`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum OrbWireStatus {
+    Ok = 0,
+    BadMagicOrVersion = 1,
+    UnsupportedSchema = 2,
+    TruncatedOrOutOfBounds = 3,
+    BudgetExceeded = 4,
+    OutputTooSmall = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireFrameInput {
+    pub magic: u32,
+    pub abi_version: u32,
+    pub schema_id: u32,
+    pub expected_schema_id: u32,
+    pub total_len: u32,
+    pub payload_len: u32,
+    pub arena_off: u32,
+    pub arena_len: u32,
+    pub max_budget_bytes: u32,
+    pub out_cap: u32,
+    pub required_out_bytes: u32,
+}
+
+#[inline]
+pub fn wire_validate_frame(input: WireFrameInput) -> OrbWireStatus {
+    let raw = unsafe {
+        orb_wire_validate_frame(
+            input.magic,
+            input.abi_version,
+            input.schema_id,
+            input.expected_schema_id,
+            input.total_len,
+            input.payload_len,
+            input.arena_off,
+            input.arena_len,
+            input.max_budget_bytes,
+            input.out_cap,
+            input.required_out_bytes,
+        )
+    };
+    match raw {
+        0 => OrbWireStatus::Ok,
+        1 => OrbWireStatus::BadMagicOrVersion,
+        2 => OrbWireStatus::UnsupportedSchema,
+        4 => OrbWireStatus::BudgetExceeded,
+        5 => OrbWireStatus::OutputTooSmall,
+        _ => OrbWireStatus::TruncatedOrOutOfBounds,
+    }
+}
+
+/// Canonical 64-bit `OrbWire` record word (`tag: u8`, `flags: u8`, `len16: u16`, `payload32: u32`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrbWireRecordWord {
+    pub tag: u8,
+    pub flags: u8,
+    pub len16: u16,
+    pub payload32: u32,
+}
+
+#[inline]
+pub fn wire_pack_record(rec: OrbWireRecordWord) -> u64 {
+    unsafe { orb_wire_pack_record(rec.tag, rec.flags, u32::from(rec.len16), rec.payload32) }
+}
+
+#[inline]
+pub const fn wire_unpack_record(word: u64) -> OrbWireRecordWord {
+    OrbWireRecordWord {
+        tag: (word & 0xFF) as u8,
+        flags: ((word >> 8) & 0xFF) as u8,
+        len16: ((word >> 16) & 0xFFFF) as u16,
+        payload32: (word >> 32) as u32,
+    }
+}
+
+#[inline]
+pub fn wire_schema_migrate_step(
+    from_schema: u32,
+    to_schema: u32,
+    current_schema: u32,
+    payload_bytes: u64,
+    max_bytes: u64,
+) -> bool {
+    unsafe {
+        orb_wire_schema_migrate_step(
+            from_schema,
+            to_schema,
+            current_schema,
+            payload_bytes,
+            max_bytes,
+        ) == 1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EffectKind {
+    Observe = 0,
+    LaunchJob = 1,
+    ResumeSession = 2,
+    DispatchProvider = 3,
+    ExecPrivCommand = 4,
+    MutateStore = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectAdmissibleInput {
+    pub effect_kind: EffectKind,
+    pub has_valid_lease: bool,
+    pub session_created: bool,
+    pub lineage_verified: bool,
+    pub is_archived: bool,
+    pub idempotency_fresh: bool,
+    pub account_bound: bool,
+    pub account_rejected: bool,
+    pub first_byte_locked: bool,
+    pub grammar_allowed: bool,
+    pub env_scrubbed: bool,
+    pub budget_ok: bool,
+}
+
+#[inline]
+pub fn effect_admissible(input: EffectAdmissibleInput) -> bool {
+    unsafe {
+        orb_effect_admissible(
+            input.effect_kind as u8,
+            u8::from(input.has_valid_lease),
+            u8::from(input.session_created),
+            u8::from(input.lineage_verified),
+            u8::from(input.is_archived),
+            u8::from(input.idempotency_fresh),
+            u8::from(input.account_bound),
+            u8::from(input.account_rejected),
+            u8::from(input.first_byte_locked),
+            u8::from(input.grammar_allowed),
+            u8::from(input.env_scrubbed),
+            u8::from(input.budget_ok),
+        ) == 1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProviderPoolAction {
+    RejectCandidate = 0,
+    DispatchBoundAccount = 1,
+    DispatchPoolCandidate = 2,
+    AbortLockedStream = 3,
+    ExhaustedFailover = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderPoolStepInput {
+    pub bound_account_id: Option<u32>,
+    pub candidate_account_id: u32,
+    pub is_rejected: bool,
+    pub first_byte_sent: bool,
+    pub is_failover_attempt: bool,
+    pub attempts: u32,
+    pub max_attempts: u32,
+    pub now_epoch: u64,
+    pub reset_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderPoolStepVerdict {
+    pub action: ProviderPoolAction,
+    pub emit_dispatch_effect: bool,
+    pub first_byte_locked_next: bool,
+    pub dispatched_account_id: u32,
+}
+
+#[inline]
+pub fn provider_pool_step(input: ProviderPoolStepInput) -> ProviderPoolStepVerdict {
+    let raw = unsafe {
+        orb_provider_pool_step(
+            u8::from(input.bound_account_id.is_some()),
+            input.bound_account_id.unwrap_or(0),
+            input.candidate_account_id,
+            u8::from(input.is_rejected),
+            u8::from(input.first_byte_sent),
+            u8::from(input.is_failover_attempt),
+            input.attempts,
+            input.max_attempts,
+            input.now_epoch,
+            input.reset_epoch,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => ProviderPoolAction::DispatchBoundAccount,
+        2 => ProviderPoolAction::DispatchPoolCandidate,
+        3 => ProviderPoolAction::AbortLockedStream,
+        4 => ProviderPoolAction::ExhaustedFailover,
+        _ => ProviderPoolAction::RejectCandidate,
+    };
+    ProviderPoolStepVerdict {
+        action,
+        emit_dispatch_effect: ((raw >> 8) & 1) != 0,
+        first_byte_locked_next: ((raw >> 16) & 1) != 0,
+        dispatched_account_id: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteCandidate {
+    pub account_id: u32,
+    pub score: u64,
+    pub is_rejected: bool,
+    pub reset_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteArgminVerdict {
+    pub has_best: bool,
+    pub took_candidate: bool,
+    pub best_id: u32,
+}
+
+#[inline]
+pub fn route_argmin_step(
+    has_best: bool,
+    best_id: u32,
+    best_score: u64,
+    cand_id: u32,
+    cand_score: u64,
+    cand_admissible: bool,
+) -> RouteArgminVerdict {
+    let raw = unsafe {
+        orb_route_argmin_step(
+            u8::from(has_best),
+            best_id,
+            best_score,
+            cand_id,
+            cand_score,
+            u8::from(cand_admissible),
+        )
+    };
+    RouteArgminVerdict {
+        has_best: (raw & 1) != 0,
+        took_candidate: ((raw >> 8) & 1) != 0,
+        best_id: (raw >> 32) as u32,
+    }
+}
+
+/// Pure `ArgminRouteFold` over a slice of candidate accounts backed by `orb_provider_pool_step`
+/// and `orb_route_argmin_step`. Guarantees `antigravity_dispatch_matches_bound_account` and
+/// `rejected_account_never_routed_before_reset`.
+pub fn select_best_provider_account(
+    bound_account_id: Option<u32>,
+    first_byte_sent: bool,
+    is_failover_attempt: bool,
+    attempts: u32,
+    max_attempts: u32,
+    now_epoch: u64,
+    candidates: &[RouteCandidate],
+) -> Option<u32> {
+    let mut has_best = false;
+    let mut best_id = 0u32;
+    let mut best_score = u64::MAX;
+
+    for cand in candidates {
+        let pool_verdict = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id,
+            candidate_account_id: cand.account_id,
+            is_rejected: cand.is_rejected,
+            first_byte_sent,
+            is_failover_attempt,
+            attempts,
+            max_attempts,
+            now_epoch,
+            reset_epoch: cand.reset_epoch,
+        });
+        let step = route_argmin_step(
+            has_best,
+            best_id,
+            best_score,
+            cand.account_id,
+            cand.score,
+            pool_verdict.emit_dispatch_effect,
+        );
+        if step.took_candidate {
+            has_best = true;
+            best_id = step.best_id;
+            best_score = cand.score;
+        }
+    }
+    if has_best {
+        Some(best_id)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MissionControlAction {
+    RejectArchived = 0,
+    DispatchFreshTurn = 1,
+    ResumeVerifiedSession = 2,
+    SeedFallbackFreshSession = 3,
+    DedupeDeliveredMessage = 4,
+    RejectTrackWriterConflict = 5,
+    RejectUnverifiedResume = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionControlStepInput {
+    pub is_archived: bool,
+    pub active_track_writers: u32,
+    pub has_lease: bool,
+    pub msg_already_delivered: bool,
+    pub is_resume: bool,
+    pub session_created: bool,
+    pub lineage_verified: bool,
+    pub rollout_exists: bool,
+    pub has_fallback_prompt: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionControlStepVerdict {
+    pub action: MissionControlAction,
+    pub emit_dispatch_effect: bool,
+    pub seed_fallback_session: bool,
+    pub archived_next: bool,
+    pub track_writers_next: u32,
+}
+
+#[inline]
+pub fn mission_control_step(input: MissionControlStepInput) -> MissionControlStepVerdict {
+    let raw = unsafe {
+        orb_mission_control_step(
+            u8::from(input.is_archived),
+            input.active_track_writers,
+            u8::from(input.has_lease),
+            u8::from(input.msg_already_delivered),
+            u8::from(input.is_resume),
+            u8::from(input.session_created),
+            u8::from(input.lineage_verified),
+            u8::from(input.rollout_exists),
+            u8::from(input.has_fallback_prompt),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => MissionControlAction::DispatchFreshTurn,
+        2 => MissionControlAction::ResumeVerifiedSession,
+        3 => MissionControlAction::SeedFallbackFreshSession,
+        4 => MissionControlAction::DedupeDeliveredMessage,
+        5 => MissionControlAction::RejectTrackWriterConflict,
+        6 => MissionControlAction::RejectUnverifiedResume,
+        _ => MissionControlAction::RejectArchived,
+    };
+    MissionControlStepVerdict {
+        action,
+        emit_dispatch_effect: ((raw >> 8) & 1) != 0,
+        seed_fallback_session: ((raw >> 9) & 1) != 0,
+        archived_next: ((raw >> 16) & 1) != 0,
+        track_writers_next: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ForkHomeAction {
+    RejectForkWorkspace = 0,
+    StandardJobWorkspace = 1,
+    UseSiblingSourceCwdKeepJobHome = 2,
+    UseTransferredRootCwdKeepJobHome = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkHomeStepInput {
+    pub is_fork_or_side: bool,
+    pub source_exists: bool,
+    pub source_is_symlink: bool,
+    pub same_workspace: bool,
+    pub same_node: bool,
+    pub has_committed_transfer: bool,
+    pub requested_override_home: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkHomeStepVerdict {
+    pub action: ForkHomeAction,
+    pub admit_launch: bool,
+    pub use_source_cwd: bool,
+    pub override_home: bool,
+    pub job_home_preserved: bool,
+    pub exit_code: u32,
+}
+
+#[inline]
+pub fn fork_home_step(input: ForkHomeStepInput) -> ForkHomeStepVerdict {
+    let raw = unsafe {
+        orb_fork_home_step(
+            u8::from(input.is_fork_or_side),
+            u8::from(input.source_exists),
+            u8::from(input.source_is_symlink),
+            u8::from(input.same_workspace),
+            u8::from(input.same_node),
+            u8::from(input.has_committed_transfer),
+            u8::from(input.requested_override_home),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => ForkHomeAction::StandardJobWorkspace,
+        2 => ForkHomeAction::UseSiblingSourceCwdKeepJobHome,
+        3 => ForkHomeAction::UseTransferredRootCwdKeepJobHome,
+        _ => ForkHomeAction::RejectForkWorkspace,
+    };
+    ForkHomeStepVerdict {
+        action,
+        admit_launch: ((raw >> 8) & 1) != 0,
+        use_source_cwd: ((raw >> 9) & 1) != 0,
+        override_home: ((raw >> 16) & 1) != 0,
+        job_home_preserved: ((raw >> 17) & 1) != 0,
+        exit_code: (raw >> 32) as u32,
+    }
+}
+
 #[cfg(test)]
 mod privilege_bunker_deploy_tests {
     use super::*;
@@ -2765,5 +3391,27 @@ mod tests {
         assert!(lean_sys_cabi::gfm_pipe_scan(0, 24, 64, 3, 3, false));
         assert!(lean_sys_cabi::tag_scan(0, 32, 4, 8, 64, 1));
         assert_ne!(lean_sys_cabi::transcript_index(0, 40, 128, 1, 9), 0);
+        assert!(lean_sys_cabi::verify_page_aligned_buffer(
+            0x10000,
+            12_000,
+            16_384,
+            100_000_000,
+            1_400_000_000,
+            16_383
+        ));
+        assert!(!lean_sys_cabi::verify_page_aligned_buffer(
+            0x10004,
+            12_000,
+            16_384,
+            100_000_000,
+            1_400_000_000,
+            16_383
+        ));
+        assert!(lean_sys_cabi::verify_worker_budget(6, 9, 12, 4096, 2));
+        assert!(!lean_sys_cabi::verify_worker_budget(6, 10, 12, 4096, 2));
+        assert_eq!(lean_sys_cabi::select_isa(927, 927, 4, 4), 4);
+        assert_eq!(lean_sys_cabi::select_isa(775, 927, 4, 4), 0);
+        assert!(lean_sys_cabi::verify_isa_selection(927, 927, 4, 4));
+        assert!(!lean_sys_cabi::verify_isa_selection(775, 927, 4, 4));
     }
 }

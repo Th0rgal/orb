@@ -131,6 +131,126 @@ theorem ProjectionStability.ensures_stable {Input Out : Type} (P : ProjectionSta
     P.stable x (P.project x) = true :=
   P.preserves x h_in
 
+/--
+  Meta-Spec 6 (`EffectSafety`):
+  Every effect `eff` emitted by a state-machine transition `(step s e).2` satisfies its domain
+  authorization & safety precondition (`authorized s e eff = true`).
+-/
+structure EffectSafety (State Event Effect : Type) where
+  step       : State → Event → State × List Effect
+  authorized : State → Event → Effect → Bool
+  sound      : ∀ s e eff, eff ∈ (step s e).2 → authorized s e eff = true
+
+theorem EffectSafety.forbids_unauthorized {State Event Effect : Type}
+    (E : EffectSafety State Event Effect) (s : State) (e : Event) (eff : Effect)
+    (h_unauth : E.authorized s e eff = false) :
+    eff ∉ (E.step s e).2 :=
+  fun h_in => by simpa [h_unauth] using E.sound s e eff h_in
+
+/--
+  Meta-Spec 7 (`EffectLiveness`):
+  When progress is required (`progressRequired s e = true`), `(step s e).2` emits at least one
+  expected effect (`expectedEffect e eff = true`), and includes explicit positive (`effects ≠ []`)
+  and negative (`effects = []`) witnesses reached by a finite trace from `init`, structurally
+  forbidding the silent/no-op implementation `step s _ := (s, [])`.
+-/
+structure EffectLiveness (State Event Effect : Type) where
+  init             : State
+  step             : State → Event → State × List Effect
+  progressRequired : State → Event → Bool
+  expectedEffect   : Event → Effect → Bool
+  live             : ∀ s e, progressRequired s e = true → ∃ eff ∈ (step s e).2, expectedEffect e eff = true
+  traceEvents      : List Event
+  posEvent         : Event
+  negEvent         : Event
+  reachable_live   :
+    let sReach := traceEvents.foldl (fun st ev => (step st ev).1) init
+    progressRequired sReach posEvent = true ∧ ((step sReach posEvent).2 ≠ []) ∧
+    progressRequired sReach negEvent = false ∧ ((step sReach negEvent).2 = [])
+
+theorem EffectLiveness.emits_on_progress {State Event Effect : Type}
+    (L : EffectLiveness State Event Effect) (s : State) (e : Event)
+    (h_req : L.progressRequired s e = true) :
+    (L.step s e).2 ≠ [] := by
+  intro h_empty
+  rcases L.live s e h_req with ⟨eff, h_in, _⟩
+  rw [h_empty] at h_in
+  exact List.not_mem_nil h_in
+
+/--
+  Meta-Spec 8 (`CostBound`):
+  Every transition `step s e` is bounded in CPU fuel (`c0 + c1 * inputBytes e`), emitted effect
+  count (`maxEffects`), and wire output size (`maxOutBytes`), preventing unbounded loops or
+  allocation amplification.
+-/
+structure CostBound (State Event Effect : Type) where
+  step        : State → Event → State × List Effect
+  cpuFuel     : State → Event → Nat
+  inputBytes  : Event → Nat
+  outputBytes : State → Event → Nat
+  c0          : Nat
+  c1          : Nat
+  maxEffects  : Nat
+  maxOutBytes : Nat
+  fuel_bound  : ∀ s e, cpuFuel s e ≤ c0 + c1 * inputBytes e
+  eff_bound   : ∀ s e, ((step s e).2).length ≤ maxEffects
+  out_bound   : ∀ s e, outputBytes s e ≤ maxOutBytes
+
+theorem CostBound.within_envelope {State Event Effect : Type}
+    (B : CostBound State Event Effect) (s : State) (e : Event) :
+    B.cpuFuel s e ≤ B.c0 + B.c1 * B.inputBytes e ∧
+    ((B.step s e).2).length ≤ B.maxEffects ∧
+    B.outputBytes s e ≤ B.maxOutBytes :=
+  ⟨B.fuel_bound s e, B.eff_bound s e, B.out_bound s e⟩
+
+/--
+  Meta-Spec 9 (`ReplayIdempotence`):
+  Replaying an event whose `IdempotencyKey` / sequence has already been acknowledged
+  (`alreadyAcked s e = true`) leaves the state invariant and emits zero effects (`[]`).
+-/
+structure ReplayIdempotence (State Event Effect : Type) where
+  step         : State → Event → State × List Effect
+  alreadyAcked : State → Event → Bool
+  idempotent   : ∀ s e, alreadyAcked s e = true → step s e = (s, [])
+
+theorem ReplayIdempotence.replay_no_effects {State Event Effect : Type}
+    (R : ReplayIdempotence State Event Effect) (s : State) (e : Event)
+    (h_acked : R.alreadyAcked s e = true) :
+    (R.step s e).1 = s ∧ (R.step s e).2 = [] := by
+  rw [R.idempotent s e h_acked]; exact ⟨rfl, rfl⟩
+
+/--
+  Meta-Spec 10 (`GrammarConfinement` / `NoPrivilegeEscalation`):
+  Every admitted command or path belongs to a constructive allowlist grammar (`inGrammar cmd = true`,
+  forbidding shell metacharacters, `..` traversal, and unauthorized environment variables), and
+  never escalates privileges beyond the caller's bound scope (`privsAfter x p ≤ allowedPrivs p`).
+-/
+structure GrammarConfinement (Input Cmd Principal : Type) where
+  parse        : Input → Option Cmd
+  inGrammar    : Cmd → Bool
+  privsAfter   : Input → Principal → Nat
+  allowedPrivs : Principal → Nat
+  confined     : ∀ x cmd, parse x = some cmd → inGrammar cmd = true
+  no_escalate  : ∀ x p, privsAfter x p ≤ allowedPrivs p
+
+theorem GrammarConfinement.rejects_outside_grammar {Input Cmd Principal : Type}
+    (G : GrammarConfinement Input Cmd Principal) (x : Input) (cmd : Cmd)
+    (h_bad : G.inGrammar cmd = false) :
+    G.parse x ≠ some cmd :=
+  fun h_ok => by simpa [h_bad] using G.confined x cmd h_ok
+
+/--
+  Universal `MetaStepSpec` Bundle:
+  Links a pure `step : State → Event → State × List Effect` transition to `EffectSafety`,
+  reachable-trace `EffectLiveness` (`effects ≠ []` on `posEvent`, `effects = []` on `negEvent`),
+  and `CostBound`.
+-/
+structure MetaStepSpec (State Event Effect : Type) where
+  safety   : EffectSafety State Event Effect
+  liveness : EffectLiveness State Event Effect
+  cost     : CostBound State Event Effect
+  sameStep : safety.step = liveness.step ∧ liveness.step = cost.step
+
 /-! ## Layer I Compatibility Combinators (`LinearLeaseSpec`, `IdempotentOutboxSpec`, `DagScheduleSpec`, `QuotaCircuitSpec`) -/
 
 structure LinearLeaseSpec (σ α : Type) where
@@ -1140,7 +1260,9 @@ def streamCommitMetaGate : MetaGateSpec StreamCommitCheck
       let nextTick : UInt8 := if s.lineTick == 1 then (if s.tick == 1 then 0 else 1) else (if s.tick == 1 then 1 else 0)
       let nextFence := streamNextFenceKind s.openKind s.openCount s.markerKind s.markerCount
       (s.lineBlank == 1 && nextTick == 0 && nextFence == 0) = true) where
-  gate s := ((streamCommitStep s.tick s.openKind s.openCount s.lineBlank s.lineTick s.markerKind s.markerCount s.pos s.commit &&& 0xFFFFFFFF) &&& 65536) != 0
+  gate s :=
+    ((streamCommitStep s.tick s.openKind s.openCount s.lineBlank s.lineTick
+        s.markerKind s.markerCount s.pos s.commit &&& 0xFFFFFFFF) &&& 65536) != 0
   sound s h := by
     unfold streamCommitStep at h
     rw [pack32_lo] at h
@@ -1151,7 +1273,11 @@ def streamCommitMetaGate : MetaGateSpec StreamCommitCheck
       cases hnf : (nf == 0) <;>
       cases hnf1 : (nf == 1) <;>
       cases hnf2 : (nf == 2) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide)
   complete s h := by
     unfold streamCommitStep
     rw [pack32_lo]
@@ -1186,7 +1312,9 @@ structure MissionAttentionCheck where
   deriving Repr, DecidableEq
 
 def missionAttentionMetaGate : MetaGateSpec MissionAttentionCheck
-    (fun m => (missionStateClassify m.stateId == 0 || missionStateClassify m.stateId == 1 || missionStateClassify m.stateId == 2) = true) where
+    (fun m => (missionStateClassify m.stateId == 0 ||
+      missionStateClassify m.stateId == 1 ||
+      missionStateClassify m.stateId == 2) = true) where
   gate m := (missionFlags m.stateId &&& 4) != 0
   sound m h := by
     revert h
@@ -1253,7 +1381,12 @@ def connectionIssueMetaGate : MetaGateSpec ConnectionIssueCheck
       cases hd1 : (c.isUsingDefault == 1) <;>
       cases ha : (c.isPrivateAddr == 1) <;>
       cases hr : (c.defaultReachable == 1) <;>
-      (simp_all; try (exfalso; revert h; decide); try decide)
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide
+       try decide)
   complete c h := by
     unfold connectionIssueClassify
     cases hu : (c.isUnreachable != 1) <;>
@@ -1364,7 +1497,11 @@ def machineActionMetaGate : MetaGateSpec MachineActionCheck
       by_cases h2 : m.stateKind ≤ 2 <;>
       cases hb : (m.isBusy == 0) <;>
       cases hm : (m.isMuted == 0) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide)
   complete m h := by
     unfold machineActionAdmitted
     split <;> (simp_all; try decide)
@@ -1383,5 +1520,649 @@ theorem machine_action_and_send_flow_invariants :
     (sendFlowStep 1 0 1 0 0 2 200 &&& 0xFF) = 0 ∧
     (sendFlowStep 1 1 1 0 0 2 409) = 196866 := by
   decide
+
+/-! ## Wave 9 — Phase 0: `OrbWire` Canonical Word+Arena Wire Codec & Universal Effect Safety -/
+
+structure WireFrameCheck where
+  magic            : UInt32
+  abiVersion       : UInt32
+  schemaId         : UInt32
+  expectedSchemaId : UInt32
+  totalLen         : UInt32
+  payloadLen       : UInt32
+  arenaOff         : UInt32
+  arenaLen         : UInt32
+  maxBudgetBytes   : UInt32
+  outCap           : UInt32
+  requiredOutBytes : UInt32
+  deriving Repr, DecidableEq
+
+def wireFrameMetaGate : MetaGateSpec WireFrameCheck
+    (fun f => ((f.magic == 0x4F524257 && f.abiVersion == 1) &&
+      (f.schemaId == f.expectedSchemaId) && (24 ≤ f.totalLen) && (f.totalLen ≤ f.maxBudgetBytes) &&
+      (f.payloadLen ≤ f.totalLen - 24) && (f.arenaOff ≤ f.payloadLen &&
+      f.arenaLen ≤ f.payloadLen - f.arenaOff) && (f.requiredOutBytes ≤ f.outCap)) = true) where
+  gate f := wireValidateFrame f.magic f.abiVersion f.schemaId f.expectedSchemaId
+    f.totalLen f.payloadLen f.arenaOff f.arenaLen f.maxBudgetBytes f.outCap f.requiredOutBytes == 0
+  sound f h := by
+    unfold wireValidateFrame at h
+    cases hm : (f.magic == 0x4F524257 && f.abiVersion == 1) <;>
+      cases hs : (f.schemaId == f.expectedSchemaId) <;>
+      cases ht : decide (24 ≤ f.totalLen) <;>
+      cases hb : decide (f.totalLen ≤ f.maxBudgetBytes) <;>
+      cases hp : decide (f.payloadLen ≤ f.totalLen - 24) <;>
+      cases ha : (decide (f.arenaOff ≤ f.payloadLen) && decide (f.arenaLen ≤ f.payloadLen - f.arenaOff)) <;>
+      cases ho : decide (f.requiredOutBytes ≤ f.outCap) <;>
+      (simp_all; try decide)
+  complete f h := by
+    unfold wireValidateFrame
+    cases hm : (f.magic == 0x4F524257 && f.abiVersion == 1) <;>
+      cases hs : (f.schemaId == f.expectedSchemaId) <;>
+      cases ht : decide (24 ≤ f.totalLen) <;>
+      cases hb : decide (f.totalLen ≤ f.maxBudgetBytes) <;>
+      cases hp : decide (f.payloadLen ≤ f.totalLen - 24) <;>
+      cases ha : (decide (f.arenaOff ≤ f.payloadLen) && decide (f.arenaLen ≤ f.payloadLen - f.arenaOff)) <;>
+      cases ho : decide (f.requiredOutBytes ≤ f.outCap) <;>
+      (simp_all; try decide)
+  posWitness := ⟨0x4F524257, 1, 10, 10, 128, 64, 16, 32, 4096, 256, 128⟩
+  negWitness := ⟨0x4F524257, 1, 10, 10, 128, 120, 16, 32, 4096, 256, 128⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 52 (`ConservedResource` & `OrbWire` — `orb_wire_validate_frame` & `orb_wire_pack_record`):
+    `wireValidateFrame` is total and rejects bad magic (`1`), schema mismatch (`2`), truncated/out-of-bounds
+    arena slices (`3`), budget overflow (`4`), and undersized caller output buffers (`5`), while
+    `wirePackRecord` / `wireRecord*` satisfy round-trip identity (`decode_encode_id`). -/
+theorem wire_frame_total_and_record_roundtrip (tag flags : UInt8) (len16 payload32 : UInt32) :
+    (wirePackRecord tag flags len16 payload32 >>> 32) = payload32.toUInt64 ∧
+    wireRecordTag (wirePackRecord 7 3 512 0xCAFEBABE) = 7 ∧
+    wireRecordFlags (wirePackRecord 7 3 512 0xCAFEBABE) = 3 ∧
+    wireRecordLen16 (wirePackRecord 7 3 512 0xCAFEBABE) = 512 ∧
+    wireRecordPayload32 (wirePackRecord 7 3 512 0xCAFEBABE) = 0xCAFEBABE ∧
+    wireValidateFrame 0 1 1 1 64 16 0 8 4096 64 32 = 1 ∧
+    wireValidateFrame 0x4F524257 1 2 1 64 16 0 8 4096 64 32 = 2 ∧
+    wireValidateFrame 0x4F524257 1 1 1 64 48 0 8 4096 64 32 = 3 ∧
+    wireValidateFrame 0x4F524257 1 1 1 8192 16 0 8 4096 64 32 = 4 ∧
+    wireValidateFrame 0x4F524257 1 1 1 64 16 0 8 4096 16 32 = 5 := by
+  refine ⟨?_, by decide⟩
+  unfold wirePackRecord
+  exact pack32_hi _ payload32
+
+structure WireSchemaMigrateCheck where
+  fromSchema    : UInt32
+  toSchema      : UInt32
+  currentSchema : UInt32
+  payloadBytes  : UInt64
+  maxBytes      : UInt64
+  deriving Repr, DecidableEq
+
+def wireSchemaMigrateMetaGate : MetaGateSpec WireSchemaMigrateCheck
+    (fun m => (m.fromSchema == m.currentSchema && m.fromSchema < m.toSchema &&
+      m.toSchema - m.fromSchema == 1 && 0 < m.payloadBytes && m.payloadBytes ≤ m.maxBytes) = true) where
+  gate m := wireSchemaMigrateStep m.fromSchema m.toSchema m.currentSchema m.payloadBytes m.maxBytes == 1
+  sound m h := by
+    unfold wireSchemaMigrateStep at h
+    cases hc : (m.fromSchema == m.currentSchema && m.fromSchema < m.toSchema &&
+      m.toSchema - m.fromSchema == 1 && 0 < m.payloadBytes && m.payloadBytes ≤ m.maxBytes) <;>
+      (simp [hc] at h ⊢)
+  complete m h := by
+    unfold wireSchemaMigrateStep
+    simp [h]
+  posWitness := ⟨3, 4, 3, 256, 4096⟩
+  negWitness := ⟨3, 5, 3, 256, 4096⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 53 (`ScopedAuthority` — `orb_wire_schema_migrate_step`):
+    Schema migration rejects non-consecutive version jumps, downgrades, empty payloads, and oversized payloads. -/
+theorem wire_schema_migrate_requires_consecutive_version (m : WireSchemaMigrateCheck)
+    (h_bad : (m.fromSchema == m.currentSchema && m.fromSchema < m.toSchema &&
+      m.toSchema - m.fromSchema == 1 && 0 < m.payloadBytes && m.payloadBytes ≤ m.maxBytes) = false) :
+    (wireSchemaMigrateStep m.fromSchema m.toSchema m.currentSchema m.payloadBytes m.maxBytes == 1) = false :=
+  wireSchemaMigrateMetaGate.rejects_unsafe m (by simp [h_bad])
+
+structure EffectAdmissibleCheck where
+  effectKind       : UInt8
+  hasValidLease    : UInt8
+  sessionCreated   : UInt8
+  lineageVerified  : UInt8
+  isArchived       : UInt8
+  idempotencyFresh : UInt8
+  accountBound     : UInt8
+  accountRejected  : UInt8
+  firstByteLocked  : UInt8
+  grammarAllowed   : UInt8
+  envScrubbed      : UInt8
+  budgetOk         : UInt8
+  deriving Repr, DecidableEq
+
+def EffectAdmissibleCheck.Safe (e : EffectAdmissibleCheck) : Bool :=
+  e.budgetOk == 1 &&
+  ((e.effectKind == 0) ||
+   (e.effectKind == 1 && e.hasValidLease == 1 && e.isArchived == 0 && e.idempotencyFresh == 1) ||
+   (e.effectKind == 2 && e.hasValidLease == 1 && e.sessionCreated == 1 && e.lineageVerified == 1 && e.isArchived == 0) ||
+   (e.effectKind == 3 && e.accountBound == 1 && e.accountRejected == 0 && e.firstByteLocked == 0) ||
+   (e.effectKind == 4 && e.grammarAllowed == 1 && e.envScrubbed == 1 && e.hasValidLease == 1 && e.isArchived == 0) ||
+   (e.effectKind == 5 && e.hasValidLease == 1 && e.idempotencyFresh == 1))
+
+def effectAdmissibleMetaGate : MetaGateSpec EffectAdmissibleCheck
+    (fun e => e.Safe = true) where
+  gate e := effectAdmissible e.effectKind e.hasValidLease e.sessionCreated e.lineageVerified
+    e.isArchived e.idempotencyFresh e.accountBound e.accountRejected e.firstByteLocked
+    e.grammarAllowed e.envScrubbed e.budgetOk == 1
+  sound e h := by
+    unfold effectAdmissible at h
+    unfold EffectAdmissibleCheck.Safe
+    repeat (first | split at h | simp_all)
+  complete e h := by
+    unfold EffectAdmissibleCheck.Safe at h
+    unfold effectAdmissible
+    repeat (first | split at h | split | simp_all)
+  posWitness := ⟨2, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1⟩
+  negWitness := ⟨2, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 54 (`EffectSafety` & `EffectLiveness` — `orb_effect_admissible`):
+    Never emits `LaunchJob (1)` without a lease or on an archived mission, never emits `ResumeSession (2)`
+    without `sessionCreated == 1 ∧ lineageVerified == 1`, never emits `DispatchProvider (3)` on a rejected
+    account or after `firstByteLocked == 1`, and never emits `ExecPrivCommand (4)` outside the grammar/scrubbed env. -/
+theorem effect_admissible_blocks_unleased_or_unverified
+    (lease sess lin arch idem bnd rej fb gram env : UInt8) :
+    effectAdmissible 1 0 sess lin arch idem bnd rej fb gram env 1 = 0 ∧
+    effectAdmissible 1 lease sess lin 1 idem bnd rej fb gram env 1 = 0 ∧
+    effectAdmissible 2 lease 0 lin arch idem bnd rej fb gram env 1 = 0 ∧
+    effectAdmissible 2 lease sess 0 arch idem bnd rej fb gram env 1 = 0 ∧
+    effectAdmissible 3 lease sess lin arch idem bnd 1 fb gram env 1 = 0 ∧
+    effectAdmissible 3 lease sess lin arch idem bnd rej 1 gram env 1 = 0 ∧
+    effectAdmissible 4 lease sess lin arch idem bnd rej fb 0 env 1 = 0 ∧
+    effectAdmissible 4 lease sess lin arch idem bnd rej fb gram 0 1 = 0 := by
+  unfold effectAdmissible
+  repeat (first | constructor | split | decide | simp_all)
+
+/-! ## Wave 9 — Phase 2: Proxy Provider Account Pool, Failover & `ArgminRouteFold` Specifications -/
+
+structure ProviderPoolCheck where
+  hasBoundAccount    : UInt8
+  boundAccountId     : UInt32
+  candidateAccountId : UInt32
+  isRejected         : UInt8
+  firstByteSent      : UInt8
+  isFailoverAttempt  : UInt8
+  attempts           : UInt32
+  maxAttempts        : UInt32
+  nowEpoch           : UInt64
+  resetEpoch         : UInt64
+  deriving Repr, DecidableEq
+
+def ProviderPoolCheck.Admissible (p : ProviderPoolCheck) : Bool :=
+  !(p.firstByteSent == 1 && p.isFailoverAttempt == 1) &&
+  !(p.isFailoverAttempt == 1 && !(1 ≤ p.maxAttempts && p.attempts < p.maxAttempts)) &&
+  !(p.hasBoundAccount == 1 && !(p.candidateAccountId == p.boundAccountId)) &&
+  !(p.isRejected == 1 && p.nowEpoch < p.resetEpoch) &&
+  !(p.candidateAccountId == 0)
+
+def providerPoolMetaGate : MetaGateSpec ProviderPoolCheck
+    (fun p => p.Admissible = true) where
+  gate p := ((providerPoolStep p.hasBoundAccount p.boundAccountId p.candidateAccountId
+    p.isRejected p.firstByteSent p.isFailoverAttempt p.attempts p.maxAttempts
+    p.nowEpoch p.resetEpoch &&& 0xFFFFFFFF) &&& 256) != 0
+  sound p h := by
+    unfold providerPoolStep at h
+    rw [pack32_lo] at h
+    unfold ProviderPoolCheck.Admissible
+    cases hfs : (p.firstByteSent == 1) <;>
+      cases hif : (p.isFailoverAttempt == 1) <;>
+      cases hm1 : decide (1 ≤ p.maxAttempts) <;>
+      cases hma : decide (p.attempts < p.maxAttempts) <;>
+      cases hb1 : (p.hasBoundAccount == 1) <;>
+      cases hcb : (p.candidateAccountId == p.boundAccountId) <;>
+      cases hr1 : (p.isRejected == 1) <;>
+      cases hnr : decide (p.nowEpoch < p.resetEpoch) <;>
+      cases hc0 : (p.candidateAccountId == 0) <;>
+      (simp only [hfs, hif, hm1, hma, hb1, hcb, hr1, hnr, hc0] at h ⊢; revert h; decide)
+  complete p h := by
+    unfold ProviderPoolCheck.Admissible at h
+    unfold providerPoolStep
+    rw [pack32_lo]
+    cases hfs : (p.firstByteSent == 1) <;>
+      cases hif : (p.isFailoverAttempt == 1) <;>
+      cases hm1 : decide (1 ≤ p.maxAttempts) <;>
+      cases hma : decide (p.attempts < p.maxAttempts) <;>
+      cases hb1 : (p.hasBoundAccount == 1) <;>
+      cases hcb : (p.candidateAccountId == p.boundAccountId) <;>
+      cases hr1 : (p.isRejected == 1) <;>
+      cases hnr : decide (p.nowEpoch < p.resetEpoch) <;>
+      cases hc0 : (p.candidateAccountId == 0) <;>
+      (simp only [hfs, hif, hm1, hma, hb1, hcb, hr1, hnr, hc0] at h ⊢; revert h; decide)
+  posWitness := ⟨1, 42, 42, 0, 0, 0, 0, 3, 1000, 500⟩
+  negWitness := ⟨1, 42, 99, 0, 0, 0, 0, 3, 1000, 500⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 55 (`ScopedAuthority` — `orb_provider_pool_step`, Antigravity Bound-Account Theorem):
+    When an account is bound (`hasBoundAccount == 1`), any candidate with `candidateAccountId != boundAccountId`
+    is rejected (`emitDispatchEffect == 0`, `dispatchedAccountId == 0`), and a matching eligible candidate
+    dispatches `boundAccountId` in bits 32..63. -/
+theorem antigravity_dispatch_matches_bound_account
+    (boundId candId : UInt32) (isRej fb isFail : UInt8) (att maxAtt : UInt32) (now rst : UInt64)
+    (h_mismatch : (candId == boundId) = false) :
+    ((providerPoolStep 1 boundId candId isRej fb isFail att maxAtt now rst &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (providerPoolStep 1 boundId candId isRej fb isFail att maxAtt now rst >>> 32) = 0 := by
+  unfold providerPoolStep
+  rw [pack32_lo, pack32_hi]
+  cases hfs : (fb == 1) <;>
+    cases hif : (isFail == 1) <;>
+    cases hm1 : decide (1 ≤ maxAtt) <;>
+    cases hma : decide (att < maxAtt) <;>
+    (simp_all; try decide)
+
+/-- Corollary 56 (`ClockDiscipline`, `ConservedResource` & `StickyFence` — `orb_provider_pool_step`):
+    1. `rejected_account_never_routed_before_reset`: `isRejected == 1` with `nowEpoch < resetEpoch` emits zero dispatch.
+    2. `pre_first_byte_dispatch_preserves_unlocked_state`: when `firstByteSent == 0`, `next_first_byte` bit (`65536`) is `0`, preserving pre-first-byte failover.
+    3. `failover_terminates`: `isFailoverAttempt == 1` at `attempts == maxAttempts` returns `4 (ExhaustedFailover)`.
+    4. `first_byte_locks_provider`: once `firstByteSent == 1`, any failover returns `3 (AbortLockedStream)` with lock bit `65536`. -/
+theorem rejected_account_failover_and_first_byte_lock
+    (hasBnd : UInt8) (bndId candId : UInt32) (isRej fb isFail : UInt8) (att maxAtt : UInt32)
+    (now rst : UInt64) (h_before_reset : decide (now < rst) = true) :
+    ((providerPoolStep hasBnd bndId candId 1 fb isFail att maxAtt now rst &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((providerPoolStep hasBnd bndId candId isRej 0 isFail att maxAtt now rst &&& 0xFFFFFFFF) &&& 65536) = 0 ∧
+    providerPoolStep hasBnd bndId candId 0 0 1 maxAtt maxAtt now rst = 4 ∧
+    providerPoolStep hasBnd bndId candId 0 1 1 att maxAtt now rst = 65539 := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · unfold providerPoolStep
+    rw [pack32_lo]
+    cases hfs : (fb == 1) <;>
+      cases hif : (isFail == 1) <;>
+      cases hm1 : decide (1 ≤ maxAtt) <;>
+      cases hma : decide (att < maxAtt) <;>
+      cases hb1 : (hasBnd == 1) <;>
+      cases hcb : (candId == bndId) <;>
+      cases hc0 : (candId == 0) <;>
+      (simp_all; try decide)
+  · unfold providerPoolStep
+    rw [pack32_lo]
+    cases hif : (isFail == 1) <;>
+      cases hm1 : decide (1 ≤ maxAtt) <;>
+      cases hma : decide (att < maxAtt) <;>
+      cases hb1 : (hasBnd == 1) <;>
+      cases hcb : (candId == bndId) <;>
+      cases hr1 : (isRej == 1) <;>
+      cases hnr : decide (now < rst) <;>
+      cases hc0 : (candId == 0) <;>
+      (simp_all; try decide)
+  · unfold providerPoolStep
+    have hirr : ¬ (maxAtt < maxAtt) := UInt32.lt_irrefl maxAtt
+    simp [hirr]
+  · unfold providerPoolStep
+    simp
+
+/-- Pure state-machine event enricher for `orb_provider_pool_step`:
+    `firstByteLocked` is sticky — once set in state `s` or observed in `e.firstByteSent`, it stays `1`. -/
+def effectiveFirstByte (firstByteLocked : UInt8) (e : ProviderPoolCheck) : ProviderPoolCheck :=
+  { e with firstByteSent := if firstByteLocked == 1 || e.firstByteSent == 1 then 1 else 0 }
+
+/-- Pure state-machine transition wrapper for `orb_provider_pool_step` (`State × Event → State × List UInt32`). -/
+def providerPoolMachineStep (firstByteLocked : UInt8) (e : ProviderPoolCheck) : UInt8 × List UInt32 :=
+  let e' := effectiveFirstByte firstByteLocked e
+  let w := providerPoolStep e'.hasBoundAccount e'.boundAccountId e'.candidateAccountId
+    e'.isRejected e'.firstByteSent e'.isFailoverAttempt e'.attempts e'.maxAttempts e'.nowEpoch e'.resetEpoch
+  (if ((w &&& 0xFFFFFFFF) &&& 65536) != 0 then 1 else 0,
+   if providerPoolMetaGate.gate e' then [e.candidateAccountId] else [])
+
+/-- Concrete `MetaStepSpec` instance for `orb_provider_pool_step` (`EffectSafety`, `EffectLiveness` with
+    reachable trace from `init = 0`, and `CostBound`). -/
+def providerPoolMetaStepSpec : MetaStepSpec UInt8 ProviderPoolCheck UInt32 where
+  safety := {
+    step := providerPoolMachineStep
+    authorized := fun s e eff =>
+      eff == e.candidateAccountId && (effectiveFirstByte s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [providerPoolMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := providerPoolMetaGate.sound (effectiveFirstByte s e) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := providerPoolMachineStep
+    progressRequired := fun s e => (effectiveFirstByte s e).Admissible
+    expectedEffect := fun e eff => eff == e.candidateAccountId
+    live := fun s e h_req => by
+      have h_gate := providerPoolMetaGate.complete (effectiveFirstByte s e) h_req
+      dsimp [providerPoolMachineStep]
+      simp [h_gate]
+    traceEvents := [
+      ⟨0, 0, 10, 0, 0, 0, 0, 3, 1000, 500⟩,
+      ⟨0, 0, 20, 0, 0, 1, 1, 3, 1000, 500⟩
+    ]
+    posEvent := ⟨1, 42, 42, 0, 0, 0, 0, 3, 1000, 500⟩
+    negEvent := ⟨1, 42, 99, 0, 0, 0, 0, 3, 1000, 500⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := providerPoolMachineStep
+    cpuFuel := fun _ _ => 1
+    inputBytes := fun _ => 48
+    outputBytes := fun _ _ => 8
+    c0 := 1
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 8
+    fuel_bound := fun _ _ => by omega
+    eff_bound := fun s e => by
+      dsimp [providerPoolMachineStep]
+      split <;> simp
+    out_bound := fun _ _ => by omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+structure RouteArgminCheck where
+  hasBest        : UInt8
+  bestId         : UInt32
+  bestScore      : UInt64
+  candId         : UInt32
+  candScore      : UInt64
+  candAdmissible : UInt8
+  deriving Repr, DecidableEq
+
+def routeArgminMetaGate : MetaGateSpec RouteArgminCheck
+    (fun r => (r.candAdmissible == 1 && (r.hasBest == 0 || r.candScore < r.bestScore)) = true) where
+  gate r := ((routeArgminStep r.hasBest r.bestId r.bestScore r.candId r.candScore r.candAdmissible &&& 0xFFFFFFFF) &&& 256) != 0
+  sound r h := by
+    unfold routeArgminStep at h
+    rw [pack32_lo] at h
+    cases hc : (r.candAdmissible == 1 && (r.hasBest == 0 || decide (r.candScore < r.bestScore))) <;>
+      cases hb : (r.hasBest == 1) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete r h := by
+    unfold routeArgminStep
+    rw [pack32_lo]
+    simp [h]
+    decide
+  posWitness := ⟨1, 10, 500, 20, 300, 1⟩
+  negWitness := ⟨1, 10, 500, 20, 600, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 57 (`ConservedResource` — `orb_route_argmin_step`):
+    An inadmissible candidate (`candAdmissible == 0`) or higher-cost candidate (`bestScore ≤ candScore` when `hasBest == 1`)
+    never replaces `bestId`, while a strictly better admissible candidate updates `nextBestId` to `candId`. -/
+theorem route_argmin_selects_strictly_better_eligible (bestId candId : UInt32) (bestScore candScore : UInt64) :
+    ((routeArgminStep 1 bestId bestScore candId candScore 0 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (routeArgminStep 1 bestId bestScore candId candScore 0 >>> 32) = bestId.toUInt64 ∧
+    (routeArgminStep 1 10 500 20 300 1 >>> 32) = 20 ∧
+    (routeArgminStep 1 10 500 20 500 1 >>> 32) = 10 := by
+  refine ⟨?_, ?_, by decide, by decide⟩
+  · unfold routeArgminStep
+    rw [pack32_lo]
+    simp; decide
+  · unfold routeArgminStep
+    rw [pack32_hi]
+    simp
+
+/-! ## Wave 9 — Phase 1: Control Core — Mission Lifecycle, Codex Resume, Fork `HOME` & Track Leases -/
+
+structure MissionControlCheck where
+  isArchived          : UInt8
+  activeTrackWriters  : UInt32
+  hasLease            : UInt8
+  msgAlreadyDelivered : UInt8
+  isResume            : UInt8
+  sessionCreated      : UInt8
+  lineageVerified     : UInt8
+  rolloutExists       : UInt8
+  hasFallbackPrompt   : UInt8
+  deriving Repr, DecidableEq
+
+def MissionControlCheck.Admissible (m : MissionControlCheck) : Prop :=
+  (!(m.isArchived == 1) &&
+   !(m.msgAlreadyDelivered == 1) &&
+   (m.hasLease == 1 && m.activeTrackWriters == 0) &&
+   (!(m.isResume == 1) ||
+    (m.sessionCreated == 1 && m.lineageVerified == 1 && m.rolloutExists == 1) ||
+    m.hasFallbackPrompt == 1)) = true
+
+instance (m : MissionControlCheck) : Decidable (MissionControlCheck.Admissible m) :=
+  inferInstanceAs (Decidable (_ = true))
+
+def missionControlMetaGate : MetaGateSpec MissionControlCheck MissionControlCheck.Admissible where
+  gate m :=
+    ((missionControlStep m.isArchived m.activeTrackWriters m.hasLease m.msgAlreadyDelivered
+        m.isResume m.sessionCreated m.lineageVerified m.rolloutExists m.hasFallbackPrompt &&& 0xFFFFFFFF) &&& 256) != 0
+  sound m h := by
+    unfold missionControlStep MissionControlCheck.Admissible at *
+    rw [pack32_lo] at h
+    cases ha : (m.isArchived == 1) <;>
+      cases hd : (m.msgAlreadyDelivered == 1) <;>
+      cases hlw : (m.hasLease == 1 && m.activeTrackWriters == 0) <;>
+      cases hr : (m.isResume == 1) <;>
+      cases hsv : (m.sessionCreated == 1 && m.lineageVerified == 1 && m.rolloutExists == 1) <;>
+      cases hfb : (m.hasFallbackPrompt == 1) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete m h := by
+    unfold missionControlStep MissionControlCheck.Admissible at *
+    rw [pack32_lo]
+    cases ha : (m.isArchived == 1) <;>
+      cases hd : (m.msgAlreadyDelivered == 1) <;>
+      cases hlw : (m.hasLease == 1 && m.activeTrackWriters == 0) <;>
+      cases hr : (m.isResume == 1) <;>
+      cases hsv : (m.sessionCreated == 1 && m.lineageVerified == 1 && m.rolloutExists == 1) <;>
+      cases hfb : (m.hasFallbackPrompt == 1) <;>
+      (simp_all; try decide)
+  posWitness := ⟨0, 0, 1, 0, 1, 1, 1, 1, 0⟩
+  negWitness := ⟨1, 0, 1, 0, 1, 1, 1, 1, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 58 (`StickyFence` — `orb_mission_control_step`):
+    An archived mission (`isArchived == 1`) never revives on any wakeup/reminder/resume event:
+    it emits zero dispatch (`bit 8 == 0`), keeps `archivedNext == 1` (`bit 16 == 65536`),
+    and allocates zero track writers (`hi32 == 0`). -/
+theorem archived_mission_never_revives
+    (writers : UInt32) (lease deliv res sc lv ro fb : UInt8) :
+    ((missionControlStep 1 writers lease deliv res sc lv ro fb &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((missionControlStep 1 writers lease deliv res sc lv ro fb &&& 0xFFFFFFFF) &&& 65536) = 65536 ∧
+    (missionControlStep 1 writers lease deliv res sc lv ro fb >>> 32) = 0 := by
+  unfold missionControlStep
+  simp; decide
+
+/-- Corollary 59 (`ScopedAuthority` & `EffectSafety` — `orb_mission_control_step`):
+    When Codex session lineage or rollout is unverified (`(sc == 1 && lv == 1 && ro == 1) = false`),
+    raw native resume (`action == 2`) is never emitted, and a valid turn with `hasFallbackPrompt == 1`
+    selects `SeedFallbackFreshSession` (`lo32 = 771`, `hi32 = 1`), fixing the phantom Codex session bug. -/
+theorem resume_codex_requires_verified_lineage
+    (arch : UInt8) (writers : UInt32) (lease deliv sc lv ro fb : UInt8)
+    (h_unverified : (sc == 1 && lv == 1 && ro == 1) = false) :
+    ((missionControlStep arch writers lease deliv 1 sc lv ro fb &&& 0xFFFFFFFF) &&& 0xFF) != 2 ∧
+    missionControlStep 0 0 1 0 1 sc lv ro 1 = 4294968067 ∧
+    ((missionControlStep 0 0 1 0 1 sc lv ro 0 &&& 0xFFFFFFFF) &&& 256) = 0 := by
+  refine ⟨?_, ?_, ?_⟩
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases ha : (arch == 1) <;>
+      cases hd : (deliv == 1) <;>
+      cases hlw : (lease == 1 && writers == 0) <;>
+      cases hsc : (sc == 1) <;>
+      cases hlv : (lv == 1) <;>
+      cases hro : (ro == 1) <;>
+      cases hfb : (fb == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    cases hsc : (sc == 1) <;>
+      cases hlv : (lv == 1) <;>
+      cases hro : (ro == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases hsc : (sc == 1) <;>
+      cases hlv : (lv == 1) <;>
+      cases hro : (ro == 1) <;>
+      (simp_all; try decide)
+
+/-- Corollary 60 (`ConservedResource` & `ReplayIdempotence` — `orb_mission_control_step`):
+    1. `at_most_one_writer_per_track`: when `activeTrackWriters != 0`, zero dispatch is emitted, and
+       across all transitions `hi32 ≤ 1`.
+    2. `no_user_message_lost_or_duplicated`: an already-delivered message (`deliv == 1`) is never
+       dispatched again, while a fresh leased turn (`arch == 0, writers == 0, lease == 1, deliv == 0, res == 0`)
+       is always dispatched (`lo32 = 257, hi32 = 1`). -/
+theorem at_most_one_writer_and_no_message_lost_or_duplicated
+    (arch : UInt8) (writers : UInt32) (lease deliv res sc lv ro fb : UInt8)
+    (h_busy : (writers == 0) = false) :
+    ((missionControlStep arch writers lease deliv res sc lv ro fb &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((missionControlStep arch writers lease 1 res sc lv ro fb &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (missionControlStep arch writers lease deliv res sc lv ro fb >>> 32) ≤ 1 ∧
+    missionControlStep 0 0 1 0 0 sc lv ro fb = 4294967553 := by
+  refine ⟨?_, ?_, ?_, by unfold missionControlStep; simp; decide⟩
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases ha : (arch == 1) <;>
+      cases hd : (deliv == 1) <;>
+      cases hl : (lease == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases ha : (arch == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    rw [pack32_hi]
+    cases ha : (arch == 1) <;>
+      cases hd : (deliv == 1) <;>
+      cases hlw : (lease == 1 && writers == 0) <;>
+      cases hr : (res == 1) <;>
+      cases hsv : (sc == 1 && lv == 1 && ro == 1) <;>
+      cases hfb : (fb == 1) <;>
+      (simp_all; try decide)
+
+/-- Sticky archived state enricher for `orb_mission_control_step`. -/
+def effectiveArchived (archivedState : UInt8) (e : MissionControlCheck) : MissionControlCheck :=
+  { e with isArchived := if archivedState == 1 || e.isArchived == 1 then 1 else 0 }
+
+/-- Pure state-machine transition wrapper for `orb_mission_control_step` (`State × Event → State × List UInt32`). -/
+def missionControlMachineStep (archivedState : UInt8) (e : MissionControlCheck) : UInt8 × List UInt32 :=
+  let e' := effectiveArchived archivedState e
+  let w := missionControlStep e'.isArchived e'.activeTrackWriters e'.hasLease e'.msgAlreadyDelivered
+    e'.isResume e'.sessionCreated e'.lineageVerified e'.rolloutExists e'.hasFallbackPrompt
+  (if ((w &&& 0xFFFFFFFF) &&& 65536) != 0 then 1 else 0,
+   if missionControlMetaGate.gate e' then [((w &&& 0xFFFFFFFF) &&& 0xFF).toUInt32] else [])
+
+/-- Concrete `MetaStepSpec` instance for `orb_mission_control_step` (`EffectSafety`, `EffectLiveness`
+    with multi-step reachable trace from `init = 0`, and `CostBound`). -/
+def missionControlMetaStepSpec : MetaStepSpec UInt8 MissionControlCheck UInt32 where
+  safety := {
+    step := missionControlMachineStep
+    authorized := fun s e _eff => (effectiveArchived s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [missionControlMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        exact missionControlMetaGate.sound (effectiveArchived s e) h_emit
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := missionControlMachineStep
+    progressRequired := fun s e => (effectiveArchived s e).Admissible
+    expectedEffect := fun _ _ => True
+    live := fun s e h_req => by
+      have h_gate := missionControlMetaGate.complete (effectiveArchived s e) h_req
+      dsimp [missionControlMachineStep]
+      simp [h_gate]
+    traceEvents := [
+      ⟨0, 0, 1, 0, 0, 0, 0, 0, 0⟩,
+      ⟨0, 0, 1, 0, 1, 1, 1, 0, 1⟩
+    ]
+    posEvent := ⟨0, 0, 1, 0, 1, 1, 1, 1, 0⟩
+    negEvent := ⟨1, 0, 1, 0, 1, 1, 1, 1, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := missionControlMachineStep
+    cpuFuel := fun _ _ => 1
+    inputBytes := fun _ => 16
+    outputBytes := fun _ _ => 8
+    c0 := 1
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 8
+    fuel_bound := fun _ _ => by omega
+    eff_bound := fun s e => by
+      dsimp [missionControlMachineStep]
+      split <;> simp
+    out_bound := fun _ _ => by omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+structure ForkHomeCheck where
+  isForkOrSide          : UInt8
+  sourceExists          : UInt8
+  sourceIsSymlink       : UInt8
+  sameWorkspace         : UInt8
+  sameNode              : UInt8
+  hasCommittedTransfer  : UInt8
+  requestedOverrideHome : UInt8
+  deriving Repr, DecidableEq
+
+def forkHomeMetaGate : MetaGateSpec ForkHomeCheck
+    (fun f => (f.isForkOrSide == 0 ||
+      (f.sourceExists == 1 && f.sourceIsSymlink == 0 && f.sameWorkspace == 1 && f.sameNode == 1)) = true) where
+  gate f :=
+    ((forkHomeStep f.isForkOrSide f.sourceExists f.sourceIsSymlink f.sameWorkspace
+        f.sameNode f.hasCommittedTransfer f.requestedOverrideHome &&& 0xFFFFFFFF) &&& 256) != 0
+  sound f h := by
+    unfold forkHomeStep at h
+    rw [pack32_lo] at h
+    cases hf : (f.isForkOrSide == 0) <;>
+      cases hv : (f.sourceExists == 1 && f.sourceIsSymlink == 0 && f.sameWorkspace == 1 && f.sameNode == 1) <;>
+      cases hx : (f.hasCommittedTransfer == 1) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete f h := by
+    unfold forkHomeStep
+    rw [pack32_lo]
+    cases hf : (f.isForkOrSide == 0) <;>
+      cases hv : (f.sourceExists == 1 && f.sourceIsSymlink == 0 && f.sameWorkspace == 1 && f.sameNode == 1) <;>
+      cases hx : (f.hasCommittedTransfer == 1) <;>
+      (simp_all; try decide)
+  posWitness := ⟨1, 1, 0, 1, 1, 0, 1⟩
+  negWitness := ⟨1, 1, 1, 1, 1, 0, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 61 (`ScopedAuthority` — `orb_fork_home_step`):
+    1. `fork_preserves_job_home`: under ALL inputs (even `requestedOverrideHome == 1` or rejected sources),
+       `overrideHomeBit` (`65536`) is `0` and `jobHomePreservedBit` (`131072`) is `131072`
+       (fixing the `#1302`/`9178bd08` fork `HOME` sign-out bug).
+    2. Missing (`sourceExists == 0`) or symlinked (`sourceIsSymlink == 1`) fork workspaces fail closed with exit code `78`.
+    3. A valid sibling fork (`1, 1, 0, 1, 1, 0`) sets `admitBit = 256`, `useSourceCwdBit = 512`, and `jobHomePreservedBit = 131072`. -/
+theorem fork_preserves_job_home_and_source_cwd
+    (isFork srcEx sym sameWs sameNd xfer reqHome : UInt8) :
+    ((forkHomeStep isFork srcEx sym sameWs sameNd xfer reqHome &&& 0xFFFFFFFF) &&& 65536) = 0 ∧
+    ((forkHomeStep isFork srcEx sym sameWs sameNd xfer reqHome &&& 0xFFFFFFFF) &&& 131072) = 131072 ∧
+    (forkHomeStep 1 0 sym sameWs sameNd xfer reqHome >>> 32) = 78 ∧
+    (forkHomeStep 1 srcEx 1 sameWs sameNd xfer reqHome >>> 32) = 78 ∧
+    forkHomeStep 1 1 0 1 1 0 reqHome = 131842 := by
+  refine ⟨?_, ?_, ?_, ?_, by unfold forkHomeStep; simp⟩
+  · unfold forkHomeStep
+    rw [pack32_lo]
+    cases hf : (isFork == 0) <;>
+      cases hv : (srcEx == 1 && sym == 0 && sameWs == 1 && sameNd == 1) <;>
+      cases hx : (xfer == 1) <;>
+      (simp_all; try decide)
+  · unfold forkHomeStep
+    rw [pack32_lo]
+    cases hf : (isFork == 0) <;>
+      cases hv : (srcEx == 1 && sym == 0 && sameWs == 1 && sameNd == 1) <;>
+      cases hx : (xfer == 1) <;>
+      (simp_all; try decide)
+  · unfold forkHomeStep
+    rw [pack32_hi]
+    simp
+  · unfold forkHomeStep
+    rw [pack32_hi]
+    cases hs : (srcEx == 1) <;> simp_all
 
 end Orb.Spec

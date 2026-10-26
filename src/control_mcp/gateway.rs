@@ -540,7 +540,7 @@ async fn authorize(
     // A native child may leave its parent's machine: `remote_node_id` set to
     // "auto" (fleet scheduler) or to another registered node. It then starts
     // in that node's default workspace, never in the parent's.
-    let elsewhere = launches_child(&tool.definition.name)
+    let mut elsewhere = launches_child(&tool.definition.name)
         && args.get("cloud").is_none_or(Value::is_null)
         && match args.get("remote_node_id").and_then(Value::as_str) {
             Some(r) if r.eq_ignore_ascii_case("auto") => true,
@@ -554,11 +554,31 @@ async fn authorize(
             None => false,
         };
     if let Some(raw) = args.get("workspace_id") {
-        if elsewhere || raw.as_str() != Some(owner.workspace_id.to_string().as_str()) {
+        let own_workspace = raw.as_str() == Some(owner.workspace_id.to_string().as_str());
+        // Acceptance pins a native child to the parent's workspace *and* the
+        // parent's node, and dispatch re-runs this check on those stored
+        // arguments. The parent's own node is not "elsewhere".
+        let parent_node = if elsewhere && own_workspace {
+            crate::api::control::remote_grok::placement(&state.config.working_dir, &store, own)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.node_id)
+        } else {
+            None
+        };
+        let requested_node = args.get("remote_node_id").and_then(Value::as_str);
+        if !workspace_in_scope(
+            own_workspace,
+            elsewhere,
+            requested_node,
+            parent_node.as_deref(),
+        ) {
             return Err(ToolError::denied(
                 "Workspace is outside this session's scope",
             ));
         }
+        elsewhere = false;
     }
     if tool.definition.name == "start_workspace_job"
         || (launches_child(&tool.definition.name)
@@ -642,6 +662,18 @@ fn cloud_launch_field_message(field: &str) -> String {
 
 /// Tools that create a child mission and therefore get the same placement,
 /// project and lineage treatment as `start_mission`.
+/// A pinned `workspace_id` is the caller's own, and the child either stays
+/// on the parent's machine or targets the parent's own node by id.
+fn workspace_in_scope(
+    own_workspace: bool,
+    elsewhere: bool,
+    requested_node: Option<&str>,
+    parent_node: Option<&str>,
+) -> bool {
+    own_workspace
+        && (!elsewhere || requested_node.is_some_and(|r| parent_node == Some(r) && r != "unknown"))
+}
+
 fn launches_child(name: &str) -> bool {
     matches!(name, "start_mission" | "consult_model")
 }
@@ -1259,6 +1291,37 @@ mod tests {
     #[test]
     fn launch_rejections_name_the_exact_fix() {
         assert!(launches_child("start_mission") && launches_child("consult_model"));
+    }
+
+    #[test]
+    fn dispatch_recheck_keeps_parent_node_and_workspace_in_scope() {
+        // Acceptance stored workspace_id=<own> + remote_node_id=<parent node>;
+        // dispatch must accept those same arguments (consult_model quorum on a
+        // remotely placed mission was rejected here).
+        assert!(workspace_in_scope(true, true, Some("ashur"), Some("ashur")));
+        assert!(workspace_in_scope(true, false, None, None));
+        // Another node, the fleet scheduler, or another workspace stay denied.
+        assert!(!workspace_in_scope(
+            true,
+            true,
+            Some("babylon"),
+            Some("ashur")
+        ));
+        assert!(!workspace_in_scope(true, true, Some("auto"), Some("ashur")));
+        assert!(!workspace_in_scope(true, true, Some("ashur"), None));
+        assert!(!workspace_in_scope(
+            true,
+            true,
+            Some("unknown"),
+            Some("unknown")
+        ));
+        assert!(!workspace_in_scope(false, false, None, None));
+        assert!(!workspace_in_scope(
+            false,
+            true,
+            Some("ashur"),
+            Some("ashur")
+        ));
         assert!(!launches_child("send_message_to_mission"));
         let mismatch = project_mismatch_message("other", Some("verity"));
         assert!(

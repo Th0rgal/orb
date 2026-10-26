@@ -39,7 +39,8 @@ export async function refreshNodeAntigravityModels(machine: string) {
 }
 export const harnessChoices = (machine = "core"): HarnessChoice[] => {
   const models = machine === "local" ? (localInstalled().find(row => row.id === "antigravity")?.models ?? []) : (nodeAntigravityModels()[`${connectionVersion()}:${machine}`] ?? []);
-  return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed));
+  const claude = machine === "local" ? (localInstalled().find(row => row.id === "claudecode")?.models ?? []) : [];
+  return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed), claude);
 };
 export const [harnessPick, setHarnessPick] = jsonSignal<HarnessPick | null>(PICK_KEY, null);
 /** Preserve an explicit selection; launch validation reports unavailable models.
