@@ -4150,3 +4150,5 @@ select.orb-select-native:disabled { cursor: default; }
   .settings-page > .s-inner .settings-subtitle { padding-right: 0 !important; }
 }
 .settings-page > .s-inner:has(.usage-page) .settings-subtitle { padding-right: 260px; }
+/* Models tabs replace the routing panel's own sub-tabs. */
+.settings-page-content .routing-tabs { display: none; }
