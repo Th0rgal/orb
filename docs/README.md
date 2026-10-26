@@ -41,6 +41,8 @@
 - **[Managed Fleet Harnesses](FLEET_HARNESSES.md)** — Atomic `/opt/sandboxed-tools/<harness>/<version>/` installations and daily fleet reconciliation.
 - **[Agent Software Inventory & Updates](AGENT_SOFTWARE.md)** — Inspecting and updating host CLI versions from Orb's **Machines** page (`GET /api/software`).
 - **[Remote Runner Nodes & Spark Offload](REMOTE_NODES.md)** — `sandboxed-node` lease architecture, `remote_launch` capability matrix, and Lean 4 build offload.
+- **[Lean-Mesh (`wg-leanmesh0`)](LEAN_MESH.md)** — Formally verified WireGuard + `nftables` zero-trust mesh (`10.88.0.0/16`) replacing Tailscale in both Orb-integrated and standalone CLI modes.
+- **[Biometric JIT Privilege Broker, Deploy Gate & Bunker Mode](PRIVILEGE_BROKER_AND_BUNKER.md)** — Touch ID P-256 `always_signed` privilege grants (`orb-privd` / `orb-sudo`), production deploy gate, 4-state Bunker Mode, and the 180s `dgx-spark` Dead-Man's Switch.
 - **[Workspaces](WORKSPACES.md)** — Host vs `systemd-nspawn` container workspaces, Library templates, and stdio MCP allowlists.
 - **[Storage Lifecycle Policy](STORAGE_LIFECYCLE.md)** — Dry-run-by-default storage inventory and retention rules.
 

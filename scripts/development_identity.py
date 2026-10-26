@@ -74,7 +74,9 @@ def bundle_digest(bundle):
 
 
 def validate_bundle(bundle):
-    if set(bundle) != {"secrets", "known_hosts", "ssh_hosts", "library_revision", "skill"}:
+    if not {"secrets", "known_hosts", "ssh_hosts", "library_revision", "skill"} <= set(bundle) <= {
+        "secrets", "known_hosts", "ssh_hosts", "library_revision", "skill", "host_keys"
+    }:
         raise ValueError("unexpected bundle fields")
     secrets = bundle["secrets"]
     has_paloma = "PALOMA_SSH_PRIVATE_KEY" in secrets or "PALOMA_SSH_PUBLIC_KEY" in secrets
@@ -87,16 +89,47 @@ def validate_bundle(bundle):
     for public in pub_keys:
         if "PRIVATE KEY" in secrets[public] or not secrets[public].startswith("ssh-ed25519 "):
             raise ValueError("expected an Ed25519 public key")
+    host_keys = bundle.get("host_keys") or {}
+    if not isinstance(host_keys, dict):
+        raise ValueError("invalid host_keys map")
+    referenced_host_keys = set()
     aliases = set()
+    allowed_host_fields = {"alias", "hostname", "user", "proxy_jump", "identity_key", "public_key", "fingerprint"}
     for host in bundle["ssh_hosts"]:
         # `proxy_jump` names an earlier host, e.g. a tailnet-only Mac behind agent-core.
-        if not {"alias", "hostname", "user"} <= set(host) <= {"alias", "hostname", "user", "proxy_jump"}:
+        if not {"alias", "hostname", "user"} <= set(host) <= allowed_host_fields:
             raise ValueError("invalid SSH host")
-        if any(not v or any(c.isspace() for c in v) for v in host.values()):
+        if any(not isinstance(v, str) or not v or any(c.isspace() for c in v) for v in host.values()):
             raise ValueError("invalid SSH host value")
+        if not all(c.isalnum() or c in "-_." for c in host["alias"]):
+            raise ValueError("invalid SSH host alias")
         if "proxy_jump" in host and host["proxy_jump"] not in aliases:
             raise ValueError("SSH proxy_jump must name an earlier host")
+        if ("identity_key" in host) != ("public_key" in host):
+            raise ValueError("SSH host must specify both identity_key and public_key")
+        if "identity_key" in host:
+            priv_k, pub_k = host["identity_key"], host["public_key"]
+            if priv_k not in host_keys or pub_k not in host_keys:
+                raise ValueError("SSH host key missing from host_keys")
+            if "PRIVATE KEY" in host_keys[pub_k] or not host_keys[pub_k].startswith("ssh-ed25519 "):
+                raise ValueError("expected an Ed25519 host public key")
+            referenced_host_keys.update((priv_k, pub_k))
+        elif not has_paloma:
+            raise ValueError("SSH host requires PALOMA_SSH_PRIVATE_KEY or per-host identity_key")
         aliases.add(host["alias"])
+    if set(host_keys) != referenced_host_keys or any(not isinstance(v, str) or not v.strip() for v in host_keys.values()):
+        raise ValueError("unexpected or empty host_keys entries")
+
+
+def coding_only_bundle(bundle):
+    """Strip fleet SSH keys for worker nodes and containers that only need GitHub + GPG."""
+    return {
+        "secrets": {k: bundle["secrets"][k] for k in BASE_FIELDS},
+        "known_hosts": bundle["known_hosts"],
+        "ssh_hosts": [],
+        "library_revision": bundle["library_revision"],
+        "skill": bundle["skill"],
+    }
 
 
 def github_login(token):
@@ -321,6 +354,7 @@ def prepare_generation(root, bundle):
     stage = root / ("g-" + uuid.uuid4().hex[:12])
     stage.mkdir(mode=0o700)
     s = bundle["secrets"]
+    host_keys = bundle.get("host_keys") or {}
     try:
         validate_signing_payload(s["GIT_SIGNING_PRIVATE_KEY"])
         write(stage / "github-token", s["GITHUB_TOKEN"])
@@ -338,13 +372,27 @@ def prepare_generation(root, bundle):
             fp = run(["ssh-keygen", "-lf", str(stage / "ssh" / (name + ".pub"))])
             if (SSH_FINGERPRINT if name == "github" else ADMIN_FINGERPRINT) not in fp:
                 raise RuntimeError("unexpected SSH fingerprint")
+        for host in bundle["ssh_hosts"]:
+            if "identity_key" in host:
+                h_name = "host-" + host["alias"]
+                h_priv = host_keys[host["identity_key"]].rstrip() + "\n"
+                h_pub_expected = host_keys[host["public_key"]].split()[:2]
+                write(stage / "ssh" / h_name, h_priv)
+                h_public = run(["ssh-keygen", "-y", "-P", "", "-f", str(stage / "ssh" / h_name)])
+                if h_public.split()[:2] != h_pub_expected:
+                    raise RuntimeError("per-host SSH private/public key mismatch")
+                write(stage / "ssh" / (h_name + ".pub"), h_public)
+                if "fingerprint" in host:
+                    h_fp = run(["ssh-keygen", "-lf", str(stage / "ssh" / (h_name + ".pub"))])
+                    if host["fingerprint"] not in h_fp:
+                        raise RuntimeError("unexpected per-host SSH fingerprint")
         write(stage / "ssh/known_hosts", bundle["known_hosts"])
         ssh = f"Host github.com\n  User git\n  IdentityFile {stage}/ssh/github\n"
-        if has_paloma:
-            for host in bundle["ssh_hosts"]:
-                ssh += f"Host {host['alias']} {host['hostname']}\n  HostName {host['hostname']}\n  User {host['user']}\n  IdentityFile {stage}/ssh/paloma\n"
-                if "proxy_jump" in host:
-                    ssh += f"  ProxyJump {host['proxy_jump']}\n"
+        for host in bundle["ssh_hosts"]:
+            id_file = f"{stage}/ssh/host-{host['alias']}" if "identity_key" in host else f"{stage}/ssh/paloma"
+            ssh += f"Host {host['alias']} {host['hostname']}\n  HostName {host['hostname']}\n  User {host['user']}\n  IdentityFile {id_file}\n"
+            if "proxy_jump" in host:
+                ssh += f"  ProxyJump {host['proxy_jump']}\n"
         ssh += f"Host *\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n  UserKnownHostsFile {stage}/ssh/known_hosts\n  GlobalKnownHostsFile /dev/null\n  ConnectTimeout 10\n"
         write(stage / "ssh/config", ssh)
         gpg = stage / "gnupg"
@@ -377,7 +425,18 @@ def prepare_generation(root, bundle):
         write(stage / "gitignore", "\n".join([f"/{d}/development-identity" for d in [".agents/skills", ".claude/skills", ".codex/skills", ".opencode/skills", ".grok/skills"]]) + "\n/.paloma/development-identity.json\n")
         write(stage / "gh/hosts.yml", "github.com:\n    user: Th0rgal\n    git_protocol: ssh\n    oauth_token: " + json.dumps(s["GITHUB_TOKEN"]) + "\n")
         write(stage / "skill/SKILL.md", bundle["skill"])
-        atomic_json(stage / "receipt.json", {"created_at": int(time.time()), "library_revision": bundle["library_revision"], "signing_fingerprint": FINGERPRINT, "coding_only": not has_paloma})
+        host_key_files = []
+        for host in bundle["ssh_hosts"]:
+            if "identity_key" in host:
+                h_name = "host-" + host["alias"]
+                host_key_files.extend([f"ssh/{h_name}", f"ssh/{h_name}.pub"])
+        atomic_json(stage / "receipt.json", {
+            "created_at": int(time.time()),
+            "library_revision": bundle["library_revision"],
+            "signing_fingerprint": FINGERPRINT,
+            "coding_only": not has_paloma,
+            "host_key_files": host_key_files,
+        })
         return stage
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
@@ -388,7 +447,8 @@ def active_profile_exists(root):
     try:
         generation = (root / "current").resolve(strict=True)
         receipt = json.loads((generation / "receipt.json").read_text())
-        req_files = BASE_PROFILE_FILES if receipt.get("coding_only") else REQUIRED_PROFILE_FILES
+        req_files = list(BASE_PROFILE_FILES if receipt.get("coding_only") else REQUIRED_PROFILE_FILES)
+        req_files.extend(receipt.get("host_key_files") or [])
         return (generation.parent == root.resolve() and receipt.get("signing_fingerprint") == FINGERPRINT
                 and all((generation / name).is_file() for name in req_files)
                 and any(path.is_file() for path in (generation / "gnupg/private-keys-v1.d").glob("*.key"))
@@ -464,9 +524,16 @@ def export_bundle(config):
         raise RuntimeError("Bitwarden read failed; keeping current credentials")
     values = {x["key"]: x["value"] for x in json.loads(p.stdout)}
     selected = {k: values[k] for k in FIELDS}
+    host_keys = {}
+    for host in config["ssh_hosts"]:
+        if "identity_key" in host:
+            host_keys[host["identity_key"]] = values[host["identity_key"]]
+            host_keys[host["public_key"]] = values[host["public_key"]]
     bundle = {"secrets": selected, "known_hosts": Path(config["known_hosts"]).read_text(),
               "ssh_hosts": config["ssh_hosts"], "library_revision": config["library_revision"],
               "skill": pinned_skill(config)}
+    if host_keys:
+        bundle["host_keys"] = host_keys
     validate_bundle(bundle)
     validate_signing_payload(selected["GIT_SIGNING_PRIVATE_KEY"])
     github_login(selected["GITHUB_TOKEN"])
@@ -583,17 +650,20 @@ def sync(config, apply):
         return {"source": "Bitwarden", "login": "Th0rgal", "targets": [t["name"] for t in config["targets"]]}
     reports, failed = [], []
     for t in config["targets"]:
+        target_bundle = coding_only_bundle(bundle) if t.get("coding_only") else bundle
         command = [config["python"], config["script"], "apply", "--root", t["root"]]
         if t.get("user"):
             command = ["sudo", "-n", "-u", t["user"], "-H"] + command
         if t.get("ssh"):
-            command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + config["known_hosts"], "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", "-i", config["ssh_identity"], t["ssh"], shlex.join(command)]
+            ssh_id = t.get("ssh_identity", config["ssh_identity"])
+            command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + config["known_hosts"], "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", "-i", ssh_id, t["ssh"], shlex.join(command)]
         try:
-            out = run(command, data=json.dumps(bundle), timeout=180)
+            out = run(command, data=json.dumps(target_bundle), timeout=180)
             reports.append({"target": t["name"], **json.loads(out)})
         except Exception as error:
             failed.append({"target": t["name"], "error": type(error).__name__})
-    containers = stage_containers(config, bundle) if config.get("api_url") else []
+    container_bundle = coding_only_bundle(bundle) if config.get("containers_coding_only") else bundle
+    containers = stage_containers(config, container_bundle) if config.get("api_url") else []
     failed.extend({"target": t["workspace"], "error": t["status"]} for t in containers if t["status"] != "current")
     if failed:
         print(json.dumps({"ok": reports, "failed": failed}))
