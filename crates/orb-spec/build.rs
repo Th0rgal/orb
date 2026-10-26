@@ -45,6 +45,10 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_privilege_step",
     "orb_bunker_step",
     "orb_deploy_gate_step",
+    "orb_wire_validate_frame",
+    "orb_wire_pack_record",
+    "orb_wire_schema_migrate_step",
+    "orb_effect_admissible",
 ];
 
 const LEANSYS_EXPORTS: &[&str] = &[

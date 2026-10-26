@@ -173,6 +173,18 @@ internal func orb_machine_action_admitted(_ stateKind: UInt8, _ isBusy: UInt8, _
 @_silgen_name("orb_send_flow_step")
 internal func orb_send_flow_step(_ isBusy: UInt8, _ hasNonEmptyText: UInt8, _ canQueue: UInt8, _ awaitingAck: UInt8, _ isDraining: UInt8, _ pendingCount: UInt8, _ httpStatus: UInt32) -> UInt32
 
+@_silgen_name("orb_wire_validate_frame")
+internal func orb_wire_validate_frame(_ magic: UInt32, _ abiVersion: UInt32, _ schemaId: UInt32, _ expectedSchemaId: UInt32, _ totalLen: UInt32, _ payloadLen: UInt32, _ arenaOff: UInt32, _ arenaLen: UInt32, _ maxBudgetBytes: UInt32, _ outCap: UInt32, _ requiredOutBytes: UInt32) -> UInt8
+
+@_silgen_name("orb_wire_pack_record")
+internal func orb_wire_pack_record(_ tag: UInt8, _ flags: UInt8, _ len16: UInt32, _ payload32: UInt32) -> UInt64
+
+@_silgen_name("orb_wire_schema_migrate_step")
+internal func orb_wire_schema_migrate_step(_ fromSchema: UInt32, _ toSchema: UInt32, _ currentSchema: UInt32, _ payloadBytes: UInt64, _ maxBytes: UInt64) -> UInt8
+
+@_silgen_name("orb_effect_admissible")
+internal func orb_effect_admissible(_ effectKind: UInt8, _ hasValidLease: UInt8, _ sessionCreated: UInt8, _ lineageVerified: UInt8, _ isArchived: UInt8, _ idempotencyFresh: UInt8, _ accountBound: UInt8, _ accountRejected: UInt8, _ firstByteLocked: UInt8, _ grammarAllowed: UInt8, _ envScrubbed: UInt8, _ budgetOk: UInt8) -> UInt8
+
 @_silgen_name("leansys_verify_slice_bounds")
 internal func leansys_verify_slice_bounds(_ off: UInt64, _ len: UInt64, _ cap: UInt64) -> UInt8
 

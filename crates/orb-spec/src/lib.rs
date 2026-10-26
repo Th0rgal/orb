@@ -1,6 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 //! Typed bindings to `lean/Orb/Kernel.lean` and `LeanSys/Spec.lean` (`liborb_spec_cabi.a`).
 
+pub mod shadow;
+
 pub mod lean_sys_cabi {
     //! Zero-dependency typed Rust bindings to the 21 formally verified unboxed C-ABI
     //! safety gates in `LeanSys/Spec.lean` (`0 import Lean`, `0 sorryAx`), linked from
@@ -826,6 +828,41 @@ unsafe extern "C" {
         biometric_approved: u8,
         bunker_state: u8,
         live_writers: u32,
+    ) -> u8;
+    fn orb_wire_validate_frame(
+        magic: u32,
+        abi_version: u32,
+        schema_id: u32,
+        expected_schema_id: u32,
+        total_len: u32,
+        payload_len: u32,
+        arena_off: u32,
+        arena_len: u32,
+        max_budget_bytes: u32,
+        out_cap: u32,
+        required_out_bytes: u32,
+    ) -> u8;
+    fn orb_wire_pack_record(tag: u8, flags: u8, len16: u32, payload32: u32) -> u64;
+    fn orb_wire_schema_migrate_step(
+        from_schema: u32,
+        to_schema: u32,
+        current_schema: u32,
+        payload_bytes: u64,
+        max_bytes: u64,
+    ) -> u8;
+    fn orb_effect_admissible(
+        effect_kind: u8,
+        has_valid_lease: u8,
+        session_created: u8,
+        lineage_verified: u8,
+        is_archived: u8,
+        idempotency_fresh: u8,
+        account_bound: u8,
+        account_rejected: u8,
+        first_byte_locked: u8,
+        grammar_allowed: u8,
+        env_scrubbed: u8,
+        budget_ok: u8,
     ) -> u8;
 }
 
@@ -2167,6 +2204,150 @@ pub fn deploy_gate_step(input: DeployGateInput) -> bool {
         )
     };
     raw == 1
+}
+
+/// Status code returned by `orb_wire_validate_frame`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum OrbWireStatus {
+    Ok = 0,
+    BadMagicOrVersion = 1,
+    UnsupportedSchema = 2,
+    TruncatedOrOutOfBounds = 3,
+    BudgetExceeded = 4,
+    OutputTooSmall = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireFrameInput {
+    pub magic: u32,
+    pub abi_version: u32,
+    pub schema_id: u32,
+    pub expected_schema_id: u32,
+    pub total_len: u32,
+    pub payload_len: u32,
+    pub arena_off: u32,
+    pub arena_len: u32,
+    pub max_budget_bytes: u32,
+    pub out_cap: u32,
+    pub required_out_bytes: u32,
+}
+
+#[inline]
+pub fn wire_validate_frame(input: WireFrameInput) -> OrbWireStatus {
+    let raw = unsafe {
+        orb_wire_validate_frame(
+            input.magic,
+            input.abi_version,
+            input.schema_id,
+            input.expected_schema_id,
+            input.total_len,
+            input.payload_len,
+            input.arena_off,
+            input.arena_len,
+            input.max_budget_bytes,
+            input.out_cap,
+            input.required_out_bytes,
+        )
+    };
+    match raw {
+        0 => OrbWireStatus::Ok,
+        1 => OrbWireStatus::BadMagicOrVersion,
+        2 => OrbWireStatus::UnsupportedSchema,
+        4 => OrbWireStatus::BudgetExceeded,
+        5 => OrbWireStatus::OutputTooSmall,
+        _ => OrbWireStatus::TruncatedOrOutOfBounds,
+    }
+}
+
+/// Canonical 64-bit `OrbWire` record word (`tag: u8`, `flags: u8`, `len16: u16`, `payload32: u32`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrbWireRecordWord {
+    pub tag: u8,
+    pub flags: u8,
+    pub len16: u16,
+    pub payload32: u32,
+}
+
+#[inline]
+pub fn wire_pack_record(rec: OrbWireRecordWord) -> u64 {
+    unsafe { orb_wire_pack_record(rec.tag, rec.flags, u32::from(rec.len16), rec.payload32) }
+}
+
+#[inline]
+pub const fn wire_unpack_record(word: u64) -> OrbWireRecordWord {
+    OrbWireRecordWord {
+        tag: (word & 0xFF) as u8,
+        flags: ((word >> 8) & 0xFF) as u8,
+        len16: ((word >> 16) & 0xFFFF) as u16,
+        payload32: (word >> 32) as u32,
+    }
+}
+
+#[inline]
+pub fn wire_schema_migrate_step(
+    from_schema: u32,
+    to_schema: u32,
+    current_schema: u32,
+    payload_bytes: u64,
+    max_bytes: u64,
+) -> bool {
+    unsafe {
+        orb_wire_schema_migrate_step(
+            from_schema,
+            to_schema,
+            current_schema,
+            payload_bytes,
+            max_bytes,
+        ) == 1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EffectKind {
+    Observe = 0,
+    LaunchJob = 1,
+    ResumeSession = 2,
+    DispatchProvider = 3,
+    ExecPrivCommand = 4,
+    MutateStore = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectAdmissibleInput {
+    pub effect_kind: EffectKind,
+    pub has_valid_lease: bool,
+    pub session_created: bool,
+    pub lineage_verified: bool,
+    pub is_archived: bool,
+    pub idempotency_fresh: bool,
+    pub account_bound: bool,
+    pub account_rejected: bool,
+    pub first_byte_locked: bool,
+    pub grammar_allowed: bool,
+    pub env_scrubbed: bool,
+    pub budget_ok: bool,
+}
+
+#[inline]
+pub fn effect_admissible(input: EffectAdmissibleInput) -> bool {
+    unsafe {
+        orb_effect_admissible(
+            input.effect_kind as u8,
+            u8::from(input.has_valid_lease),
+            u8::from(input.session_created),
+            u8::from(input.lineage_verified),
+            u8::from(input.is_archived),
+            u8::from(input.idempotency_fresh),
+            u8::from(input.account_bound),
+            u8::from(input.account_rejected),
+            u8::from(input.first_byte_locked),
+            u8::from(input.grammar_allowed),
+            u8::from(input.env_scrubbed),
+            u8::from(input.budget_ok),
+        ) == 1
+    }
 }
 
 #[cfg(test)]

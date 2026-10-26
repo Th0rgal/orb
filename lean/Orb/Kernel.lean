@@ -1136,4 +1136,103 @@ def sendFlowStep
     else 0
   tap ||| drain ||| (editOut <<< 16)
 
+/-! ## Wave 9 — Phase 0: `OrbWire` Canonical Word+Arena Wire Codec & Schema Migration Gates -/
+
+/--
+  Unboxed C-ABI `OrbWire` Frame & Arena Bounds Validator (`orb_wire_validate_frame`):
+  Validates a versioned `AbiHeader` (`magic == 0x4F524257 ("ORBW")`, `abiVersion == 1`,
+  `schemaId == expectedSchemaId`), total buffer bounds (`24 ≤ totalLen ≤ maxBudgetBytes`),
+  payload slice bounds (`payloadLen ≤ totalLen - 24`), contiguous string/blob arena slice
+  bounds (`arenaOff ≤ payloadLen && arenaLen ≤ payloadLen - arenaOff`), and caller output
+  buffer capacity (`requiredOutBytes ≤ outCap`).
+  Returns status code `UInt8`:
+  - `0`: `OK`
+  - `1`: `BAD_MAGIC_OR_VERSION`
+  - `2`: `UNSUPPORTED_SCHEMA`
+  - `3`: `TRUNCATED_OR_OUT_OF_BOUNDS`
+  - `4`: `BUDGET_EXCEEDED`
+  - `5`: `OUTPUT_TOO_SMALL`
+-/
+@[inline, export orb_wire_validate_frame]
+def wireValidateFrame
+    (magic abiVersion schemaId expectedSchemaId
+     totalLen payloadLen arenaOff arenaLen
+     maxBudgetBytes outCap requiredOutBytes : UInt32) : UInt8 :=
+  if !(magic == 0x4F524257 && abiVersion == 1) then 1
+  else if !(schemaId == expectedSchemaId) then 2
+  else if !(24 ≤ totalLen) then 3
+  else if !(totalLen ≤ maxBudgetBytes) then 4
+  else if !(payloadLen ≤ totalLen - 24) then 3
+  else if !(arenaOff ≤ payloadLen && arenaLen ≤ payloadLen - arenaOff) then 3
+  else if !(requiredOutBytes ≤ outCap) then 5
+  else 0
+
+/--
+  Unboxed C-ABI `OrbWire` Canonical 64-Bit Record Word Encoder (`orb_wire_pack_record`):
+  Packs `(tag : UInt8, flags : UInt8, len16 : UInt32, payload32 : UInt32)` into a canonical
+  little-endian `UInt64` word (`bits 0..7 = tag`, `bits 8..15 = flags`,
+  `bits 16..31 = len16 & 0xFFFF`, `bits 32..63 = payload32`).
+-/
+@[inline, export orb_wire_pack_record]
+def wirePackRecord (tag flags : UInt8) (len16 payload32 : UInt32) : UInt64 :=
+  let lo32 : UInt32 :=
+    tag.toUInt32 ||| (flags.toUInt32 <<< 8) ||| ((len16 &&& 0xFFFF) <<< 16)
+  lo32.toUInt64 ||| (payload32.toUInt64 <<< 32)
+
+@[inline] def wireRecordTag (w : UInt64) : UInt8 :=
+  (w &&& 0xFF).toUInt8
+
+@[inline] def wireRecordFlags (w : UInt64) : UInt8 :=
+  ((w >>> 8) &&& 0xFF).toUInt8
+
+@[inline] def wireRecordLen16 (w : UInt64) : UInt32 :=
+  ((w >>> 16) &&& 0xFFFF).toUInt32
+
+@[inline] def wireRecordPayload32 (w : UInt64) : UInt32 :=
+  (w >>> 32).toUInt32
+
+/--
+  Unboxed C-ABI `OrbWire` Consecutive Schema Migration Gate (`orb_wire_schema_migrate_step`):
+  Admits a state migration iff `fromSchema == currentSchema`, `fromSchema < toSchema`,
+  `toSchema - fromSchema == 1` (single-step consecutive version hop), and
+  `0 < payloadBytes ∧ payloadBytes ≤ maxBytes`.
+-/
+@[inline, export orb_wire_schema_migrate_step]
+def wireSchemaMigrateStep
+    (fromSchema toSchema currentSchema : UInt32)
+    (payloadBytes maxBytes : UInt64) : UInt8 :=
+  if fromSchema == currentSchema && fromSchema < toSchema &&
+     toSchema - fromSchema == 1 && 0 < payloadBytes && payloadBytes ≤ maxBytes then 1
+  else 0
+
+/--
+  Unboxed C-ABI Universal Effect Safety Precondition Gate (`orb_effect_admissible`):
+  `effectKind`:
+  - `0 = Observe / NoOp` (`budgetOk == 1`)
+  - `1 = LaunchJob` (`hasValidLease == 1 && isArchived == 0 && idempotencyFresh == 1 && budgetOk == 1`)
+  - `2 = ResumeSession` (`hasValidLease == 1 && sessionCreated == 1 && lineageVerified == 1 && isArchived == 0 && budgetOk == 1`)
+  - `3 = DispatchProvider` (`accountBound == 1 && accountRejected == 0 && firstByteLocked == 0 && budgetOk == 1`)
+  - `4 = ExecPrivCommand` (`grammarAllowed == 1 && envScrubbed == 1 && hasValidLease == 1 && isArchived == 0 && budgetOk == 1`)
+  - `5 = MutateStore` (`hasValidLease == 1 && idempotencyFresh == 1 && budgetOk == 1`)
+  Any unknown `effectKind > 5` is rejected (`0`).
+-/
+@[inline, export orb_effect_admissible]
+def effectAdmissible
+    (effectKind hasValidLease sessionCreated lineageVerified isArchived
+     idempotencyFresh accountBound accountRejected firstByteLocked
+     grammarAllowed envScrubbed budgetOk : UInt8) : UInt8 :=
+  if budgetOk != 1 then 0
+  else if effectKind == 0 then 1
+  else if effectKind == 1 then
+    if hasValidLease == 1 && isArchived == 0 && idempotencyFresh == 1 then 1 else 0
+  else if effectKind == 2 then
+    if hasValidLease == 1 && sessionCreated == 1 && lineageVerified == 1 && isArchived == 0 then 1 else 0
+  else if effectKind == 3 then
+    if accountBound == 1 && accountRejected == 0 && firstByteLocked == 0 then 1 else 0
+  else if effectKind == 4 then
+    if grammarAllowed == 1 && envScrubbed == 1 && hasValidLease == 1 && isArchived == 0 then 1 else 0
+  else if effectKind == 5 then
+    if hasValidLease == 1 && idempotencyFresh == 1 then 1 else 0
+  else 0
+
 end Orb.Kernel

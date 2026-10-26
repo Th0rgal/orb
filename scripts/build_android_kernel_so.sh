@@ -18,8 +18,37 @@ NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
 if [ -z "$NDK" ] && [ -d "$HOME/Library/Android/sdk/ndk" ]; then
   NDK="$(ls -d "$HOME"/Library/Android/sdk/ndk/* | sort -V | tail -1)"
 fi
-[ -n "$NDK" ] || { echo "Android NDK not found (set ANDROID_NDK_HOME)" >&2; exit 1; }
-BIN="$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/bin | head -1)"
+FREESTANDING_FLAGS=()
+if [ -n "$NDK" ]; then
+  BIN="$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/bin | head -1)"
+elif command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
+  BIN="$(dirname "$(command -v clang)")"
+  JNI_SHIM_DIR="$(mktemp -d)"
+  trap 'rm -rf "$JNI_SHIM_DIR"' EXIT
+  cat << 'EOF' > "$JNI_SHIM_DIR/jni.h"
+#ifndef _FREESTANDING_JNI_H_
+#define _FREESTANDING_JNI_H_
+#include <stdint.h>
+typedef uint8_t jboolean;
+typedef int8_t jbyte;
+typedef uint16_t jchar;
+typedef int16_t jshort;
+typedef int32_t jint;
+typedef int64_t jlong;
+typedef float jfloat;
+typedef double jdouble;
+typedef void *JNIEnv;
+typedef void *jclass;
+typedef void *jobject;
+#define JNIEXPORT __attribute__((visibility("default")))
+#define JNICALL
+#endif
+EOF
+  FREESTANDING_FLAGS=(-ffreestanding -fuse-ld=lld -nostdlib "-I$JNI_SHIM_DIR")
+else
+  echo "Android NDK or clang+lld not found (set ANDROID_NDK_HOME)" >&2
+  exit 1
+fi
 
 stamp() { cat "${SOURCES[@]}" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1; }
 abi_syms() { "$BIN/llvm-nm" -D --defined-only -j "$1" | grep -E '^(orb_|leansys_|Java_)' | sort; }
@@ -45,7 +74,7 @@ for pair in "${ABIS[@]}"; do
   if [ "$abi" = "arm64-v8a" ]; then
     arch_flags=(-march=armv8.2-a+lse+dotprod+fp16)
   fi
-  "$BIN/clang" --target="$target" ${arch_flags[@]+"${arch_flags[@]}"} -O2 -fPIC -shared \
+  "$BIN/clang" --target="$target" ${arch_flags[@]+"${arch_flags[@]}"} ${FREESTANDING_FLAGS[@]+"${FREESTANDING_FLAGS[@]}"} -O2 -fPIC -shared \
     -Wl,-z,max-page-size=16384 -Wl,-s -Wl,--build-id=none \
     -Iandroid_dashboard/app/src shared/orb-spec/cabi/orb_kernel_unboxed.c \
     android_dashboard/app/src/main/jni/orb_kernel_jni.c -o "$out/$abi/liborb_kernel.so"
@@ -59,6 +88,9 @@ for pair in "${ABIS[@]}"; do
 done
 
 HOST_TEST_SO=android_dashboard/app/src/test/resources/jni/liborb_kernel.so
+if ! $check && [ -d "$(dirname "$HOST_TEST_SO")" ]; then
+  cp "$out/x86_64/liborb_kernel.so" "$HOST_TEST_SO"
+fi
 if [ -f "$HOST_TEST_SO" ]; then
   check_page_align_16k "$HOST_TEST_SO"
   diff <(abi_syms "$JNILIBS/x86_64/liborb_kernel.so") <(abi_syms "$HOST_TEST_SO") \

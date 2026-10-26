@@ -183,6 +183,49 @@ object OrbKernel {
     ): Int
 
     @JvmStatic
+    external fun orbWireValidateFrame(
+        magic: Int,
+        abiVersion: Int,
+        schemaId: Int,
+        expectedSchemaId: Int,
+        totalLen: Int,
+        payloadLen: Int,
+        arenaOff: Int,
+        arenaLen: Int,
+        maxBudgetBytes: Int,
+        outCap: Int,
+        requiredOutBytes: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbWirePackRecord(tag: Int, flags: Int, len16: Int, payload32: Int): Long
+
+    @JvmStatic
+    external fun orbWireSchemaMigrateStep(
+        fromSchema: Int,
+        toSchema: Int,
+        currentSchema: Int,
+        payloadBytes: Long,
+        maxBytes: Long
+    ): Int
+
+    @JvmStatic
+    external fun orbEffectAdmissible(
+        effectKind: Int,
+        hasValidLease: Int,
+        sessionCreated: Int,
+        lineageVerified: Int,
+        isArchived: Int,
+        idempotencyFresh: Int,
+        accountBound: Int,
+        accountRejected: Int,
+        firstByteLocked: Int,
+        grammarAllowed: Int,
+        envScrubbed: Int,
+        budgetOk: Int
+    ): Int
+
+    @JvmStatic
     external fun leansysSseFrameScan(
         frameOff: Long,
         frameLen: Long,

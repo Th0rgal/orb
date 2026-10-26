@@ -151,6 +151,26 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbSendFlowStep(JNIEnv *env, jclass cl
     return (jint)orb_send_flow_step((uint8_t)isBusy, (uint8_t)hasNonEmptyText, (uint8_t)canQueue, (uint8_t)awaitingAck, (uint8_t)isDraining, (uint8_t)pendingCount, (uint32_t)httpStatus);
 }
 
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireValidateFrame(JNIEnv *env, jclass clazz, jint magic, jint abiVersion, jint schemaId, jint expectedSchemaId, jint totalLen, jint payloadLen, jint arenaOff, jint arenaLen, jint maxBudgetBytes, jint outCap, jint requiredOutBytes) {
+    return (jint)orb_wire_validate_frame((uint32_t)magic, (uint32_t)abiVersion, (uint32_t)schemaId, (uint32_t)expectedSchemaId, (uint32_t)totalLen, (uint32_t)payloadLen, (uint32_t)arenaOff, (uint32_t)arenaLen, (uint32_t)maxBudgetBytes, (uint32_t)outCap, (uint32_t)requiredOutBytes);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWirePackRecord(JNIEnv *env, jclass clazz, jint tag, jint flags, jint len16, jint payload32) {
+    return (jlong)orb_wire_pack_record((uint8_t)tag, (uint8_t)flags, (uint32_t)len16, (uint32_t)payload32);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireSchemaMigrateStep(JNIEnv *env, jclass clazz, jint fromSchema, jint toSchema, jint currentSchema, jlong payloadBytes, jlong maxBytes) {
+    return (jint)orb_wire_schema_migrate_step((uint32_t)fromSchema, (uint32_t)toSchema, (uint32_t)currentSchema, (uint64_t)payloadBytes, (uint64_t)maxBytes);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbEffectAdmissible(JNIEnv *env, jclass clazz, jint effectKind, jint hasValidLease, jint sessionCreated, jint lineageVerified, jint isArchived, jint idempotencyFresh, jint accountBound, jint accountRejected, jint firstByteLocked, jint grammarAllowed, jint envScrubbed, jint budgetOk) {
+    return (jint)orb_effect_admissible((uint8_t)effectKind, (uint8_t)hasValidLease, (uint8_t)sessionCreated, (uint8_t)lineageVerified, (uint8_t)isArchived, (uint8_t)idempotencyFresh, (uint8_t)accountBound, (uint8_t)accountRejected, (uint8_t)firstByteLocked, (uint8_t)grammarAllowed, (uint8_t)envScrubbed, (uint8_t)budgetOk);
+}
+
 JNIEXPORT jbyte JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSseFrameScan(JNIEnv *env, jclass clazz, jlong frameOff, jlong frameLen, jlong chunkLen, jint fieldKind, jint nextByte, jint lastByte) {
     return (jbyte)leansys_sse_frame_scan((uint64_t)frameOff, (uint64_t)frameLen, (uint64_t)chunkLen, (uint8_t)fieldKind, (uint8_t)nextByte, (uint8_t)lastByte);

@@ -1786,6 +1786,174 @@
       }
     },
     {
+      "name": "orb_wire_validate_frame",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "magic",
+          "type": "uint32_t"
+        },
+        {
+          "name": "abiVersion",
+          "type": "uint32_t"
+        },
+        {
+          "name": "schemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "expectedSchemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "totalLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payloadLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "arenaOff",
+          "type": "uint32_t"
+        },
+        {
+          "name": "arenaLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxBudgetBytes",
+          "type": "uint32_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint32_t"
+        },
+        {
+          "name": "requiredOutBytes",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireValidateFrame",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_wire_pack_record",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "tag",
+          "type": "uint8_t"
+        },
+        {
+          "name": "flags",
+          "type": "uint8_t"
+        },
+        {
+          "name": "len16",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payload32",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWirePackRecord",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_wire_schema_migrate_step",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "fromSchema",
+          "type": "uint32_t"
+        },
+        {
+          "name": "toSchema",
+          "type": "uint32_t"
+        },
+        {
+          "name": "currentSchema",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payloadBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "maxBytes",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireSchemaMigrateStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_effect_admissible",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "effectKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasValidLease",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sessionCreated",
+          "type": "uint8_t"
+        },
+        {
+          "name": "lineageVerified",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isArchived",
+          "type": "uint8_t"
+        },
+        {
+          "name": "idempotencyFresh",
+          "type": "uint8_t"
+        },
+        {
+          "name": "accountBound",
+          "type": "uint8_t"
+        },
+        {
+          "name": "accountRejected",
+          "type": "uint8_t"
+        },
+        {
+          "name": "firstByteLocked",
+          "type": "uint8_t"
+        },
+        {
+          "name": "grammarAllowed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "envScrubbed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "budgetOk",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbEffectAdmissible",
+        "ret": "jint"
+      }
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [
