@@ -226,7 +226,40 @@ pub(crate) fn choose<'a>(
             .then_with(|| b.expires_at.cmp(&a.expires_at))
             .then_with(|| a.file.cmp(&b.file))
     });
-    eligible
+    let now_epoch = now.max(0) as u64;
+    let any_has_quota = eligible
+        .iter()
+        .any(|c| has_quota(health.get(&c.file), now));
+    let route_candidates: Vec<crate::orb_spec::RouteCandidate> = eligible
+        .iter()
+        .enumerate()
+        .map(|(rank, c)| {
+            let c_has_quota = has_quota(health.get(&c.file), now);
+            let reset_at = usable_again(health.get(&c.file), now).max(0) as u64;
+            if any_has_quota {
+                crate::orb_spec::RouteCandidate {
+                    account_id: (rank + 1) as u32,
+                    score: rank as u64,
+                    is_rejected: !c_has_quota,
+                    reset_epoch: if c_has_quota {
+                        0
+                    } else {
+                        reset_at.max(now_epoch.saturating_add(1))
+                    },
+                }
+            } else {
+                crate::orb_spec::RouteCandidate {
+                    account_id: (rank + 1) as u32,
+                    score: reset_at
+                        .saturating_mul(1000)
+                        .saturating_add(rank as u64),
+                    is_rejected: false,
+                    reset_epoch: 0,
+                }
+            }
+        })
+        .collect();
+    let host_choice = eligible
         .iter()
         .copied()
         .find(|c| has_quota(health.get(&c.file), now))
@@ -235,7 +268,22 @@ pub(crate) fn choose<'a>(
                 .iter()
                 .copied()
                 .min_by_key(|c| usable_again(health.get(&c.file), now))
-        })
+        });
+    let host_id = host_choice.and_then(|chosen| {
+        eligible
+            .iter()
+            .position(|c| std::ptr::eq(*c, chosen))
+            .map(|idx| (idx + 1) as u32)
+    });
+    let lean_id = crate::provider_health::observe_argmin_selection_shadow(
+        None,
+        now_epoch,
+        &route_candidates,
+        host_id,
+    );
+    lean_id
+        .and_then(|id| eligible.get((id as usize).wrapping_sub(1)).copied())
+        .or(host_choice)
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -846,11 +894,15 @@ mod tests {
 
     #[test]
     fn all_exhausted_picks_the_earliest_reset() {
+        let before = crate::provider_health::proxy_shadow_snapshot();
         let c = [cand("a", 100), cand("b", 10)];
         let mut m = HashMap::new();
         m.insert("a".into(), h(Eligibility::Eligible, Some(0.0), Some(900)));
         m.insert("b".into(), h(Eligibility::Eligible, Some(0.0), Some(300)));
         assert_eq!(choose(&c, &m, 0).unwrap().file, "b");
+        let after = crate::provider_health::proxy_shadow_snapshot();
+        assert!(after.total_steps > before.total_steps);
+        assert_eq!(after.total_divergences, 0);
     }
 
     #[test]

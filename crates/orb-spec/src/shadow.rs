@@ -592,14 +592,63 @@ mod tests {
             Some(202)
         );
 
-        // 4. First-byte lock (`StickyFence`): failover after first byte sent is aborted (`AbortLockedStream`)
-        let locked = provider_pool_step(ProviderPoolStepInput {
+        // 4. Sequential state-carrying regression:
+        //    initial dispatch (first_byte_sent=false) -> next_first_byte == false ->
+        //    pre-byte failure -> allowed retry using next state ->
+        //    first byte observed -> rejected retry (`AbortLockedStream`).
+        let initial_dispatch = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 101,
+            is_rejected: false,
+            first_byte_sent: false,
+            is_failover_attempt: false,
+            attempts: 0,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert_eq!(initial_dispatch.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert!(initial_dispatch.emit_dispatch_effect);
+        assert!(!initial_dispatch.first_byte_locked_next);
+
+        let pre_byte_retry = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 303,
+            is_rejected: false,
+            first_byte_sent: initial_dispatch.first_byte_locked_next,
+            is_failover_attempt: true,
+            attempts: 1,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert_eq!(pre_byte_retry.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert!(pre_byte_retry.emit_dispatch_effect);
+        assert!(!pre_byte_retry.first_byte_locked_next);
+        assert_eq!(pre_byte_retry.dispatched_account_id, 303);
+
+        // First byte observed on candidate 303 sets sticky lock
+        let first_byte_observed = provider_pool_step(ProviderPoolStepInput {
             bound_account_id: None,
             candidate_account_id: 303,
             is_rejected: false,
             first_byte_sent: true,
+            is_failover_attempt: false,
+            attempts: 1,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert!(first_byte_observed.first_byte_locked_next);
+
+        // Subsequent failover attempt using `first_byte_observed.first_byte_locked_next` is aborted
+        let locked = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 101,
+            is_rejected: false,
+            first_byte_sent: first_byte_observed.first_byte_locked_next,
             is_failover_attempt: true,
-            attempts: 0,
+            attempts: 2,
             max_attempts: 3,
             now_epoch: 1_000,
             reset_epoch: 0,
@@ -734,5 +783,146 @@ mod tests {
         assert!(ring.entries()[0]
             .to_jsonl_line()
             .contains("legacy_bug_fixed_by_lean:antigravity_wrong_account"));
+    }
+
+    #[test]
+    fn phase1_mission_control_and_fork_home_incident_replays() {
+        use crate::{
+            fork_home_step, mission_control_step, ForkHomeAction, ForkHomeStepInput,
+            MissionControlAction, MissionControlStepInput,
+        };
+
+        // 1. Archived mission reminder revival incident: archived mission never revives
+        let archived = mission_control_step(MissionControlStepInput {
+            is_archived: true,
+            active_track_writers: 0,
+            has_lease: true,
+            msg_already_delivered: false,
+            is_resume: false,
+            session_created: true,
+            lineage_verified: true,
+            rollout_exists: true,
+            has_fallback_prompt: true,
+        });
+        assert_eq!(archived.action, MissionControlAction::RejectArchived);
+        assert!(!archived.emit_dispatch_effect);
+        assert!(archived.archived_next);
+        assert_eq!(archived.track_writers_next, 0);
+
+        // 2. Phantom Codex session bug (`16b74dd4` / `c96df4f9`):
+        //    sessionCreated=true, lineageVerified=true, but rolloutExists=false ->
+        //    must NOT emit raw ResumeVerifiedSession; selects SeedFallbackFreshSession when has_fallback_prompt=true
+        let phantom_codex_fallback = mission_control_step(MissionControlStepInput {
+            is_archived: false,
+            active_track_writers: 0,
+            has_lease: true,
+            msg_already_delivered: false,
+            is_resume: true,
+            session_created: true,
+            lineage_verified: true,
+            rollout_exists: false,
+            has_fallback_prompt: true,
+        });
+        assert_eq!(
+            phantom_codex_fallback.action,
+            MissionControlAction::SeedFallbackFreshSession
+        );
+        assert!(phantom_codex_fallback.emit_dispatch_effect);
+        assert!(phantom_codex_fallback.seed_fallback_session);
+        assert_eq!(phantom_codex_fallback.track_writers_next, 1);
+
+        // Without fallback prompt, unverified resume fails closed
+        let phantom_codex_reject = mission_control_step(MissionControlStepInput {
+            has_fallback_prompt: false,
+            ..MissionControlStepInput {
+                is_archived: false,
+                active_track_writers: 0,
+                has_lease: true,
+                msg_already_delivered: false,
+                is_resume: true,
+                session_created: true,
+                lineage_verified: true,
+                rollout_exists: false,
+                has_fallback_prompt: false,
+            }
+        });
+        assert_eq!(
+            phantom_codex_reject.action,
+            MissionControlAction::RejectUnverifiedResume
+        );
+        assert!(!phantom_codex_reject.emit_dispatch_effect);
+
+        // 3. Track writer conflict & duplicate message deduplication
+        let busy_track = mission_control_step(MissionControlStepInput {
+            is_archived: false,
+            active_track_writers: 1,
+            has_lease: true,
+            msg_already_delivered: false,
+            is_resume: false,
+            session_created: false,
+            lineage_verified: false,
+            rollout_exists: false,
+            has_fallback_prompt: false,
+        });
+        assert_eq!(
+            busy_track.action,
+            MissionControlAction::RejectTrackWriterConflict
+        );
+        assert!(!busy_track.emit_dispatch_effect);
+
+        let dup_msg = mission_control_step(MissionControlStepInput {
+            active_track_writers: 0,
+            msg_already_delivered: true,
+            ..MissionControlStepInput {
+                is_archived: false,
+                active_track_writers: 0,
+                has_lease: true,
+                msg_already_delivered: true,
+                is_resume: false,
+                session_created: false,
+                lineage_verified: false,
+                rollout_exists: false,
+                has_fallback_prompt: false,
+            }
+        });
+        assert_eq!(dup_msg.action, MissionControlAction::DedupeDeliveredMessage);
+        assert!(!dup_msg.emit_dispatch_effect);
+
+        // 4. Fork HOME bug (`#1302` / `9178bd08`): even if caller requests override_home,
+        //    fork_home_step preserves job HOME (`override_home == false`, `job_home_preserved == true`)
+        //    while using the sibling source cwd (`use_source_cwd == true`).
+        let valid_fork = fork_home_step(ForkHomeStepInput {
+            is_fork_or_side: true,
+            source_exists: true,
+            source_is_symlink: false,
+            same_workspace: true,
+            same_node: true,
+            has_committed_transfer: false,
+            requested_override_home: true,
+        });
+        assert_eq!(
+            valid_fork.action,
+            ForkHomeAction::UseSiblingSourceCwdKeepJobHome
+        );
+        assert!(valid_fork.admit_launch);
+        assert!(valid_fork.use_source_cwd);
+        assert!(!valid_fork.override_home);
+        assert!(valid_fork.job_home_preserved);
+        assert_eq!(valid_fork.exit_code, 0);
+
+        // Symlinked or missing fork source workspace fails closed with exit code 78
+        let symlink_fork = fork_home_step(ForkHomeStepInput {
+            is_fork_or_side: true,
+            source_exists: true,
+            source_is_symlink: true,
+            same_workspace: true,
+            same_node: true,
+            has_committed_transfer: false,
+            requested_override_home: false,
+        });
+        assert_eq!(symlink_fork.action, ForkHomeAction::RejectForkWorkspace);
+        assert!(!symlink_fork.admit_launch);
+        assert!(!symlink_fork.override_home);
+        assert_eq!(symlink_fork.exit_code, 78);
     }
 }
