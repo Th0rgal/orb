@@ -1345,27 +1345,29 @@ mod tests {
         );
         assert!(!v_dedupe.emit_dispatch_effect);
 
-        // 6. Archived mission (`MissionStatus::Acknowledged`) -> RejectArchived
-        let mut archived_mission = mission.clone();
-        archived_mission.status = MissionStatus::Acknowledged;
-        let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
-            dir.path(),
-            store.as_ref(),
-            &archived_mission,
-            &owner,
-            Some("thread-1"),
-            &events_with_rollout,
-            Some("recovered history"),
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            v_archived.action,
-            crate::orb_spec::MissionControlAction::RejectArchived
-        );
-        assert!(!v_archived.emit_dispatch_effect);
-        assert!(v_archived.archived_next);
+        // 6. Archived mission (`MissionStatus::Acknowledged` and `MissionStatus::Completed`) -> RejectArchived
+        for archived_status in [MissionStatus::Acknowledged, MissionStatus::Completed] {
+            let mut archived_mission = mission.clone();
+            archived_mission.status = archived_status;
+            let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
+                dir.path(),
+                store.as_ref(),
+                &archived_mission,
+                &owner,
+                Some("thread-1"),
+                &events_with_rollout,
+                Some("recovered history"),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v_archived.action,
+                crate::orb_spec::MissionControlAction::RejectArchived
+            );
+            assert!(!v_archived.emit_dispatch_effect);
+            assert!(v_archived.archived_next);
+        }
 
         // 7. Usage-limit replay gate: while `run` is active -> RejectTrackWriterConflict;
         //    once `run` finishes -> SeedFallbackFreshSession on FRESH_SESSION_FALLBACK

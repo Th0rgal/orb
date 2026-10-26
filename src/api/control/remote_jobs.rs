@@ -18,9 +18,13 @@ pub(super) async fn evaluate_mission_control_gate(
         .as_ref()
         .map(|m| m.status)
         .unwrap_or(mission.status);
-    let is_archived = mission.status == MissionStatus::Acknowledged
-        || effective_status == MissionStatus::Acknowledged
-        || crate::api::mission_horizon::superseded_by(mission).is_some()
+    let is_archived = matches!(
+        mission.status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) || matches!(
+        effective_status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) || crate::api::mission_horizon::superseded_by(mission).is_some()
         || mission
             .project
             .tags
@@ -86,8 +90,10 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
     wait_limit: &str,
     replay_prompt: Option<&str>,
 ) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
-    let is_archived = mission.status == MissionStatus::Acknowledged
-        || crate::api::mission_horizon::superseded_by(mission).is_some()
+    let is_archived = matches!(
+        mission.status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) || crate::api::mission_horizon::superseded_by(mission).is_some()
         || mission
             .project
             .tags
@@ -287,9 +293,13 @@ pub(super) async fn submit_leased_remote_job(
         .as_ref()
         .and_then(|m| m.session_id.as_deref())
         .or(mission.session_id.as_deref());
-    let host_admits_submission = mission.status != MissionStatus::Acknowledged
-        && effective_status != MissionStatus::Acknowledged
-        && crate::api::mission_horizon::superseded_by(mission).is_none()
+    let host_admits_submission = !matches!(
+        mission.status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) && !matches!(
+        effective_status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) && crate::api::mission_horizon::superseded_by(mission).is_none()
         && !mission
             .project
             .tags
