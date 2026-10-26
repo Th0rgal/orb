@@ -11,13 +11,19 @@ development identity, not a per-mission authorization broker.
 | --- | --- |
 | GitHub API and HTTPS Git | Bitwarden `GITHUB_TOKEN`, validated as `Th0rgal` |
 | GitHub SSH | `GITHUB_SSH_PRIVATE_KEY` / `GITHUB_SSH_PUBLIC_KEY`, existing GitHub `agent` key |
-| Infrastructure SSH | Existing `PALOMA_SSH_PRIVATE_KEY` / `PALOMA_SSH_PUBLIC_KEY` |
+| Infrastructure SSH (Per-Host) | Per-machine `PALOMA_SSH_KEY_<HOST>` / `PALOMA_SSH_KEY_<HOST>_PUBLIC_KEY` in Bitwarden (`bws`) |
+| Infrastructure SSH (Break-Glass) | `PALOMA_SSH_PRIVATE_KEY` / `PALOMA_SSH_PUBLIC_KEY` retained in Bitwarden (`bws`) as break-glass |
 | Signed commits | `GIT_SIGNING_PRIVATE_KEY`, existing agent OpenPGP identity |
 
 Commits use `Thomas Marchand (agent) <agent@thomas.md>` and fingerprint
 `30EAE29B6766A7A70A4DEB4BF480B9A3F84BE648`. GitHub SSH fingerprint:
-`SHA256:sjqEzn4AF7dPpBvNPK5bfJ0sAsIk7qKxrp4PbF5Ekd0`. Infrastructure fingerprint:
+`SHA256:sjqEzn4AF7dPpBvNPK5bfJ0sAsIk7qKxrp4PbF5Ekd0`. Break-glass infrastructure fingerprint:
 `SHA256:DudUQO4SLLQgsBYmLgkd8aUNSWg7jeLqG/TUiO7/E10`.
+
+### Per-Machine SSH Keys & `coding_only` Worker Profiles
+
+- **Per-Host SSH Keys in Bitwarden (`bws`)**: Each fleet machine has a dedicated Ed25519 keypair stored in Bitwarden Secrets Manager (`PALOMA_SSH_KEY_AGENT_CORE`, `PALOMA_SSH_KEY_ASHUR`, `PALOMA_SSH_KEY_BABYLON`, `PALOMA_SSH_KEY_NIPPUR`, `PALOMA_SSH_KEY_OLD_AGENT`, `PALOMA_SSH_KEY_DGX_SPARK`, `PALOMA_SSH_KEY_THOMAS_MD`, `PALOMA_SSH_KEY_POLYMATH`, `PALOMA_SSH_KEY_MAVEN_REPO`, `PALOMA_SSH_KEY_WATCHTOWER` and matching `*_PUBLIC_KEY` entries). Each host's `ssh_hosts` entry can bind `"identity_key"` and `"public_key"` so `prepare_generation` writes `ssh/host-<alias>` (`0600`) and pins `IdentityFile` per host over the `wg-leanmesh0` (`10.88.0.0/16`) overlay.
+- **Coding-Only Worker & Container Targets (`coding_only: true`)**: Worker node targets (`targets[].coding_only = true`) and workspace containers (`containers_coding_only = true`) receive only `BASE_FIELDS` (`GITHUB_TOKEN`, `GITHUB_SSH_PRIVATE_KEY` and `GITHUB_SSH_PUBLIC_KEY` scoped strictly to `Host github.com` in `ssh/config`, and `GIT_SIGNING_PRIVATE_KEY`). All fleet/infrastructure SSH keys (`PALOMA_SSH_PRIVATE_KEY`, `host_keys`, and `ssh_hosts`) are stripped; missions obtain host SSH or root command execution on demand via the Biometric JIT Privilege Broker (`docs/PRIVILEGE_BROKER_AND_BUNKER.md`) or Touch ID-gated `secret_get`.
 
 The existing GitHub token has broad account permissions. This rollout reuses it
 as authorized; it does not claim repository-scoped access. Jobs sharing an

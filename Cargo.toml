@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/orb-spec"]
+members = [".", "crates/orb-spec", "crates/lean-mesh"]
 
 [package]
 name = "sandboxed_sh"
@@ -11,6 +11,8 @@ authors = ["sandboxed.sh Contributors"]
 
 [dependencies]
 orb-spec = { path = "crates/orb-spec" }
+lean-mesh = { path = "crates/lean-mesh" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 notify = "8"
 tempfile = "3"
 # Async runtime

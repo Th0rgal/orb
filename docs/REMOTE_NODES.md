@@ -90,17 +90,19 @@ never replace its native thread or reset its budget to work around a stop.
 Use one distinct secret per node. Do not paste the secret into logs or docs.
 
 The node binds to `127.0.0.1:3088` by default so it is never reachable over a
-network by accident. To let core reach it, set `SANDBOXED_NODE_BIND` to a
-private interface — preferably the node's tailscale IP (e.g.
-`SANDBOXED_NODE_BIND=100.64.0.10:3088`), or `0.0.0.0:3088` only when the host
-firewall restricts the port to core.
+network by accident. To let core reach it, bind `SANDBOXED_NODE_BIND` to the
+node's **`lean-mesh` (`wg-leanmesh0`, `10.88.0.x/32`)** interface (see
+[`docs/LEAN_MESH.md`](LEAN_MESH.md), e.g. `SANDBOXED_NODE_BIND=10.88.0.12:3088`),
+or `0.0.0.0:3088` when `table inet lean_mesh` (`nftables`) +
+`sandboxed-node-firewall.sh` restrict port `3088` exclusively to `agent-core`
+(`10.88.0.1`).
 
 Example (Babylon):
 
 ```bash
 export SANDBOXED_NODE_ID=babylon
-# Bind a private/tailscale interface; default is 127.0.0.1:3088.
-export SANDBOXED_NODE_BIND=<tailscale-ip>:3088
+# Bind the wg-leanmesh0 overlay address (10.88.0.12); default is 127.0.0.1:3088.
+export SANDBOXED_NODE_BIND=10.88.0.12:3088
 export SANDBOXED_NODE_WORK_DIR=/var/lib/sandboxed-node/work
 export SANDBOXED_NODE_CAPACITY=1
 export SANDBOXED_NODE_TOKEN="$SANDBOXED_REMOTE_NODE_BABYLON_TOKEN"

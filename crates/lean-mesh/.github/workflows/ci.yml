@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify-lean-and-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Elan & Lean 4.35.0
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain leanprover/lean4:v4.35.0
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Verify C99 ABI sync
+        run: python3 scripts/gen_lean_mesh_kernel_unboxed.py --check
+      - name: Verify Lean 4 Kernel, Spec & Zero-Trust AuditSpec
+        run: |
+          cd lean
+          mkdir -p build/LeanMesh
+          export LEAN_PATH="$PWD/build"
+          lean -DwarningAsError=true -DautoImplicit=false LeanMesh/Kernel.lean -o build/LeanMesh/Kernel.olean -c build/LeanMesh/Kernel.c
+          lean -DwarningAsError=true -DautoImplicit=false LeanMesh/Spec.lean -o build/LeanMesh/Spec.olean
+          lean --run audit/AuditSpec.lean
+      - name: Cargo Test & Clippy (with LEAN_MESH_VERIFY_LEAN=1)
+        run: |
+          LEAN_MESH_VERIFY_LEAN=1 cargo test
+          cargo clippy --all-targets -- -D warnings
