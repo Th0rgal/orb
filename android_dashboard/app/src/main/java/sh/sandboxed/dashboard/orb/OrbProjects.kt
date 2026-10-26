@@ -144,11 +144,39 @@ fun OrbAppRoot(
 
     // Poll the Bitwarden broker every 10 s while the app is visible (Orb App.tsx),
     // so a mission blocked on a secret request is noticed from the main screen.
+    // Fleet Bunker Mode and approval-device enrollment, shown on Home like iOS.
+    val homeContext = androidx.compose.ui.platform.LocalContext.current
+    val homeActivity = homeContext.fragmentActivity()
+    val homeScope = rememberCoroutineScope()
+    var bunkerState by remember(baseURL) { mutableStateOf(0) }
+    var bunkerReason by remember(baseURL) { mutableStateOf<String?>(null) }
+    var bunkerDismissedLevel by remember(baseURL) { mutableStateOf(0) }
+    var bunkerError by remember(baseURL) { mutableStateOf<String?>(null) }
+    var approvalMode by remember(baseURL) { mutableStateOf("") }
+    var approvalEnrolled by remember(baseURL) { mutableStateOf(true) }
+    val enrollPrefs = remember { homeContext.getSharedPreferences("orb.approval.prompt", android.content.Context.MODE_PRIVATE) }
+    var enrollDismissedMode by remember(baseURL) { mutableStateOf(enrollPrefs.getString("dismissed.$baseURL", null)) }
+    suspend fun refreshFleetPosture() {
+        runCatching {
+            val snap = OrbJSON.dict(core.request("/api/privilege-access")) ?: emptyMap()
+            val mesh = runCatching { OrbJSON.dict(core.request("/api/mesh/status")) ?: emptyMap() }.getOrDefault(emptyMap())
+            bunkerState = maxOf((snap["bunker_state"] as? Number)?.toInt() ?: 0, (mesh["bunker_state"] as? Number)?.toInt() ?: 0)
+            bunkerReason = OrbPrivilegeAccess.latestIncidentReason(OrbJSON.dictList(snap["bunker_incidents"]))
+            if (bunkerState <= 0) bunkerDismissedLevel = 0
+        }
+        runCatching {
+            val d = OrbJSON.dict(core.request("/api/approvals/devices")) ?: emptyMap()
+            approvalMode = OrbJSON.str(d, "mode") ?: ""
+            approvalEnrolled = OrbPrivilegeAccess.isEnrolled(OrbApprovalKey.publicKey(), OrbJSON.dictList(d["devices"]))
+        }
+    }
+
     LaunchedEffect(baseURL, lifecycleOwner) {
         if (baseURL.trim().isEmpty()) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 core.refreshSecretRequests()
+                refreshFleetPosture()
                 kotlinx.coroutines.delay(10_000)
             }
         }
@@ -311,6 +339,74 @@ fun OrbAppRoot(
                     entry = currentScreen.entry,
                     onBack = { pop() }
                 )
+            }
+        }
+
+        androidx.compose.foundation.layout.Column(
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 64.dp, start = 12.dp, end = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (OrbPrivilegeAccess.showsBunkerCard(bunkerState, bunkerDismissedLevel)) {
+                androidx.compose.foundation.layout.Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(OrbStyle.elevated)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFFF6B6B), modifier = Modifier.size(15.dp))
+                        Text(
+                            "Fleet Bunker Mode: ${OrbPrivilegeAccess.bunkerLabel(bunkerState)}",
+                            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f).padding(start = 8.dp)
+                        )
+                        Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = OrbStyle.textMuted,
+                            modifier = Modifier.size(18.dp).orbPressClickable { bunkerDismissedLevel = bunkerState })
+                    }
+                    Text("New privileged requests are locked and active root/deploy grants are revoked.", color = OrbStyle.textMuted, fontSize = 12.sp)
+                    bunkerReason?.let { Text(it, color = Color.White, fontSize = 12.sp, maxLines = 3) }
+                    bunkerError?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        androidx.compose.material3.TextButton(onClick = {
+                            settingsInitialRoute = OrbSettingsRoute.Secrets
+                            showSettingsSheet = true
+                        }) { Text("Review") }
+                        androidx.compose.material3.TextButton(onClick = {
+                            homeScope.launch {
+                                bunkerError = runCatching {
+                                    OrbApprovalKey.signedRequest(core, homeActivity, "POST", "/api/privilege-access/unbunker", null, "exit Fleet Bunker Mode")
+                                    refreshFleetPosture()
+                                }.exceptionOrNull()?.message
+                            }
+                        }) { Text("Exit Bunker Mode") }
+                    }
+                }
+            }
+            if (OrbPrivilegeAccess.shouldPromptEnrollment(approvalMode, approvalEnrolled, enrollDismissedMode)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(OrbStyle.elevated)
+                        .orbPressClickable {
+                            settingsInitialRoute = OrbSettingsRoute.Secrets
+                            showSettingsSheet = true
+                        }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
+                        Text("Enroll this phone for approvals", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Approve protected actions, like exiting Bunker Mode, with your fingerprint or face.", color = OrbStyle.textMuted, fontSize = 12.sp)
+                    }
+                    Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = OrbStyle.textMuted,
+                        modifier = Modifier.size(18.dp).orbPressClickable {
+                            enrollDismissedMode = approvalMode
+                            enrollPrefs.edit().putString("dismissed.$baseURL", approvalMode).apply()
+                        })
+                }
             }
         }
 
