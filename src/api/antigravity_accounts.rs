@@ -531,8 +531,13 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
 /// sign-in at that moment is spent until the announced reset, whatever its
 /// quota figures say. Returns the (spent, next) logins' identities when the
 /// choice moves to another login; the next dispatch pushes it to its node.
+///
+/// "Eligibility check failed" means Google wants the owner to verify that
+/// login: it is marked unverified so the machine moves to a sibling, and the
+/// periodic check restores it once verified.
 pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option<String>)> {
-    if !is_individual_quota_refusal(failure) {
+    let ineligible = is_eligibility_refusal(failure);
+    if !ineligible && !is_individual_quota_refusal(failure) {
         return None;
     }
     let dir = super::cli_proxy_accounts::auth_dir()?;
@@ -556,7 +561,11 @@ pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option
             claude_reset: None,
             refused_until: None,
         });
-        health.refused_until = Some(until);
+        if ineligible {
+            health.eligibility = Eligibility::NeedsVerification;
+        } else {
+            health.refused_until = Some(until);
+        }
     }
     let next = chosen_file(&dir).filter(|next| *next != spent);
     let identity = |file: &str| {
@@ -583,6 +592,12 @@ pub(crate) fn is_individual_quota_refusal(failure: &str) -> bool {
     lower.contains("individual quota reached")
         && lower.contains("resource_exhausted")
         && lower.contains("429")
+}
+
+/// `agy` refusing the signed-in login until its owner verifies it.
+pub(crate) fn is_eligibility_refusal(failure: &str) -> bool {
+    let lower = failure.to_ascii_lowercase();
+    lower.contains("eligibility check failed") && lower.contains("not eligible for antigravity")
 }
 
 /// Longest real Antigravity quota window (weekly), plus margin.
@@ -883,6 +898,12 @@ mod tests {
         both.refused_until = Some(800);
         m.insert("marchand".into(), both);
         assert_eq!(choose(&c, &m, 0).unwrap().file, "her3sy");
+    }
+
+    #[test]
+    fn eligibility_refusal_is_recognized() {
+        assert!(is_eligibility_refusal("CLI error: Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue."));
+        assert!(!is_eligibility_refusal("Eligibility check failed: network"));
     }
 
     #[test]
