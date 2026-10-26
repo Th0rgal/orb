@@ -665,6 +665,7 @@ pub struct MeshPeer {
     pub overlay_ip: String,
     pub prefix_len: u8,
     pub wg_pubkey: String,
+    pub sign_pubkey_hex: String,
     pub endpoint: Option<String>,
     pub pinned_static: bool,
     pub revoked: bool,
@@ -825,7 +826,10 @@ impl MeshManifest {
 
         for i in 0..self.peers.len() {
             let p_a = &self.peers[i];
-            if has_unsafe_chars(&p_a.name) || has_unsafe_chars(&p_a.wg_pubkey) {
+            if has_unsafe_chars(&p_a.name)
+                || has_unsafe_chars(&p_a.wg_pubkey)
+                || has_unsafe_chars(&p_a.sign_pubkey_hex)
+            {
                 return Err(MeshError::InvalidPeerMetadata(format!(
                     "peer `{}` contains forbidden characters",
                     p_a.name
@@ -852,6 +856,30 @@ impl MeshManifest {
                     "peer `{}` wg_pubkey must decode to 32 bytes (got {})",
                     p_a.name,
                     decoded_key.len()
+                )));
+            }
+            let decoded_sign_pk = hex::decode(&p_a.sign_pubkey_hex).map_err(|_| {
+                MeshError::InvalidPeerMetadata(format!(
+                    "peer `{}` sign_pubkey_hex is not valid hex",
+                    p_a.name
+                ))
+            })?;
+            let sign_pk_arr: [u8; 32] = decoded_sign_pk.try_into().map_err(|_| {
+                MeshError::InvalidPeerMetadata(format!(
+                    "peer `{}` sign_pubkey_hex must decode to 32 bytes",
+                    p_a.name
+                ))
+            })?;
+            if VerifyingKey::from_bytes(&sign_pk_arr).is_err() {
+                return Err(MeshError::InvalidPeerMetadata(format!(
+                    "peer `{}` sign_pubkey_hex is not a valid Ed25519 verifying key",
+                    p_a.name
+                )));
+            }
+            if p_a.sign_pubkey_hex.eq_ignore_ascii_case(&self.coordinator_pubkey_hex) {
+                return Err(MeshError::InvalidPeerMetadata(format!(
+                    "peer `{}` sign_pubkey_hex must be distinct from coordinator_pubkey_hex",
+                    p_a.name
                 )));
             }
 
@@ -881,9 +909,12 @@ impl MeshManifest {
 
             for j in (i + 1)..self.peers.len() {
                 let p_b = &self.peers[j];
-                if p_a.name == p_b.name || p_a.wg_pubkey == p_b.wg_pubkey {
+                if p_a.name == p_b.name
+                    || p_a.wg_pubkey == p_b.wg_pubkey
+                    || p_a.sign_pubkey_hex.eq_ignore_ascii_case(&p_b.sign_pubkey_hex)
+                {
                     return Err(MeshError::InvalidPeerMetadata(format!(
-                        "duplicate peer name or WireGuard public key between `{}` and `{}`",
+                        "duplicate peer name, WireGuard public key, or Ed25519 sign_pubkey_hex between `{}` and `{}`",
                         p_a.name, p_b.name
                     )));
                 }
@@ -1317,6 +1348,9 @@ impl MeshManifest {
             h.update(label.as_bytes());
             base64::engine::general_purpose::STANDARD.encode(h.finalize())
         };
+        let det_sign_pub = |label: &str| -> String {
+            hex::encode(default_peer_signing_key(label).verifying_key().to_bytes())
+        };
 
         let peers = vec![
             MeshPeer {
@@ -1326,6 +1360,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.1".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("agent-core"),
+                sign_pubkey_hex: det_sign_pub("agent-core"),
                 endpoint: Some("95.216.173.237:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1338,6 +1373,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.2".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("dgx-spark"),
+                sign_pubkey_hex: det_sign_pub("dgx-spark"),
                 endpoint: None,
                 pinned_static: false,
                 revoked: false,
@@ -1350,6 +1386,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.3".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("thomas-md"),
+                sign_pubkey_hex: det_sign_pub("thomas-md"),
                 endpoint: Some("46.225.188.198:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1362,6 +1399,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.4".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("polymath"),
+                sign_pubkey_hex: det_sign_pub("polymath"),
                 endpoint: Some("51.83.45.146:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1374,6 +1412,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.5".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("maven-repo"),
+                sign_pubkey_hex: det_sign_pub("maven-repo"),
                 endpoint: Some("54.36.110.220:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1386,6 +1425,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.11".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("ashur"),
+                sign_pubkey_hex: det_sign_pub("ashur"),
                 endpoint: Some("65.108.230.229:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1398,6 +1438,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.12".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("babylon"),
+                sign_pubkey_hex: det_sign_pub("babylon"),
                 endpoint: Some("15.235.226.153:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1410,6 +1451,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.13".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("nippur"),
+                sign_pubkey_hex: det_sign_pub("nippur"),
                 endpoint: Some("37.187.143.36:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1422,6 +1464,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.14".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("old-agent"),
+                sign_pubkey_hex: det_sign_pub("old-agent"),
                 endpoint: Some("46.225.95.157:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1434,6 +1477,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.15".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("watchtower"),
+                sign_pubkey_hex: det_sign_pub("watchtower"),
                 endpoint: Some("51.75.66.161:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1446,6 +1490,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.21".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("api-starknet-id"),
+                sign_pubkey_hex: det_sign_pub("api-starknet-id"),
                 endpoint: Some("5.39.72.91:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1458,6 +1503,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.22".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("sepolia-starknet-id"),
+                sign_pubkey_hex: det_sign_pub("sepolia-starknet-id"),
                 endpoint: Some("5.39.73.3:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1470,6 +1516,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.100".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("macbook-air"),
+                sign_pubkey_hex: det_sign_pub("macbook-air"),
                 endpoint: None,
                 pinned_static: false,
                 revoked: false,
@@ -1542,6 +1589,68 @@ pub struct PeerReconcilePlan {
     pub wg_pubkey: String,
     pub action: ReconcileAction,
     pub wg_set_args: Option<Vec<String>>,
+}
+
+/// Derives the default initial per-peer Ed25519 signing key used in `paloma_fleet_default`
+/// before a node's hardware-generated Ed25519 public key is enrolled in the manifest.
+pub fn default_peer_signing_key(peer_name: &str) -> SigningKey {
+    let mut h = Sha256::new();
+    h.update(b"lean-mesh-peer-ed25519-v1:");
+    h.update(peer_name.as_bytes());
+    let digest: [u8; 32] = h.finalize().into();
+    SigningKey::from_bytes(&digest)
+}
+
+/// Canonical domain-separated SHA-256 digest for authenticated node configuration render requests.
+pub fn canonical_render_auth_bytes(peer_name: &str, seq: u64, timestamp: u64) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lean-mesh-render-v1:");
+    hasher.update(peer_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(seq.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(timestamp.to_be_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Signs a canonical node configuration render request `(peer_name, seq, timestamp)` with `signing_key`.
+pub fn sign_render_auth(
+    signing_key: &SigningKey,
+    peer_name: &str,
+    seq: u64,
+    timestamp: u64,
+) -> String {
+    let digest = canonical_render_auth_bytes(peer_name, seq, timestamp);
+    let sig: Signature = signing_key.sign(&digest);
+    hex::encode(sig.to_bytes())
+}
+
+/// Verifies an Ed25519 signature over a canonical node configuration render request `(peer_name, seq, timestamp)`.
+pub fn verify_render_auth_signature(
+    pubkey_hex: &str,
+    peer_name: &str,
+    seq: u64,
+    timestamp: u64,
+    signature_hex: &str,
+) -> bool {
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(pk_arr): Result<[u8; 32], _> = pk_bytes.try_into() else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    let digest = canonical_render_auth_bytes(peer_name, seq, timestamp);
+    verifying_key.verify(&digest, &signature).is_ok()
 }
 
 /// Canonical domain-separated SHA-256 digest for authenticated mesh heartbeats.
@@ -1986,9 +2095,11 @@ mod tests {
             }
         }
 
-        // 3. Authenticated heartbeat signature verification succeeds only for matching parameters.
-        let pub_hex = hex::encode(sk.verifying_key().to_bytes());
-        let sig_hex = sign_heartbeat(&sk, "dgx-spark", 1, now + 5);
+        // 3. Authenticated heartbeat signature verification succeeds only for matching parameters
+        // and is domain-separated from `sign_render_auth`.
+        let peer_sk = default_peer_signing_key("dgx-spark");
+        let pub_hex = hex::encode(peer_sk.verifying_key().to_bytes());
+        let sig_hex = sign_heartbeat(&peer_sk, "dgx-spark", 1, now + 5);
         assert!(verify_heartbeat_signature(
             &pub_hex,
             "dgx-spark",
@@ -2010,10 +2121,34 @@ mod tests {
             now + 5,
             &sig_hex
         ));
+        let render_sig_hex = sign_render_auth(&peer_sk, "dgx-spark", 1, now + 5);
+        assert!(verify_render_auth_signature(
+            &pub_hex,
+            "dgx-spark",
+            1,
+            now + 5,
+            &render_sig_hex
+        ));
+        assert!(!verify_render_auth_signature(
+            &pub_hex,
+            "dgx-spark",
+            1,
+            now + 5,
+            &sig_hex
+        ));
+        assert!(!verify_heartbeat_signature(
+            &pub_hex,
+            "dgx-spark",
+            1,
+            now + 5,
+            &render_sig_hex
+        ));
 
         // 4. Authenticated roam frame signature + bounds check.
+        let mac_sk = default_peer_signing_key("macbook-air");
+        let mac_pub_hex = hex::encode(mac_sk.verifying_key().to_bytes());
         let roam_sig = sign_roam(
-            &sk,
+            &mac_sk,
             "macbook-air",
             Ipv4Addr::new(95, 216, 173, 237),
             51888,
@@ -2021,7 +2156,7 @@ mod tests {
             now + 5,
         );
         assert!(verify_roam_signature(
-            &pub_hex,
+            &mac_pub_hex,
             "macbook-air",
             Ipv4Addr::new(95, 216, 173, 237),
             51888,
@@ -2031,6 +2166,15 @@ mod tests {
         ));
         assert!(!verify_roam_signature(
             &pub_hex,
+            "macbook-air",
+            Ipv4Addr::new(95, 216, 173, 237),
+            51888,
+            10,
+            now + 5,
+            &roam_sig
+        ));
+        assert!(!verify_roam_signature(
+            &mac_pub_hex,
             "macbook-air",
             Ipv4Addr::new(95, 216, 173, 238),
             51888,

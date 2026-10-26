@@ -35,9 +35,9 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use lean_mesh::{
     check_endpoint_roam, select_relay_path, step_bunker_isolate, verify_frame_bounds,
-    verify_heartbeat_signature, verify_jit_lease, verify_roam_signature,
-    BunkerState as MeshBunkerState, BunkerTransition, MeshManifest, MeshProto, NodeClass,
-    RelayPathKind, ReplayWindow64, RouteDecision, LEAN_MESH_DEFAULT_WG_PORT,
+    verify_heartbeat_signature, verify_jit_lease, verify_render_auth_signature,
+    verify_roam_signature, BunkerState as MeshBunkerState, BunkerTransition, MeshManifest,
+    MeshProto, NodeClass, RelayPathKind, ReplayWindow64, RouteDecision, LEAN_MESH_DEFAULT_WG_PORT,
     LEAN_MESH_FRAME_MAGIC, LEAN_MESH_INTERFACE_NAME, LEAN_MESH_PROTOCOL_VERSION,
     LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
 };
@@ -331,11 +331,12 @@ async fn effective_mesh_bunker(
 /// Pure server-side heartbeat verification & bunker state transition step.
 ///
 /// Enforces:
-/// 1. `is_sovereign_node` is derived strictly from the pinned manifest (`NodeClass::SovereignVault`),
-///    never from a client boolean.
+/// 1. `effective_sovereign` combines the manifest-derived `peer.node_class == NodeClass::SovereignVault`
+///    with the store-wide fail-safe `state.is_sovereign_node` flag, never trusting a client boolean.
 /// 2. `canary_tripped` and `auth_failure_burst` are derived strictly from server-side `orb_bunker`.
-/// 3. Ed25519 signature over `("lean-mesh-heartbeat-v1", peer_name, heartbeat_seq, timestamp)`,
-///    timestamp freshness, and `ReplayWindow64` anti-replay are verified **before** updating
+/// 3. Ed25519 signature over `("lean-mesh-heartbeat-v1", peer_name, heartbeat_seq, timestamp)`
+///    is verified against the peer's own manifest-pinned `peer.sign_pubkey_hex` (NOT the coordinator key!),
+///    along with timestamp freshness and `ReplayWindow64` anti-replay, **before** updating
 ///    `last_heartbeat_at`.
 /// 4. If heartbeat verification fails, `last_heartbeat_at` is NOT updated and `step_bunker_isolate`
 ///    is evaluated with `heartbeat_valid = false` against the previously persisted `last_heartbeat_at`,
@@ -361,6 +362,7 @@ pub fn process_heartbeat_step(
     let peer_active = !peer.revoked && now_epoch < peer.expires_at;
     let is_sovereign_peer = peer.node_class == NodeClass::SovereignVault;
     let effective_sovereign = state.is_sovereign_node || is_sovereign_peer;
+    let peer_sign_pubkey_hex = peer.sign_pubkey_hex.clone();
 
     let canary_tripped = orb_bunker == OrbBunkerState::HardLockdown;
     let auth_failure_burst = orb_bunker == OrbBunkerState::SoftQuarantine;
@@ -368,7 +370,7 @@ pub fn process_heartbeat_step(
 
     let sig_ok = peer_active
         && verify_heartbeat_signature(
-            &state.pinned_coordinator_pubkey_hex,
+            &peer_sign_pubkey_hex,
             &req.peer_name,
             req.heartbeat_seq,
             req.timestamp,
@@ -772,13 +774,14 @@ pub fn process_endpoint_roam_step(
     let peer = &state.manifest.peers[peer_idx];
     let peer_active = !peer.revoked && now_epoch < peer.expires_at;
     let pinned_static = peer.pinned_static;
+    let peer_sign_pubkey_hex = peer.sign_pubkey_hex.clone();
 
     let ts_fresh = req.timestamp <= now_epoch.saturating_add(30)
         && now_epoch.saturating_sub(req.timestamp) <= 120;
     let aead_auth_ok = peer_active
         && ts_fresh
         && verify_roam_signature(
-            &state.pinned_coordinator_pubkey_hex,
+            &peer_sign_pubkey_hex,
             &req.peer_name,
             ip,
             req.candidate_port,
@@ -898,17 +901,15 @@ async fn authorize_node_render(
         ));
     }
     if let (Some(seq), Some(ts), Some(sig)) = (auth.seq, auth.timestamp, auth.signature_hex.as_deref()) {
-        let ts_fresh = ts <= now_epoch.saturating_add(30) && now_epoch.saturating_sub(ts) <= 120;
-        if ts_fresh
-            && verify_heartbeat_signature(
-                &mesh_state.pinned_coordinator_pubkey_hex,
-                node,
-                seq,
-                ts,
-                sig,
-            )
-        {
-            return Ok(());
+        if let Ok(peer) = mesh_state.manifest.find_peer(node) {
+            let peer_active = !peer.revoked && now_epoch < peer.expires_at;
+            let ts_fresh = ts <= now_epoch.saturating_add(30) && now_epoch.saturating_sub(ts) <= 120;
+            if peer_active
+                && ts_fresh
+                && verify_render_auth_signature(&peer.sign_pubkey_hex, node, seq, ts, sig)
+            {
+                return Ok(());
+            }
         }
     }
     if let Some(grant_id) = auth.grant_id {
@@ -1076,7 +1077,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lean_mesh::sign_heartbeat;
+    use lean_mesh::{default_peer_signing_key, sign_heartbeat, sign_render_auth};
 
     #[test]
     fn mesh_store_initializes_and_enforces_sovereign_isolation() {
@@ -1133,19 +1134,28 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         rt.block_on(async {
             let mut guard = ms.inner.lock().await;
-            let sk = guard.signing_key().expect("valid coordinator signing key");
+            let coord_sk = guard.signing_key().expect("valid coordinator signing key");
+            let peer_sk = default_peer_signing_key("macbook-air");
             let now = guard.manifest.issued_at + 10;
             let initial_epoch = guard.manifest.epoch;
 
-            // 1. Forged roam signature for `macbook-air` (non-pinned) with pkt_seq = 77
+            // 1. Roam frame signed by the COORDINATOR key (or forged) for `macbook-air` with `pkt_seq = 77`
             // is rejected by `process_endpoint_roam_step` BEFORE touching `replay_window`.
+            let coord_roam_sig = sign_roam(
+                &coord_sk,
+                "macbook-air",
+                Ipv4Addr::new(95, 216, 173, 237),
+                51888,
+                77,
+                now,
+            );
             let forged_roam = EndpointRoamRequest {
                 peer_name: "macbook-air".into(),
                 candidate_ip: "95.216.173.237".into(),
                 candidate_port: 51888,
                 pkt_seq: 77,
                 timestamp: now,
-                signature_hex: "00".repeat(64),
+                signature_hex: coord_roam_sig,
                 allow_private_roam: false,
             };
             let err_unauth = process_endpoint_roam_step(
@@ -1157,10 +1167,10 @@ mod tests {
             .unwrap_err();
             assert_eq!(err_unauth.0, StatusCode::FORBIDDEN);
 
-            // 2. Legitimate Ed25519-signed roam frame with the same `pkt_seq = 77` succeeds,
-            // advances the replay window, and re-signs + ratchets the manifest epoch.
+            // 2. Legitimate Ed25519 roam frame signed by `macbook-air`'s own node signing key
+            // with the same `pkt_seq = 77` succeeds, advances the replay window, and re-signs + ratchets the manifest epoch.
             let valid_sig = sign_roam(
-                &sk,
+                &peer_sk,
                 "macbook-air",
                 Ipv4Addr::new(95, 216, 173, 237),
                 51888,
@@ -1193,7 +1203,7 @@ mod tests {
 
             // 3. Replaying the same signed roam frame (`pkt_seq = 77`) is rejected by `ReplayWindow64`.
             let replay_sig = sign_roam(
-                &sk,
+                &peer_sk,
                 "macbook-air",
                 Ipv4Addr::new(95, 216, 173, 238),
                 51888,
@@ -1227,12 +1237,73 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         rt.block_on(async {
             let mut guard = ms.inner.lock().await;
-            let sk = guard.signing_key().expect("valid signing key");
+            let coord_sk = guard.signing_key().expect("valid coordinator signing key");
+            let spark_sk = default_peer_signing_key("dgx-spark");
+            let ashur_sk = default_peer_signing_key("ashur");
             let t0 = guard.manifest.issued_at;
             guard.last_heartbeat_at = t0;
 
-            // 1. Valid signed heartbeat at `t0 + 10` advances `last_heartbeat_at` and keeps Normal state.
-            let sig1 = sign_heartbeat(&sk, "dgx-spark", 1, t0 + 10);
+            // 0. A heartbeat signed by the COORDINATOR key (or by another node's key) is REJECTED
+            // and does NOT advance `last_heartbeat_at` or consume `heartbeat_seq = 1`.
+            let coord_sig = sign_heartbeat(&coord_sk, "dgx-spark", 1, t0 + 10);
+            let coord_hb_req = HeartbeatRequest {
+                peer_name: "dgx-spark".into(),
+                heartbeat_seq: 1,
+                timestamp: t0 + 10,
+                signature_hex: coord_sig,
+                unbunker_grant_id: None,
+            };
+            let coord_err = process_heartbeat_step(
+                &mut guard,
+                &coord_hb_req,
+                OrbBunkerState::Normal,
+                false,
+                t0 + 10,
+            )
+            .unwrap_err();
+            assert_eq!(coord_err.0, StatusCode::UNAUTHORIZED);
+            assert_eq!(guard.last_heartbeat_at, t0);
+
+            let cross_node_sig = sign_heartbeat(&ashur_sk, "dgx-spark", 1, t0 + 10);
+            let cross_node_req = HeartbeatRequest {
+                peer_name: "dgx-spark".into(),
+                heartbeat_seq: 1,
+                timestamp: t0 + 10,
+                signature_hex: cross_node_sig,
+                unbunker_grant_id: None,
+            };
+            let cross_err = process_heartbeat_step(
+                &mut guard,
+                &cross_node_req,
+                OrbBunkerState::Normal,
+                false,
+                t0 + 10,
+            )
+            .unwrap_err();
+            assert_eq!(cross_err.0, StatusCode::UNAUTHORIZED);
+            assert_eq!(guard.last_heartbeat_at, t0);
+
+            // Also verify domain separation: a render-auth token signed by `dgx-spark` is rejected as a heartbeat!
+            let render_tok = sign_render_auth(&spark_sk, "dgx-spark", 1, t0 + 10);
+            let render_as_hb = HeartbeatRequest {
+                peer_name: "dgx-spark".into(),
+                heartbeat_seq: 1,
+                timestamp: t0 + 10,
+                signature_hex: render_tok,
+                unbunker_grant_id: None,
+            };
+            assert!(process_heartbeat_step(
+                &mut guard,
+                &render_as_hb,
+                OrbBunkerState::Normal,
+                false,
+                t0 + 10,
+            )
+            .is_err());
+
+            // 1. Valid heartbeat signed by `dgx-spark`'s own pinned Ed25519 key at `t0 + 10`
+            // advances `last_heartbeat_at` and keeps Normal state.
+            let sig1 = sign_heartbeat(&spark_sk, "dgx-spark", 1, t0 + 10);
             let req1 = HeartbeatRequest {
                 peer_name: "dgx-spark".into(),
                 heartbeat_seq: 1,
@@ -1247,7 +1318,7 @@ mod tests {
                 false,
                 t0 + 10,
             )
-            .expect("valid signed heartbeat must succeed");
+            .expect("valid node-signed heartbeat must succeed");
             assert_eq!(tr1.next_state, MeshBunkerState::Normal);
             assert_eq!(guard.last_heartbeat_at, t0 + 10);
 
@@ -1264,13 +1335,14 @@ mod tests {
             assert_eq!(replay_err.0, StatusCode::UNAUTHORIZED);
             assert_eq!(guard.last_heartbeat_at, t0 + 10);
 
-            // 3. Forged heartbeat after 200s (`> 180s` dead-man timeout) does NOT overwrite
-            // `last_heartbeat_at` and trips `SovereignDeadManTripped` (State 3)!
+            // 3. Heartbeat signed by the coordinator key after 200s (`> 180s` dead-man timeout)
+            // is rejected, does NOT overwrite `last_heartbeat_at`, and trips `SovereignDeadManTripped` (State 3)!
+            let coord_late_sig = sign_heartbeat(&coord_sk, "dgx-spark", 2, t0 + 215);
             let forged_req = HeartbeatRequest {
                 peer_name: "dgx-spark".into(),
                 heartbeat_seq: 2,
                 timestamp: t0 + 215,
-                signature_hex: "00".repeat(64),
+                signature_hex: coord_late_sig,
                 unbunker_grant_id: None,
             };
             let forged_err = process_heartbeat_step(
@@ -1288,9 +1360,9 @@ mod tests {
                 MeshBunkerState::SovereignDeadManTripped
             );
 
-            // 4. Even a valid heartbeat WITHOUT a verified server-side biometric unbunker grant
+            // 4. Even a valid node-signed heartbeat WITHOUT a verified server-side biometric unbunker grant
             // cannot exit `SovereignDeadManTripped` (sticky fence).
-            let sig2 = sign_heartbeat(&sk, "dgx-spark", 2, t0 + 220);
+            let sig2 = sign_heartbeat(&spark_sk, "dgx-spark", 2, t0 + 220);
             let req2 = HeartbeatRequest {
                 peer_name: "dgx-spark".into(),
                 heartbeat_seq: 2,
@@ -1308,8 +1380,8 @@ mod tests {
             .expect("valid heartbeat accepted");
             assert_eq!(tr2.next_state, MeshBunkerState::SovereignDeadManTripped);
 
-            // 5. Valid heartbeat WITH verified server-side biometric `RootExec` grant unbunkers back to Normal.
-            let sig3 = sign_heartbeat(&sk, "dgx-spark", 3, t0 + 225);
+            // 5. Valid node-signed heartbeat WITH verified server-side biometric `RootExec` grant unbunkers back to Normal.
+            let sig3 = sign_heartbeat(&spark_sk, "dgx-spark", 3, t0 + 225);
             let req3 = HeartbeatRequest {
                 peer_name: "dgx-spark".into(),
                 heartbeat_seq: 3,
