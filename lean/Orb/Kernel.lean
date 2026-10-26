@@ -1617,4 +1617,106 @@ def clientParityStep
     else transcriptSeq ^^^ (markdownBlocksCount <<< 16) ^^^ (sendQueueDepth <<< 24)
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 10: Fleet Security — Canary Blast-Radius Isolation, Process Whitelist,
+--          High-Signal Attacker Bait, Enforcer Convergence & Biometric/Mesh Gates
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Canary Tripwire Blast-Radius & Process Whitelist Stepper (`canaryTripwireStep`):
+  - `canaryClass`:
+    - `0 = AmbientDecoy` (`.env.production.canary`, `.vault-recovery.age`, `mongo_27017`)
+    - `≥ 1 = HighSignalBait` (attacker-only bait such as fake Bitcoin WIF / BIP-39 wallet seed
+      `btc-treasury-wallet.dat` or fake SSH exfil key `ssh_exfil_canary` that legitimate agents
+      never access; a hit even from an agent process implies process/inference compromise).
+  - `actorTrust`:
+    - `0 = WhitelistedAgentWalk` (routine search/walk by a known agent process: `rg`, `fd`, `find`, `ls`, `git`)
+    - `1 = MissionProcess` (mission job process directly reading/probing an ambient decoy)
+    - `≥ 2 = UntrustedOrSystem` (non-agent / unknown / root / external process)
+  - `isDryRun`: `1` if synthetic `--dry-run`, else `0`.
+  - `currentFleetBunker`: `0 = Normal`, `1 = SoftQuarantine`, `≥ 2 = HardLockdown`.
+  - Returns a packed `UInt32`:
+    - `bits 0..7`: `action` (`0 = IgnoreWhitelisted`, `1 = QuarantineNodeOnly`, `2 = EscalateFleetLockdown`)
+    - `bit 8 (256)`: `quarantineReportingNodeBit` (`1` iff `action ≥ 1`)
+    - `bit 9 (512)`: `fleetLockdownBit` (`1` iff `action == 2`)
+    - `bit 10 (1024)`: `alertOperatorBit` (`1` iff `action ≥ 1` or `isDryRun == 1`)
+    - `bits 16..23`: `nextFleetBunker` (`2` if `action == 2`, else `clampedFleetBunker`)
+-/
+@[inline]
+def canaryTripwireStep
+    (canaryClass actorTrust isDryRun currentFleetBunker : UInt8) : UInt64 :=
+  let isHighSignal : Bool := canaryClass >= 1
+  let lo32 : UInt32 :=
+    if isDryRun == 1 then 1024
+    else if isHighSignal then 1794
+    else if actorTrust == 0 then 0
+    else if actorTrust == 1 then 1281
+    else 1794
+  let hi32 : UInt32 :=
+    if isDryRun == 1 then
+      (if currentFleetBunker >= 2 then 2 else currentFleetBunker.toUInt32)
+    else if isHighSignal then 2
+    else if actorTrust == 0 || actorTrust == 1 then
+      (if currentFleetBunker >= 2 then 2 else currentFleetBunker.toUInt32)
+    else 2
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Worker Node Bunker Enforcer Convergence Stepper (`bunkerEnforcerStep`):
+  Determines whether a worker node's `orb-bunker-enforcer` should apply/keep `paloma_canary_quarantine`
+  or release it and clear `/run/paloma-canary-tripped`:
+  - When `statusReachable == 0`: preserves local quarantine if `hasLocalTripMarker == 1`, else stays normal.
+  - When `statusReachable == 1`:
+    - Keeps/applies quarantine (`action = 1`, `bit 8 = 256`) iff `fleetBunker >= 2` (`HardLockdown` /
+      `SovereignDeadManTripped`), or `nodeQuarantinedByCore == 1`, or (`hasLocalTripMarker == 1` and
+      `lastUnbunkerEpoch < localTripEpoch`).
+    - Releases quarantine (`action = 0`, `bit 8 = 0`, `clearMarkerBit = 512` if marker present)
+      whenever `fleetBunker < 2 && nodeQuarantinedByCore == 0 && (hasLocalTripMarker == 0 || lastUnbunkerEpoch >= localTripEpoch)`.
+-/
+@[inline]
+def bunkerEnforcerStep
+    (statusReachable fleetBunker nodeQuarantinedByCore hasLocalTripMarker : UInt8)
+    (localTripEpoch lastUnbunkerEpoch : UInt64) : UInt32 :=
+  let fleetLockdown : Bool := fleetBunker >= 2
+  let markerCleared : Bool := hasLocalTripMarker == 0 || lastUnbunkerEpoch >= localTripEpoch
+  if statusReachable == 0 then
+    if hasLocalTripMarker == 1 then 257 else 0
+  else if fleetLockdown || nodeQuarantinedByCore == 1 || !markerCleared then
+    257
+  else if hasLocalTripMarker == 1 then
+    512
+  else
+    0
+
+/--
+  Biometric Approval Gate Stepper (`biometricGateStep`):
+  Enforces non-bypassable Face ID / Touch ID evaluation on mobile & desktop approval surfaces:
+  - When `surfaceRequiresBio == 0`: admitted (`257`).
+  - When `surfaceRequiresBio == 1`:
+    - Admitted (`257`, `admittedBit = 256`) iff `(hardwareEnrolled == 1 && evalSucceeded == 1)` or
+      `(hardwareEnrolled == 0 && passcodeFallbackSucceeded == 1)`.
+    - Otherwise rejected (`512`, `admittedBit = 0`, `surfaceErrorBit = 512`) so failed or unavailable
+      biometric contexts never silently drop or auto-approve the request.
+-/
+@[inline]
+def biometricGateStep
+    (surfaceRequiresBio hardwareEnrolled evalSucceeded passcodeFallbackSucceeded : UInt8) : UInt32 :=
+  if surfaceRequiresBio == 0 then 257
+  else if (hardwareEnrolled == 1 && evalSucceeded == 1) ||
+          (hardwareEnrolled == 0 && passcodeFallbackSucceeded == 1) then 257
+  else 512
+
+/--
+  Mesh Internal Service Route Admission Stepper (`meshServiceRouteStep`):
+  Enforces that internal service endpoints (such as Spark Whisper `/v1/audio/transcriptions`)
+  never route to a retired Tailscale CGNAT address (`endpointInRetiredTailnet == 1`) and only
+  admit requests over the verified `lean-mesh` `10.88.0.0/16` overlay, loopback, or explicit bearer auth.
+-/
+@[inline]
+def meshServiceRouteStep
+    (endpointInMeshOverlay endpointInRetiredTailnet hasMeshAuthOrBearer isLoopback : UInt8) : UInt32 :=
+  if endpointInRetiredTailnet == 1 then 512
+  else if isLoopback == 1 || endpointInMeshOverlay == 1 || hasMeshAuthOrBearer == 1 then 257
+  else 512
+
 end Orb.Kernel

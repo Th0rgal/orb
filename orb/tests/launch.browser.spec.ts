@@ -463,7 +463,10 @@ test('follow-up composer does not alternate layouts while typing wrapped text',a
 
 test("unsupported Cyber route keeps the draft and never submits a remote mission",async({page})=>{
  const state=await setup(page,{cyberRefusal:true,capability:{...typedCapability,harnesses:["grok","codex"]}});
- state.releasePost();state.releaseHistory();await chooseRemote(page);
+ state.releasePost();state.releaseHistory();
+ await page.getByRole("button",{name:"Cyber program: Automatic"}).click();
+ await page.getByRole("menuitemradio",{name:/Standard/}).click();
+ await chooseRemote(page);
  await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:/^Codex/}).click();
  const input=composerInput(page);await input.fill(objective);await input.press("Enter");
  await expect(page.getByRole("alert")).toContainText("Choose Automatic explicitly");

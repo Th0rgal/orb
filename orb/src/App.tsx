@@ -551,7 +551,7 @@ export default function App() {
   /** `remote`: a start requested from another device over the client link.
    * It never reads or clears this window's draft and never navigates. */
   const launchLocal = async (typed: string, prompt: string, title: string, projectSlug: string | undefined, pick: HarnessPick, images: DraftImage[], launchNavigation: number, remote?: { key: string; cwd?: string | null }) => {
-    const selectedCyber = remote ? "standard" : draftCyber();
+    const selectedCyber = remote ? "automatic" : draftCyber();
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
     if (pick.backend === "codex") await requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true);
     const row = await localAgentForLaunch(pick.backend);
@@ -575,7 +575,7 @@ export default function App() {
     if (launchAttempt?.signature !== signature) launchAttempt = { signature, key: crypto.randomUUID() };
     const m=await startLocalOrigin({harness:pick.backend,bin:row.path,cwd:root,prompt:sent,model:pick.model,effort:pick.backend === "antigravity" ? effort ?? undefined : undefined,cyber_access:pick.backend === "codex" ? selectedCyber : undefined,service_tier:pick.backend === "codex" ? pick.service_tier??"standard" : undefined,imagePaths}, {key:launchAttempt.key,title,project:projectSlug,prompt:body.prompt,tags:body.tags});
     launchAttempt = undefined;
-    setDraftCyber("standard");
+    setDraftCyber("automatic");
     setAttachChips([]);
     rememberLaunch(m.id, {messageKey:launchPreview()?.messageKey,prompt:imagePrompt(typed,imagePaths,images),images,nodeId:"local",destination:"This computer"});
     launchedViewKeys.set(m.id, launchViewKey());
@@ -665,7 +665,7 @@ export default function App() {
         if (launchAttempt?.signature !== signature) launchAttempt = {signature,key:crypto.randomUUID()};
         const m = await createMission({...body,idempotency_key:launchAttempt.key});
         launchAttempt = undefined;
-        setDraftCyber("standard");
+        setDraftCyber("automatic");
         setAttachChips([]);
         rememberLaunch(m.id, {...receipt,prompt:sentPrompt});
         if (machine === "dgx-spark-admin") chooseMachine("core");

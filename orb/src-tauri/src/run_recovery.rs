@@ -167,8 +167,24 @@ fn workspace_quiet(cwd: &str) -> Result<(), String> {
             .with_exe(UpdateKind::Always),
     );
     let self_pid = std::process::id();
+    let temp_dir = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir());
     for (pid, process) in system.processes() {
         if pid.as_u32() == self_pid {
+            continue;
+        }
+        if matches!(
+            process.status(),
+            sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
+        ) {
+            continue;
+        }
+        if process.cwd().is_none()
+            && process
+                .exe()
+                .is_some_and(|exe| exe.starts_with(&temp_dir) && !exe.starts_with(&root))
+        {
             continue;
         }
         let name = process.name().to_string_lossy().to_lowercase();
@@ -763,7 +779,8 @@ mod process_tests {
             root.path().to_str().unwrap(),
             None,
         ));
-        local_agents::local_agents_stop(id).unwrap();
+        local_agents::local_agents_stop(id.clone()).unwrap();
+        let _ = local_agents::wait_stopped(&id, Duration::from_secs(5));
         assert!(result
             .unwrap_err()
             .contains("still running locally or waiting"));

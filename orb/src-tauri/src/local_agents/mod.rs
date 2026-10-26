@@ -546,8 +546,10 @@ mod directory_tests {
             "unrelated mission must still see directory as busy"
         );
         local_agents_stop(side_id.clone()).unwrap();
+        let _ = wait_stopped(&side_id, Duration::from_secs(5));
         runs().lock().unwrap().remove(&side_id);
         local_agents_stop(first.clone()).unwrap();
+        let _ = wait_stopped(&first, Duration::from_secs(5));
         runs().lock().unwrap().remove(&first);
         assert!(second
             .unwrap_err()
