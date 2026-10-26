@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { isArchivable, isFailedStatus, isLive, isQueued, isReopenable, isRunning, isSettingsIdle, isWorking, statusPresentation } from "../src/missionStatus";
+import { isArchivable, isFailedStatus, isLive, isQueued, isReopenable, isRunning, isSettingsIdle, isWorking, missionActivity, queueWaitLabel, statusPresentation } from "../src/missionStatus";
 
 const STATUSES = ["active", "running", "starting", "resuming", "pending", "queued", "waiting_background", "awaiting_user", "waiting_user", "acknowledged", "blocked", "paused", "completed", "failed", "not_feasible", "interrupted", "cancelled"] as const;
 // status:   running queued live working archivable reopenable failed settingsIdle label
@@ -33,4 +33,14 @@ it("treats missing and unknown statuses as idle", () => {
   for (const status of [null, undefined, "", "mystery"]) expect([isLive(status), isRunning(status), isWorking(status)]).toEqual([false, false, false]);
   expect(isSettingsIdle("AWAITING_USER")).toBe(true);
   expect(statusPresentation("mystery").label).toBe("mystery");
+});
+
+it("a pending mission waiting for a Core slot says so instead of a bare Queued", () => {
+  const queue_wait = { reason: "waiting_for_slot", slots_used: 1, slots_max: 1, running_mission_ids: ["6d25e770"] };
+  expect(queueWaitLabel({ status: "pending", queue_wait })).toBe("Waiting for a free slot (1/1 in use)");
+  expect(missionActivity({ status: "pending", queue_wait })).toEqual({ working: true, reason: "queued", label: "Waiting for a free slot (1/1 in use)" });
+  // No capacity data, or the mission already started: nothing changes.
+  expect(queueWaitLabel({ status: "pending" })).toBeNull();
+  expect(queueWaitLabel({ status: "active", queue_wait })).toBeNull();
+  expect(missionActivity({ status: "pending" })).toEqual({ working: true, reason: "queued" });
 });

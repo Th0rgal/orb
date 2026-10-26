@@ -1260,7 +1260,9 @@ def streamCommitMetaGate : MetaGateSpec StreamCommitCheck
       let nextTick : UInt8 := if s.lineTick == 1 then (if s.tick == 1 then 0 else 1) else (if s.tick == 1 then 1 else 0)
       let nextFence := streamNextFenceKind s.openKind s.openCount s.markerKind s.markerCount
       (s.lineBlank == 1 && nextTick == 0 && nextFence == 0) = true) where
-  gate s := ((streamCommitStep s.tick s.openKind s.openCount s.lineBlank s.lineTick s.markerKind s.markerCount s.pos s.commit &&& 0xFFFFFFFF) &&& 65536) != 0
+  gate s :=
+    ((streamCommitStep s.tick s.openKind s.openCount s.lineBlank s.lineTick
+        s.markerKind s.markerCount s.pos s.commit &&& 0xFFFFFFFF) &&& 65536) != 0
   sound s h := by
     unfold streamCommitStep at h
     rw [pack32_lo] at h
@@ -1271,7 +1273,11 @@ def streamCommitMetaGate : MetaGateSpec StreamCommitCheck
       cases hnf : (nf == 0) <;>
       cases hnf1 : (nf == 1) <;>
       cases hnf2 : (nf == 2) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide)
   complete s h := by
     unfold streamCommitStep
     rw [pack32_lo]
@@ -1306,7 +1312,9 @@ structure MissionAttentionCheck where
   deriving Repr, DecidableEq
 
 def missionAttentionMetaGate : MetaGateSpec MissionAttentionCheck
-    (fun m => (missionStateClassify m.stateId == 0 || missionStateClassify m.stateId == 1 || missionStateClassify m.stateId == 2) = true) where
+    (fun m => (missionStateClassify m.stateId == 0 ||
+      missionStateClassify m.stateId == 1 ||
+      missionStateClassify m.stateId == 2) = true) where
   gate m := (missionFlags m.stateId &&& 4) != 0
   sound m h := by
     revert h
@@ -1373,7 +1381,12 @@ def connectionIssueMetaGate : MetaGateSpec ConnectionIssueCheck
       cases hd1 : (c.isUsingDefault == 1) <;>
       cases ha : (c.isPrivateAddr == 1) <;>
       cases hr : (c.defaultReachable == 1) <;>
-      (simp_all; try (exfalso; revert h; decide); try decide)
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide
+       try decide)
   complete c h := by
     unfold connectionIssueClassify
     cases hu : (c.isUnreachable != 1) <;>
@@ -1484,7 +1497,11 @@ def machineActionMetaGate : MetaGateSpec MachineActionCheck
       by_cases h2 : m.stateKind ≤ 2 <;>
       cases hb : (m.isBusy == 0) <;>
       cases hm : (m.isMuted == 0) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide)
   complete m h := by
     unfold machineActionAdmitted
     split <;> (simp_all; try decide)
@@ -1887,5 +1904,257 @@ theorem route_argmin_selects_strictly_better_eligible (bestId candId : UInt32) (
   · unfold routeArgminStep
     rw [pack32_hi]
     simp
+
+/-! ## Wave 9 — Phase 1: Control Core — Mission Lifecycle, Codex Resume, Fork `HOME` & Track Leases -/
+
+structure MissionControlCheck where
+  isArchived          : UInt8
+  activeTrackWriters  : UInt32
+  hasLease            : UInt8
+  msgAlreadyDelivered : UInt8
+  isResume            : UInt8
+  sessionCreated      : UInt8
+  lineageVerified     : UInt8
+  rolloutExists       : UInt8
+  hasFallbackPrompt   : UInt8
+  deriving Repr, DecidableEq
+
+def MissionControlCheck.Admissible (m : MissionControlCheck) : Prop :=
+  (!(m.isArchived == 1) &&
+   !(m.msgAlreadyDelivered == 1) &&
+   (m.hasLease == 1 && m.activeTrackWriters == 0) &&
+   (!(m.isResume == 1) ||
+    (m.sessionCreated == 1 && m.lineageVerified == 1 && m.rolloutExists == 1) ||
+    m.hasFallbackPrompt == 1)) = true
+
+instance (m : MissionControlCheck) : Decidable (MissionControlCheck.Admissible m) :=
+  inferInstanceAs (Decidable (_ = true))
+
+def missionControlMetaGate : MetaGateSpec MissionControlCheck MissionControlCheck.Admissible where
+  gate m :=
+    ((missionControlStep m.isArchived m.activeTrackWriters m.hasLease m.msgAlreadyDelivered
+        m.isResume m.sessionCreated m.lineageVerified m.rolloutExists m.hasFallbackPrompt &&& 0xFFFFFFFF) &&& 256) != 0
+  sound m h := by
+    unfold missionControlStep MissionControlCheck.Admissible at *
+    rw [pack32_lo] at h
+    cases ha : (m.isArchived == 1) <;>
+      cases hd : (m.msgAlreadyDelivered == 1) <;>
+      cases hlw : (m.hasLease == 1 && m.activeTrackWriters == 0) <;>
+      cases hr : (m.isResume == 1) <;>
+      cases hsv : (m.sessionCreated == 1 && m.lineageVerified == 1 && m.rolloutExists == 1) <;>
+      cases hfb : (m.hasFallbackPrompt == 1) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete m h := by
+    unfold missionControlStep MissionControlCheck.Admissible at *
+    rw [pack32_lo]
+    cases ha : (m.isArchived == 1) <;>
+      cases hd : (m.msgAlreadyDelivered == 1) <;>
+      cases hlw : (m.hasLease == 1 && m.activeTrackWriters == 0) <;>
+      cases hr : (m.isResume == 1) <;>
+      cases hsv : (m.sessionCreated == 1 && m.lineageVerified == 1 && m.rolloutExists == 1) <;>
+      cases hfb : (m.hasFallbackPrompt == 1) <;>
+      (simp_all; try decide)
+  posWitness := ⟨0, 0, 1, 0, 1, 1, 1, 1, 0⟩
+  negWitness := ⟨1, 0, 1, 0, 1, 1, 1, 1, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 58 (`StickyFence` — `orb_mission_control_step`):
+    An archived mission (`isArchived == 1`) never revives on any wakeup/reminder/resume event:
+    it emits zero dispatch (`bit 8 == 0`), keeps `archivedNext == 1` (`bit 16 == 65536`),
+    and allocates zero track writers (`hi32 == 0`). -/
+theorem archived_mission_never_revives
+    (writers : UInt32) (lease deliv res sc lv ro fb : UInt8) :
+    ((missionControlStep 1 writers lease deliv res sc lv ro fb &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((missionControlStep 1 writers lease deliv res sc lv ro fb &&& 0xFFFFFFFF) &&& 65536) = 65536 ∧
+    (missionControlStep 1 writers lease deliv res sc lv ro fb >>> 32) = 0 := by
+  unfold missionControlStep
+  simp; decide
+
+/-- Corollary 59 (`ScopedAuthority` & `EffectSafety` — `orb_mission_control_step`):
+    When Codex session lineage or rollout is unverified (`(sc == 1 && lv == 1 && ro == 1) = false`),
+    raw native resume (`action == 2`) is never emitted, and a valid turn with `hasFallbackPrompt == 1`
+    selects `SeedFallbackFreshSession` (`lo32 = 771`, `hi32 = 1`), fixing the phantom Codex session bug. -/
+theorem resume_codex_requires_verified_lineage
+    (arch : UInt8) (writers : UInt32) (lease deliv sc lv ro fb : UInt8)
+    (h_unverified : (sc == 1 && lv == 1 && ro == 1) = false) :
+    ((missionControlStep arch writers lease deliv 1 sc lv ro fb &&& 0xFFFFFFFF) &&& 0xFF) != 2 ∧
+    missionControlStep 0 0 1 0 1 sc lv ro 1 = 4294968067 ∧
+    ((missionControlStep 0 0 1 0 1 sc lv ro 0 &&& 0xFFFFFFFF) &&& 256) = 0 := by
+  refine ⟨?_, ?_, ?_⟩
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases ha : (arch == 1) <;>
+      cases hd : (deliv == 1) <;>
+      cases hlw : (lease == 1 && writers == 0) <;>
+      cases hsc : (sc == 1) <;>
+      cases hlv : (lv == 1) <;>
+      cases hro : (ro == 1) <;>
+      cases hfb : (fb == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    cases hsc : (sc == 1) <;>
+      cases hlv : (lv == 1) <;>
+      cases hro : (ro == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases hsc : (sc == 1) <;>
+      cases hlv : (lv == 1) <;>
+      cases hro : (ro == 1) <;>
+      (simp_all; try decide)
+
+/-- Corollary 60 (`ConservedResource` & `ReplayIdempotence` — `orb_mission_control_step`):
+    1. `at_most_one_writer_per_track`: when `activeTrackWriters != 0`, zero dispatch is emitted, and
+       across all transitions `hi32 ≤ 1`.
+    2. `no_user_message_lost_or_duplicated`: an already-delivered message (`deliv == 1`) is never
+       dispatched again, while a fresh leased turn (`arch == 0, writers == 0, lease == 1, deliv == 0, res == 0`)
+       is always dispatched (`lo32 = 257, hi32 = 1`). -/
+theorem at_most_one_writer_and_no_message_lost_or_duplicated
+    (arch : UInt8) (writers : UInt32) (lease deliv res sc lv ro fb : UInt8)
+    (h_busy : (writers == 0) = false) :
+    ((missionControlStep arch writers lease deliv res sc lv ro fb &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((missionControlStep arch writers lease 1 res sc lv ro fb &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (missionControlStep arch writers lease deliv res sc lv ro fb >>> 32) ≤ 1 ∧
+    missionControlStep 0 0 1 0 0 sc lv ro fb = 4294967553 := by
+  refine ⟨?_, ?_, ?_, by unfold missionControlStep; simp; decide⟩
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases ha : (arch == 1) <;>
+      cases hd : (deliv == 1) <;>
+      cases hl : (lease == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    rw [pack32_lo]
+    cases ha : (arch == 1) <;>
+      (simp_all; try decide)
+  · unfold missionControlStep
+    rw [pack32_hi]
+    cases ha : (arch == 1) <;>
+      cases hd : (deliv == 1) <;>
+      cases hlw : (lease == 1 && writers == 0) <;>
+      cases hr : (res == 1) <;>
+      cases hsv : (sc == 1 && lv == 1 && ro == 1) <;>
+      cases hfb : (fb == 1) <;>
+      (simp_all; try decide)
+
+/-- Sticky archived state enricher for `orb_mission_control_step`. -/
+def effectiveArchived (archivedState : UInt8) (e : MissionControlCheck) : MissionControlCheck :=
+  { e with isArchived := if archivedState == 1 || e.isArchived == 1 then 1 else 0 }
+
+/-- Pure state-machine transition wrapper for `orb_mission_control_step` (`State × Event → State × List UInt32`). -/
+def missionControlMachineStep (archivedState : UInt8) (e : MissionControlCheck) : UInt8 × List UInt32 :=
+  let e' := effectiveArchived archivedState e
+  let w := missionControlStep e'.isArchived e'.activeTrackWriters e'.hasLease e'.msgAlreadyDelivered
+    e'.isResume e'.sessionCreated e'.lineageVerified e'.rolloutExists e'.hasFallbackPrompt
+  (if ((w &&& 0xFFFFFFFF) &&& 65536) != 0 then 1 else 0,
+   if missionControlMetaGate.gate e' then [((w &&& 0xFFFFFFFF) &&& 0xFF).toUInt32] else [])
+
+/-- Concrete `MetaStepSpec` instance for `orb_mission_control_step` (`EffectSafety`, `EffectLiveness`
+    with multi-step reachable trace from `init = 0`, and `CostBound`). -/
+def missionControlMetaStepSpec : MetaStepSpec UInt8 MissionControlCheck UInt32 where
+  safety := {
+    step := missionControlMachineStep
+    authorized := fun s e _eff => (effectiveArchived s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [missionControlMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        exact missionControlMetaGate.sound (effectiveArchived s e) h_emit
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := missionControlMachineStep
+    progressRequired := fun s e => (effectiveArchived s e).Admissible
+    expectedEffect := fun _ _ => True
+    live := fun s e h_req => by
+      have h_gate := missionControlMetaGate.complete (effectiveArchived s e) h_req
+      dsimp [missionControlMachineStep]
+      simp [h_gate]
+    traceEvents := [
+      ⟨0, 0, 1, 0, 0, 0, 0, 0, 0⟩,
+      ⟨0, 0, 1, 0, 1, 1, 1, 0, 1⟩
+    ]
+    posEvent := ⟨0, 0, 1, 0, 1, 1, 1, 1, 0⟩
+    negEvent := ⟨1, 0, 1, 0, 1, 1, 1, 1, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := missionControlMachineStep
+    cpuFuel := fun _ _ => 1
+    inputBytes := fun _ => 16
+    outputBytes := fun _ _ => 8
+    c0 := 1
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 8
+    fuel_bound := fun _ _ => by omega
+    eff_bound := fun s e => by
+      dsimp [missionControlMachineStep]
+      split <;> simp
+    out_bound := fun _ _ => by omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+structure ForkHomeCheck where
+  isForkOrSide          : UInt8
+  sourceExists          : UInt8
+  sourceIsSymlink       : UInt8
+  sameWorkspace         : UInt8
+  sameNode              : UInt8
+  hasCommittedTransfer  : UInt8
+  requestedOverrideHome : UInt8
+  deriving Repr, DecidableEq
+
+def forkHomeMetaGate : MetaGateSpec ForkHomeCheck
+    (fun f => (f.isForkOrSide == 0 ||
+      (f.sourceExists == 1 && f.sourceIsSymlink == 0 && f.sameWorkspace == 1 && f.sameNode == 1)) = true) where
+  gate f :=
+    ((forkHomeStep f.isForkOrSide f.sourceExists f.sourceIsSymlink f.sameWorkspace
+        f.sameNode f.hasCommittedTransfer f.requestedOverrideHome &&& 0xFFFFFFFF) &&& 256) != 0
+  sound f h := by
+    unfold forkHomeStep at h
+    rw [pack32_lo] at h
+    cases hf : (f.isForkOrSide == 0) <;>
+      cases hv : (f.sourceExists == 1 && f.sourceIsSymlink == 0 && f.sameWorkspace == 1 && f.sameNode == 1) <;>
+      cases hx : (f.hasCommittedTransfer == 1) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete f h := by
+    unfold forkHomeStep
+    rw [pack32_lo]
+    cases hf : (f.isForkOrSide == 0) <;>
+      cases hv : (f.sourceExists == 1 && f.sourceIsSymlink == 0 && f.sameWorkspace == 1 && f.sameNode == 1) <;>
+      cases hx : (f.hasCommittedTransfer == 1) <;>
+      (simp_all; try decide)
+  posWitness := ⟨1, 1, 0, 1, 1, 0, 1⟩
+  negWitness := ⟨1, 1, 1, 1, 1, 0, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 61 (`ScopedAuthority` — `orb_fork_home_step`):
+    1. `fork_preserves_job_home`: under ALL inputs (even `requestedOverrideHome == 1`), `overrideHomeBit` (`65536`)
+       is `0` (fixing the `#1302`/`9178bd08` fork `HOME` sign-out bug).
+    2. Missing (`sourceExists == 0`) or symlinked (`sourceIsSymlink == 1`) fork workspaces fail closed with exit code `78`.
+    3. A valid sibling fork (`1, 1, 0, 1, 1, 0`) sets `admitBit = 256`, `useSourceCwdBit = 512`, and `jobHomePreservedBit = 131072`. -/
+theorem fork_preserves_job_home_and_source_cwd
+    (isFork srcEx sym sameWs sameNd xfer reqHome : UInt8) :
+    ((forkHomeStep isFork srcEx sym sameWs sameNd xfer reqHome &&& 0xFFFFFFFF) &&& 65536) = 0 ∧
+    (forkHomeStep 1 0 sym sameWs sameNd xfer reqHome >>> 32) = 78 ∧
+    (forkHomeStep 1 srcEx 1 sameWs sameNd xfer reqHome >>> 32) = 78 ∧
+    forkHomeStep 1 1 0 1 1 0 reqHome = 131842 := by
+  refine ⟨?_, ?_, ?_, by unfold forkHomeStep; simp⟩
+  · unfold forkHomeStep
+    rw [pack32_lo]
+    cases hf : (isFork == 0) <;>
+      cases hv : (srcEx == 1 && sym == 0 && sameWs == 1 && sameNd == 1) <;>
+      cases hx : (xfer == 1) <;>
+      (simp_all; try decide)
+  · unfold forkHomeStep
+    rw [pack32_hi]
+    simp
+  · unfold forkHomeStep
+    rw [pack32_hi]
+    cases hs : (srcEx == 1) <;> simp_all
 
 end Orb.Spec

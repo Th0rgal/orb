@@ -1,6 +1,135 @@
 //! Operator-created conversation forks. Native sessions are never reused.
 use super::*;
 
+/// Serializable snapshot of the live Lean 4 control-plane shadow runner (`RefinementSimulation`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ControlShadowSnapshot {
+    pub subsystem: &'static str,
+    pub total_steps: u64,
+    pub total_divergences: u64,
+    pub recent_divergences: usize,
+}
+
+static CONTROL_SHADOW_RING: std::sync::LazyLock<
+    std::sync::Mutex<crate::orb_spec::shadow::ShadowDivergenceRing<256>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(crate::orb_spec::shadow::ShadowDivergenceRing::<256>::new())
+});
+
+pub fn control_shadow_snapshot() -> ControlShadowSnapshot {
+    let ring = CONTROL_SHADOW_RING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ControlShadowSnapshot {
+        subsystem: "mission_control_and_fork_home",
+        total_steps: ring.total_events,
+        total_divergences: ring.unexpected_divergences,
+        recent_divergences: ring.entries().len(),
+    }
+}
+
+/// Run `mission_control_step` (`orb_mission_control_step`) in lockstep with the host decision
+/// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
+pub(super) fn observe_mission_control_shadow(
+    input: crate::orb_spec::MissionControlStepInput,
+    host_admits: bool,
+) -> crate::orb_spec::MissionControlStepVerdict {
+    let verdict = crate::orb_spec::mission_control_step(input);
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        bool,
+        bool,
+        crate::orb_spec::MissionControlStepInput,
+        u8,
+        u8,
+    > {
+        subsystem: "mission_control",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::mission_control_step(*ev);
+            let effs = if v.emit_dispatch_effect {
+                vec![1u8]
+            } else {
+                Vec::new()
+            };
+            (v.archived_next, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits { vec![1u8] } else { Vec::new() };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: input.active_track_writers as u64,
+        idempotency_key: u64::from(input.msg_already_delivered),
+        boot_id_matches: true,
+        schema_id: 1,
+    };
+    if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
+        let _ = sim.observe_step(
+            &input.is_archived,
+            &verdict.archived_next,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Run `fork_home_step` (`orb_fork_home_step`) in lockstep with the host decision
+/// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
+pub(super) fn observe_fork_home_shadow(
+    input: crate::orb_spec::ForkHomeStepInput,
+    host_admits: bool,
+) -> crate::orb_spec::ForkHomeStepVerdict {
+    let verdict = crate::orb_spec::fork_home_step(input);
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        bool,
+        bool,
+        crate::orb_spec::ForkHomeStepInput,
+        u32,
+        u32,
+    > {
+        subsystem: "fork_home",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::fork_home_step(*ev);
+            let effs = if v.admit_launch {
+                vec![0u32]
+            } else {
+                vec![v.exit_code]
+            };
+            (v.override_home, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits {
+        vec![0u32]
+    } else {
+        vec![78u32]
+    };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: 0,
+        idempotency_key: u64::from(input.is_fork_or_side),
+        boot_id_matches: true,
+        schema_id: 1,
+    };
+    if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
+        let _ = sim.observe_step(
+            &false,
+            &false,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
 #[derive(Deserialize)]
 pub struct ForkRequest {
     pub backend: String,
@@ -220,7 +349,21 @@ pub async fn fork_mission(
         crate::workspace::ensure_persisted_mission_root_is_available(&workspace, id)
             .map_err(internal_error)?;
         let directory = crate::workspace::mission_workspace_dir_for_workspace(&workspace, id);
-        if !directory.is_dir() {
+        let dir_exists = directory.is_dir();
+        let dir_is_symlink = directory.is_symlink();
+        let fork_verdict = observe_fork_home_shadow(
+            crate::orb_spec::ForkHomeStepInput {
+                is_fork_or_side: true,
+                source_exists: dir_exists,
+                source_is_symlink: dir_is_symlink,
+                same_workspace: true,
+                same_node: true,
+                has_committed_transfer: false,
+                requested_override_home: false,
+            },
+            dir_exists && !dir_is_symlink,
+        );
+        if !dir_exists || !fork_verdict.admit_launch || fork_verdict.override_home {
             return Err((
                 StatusCode::CONFLICT,
                 "Original workspace is unavailable".into(),
@@ -655,6 +798,22 @@ pub(super) async fn workspace_prefix(
         .iter()
         .find_map(|tag| tag.strip_prefix("fork-workspace:"))
     else {
+        let std_verdict = observe_fork_home_shadow(
+            crate::orb_spec::ForkHomeStepInput {
+                is_fork_or_side: false,
+                source_exists: true,
+                source_is_symlink: false,
+                same_workspace: true,
+                same_node: true,
+                has_committed_transfer: false,
+                requested_override_home: false,
+            },
+            true,
+        );
+        if !std_verdict.admit_launch || std_verdict.override_home || !std_verdict.job_home_preserved
+        {
+            return Err("Standard workspace gate rejected launch".into());
+        }
         return Ok(String::new());
     };
     let source_id = Uuid::parse_str(source_id).map_err(|_| "Invalid fork workspace identity")?;
@@ -663,13 +822,39 @@ pub(super) async fn workspace_prefix(
         .get_mission(source_id)
         .await?
         .ok_or("Fork workspace source no longer exists")?;
-    if source.workspace_id != mission.workspace_id {
+    let same_workspace = source.workspace_id == mission.workspace_id;
+    if !same_workspace {
+        let _ = observe_fork_home_shadow(
+            crate::orb_spec::ForkHomeStepInput {
+                is_fork_or_side: true,
+                source_exists: true,
+                source_is_symlink: false,
+                same_workspace: false,
+                same_node: true,
+                has_committed_transfer: false,
+                requested_override_home: false,
+            },
+            false,
+        );
         return Err("Fork workspace does not match source".into());
     }
     let placement = remote_grok::placement(ledger_dir, &control.mission_store, source_id)
         .await?
         .ok_or("Fork source is not on a remote node")?;
-    if placement.node_id != node_id {
+    let same_node = placement.node_id == node_id;
+    if !same_node {
+        let _ = observe_fork_home_shadow(
+            crate::orb_spec::ForkHomeStepInput {
+                is_fork_or_side: true,
+                source_exists: true,
+                source_is_symlink: false,
+                same_workspace: true,
+                same_node: false,
+                has_committed_transfer: false,
+                requested_override_home: false,
+            },
+            false,
+        );
         return Err("Fork source is on a different node".into());
     }
     if let Some(transfer) =
@@ -678,6 +863,25 @@ pub(super) async fn workspace_prefix(
         let root = transfer
             .destination_root
             .ok_or("Transferred workspace missing")?;
+        let xfer_verdict = observe_fork_home_shadow(
+            crate::orb_spec::ForkHomeStepInput {
+                is_fork_or_side: true,
+                source_exists: true,
+                source_is_symlink: false,
+                same_workspace: true,
+                same_node: true,
+                has_committed_transfer: true,
+                requested_override_home: false,
+            },
+            true,
+        );
+        if !xfer_verdict.admit_launch
+            || !xfer_verdict.use_source_cwd
+            || xfer_verdict.override_home
+            || !xfer_verdict.job_home_preserved
+        {
+            return Err("Fork workspace transfer rejected by kernel gate".into());
+        }
         let root = shell_single_quote(&root);
         return Ok(format!("cd -- {root} || exit 78; "));
     }
@@ -685,6 +889,19 @@ pub(super) async fn workspace_prefix(
 }
 
 fn workspace_command(source_id: Uuid) -> String {
+    let verdict = observe_fork_home_shadow(
+        crate::orb_spec::ForkHomeStepInput {
+            is_fork_or_side: true,
+            source_exists: true,
+            source_is_symlink: false,
+            same_workspace: true,
+            same_node: true,
+            has_committed_transfer: false,
+            requested_override_home: false,
+        },
+        true,
+    );
+    debug_assert!(verdict.admit_launch && verdict.use_source_cwd && !verdict.override_home && verdict.job_home_preserved);
     format!("fork_root=$(pwd -P); fork_root=${{fork_root%/*}}; fork_dir=\"$fork_root/{source_id}\"; [ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || {{ echo 'Fork workspace unavailable' >&2; exit 78; }}; cd -- \"$fork_dir\" || exit 78; ")
 }
 
@@ -870,6 +1087,7 @@ mod tests {
     }
     #[test]
     fn remote_fork_uses_existing_sibling_and_refuses_missing_workspace() {
+        let before_shadow = super::control_shadow_snapshot();
         let root = tempfile::tempdir().unwrap();
         let source_id = Uuid::new_v4();
         let source = root.path().join(source_id.to_string());
@@ -902,6 +1120,9 @@ mod tests {
                 .unwrap(),
             target.canonicalize().unwrap()
         );
+        let after_shadow = super::control_shadow_snapshot();
+        assert!(after_shadow.total_steps > before_shadow.total_steps);
+        assert_eq!(after_shadow.total_divergences, 0);
         #[cfg(unix)]
         {
             std::fs::remove_dir(&source).unwrap();

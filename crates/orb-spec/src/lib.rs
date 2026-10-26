@@ -884,6 +884,26 @@ unsafe extern "C" {
         cand_score: u64,
         cand_admissible: u8,
     ) -> u64;
+    fn orb_mission_control_step(
+        is_archived: u8,
+        active_track_writers: u32,
+        has_lease: u8,
+        msg_already_delivered: u8,
+        is_resume: u8,
+        session_created: u8,
+        lineage_verified: u8,
+        rollout_exists: u8,
+        has_fallback_prompt: u8,
+    ) -> u64;
+    fn orb_fork_home_step(
+        is_fork_or_side: u8,
+        source_exists: u8,
+        source_is_symlink: u8,
+        same_workspace: u8,
+        same_node: u8,
+        has_committed_transfer: u8,
+        requested_override_home: u8,
+    ) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2519,6 +2539,132 @@ pub fn select_best_provider_account(
         Some(best_id)
     } else {
         None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MissionControlAction {
+    RejectArchived = 0,
+    DispatchFreshTurn = 1,
+    ResumeVerifiedSession = 2,
+    SeedFallbackFreshSession = 3,
+    DedupeDeliveredMessage = 4,
+    RejectTrackWriterConflict = 5,
+    RejectUnverifiedResume = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionControlStepInput {
+    pub is_archived: bool,
+    pub active_track_writers: u32,
+    pub has_lease: bool,
+    pub msg_already_delivered: bool,
+    pub is_resume: bool,
+    pub session_created: bool,
+    pub lineage_verified: bool,
+    pub rollout_exists: bool,
+    pub has_fallback_prompt: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionControlStepVerdict {
+    pub action: MissionControlAction,
+    pub emit_dispatch_effect: bool,
+    pub seed_fallback_session: bool,
+    pub archived_next: bool,
+    pub track_writers_next: u32,
+}
+
+#[inline]
+pub fn mission_control_step(input: MissionControlStepInput) -> MissionControlStepVerdict {
+    let raw = unsafe {
+        orb_mission_control_step(
+            u8::from(input.is_archived),
+            input.active_track_writers,
+            u8::from(input.has_lease),
+            u8::from(input.msg_already_delivered),
+            u8::from(input.is_resume),
+            u8::from(input.session_created),
+            u8::from(input.lineage_verified),
+            u8::from(input.rollout_exists),
+            u8::from(input.has_fallback_prompt),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => MissionControlAction::DispatchFreshTurn,
+        2 => MissionControlAction::ResumeVerifiedSession,
+        3 => MissionControlAction::SeedFallbackFreshSession,
+        4 => MissionControlAction::DedupeDeliveredMessage,
+        5 => MissionControlAction::RejectTrackWriterConflict,
+        6 => MissionControlAction::RejectUnverifiedResume,
+        _ => MissionControlAction::RejectArchived,
+    };
+    MissionControlStepVerdict {
+        action,
+        emit_dispatch_effect: ((raw >> 8) & 1) != 0,
+        seed_fallback_session: ((raw >> 9) & 1) != 0,
+        archived_next: ((raw >> 16) & 1) != 0,
+        track_writers_next: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ForkHomeAction {
+    RejectForkWorkspace = 0,
+    StandardJobWorkspace = 1,
+    UseSiblingSourceCwdKeepJobHome = 2,
+    UseTransferredRootCwdKeepJobHome = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkHomeStepInput {
+    pub is_fork_or_side: bool,
+    pub source_exists: bool,
+    pub source_is_symlink: bool,
+    pub same_workspace: bool,
+    pub same_node: bool,
+    pub has_committed_transfer: bool,
+    pub requested_override_home: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkHomeStepVerdict {
+    pub action: ForkHomeAction,
+    pub admit_launch: bool,
+    pub use_source_cwd: bool,
+    pub override_home: bool,
+    pub job_home_preserved: bool,
+    pub exit_code: u32,
+}
+
+#[inline]
+pub fn fork_home_step(input: ForkHomeStepInput) -> ForkHomeStepVerdict {
+    let raw = unsafe {
+        orb_fork_home_step(
+            u8::from(input.is_fork_or_side),
+            u8::from(input.source_exists),
+            u8::from(input.source_is_symlink),
+            u8::from(input.same_workspace),
+            u8::from(input.same_node),
+            u8::from(input.has_committed_transfer),
+            u8::from(input.requested_override_home),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => ForkHomeAction::StandardJobWorkspace,
+        2 => ForkHomeAction::UseSiblingSourceCwdKeepJobHome,
+        3 => ForkHomeAction::UseTransferredRootCwdKeepJobHome,
+        _ => ForkHomeAction::RejectForkWorkspace,
+    };
+    ForkHomeStepVerdict {
+        action,
+        admit_launch: ((raw >> 8) & 1) != 0,
+        use_source_cwd: ((raw >> 9) & 1) != 0,
+        override_home: ((raw >> 16) & 1) != 0,
+        job_home_preserved: ((raw >> 17) & 1) != 0,
+        exit_code: (raw >> 32) as u32,
     }
 }
 

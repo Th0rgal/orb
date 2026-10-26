@@ -32,6 +32,11 @@
       "description": "Balanced speed and capability"
     },
     {
+      "id": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5",
+      "description": "Latest Sonnet, efficient for routine tasks"
+    },
+    {
       "id": "claude-sonnet-5",
       "name": "Claude Sonnet 5",
       "description": "Balanced speed and capability"
@@ -40,6 +45,11 @@
       "id": "claude-sonnet-4-20250514",
       "name": "Claude Sonnet 4",
       "description": "Good balance of speed and capability"
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "description": "Latest Haiku, fastest for quick answers"
     },
     {
       "id": "claude-3-5-haiku-20241022",

@@ -250,6 +250,30 @@ object OrbKernel {
     ): Long
 
     @JvmStatic
+    external fun orbMissionControlStep(
+        isArchived: Int,
+        activeTrackWriters: Int,
+        hasLease: Int,
+        msgAlreadyDelivered: Int,
+        isResume: Int,
+        sessionCreated: Int,
+        lineageVerified: Int,
+        rolloutExists: Int,
+        hasFallbackPrompt: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbForkHomeStep(
+        isForkOrSide: Int,
+        sourceExists: Int,
+        sourceIsSymlink: Int,
+        sameWorkspace: Int,
+        sameNode: Int,
+        hasCommittedTransfer: Int,
+        requestedOverrideHome: Int
+    ): Long
+
+    @JvmStatic
     external fun leansysSseFrameScan(
         frameOff: Long,
         frameLen: Long,

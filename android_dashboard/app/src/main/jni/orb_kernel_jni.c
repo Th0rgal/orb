@@ -181,6 +181,16 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbRouteArgminStep(JNIEnv *env, jclass
     return (jlong)orb_route_argmin_step((uint8_t)hasBest, (uint32_t)bestId, (uint64_t)bestScore, (uint32_t)candId, (uint64_t)candScore, (uint8_t)candAdmissible);
 }
 
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbMissionControlStep(JNIEnv *env, jclass clazz, jint isArchived, jint activeTrackWriters, jint hasLease, jint msgAlreadyDelivered, jint isResume, jint sessionCreated, jint lineageVerified, jint rolloutExists, jint hasFallbackPrompt) {
+    return (jlong)orb_mission_control_step((uint8_t)isArchived, (uint32_t)activeTrackWriters, (uint8_t)hasLease, (uint8_t)msgAlreadyDelivered, (uint8_t)isResume, (uint8_t)sessionCreated, (uint8_t)lineageVerified, (uint8_t)rolloutExists, (uint8_t)hasFallbackPrompt);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbForkHomeStep(JNIEnv *env, jclass clazz, jint isForkOrSide, jint sourceExists, jint sourceIsSymlink, jint sameWorkspace, jint sameNode, jint hasCommittedTransfer, jint requestedOverrideHome) {
+    return (jlong)orb_fork_home_step((uint8_t)isForkOrSide, (uint8_t)sourceExists, (uint8_t)sourceIsSymlink, (uint8_t)sameWorkspace, (uint8_t)sameNode, (uint8_t)hasCommittedTransfer, (uint8_t)requestedOverrideHome);
+}
+
 JNIEXPORT jbyte JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSseFrameScan(JNIEnv *env, jclass clazz, jlong frameOff, jlong frameLen, jlong chunkLen, jint fieldKind, jint nextByte, jint lastByte) {
     return (jbyte)leansys_sse_frame_scan((uint64_t)frameOff, (uint64_t)frameLen, (uint64_t)chunkLen, (uint8_t)fieldKind, (uint8_t)nextByte, (uint8_t)lastByte);

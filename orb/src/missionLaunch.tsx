@@ -1,7 +1,7 @@
 import { isRecord, readJson, writeJson } from "./storage";
 import { missionNode, nodeLabel } from "./machines/nodes";
 import { REMOTE_PROXY_HARNESSES } from "./harnesses";
-import { isQueued } from "./missionStatus";
+import { isQueued, queueWaitLabel } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
 import { ErrorNotice } from "./ErrorNotice";
@@ -274,6 +274,8 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
     return {label:"Remote job accepted",moving:true,detail:"Waiting for the remote node to confirm execution."};
   }
   if (status === "resuming") return {label:"Resuming",moving:true,detail:"Waiting for the runner to resume."};
+  const slotWait = queueWaitLabel(mission);
+  if (slotWait) return {label:slotWait,moving:true,detail:"Every parallel slot on Core is busy. This mission starts automatically when one frees up."};
   if (isQueued(status)) return {label:"Queued",moving:true,detail:"Request accepted. Waiting for the runner to start."};
   if (["active","running","starting"].includes(status)) return {label:activity?"Running":"Starting",moving:true,detail:activity?"":"Request accepted. Waiting for the first output."};
   return {label:status.replaceAll("_"," "),moving:false,detail:""};

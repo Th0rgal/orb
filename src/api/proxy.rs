@@ -2043,12 +2043,14 @@ async fn native_protocol_proxy(
     let mut last_upstream_error: Option<(StatusCode, HeaderMap, bytes::Bytes)> = None;
     let native_chain_length = (entries.len() as u32).max(1);
     let mut native_first_byte_locked = false;
+    let mut native_account_ordinals = crate::provider_health::AccountOrdinalTable::new();
     for (entry_idx, entry) in entries.iter().enumerate() {
         let now_epoch = chrono::Utc::now().timestamp().max(0) as u64;
+        let cand_ord = native_account_ordinals.intern(entry.account_id);
         let pool_verdict = crate::provider_health::observe_account_candidate_shadow(
             crate::orb_spec::ProviderPoolStepInput {
                 bound_account_id: None,
-                candidate_account_id: crate::provider_health::account_u32_id(entry.account_id),
+                candidate_account_id: cand_ord,
                 is_rejected: false,
                 first_byte_sent: native_first_byte_locked,
                 is_failover_attempt: entry_idx > 0,
@@ -2060,7 +2062,10 @@ async fn native_protocol_proxy(
             !native_first_byte_locked && (entry_idx as u32) < native_chain_length,
         );
         native_first_byte_locked = pool_verdict.first_byte_locked_next;
-        if !pool_verdict.emit_dispatch_effect {
+        if !pool_verdict.emit_dispatch_effect
+            || native_account_ordinals.uuid_of(pool_verdict.dispatched_account_id)
+                != Some(entry.account_id)
+        {
             break;
         }
         if speed_accounts
@@ -3207,12 +3212,14 @@ async fn chat_completions_routed(
     let mut kimi_auth_refreshed: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
     let mut waterfall_first_byte_locked = false;
+    let mut waterfall_account_ordinals = crate::provider_health::AccountOrdinalTable::new();
     for (entry_idx, entry) in entries.iter().enumerate() {
         let now_epoch = chrono::Utc::now().timestamp().max(0) as u64;
+        let cand_ord = waterfall_account_ordinals.intern(entry.account_id);
         let pool_verdict = crate::provider_health::observe_account_candidate_shadow(
             crate::orb_spec::ProviderPoolStepInput {
                 bound_account_id: None,
-                candidate_account_id: crate::provider_health::account_u32_id(entry.account_id),
+                candidate_account_id: cand_ord,
                 is_rejected: false,
                 first_byte_sent: waterfall_first_byte_locked,
                 is_failover_attempt: entry_idx > 0,
@@ -3224,7 +3231,10 @@ async fn chat_completions_routed(
             !waterfall_first_byte_locked && (entry_idx as u32) < chain_length.max(1),
         );
         waterfall_first_byte_locked = pool_verdict.first_byte_locked_next;
-        if !pool_verdict.emit_dispatch_effect {
+        if !pool_verdict.emit_dispatch_effect
+            || waterfall_account_ordinals.uuid_of(pool_verdict.dispatched_account_id)
+                != Some(entry.account_id)
+        {
             break;
         }
         // Gemini thinking models may think silently for a long time before

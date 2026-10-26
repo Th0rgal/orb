@@ -2038,6 +2038,90 @@
       }
     },
     {
+      "name": "orb_mission_control_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "isArchived",
+          "type": "uint8_t"
+        },
+        {
+          "name": "activeTrackWriters",
+          "type": "uint32_t"
+        },
+        {
+          "name": "hasLease",
+          "type": "uint8_t"
+        },
+        {
+          "name": "msgAlreadyDelivered",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isResume",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sessionCreated",
+          "type": "uint8_t"
+        },
+        {
+          "name": "lineageVerified",
+          "type": "uint8_t"
+        },
+        {
+          "name": "rolloutExists",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasFallbackPrompt",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbMissionControlStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_fork_home_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "isForkOrSide",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sourceExists",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sourceIsSymlink",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameWorkspace",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameNode",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasCommittedTransfer",
+          "type": "uint8_t"
+        },
+        {
+          "name": "requestedOverrideHome",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbForkHomeStep",
+        "ret": "jlong"
+      }
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [

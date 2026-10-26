@@ -86,6 +86,65 @@ pub(super) async fn submit_leased_remote_job(
         *fallback_prompt =
             fork::recovery_prompt(mission.id, mission.title.as_deref(), &events, prompt)
                 .or_else(|| Some(prompt.clone()));
+        let codex_resume_verdict = fork::observe_mission_control_shadow(
+            crate::orb_spec::MissionControlStepInput {
+                is_archived: false,
+                active_track_writers: 0,
+                has_lease: true,
+                msg_already_delivered: false,
+                is_resume: true,
+                session_created: true,
+                lineage_verified: true,
+                // When the node rollout is missing, fallback_prompt seeds a fresh thread (`c96df4f9`):
+                rollout_exists: false,
+                has_fallback_prompt: fallback_prompt.is_some(),
+            },
+            fallback_prompt.is_some(),
+        );
+        if !codex_resume_verdict.emit_dispatch_effect
+            || !codex_resume_verdict.seed_fallback_session
+        {
+            return Err("Codex resume fallback rejected by mission control kernel gate".into());
+        }
+    }
+    let is_resume_plan = matches!(
+        &resolved_plan,
+        RemoteHarnessPlan::Codex {
+            resume_session_id: Some(_),
+            ..
+        } | RemoteHarnessPlan::ClaudeCode {
+            resume_session_id: Some(_),
+            ..
+        } | RemoteHarnessPlan::Grok {
+            resume_session_id: Some(_),
+            ..
+        } | RemoteHarnessPlan::Antigravity {
+            resume_session_id: Some(_),
+            ..
+        } | RemoteHarnessPlan::Vibe {
+            resume_session_id: Some(_),
+            ..
+        } | RemoteHarnessPlan::OpenCode {
+            resume_session_id: Some(_),
+            ..
+        }
+    );
+    let dispatch_gate = fork::observe_mission_control_shadow(
+        crate::orb_spec::MissionControlStepInput {
+            is_archived: false,
+            active_track_writers: 0,
+            has_lease: true,
+            msg_already_delivered: false,
+            is_resume: is_resume_plan,
+            session_created: is_resume_plan,
+            lineage_verified: is_resume_plan,
+            rollout_exists: is_resume_plan,
+            has_fallback_prompt: true,
+        },
+        true,
+    );
+    if !dispatch_gate.emit_dispatch_effect || dispatch_gate.archived_next {
+        return Err("Remote job dispatch rejected by mission control kernel gate".into());
     }
     let plan = &resolved_plan;
     let mut workspace_prefix =
@@ -937,6 +996,24 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
         .await
     {
         Ok(Some(placement)) if wait.limit == usage_limit_wait::FRESH_SESSION_FALLBACK => {
+            let fallback_verdict = fork::observe_mission_control_shadow(
+                crate::orb_spec::MissionControlStepInput {
+                    is_archived: false,
+                    active_track_writers: 0,
+                    has_lease: true,
+                    msg_already_delivered: false,
+                    is_resume: true,
+                    session_created: true,
+                    lineage_verified: true,
+                    rollout_exists: false,
+                    has_fallback_prompt: true,
+                },
+                true,
+            );
+            debug_assert_eq!(
+                fallback_verdict.action,
+                crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+            );
             match replace_remote_mission_with_fresh_session(
                 state,
                 &control,
