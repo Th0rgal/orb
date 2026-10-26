@@ -1954,6 +1954,90 @@
       }
     },
     {
+      "name": "orb_provider_pool_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "hasBoundAccount",
+          "type": "uint8_t"
+        },
+        {
+          "name": "boundAccountId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "candidateAccountId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "isRejected",
+          "type": "uint8_t"
+        },
+        {
+          "name": "firstByteSent",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isFailoverAttempt",
+          "type": "uint8_t"
+        },
+        {
+          "name": "attempts",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxAttempts",
+          "type": "uint32_t"
+        },
+        {
+          "name": "nowEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "resetEpoch",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbProviderPoolStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_route_argmin_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "hasBest",
+          "type": "uint8_t"
+        },
+        {
+          "name": "bestId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "bestScore",
+          "type": "uint64_t"
+        },
+        {
+          "name": "candId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "candScore",
+          "type": "uint64_t"
+        },
+        {
+          "name": "candAdmissible",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbRouteArgminStep",
+        "ret": "jlong"
+      }
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [

@@ -864,6 +864,26 @@ unsafe extern "C" {
         env_scrubbed: u8,
         budget_ok: u8,
     ) -> u8;
+    fn orb_provider_pool_step(
+        has_bound_account: u8,
+        bound_account_id: u32,
+        candidate_account_id: u32,
+        is_rejected: u8,
+        first_byte_sent: u8,
+        is_failover_attempt: u8,
+        attempts: u32,
+        max_attempts: u32,
+        now_epoch: u64,
+        reset_epoch: u64,
+    ) -> u64;
+    fn orb_route_argmin_step(
+        has_best: u8,
+        best_id: u32,
+        best_score: u64,
+        cand_id: u32,
+        cand_score: u64,
+        cand_admissible: u8,
+    ) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2347,6 +2367,158 @@ pub fn effect_admissible(input: EffectAdmissibleInput) -> bool {
             u8::from(input.env_scrubbed),
             u8::from(input.budget_ok),
         ) == 1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProviderPoolAction {
+    RejectCandidate = 0,
+    DispatchBoundAccount = 1,
+    DispatchPoolCandidate = 2,
+    AbortLockedStream = 3,
+    ExhaustedFailover = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderPoolStepInput {
+    pub bound_account_id: Option<u32>,
+    pub candidate_account_id: u32,
+    pub is_rejected: bool,
+    pub first_byte_sent: bool,
+    pub is_failover_attempt: bool,
+    pub attempts: u32,
+    pub max_attempts: u32,
+    pub now_epoch: u64,
+    pub reset_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderPoolStepVerdict {
+    pub action: ProviderPoolAction,
+    pub emit_dispatch_effect: bool,
+    pub first_byte_locked_next: bool,
+    pub dispatched_account_id: u32,
+}
+
+#[inline]
+pub fn provider_pool_step(input: ProviderPoolStepInput) -> ProviderPoolStepVerdict {
+    let raw = unsafe {
+        orb_provider_pool_step(
+            u8::from(input.bound_account_id.is_some()),
+            input.bound_account_id.unwrap_or(0),
+            input.candidate_account_id,
+            u8::from(input.is_rejected),
+            u8::from(input.first_byte_sent),
+            u8::from(input.is_failover_attempt),
+            input.attempts,
+            input.max_attempts,
+            input.now_epoch,
+            input.reset_epoch,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => ProviderPoolAction::DispatchBoundAccount,
+        2 => ProviderPoolAction::DispatchPoolCandidate,
+        3 => ProviderPoolAction::AbortLockedStream,
+        4 => ProviderPoolAction::ExhaustedFailover,
+        _ => ProviderPoolAction::RejectCandidate,
+    };
+    ProviderPoolStepVerdict {
+        action,
+        emit_dispatch_effect: ((raw >> 8) & 1) != 0,
+        first_byte_locked_next: ((raw >> 16) & 1) != 0,
+        dispatched_account_id: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteCandidate {
+    pub account_id: u32,
+    pub score: u64,
+    pub is_rejected: bool,
+    pub reset_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteArgminVerdict {
+    pub has_best: bool,
+    pub took_candidate: bool,
+    pub best_id: u32,
+}
+
+#[inline]
+pub fn route_argmin_step(
+    has_best: bool,
+    best_id: u32,
+    best_score: u64,
+    cand_id: u32,
+    cand_score: u64,
+    cand_admissible: bool,
+) -> RouteArgminVerdict {
+    let raw = unsafe {
+        orb_route_argmin_step(
+            u8::from(has_best),
+            best_id,
+            best_score,
+            cand_id,
+            cand_score,
+            u8::from(cand_admissible),
+        )
+    };
+    RouteArgminVerdict {
+        has_best: (raw & 1) != 0,
+        took_candidate: ((raw >> 8) & 1) != 0,
+        best_id: (raw >> 32) as u32,
+    }
+}
+
+/// Pure `ArgminRouteFold` over a slice of candidate accounts backed by `orb_provider_pool_step`
+/// and `orb_route_argmin_step`. Guarantees `antigravity_dispatch_matches_bound_account` and
+/// `rejected_account_never_routed_before_reset`.
+pub fn select_best_provider_account(
+    bound_account_id: Option<u32>,
+    first_byte_sent: bool,
+    is_failover_attempt: bool,
+    attempts: u32,
+    max_attempts: u32,
+    now_epoch: u64,
+    candidates: &[RouteCandidate],
+) -> Option<u32> {
+    let mut has_best = false;
+    let mut best_id = 0u32;
+    let mut best_score = u64::MAX;
+
+    for cand in candidates {
+        let pool_verdict = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id,
+            candidate_account_id: cand.account_id,
+            is_rejected: cand.is_rejected,
+            first_byte_sent,
+            is_failover_attempt,
+            attempts,
+            max_attempts,
+            now_epoch,
+            reset_epoch: cand.reset_epoch,
+        });
+        let step = route_argmin_step(
+            has_best,
+            best_id,
+            best_score,
+            cand.account_id,
+            cand.score,
+            pool_verdict.emit_dispatch_effect,
+        );
+        if step.took_candidate {
+            has_best = true;
+            best_id = step.best_id;
+            best_score = cand.score;
+        }
+    }
+    if has_best {
+        Some(best_id)
+    } else {
+        None
     }
 }
 

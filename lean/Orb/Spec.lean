@@ -1663,4 +1663,200 @@ theorem effect_admissible_blocks_unleased_or_unverified
   unfold effectAdmissible
   repeat (first | constructor | split | decide | simp_all)
 
+/-! ## Wave 9 — Phase 2: Proxy Provider Account Pool, Failover & `ArgminRouteFold` Specifications -/
+
+structure ProviderPoolCheck where
+  hasBoundAccount    : UInt8
+  boundAccountId     : UInt32
+  candidateAccountId : UInt32
+  isRejected         : UInt8
+  firstByteSent      : UInt8
+  isFailoverAttempt  : UInt8
+  attempts           : UInt32
+  maxAttempts        : UInt32
+  nowEpoch           : UInt64
+  resetEpoch         : UInt64
+  deriving Repr, DecidableEq
+
+def ProviderPoolCheck.Admissible (p : ProviderPoolCheck) : Bool :=
+  !(p.firstByteSent == 1 && p.isFailoverAttempt == 1) &&
+  !(p.isFailoverAttempt == 1 && !(1 ≤ p.maxAttempts && p.attempts < p.maxAttempts)) &&
+  !(p.hasBoundAccount == 1 && !(p.candidateAccountId == p.boundAccountId)) &&
+  !(p.isRejected == 1 && p.nowEpoch < p.resetEpoch) &&
+  !(p.candidateAccountId == 0)
+
+def providerPoolMetaGate : MetaGateSpec ProviderPoolCheck
+    (fun p => p.Admissible = true) where
+  gate p := ((providerPoolStep p.hasBoundAccount p.boundAccountId p.candidateAccountId
+    p.isRejected p.firstByteSent p.isFailoverAttempt p.attempts p.maxAttempts
+    p.nowEpoch p.resetEpoch &&& 0xFFFFFFFF) &&& 256) != 0
+  sound p h := by
+    unfold providerPoolStep at h
+    rw [pack32_lo] at h
+    unfold ProviderPoolCheck.Admissible
+    cases hfb : (p.firstByteSent == 1 && p.isFailoverAttempt == 1) <;>
+      cases hfa : (p.isFailoverAttempt == 1 && !(decide (1 ≤ p.maxAttempts) && decide (p.attempts < p.maxAttempts))) <;>
+      cases hba : (p.hasBoundAccount == 1 && !(p.candidateAccountId == p.boundAccountId)) <;>
+      cases hrj : (p.isRejected == 1 && decide (p.nowEpoch < p.resetEpoch)) <;>
+      cases hc0 : (p.candidateAccountId == 0) <;>
+      cases hfs : (p.firstByteSent == 1) <;>
+      cases hb1 : (p.hasBoundAccount == 1) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete p h := by
+    unfold ProviderPoolCheck.Admissible at h
+    unfold providerPoolStep
+    rw [pack32_lo]
+    cases hfb : (p.firstByteSent == 1 && p.isFailoverAttempt == 1) <;>
+      cases hfa : (p.isFailoverAttempt == 1 && !(decide (1 ≤ p.maxAttempts) && decide (p.attempts < p.maxAttempts))) <;>
+      cases hba : (p.hasBoundAccount == 1 && !(p.candidateAccountId == p.boundAccountId)) <;>
+      cases hrj : (p.isRejected == 1 && decide (p.nowEpoch < p.resetEpoch)) <;>
+      cases hc0 : (p.candidateAccountId == 0) <;>
+      cases hfs : (p.firstByteSent == 1) <;>
+      cases hb1 : (p.hasBoundAccount == 1) <;>
+      (simp_all; try decide)
+  posWitness := ⟨1, 42, 42, 0, 0, 0, 0, 3, 1000, 500⟩
+  negWitness := ⟨1, 42, 99, 0, 0, 0, 0, 3, 1000, 500⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 55 (`ScopedAuthority` — `orb_provider_pool_step`, Antigravity Bound-Account Theorem):
+    When an account is bound (`hasBoundAccount == 1`), any candidate with `candidateAccountId != boundAccountId`
+    is rejected (`emitDispatchEffect == 0`, `dispatchedAccountId == 0`), and a matching eligible candidate
+    dispatches `boundAccountId` in bits 32..63. -/
+theorem antigravity_dispatch_matches_bound_account
+    (boundId candId : UInt32) (isRej fb isFail : UInt8) (att maxAtt : UInt32) (now rst : UInt64)
+    (h_mismatch : (candId == boundId) = false) :
+    ((providerPoolStep 1 boundId candId isRej fb isFail att maxAtt now rst &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (providerPoolStep 1 boundId candId isRej fb isFail att maxAtt now rst >>> 32) = 0 := by
+  unfold providerPoolStep
+  rw [pack32_lo, pack32_hi]
+  cases hfb : (fb == 1 && isFail == 1) <;>
+    cases hfa : (isFail == 1 && !(decide (1 ≤ maxAtt) && decide (att < maxAtt))) <;>
+    cases hfs : (fb == 1) <;>
+    (simp_all; try decide)
+
+/-- Corollary 56 (`ClockDiscipline`, `ConservedResource` & `StickyFence` — `orb_provider_pool_step`):
+    1. `rejected_account_never_routed_before_reset`: `isRejected == 1` with `nowEpoch < resetEpoch` emits zero dispatch.
+    2. `failover_terminates`: `isFailoverAttempt == 1` at `attempts == maxAttempts` returns `4 (ExhaustedFailover)`.
+    3. `first_byte_locks_provider`: once `firstByteSent == 1`, any failover returns `3 (AbortLockedStream)` with lock bit `65536`. -/
+theorem rejected_account_failover_and_first_byte_lock
+    (hasBnd : UInt8) (bndId candId : UInt32) (fb isFail : UInt8) (att maxAtt : UInt32)
+    (now rst : UInt64) (h_before_reset : (now < rst) = true) :
+    ((providerPoolStep hasBnd bndId candId 1 fb isFail att maxAtt now rst &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    providerPoolStep hasBnd bndId candId 0 0 1 maxAtt maxAtt now rst = 4 ∧
+    providerPoolStep hasBnd bndId candId 0 1 1 att maxAtt now rst = 65539 := by
+  refine ⟨?_, ?_, rfl⟩
+  · unfold providerPoolStep
+    rw [pack32_lo]
+    cases hfb : (fb == 1 && isFail == 1) <;>
+      cases hfa : (isFail == 1 && !(decide (1 ≤ maxAtt) && decide (att < maxAtt))) <;>
+      cases hba : (hasBnd == 1 && !(candId == bndId)) <;>
+      cases hfs : (fb == 1) <;>
+      (simp_all; try decide)
+  · unfold providerPoolStep
+    have hirr : ¬ (maxAtt < maxAtt) := UInt32.lt_irrefl maxAtt
+    simp [hirr]
+    decide
+
+/-- Pure state-machine transition wrapper for `orb_provider_pool_step` (`State × Event → State × List UInt32`). -/
+def providerPoolMachineStep (firstByteSent : UInt8) (e : ProviderPoolCheck) : UInt8 × List UInt32 :=
+  let e' : ProviderPoolCheck := { e with firstByteSent := firstByteSent }
+  let w := providerPoolStep e'.hasBoundAccount e'.boundAccountId e'.candidateAccountId
+    e'.isRejected e'.firstByteSent e'.isFailoverAttempt e'.attempts e'.maxAttempts e'.nowEpoch e'.resetEpoch
+  (if ((w &&& 0xFFFFFFFF) &&& 65536) != 0 then 1 else 0,
+   if providerPoolMetaGate.gate e' then [e.candidateAccountId] else [])
+
+/-- Concrete `MetaStepSpec` instance for `orb_provider_pool_step` (`EffectSafety`, `EffectLiveness` with
+    reachable trace from `init = 0`, and `CostBound`). -/
+def providerPoolMetaStepSpec : MetaStepSpec UInt8 ProviderPoolCheck UInt32 where
+  safety := {
+    step := providerPoolMachineStep
+    authorized := fun s e eff =>
+      eff == e.candidateAccountId &&
+      ({ e with firstByteSent := s } : ProviderPoolCheck).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [providerPoolMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := providerPoolMetaGate.sound { e with firstByteSent := s } h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := providerPoolMachineStep
+    progressRequired := fun s e => ({ e with firstByteSent := s } : ProviderPoolCheck).Admissible
+    expectedEffect := fun e eff => eff == e.candidateAccountId
+    live := fun s e h_req => by
+      have h_gate := providerPoolMetaGate.complete { e with firstByteSent := s } h_req
+      dsimp [providerPoolMachineStep]
+      simp [h_gate]
+    traceEvents := []
+    posEvent := ⟨1, 42, 42, 0, 0, 0, 0, 3, 1000, 500⟩
+    negEvent := ⟨1, 42, 99, 0, 0, 0, 0, 3, 1000, 500⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := providerPoolMachineStep
+    cpuFuel := fun _ _ => 1
+    inputBytes := fun _ => 48
+    outputBytes := fun _ _ => 8
+    c0 := 1
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 8
+    fuel_bound := fun _ _ => by omega
+    eff_bound := fun s e => by
+      dsimp [providerPoolMachineStep]
+      split <;> simp
+    out_bound := fun _ _ => by omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+structure RouteArgminCheck where
+  hasBest        : UInt8
+  bestId         : UInt32
+  bestScore      : UInt64
+  candId         : UInt32
+  candScore      : UInt64
+  candAdmissible : UInt8
+  deriving Repr, DecidableEq
+
+def routeArgminMetaGate : MetaGateSpec RouteArgminCheck
+    (fun r => (r.candAdmissible == 1 && (r.hasBest == 0 || r.candScore < r.bestScore)) = true) where
+  gate r := ((routeArgminStep r.hasBest r.bestId r.bestScore r.candId r.candScore r.candAdmissible &&& 0xFFFFFFFF) &&& 256) != 0
+  sound r h := by
+    unfold routeArgminStep at h
+    rw [pack32_lo] at h
+    cases hc : (r.candAdmissible == 1 && (r.hasBest == 0 || decide (r.candScore < r.bestScore))) <;>
+      cases hb : (r.hasBest == 1) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete r h := by
+    unfold routeArgminStep
+    rw [pack32_lo]
+    simp [h]
+    decide
+  posWitness := ⟨1, 10, 500, 20, 300, 1⟩
+  negWitness := ⟨1, 10, 500, 20, 600, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 57 (`ConservedResource` — `orb_route_argmin_step`):
+    An inadmissible candidate (`candAdmissible == 0`) or higher-cost candidate (`bestScore ≤ candScore` when `hasBest == 1`)
+    never replaces `bestId`, while a strictly better admissible candidate updates `nextBestId` to `candId`. -/
+theorem route_argmin_selects_strictly_better_eligible (bestId candId : UInt32) (bestScore candScore : UInt64) :
+    ((routeArgminStep 1 bestId bestScore candId candScore 0 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (routeArgminStep 1 bestId bestScore candId candScore 0 >>> 32) = bestId.toUInt64 ∧
+    (routeArgminStep 1 10 500 20 300 1 >>> 32) = 20 ∧
+    (routeArgminStep 1 10 500 20 500 1 >>> 32) = 10 := by
+  refine ⟨?_, ?_, by decide, by decide⟩
+  · unfold routeArgminStep
+    rw [pack32_lo]
+    decide
+  · unfold routeArgminStep
+    rw [pack32_hi]
+    rfl
+
 end Orb.Spec

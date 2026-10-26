@@ -49,6 +49,8 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_wire_pack_record",
     "orb_wire_schema_migrate_step",
     "orb_effect_admissible",
+    "orb_provider_pool_step",
+    "orb_route_argmin_step",
 ];
 
 const LEANSYS_EXPORTS: &[&str] = &[

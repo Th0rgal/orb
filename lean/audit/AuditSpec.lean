@@ -123,8 +123,13 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
       | none => false
     unless used do
       errors := errors.push s!"{n} (export {sym}): not referenced by any Orb.Spec declaration"
-  if theorems == 0 || exports == 0 then
-    errors := errors.push s!"audit found {theorems} theorems / {exports} exports; expected both > 0"
+  let mut metaStepSpecs := 0
+  for n in spec do
+    let some ci := env.find? n | continue
+    if ci.type.isAppOf ``Orb.Spec.MetaStepSpec then
+      metaStepSpecs := metaStepSpecs + 1
+  if theorems == 0 || exports == 0 || metaStepSpecs == 0 then
+    errors := errors.push s!"audit found {theorems} theorems / {exports} exports / {metaStepSpecs} MetaStepSpecs; expected all > 0"
   unless errors.isEmpty do
     throwError "Orb spec audit failed:\n{String.intercalate "\n" errors.toList}"
-  logInfo m!"Orb spec audit OK: {kernel.size + spec.size} declarations, {theorems} theorems, {exports} exports, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"
+  logInfo m!"Orb spec audit OK: {kernel.size + spec.size} declarations, {theorems} theorems, {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"

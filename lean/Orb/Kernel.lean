@@ -1235,4 +1235,64 @@ def effectAdmissible
     if hasValidLease == 1 && idempotencyFresh == 1 then 1 else 0
   else 0
 
+/-! ## Wave 9 — Phase 2: Proxy Provider Account Pool, Failover & `ArgminRouteFold` -/
+
+/--
+  Unboxed C-ABI Provider Account Pool & Failover Stepper (`orb_provider_pool_step`):
+  Pure decision machine for provider/account selection, Antigravity account pinning,
+  cooldown/quota rejection enforcement, bounded failover, and first-byte commitment lock:
+  - If `firstByteSent == 1 && isFailoverAttempt == 1`, returns `action = 3 (AbortLockedStream)`,
+    emitting zero dispatch (`bit 8 == 0`, `StickyFence`).
+  - Else if `isFailoverAttempt == 1 && !(1 ≤ maxAttempts && attempts < maxAttempts)`,
+    returns `action = 4 (ExhaustedFailover)`, emitting zero dispatch.
+  - Else if `hasBoundAccount == 1 && candidateAccountId != boundAccountId`,
+    returns `action = 0 (RejectCandidate)` (prevents the wrong-account Antigravity bug).
+  - Else if `isRejected == 1 && nowEpoch < resetEpoch`,
+    returns `action = 0 (RejectCandidate)` (never routes to a rejected account before `resetEpoch`).
+  - Else if `candidateAccountId == 0`, returns `action = 0 (RejectCandidate)`.
+  - Otherwise admits dispatch (`bit 8 = 256`, `bit 16 = 65536 = firstByteLockedNext`,
+    `bits 32..63 = candidateAccountId`), with `action = 1 (DispatchBoundAccount)` when
+    `hasBoundAccount == 1` and `action = 2 (DispatchPoolCandidate)` when `hasBoundAccount == 0`.
+-/
+@[inline, export orb_provider_pool_step]
+def providerPoolStep
+    (hasBoundAccount : UInt8) (boundAccountId candidateAccountId : UInt32)
+    (isRejected firstByteSent isFailoverAttempt : UInt8)
+    (attempts maxAttempts : UInt32)
+    (nowEpoch resetEpoch : UInt64) : UInt64 :=
+  let lockBit : UInt32 := if firstByteSent == 1 then 65536 else 0
+  let lo32 : UInt32 :=
+    if firstByteSent == 1 && isFailoverAttempt == 1 then (3 : UInt32) ||| lockBit
+    else if isFailoverAttempt == 1 && !(1 ≤ maxAttempts && attempts < maxAttempts) then (4 : UInt32) ||| lockBit
+    else if hasBoundAccount == 1 && !(candidateAccountId == boundAccountId) then lockBit
+    else if isRejected == 1 && nowEpoch < resetEpoch then lockBit
+    else if candidateAccountId == 0 then lockBit
+    else (if hasBoundAccount == 1 then (1 : UInt32) else 2) ||| 256 ||| 65536
+  let hi32 : UInt32 :=
+    if (lo32 &&& 256) != 0 then candidateAccountId else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI `ArgminRouteFold` Candidate Selection Stepper (`orb_route_argmin_step`):
+  Folds one candidate `(candId, candScore, candAdmissible)` into the running best route
+  `(hasBest, bestId, bestScore)`:
+  - Selects `candId` (`tookCandidate = 1`, `bit 8 = 256`) iff `candAdmissible == 1` and
+    (`hasBest == 0 || candScore < bestScore`).
+  - Packs `bit 0 = nextHasBest`, `bit 8 = tookCandidate`, `bits 32..63 = nextBestId : UInt32`.
+-/
+@[inline, export orb_route_argmin_step]
+def routeArgminStep
+    (hasBest : UInt8) (bestId : UInt32) (bestScore : UInt64)
+    (candId : UInt32) (candScore : UInt64) (candAdmissible : UInt8) : UInt64 :=
+  let takeCand : Bool := candAdmissible == 1 && (hasBest == 0 || candScore < bestScore)
+  let lo32 : UInt32 :=
+    if takeCand then 257
+    else if hasBest == 1 then 1
+    else 0
+  let hi32 : UInt32 :=
+    if takeCand then candId
+    else if hasBest == 1 then bestId
+    else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
 end Orb.Kernel

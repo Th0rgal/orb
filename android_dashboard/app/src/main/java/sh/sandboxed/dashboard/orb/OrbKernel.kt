@@ -226,6 +226,30 @@ object OrbKernel {
     ): Int
 
     @JvmStatic
+    external fun orbProviderPoolStep(
+        hasBoundAccount: Int,
+        boundAccountId: Int,
+        candidateAccountId: Int,
+        isRejected: Int,
+        firstByteSent: Int,
+        isFailoverAttempt: Int,
+        attempts: Int,
+        maxAttempts: Int,
+        nowEpoch: Long,
+        resetEpoch: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbRouteArgminStep(
+        hasBest: Int,
+        bestId: Int,
+        bestScore: Long,
+        candId: Int,
+        candScore: Long,
+        candAdmissible: Int
+    ): Long
+
+    @JvmStatic
     external fun leansysSseFrameScan(
         frameOff: Long,
         frameLen: Long,

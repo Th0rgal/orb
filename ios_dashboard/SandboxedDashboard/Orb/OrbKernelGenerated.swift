@@ -185,6 +185,12 @@ internal func orb_wire_schema_migrate_step(_ fromSchema: UInt32, _ toSchema: UIn
 @_silgen_name("orb_effect_admissible")
 internal func orb_effect_admissible(_ effectKind: UInt8, _ hasValidLease: UInt8, _ sessionCreated: UInt8, _ lineageVerified: UInt8, _ isArchived: UInt8, _ idempotencyFresh: UInt8, _ accountBound: UInt8, _ accountRejected: UInt8, _ firstByteLocked: UInt8, _ grammarAllowed: UInt8, _ envScrubbed: UInt8, _ budgetOk: UInt8) -> UInt8
 
+@_silgen_name("orb_provider_pool_step")
+internal func orb_provider_pool_step(_ hasBoundAccount: UInt8, _ boundAccountId: UInt32, _ candidateAccountId: UInt32, _ isRejected: UInt8, _ firstByteSent: UInt8, _ isFailoverAttempt: UInt8, _ attempts: UInt32, _ maxAttempts: UInt32, _ nowEpoch: UInt64, _ resetEpoch: UInt64) -> UInt64
+
+@_silgen_name("orb_route_argmin_step")
+internal func orb_route_argmin_step(_ hasBest: UInt8, _ bestId: UInt32, _ bestScore: UInt64, _ candId: UInt32, _ candScore: UInt64, _ candAdmissible: UInt8) -> UInt64
+
 @_silgen_name("leansys_verify_slice_bounds")
 internal func leansys_verify_slice_bounds(_ off: UInt64, _ len: UInt64, _ cap: UInt64) -> UInt8
 

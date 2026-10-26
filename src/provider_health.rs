@@ -90,6 +90,37 @@ pub fn account_error_cooldown(consecutive: u32) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Verified Lean 4 account pool & failover gate (`orb_provider_pool_step`):
+/// enforces bound-account matching (preventing the Antigravity wrong-account bug),
+/// rejected-account cooldown/quota reset isolation, bounded failover attempts,
+/// and first-byte stream lock (`StickyFence`).
+pub fn verify_account_dispatch_candidate(
+    input: crate::orb_spec::ProviderPoolStepInput,
+) -> crate::orb_spec::ProviderPoolStepVerdict {
+    crate::orb_spec::provider_pool_step(input)
+}
+
+/// Verified Lean 4 `ArgminRouteFold` candidate selector (`orb_route_argmin_step` + `orb_provider_pool_step`).
+pub fn select_argmin_account_candidate(
+    bound_account_id: Option<u32>,
+    first_byte_sent: bool,
+    is_failover_attempt: bool,
+    attempts: u32,
+    max_attempts: u32,
+    now_epoch: u64,
+    candidates: &[crate::orb_spec::RouteCandidate],
+) -> Option<u32> {
+    crate::orb_spec::select_best_provider_account(
+        bound_account_id,
+        first_byte_sent,
+        is_failover_attempt,
+        attempts,
+        max_attempts,
+        now_epoch,
+        candidates,
+    )
+}
+
 /// Label stored with a persisted out-of-credit cooldown, so a restart still
 /// reports "out of credit" rather than a generic usage limit.
 pub const OUT_OF_CREDIT_LIMIT: &str = "out of credit";

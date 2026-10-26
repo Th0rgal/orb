@@ -471,6 +471,156 @@ mod tests {
         assert!(wire_schema_migrate_step(3, 4, 3, 128, 4096));
         assert!(!wire_schema_migrate_step(3, 5, 3, 128, 4096));
         assert!(!wire_schema_migrate_step(4, 3, 4, 128, 4096));
+        assert!(frame.can_migrate_to(8, 4096));
+        assert!(!frame.can_migrate_to(9, 4096));
+    }
+
+    #[test]
+    fn orb_wire_enumerative_boundary_perturbations_rejected() {
+        let frame = OrbWireFrame {
+            schema_id: 3,
+            flags: 0,
+            records: vec![OrbWireRecordWord {
+                tag: 4,
+                flags: 1,
+                len16: 6,
+                payload32: 0,
+            }],
+            arena: b"border".to_vec(),
+        };
+        let mut valid_buf = [0u8; 64];
+        let n = frame
+            .encode_into(&mut valid_buf, 128)
+            .expect("valid frame encodes");
+        let valid_hdr = OrbWireHeader::from_le_bytes(&valid_buf[..n]).unwrap();
+
+        // Perturb each header field by ±1 around the valid boundary
+        for delta in [-1i64, 1i64] {
+            // 1. total_len ± 1
+            let mut b = valid_buf;
+            let mut h = valid_hdr;
+            h.total_len = (i64::from(valid_hdr.total_len) + delta) as u32;
+            b[..ORB_WIRE_HEADER_BYTES].copy_from_slice(&h.to_le_bytes());
+            assert_eq!(
+                OrbWireFrame::decode(&b[..n], 3, 128),
+                Err(OrbWireStatus::TruncatedOrOutOfBounds)
+            );
+
+            // 2. payload_len ± 1
+            let mut b = valid_buf;
+            let mut h = valid_hdr;
+            h.payload_len = (i64::from(valid_hdr.payload_len) + delta) as u32;
+            b[..ORB_WIRE_HEADER_BYTES].copy_from_slice(&h.to_le_bytes());
+            assert_eq!(
+                OrbWireFrame::decode(&b[..n], 3, 128),
+                Err(OrbWireStatus::TruncatedOrOutOfBounds)
+            );
+
+            // 3. arena_off ± 1
+            let mut b = valid_buf;
+            let mut h = valid_hdr;
+            h.arena_off = (i64::from(valid_hdr.arena_off) + delta) as u16;
+            b[..ORB_WIRE_HEADER_BYTES].copy_from_slice(&h.to_le_bytes());
+            assert_eq!(
+                OrbWireFrame::decode(&b[..n], 3, 128),
+                Err(OrbWireStatus::TruncatedOrOutOfBounds)
+            );
+
+            // 4. arena_len ± 1
+            let mut b = valid_buf;
+            let mut h = valid_hdr;
+            h.arena_len = (i64::from(valid_hdr.arena_len) + delta) as u16;
+            b[..ORB_WIRE_HEADER_BYTES].copy_from_slice(&h.to_le_bytes());
+            assert_eq!(
+                OrbWireFrame::decode(&b[..n], 3, 128),
+                Err(OrbWireStatus::TruncatedOrOutOfBounds)
+            );
+        }
+
+        // 5. max_budget_bytes = n (ok) vs n - 1 (BudgetExceeded)
+        assert!(OrbWireFrame::decode(&valid_buf[..n], 3, n as u32).is_ok());
+        assert_eq!(
+            OrbWireFrame::decode(&valid_buf[..n], 3, (n - 1) as u32),
+            Err(OrbWireStatus::BudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn phase2_proxy_provider_pool_and_argmin_route_fold_replay() {
+        use crate::{
+            provider_pool_step, select_best_provider_account, ProviderPoolAction,
+            ProviderPoolStepInput, RouteCandidate,
+        };
+
+        let candidates = [
+            RouteCandidate {
+                account_id: 101,
+                score: 50,
+                is_rejected: false,
+                reset_epoch: 0,
+            },
+            RouteCandidate {
+                account_id: 202,
+                score: 20,
+                is_rejected: true,
+                reset_epoch: 5_000,
+            },
+            RouteCandidate {
+                account_id: 303,
+                score: 30,
+                is_rejected: false,
+                reset_epoch: 0,
+            },
+        ];
+
+        // 1. Antigravity bound-account incident replay: bound to 101 -> must pick 101 even though 303 has lower score (30 < 50)
+        assert_eq!(
+            select_best_provider_account(Some(101), false, false, 0, 3, 1_000, &candidates),
+            Some(101)
+        );
+
+        // 2. Unbound pool routing before reset (now = 1_000 < 5_000): 202 is rejected, so 303 (score 30 < 50) wins
+        assert_eq!(
+            select_best_provider_account(None, false, false, 0, 3, 1_000, &candidates),
+            Some(303)
+        );
+
+        // 3. Unbound pool routing after reset (now = 6_000 >= 5_000): 202 is eligible again and has lowest score (20)
+        assert_eq!(
+            select_best_provider_account(None, false, false, 0, 3, 6_000, &candidates),
+            Some(202)
+        );
+
+        // 4. First-byte lock (`StickyFence`): failover after first byte sent is aborted (`AbortLockedStream`)
+        let locked = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 303,
+            is_rejected: false,
+            first_byte_sent: true,
+            is_failover_attempt: true,
+            attempts: 0,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert_eq!(locked.action, ProviderPoolAction::AbortLockedStream);
+        assert!(!locked.emit_dispatch_effect);
+        assert!(locked.first_byte_locked_next);
+
+        // 5. Failover termination at `attempts == max_attempts`
+        let exhausted = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 303,
+            is_rejected: false,
+            first_byte_sent: false,
+            is_failover_attempt: true,
+            attempts: 3,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert_eq!(exhausted.action, ProviderPoolAction::ExhaustedFailover);
+        assert!(!exhausted.emit_dispatch_effect);
     }
 
     #[test]

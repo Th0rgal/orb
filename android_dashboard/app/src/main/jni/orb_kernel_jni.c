@@ -171,6 +171,16 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbEffectAdmissible(JNIEnv *env, jclas
     return (jint)orb_effect_admissible((uint8_t)effectKind, (uint8_t)hasValidLease, (uint8_t)sessionCreated, (uint8_t)lineageVerified, (uint8_t)isArchived, (uint8_t)idempotencyFresh, (uint8_t)accountBound, (uint8_t)accountRejected, (uint8_t)firstByteLocked, (uint8_t)grammarAllowed, (uint8_t)envScrubbed, (uint8_t)budgetOk);
 }
 
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbProviderPoolStep(JNIEnv *env, jclass clazz, jint hasBoundAccount, jint boundAccountId, jint candidateAccountId, jint isRejected, jint firstByteSent, jint isFailoverAttempt, jint attempts, jint maxAttempts, jlong nowEpoch, jlong resetEpoch) {
+    return (jlong)orb_provider_pool_step((uint8_t)hasBoundAccount, (uint32_t)boundAccountId, (uint32_t)candidateAccountId, (uint8_t)isRejected, (uint8_t)firstByteSent, (uint8_t)isFailoverAttempt, (uint32_t)attempts, (uint32_t)maxAttempts, (uint64_t)nowEpoch, (uint64_t)resetEpoch);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbRouteArgminStep(JNIEnv *env, jclass clazz, jint hasBest, jint bestId, jlong bestScore, jint candId, jlong candScore, jint candAdmissible) {
+    return (jlong)orb_route_argmin_step((uint8_t)hasBest, (uint32_t)bestId, (uint64_t)bestScore, (uint32_t)candId, (uint64_t)candScore, (uint8_t)candAdmissible);
+}
+
 JNIEXPORT jbyte JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSseFrameScan(JNIEnv *env, jclass clazz, jlong frameOff, jlong frameLen, jlong chunkLen, jint fieldKind, jint nextByte, jint lastByte) {
     return (jbyte)leansys_sse_frame_scan((uint64_t)frameOff, (uint64_t)frameLen, (uint64_t)chunkLen, (uint8_t)fieldKind, (uint8_t)nextByte, (uint8_t)lastByte);

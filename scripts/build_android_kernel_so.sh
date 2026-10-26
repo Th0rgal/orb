@@ -22,7 +22,11 @@ FREESTANDING_FLAGS=()
 if [ -n "$NDK" ]; then
   BIN="$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/bin | head -1)"
 elif command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
-  BIN="$(dirname "$(command -v clang)")"
+  if [ -x /usr/bin/clang ]; then
+    BIN=/usr/bin
+  else
+    BIN="$(dirname "$(command -v clang)")"
+  fi
   JNI_SHIM_DIR="$(mktemp -d)"
   trap 'rm -rf "$JNI_SHIM_DIR"' EXIT
   cat << 'EOF' > "$JNI_SHIM_DIR/jni.h"
