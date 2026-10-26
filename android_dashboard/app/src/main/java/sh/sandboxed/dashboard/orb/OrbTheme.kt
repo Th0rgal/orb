@@ -440,9 +440,6 @@ object OrbProjectAppearance {
     fun color(project: OrbRow): Color =
         colorFromHex(hex(project)) ?: OrbStyle.icon
 
-    fun colorForSlug(slug: String): Color =
-        colorFromHex(customColors[slug.trim().lowercase()] ?: "") ?: OrbStyle.icon
-
     fun setColor(hex: String, project: OrbRow, core: OrbCore) {
         val key = slug(project)
         val normalized = wireNameToHex(hex)

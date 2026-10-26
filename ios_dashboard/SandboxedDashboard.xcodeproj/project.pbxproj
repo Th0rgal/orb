@@ -89,7 +89,6 @@
 		B5EE1ADCDB8858D11427C724 /* OrbSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21640FEB52CF2B7E7E341BAA /* OrbSettingsTests.swift */; };
 		B850A735902D68D3DA9C853C /* OrbKernelGenerated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFD4EB6514ED6508583BEA3 /* OrbKernelGenerated.swift */; };
 		BB5DB1F08C030B1179CC282F /* OrbLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 056EA2099041C13447B4B6C0 /* OrbLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		C565A0819B851735DAA71172 /* OrbMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD651E846151C5070BA0765 /* OrbMath.swift */; };
 		C60896D7D6FAD14C0A2C630F /* OrbMissionBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F526F4756A22E75CD4F94C2 /* OrbMissionBudgetTests.swift */; };
 		C7AB925DE11602AB4B34D1EE /* OrbNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3A9EEA92978894DB2B0A410 /* OrbNotifications.swift */; };
 		D057B578B2884C4B2B36B1C3 /* FidoApprovalState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EB13B92B70F6884D323E5FF /* FidoApprovalState.swift */; };
@@ -239,7 +238,6 @@
 		BA6CA5F698C6D1559550F7FF /* OrbProjects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjects.swift; sourceTree = "<group>"; };
 		BB4BFC16F121E10DCFD755BC /* OrbLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbLog.swift; sourceTree = "<group>"; };
 		BC1EA34EDE4E3ABF51473613 /* OrbMissionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMissionSettings.swift; sourceTree = "<group>"; };
-		BDD651E846151C5070BA0765 /* OrbMath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMath.swift; sourceTree = "<group>"; };
 		BFA9AF87C230C7A8BAFB1E26 /* OrbConversation+Menu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "OrbConversation+Menu.swift"; sourceTree = "<group>"; };
 		C2C02DBE97BE17916DD22DB5 /* OrbPrivilegeAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbPrivilegeAccess.swift; sourceTree = "<group>"; };
 		C56C02CD1D4A5276DBD3EB7F /* OrbFleetLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFleetLiveActivity.swift; sourceTree = "<group>"; };
@@ -280,8 +278,7 @@
 			children = (
 				9331F1134F0091DB717302CC /* OrbFleetActivity.swift */,
 			);
-			name = Shared;
-			path = OrbLiveActivity/Shared;
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		432570506AADD1D2CA8F2DD6 /* cabi */ = {
@@ -358,7 +355,6 @@
 				BB4BFC16F121E10DCFD755BC /* OrbLog.swift */,
 				2D5BB808D250AF7F06FD9AC7 /* OrbMachinesSettings.swift */,
 				AC3C9E662975DD7E0D3634C8 /* OrbManagedMachines.swift */,
-				BDD651E846151C5070BA0765 /* OrbMath.swift */,
 				3591A1E21D5838299181604D /* OrbMermaid.swift */,
 				6E793D17A373009D35033D9E /* OrbMessageImages.swift */,
 				BC1EA34EDE4E3ABF51473613 /* OrbMissionSettings.swift */,
@@ -423,7 +419,6 @@
 				6DBC9AF3F2EFD0B5057A2EB6 /* SandboxedDashboard */,
 				A5A307A24CE6E469C4A2FA0D /* SandboxedDashboardTests */,
 				69E84F6BBDAEC47870846B46 /* SandboxedDashboardUITests */,
-				35EE4E34BE8C2BF15EEDF6F8 /* Shared */,
 				057719CAD3366030137C44B3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -580,6 +575,7 @@
 				};
 			};
 			buildConfigurationList = 210E554B4D49DD6F4EE7F3FD /* Build configuration list for PBXProject "SandboxedDashboard" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -589,12 +585,11 @@
 			mainGroup = 9402FD943158ED3148A81A0C;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 057719CAD3366030137C44B3 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
 				14C19B3219EFE4065FBC9952 /* OrbLiveActivity */,
+				AAACA90456A4A22561940B6B /* SandboxedDashboard */,
 				C50B6EE186DD640BD408EEA7 /* SandboxedDashboardTests */,
 				8A8DCA11CAC3A5FFA56DC86C /* SandboxedDashboardUITests */,
 			);
@@ -668,7 +663,6 @@
 				10EE88187305C6ECFA6DD140 /* OrbLog.swift in Sources */,
 				50AD3F51FCD5F045B1715B24 /* OrbMachinesSettings.swift in Sources */,
 				EB1CE471D547494B3C5A01B8 /* OrbManagedMachines.swift in Sources */,
-				C565A0819B851735DAA71172 /* OrbMath.swift in Sources */,
 				29EA1E2FB2CB813214E418EE /* OrbMermaid.swift in Sources */,
 				A93C114237EAF4604D4B9571 /* OrbMessageImages.swift in Sources */,
 				7BCE2A1BEF140CC4592389CE /* OrbMissionSettings.swift in Sources */,
@@ -814,7 +808,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102503;
+				CURRENT_PROJECT_VERSION = 2026102601;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -965,7 +959,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102503;
+				CURRENT_PROJECT_VERSION = 2026102601;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_PREVIEWS = YES;
