@@ -1,6 +1,124 @@
 //! Operator-created conversation forks. Native sessions are never reused.
 use super::*;
 
+/// Serializable snapshot of the live Lean 4 control-plane shadow runner (`RefinementSimulation`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ControlShadowSnapshot {
+    pub subsystem: &'static str,
+    pub total_steps: u64,
+    pub total_divergences: u64,
+    pub recent_divergences: usize,
+}
+
+static CONTROL_SHADOW_RING: std::sync::LazyLock<
+    std::sync::Mutex<crate::orb_spec::shadow::ShadowDivergenceRing<256>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(crate::orb_spec::shadow::ShadowDivergenceRing::<256>::new())
+});
+
+pub fn control_shadow_snapshot() -> ControlShadowSnapshot {
+    let ring = CONTROL_SHADOW_RING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ControlShadowSnapshot {
+        subsystem: "mission_control_and_fork_home",
+        total_steps: ring.total_events,
+        total_divergences: ring.unexpected_divergences,
+        recent_divergences: ring.entries().len(),
+    }
+}
+
+/// Run `mission_control_step` (`orb_mission_control_step`) in lockstep with the host decision
+/// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
+pub(super) fn observe_mission_control_shadow(
+    input: crate::orb_spec::MissionControlStepInput,
+    host_admits: bool,
+) -> crate::orb_spec::MissionControlStepVerdict {
+    let verdict = crate::orb_spec::mission_control_step(input);
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        bool,
+        bool,
+        crate::orb_spec::MissionControlStepInput,
+        u8,
+        u8,
+    > {
+        subsystem: "mission_control",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::mission_control_step(*ev);
+            let effs = if v.emit_dispatch_effect {
+                vec![1u8]
+            } else {
+                Vec::new()
+            };
+            (v.archived_next, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits { vec![1u8] } else { Vec::new() };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: input.active_track_writers as u64,
+        idempotency_key: u64::from(input.msg_already_delivered),
+        boot_id_matches: true,
+        schema_id: 1,
+    };
+    if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
+        let _ = sim.observe_step(
+            &input.is_archived,
+            &verdict.archived_next,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Run `fork_home_step` (`orb_fork_home_step`) in lockstep with the host decision
+/// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
+pub(super) fn observe_fork_home_shadow(
+    input: crate::orb_spec::ForkHomeStepInput,
+    host_admits: bool,
+) -> crate::orb_spec::ForkHomeStepVerdict {
+    let verdict = crate::orb_spec::fork_home_step(input);
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        bool,
+        bool,
+        crate::orb_spec::ForkHomeStepInput,
+        u32,
+        u32,
+    > {
+        subsystem: "fork_home",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::fork_home_step(*ev);
+            let effs = if v.admit_launch {
+                vec![0u32]
+            } else {
+                vec![v.exit_code]
+            };
+            (v.override_home, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits { vec![0u32] } else { vec![78u32] };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: 0,
+        idempotency_key: u64::from(input.is_fork_or_side),
+        boot_id_matches: true,
+        schema_id: 1,
+    };
+    if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
+        let _ = sim.observe_step(&false, &false, &input, &host_effects, ctx, &mut ring);
+    }
+    verdict
+}
+
 #[derive(Deserialize)]
 pub struct ForkRequest {
     pub backend: String,
@@ -220,7 +338,35 @@ pub async fn fork_mission(
         crate::workspace::ensure_persisted_mission_root_is_available(&workspace, id)
             .map_err(internal_error)?;
         let directory = crate::workspace::mission_workspace_dir_for_workspace(&workspace, id);
-        if !directory.is_dir() {
+        let dir_exists = directory.is_dir();
+        let dir_is_symlink = directory.is_symlink();
+        let same_workspace = workspace.id == source.workspace_id;
+        let same_node = placement.is_none() && !client;
+        let has_committed_transfer = super::machine_transfer::committed(&control.mission_store, id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|t| t.destination_root.is_some());
+        let requested_override_home = std::env::var_os("HOME")
+            .is_some_and(|h| std::path::Path::new(&h) == directory.as_path());
+        let host_admits = dir_exists && !dir_is_symlink && same_workspace && same_node;
+        let fork_verdict = observe_fork_home_shadow(
+            crate::orb_spec::ForkHomeStepInput {
+                is_fork_or_side: req.side_question.is_some() || workspace_source == id,
+                source_exists: dir_exists,
+                source_is_symlink: dir_is_symlink,
+                same_workspace,
+                same_node,
+                has_committed_transfer,
+                requested_override_home,
+            },
+            host_admits,
+        );
+        if !dir_exists
+            || !fork_verdict.admit_launch
+            || fork_verdict.override_home
+            || !fork_verdict.job_home_preserved
+        {
             return Err((
                 StatusCode::CONFLICT,
                 "Original workspace is unavailable".into(),
@@ -644,7 +790,7 @@ pub(super) fn recovery_prompt(
 /// pointing HOME at the source folder left the harness signed out with no
 /// history. Its job/session identity remains newly allocated.
 pub(super) async fn workspace_prefix(
-    control: &ControlState,
+    mission_store: &Arc<dyn MissionStore>,
     mission: &Mission,
     node_id: &str,
     ledger_dir: &std::path::Path,
@@ -658,23 +804,68 @@ pub(super) async fn workspace_prefix(
         return Ok(String::new());
     };
     let source_id = Uuid::parse_str(source_id).map_err(|_| "Invalid fork workspace identity")?;
-    let source = control
-        .mission_store
-        .get_mission(source_id)
-        .await?
-        .ok_or("Fork workspace source no longer exists")?;
-    if source.workspace_id != mission.workspace_id {
+    let source = mission_store.get_mission(source_id).await?;
+    let source_dir_on_ledger = ledger_dir.join(source_id.to_string());
+    let source_is_symlink = source_dir_on_ledger.is_symlink();
+    let source_exists = source.is_some();
+    let same_workspace = source
+        .as_ref()
+        .is_some_and(|s| s.workspace_id == mission.workspace_id);
+    let placement = if source_exists {
+        remote_grok::placement(ledger_dir, mission_store, source_id).await?
+    } else {
+        None
+    };
+    let same_node = placement.as_ref().is_some_and(|p| p.node_id == node_id);
+    let transfer = if source_exists {
+        super::machine_transfer::committed(mission_store, source_id).await?
+    } else {
+        None
+    };
+    let has_committed_transfer = transfer
+        .as_ref()
+        .is_some_and(|t| t.destination_root.is_some());
+    let requested_override_home = mission
+        .working_directory
+        .as_deref()
+        .is_some_and(|wd| std::env::var_os("HOME").is_some_and(|h| h == wd));
+    let host_admits = source_exists && !source_is_symlink && same_workspace && same_node;
+    let fork_verdict = observe_fork_home_shadow(
+        crate::orb_spec::ForkHomeStepInput {
+            is_fork_or_side: mission
+                .project
+                .tags
+                .iter()
+                .any(|t| t.starts_with("fork-workspace:") || t.starts_with("btw-parent:")),
+            source_exists,
+            source_is_symlink,
+            same_workspace,
+            same_node,
+            has_committed_transfer,
+            requested_override_home,
+        },
+        host_admits,
+    );
+    if source.is_none() {
+        return Err("Fork workspace source no longer exists".into());
+    }
+    if !same_workspace {
         return Err("Fork workspace does not match source".into());
     }
-    let placement = remote_grok::placement(ledger_dir, &control.mission_store, source_id)
-        .await?
-        .ok_or("Fork source is not on a remote node")?;
-    if placement.node_id != node_id {
+    if placement.is_none() {
+        return Err("Fork source is not on a remote node".into());
+    }
+    if !same_node {
         return Err("Fork source is on a different node".into());
     }
-    if let Some(transfer) =
-        super::machine_transfer::committed(&control.mission_store, source_id).await?
+    if !fork_verdict.admit_launch
+        || !fork_verdict.use_source_cwd
+        || fork_verdict.override_home
+        || !fork_verdict.job_home_preserved
     {
+        return Err("Fork workspace rejected by kernel gate".into());
+    }
+    if let Some(transfer) = transfer {
         let root = transfer
             .destination_root
             .ok_or("Transferred workspace missing")?;
@@ -908,6 +1099,325 @@ mod tests {
             std::os::unix::fs::symlink(&target, &source).unwrap();
             assert_eq!(run().status.code(), Some(78));
         }
+    }
+
+    #[tokio::test]
+    async fn production_workspace_prefix_enforces_fork_home_and_node_invariants() {
+        let store: Arc<dyn MissionStore> =
+            Arc::new(crate::api::mission_store::InMemoryMissionStore::new());
+        let ledger = tempfile::tempdir().unwrap();
+        let before_shadow = super::control_shadow_snapshot();
+
+        // 1. Missing source mission in store -> rejected
+        let missing_src_id = Uuid::new_v4();
+        let mut child = store
+            .create_mission(Some("Child"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        child.project.tags = vec![format!("fork-workspace:{missing_src_id}")];
+        assert_eq!(
+            super::workspace_prefix(&store, &child, "node-a", ledger.path()).await,
+            Err("Fork workspace source no longer exists".to_string())
+        );
+
+        // 2. Real source mission created in store, placed on `node-a`
+        let source = store
+            .create_mission(Some("Source"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        crate::remote_node::job_ledger::record(
+            ledger.path(),
+            crate::remote_node::job_ledger::JobHandle {
+                mission_id: source.id,
+                node_id: "node-a".to_string(),
+                job_id: Uuid::new_v4(),
+                started_at: chrono::Utc::now(),
+                submission_sequence: 1,
+                accepted_at: Some(chrono::Utc::now()),
+                heartbeat_at: Some(chrono::Utc::now()),
+                disk_reservation_bytes: 0,
+                kind: crate::remote_node::job_ledger::JobHandleKind::Mission,
+                identity: None,
+                wait_for_completion: None,
+                wake_on_terminal: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        child.project.tags = vec![format!("fork-workspace:{}", source.id)];
+
+        // Cross-workspace fork -> rejected
+        let mut cross_ws_child = child.clone();
+        cross_ws_child.workspace_id = Uuid::new_v4();
+        assert_eq!(
+            super::workspace_prefix(&store, &cross_ws_child, "node-a", ledger.path()).await,
+            Err("Fork workspace does not match source".to_string())
+        );
+
+        // Cross-node fork (`node-b` != `node-a`) -> rejected
+        assert_eq!(
+            super::workspace_prefix(&store, &child, "node-b", ledger.path()).await,
+            Err("Fork source is on a different node".to_string())
+        );
+
+        // Valid same-workspace, same-node fork -> admitted with sibling cwd command
+        let ok_prefix = super::workspace_prefix(&store, &child, "node-a", ledger.path())
+            .await
+            .unwrap();
+        assert!(ok_prefix.contains(&source.id.to_string()));
+
+        // Symlinked source workspace on ledger -> rejected by kernel gate
+        #[cfg(unix)]
+        {
+            let sym_target = ledger.path().join("target_dir");
+            std::fs::create_dir(&sym_target).unwrap();
+            let sym_source = ledger.path().join(source.id.to_string());
+            std::os::unix::fs::symlink(&sym_target, &sym_source).unwrap();
+            assert_eq!(
+                super::workspace_prefix(&store, &child, "node-a", ledger.path()).await,
+                Err("Fork workspace rejected by kernel gate".to_string())
+            );
+        }
+
+        let after_shadow = super::control_shadow_snapshot();
+        assert!(after_shadow.total_steps >= before_shadow.total_steps + 4);
+        assert_eq!(after_shadow.total_divergences, 0);
+    }
+
+    #[tokio::test]
+    async fn production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout() {
+        let store: Arc<dyn MissionStore> =
+            Arc::new(crate::api::mission_store::InMemoryMissionStore::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mut mission = store
+            .create_mission(
+                Some("Codex Turn"),
+                None,
+                None,
+                None,
+                None,
+                Some("codex"),
+                None,
+            )
+            .await
+            .unwrap();
+        let job_id = Uuid::new_v4();
+        let owner = super::super::remote_job_lease_owner(job_id);
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        let run = store
+            .begin_mission_run(mission.id, &owner, None)
+            .await
+            .unwrap();
+        let fence = crate::api::mission_store::SessionUpdateRun::from(&run);
+        store
+            .update_mission_session_id(mission.id, "thread-1", "codex", Some(&fence))
+            .await
+            .unwrap();
+        mission = store.get_mission(mission.id).await.unwrap().unwrap();
+
+        // 0. Fresh submission (`resume_session_id: None`) -> DispatchFreshTurn
+        let v_fresh = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            &owner,
+            None,
+            &[],
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_fresh.action,
+            crate::orb_spec::MissionControlAction::DispatchFreshTurn
+        );
+        assert!(v_fresh.emit_dispatch_effect);
+
+        // 1. Missing rollout on node (no assistant_message yet) with fallback prompt -> SeedFallbackFreshSession
+        let events_no_rollout = vec![event(
+            "user_message",
+            "initial prompt",
+            serde_json::Value::Null,
+        )];
+        let v_fallback = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            &owner,
+            Some("thread-1"),
+            &events_no_rollout,
+            Some("recovered history + prompt"),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_fallback.action,
+            crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+        );
+        assert!(v_fallback.emit_dispatch_effect);
+        assert!(v_fallback.seed_fallback_session);
+
+        // 2. Missing rollout without fallback prompt -> RejectUnverifiedResume
+        let v_no_fallback = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            &owner,
+            Some("thread-1"),
+            &events_no_rollout,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_no_fallback.action,
+            crate::orb_spec::MissionControlAction::RejectUnverifiedResume
+        );
+        assert!(!v_no_fallback.emit_dispatch_effect);
+
+        // 3. Verified rollout (assistant_message present) -> ResumeVerifiedSession
+        let events_with_rollout = vec![
+            event("user_message", "initial prompt", serde_json::Value::Null),
+            event(
+                "assistant_message",
+                "completed step 1",
+                serde_json::Value::Null,
+            ),
+        ];
+        let v_verified = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            &owner,
+            Some("thread-1"),
+            &events_with_rollout,
+            Some("recovered history"),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_verified.action,
+            crate::orb_spec::MissionControlAction::ResumeVerifiedSession
+        );
+        assert!(v_verified.emit_dispatch_effect);
+        assert!(!v_verified.seed_fallback_session);
+
+        // 4. Conflicting track writer (`other-owner` != `owner`) -> RejectTrackWriterConflict
+        let v_conflict = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            "remote-job:other",
+            Some("thread-1"),
+            &events_with_rollout,
+            Some("recovered history"),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_conflict.action,
+            crate::orb_spec::MissionControlAction::RejectTrackWriterConflict
+        );
+        assert!(!v_conflict.emit_dispatch_effect);
+
+        // 5. Already-accepted side launch receipt on initial launch (`None`) -> DedupeDeliveredMessage
+        super::record_side_launch(dir.path(), mission.id, "k1", "fp1").unwrap();
+        super::accept_side_launch(dir.path(), mission.id).unwrap();
+        let v_dedupe = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            &owner,
+            None,
+            &[],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_dedupe.action,
+            crate::orb_spec::MissionControlAction::DedupeDeliveredMessage
+        );
+        assert!(!v_dedupe.emit_dispatch_effect);
+
+        // 6. Archived mission (`MissionStatus::Acknowledged` and `SUPERSEDED_TAG`) -> RejectArchived
+        for is_superseded_tag in [false, true] {
+            let mut archived_mission = mission.clone();
+            if is_superseded_tag {
+                archived_mission
+                    .project
+                    .tags
+                    .push(crate::api::mission_store::SUPERSEDED_TAG.to_string());
+            } else {
+                archived_mission.status = MissionStatus::Acknowledged;
+            }
+            let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
+                dir.path(),
+                store.as_ref(),
+                &archived_mission,
+                &owner,
+                Some("thread-1"),
+                &events_with_rollout,
+                Some("recovered history"),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v_archived.action,
+                crate::orb_spec::MissionControlAction::RejectArchived
+            );
+            assert!(!v_archived.emit_dispatch_effect);
+            assert!(v_archived.archived_next);
+        }
+
+        // 7. Usage-limit replay gate: while `run` is active -> RejectTrackWriterConflict;
+        //    once `run` finishes -> SeedFallbackFreshSession on FRESH_SESSION_FALLBACK
+        let v_replay_busy = super::super::remote_jobs::evaluate_usage_limit_replay_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            super::super::usage_limit_wait::FRESH_SESSION_FALLBACK,
+            Some("fallback history"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_replay_busy.action,
+            crate::orb_spec::MissionControlAction::RejectTrackWriterConflict
+        );
+        assert!(!v_replay_busy.emit_dispatch_effect);
+
+        store
+            .finish_mission_run(run.run_id, run.generation, Some("failed"))
+            .await
+            .unwrap();
+        let v_replay_ready = super::super::remote_jobs::evaluate_usage_limit_replay_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            super::super::usage_limit_wait::FRESH_SESSION_FALLBACK,
+            Some("fallback history"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_replay_ready.action,
+            crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+        );
+        assert!(v_replay_ready.emit_dispatch_effect);
+        assert!(v_replay_ready.seed_fallback_session);
+        assert_eq!(super::control_shadow_snapshot().total_divergences, 0);
     }
 }
 

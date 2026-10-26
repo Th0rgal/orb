@@ -148,7 +148,7 @@ function LocalAgentsCard() {
         {(id) => {
           const found = () => row(id);
           return (
-            <Row title={harnessName(id)} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
+            <Row title={harnessName(id)} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : found()?.models?.length ? ` · ${found()!.models!.map(([, label]) => label.replace(/^Claude\s+/, "")).join(", ")}` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
               <input
                 class="s-input"
                 aria-label={`${harnessName(id)} path`}
@@ -275,28 +275,15 @@ function DiagnosticsCard() {
   );
 }
 
+/** Account: server connection, connected accounts and appearance. */
 export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
-  const [executionMounted, setExecutionMounted] = createSignal(false);
+  const [advancedMounted, setAdvancedMounted] = createSignal(false);
   return (
     <div class="s-body settings-body">
       <div class="s-inner">
-        <h2>General</h2>
+        <h2>Account</h2>
         <BackendTab />
-        <LocalAgentsCard />
         <CloudAccountsCard onOpenPage={p.onOpenPage} />
-        <BackgroundSyncCard />
-        <Show when={isConnected()}>
-          <section class="s-sec">
-            <h3>Execution</h3>
-            <details class="s-card execution-disclosure" onToggle={e => { if (e.currentTarget.open) setExecutionMounted(true); }}>
-              <summary class="s-row">
-                <span class="s-row-text"><span class="s-row-title">Concurrency limits</span><span class="s-row-desc">Agent and task limits across all projects.</span></span>
-                <Ic.ChevronDown size={14} />
-              </summary>
-              <Show when={executionMounted()}><ExecutionSettings inline /></Show>
-            </details>
-          </section>
-        </Show>
         <Card title="Appearance">
           <Row title="Theme" desc="Auto follows your desktop appearance.">
             <Select
@@ -306,7 +293,37 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
             ><option>Auto</option><option>Light</option><option>Dark</option></Select>
           </Row>
         </Card>
-        <DiagnosticsCard />
+        <details class="settings-advanced" onToggle={e => { if (e.currentTarget.open) setAdvancedMounted(true); }}>
+          <summary>Advanced <Ic.ChevronDown size={14} /></summary>
+          <Show when={advancedMounted()}>
+            <BackgroundSyncCard />
+            <DiagnosticsCard />
+          </Show>
+        </details>
+      </div>
+    </div>
+  );
+}
+
+/** Agents → Local agents: CLIs on this computer and concurrency limits. */
+export function LocalAgentsSettings() {
+  const [executionMounted, setExecutionMounted] = createSignal(false);
+  return (
+    <div class="s-body settings-body">
+      <div class="s-inner">
+        <LocalAgentsCard />
+        <Show when={isConnected()}>
+          <section class="s-sec">
+            <h3>Concurrency</h3>
+            <details class="s-card execution-disclosure" onToggle={e => { if (e.currentTarget.open) setExecutionMounted(true); }}>
+              <summary class="s-row">
+                <span class="s-row-text"><span class="s-row-title">Concurrency limits</span><span class="s-row-desc">Agent and task limits across all projects.</span></span>
+                <Ic.ChevronDown size={14} />
+              </summary>
+              <Show when={executionMounted()}><ExecutionSettings inline /></Show>
+            </details>
+          </section>
+        </Show>
       </div>
     </div>
   );

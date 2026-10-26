@@ -162,6 +162,14 @@ pub async fn local_antigravity_models(path: String) -> Result<Vec<(String, Strin
         .map_err(|error| error.to_string())?
 }
 
+/// Models this computer's Claude Code offers; no inference request is sent.
+#[tauri::command]
+pub async fn local_claude_models(path: String) -> Result<Vec<(String, String)>, String> {
+    tauri::async_runtime::spawn_blocking(move || harness::claude_models::models(&path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub fn local_agents_directory(path: String) -> Result<String, String> {
     let requested = Path::new(path.trim());

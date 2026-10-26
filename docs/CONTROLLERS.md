@@ -1,7 +1,7 @@
 # Piloter un projet en autonomie
 
 Mode d'emploi des contrôleurs autonomes. Un contrôleur, c'est un cron Hermes qui
-se réveille toutes les N minutes, charge le skill `controllers-policy`, et fait
+se réveille toutes les N minutes, charge le skill `orb-control` (référence `controllers-policy.md`), et fait
 avancer **un** projet : il dispatche des missions, merge des PRs, met à jour son
 tracker, et te livre un rapport.
 
@@ -31,14 +31,14 @@ Contrôleur <nom>. Objectif : <ce qu'il doit faire aboutir>, projet `<slug>`.
 Gates du projet :
 - <la branche autorisée, ce qu'il ne faut jamais toucher, les invariants>
 - Autonomie, format de livraison, trailer `[CTRL: ...]`, escalade et questions
-  d'installation sont régis par le skill controllers-policy.
+  d'installation sont régis par le skill orb-control (controllers policy).
 ```
 
 **2. Attacher le skill.**
 
 ```bash
 hermes cron create --name "<nom>" --every 30m \
-  --skill controllers-policy --deliver project:<slug> --prompt "$(cat prompt.txt)"
+  --skill orb-control --deliver project:<slug> --prompt "$(cat prompt.txt)"
 ```
 
 `--deliver project:<slug>` est du **plomberie** : ça route encore la copie
@@ -60,7 +60,7 @@ Un ordre ponctuel — « merge ces PRs », « regarde le dossier notes » — es
 **steer**, pas un grant et pas un message dans Hermes. Depuis Orb, ouvre le
 contrôleur du projet (`c:<slug>`), écris dans *Steer the next tick…*, et
 laisse **Run now** coché. Le tick lit `steers.pending` via `get_situation` /
-`get_project` (étape 0 de `controllers-policy`) : s'il y en a, ils **battent**
+`get_project` (étape 0 de la controllers policy) : s'il y en a, ils **battent**
 « nothing to do » / `[SILENT]`. `update_project_status.consumed_steer_ids` acquitte uniquement les IDs lus et traités. Le
 grant reste l'autorité permanente.
 
@@ -258,7 +258,7 @@ native).
 
 ## Références
 
-- Le contrat complet : `skills/controllers-policy/SKILL.md` sur agent-core.
+- Le contrat complet : `skill/orb-control/references/controllers-policy.md` dans la Library.
 - Les doctrines d'autonomie, avec les incidents qui les ont produites :
   `references/autonomy-playbook.md`.
 - Les questions d'installation et le bloc `GRANT:` :

@@ -260,7 +260,7 @@ fn ingest_deliveries_with_live(
         let descriptor = delivery.state.clone().unwrap_or_else(|| {
             format!("{CTRL_DESCRIPTOR_PREFIX}{}", gated_mode.unwrap_or("report"))
         });
-        // `[SILENT]` is the controllers-policy convention for "nothing to
+        // `[SILENT]` is the controllers policy (orb-control) convention for "nothing to
         // report". It must advance freshness (a quiet tick is proof of life),
         // but it must never become the headline the card shows — fold it onto
         // the previous state event so `latest_update` keeps surfacing the last
@@ -6242,7 +6242,7 @@ mod tests {
     #[test]
     fn an_unearned_autonomous_act_is_coerced_into_an_escalation() {
         // observe and propose deny acting. An unset grant follows the
-        // controllers-policy default (act_reversible), not observe.
+        // controllers policy (orb-control) default (act_reversible), not observe.
         for level in [Some("observe"), Some("propose")] {
             let d = resolve_decision_disposition(level, Some("granted"), Some("decided"), None)
                 .expect("valid");

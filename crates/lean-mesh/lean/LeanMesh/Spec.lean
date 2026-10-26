@@ -140,7 +140,9 @@ structure SlidingWindowAntiReplay where
 /--
   8. `SovereignNonInterference`: Untrusted allocation classes (`MissionSandbox = 0`, `RetiredFree = 1`,
   `ReservedProd = 3`, `SovereignVault = 5`) can never obtain a route or JIT lease to `SovereignVault` (`5`, `dgx-spark`),
-  and leaf worker nodes never accept `:3088` control-plane traffic laterally from non-control-plane peers.
+  leaf worker nodes never accept `:3088` control-plane traffic laterally from non-control-plane peers,
+  and non-coordinator/non-admin nodes (`srcClass ∉ {4, 6}`) can never initiate SSH (`:22`) or route to
+  `OperatorAdmin` (`6`, `macbook-air`).
 -/
 structure SovereignNonInterference (RouteReq JitReq : Type) where
   evalRoute               : RouteReq → UInt32
@@ -148,9 +150,11 @@ structure SovereignNonInterference (RouteReq JitReq : Type) where
   isUntrustedToVaultRoute : RouteReq → Bool
   isUntrustedToVaultJit   : JitReq → Bool
   isLateral3088Route      : RouteReq → Bool
+  isLateralSshOrOperatorRoute : RouteReq → Bool
   route_blocks_untrusted_vault : ∀ r, isUntrustedToVaultRoute r = true → (evalRoute r &&& 1) = 0
   jit_blocks_untrusted_vault   : ∀ j, isUntrustedToVaultJit j = true → (evalJit j &&& 1) = 0
   route_blocks_lateral_3088    : ∀ r, isLateral3088Route r = true → (evalRoute r &&& 1) = 0
+  route_blocks_lateral_ssh_and_operator : ∀ r, isLateralSshOrOperatorRoute r = true → (evalRoute r &&& 1) = 0
 
 /-! ## Layer II: Independent Declarative `MetaGateSpec` Instances & Corollaries for All 12 C-ABI Exports -/
 
@@ -309,6 +313,28 @@ theorem eval_route_blocks_lateral_worker_port_3088_and_straddling_range
     (evalRouteStep 2 3 2 2 0 0 1 6 3000 3000 3100 0 0 1000 2000 2000 0 &&& 1) = 0 ∧
     (evalRouteStep 2 3 2 2 0 0 1 6 3000 3000 3100 0 0 1000 2000 2000 0 &&& 65536) = 65536 ∧
     evalRouteStep 1 2 4 2 0 0 1 6 3088 3088 3088 0 0 1000 2000 2000 0 = 1 := by
+  unfold evalRouteStep sovereignOrLateralViolation
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 2c (`SovereignNonInterference` — SOC 2 CC6.6 Operator Workstation & SSH Isolation):
+    - Compute workers (`srcClass == 2`), sandboxes (`0`), retired nodes (`1`), reserved prod (`3`),
+      and vault (`5`) can NEVER initiate SSH (`:22` or straddling range) to ANY peer, and can NEVER
+      route to `OperatorAdmin` (`dstClass == 6`, `macbook-air`) on ANY port.
+    - `SharedProtected` (`4`, `agent-core`) and `OperatorAdmin` (`6`, `macbook-air`) ARE permitted
+      to initiate SSH (`:22`) so Orb's Touch ID JIT privilege broker and macOS Remote Login work. -/
+theorem eval_route_blocks_worker_to_operator_macbook_and_lateral_ssh
+    (srcId dstId dstPort pMin pMax : UInt32)
+    (dstClass srcRev dstRev matched proto jit bunker : UInt8)
+    (now srcExp dstExp jitExp : UInt64) :
+    (evalRouteStep srcId dstId 2 6 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep srcId dstId 0 6 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep srcId dstId 1 6 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep srcId dstId 3 6 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep srcId dstId 5 6 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep srcId dstId 2 dstClass srcRev dstRev matched proto 22 pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep 13 100 2 6 0 0 1 6 22 22 22 0 0 1000 2000 2000 0 &&& 65536) = 65536 ∧
+    evalRouteStep 1 100 4 6 0 0 1 6 22 22 22 0 0 1000 2000 2000 0 = 1 ∧
+    evalRouteStep 100 13 6 2 0 0 1 6 22 22 22 0 0 1000 2000 2000 0 = 1 := by
   unfold evalRouteStep sovereignOrLateralViolation
   repeat (first | constructor | split | decide | simp_all)
 
@@ -1117,6 +1143,18 @@ def palomaSlidingWindowAntiReplay : SlidingWindowAntiReplay where
   reject_preserves_state := replay_window_reject_preserves_state
   rejects_duplicate := replay_window_rejects_duplicate
 
+theorem viol_true_implies_eval_route_zero (r : EvalRouteCheck)
+    (h_viol : sovereignOrLateralViolation r.srcClass r.dstClass r.dstPort r.rulePortMin r.rulePortMax
+      r.jitBiometricGrant r.bunkerState r.nowEpoch r.jitExpiresAt = true) :
+    (evalRouteStep r.srcId r.dstId r.srcClass r.dstClass r.srcRevoked r.dstRevoked
+      r.ruleMatched r.proto r.dstPort r.rulePortMin r.rulePortMax r.jitBiometricGrant
+      r.bunkerState r.nowEpoch r.srcExpiresAt r.dstExpiresAt r.jitExpiresAt &&& 1) = 0 := by
+  unfold evalRouteStep
+  dsimp only
+  rw [h_viol, Bool.or_true]
+  simp only [↓reduceIte]
+  decide
+
 /-- 8. Concrete `SovereignNonInterference` instance linking `evalRouteStep` and `jitLeaseStep`. -/
 def palomaSovereignNonInterference : SovereignNonInterference EvalRouteCheck JitLeaseCheck where
   evalRoute r :=
@@ -1132,15 +1170,33 @@ def palomaSovereignNonInterference : SovereignNonInterference EvalRouteCheck Jit
   isLateral3088Route r      :=
     (r.dstPort == 3088 || (r.rulePortMin ≤ 3088 && 3088 ≤ r.rulePortMax)) &&
     r.srcClass != 4 && r.srcClass != 6
+  isLateralSshOrOperatorRoute r :=
+    ((r.dstPort == 22 || (r.rulePortMin ≤ 22 && 22 ≤ r.rulePortMax)) || r.dstClass == 6) &&
+    r.srcClass != 4 && r.srcClass != 6
   route_blocks_untrusted_vault r h := by
-    unfold evalRouteStep sovereignOrLateralViolation
-    repeat (first | split at h | split | decide | simp_all)
+    apply viol_true_implies_eval_route_zero
+    unfold sovereignOrLateralViolation
+    dsimp only
+    simp only [Bool.and_eq_true, Bool.or_eq_true] at h ⊢
+    exact Or.inl (Or.inr ⟨h.1, Or.inl (Or.inl h.2)⟩)
   jit_blocks_untrusted_vault j h := by
     unfold jitLeaseStep jitClassPairAllowed
     repeat (first | split at h | split | decide | simp_all)
   route_blocks_lateral_3088 r h := by
-    unfold evalRouteStep sovereignOrLateralViolation
-    repeat (first | split at h | split | decide | simp_all)
+    apply viol_true_implies_eval_route_zero
+    unfold sovereignOrLateralViolation
+    dsimp only
+    simp only [Bool.and_eq_true, Bool.or_eq_true] at h ⊢
+    exact Or.inl (Or.inl (Or.inl (Or.inl h)))
+  route_blocks_lateral_ssh_and_operator r h := by
+    apply viol_true_implies_eval_route_zero
+    unfold sovereignOrLateralViolation
+    dsimp only
+    simp only [Bool.and_eq_true, Bool.or_eq_true] at h ⊢
+    rcases h with ⟨⟨h_or, h_not4⟩, h_not6⟩
+    rcases h_or with h_ssh | h_op
+    · exact Or.inl (Or.inl (Or.inl (Or.inr ⟨⟨h_ssh, h_not4⟩, h_not6⟩)))
+    · exact Or.inl (Or.inl (Or.inr ⟨⟨h_op, h_not4⟩, h_not6⟩))
 
 /-- Cross-Gate Coherence Theorem (`bunkerState != 0` across `evalRouteStep` and `jitLeaseStep`):
     Whenever the mesh is in any non-normal Bunker state (`bunkerState != 0`), `jitLeaseStep`

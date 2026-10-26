@@ -5,6 +5,7 @@ use super::*;
 
 pub(crate) mod antigravity;
 pub(crate) mod claude;
+pub(crate) mod claude_models;
 pub(crate) mod codex;
 pub(crate) mod piped;
 pub(crate) mod vibe;

@@ -14,7 +14,6 @@ import { isPartialList, mergeMission, reconcileMissionList, type Misses, resetMi
 import { draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
 import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
-import { MessageCircle } from "./sidebarIcons";
 import {MentionProjectContext} from "./PromptEditor";
 import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
@@ -36,9 +35,14 @@ import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
 import { hasOverlay } from "./overlayLayer";
-import { For, Show, Switch, Match, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch } from "solid-js";
+import { For, Show, Switch, Match, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch, type JSX } from "solid-js";
 import * as Ic from "./icons";
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
+const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
+const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
+import { SettingsShell } from "./SettingsShell";
+import { SETTINGS_PAGE_IDS, SETTINGS_SECTIONS, settingsAttention, settingsPageId, settingsSectionFor } from "./settingsNav";
+import { quotaStatus, usageWindows } from "./providerUsage";
 import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
@@ -58,7 +62,7 @@ import { syncMissionAccessNotices } from "./missionAccessNotices";
 import { getMissionAccess } from "./missionAccessApi";
 import { syncPrivilegeAccessNotices } from "./privilegeAccessNotices";
 import { getPrivilegeAccess } from "./privilegeAccessApi";
-import { listApprovalDevices, thisDeviceEnrollment } from "./deviceApproval";
+import { listApprovalDevices, localApprovalKey, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
 import {
@@ -87,6 +91,7 @@ import {
   bumpProjects,
   projectsVersion,
   connectionVersion,
+  getAllProviderUsage,
   getApiUrl,
   type Mission,
   type ProjectSummary,
@@ -110,16 +115,23 @@ import { Composer } from "./composer/Composer";
 import { MissionView, NativeMissionView } from "./mission/MissionView";
 
 
-const PAGES = new Set(["inbox", "cloud-agent", "settings", "inbox-settings", "btw-settings", "hermes-settings", "skills-settings", "bitwarden-settings", "usage-settings", "routing", "machines", "providers", "execution"]);
+const SETTINGS_ICONS: Record<string, () => JSX.Element> = {
+  account: () => <Ic.GearIcon />, models: () => <Ic.CubeIcon />, agents: () => <Ic.SkillsIcon />, security: () => <Ic.KeyIcon />, notifications: () => <Ic.BellIcon />,
+};
+const PAGES = new Set(["inbox", "cloud-agent", "machines", "providers", ...SETTINGS_PAGE_IDS]);
 
 export default function App() {
   const [secretRequests, setSecretRequests] = createSignal(0);
   const [accessRequests, setAccessRequests] = createSignal(0);
   const [privilegeRequests, setPrivilegeRequests] = createSignal(0);
+  const [bunkerActive, setBunkerActive] = createSignal(false);
+  const [deviceUnenrolled, setDeviceUnenrolled] = createSignal(false);
+  const [quotaExhausted, setQuotaExhausted] = createSignal(false);
+  const settingsDots = createMemo(() => settingsAttention({ bunkerActive: bunkerActive(), deviceEnrolled: !deviceUnenrolled(), quotaExhausted: quotaExhausted() }));
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
-  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? saved : null; })());
+  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => { writeString("orb.selectedConversation", selected() ?? ""); });
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
   const [sbWidth, setSbWidth] = createSignal(220);
@@ -494,14 +506,14 @@ export default function App() {
       context: previewContext()?.id === id ? previewContext()?.pct : null };
   });
 
-  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "inbox-settings" || selected() === "btw-settings" || selected() === "hermes-settings" || selected() === "skills-settings" || selected() === "bitwarden-settings" || selected() === "usage-settings";
+  const onSettings = () => !!settingsSectionFor(selected());
   const openSettings = () => {
     open("settings");
   };
   const leaveSettings = () => {
     const h = history();
     for (let i = hIdx() - 1; i >= 0; i--) {
-      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "inbox-settings" && h[i] !== "btw-settings" && h[i] !== "hermes-settings" && h[i] !== "skills-settings" && h[i] !== "bitwarden-settings" && h[i] !== "usage-settings") {
+      if (!settingsSectionFor(h[i])) {
         if (selected() === "routing" && !confirmLeaveRouting(() => { if (open(h[i], false)) setHIdx(i); })) return;
         if (open(h[i], false)) setHIdx(i);
         return;
@@ -520,7 +532,7 @@ export default function App() {
       const first = firstNodeId();
       if (first) setNewMachine(first);
     }
-    if (id === "execution") id = "settings";
+    if (id) id = settingsPageId(id);
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
     navigationVersion++;
     if (window.matchMedia("(max-width: 720px)").matches) setSidebar(false);
@@ -555,7 +567,7 @@ export default function App() {
     if (!projectSlug) throw new Error("Choose a project before starting on this computer. Your draft is kept.");
     if (pick.backend === "codex") await requireSpeedSupport(pick.model,pick.service_tier??"standard",undefined,true);
     const row = await localAgentForLaunch(pick.backend);
-    if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Local agents. Your draft is kept.");
+    if (!row?.path) throw new Error("That CLI is not installed on this computer. Set its path in Settings → Agents → Local agents. Your draft is kept.");
     const plan = await materializeMentions(projectSlug, prompt, remote ? [] : attachChips());
     const chosenDirectory = remote ? (remote.cwd ?? "") : workingDirectory();
     const root = chosenDirectory.trim() ? await localDirectory(chosenDirectory) : await localWorkspace(projectSlug);
@@ -784,7 +796,21 @@ export default function App() {
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000, "app.missions");
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000, "app.fleet");
     // Learn this Mac's approval device id so notifications sign approvals too.
-    if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(swallow("app.approvalDevices"));
+    // An unenrolled device that could approve puts a dot on Security.
+    const loadEnrollment = () => {
+      if (!isConnected()) return;
+      void Promise.all([listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)), localApprovalKey()])
+        .then(([mine, key]) => setDeviceUnenrolled(key.available && !mine))
+        .catch(swallow("app.approvalDevices"));
+    };
+    loadEnrollment();
+    window.addEventListener("orb:approval-devices-changed", loadEnrollment);
+    onCleanup(() => window.removeEventListener("orb:approval-devices-changed", loadEnrollment));
+    // A spent provider quota puts a dot on Models.
+    const loadQuota = () => (isConnected() ? getAllProviderUsage().then((u) => setQuotaExhausted(Object.values(u).some((x) => quotaStatus(usageWindows(x))?.level === "exhausted"))).catch(swallow("app.quota")) : undefined);
+    void loadQuota();
+    const stopQuota = pollWhileVisible(loadQuota, 60000, "app.quota");
+    onCleanup(stopQuota);
     const loadSecretRequests = () =>
         isConnected()
           ? getSecretBroker()
@@ -802,7 +828,7 @@ export default function App() {
               .then((snap) => {
                 const pending = snap.requests.filter((r) => r.state === "pending");
                 setAccessRequests(pending.length);
-                syncMissionAccessNotices(pending, () => open("bitwarden-settings"));
+                syncMissionAccessNotices(pending, () => open("security-settings"));
               })
               .catch(swallow("app.accessRequests"))
           : undefined;
@@ -818,11 +844,14 @@ export default function App() {
               .then((snap) => {
                 const pending = snap.requests.filter((r) => r.state === "pending");
                 setPrivilegeRequests(pending.length);
-                syncPrivilegeAccessNotices(pending, () => open("bitwarden-settings"));
+                setBunkerActive(snap.bunker_state > 0);
+                syncPrivilegeAccessNotices(pending, () => open("security-settings"), snap.bunker_state);
               })
               .catch(swallow("app.privilegeRequests"))
           : undefined;
     const stopPrivilegeRequests = pollWhileVisible(loadPrivilegeRequests, 10000, "app.privilegeRequests");
+    // Bunker Mode shows at launch, not after the first poll.
+    void loadPrivilegeRequests();
     const onPrivilegeAnswered = () => { setPrivilegeRequests((n) => Math.max(0, n - 1)); void loadPrivilegeRequests(); };
     const onPrivilegeFocus = () => void loadPrivilegeRequests();
     window.addEventListener("orb:privilege-access-answered", onPrivilegeAnswered);
@@ -970,17 +999,15 @@ export default function App() {
               <span class="row-label">Back</span>
             </button>
             <div class="settings-nav-gap" />
-            <button class={`row ${selected() === "settings" ? "active" : ""}`} onClick={() => open("settings")}><span class="row-ico"><Ic.GearIcon /></span><span class="row-label">General</span></button>
-            <div class="settings-nav-group-gap" />
-            <button class={`row ${selected() === "routing" ? "active" : ""}`} onClick={() => open("routing")}><span class="row-ico"><Ic.CubeIcon /></span><span class="row-label">Models &amp; Routing</span></button>
-            <button class={`row ${selected() === "usage-settings" ? "active" : ""}`} onClick={() => open("usage-settings")}><span class="row-ico"><Ic.UsageIcon /></span><span class="row-label">Usage</span></button>
-            <button class={`row ${selected() === "hermes-settings" ? "active" : ""}`} onClick={() => open("hermes-settings")}><span class="row-ico"><Ic.TargetIcon /></span><span class="row-label">Coordinator</span></button>
-            <button class={`row ${selected() === "btw-settings" ? "active" : ""}`} onClick={() => open("btw-settings")}><span class="row-ico"><MessageCircle size={16} /></span><span class="row-label">Side Questions</span></button>
-            <div class="settings-nav-group-gap" />
-            <button class={`row ${selected() === "skills-settings" ? "active" : ""}`} onClick={() => open("skills-settings")}><span class="row-ico"><Ic.SkillsIcon /></span><span class="row-label">Skills</span></button>
-            <button class={`row ${selected() === "bitwarden-settings" ? "active" : ""}`} onClick={() => open("bitwarden-settings")}><span class="row-ico"><Ic.KeyIcon /></span><span class="row-label">Secrets</span><Show when={secretRequests() + accessRequests() + privilegeRequests() > 0}><span class="row-badge">{secretRequests() + accessRequests() + privilegeRequests()}</span></Show></button>
-            <div class="settings-nav-group-gap" />
-            <button class={`row ${selected() === "inbox-settings" ? "active" : ""}`} onClick={() => open("inbox-settings")}><span class="row-ico"><Ic.BellIcon /></span><span class="row-label">Notifications</span></button>
+            <For each={SETTINGS_SECTIONS}>{(sec) => {
+              const count = () => sec.id === "security" ? secretRequests() + accessRequests() + privilegeRequests() : 0;
+              return <button class={`row ${settingsSectionFor(selected())?.id === sec.id ? "active" : ""}`} data-settings-section={sec.id}
+                aria-current={settingsSectionFor(selected())?.id === sec.id ? "page" : undefined} onClick={() => open(sec.tabs[0].id)}>
+                <span class="row-ico">{SETTINGS_ICONS[sec.id]()}</span><span class="row-label">{sec.label}</span>
+                <Show when={count() > 0}><span class="row-badge">{count()}</span></Show>
+                <Show when={settingsDots().has(sec.id)}><span class="row-dot" role="img" aria-label="Needs attention" title="Needs attention" /></Show>
+              </button>;
+            }}</For>
           </Show>
         </nav>
         <div class="sb-foot">
@@ -1018,16 +1045,7 @@ export default function App() {
         </div>
         <div class="tb-title" data-tauri-drag-region>
           <Switch>
-            <Match when={selected() === "settings" || selected() === "execution"}>
-              <span>Settings · General</span>
-            </Match>
-            <Match when={selected() === "skills-settings"}><span>Settings · Skills</span></Match>
-            <Match when={selected() === "bitwarden-settings"}><span>Settings · Secrets</span></Match>
-            <Match when={selected() === "inbox-settings"}><span>Settings · Notifications</span></Match>
-            <Match when={selected() === "hermes-settings"}><span>Settings · Coordinator</span></Match>
-            <Match when={selected() === "btw-settings"}><span>Settings · Side Questions</span></Match>
-            <Match when={selected() === "routing"}><span>Settings · Models &amp; Routing</span></Match>
-            <Match when={selected() === "usage-settings"}><span>Settings · Usage</span></Match>
+            <Match when={settingsSectionFor(selected())}>{(sec) => <span>Settings · {sec().label}</span>}</Match>
             <Match when={selected() === "machines"}>
               <span>Machines</span>
             </Match>
@@ -1318,17 +1336,23 @@ export default function App() {
               onPending={seed => setCloudLaunchTitle(seed?.prompt.trim() || null)}
               onCreated={m => { setCloudLaunchTitle(null); setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
           </Match>
-          <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
-          <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>
-          <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
-          <Match when={selected() === "inbox-settings"}><InboxSettings /></Match>
-          <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
-          <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
-          <Match when={selected() === "settings" || selected() === "execution"}>
-            <Settings onOpenPage={open} />
-          </Match>
-          <Match when={selected() === "routing"}>
-            <RoutingSettings onOpenClient={() => open("settings")} />
+          <Match when={settingsSectionFor(selected())}>
+            <SettingsShell page={selected()!} onOpen={open}>
+              <Switch>
+                <Match when={selected() === "settings"}><Settings onOpenPage={open} /></Match>
+                <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
+                  <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
+                </Match>
+                <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
+                <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
+                <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
+                <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
+                <Match when={selected() === "local-agents"}><LocalAgentsSettings /></Match>
+                <Match when={selected() === "security-settings"}><SecuritySettings /></Match>
+                <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>
+                <Match when={selected() === "inbox-settings"}><InboxSettings /></Match>
+              </Switch>
+            </SettingsShell>
           </Match>
           <Match when={selected() === "machines"}>
             <Machines />

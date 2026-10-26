@@ -1300,4 +1300,493 @@ def routeArgminStep
     else 0
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 
+/-! ## Wave 9 — Phase 1: Control Core — Mission Lifecycle, Codex Resume, Fork `HOME` & Track Leases -/
+
+/--
+  Unboxed C-ABI Mission Control & Codex Resume Stepper (`orb_mission_control_step`):
+  Pure decision machine for mission lifecycle, archived mission fencing, single-writer track
+  admission, message replay deduplication, and verified Codex session resume vs. seeded fallback:
+  - If `isArchived == 1`, returns `action = 0 (RejectArchived)` with `archivedNext = 1` (`bit 16 = 65536`)
+    and zero dispatch (`bit 8 = 0`, `StickyFence` — archived missions never revive).
+  - Else if `msgAlreadyDelivered == 1`, returns `action = 4 (DedupeDeliveredMessage)` with zero dispatch
+    (`ReplayIdempotence` — no user message is delivered twice).
+  - Else if `!(hasLease == 1 && activeTrackWriters == 0)`, returns `action = 5 (RejectTrackWriterConflict)`
+    with zero dispatch (`at_most_one_writer_per_track`).
+  - Else if `isResume == 1`:
+    - If `sessionCreated == 1 && lineageVerified == 1 && rolloutExists == 1`, returns
+      `action = 2 (ResumeVerifiedSession)` with `emitDispatch = 256` (`bit 8 = 1`) and `hi32 = 1`.
+    - Else if `hasFallbackPrompt == 1`, returns `action = 3 (SeedFallbackFreshSession)` with
+      `emitDispatch = 256` (`bit 8 = 1`), `seedFallback = 512` (`bit 9 = 1`), and `hi32 = 1`
+      (prevents the phantom Codex session bug `16b74dd4` / `c96df4f9`).
+    - Else returns `action = 6 (RejectUnverifiedResume)` with zero dispatch.
+  - Otherwise (`isResume == 0`), returns `action = 1 (DispatchFreshTurn)` with `emitDispatch = 256`
+    and `hi32 = 1` (`no_user_message_lost_or_duplicated`).
+-/
+@[inline, export orb_mission_control_step]
+def missionControlStep
+    (isArchived : UInt8) (activeTrackWriters : UInt32)
+    (hasLease msgAlreadyDelivered isResume : UInt8)
+    (sessionCreated lineageVerified rolloutExists hasFallbackPrompt : UInt8) : UInt64 :=
+  let lo32 : UInt32 :=
+    if isArchived == 1 then 65536
+    else if msgAlreadyDelivered == 1 then 4
+    else if !(hasLease == 1 && activeTrackWriters == 0) then 5
+    else if isResume == 1 then
+      if sessionCreated == 1 && lineageVerified == 1 && rolloutExists == 1 then 258
+      else if hasFallbackPrompt == 1 then 771
+      else 6
+    else 257
+  let hi32 : UInt32 :=
+    if isArchived == 1 then 0
+    else if msgAlreadyDelivered == 1 then 0
+    else if !(hasLease == 1 && activeTrackWriters == 0) then 0
+    else if isResume == 1 then
+      if sessionCreated == 1 && lineageVerified == 1 && rolloutExists == 1 then 1
+      else if hasFallbackPrompt == 1 then 1
+      else 0
+    else 1
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Fork & `/btw` Workspace / `HOME` Isolation Stepper (`orb_fork_home_step`):
+  Pure decision machine for conversation fork and `/btw` side-agent workspace resolution:
+  - Under ALL inputs (`isForkOrSide == 0` or `1`, regardless of `requestedOverrideHome`),
+    `overrideHomeBit` (`bit 16 = 65536`) is ALWAYS `0`: a fork or `/btw` job NEVER overrides
+    its own job `HOME` directory with the source workspace (preventing the `#1302` / `9178bd08`
+    harness sign-out bug).
+  - If `isForkOrSide == 0`:
+    returns `action = 1 (StandardJobWorkspace)` with `admitBit = 256` (`bit 8 = 1`),
+    `jobHomePreservedBit = 131072` (`bit 17 = 1`), `useSourceCwdBit = 0`, `hi32 = 0` (`lo32 = 131329`).
+  - Else (`isForkOrSide == 1`):
+    - If `!(sourceExists == 1 && sourceIsSymlink == 0 && sameWorkspace == 1 && sameNode == 1)`,
+      returns `action = 0 (RejectForkWorkspace)` with `admitBit = 0` and `hi32 = 78` (`EX_CONFIG`).
+    - Else if `hasCommittedTransfer == 1`, returns `action = 3 (UseTransferredRootCwdKeepJobHome)`
+      with `admitBit = 256`, `useSourceCwdBit = 512`, `jobHomePreservedBit = 131072`, `hi32 = 0`
+      (`lo32 = 131843`).
+    - Else returns `action = 2 (UseSiblingSourceCwdKeepJobHome)` with `admitBit = 256`,
+      `useSourceCwdBit = 512`, `jobHomePreservedBit = 131072`, `hi32 = 0` (`lo32 = 131842`).
+-/
+@[inline, export orb_fork_home_step]
+def forkHomeStep
+    (isForkOrSide sourceExists sourceIsSymlink sameWorkspace sameNode : UInt8)
+    (hasCommittedTransfer requestedOverrideHome : UInt8) : UInt64 :=
+  let _ := requestedOverrideHome
+  let validForkSource : Bool :=
+    sourceExists == 1 && sourceIsSymlink == 0 && sameWorkspace == 1 && sameNode == 1
+  let lo32 : UInt32 :=
+    if isForkOrSide == 0 then 131329
+    else if !validForkSource then 131072
+    else if hasCommittedTransfer == 1 then 131843
+    else 131842
+  let hi32 : UInt32 :=
+    if isForkOrSide == 0 then 0
+    else if !validForkSource then 78
+    else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 5: Security-Critical System Primitives (`orb-privd`, `development_identity`, Codex Driver)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Privileged Command Grammar & Environment Confinement Stepper (`orb_privd_command_step`):
+  Constructive grammar and environment/path confinement replacing bypassable blacklists in `orb-privd`:
+  - `grantScope`: `0 = OpsRead`, `1 = ServiceDeploy`, `2 = RootExec`.
+  - `commandClass`: `0 = UnknownOrForbidden`, `1 = OpsReadSafe`, `2 = ServiceDeployUnit`,
+    `3 = ServiceDeployReload`, `4 = RootExecCommand`.
+  - Under ALL inputs (admitted or rejected), `scrubEnvBit` (`bit 9 = 512`) and
+    `auditRequiredBit` (`bit 10 = 1024`) are ALWAYS `1` (`1536`).
+  - Admits (`allowExecBit = 256`, `hi32 = 0`) iff `leaseValid == 1`, no shell metacharacter / flag
+    bypass (`hasShellMetacharOrFlagBypass == 0`), no `..` traversal or symlink escape
+    (`hasPathTraversalOrSymlink == 0`), no unsafe environment variable (`hasUnsafeEnvVar == 0`),
+    and `(commandClass, grantScope)` satisfies `GrammarConfinement` and `NoPrivilegeEscalation`.
+  - Otherwise rejects (`action = 0`, `allowExecBit = 0`, `lo32 = 1536`, `hi32 = 126`).
+-/
+@[inline, export orb_privd_command_step]
+def privdCommandStep
+    (leaseValid grantScope commandClass unitMatchesAllowed : UInt8)
+    (hasShellMetacharOrFlagBypass hasPathTraversalOrSymlink hasUnsafeEnvVar requireForceCmd : UInt8) : UInt64 :=
+  let safeInput : Bool :=
+    leaseValid == 1 && hasShellMetacharOrFlagBypass == 0 &&
+    hasPathTraversalOrSymlink == 0 && hasUnsafeEnvVar == 0
+  let lo32 : UInt32 :=
+    if !safeInput then 1536
+    else if !(grantScope <= 2) then 1536
+    else if commandClass == 1 then 1793
+    else if commandClass == 2 && 1 <= grantScope && unitMatchesAllowed == 1 then 1794
+    else if commandClass == 3 && 1 <= grantScope then 1794
+    else if commandClass == 4 && grantScope == 2 && requireForceCmd == 0 then 1795
+    else 1536
+  let hi32 : UInt32 :=
+    if lo32 == 1536 then 126 else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI SSH Development Identity & Codex Node Driver Confinement Stepper (`orb_ssh_identity_step`):
+  Proves non-leakage of control-plane secrets (`PALOMA_SSH_PRIVATE_KEY`, `host_keys`, `ssh_hosts`) to
+  worker nodes/containers (`coding_only_bundle`), rejects symlinked parent directories, private keys
+  in public key fields, forward `proxy_jump` references, invalid `SANDBOXED_CYBER_PROGRAM` values,
+  and exhausted Codex native goal budgets:
+  - Under ALL inputs, `noSecretLeakBit` (`bit 10 = 1024`) is `1`, and whenever
+    `isWorkerOrContainerTarget == 1`, `stripControlPlaneSecretsBit` (`bit 9 = 512`) is `1`.
+  - When `valid` holds:
+    - `isWorkerOrContainerTarget == 1` -> `action = 1 (AdmitCodingOnlyIdentity)`, `admitBit = 256`, `lo32 = 1793`, `hi32 = 0`.
+    - `isWorkerOrContainerTarget == 0` -> `action = 2 (AdmitFleetIdentity)`, `admitBit = 256`, `lo32 = 1282`, `hi32 = 0`.
+  - Otherwise rejects (`action = 0`, `admitBit = 0`, `hi32 = 78`).
+-/
+@[inline, export orb_ssh_identity_step]
+def sshIdentityStep
+    (isWorkerOrContainerTarget bundleHasControlPlaneKey parentDirIsSymlink : UInt8)
+    (pubKeyIsEd25519WithoutPrivate proxyJumpValid codexCyberProgramValid codexGoalBudgetExhausted : UInt8) : UInt64 :=
+  let valid : Bool :=
+    parentDirIsSymlink == 0 && pubKeyIsEd25519WithoutPrivate == 1 &&
+    proxyJumpValid == 1 && codexCyberProgramValid == 1 &&
+    codexGoalBudgetExhausted == 0 &&
+    !(isWorkerOrContainerTarget == 1 && bundleHasControlPlaneKey == 1)
+  let lo32 : UInt32 :=
+    if !valid then
+      if isWorkerOrContainerTarget == 1 then 1536 else 1024
+    else if isWorkerOrContainerTarget == 1 then 1793
+    else 1282
+  let hi32 : UInt32 :=
+    if valid then 0 else 78
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 3: Multi-Harness Agent Event Normalizer & Unified Transcript Reducer
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Multi-Harness Agent Event Normalizer Stepper (`orb_agent_event_normalize_step`):
+  Total, bounded transducer step normalizing raw events across all 6 supported harnesses
+  (`0 = Codex`, `1 = ClaudeCode`, `2 = Antigravity`, `3 = OpenCode`, `4 = Grok`, `5 = Vibe`):
+  - `rawEventKind`: `0 = DiagnosticLine`, `1 = SessionIdUpdate`, `2 = ThinkingUpdate`,
+    `3 = AssistantText`, `4 = ToolCall`, `5 = GoalProgress`, `6 = TurnCompleted`, `7 = ErrorOrAuth`.
+  - Universally sets `totalTransducerBit` (`bit 11 = 2048`) and bounds `hi32` by `maxPayloadBytes` (`CostBound`).
+-/
+@[inline, export orb_agent_event_normalize_step]
+def agentEventNormalizeStep
+    (harnessKind rawEventKind isCompleted hasNonEmptyText : UInt8)
+    (sessionMatchesExpected isDuplicateTurnOrTool payloadBytes maxPayloadBytes : UInt32) : UInt64 :=
+  let bounded : Bool := payloadBytes <= maxPayloadBytes
+  let harnessValid : Bool := harnessKind <= 5
+  let sessionOk : Bool :=
+    sessionMatchesExpected == 1 || rawEventKind == 0 || rawEventKind == 1 || rawEventKind == 7
+  let notDup : Bool := isDuplicateTurnOrTool == 0
+  let lo32 : UInt32 :=
+    if !bounded then 2048
+    else if !(harnessValid && sessionOk && notDup) then 2049
+    else if rawEventKind == 0 then 2306
+    else if rawEventKind == 1 then 2307
+    else if rawEventKind == 2 then (if hasNonEmptyText == 1 then 2820 else 2049)
+    else if rawEventKind == 3 then (if hasNonEmptyText == 1 then 3333 else 2049)
+    else if rawEventKind == 4 then (if isCompleted == 1 then 3334 else 3335)
+    else if rawEventKind == 5 then 2312
+    else if rawEventKind == 6 then 3337
+    else if rawEventKind == 7 then 3338
+    else 2049
+  let hi32 : UInt32 :=
+    if bounded then payloadBytes else maxPayloadBytes
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Unified Transcript Reducer Stepper (`orb_transcript_reduce_step`):
+  Pure transcript reduction step shared by Core, iOS, Android, and Desktop (`wasm32`).
+  Satisfies `replay_log_eq_live_transcript` (`isReplayFromLog` invariance) and strict sequence
+  monotonicity (`incomingSeq > lastAppliedSeq` required to append/mutate transcript entries).
+-/
+@[inline, export orb_transcript_reduce_step]
+def transcriptReduceStep
+    (lastAppliedSeq incomingSeq : UInt64)
+    (thinkingOpen normalizedAction isReplayFromLog : UInt8) : UInt64 :=
+  let _ := isReplayFromLog
+  let seqAdvances : Bool := incomingSeq > lastAppliedSeq
+  let nextSeq32 : UInt32 := (if seqAdvances then incomingSeq else lastAppliedSeq).toUInt32
+  let lo32 : UInt32 :=
+    if !seqAdvances then
+      if thinkingOpen == 1 then 512 else 0
+    else if normalizedAction == 4 then 769
+    else if normalizedAction == 5 || normalizedAction == 6 || normalizedAction == 7 ||
+            normalizedAction == 9 || normalizedAction == 10 then
+      if thinkingOpen == 1 then 1282 else 258
+    else if normalizedAction == 2 || normalizedAction == 3 || normalizedAction == 8 then
+      if thinkingOpen == 1 then 771 else 259
+    else
+      if thinkingOpen == 1 then 512 else 0
+  lo32.toUInt64 ||| (nextSeq32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 4: Storage Invariants — Pagination Cursors & Sidebar Merge
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Storage Pagination Cursor & Partial-Response Preservation Stepper (`orb_cursor_page_step`):
+  Enforces strict exclusive cursor bounds (`since_seq < itemSeq < before_seq`), rejects inverted
+  windows (`sinceSeq >= beforeSeq` when both bounds are active), and universally sets
+  `preserveExistingBit` (`bit 9 = 512`) so partial or paginated responses never wipe stored data.
+-/
+@[inline, export orb_cursor_page_step]
+def cursorPageStep
+    (sinceSeq beforeSeq itemSeq : UInt64)
+    (hasSinceCursor hasBeforeCursor isPartialResponse existingCount : UInt32) : UInt64 :=
+  let validWindow : Bool := !(hasSinceCursor == 1 && hasBeforeCursor == 1 && sinceSeq >= beforeSeq)
+  let afterSince : Bool := hasSinceCursor == 0 || itemSeq > sinceSeq
+  let beforeBound : Bool := hasBeforeCursor == 0 || itemSeq < beforeSeq
+  let admitItem : Bool := validWindow && afterSince && beforeBound
+  let partialBit : UInt32 := if isPartialResponse == 1 then 1024 else 0
+  let lo32 : UInt32 :=
+    if !validWindow then 512 ||| partialBit
+    else if admitItem then 769 ||| partialBit
+    else 514 ||| partialBit
+  let hi32 : UInt32 :=
+    if admitItem then existingCount + 1 else existingCount
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Sidebar Mission List Merge & Deduplication Stepper (`orb_sidebar_merge_step`):
+  Eliminates duplicate missions in the sidebar (`sidebar_missions_unique_and_idempotent`):
+  - When `existingIdOrd != 0 && existingIdOrd == incomingIdOrd` (`sameMission`), updates in place
+    (`insertNewBit = 0`, `hi32 = 0` net new rows) if `incomingUpdatedAtMs >= existingUpdatedAtMs`
+    or retains the newer existing row.
+  - When `incomingSupersededOrArchived == 1`, removes or skips the superseded/archived mission.
+  - Universally sets `uniqueSidebarBit` (`bit 10 = 1024`).
+-/
+@[inline, export orb_sidebar_merge_step]
+def sidebarMergeStep
+    (existingIdOrd incomingIdOrd : UInt32)
+    (existingUpdatedAtMs incomingUpdatedAtMs : UInt64)
+    (incomingSupersededOrArchived isPartialPage : UInt8) : UInt64 :=
+  let sameMission : Bool := existingIdOrd != 0 && existingIdOrd == incomingIdOrd
+  let incomingNewer : Bool := incomingUpdatedAtMs >= existingUpdatedAtMs
+  let partialKeepBit : UInt32 := if isPartialPage == 1 then 2048 else 0
+  let lo32 : UInt32 :=
+    if incomingSupersededOrArchived == 1 then
+      (if sameMission then 1028 else 1024) ||| partialKeepBit
+    else if sameMission then
+      (if incomingNewer then 1281 else 1282) ||| partialKeepBit
+    else 1795 ||| partialKeepBit
+  let hi32 : UInt32 :=
+    if !(incomingSupersededOrArchived == 1) && !sameMission then 1 else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 6: Clients (iOS, Android & Desktop `wasm32`) Scroll Epoch & Parity
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Client Scroll Correction Epoch Gate (`orb_scroll_epoch_step`):
+  Enforces `scroll_correction_at_most_once_per_epoch` across iOS, Android, and Desktop (`wasm32`):
+  once a scroll correction has been applied in `layoutEpoch` (`layoutEpoch <= lastCorrectedEpoch && correctionsInEpoch > 0`),
+  any second correction in the same epoch is suppressed (`applyScrollBit = 0`, `hi32 = currentScrollTopPx`).
+-/
+@[inline, export orb_scroll_epoch_step]
+def scrollEpochStep
+    (layoutEpoch lastCorrectedEpoch : UInt32)
+    (correctionsInEpoch isPinnedToBottom userIsDragging : UInt8)
+    (targetScrollTopPx currentScrollTopPx : UInt32) : UInt64 :=
+  let newEpoch : Bool := layoutEpoch > lastCorrectedEpoch
+  let alreadyCorrected : Bool := !newEpoch && correctionsInEpoch > 0
+  let needsDelta : Bool := targetScrollTopPx != currentScrollTopPx
+  let admitCorrection : Bool :=
+    isPinnedToBottom == 1 && userIsDragging == 0 && !alreadyCorrected && needsDelta
+  let lo32 : UInt32 :=
+    if admitCorrection then 1281
+    else if alreadyCorrected then 1026
+    else 0
+  let hi32 : UInt32 :=
+    if admitCorrection then targetScrollTopPx else currentScrollTopPx
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Cross-Client `OrbWire` Projection Parity Stepper (`orb_client_parity_step`):
+  Computes the canonical client projection state word across Core (`0`), iOS (`1`), Android (`2`),
+  and Desktop `wasm32` (`3`), proving bit-for-bit parity across all 4 targets on the same `OrbWire` stream.
+-/
+@[inline, export orb_client_parity_step]
+def clientParityStep
+    (clientTarget : UInt8) (wireSchemaId : UInt32)
+    (transcriptSeq markdownBlocksCount sendQueueDepth : UInt32)
+    (scrollCorrectedInEpoch : UInt8) : UInt64 :=
+  let validTarget : Bool := clientTarget <= 3
+  let schemaOk : Bool := wireSchemaId >= 1 && wireSchemaId <= 2
+  let lo32 : UInt32 :=
+    if !(validTarget && schemaOk) then 0
+    else if scrollCorrectedInEpoch == 1 then 769 else 257
+  let hi32 : UInt32 :=
+    if !(validTarget && schemaOk) then 0
+    else transcriptSeq ^^^ (markdownBlocksCount <<< 16) ^^^ (sendQueueDepth <<< 24)
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 10: Fleet Security — Canary Blast-Radius Isolation, Process Whitelist,
+--          High-Signal Attacker Bait, Enforcer Convergence & Biometric/Mesh Gates
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Canary Tripwire Blast-Radius & Process Whitelist Stepper (`canaryTripwireStep`):
+  - `canaryClass`:
+    - `0 = AmbientDecoy` (`.env.production.canary`, `.vault-recovery.age`, `mongo_27017`)
+    - `≥ 1 = HighSignalBait` (attacker-only bait such as fake Bitcoin WIF / BIP-39 wallet seed
+      `btc-treasury-wallet.dat` or fake SSH exfil key `ssh_exfil_canary` that legitimate agents
+      never access; a hit even from an agent process implies process/inference compromise).
+  - `actorTrust`:
+    - `0 = WhitelistedAgentWalk` (routine search/walk by a known agent process: `rg`, `fd`, `find`, `ls`, `git`)
+    - `1 = MissionProcess` (mission job process directly reading/probing an ambient decoy)
+    - `≥ 2 = UntrustedOrSystem` (non-agent / unknown / root / external process)
+  - `isDryRun`: `1` if synthetic `--dry-run`, else `0`.
+  - `currentFleetBunker`: `0 = Normal`, `1 = SoftQuarantine`, `≥ 2 = HardLockdown`.
+  - Returns a packed `UInt32`:
+    - `bits 0..7`: `action` (`0 = IgnoreWhitelisted`, `1 = QuarantineNodeOnly`, `2 = EscalateFleetLockdown`)
+    - `bit 8 (256)`: `quarantineReportingNodeBit` (`1` iff `action ≥ 1`)
+    - `bit 9 (512)`: `fleetLockdownBit` (`1` iff `action == 2`)
+    - `bit 10 (1024)`: `alertOperatorBit` (`1` iff `action ≥ 1` or `isDryRun == 1`)
+    - `bits 16..23`: `nextFleetBunker` (`2` if `action == 2`, else `clampedFleetBunker`)
+-/
+@[inline]
+def canaryTripwireStep
+    (canaryClass actorTrust isDryRun currentFleetBunker : UInt8) : UInt64 :=
+  let isHighSignal : Bool := canaryClass >= 1
+  let lo32 : UInt32 :=
+    if isDryRun == 1 then 1024
+    else if isHighSignal then 1794
+    else if actorTrust == 0 then 0
+    else if actorTrust == 1 then 1281
+    else 1794
+  let hi32 : UInt32 :=
+    if isDryRun == 1 then
+      (if currentFleetBunker >= 2 then 2 else currentFleetBunker.toUInt32)
+    else if isHighSignal then 2
+    else if actorTrust == 0 || actorTrust == 1 then
+      (if currentFleetBunker >= 2 then 2 else currentFleetBunker.toUInt32)
+    else 2
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Worker Node Bunker Enforcer Convergence Stepper (`bunkerEnforcerStep`):
+  Determines whether a worker node's `orb-bunker-enforcer` should apply/keep `paloma_canary_quarantine`
+  or release it and clear `/run/paloma-canary-tripped`:
+  - When `statusReachable == 0`: preserves local quarantine if `hasLocalTripMarker == 1`, else stays normal.
+  - When `statusReachable == 1`:
+    - Keeps/applies quarantine (`action = 1`, `bit 8 = 256`) iff `fleetBunker >= 2` (`HardLockdown` /
+      `SovereignDeadManTripped`), or `nodeQuarantinedByCore == 1`, or (`hasLocalTripMarker == 1` and
+      `lastUnbunkerEpoch < localTripEpoch`).
+    - Releases quarantine (`action = 0`, `bit 8 = 0`, `clearMarkerBit = 512` if marker present)
+      whenever `fleetBunker < 2 && nodeQuarantinedByCore == 0 && (hasLocalTripMarker == 0 || lastUnbunkerEpoch >= localTripEpoch)`.
+-/
+@[inline]
+def bunkerEnforcerStep
+    (statusReachable fleetBunker nodeQuarantinedByCore hasLocalTripMarker : UInt8)
+    (localTripEpoch lastUnbunkerEpoch : UInt64) : UInt32 :=
+  let fleetLockdown : Bool := fleetBunker >= 2
+  let markerCleared : Bool := hasLocalTripMarker == 0 || lastUnbunkerEpoch >= localTripEpoch
+  if statusReachable == 0 then
+    if hasLocalTripMarker == 1 then 257 else 0
+  else if fleetLockdown || nodeQuarantinedByCore == 1 || !markerCleared then
+    257
+  else if hasLocalTripMarker == 1 then
+    512
+  else
+    0
+
+/--
+  Biometric Approval Gate Stepper (`biometricGateStep`):
+  Enforces non-bypassable Face ID / Touch ID evaluation on mobile & desktop approval surfaces:
+  - When `surfaceRequiresBio == 0`: admitted (`257`).
+  - When `surfaceRequiresBio == 1`:
+    - Admitted (`257`, `admittedBit = 256`) iff `(hardwareEnrolled == 1 && evalSucceeded == 1)` or
+      `(hardwareEnrolled == 0 && passcodeFallbackSucceeded == 1)`.
+    - Otherwise rejected (`512`, `admittedBit = 0`, `surfaceErrorBit = 512`) so failed or unavailable
+      biometric contexts never silently drop or auto-approve the request.
+-/
+@[inline]
+def biometricGateStep
+    (surfaceRequiresBio hardwareEnrolled evalSucceeded passcodeFallbackSucceeded : UInt8) : UInt32 :=
+  if surfaceRequiresBio == 0 then 257
+  else if (hardwareEnrolled == 1 && evalSucceeded == 1) ||
+          (hardwareEnrolled == 0 && passcodeFallbackSucceeded == 1) then 257
+  else 512
+
+/--
+  Mesh Internal Service Route Admission Stepper (`meshServiceRouteStep`):
+  Enforces that internal service endpoints (such as Spark Whisper `/v1/audio/transcriptions`)
+  never route to a retired Tailscale CGNAT address (`endpointInRetiredTailnet == 1`) and only
+  admit requests over the verified `lean-mesh` `10.88.0.0/16` overlay, loopback, or explicit bearer auth.
+-/
+@[inline]
+def meshServiceRouteStep
+    (endpointInMeshOverlay endpointInRetiredTailnet hasMeshAuthOrBearer isLoopback : UInt8) : UInt32 :=
+  if endpointInRetiredTailnet == 1 then 512
+  else if isLoopback == 1 || endpointInMeshOverlay == 1 || hasMeshAuthOrBearer == 1 then 257
+  else 512
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 11: SOC 2 Type I Compliance Gates — 3-Key SSH & macOS Remote Login,
+--          Off-Host B2 Audit Log Shipper, and OS Lifecycle / Boundary Scope
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  SOC 2 CC6.1 / CC6.6 3-Key SSH & macOS Remote Login Hardening Stepper (`soc2SshHostKeyPolicyStep`):
+  Verifies that an enrolled fleet node (or `macbook-air` with macOS Remote Login enabled) enforces:
+  - Exactly the 3 authorized public keys (`hasYubikeyAdminKey == 1 && hasBreakglassKey == 1 && hasUniqueHostKey == 1`)
+  - Zero legacy/shared keys or worker private keys (`hasSharedLegacyKey == 0 && hasProvisioningRsaKey == 0 && workerHasFleetPrivateKey == 0`)
+  - Key-only `sshd` configuration (`passwordAuthDisabled == 1 && kbdInteractiveDisabled == 1 && rootPasswordDisabled == 1`).
+  Returns `257` (`admittedBit = 256 | 1`) when compliant, else `512` (`rejectBit = 512`).
+-/
+@[inline]
+def soc2SshHostKeyPolicyStep
+    (hasYubikeyAdminKey hasBreakglassKey hasUniqueHostKey : UInt8)
+    (hasSharedLegacyKey hasProvisioningRsaKey workerHasFleetPrivateKey : UInt8)
+    (passwordAuthDisabled kbdInteractiveDisabled rootPasswordDisabled : UInt8) : UInt32 :=
+  if hasYubikeyAdminKey == 1 && hasBreakglassKey == 1 && hasUniqueHostKey == 1 &&
+     hasSharedLegacyKey == 0 && hasProvisioningRsaKey == 0 && workerHasFleetPrivateKey == 0 &&
+     passwordAuthDisabled == 1 && kbdInteractiveDisabled == 1 && rootPasswordDisabled == 1 then
+    257
+  else
+    512
+
+/--
+  SOC 2 CC7.2 / C1.1 Off-Host Immutable Audit Log Shipper & Redaction Stepper (`soc2AuditShipperStep`):
+  Admits an audit log batch for off-host Backblaze B2 shipping (`257`) iff:
+  - Backblaze B2 credentials and append-only/Object-Lock mode are active (`hasB2Credentials == 1 && objectLockOrAppendOnly == 1`)
+  - Command-line / environment secrets have been scrubbed (`secretsRedacted == 1`)
+  - Per-record SHA-256 digest chain is verified (`sha256DigestVerified == 1`)
+  - Batch payload is non-empty and within budget (`0 < batchBytes && batchBytes ≤ maxBatchBytes`).
+  Otherwise returns `512` (`rejectBit = 512`).
+-/
+@[inline]
+def soc2AuditShipperStep
+    (hasB2Credentials objectLockOrAppendOnly secretsRedacted sha256DigestVerified : UInt8)
+    (batchBytes maxBatchBytes : UInt64) : UInt32 :=
+  if hasB2Credentials == 1 && objectLockOrAppendOnly == 1 &&
+     secretsRedacted == 1 && sha256DigestVerified == 1 &&
+     0 < batchBytes && batchBytes ≤ maxBatchBytes then
+    257
+  else
+    512
+
+/--
+  SOC 2 CC7.1 / CC6.8 OS Lifecycle, Egress Filter & System Boundary Scope Stepper (`soc2HostScopeStep`):
+  - For Out-of-Scope Scheduled Decommission hosts (`isOutOfScopeDecommission == 1`, e.g. expiring legacy Starknet.id VPSs):
+    admits (`258`, `admittedBit = 256 | 2`) iff strictly isolated from `lean-mesh` and fleet credentials
+    (`enrolledInLeanMesh == 0 && holdsFleetCredentials == 0`).
+  - For In-Scope Fleet hosts (`isOutOfScopeDecommission == 0`):
+    admits (`257`, `admittedBit = 256 | 1`) iff running a supported LTS OS (`osSupportedLts == 1`),
+    `unattended-upgrades` or equivalent is active (`unattendedUpgradesActive == 1`), enrolled in `lean-mesh`
+    (`enrolledInLeanMesh == 1`), and `chain mesh_output` egress filtering is active (`meshOutputEgressFilterActive == 1`).
+  - Otherwise returns `512` (`rejectBit = 512`), automatically flagging EOL OS hosts inside `lean-mesh`
+    or nodes missing `chain mesh_output`.
+-/
+@[inline]
+def soc2HostScopeStep
+    (isOutOfScopeDecommission osSupportedLts unattendedUpgradesActive : UInt8)
+    (enrolledInLeanMesh meshOutputEgressFilterActive holdsFleetCredentials : UInt8) : UInt32 :=
+  if isOutOfScopeDecommission == 1 then
+    if enrolledInLeanMesh == 0 && holdsFleetCredentials == 0 then 258 else 512
+  else
+    if osSupportedLts == 1 && unattendedUpgradesActive == 1 &&
+       enrolledInLeanMesh == 1 && meshOutputEgressFilterActive == 1 then
+      257
+    else
+      512
+
 end Orb.Kernel

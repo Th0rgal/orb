@@ -2,6 +2,206 @@
 
 use super::*;
 
+static SSH_IDENTITY_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+pub fn ssh_identity_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    SSH_IDENTITY_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_remote_ssh_and_codex_confinement(
+    is_worker_or_container_target: bool,
+    env: Option<&HashMap<String, String>>,
+    working_directory: Option<&str>,
+    pub_key: Option<&str>,
+    proxy_jump_valid: bool,
+    cyber_program: Option<&str>,
+    codex_tokens_used: u64,
+    codex_token_budget: Option<u64>,
+) -> crate::orb_spec::SshIdentityVerdict {
+    let bundle_has_control_plane_key = env.is_some_and(|m| {
+        m.contains_key("PALOMA_SSH_PRIVATE_KEY")
+            || m.contains_key("PALOMA_SSH_PUBLIC_KEY")
+            || m.contains_key("ORB_HOST_KEYS_JSON")
+    });
+    let parent_dir_is_symlink = working_directory.is_some_and(|dir| {
+        let p = std::path::Path::new(dir.trim());
+        p.parent()
+            .and_then(|parent| std::fs::symlink_metadata(parent).ok())
+            .is_some_and(|meta| meta.file_type().is_symlink())
+    });
+    let pub_key_is_ed25519_without_private = match pub_key {
+        Some(pk) => pk.starts_with("ssh-ed25519 ") && !pk.contains("PRIVATE KEY"),
+        None => true,
+    };
+    let codex_cyber_program_valid = match cyber_program {
+        Some(prog) => matches!(prog, "standard" | "daybreak_blue" | "daybreak_red"),
+        None => true,
+    };
+    let codex_goal_budget_exhausted =
+        codex_token_budget.is_some_and(|budget| budget > 0 && codex_tokens_used >= budget);
+    let host_admits = !parent_dir_is_symlink
+        && pub_key_is_ed25519_without_private
+        && proxy_jump_valid
+        && codex_cyber_program_valid
+        && !codex_goal_budget_exhausted
+        && !(is_worker_or_container_target && bundle_has_control_plane_key);
+    crate::orb_spec::observe_ssh_identity_shadow(
+        crate::orb_spec::SshIdentityStepInput {
+            is_worker_or_container_target,
+            bundle_has_control_plane_key,
+            parent_dir_is_symlink,
+            pub_key_is_ed25519_without_private,
+            proxy_jump_valid,
+            codex_cyber_program_valid,
+            codex_goal_budget_exhausted,
+        },
+        host_admits,
+        ssh_identity_shadow_counter(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn evaluate_mission_control_gate(
+    working_dir: &std::path::Path,
+    mission_store: &dyn MissionStore,
+    mission: &Mission,
+    expected_lease_owner: &str,
+    resume_session_id: Option<&str>,
+    events: &[crate::api::mission_store::StoredEvent],
+    fallback_prompt: Option<&str>,
+    host_admits: bool,
+) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
+    let stored_mission = mission_store.get_mission(mission.id).await?;
+    let effective_status = stored_mission
+        .as_ref()
+        .map(|m| m.status)
+        .unwrap_or(mission.status);
+    let is_archived = matches!(mission.status, MissionStatus::Acknowledged)
+        || matches!(effective_status, MissionStatus::Acknowledged)
+        || crate::api::mission_horizon::superseded_by(mission).is_some()
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let active_run = mission_store.get_active_mission_run(mission.id).await?;
+    let has_lease = active_run
+        .as_ref()
+        .is_some_and(|run| run.owner_actor_id == expected_lease_owner);
+    let active_track_writers = match &active_run {
+        Some(run)
+            if !run.owner_actor_id.is_empty() && run.owner_actor_id != expected_lease_owner =>
+        {
+            1
+        }
+        _ => 0,
+    };
+    let msg_already_delivered = resume_session_id.is_none()
+        && fork::side_launch_receipt(working_dir, mission.id)
+            .ok()
+            .flatten()
+            .is_some_and(|receipt| receipt.accepted);
+    let is_resume = resume_session_id.is_some();
+    let stored_sid = stored_mission
+        .as_ref()
+        .and_then(|m| m.session_id.as_deref())
+        .or(mission.session_id.as_deref());
+    let session_created = stored_sid.is_some_and(|sid| !sid.trim().is_empty());
+    let lineage_verified = match (resume_session_id, stored_sid) {
+        (Some(req_sid), Some(sid)) => {
+            req_sid == sid || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
+        }
+        (None, _) => session_created,
+        (Some(_), None) => false,
+    };
+    let rollout_exists = events.iter().any(|event| {
+        event.event_type == "assistant_message"
+            && !event.content.trim().is_empty()
+            && event.metadata["success"] != serde_json::json!(false)
+    });
+    let has_fallback_prompt =
+        (!is_resume || lineage_verified) && fallback_prompt.is_some_and(|p| !p.trim().is_empty());
+    Ok(fork::observe_mission_control_shadow(
+        crate::orb_spec::MissionControlStepInput {
+            is_archived,
+            active_track_writers,
+            has_lease,
+            msg_already_delivered,
+            is_resume,
+            session_created,
+            lineage_verified,
+            rollout_exists,
+            has_fallback_prompt,
+        },
+        host_admits,
+    ))
+}
+
+pub(super) async fn evaluate_usage_limit_replay_gate(
+    working_dir: &std::path::Path,
+    mission_store: &dyn MissionStore,
+    mission: &Mission,
+    wait_limit: &str,
+    replay_prompt: Option<&str>,
+) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
+    let is_archived = matches!(mission.status, MissionStatus::Acknowledged)
+        || crate::api::mission_horizon::superseded_by(mission).is_some()
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let active_run = mission_store.get_active_mission_run(mission.id).await?;
+    let has_lease = active_run.is_none();
+    let active_track_writers = if active_run.is_some() { 1 } else { 0 };
+    let msg_already_delivered = mission.session_id.is_none()
+        && fork::side_launch_receipt(working_dir, mission.id)
+            .ok()
+            .flatten()
+            .is_some_and(|receipt| receipt.accepted);
+    let session_created = mission
+        .session_id
+        .as_deref()
+        .is_some_and(|sid| !sid.trim().is_empty());
+    let lineage_verified = session_created;
+    let events = mission_store
+        .get_events(
+            mission.id,
+            Some(&["user_message", "assistant_message"]),
+            None,
+            None,
+        )
+        .await?;
+    let rollout_exists = wait_limit != usage_limit_wait::FRESH_SESSION_FALLBACK
+        && events.iter().any(|event| {
+            event.event_type == "assistant_message"
+                && !event.content.trim().is_empty()
+                && event.metadata["success"] != serde_json::json!(false)
+        });
+    let has_fallback_prompt = replay_prompt.is_some_and(|p| !p.trim().is_empty());
+    let host_admits = !is_archived
+        && has_lease
+        && active_track_writers == 0
+        && !msg_already_delivered
+        && ((session_created && lineage_verified && rollout_exists) || has_fallback_prompt);
+    Ok(fork::observe_mission_control_shadow(
+        crate::orb_spec::MissionControlStepInput {
+            is_archived,
+            active_track_writers,
+            has_lease,
+            msg_already_delivered,
+            is_resume: true,
+            session_created,
+            lineage_verified,
+            rollout_exists,
+            has_fallback_prompt,
+        },
+        host_admits,
+    ))
+}
+
 pub(super) async fn submit_leased_remote_job(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -87,6 +287,114 @@ pub(super) async fn submit_leased_remote_job(
             fork::recovery_prompt(mission.id, mission.title.as_deref(), &events, prompt)
                 .or_else(|| Some(prompt.clone()));
     }
+    let (resume_sid_opt, fallback_prompt_opt) = match &resolved_plan {
+        RemoteHarnessPlan::Codex {
+            resume_session_id,
+            fallback_prompt,
+            ..
+        } => (resume_session_id.as_deref(), fallback_prompt.as_deref()),
+        RemoteHarnessPlan::ClaudeCode {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::OpenCode {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::Grok {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::Antigravity {
+            resume_session_id,
+            prompt,
+            ..
+        }
+        | RemoteHarnessPlan::Vibe {
+            resume_session_id,
+            prompt,
+            ..
+        } => (resume_session_id.as_deref(), Some(prompt.as_str())),
+        RemoteHarnessPlan::Raw { .. } => (None, None),
+    };
+    let resume_events = if resume_sid_opt.is_some() {
+        control
+            .mission_store
+            .get_events(
+                mission.id,
+                Some(&["user_message", "assistant_message"]),
+                None,
+                None,
+            )
+            .await?
+    } else {
+        Vec::new()
+    };
+    let expected_owner = remote_job_lease_owner(job_id);
+    let active_run = control
+        .mission_store
+        .get_active_mission_run(mission.id)
+        .await?;
+    let stored_mission = control.mission_store.get_mission(mission.id).await?;
+    let effective_status = stored_mission
+        .as_ref()
+        .map(|m| m.status)
+        .unwrap_or(mission.status);
+    let stored_sid = stored_mission
+        .as_ref()
+        .and_then(|m| m.session_id.as_deref())
+        .or(mission.session_id.as_deref());
+    let host_admits_submission = !matches!(mission.status, MissionStatus::Acknowledged)
+        && !matches!(effective_status, MissionStatus::Acknowledged)
+        && crate::api::mission_horizon::superseded_by(mission).is_none()
+        && !mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+        && active_run
+            .as_ref()
+            .is_some_and(|run| run.owner_actor_id == expected_owner)
+        && !(resume_sid_opt.is_none()
+            && fork::side_launch_receipt(&state.config.working_dir, mission.id)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.accepted))
+        && match resume_sid_opt {
+            Some(req_sid) => {
+                let lineage_ok = stored_sid.is_some_and(|sid| {
+                    req_sid == sid || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
+                });
+                let rollout_ok = resume_events.iter().any(|event| {
+                    event.event_type == "assistant_message"
+                        && !event.content.trim().is_empty()
+                        && event.metadata["success"] != serde_json::json!(false)
+                });
+                lineage_ok
+                    && (rollout_ok || fallback_prompt_opt.is_some_and(|p| !p.trim().is_empty()))
+            }
+            None => true,
+        };
+    let submission_verdict = evaluate_mission_control_gate(
+        &state.config.working_dir,
+        control.mission_store.as_ref(),
+        mission,
+        &expected_owner,
+        resume_sid_opt,
+        &resume_events,
+        fallback_prompt_opt,
+        host_admits_submission,
+    )
+    .await?;
+    if !submission_verdict.emit_dispatch_effect || submission_verdict.archived_next {
+        return Err(format!(
+            "Remote job submission rejected by mission control kernel gate ({:?})",
+            submission_verdict.action
+        ));
+    }
     let plan = &resolved_plan;
     let mut workspace_prefix =
         if let Some(t) = machine_transfer::committed(&control.mission_store, mission.id).await? {
@@ -98,7 +406,13 @@ pub(super) async fn submit_leased_remote_job(
             }
             format!("cd -- {} || exit 78; ", shell_single_quote(directory))
         } else {
-            fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
+            fork::workspace_prefix(
+                &control.mission_store,
+                mission,
+                &node.id,
+                &state.config.working_dir,
+            )
+            .await?
         };
     // Run in the final execution cwd, before any harness command. A failed
     // preparation exits the job clearly rather than starting without skills.
@@ -282,6 +596,29 @@ pub(super) async fn submit_leased_remote_job(
             .env
             .get_or_insert_with(HashMap::new)
             .insert("SANDBOXED_CYBER_PROGRAM".into(), program.into());
+    }
+    let ssh_codex_verdict = evaluate_remote_ssh_and_codex_confinement(
+        node.id != "agent-core",
+        execution.env.as_ref(),
+        mission.working_directory.as_deref(),
+        None,
+        true,
+        execution
+            .env
+            .as_ref()
+            .and_then(|e| e.get("SANDBOXED_CYBER_PROGRAM"))
+            .map(String::as_str),
+        0,
+        None,
+    );
+    if !ssh_codex_verdict.admit || !ssh_codex_verdict.no_secret_leak {
+        if let Some(id) = proxy_key_id {
+            let _ = state.proxy_api_keys.delete(id).await;
+        }
+        return Err(format!(
+            "Remote job rejected by orb_ssh_identity_step confinement gate ({:?}, exit={})",
+            ssh_codex_verdict.action, ssh_codex_verdict.exit_code_on_reject
+        ));
     }
 
     if let Some((session_id, _)) = &claude_session {
@@ -959,17 +1296,40 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
         Ok(Some(placement)) => {
             // A goal resumes natively (`/goal resume`).
             let content = usage_limit_wait::remote_replay_content(&mission, &wait.limit);
-            remote_grok::continue_on_node(
-                state,
-                &control,
-                "usage-limit-replay",
-                mission_id,
-                placement,
-                content,
-                None,
+            let replay_prompt = content
+                .as_deref()
+                .unwrap_or(super::INTERRUPTED_RESUME_PROMPT);
+            match evaluate_usage_limit_replay_gate(
+                &working_dir,
+                control.mission_store.as_ref(),
+                &mission,
+                &wait.limit,
+                Some(replay_prompt),
             )
             .await
-            .map(|_| ())
+            {
+                Ok(verdict) if verdict.emit_dispatch_effect && !verdict.archived_next => {
+                    remote_grok::continue_on_node(
+                        state,
+                        &control,
+                        "usage-limit-replay",
+                        mission_id,
+                        placement,
+                        content,
+                        None,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+                Ok(verdict) => Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Usage-limit replay rejected by mission control kernel gate ({:?})",
+                        verdict.action
+                    ),
+                )),
+                Err(error) => Err((StatusCode::INTERNAL_SERVER_ERROR, error)),
+            }
         }
         Ok(None) => Err((
             StatusCode::CONFLICT,
@@ -1073,6 +1433,27 @@ pub(super) async fn replace_remote_mission_with_fresh_session(
         mission,
         state.config.context.max_history_total_chars,
     );
+    let replay_verdict = evaluate_usage_limit_replay_gate(
+        &state.config.working_dir,
+        control.mission_store.as_ref(),
+        mission,
+        usage_limit_wait::FRESH_SESSION_FALLBACK,
+        Some(prompt.as_str()),
+    )
+    .await
+    .map_err(internal_error)?;
+    if !replay_verdict.emit_dispatch_effect
+        || !replay_verdict.seed_fallback_session
+        || replay_verdict.archived_next
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Fresh-session fallback rejected by mission control kernel gate ({:?})",
+                replay_verdict.action
+            ),
+        ));
+    }
     let title = mission
         .title
         .as_deref()
@@ -2116,5 +2497,117 @@ mod boot_leftover_tests {
         let kept = boot_leftovers(vec![old.clone(), live], boot);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].job_id, old.job_id);
+    }
+
+    #[test]
+    fn phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences() {
+        use super::{evaluate_remote_ssh_and_codex_confinement, ssh_identity_shadow_counter};
+        use crate::orb_spec::SshIdentityAction;
+        use std::collections::HashMap;
+
+        // 1. Valid worker coding_only bundle (no control-plane secrets, valid cyber program)
+        let mut clean_env = HashMap::new();
+        clean_env.insert(
+            "SANDBOXED_CYBER_PROGRAM".to_string(),
+            "standard".to_string(),
+        );
+        let v_ok = evaluate_remote_ssh_and_codex_confinement(
+            true,
+            Some(&clean_env),
+            Some("/var/lib/sandboxed-node/work/m1"),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGithubKey"),
+            true,
+            Some("standard"),
+            100,
+            Some(1000),
+        );
+        assert!(v_ok.admit);
+        assert!(v_ok.strip_control_plane_secrets);
+        assert!(v_ok.no_secret_leak);
+        assert_eq!(v_ok.action, SshIdentityAction::AdmitCodingOnlyIdentity);
+
+        // 2. Attack vector: Worker env containing PALOMA_SSH_PRIVATE_KEY secret leak
+        let mut leak_env = clean_env.clone();
+        leak_env.insert(
+            "PALOMA_SSH_PRIVATE_KEY".to_string(),
+            "-----BEGIN OPENSSH PRIVATE KEY-----".to_string(),
+        );
+        let v_leak = evaluate_remote_ssh_and_codex_confinement(
+            true,
+            Some(&leak_env),
+            Some("/var/lib/sandboxed-node/work/m1"),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGithubKey"),
+            true,
+            Some("standard"),
+            100,
+            Some(1000),
+        );
+        assert!(!v_leak.admit);
+        assert!(v_leak.strip_control_plane_secrets);
+        assert!(v_leak.no_secret_leak);
+        assert_eq!(v_leak.action, SshIdentityAction::RejectSshOrCodexConfig);
+        assert_eq!(v_leak.exit_code_on_reject, 78);
+
+        // 3. Attack vector: Private key material inside public key field
+        let v_priv_in_pub = evaluate_remote_ssh_and_codex_confinement(
+            true,
+            Some(&clean_env),
+            Some("/var/lib/sandboxed-node/work/m1"),
+            Some("ssh-ed25519 -----BEGIN OPENSSH PRIVATE KEY-----"),
+            true,
+            Some("standard"),
+            100,
+            Some(1000),
+        );
+        assert!(!v_priv_in_pub.admit);
+
+        // 4. Attack vector: Symlinked parent directory for working_directory
+        let tmp_dir = std::env::temp_dir().join(format!("ssh-symlink-{}", uuid::Uuid::new_v4()));
+        let real_parent = tmp_dir.join("real_parent");
+        let link_parent = tmp_dir.join("link_parent");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        std::os::unix::fs::symlink(&real_parent, &link_parent).unwrap();
+        let child_in_symlink = link_parent.join("workspace");
+        let v_symlink = evaluate_remote_ssh_and_codex_confinement(
+            true,
+            Some(&clean_env),
+            Some(&child_in_symlink.to_string_lossy()),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGithubKey"),
+            true,
+            Some("standard"),
+            100,
+            Some(1000),
+        );
+        assert!(!v_symlink.admit);
+
+        // 5. Attack vector: Invalid SANDBOXED_CYBER_PROGRAM (`"root_bypass"`)
+        let v_cyber = evaluate_remote_ssh_and_codex_confinement(
+            true,
+            Some(&clean_env),
+            Some("/var/lib/sandboxed-node/work/m1"),
+            None,
+            true,
+            Some("root_bypass"),
+            100,
+            Some(1000),
+        );
+        assert!(!v_cyber.admit);
+
+        // 6. Attack vector: Exhausted Codex native goal budget (`tokens_used >= token_budget`)
+        let v_budget = evaluate_remote_ssh_and_codex_confinement(
+            true,
+            Some(&clean_env),
+            Some("/var/lib/sandboxed-node/work/m1"),
+            None,
+            true,
+            Some("daybreak_blue"),
+            1000,
+            Some(1000),
+        );
+        assert!(!v_budget.admit);
+
+        let snap = ssh_identity_shadow_counter().snapshot("orb_ssh_identity_step");
+        assert!(snap.total_events >= 6);
+        assert_eq!(snap.total_divergences, 0);
     }
 }

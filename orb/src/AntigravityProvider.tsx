@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount, type JSX } from "solid-js";
 import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
 import { isManagedNode } from "./machines/nodes";
 import { getManagedSettings, managedError, putManagedSettings } from "./managedMachineModel";
@@ -11,10 +11,17 @@ export function availabilityLine(ready: string[], managed: boolean | null, check
   return managed ? "Available on managed machines" : "Not available on any machine";
 }
 
+/** Short form for the header row; the full list is its tooltip. */
+export function availabilitySummary(ready: string[], managed: boolean | null, checking: boolean): string {
+  if (!ready.length) return availabilityLine(ready, managed, checking);
+  const extra = ready.length - 1 + (managed ? 1 : 0);
+  return `Available on ${ready[0]}${extra ? ` +${extra}` : ""}`;
+}
+
 type Machine = { id: string; label: string; phase: "loading" | "ready" | "error" };
 
 /** Native runs use this Google sign-in on every machine; checking one also hands it the login. */
-export function AntigravityProvider() {
+export function AntigravityProvider(p: { lead?: JSX.Element } = {}) {
   const [machines, setMachines] = createSignal<Machine[]>([{ id: "core", label: "Core", phase: "loading" }]);
   const [models, setModels] = createSignal<[string, string][]>([]);
   const [showModels, setShowModels] = createSignal(false);
@@ -69,29 +76,35 @@ export function AntigravityProvider() {
   const failed = () => machines().filter(m => m.phase === "error");
   const checking = () => machines().some(m => m.phase === "loading");
   return <section class="p-native" aria-label="Antigravity execution">
-      <p class="s-row-desc">Native runs use this Google sign-in on every machine.</p>
+      {/* One header row: account order, where native runs can use this sign-in, refresh. */}
       <div class="p-native-controls">
-        <span class="s-row-desc" role="status">{availabilityLine(ready().map(m => m.label), managed(), checking())}</span>
+        {p.lead}
+        <span class="s-row-desc p-native-where" role="status" tabIndex={0}
+          title={`${availabilityLine(ready().map(m => m.label), managed(), checking())}. Native runs use this Google sign-in on every machine.`}>
+          {availabilitySummary(ready().map(m => m.label), managed(), checking())}
+        </span>
         <Show when={checking() && ready().length}><span class="s-row-desc">Checking…</span></Show>
-        <button class="s-btn" disabled={checking()} onClick={() => void refresh()}>Refresh</button>
+        <button class="s-btn quiet" disabled={checking()} onClick={() => void refresh()}>Refresh</button>
       </div>
-      <Show when={managed() !== null}>
-        <div class="p-native-managed">
-          <div class="s-row-text"><div class="s-row-title">Managed machines</div><div class="s-row-desc">Install Antigravity and hand it this sign-in on new boat.dev machines.</div></div>
-          <button class={`toggle ${managed() ? "on" : ""}`} role="switch" aria-checked={!!managed()} aria-label="Antigravity on managed machines" disabled={saving()} onClick={() => void toggleManaged()} />
-        </div>
-        <Show when={settingError()}><p class="s-row-desc managed-error" role="alert">{settingError()}</p></Show>
-      </Show>
+      <div class="p-native-row">
+        <Show when={managed() !== null}>
+          <label class="p-native-managed" title="Install Antigravity and hand it this sign-in on new boat.dev machines.">
+            <span>Managed machines</span>
+            <button class={`toggle ${managed() ? "on" : ""}`} role="switch" aria-checked={!!managed()} aria-label="Antigravity on managed machines" disabled={saving()} onClick={() => void toggleManaged()} />
+          </label>
+        </Show>
+        <Show when={models().length}>
+          <button class="p-native-models-toggle" aria-expanded={showModels()} aria-controls={modelsId} onClick={() => setShowModels(!showModels())}>
+            {showModels() ? "Hide models" : `${models().length} ${models().length === 1 ? "model" : "models"} available`}<span class={`chev p-acc-chev ${showModels() ? "open" : ""}`}>›</span>
+          </button>
+        </Show>
+      </div>
+      <Show when={settingError()}><p class="s-row-desc managed-error" role="alert">{settingError()}</p></Show>
       <Show when={failed().length}>
         <ul class="p-native-failed" aria-label="Unavailable machines">
           <For each={failed()}>{m => <li><span>{m.label} unavailable</span> <button class="p-native-retry" onClick={() => void refresh(m.id)}>Retry</button></li>}</For>
         </ul>
       </Show>
-      <Show when={models().length}>
-        <button class="p-native-models-toggle" aria-expanded={showModels()} aria-controls={modelsId} onClick={() => setShowModels(!showModels())}>
-          {showModels() ? "Hide models" : `${models().length} ${models().length === 1 ? "model" : "models"} available`}<span class={`chev p-acc-chev ${showModels() ? "open" : ""}`}>›</span>
-        </button>
-        <Show when={showModels()}><ul id={modelsId} class="p-native-models" aria-label="Antigravity models"><For each={models()}>{model => <li>{model[1]}</li>}</For></ul></Show>
-      </Show>
+      <Show when={showModels() && models().length}><ul id={modelsId} class="p-native-models" aria-label="Antigravity models"><For each={models()}>{model => <li>{model[1]}</li>}</For></ul></Show>
   </section>;
 }

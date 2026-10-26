@@ -24,7 +24,7 @@ struct OrbRoutingSettings: View {
             eventsSection
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
-        .navigationTitle("Models & Routing").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Fallback Chains").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button { editing = OrbChainDraft() } label: { Image(systemName: "plus") }.accessibilityLabel("New chain") } }
         .refreshable { await load() }
         .task { await load() }
@@ -273,7 +273,7 @@ struct OrbProxyKeysSettings: View {
             } header: { Text("Cleanup") }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
-        .navigationTitle("Proxy API keys").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("API Keys").navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
         .task { await load() }
         .alert("Delete key?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), presenting: deleting) { key in
@@ -338,6 +338,31 @@ struct OrbSkillsSettings: View {
     @State private var error = ""
     @State private var creating = false
     @State private var newName = ""
+    @State private var repo: OrbJSON?
+    @State private var pulling = false
+    @State private var opened: OrbSkillTarget?
+    @State private var deleteTarget: String?
+    @State private var deleteError = ""
+    @State private var deleting = false
+
+    /// Plain words for a failed delete (desktop: deleteMessage in SkillsSettings.tsx).
+    static func deleteMessage(_ name: String, _ raw: String) -> String {
+        let detail = raw.replacingOccurrences(of: #"^\d{3}\s+"#, with: "", options: .regularExpression)
+        if detail.range(of: "gpg|sign", options: [.regularExpression, .caseInsensitive]) != nil { return "Core couldn’t sign the Library commit, so \(name) is still there." }
+        if detail.range(of: "push|rejected|denied", options: [.regularExpression, .caseInsensitive]) != nil { return "Core couldn’t push the Library, so the delete isn’t saved yet." }
+        return "Couldn’t delete \(name): \(detail)"
+    }
+
+    /// "Th0rgal/sandboxed-library · synced 2m ago" (desktop: SkillsSettings header).
+    static func repoLine(_ status: OrbJSON?, now: Double = Date().timeIntervalSince1970) -> String {
+        guard let status else { return "Library" }
+        var remote = status["remote"].text
+        if remote.hasSuffix(".git") { remote.removeLast(4) }
+        let name = remote.split(whereSeparator: { $0 == "/" || $0 == ":" }).suffix(2).joined(separator: "/")
+        let label = name.contains("/") ? name : "Library"
+        guard let at = status["last_synced_at"].doubleValue else { return "\(label) · not synced yet" }
+        return "\(label) · synced " + OrbSkillTime.ago(now - at)
+    }
 
     private var filtered: [OrbJSON] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -349,14 +374,17 @@ struct OrbSkillsSettings: View {
             OrbSettingsError(message: error)
             Section {
                 ForEach(filtered, id: \.skillName) { skill in
-                    NavigationLink { OrbSkillEditor(name: skill.skillName) } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(skill.skillName).font(.subheadline.weight(.medium))
-                            if !skill["description"].text.isEmpty { Text(skill["description"].text).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                    // A skill behaves like a file: tap opens it, long-press or swipe for the rest.
+                    Button { opened = OrbSkillTarget(name: skill.skillName, history: false) } label: { OrbSkillRow(skill: skill) }
+                        .foregroundStyle(.primary)
+                        .contextMenu {
+                            Button { opened = OrbSkillTarget(name: skill.skillName, history: false) } label: { Label("Edit", systemImage: "pencil") }
+                            Button { opened = OrbSkillTarget(name: skill.skillName, history: true) } label: { Label("History", systemImage: "clock.arrow.circlepath") }
+                            Button(role: .destructive) { deleteError = ""; deleteTarget = skill.skillName } label: { Label("Delete…", systemImage: "trash") }
                         }
-                    }
+                        .swipeActions { Button(role: .destructive) { deleteError = ""; deleteTarget = skill.skillName } label: { Label("Delete", systemImage: "trash") } }
                 }
-            } header: { Text("Library catalog (\(filtered.count))") } footer: { Text("Library skills are synced into every mission workspace.") }
+            } header: { Text(pulling ? "Pulling…" : Self.repoLine(repo)).textCase(nil) }
             Section("Project skills (@context/skills)") {
                 ForEach(projects, id: \.projectSlug) { p in
                     NavigationLink { OrbDocuments(project: p.projectSlug, path: "skills") } label: { Text(p["title"].text.isEmpty ? p.projectSlug : p["title"].text) }
@@ -366,23 +394,57 @@ struct OrbSkillsSettings: View {
         .searchable(text: $search, prompt: "Search skills")
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Skills").navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { Image(systemName: "plus") }.accessibilityLabel("New skill") } }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { Button { Task { await pull() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Pull from the repo").disabled(pulling) }
+            ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { Image(systemName: "plus") }.accessibilityLabel("New skill") }
+        }
         .alert("New Library skill", isPresented: $creating) {
             TextField("skill-name", text: $newName).textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Create") { Task { await create() } }
             Button("Cancel", role: .cancel) { newName = "" }
         }
+        .navigationDestination(item: $opened) { t in OrbSkillEditor(name: t.name, startOnHistory: t.history) }
+        // A failed delete stays in this one confirm, in plain words, with Retry.
+        .alert(deleteTarget.map { "Delete \($0)?" } ?? "", isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 && !deleting { deleteTarget = nil } })) {
+            Button(deleteError.isEmpty ? "Delete" : "Retry", role: .destructive) { if let name = deleteTarget { Task { await delete(name) } } }
+            Button("Cancel", role: .cancel) { deleteTarget = nil }
+        } message: { Text(deleteError.isEmpty ? "It leaves the Library and every agent." : deleteError) }
         .refreshable { await load() }
         .task { await load() }
+    }
+
+    /// Optimistic: the row goes at once and comes back if Core refuses. Retry-safe:
+    /// a skill already gone (an earlier try failed at commit) only needs the commit.
+    private func delete(_ name: String) async {
+        deleting = true; defer { deleting = false }
+        let before = skills
+        skills.removeAll { $0.skillName == name }
+        do {
+            do { _ = try await client.callText("/api/library/skill/\(OrbCore.escape(name))", method: "DELETE") }
+            catch { if !"\(error)".localizedCaseInsensitiveContains("not found") && !"\(error)".contains("404") { throw error } }
+            try await OrbSkillEditor.commitAndPush("skill: delete \(name)", client: client)
+            deleteTarget = nil; deleteError = ""
+        } catch is CancellationError { skills = before } catch {
+            skills = before
+            deleteError = Self.deleteMessage(name, error.localizedDescription)
+            deleteTarget = name
+        }
     }
 
     private func load() async {
         do {
             skills = try await client.call("/api/library/skill").items.sorted { $0.skillName < $1.skillName }
+            repo = try? await client.call("/api/library/status")
             let raw = (try? await client.call("/api/projects")) ?? .null
             projects = raw.items.isEmpty ? raw["projects"].items : raw.items
             error = ""
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+
+    private func pull() async {
+        pulling = true; defer { pulling = false }
+        do { _ = try await client.callText("/api/library/sync", method: "POST"); await load() }
+        catch is CancellationError {} catch { self.error = "Couldn’t pull the Library: \(error.localizedDescription)" }
     }
 
     private func create() async {
@@ -391,9 +453,18 @@ struct OrbSkillsSettings: View {
         guard !name.isEmpty else { return }
         let template = "---\nname: \(name)\ndescription: Describe when to use this skill.\n---\n\n# \(name)\n"
         do {
-            _ = try await client.call("/api/library/skill/\(OrbCore.escape(name))", method: "PUT", body: .object(["content": .string(template)]))
+            _ = try await client.callText("/api/library/skill/\(OrbCore.escape(name))", method: "PUT", body: .object(["content": .string(template)]))
+            try await OrbSkillEditor.commitAndPush("skill: create \(name)", client: client)
             await load()
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+}
+
+/// "just now" / "2m ago" from the shared Lean relative-time buckets.
+enum OrbSkillTime {
+    static func ago(_ secs: Double) -> String {
+        let t = OrbKernel.relativeTimeString(elapsedSecs: Int(max(0, secs)))
+        return t == "now" ? "just now" : "\(t) ago"
     }
 }
 
@@ -402,44 +473,151 @@ private extension OrbJSON {
     var projectSlug: String { self["slug"].text }
 }
 
+/// Name, one-line description and at most one badge (desktop: skillBadge in skillRows.ts).
+/// Drift and local edits are desktop-only, so a phone only ever shows "Always loaded".
+struct OrbSkillTarget: Hashable { let name: String; let history: Bool }
+
+private struct OrbSkillRow: View {
+    let skill: OrbJSON
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(skill["name"].text).font(.subheadline.weight(.medium))
+                if skill["scope"].text == "global" {
+                    Text("Always loaded").font(.caption2).padding(.horizontal, 6).padding(.vertical, 1).background(.quaternary, in: Capsule())
+                }
+            }
+            if !skill["description"].text.isEmpty { Text(skill["description"].text).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+        }
+    }
+}
+
 private struct OrbSkillEditor: View {
     let name: String
+    var startOnHistory = false
+    @State private var files: [String] = []
     @State private var client = OrbSettingsClient()
     @State private var content = ""
     @State private var original = ""
     @State private var loaded = false
+    @State private var editing = false
     @State private var saving = false
     @State private var error = ""
-    @State private var notice = ""
+    @State private var saved = false
+    @State private var history: [OrbJSON]?
+
+    /// Save lands in the Library repo (desktop: commitAndPush in skillsApi.ts).
+    static func commitAndPush(_ message: String, client: OrbSettingsClient) async throws {
+        _ = try await client.callText("/api/library/commit", method: "POST", body: .object(["message": .string(message)]))
+        _ = try await client.callText("/api/library/push", method: "POST")
+    }
+
+    /// The rendered view hides the frontmatter.
+    static func body(_ markdown: String) -> String {
+        guard markdown.hasPrefix("---\n"), let end = markdown.range(of: "\n---", range: markdown.index(markdown.startIndex, offsetBy: 4)..<markdown.endIndex) else { return markdown }
+        return String(markdown[end.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !error.isEmpty { OrbNotice(message: error).padding(.horizontal) }
-            if !notice.isEmpty { Text(notice).font(.footnote).foregroundStyle(.secondary).padding(.horizontal) }
-            TextEditor(text: $content)
-                .font(.system(.footnote, design: .monospaced))
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .disabled(!loaded)
+        ScrollViewReader { proxy in
+        List {
+            if !error.isEmpty {
+                Section { OrbNotice(message: error); if content != original { Button("Retry") { Task { await save(content, message: "skill: update \(name)") } } } }
+            }
+            Section {
+                if editing {
+                    TextEditor(text: $content).font(.system(.footnote, design: .monospaced)).frame(minHeight: 320).disabled(!loaded || saving)
+                } else {
+                    OrbRichText(source: Self.body(content).isEmpty ? "_Loading…_" : Self.body(content))
+                }
+            } footer: { if saved && content == original { Text("Saved to repo") } }
+            // Its files, like opening a folder.
+            if !files.isEmpty {
+                Section("Files") {
+                    ForEach(files, id: \.self) { rel in
+                        NavigationLink { OrbSkillFileView(skill: name, rel: rel) } label: {
+                            Label { Text(rel).truncationMode(.middle).lineLimit(1) } icon: { Image(systemName: "doc.text") }
+                        }
+                    }
+                }
+            }
+            Section("History") {
+                Color.clear.frame(height: 0).id("history")
+                if let history {
+                    if history.isEmpty { Text("No saved versions yet.").foregroundStyle(.secondary) }
+                    ForEach(Array(history.enumerated()), id: \.offset) { i, v in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(v["subject"].text).font(.subheadline).lineLimit(1)
+                                Text("\(v["author"].text) · \(OrbSkillTime.ago(Date().timeIntervalSince1970 - (v["timestamp"].doubleValue ?? 0))) · \(String(v["rev"].text.prefix(7)))").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if i > 0 { Button("Restore") { Task { await restore(v["rev"].text) } }.disabled(saving) }
+                        }
+                    }
+                } else { Text("Loading…").foregroundStyle(.secondary).redacted(reason: .placeholder) }
+            }
         }
-        .background(OrbStyle.background)
+        .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle(name).navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button(saving ? "Saving…" : "Save") { Task { await save() } }.disabled(!loaded || saving || content == original) } }
-        .task { await load() }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) { Button(editing ? "Done" : "Edit") { editing.toggle() }.disabled(!loaded) }
+            ToolbarItem(placement: .topBarTrailing) { Button(saving ? "Saving…" : "Save") { Task { await save(content, message: "skill: update \(name)") } }.disabled(!loaded || saving || content == original) }
+        }
+        .task { await load(); if startOnHistory { withAnimation { proxy.scrollTo("history", anchor: .top) } } }
+        }
     }
 
     private func load() async {
         do {
-            content = try await client.call("/api/library/skill/\(OrbCore.escape(name))")["content"].text
+            let skill = try await client.call("/api/library/skill/\(OrbCore.escape(name))")
+            content = skill["content"].text
+            files = Array(Set(skill["references"].items.map(\.text) + skill["files"].items.map { $0["path"].text.isEmpty ? $0["name"].text : $0["path"].text }).filter { !$0.isEmpty && $0 != "SKILL.md" }).sorted()
             original = content; loaded = true; error = ""
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        // Older cores have no history endpoint: the section then stays empty.
+        history = (try? await client.call("/api/library/skill/\(OrbCore.escape(name))/history").items) ?? []
     }
-    private func save() async {
-        saving = true; defer { saving = false }
+    private func save(_ text: String, message: String) async {
+        saving = true; saved = false; defer { saving = false }
         do {
-            _ = try await client.call("/api/library/skill/\(OrbCore.escape(name))", method: "PUT", body: .object(["content": .string(content)]))
-            original = content; error = ""; notice = "Saved to the Library."
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+            _ = try await client.callText("/api/library/skill/\(OrbCore.escape(name))", method: "PUT", body: .object(["content": .string(text)]))
+            try await Self.commitAndPush(message, client: client)
+            content = text; original = text; error = ""; saved = true; editing = false
+            history = (try? await client.call("/api/library/skill/\(OrbCore.escape(name))/history").items) ?? history
+        } catch is CancellationError {} catch { self.error = "Couldn’t save to the repo: \(error.localizedDescription)" }
+    }
+    private func restore(_ rev: String) async {
+        do {
+            let old = try await client.callText("/api/library/skill/\(OrbCore.escape(name))/history/\(rev)")
+            await save(old, message: "skill: restore \(name) to \(rev.prefix(7))")
+        } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// A reference file of a skill, read-only on a phone (desktop edits it in the skill panel).
+private struct OrbSkillFileView: View {
+    let skill: String
+    let rel: String
+    @State private var client = OrbSettingsClient()
+    @State private var text: String?
+    @State private var error = ""
+    var body: some View {
+        ScrollView {
+            if !error.isEmpty { OrbNotice(message: error).padding(16) }
+            Group {
+                if rel.hasSuffix(".md") { OrbRichText(source: text ?? "_Loading…_") }
+                else { Text(text ?? "Loading…").font(.system(.footnote, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            }
+            .padding(16)
+            .redacted(reason: text == nil ? .placeholder : [])
+        }
+        .background(OrbStyle.background)
+        .navigationTitle((rel as NSString).lastPathComponent).navigationBarTitleDisplayMode(.inline)
+        .task {
+            do { text = try await client.callText("/api/library/skill/\(OrbCore.escape(skill))/files/" + rel.split(separator: "/").map { OrbCore.escape(String($0)) }.joined(separator: "/")) }
+            catch is CancellationError {} catch { self.error = error.localizedDescription }
+        }
     }
 }
 
@@ -494,7 +672,7 @@ struct OrbHermesSettings: View {
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
-        .navigationTitle("Hermes").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Assistant").navigationBarTitleDisplayMode(.inline)
         .task { await load() }
     }
 

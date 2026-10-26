@@ -181,6 +181,56 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbRouteArgminStep(JNIEnv *env, jclass
     return (jlong)orb_route_argmin_step((uint8_t)hasBest, (uint32_t)bestId, (uint64_t)bestScore, (uint32_t)candId, (uint64_t)candScore, (uint8_t)candAdmissible);
 }
 
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbMissionControlStep(JNIEnv *env, jclass clazz, jint isArchived, jint activeTrackWriters, jint hasLease, jint msgAlreadyDelivered, jint isResume, jint sessionCreated, jint lineageVerified, jint rolloutExists, jint hasFallbackPrompt) {
+    return (jlong)orb_mission_control_step((uint8_t)isArchived, (uint32_t)activeTrackWriters, (uint8_t)hasLease, (uint8_t)msgAlreadyDelivered, (uint8_t)isResume, (uint8_t)sessionCreated, (uint8_t)lineageVerified, (uint8_t)rolloutExists, (uint8_t)hasFallbackPrompt);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbForkHomeStep(JNIEnv *env, jclass clazz, jint isForkOrSide, jint sourceExists, jint sourceIsSymlink, jint sameWorkspace, jint sameNode, jint hasCommittedTransfer, jint requestedOverrideHome) {
+    return (jlong)orb_fork_home_step((uint8_t)isForkOrSide, (uint8_t)sourceExists, (uint8_t)sourceIsSymlink, (uint8_t)sameWorkspace, (uint8_t)sameNode, (uint8_t)hasCommittedTransfer, (uint8_t)requestedOverrideHome);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbPrivdCommandStep(JNIEnv *env, jclass clazz, jint leaseValid, jint grantScope, jint commandClass, jint unitMatchesAllowed, jint hasShellMetacharOrFlagBypass, jint hasPathTraversalOrSymlink, jint hasUnsafeEnvVar, jint requireForceCmd) {
+    return (jlong)orb_privd_command_step((uint8_t)leaseValid, (uint8_t)grantScope, (uint8_t)commandClass, (uint8_t)unitMatchesAllowed, (uint8_t)hasShellMetacharOrFlagBypass, (uint8_t)hasPathTraversalOrSymlink, (uint8_t)hasUnsafeEnvVar, (uint8_t)requireForceCmd);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbSshIdentityStep(JNIEnv *env, jclass clazz, jint isWorkerOrContainerTarget, jint bundleHasControlPlaneKey, jint parentDirIsSymlink, jint pubKeyIsEd25519WithoutPrivate, jint proxyJumpValid, jint codexCyberProgramValid, jint codexGoalBudgetExhausted) {
+    return (jlong)orb_ssh_identity_step((uint8_t)isWorkerOrContainerTarget, (uint8_t)bundleHasControlPlaneKey, (uint8_t)parentDirIsSymlink, (uint8_t)pubKeyIsEd25519WithoutPrivate, (uint8_t)proxyJumpValid, (uint8_t)codexCyberProgramValid, (uint8_t)codexGoalBudgetExhausted);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbAgentEventNormalizeStep(JNIEnv *env, jclass clazz, jint harnessKind, jint rawEventKind, jint isCompleted, jint hasNonEmptyText, jint sessionMatchesExpected, jint isDuplicateTurnOrTool, jint payloadBytes, jint maxPayloadBytes) {
+    return (jlong)orb_agent_event_normalize_step((uint8_t)harnessKind, (uint8_t)rawEventKind, (uint8_t)isCompleted, (uint8_t)hasNonEmptyText, (uint32_t)sessionMatchesExpected, (uint32_t)isDuplicateTurnOrTool, (uint32_t)payloadBytes, (uint32_t)maxPayloadBytes);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbTranscriptReduceStep(JNIEnv *env, jclass clazz, jlong lastAppliedSeq, jlong incomingSeq, jint thinkingOpen, jint normalizedAction, jint isReplayFromLog) {
+    return (jlong)orb_transcript_reduce_step((uint64_t)lastAppliedSeq, (uint64_t)incomingSeq, (uint8_t)thinkingOpen, (uint8_t)normalizedAction, (uint8_t)isReplayFromLog);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbCursorPageStep(JNIEnv *env, jclass clazz, jlong sinceSeq, jlong beforeSeq, jlong itemSeq, jint hasSinceCursor, jint hasBeforeCursor, jint isPartialResponse, jint existingCount) {
+    return (jlong)orb_cursor_page_step((uint64_t)sinceSeq, (uint64_t)beforeSeq, (uint64_t)itemSeq, (uint32_t)hasSinceCursor, (uint32_t)hasBeforeCursor, (uint32_t)isPartialResponse, (uint32_t)existingCount);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbSidebarMergeStep(JNIEnv *env, jclass clazz, jint existingIdOrd, jint incomingIdOrd, jlong existingUpdatedAtMs, jlong incomingUpdatedAtMs, jint incomingSupersededOrArchived, jint isPartialPage) {
+    return (jlong)orb_sidebar_merge_step((uint32_t)existingIdOrd, (uint32_t)incomingIdOrd, (uint64_t)existingUpdatedAtMs, (uint64_t)incomingUpdatedAtMs, (uint8_t)incomingSupersededOrArchived, (uint8_t)isPartialPage);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbScrollEpochStep(JNIEnv *env, jclass clazz, jint layoutEpoch, jint lastCorrectedEpoch, jint correctionsInEpoch, jint isPinnedToBottom, jint userIsDragging, jint targetScrollTopPx, jint currentScrollTopPx) {
+    return (jlong)orb_scroll_epoch_step((uint32_t)layoutEpoch, (uint32_t)lastCorrectedEpoch, (uint8_t)correctionsInEpoch, (uint8_t)isPinnedToBottom, (uint8_t)userIsDragging, (uint32_t)targetScrollTopPx, (uint32_t)currentScrollTopPx);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbClientParityStep(JNIEnv *env, jclass clazz, jint clientTarget, jint wireSchemaId, jint transcriptSeq, jint markdownBlocksCount, jint sendQueueDepth, jint scrollCorrectedInEpoch) {
+    return (jlong)orb_client_parity_step((uint8_t)clientTarget, (uint32_t)wireSchemaId, (uint32_t)transcriptSeq, (uint32_t)markdownBlocksCount, (uint32_t)sendQueueDepth, (uint8_t)scrollCorrectedInEpoch);
+}
+
 JNIEXPORT jbyte JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSseFrameScan(JNIEnv *env, jclass clazz, jlong frameOff, jlong frameLen, jlong chunkLen, jint fieldKind, jint nextByte, jint lastByte) {
     return (jbyte)leansys_sse_frame_scan((uint64_t)frameOff, (uint64_t)frameLen, (uint64_t)chunkLen, (uint8_t)fieldKind, (uint8_t)nextByte, (uint8_t)lastByte);

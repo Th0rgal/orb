@@ -250,6 +250,116 @@ object OrbKernel {
     ): Long
 
     @JvmStatic
+    external fun orbMissionControlStep(
+        isArchived: Int,
+        activeTrackWriters: Int,
+        hasLease: Int,
+        msgAlreadyDelivered: Int,
+        isResume: Int,
+        sessionCreated: Int,
+        lineageVerified: Int,
+        rolloutExists: Int,
+        hasFallbackPrompt: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbForkHomeStep(
+        isForkOrSide: Int,
+        sourceExists: Int,
+        sourceIsSymlink: Int,
+        sameWorkspace: Int,
+        sameNode: Int,
+        hasCommittedTransfer: Int,
+        requestedOverrideHome: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbPrivdCommandStep(
+        leaseValid: Int,
+        grantScope: Int,
+        commandClass: Int,
+        unitMatchesAllowed: Int,
+        hasShellMetacharOrFlagBypass: Int,
+        hasPathTraversalOrSymlink: Int,
+        hasUnsafeEnvVar: Int,
+        requireForceCmd: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbSshIdentityStep(
+        isWorkerOrContainerTarget: Int,
+        bundleHasControlPlaneKey: Int,
+        parentDirIsSymlink: Int,
+        pubKeyIsEd25519WithoutPrivate: Int,
+        proxyJumpValid: Int,
+        codexCyberProgramValid: Int,
+        codexGoalBudgetExhausted: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbAgentEventNormalizeStep(
+        harnessKind: Int,
+        rawEventKind: Int,
+        isCompleted: Int,
+        hasNonEmptyText: Int,
+        sessionMatchesExpected: Int,
+        isDuplicateTurnOrTool: Int,
+        payloadBytes: Int,
+        maxPayloadBytes: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbTranscriptReduceStep(
+        lastAppliedSeq: Long,
+        incomingSeq: Long,
+        thinkingOpen: Int,
+        normalizedAction: Int,
+        isReplayFromLog: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbCursorPageStep(
+        sinceSeq: Long,
+        beforeSeq: Long,
+        itemSeq: Long,
+        hasSinceCursor: Int,
+        hasBeforeCursor: Int,
+        isPartialResponse: Int,
+        existingCount: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbSidebarMergeStep(
+        existingIdOrd: Int,
+        incomingIdOrd: Int,
+        existingUpdatedAtMs: Long,
+        incomingUpdatedAtMs: Long,
+        incomingSupersededOrArchived: Int,
+        isPartialPage: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbScrollEpochStep(
+        layoutEpoch: Int,
+        lastCorrectedEpoch: Int,
+        correctionsInEpoch: Int,
+        isPinnedToBottom: Int,
+        userIsDragging: Int,
+        targetScrollTopPx: Int,
+        currentScrollTopPx: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbClientParityStep(
+        clientTarget: Int,
+        wireSchemaId: Int,
+        transcriptSeq: Int,
+        markdownBlocksCount: Int,
+        sendQueueDepth: Int,
+        scrollCorrectedInEpoch: Int
+    ): Long
+
+    @JvmStatic
     external fun leansysSseFrameScan(
         frameOff: Long,
         frameLen: Long,
@@ -695,5 +805,75 @@ object OrbKernel {
     ): Boolean {
         requireNative()
         return leansysVerifyIsaSelection(detectedHwCaps, requiredMask, selectedVariantId.coerceIn(0, 255), maxVariantId.coerceIn(0, 255)) != 0
+    }
+
+    data class ScrollEpochVerdict(
+        val action: Int,
+        val applyCorrection: Boolean,
+        val nextCorrectionsInEpoch: Int,
+        val resolvedScrollTopPx: Int
+    )
+
+    fun scrollEpochStep(
+        layoutEpoch: Int,
+        lastCorrectedEpoch: Int,
+        correctionsInEpoch: Int,
+        isPinnedToBottom: Boolean,
+        userIsDragging: Boolean,
+        targetScrollTopPx: Int,
+        currentScrollTopPx: Int
+    ): ScrollEpochVerdict {
+        requireNative()
+        val raw = orbScrollEpochStep(
+            maxOf(0, layoutEpoch),
+            maxOf(0, lastCorrectedEpoch),
+            correctionsInEpoch.coerceIn(0, 255),
+            bInt(isPinnedToBottom),
+            bInt(userIsDragging),
+            maxOf(0, targetScrollTopPx),
+            maxOf(0, currentScrollTopPx)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+        return ScrollEpochVerdict(
+            action = lo32 and 0xFF,
+            applyCorrection = ((lo32 ushr 8) and 1) != 0,
+            nextCorrectionsInEpoch = (lo32 ushr 10) and 1,
+            resolvedScrollTopPx = hi32
+        )
+    }
+
+    data class ClientParityVerdict(
+        val action: Int,
+        val parityAdmitted: Boolean,
+        val singleScrollCorrectionOk: Boolean,
+        val digest32: Long
+    )
+
+    fun clientParityStep(
+        clientTarget: Int,
+        wireSchemaId: Int,
+        transcriptSeq: Int,
+        markdownBlocksCount: Int,
+        sendQueueDepth: Int,
+        scrollCorrectedInEpoch: Int
+    ): ClientParityVerdict {
+        requireNative()
+        val raw = orbClientParityStep(
+            clientTarget.coerceIn(0, 255),
+            maxOf(0, wireSchemaId),
+            maxOf(0, transcriptSeq),
+            maxOf(0, markdownBlocksCount),
+            maxOf(0, sendQueueDepth),
+            scrollCorrectedInEpoch.coerceIn(0, 255)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
+        return ClientParityVerdict(
+            action = lo32 and 0xFF,
+            parityAdmitted = ((lo32 ushr 8) and 1) != 0,
+            singleScrollCorrectionOk = ((lo32 ushr 9) and 1) != 0,
+            digest32 = hi32
+        )
     }
 }

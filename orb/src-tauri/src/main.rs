@@ -164,10 +164,8 @@ fn main() {
                 local_agents::clear_subscriptions();
             }
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) =
-                event
-            {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) => {
                 use tauri::Emitter;
                 let (paths, offer) = uploads::allow_drop(paths);
                 let count = paths.len() + offer.len();
@@ -182,6 +180,10 @@ fn main() {
                     );
                 }
             }
+            tauri::WindowEvent::Destroyed if window.label() == "main" => {
+                uploads::cleanup_session_staging(Some(window.app_handle()));
+            }
+            _ => {}
         })
         .setup(|app| {
             // Local voice input: the Python worker starts on first use and
@@ -278,6 +280,7 @@ fn main() {
             local_agents::local_codex_speed_options,
             local_agents::local_agents_scan,
             local_agents::local_antigravity_models,
+            local_agents::local_claude_models,
             local_agents::local_agents_workspace,
             local_agents::local_agents_directory,
             local_agents::local_agents_write,

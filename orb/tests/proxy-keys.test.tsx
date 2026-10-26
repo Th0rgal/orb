@@ -11,6 +11,7 @@ const key = (id: string): ProxyApiKeySummary => ({
 let keys: ProxyApiKeySummary[];
 let failDelete: string;
 let failList: boolean;
+let hangUsage: boolean;
 let writes: { path: string; method: string; body: any }[];
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 
@@ -18,6 +19,7 @@ beforeEach(() => {
   keys = [key("Cursor"), key("CI")];
   failDelete = "";
   failList = false;
+  hangUsage = false;
   writes = [];
   setConnection("https://keys.test", "fixture");
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
@@ -26,6 +28,7 @@ beforeEach(() => {
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
     if (method !== "GET") writes.push({ path, method, body });
     if (path === "/api/model-routing/chains") return response([]);
+    if (path === "/api/ai/usage/summary" && hangUsage) return new Promise<Response>(() => {});
     if (path === "/api/ai/usage/summary") return response({ by_api_key: [{ key: "Cursor", label: "Cursor", requests: 250, input_tokens: 1_500_000, output_tokens: 20_000, cache_creation_tokens: 0, cache_read_tokens: 0, cost_cents: 340, unknown_cost_requests: 0, cost_status: "known" }] });
     if (path === "/api/proxy-keys/cleanup") return response({ keys: [...keys], cutoff: "2026-10-01", dry_run: true });
     if (method === "DELETE") {
@@ -164,4 +167,11 @@ describe("Proxy API keys", () => {
     await screen.findByRole("button", { name: "Revoke Cursor" });
     expect(screen.queryByText(/Could not load proxy API keys/)).toBeNull();
   });
+});
+
+it("lists keys and stops refreshing while the usage totals never answer", async () => {
+  hangUsage = true;
+  render(() => <ProxyApiKeys />);
+  await screen.findByRole("button", { name: "Revoke Cursor" });
+  expect(screen.queryByText("Refreshing…")).toBeNull();
 });
