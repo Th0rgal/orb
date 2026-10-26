@@ -47,6 +47,7 @@ export function ApprovalDevicesPanel(p: { onError: (message: string) => void }) 
     try {
       await fn();
       await load();
+      window.dispatchEvent(new Event("orb:approval-devices-changed"));
     } catch (e) {
       if (!(e instanceof ApprovalCancelled)) p.onError(e instanceof Error ? e.message : String(e));
     } finally {

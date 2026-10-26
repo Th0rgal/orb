@@ -578,10 +578,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         <div class="skills-head">
           <div>
             <h2>Skills</h2>
-            <p class="s-lead">
-              The Library is the single source of skills. Orb installs Library skills meant for <code>local</code> use into every local harness
-              and flags copies that only live in legacy folders.
-            </p>
           </div>
           <div class="skills-head-actions">
             <button type="button" class="s-btn sm" disabled={loading() || syncing()} onClick={() => void loadAll(true)} title="Re-scan local and remote skill directories">

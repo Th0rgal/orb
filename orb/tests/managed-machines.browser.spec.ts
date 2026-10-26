@@ -161,14 +161,14 @@ for (const theme of ["dark", "light"] as const) test.describe(theme, () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Providers", exact: true }).click();
     const native = page.getByRole("region", { name: "Antigravity execution", exact: true });
-    await expect(native.getByRole("status")).toHaveText("Available on Core, spark + managed machines");
+    await expect(native.getByRole("status")).toHaveAttribute("title", new RegExp("^" + "Available on Core, spark + managed machines".replace(/[+]/g, "\\+") + "\\."));
     const toggle = native.getByRole("switch", { name: "Antigravity on managed machines" });
     await expect(toggle).toHaveAttribute("aria-checked", "true");
     await page.screenshot({ path: `${shots}/antigravity-card-${theme}.png`, fullPage: true });
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-checked", "false");
     expect(api.calls).toContain('PUT /api/managed-machines/settings {"antigravity_on_managed":false}');
-    await expect(native.getByRole("status")).toHaveText("Available on Core, spark");
+    await expect(native.getByRole("status")).toHaveAttribute("title", new RegExp("^" + "Available on Core, spark".replace(/[+]/g, "\\+") + "\\."));
   });
 });
 
@@ -243,7 +243,7 @@ test("older backends: no names, no settings, no managed endpoint", async ({ page
   await expect(page.getByRole("heading", { name: "Managed (boat.dev)" })).toHaveCount(0);
   await page.getByRole("button", { name: "Providers", exact: true }).click();
   const native = page.getByRole("region", { name: "Antigravity execution", exact: true });
-  await expect(native.getByRole("status")).toHaveText("Available on Core, spark");
+  await expect(native.getByRole("status")).toHaveAttribute("title", new RegExp("^" + "Available on Core, spark".replace(/[+]/g, "\\+") + "\\."));
   await expect(native.getByRole("switch")).toHaveCount(0);
 });
 

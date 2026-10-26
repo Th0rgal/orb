@@ -382,9 +382,11 @@ test("retrying a refused launch reuses the idempotency key, so no second mission
   expect(posts[1].idempotency_key).toBe(posts[0].idempotency_key);
 });
 
-test("Concurrency limits expand inside client settings and preserve the draft", async ({ page }) => {
+test("Concurrency limits expand inside Agents settings and preserve the draft", async ({ page }) => {
   await setup(page);
   await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-settings-section="agents"]').click();
+  await page.getByRole("tab", { name: "Local agents" }).click();
   const summary = page.locator(".execution-disclosure > summary");
   await summary.click();
   const global = page.getByLabel("Maximum agents across all projects");
@@ -395,7 +397,7 @@ test("Concurrency limits expand inside client settings and preserve the draft", 
   await expect(global).not.toBeVisible();
   await summary.click();
   await expect(global).toHaveValue("7");
-  await expect(page.locator(".settings-body h2")).toHaveText("General");
+  await expect(page.locator(".settings-page > .s-inner > h2")).toHaveText("Agents");
   await page.screenshot({ path: "artifacts/orb-execution-settings.png" });
 });
 
