@@ -488,7 +488,7 @@ pub struct PrivilegeRequest {
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
     /// SHA-256 of the ephemeral lease token issued to the mission on approval.
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub lease_token_sha256: Option<String>,
 }
 
@@ -929,7 +929,27 @@ impl PrivilegeBroker {
     }
 
     pub async fn lease_token_for(&self, request_id: Uuid) -> Option<String> {
-        self.live_tokens.lock().await.get(&request_id).cloned()
+        if let Some(tok) = self.live_tokens.lock().await.get(&request_id).cloned() {
+            return Some(tok);
+        }
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        data.prune(now);
+        let bunker = data.current_bunker();
+        let idx = data.requests.iter().position(|r| r.id == request_id)?;
+        if !data.requests[idx].live_grant(now, bunker) {
+            return None;
+        }
+        let token = format!(
+            "orb-jit-{}-{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        data.requests[idx].lease_token_sha256 = Some(sha256_hex(&token));
+        self.save(&data).await;
+        drop(data);
+        self.live_tokens.lock().await.insert(request_id, token.clone());
+        Some(token)
     }
 
     async fn transition(
