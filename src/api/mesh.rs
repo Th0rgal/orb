@@ -81,6 +81,36 @@ pub struct PersistedMeshState {
 }
 
 impl PersistedMeshState {
+    /// Constructs an explicit non-signing fail-closed lockdown state without ever
+    /// instantiating a `SigningKey` or synthetic signed manifest.
+    pub fn lockdown_store_without_signing_key(now_epoch: u64) -> Self {
+        Self {
+            coordinator_seed_hex: String::new(),
+            pinned_coordinator_pubkey_hex: String::new(),
+            manifest: MeshManifest {
+                version: 0,
+                epoch: 0,
+                panic_seq: 0,
+                is_emergency_panic: true,
+                issued_at: 0,
+                expires_at: 0,
+                max_ttl_secs: 0,
+                coordinator_pubkey_hex: String::new(),
+                peers: Vec::new(),
+                rules: Vec::new(),
+                signature_hex: String::new(),
+            },
+            peer_roam: BTreeMap::new(),
+            heartbeat_replay: BTreeMap::new(),
+            last_heartbeat_at: now_epoch,
+            is_sovereign_node: true,
+            bunker_state: MeshBunkerState::HardLockdown,
+            active_relay_sessions: 0,
+            max_relay_sessions: 128,
+            corrupted_state: true,
+        }
+    }
+
     /// Decodes the coordinator Ed25519 signing key and verifies it matches the pinned
     /// coordinator public key. Fails closed (`Err`) on any corruption — never falls back
     /// to a hardcoded or predictable key.
@@ -159,27 +189,7 @@ impl MeshStore {
                 {
                     loaded
                 }
-                _ => {
-                    // Existing state file on disk is corrupted or tampered: fail closed in
-                    // `HardLockdown` with `corrupted_state = true` rather than overwriting
-                    // with a new or predictable key.
-                    let fallback_seed = generate_csprng_seed().unwrap_or([0x99; 32]);
-                    let sk = SigningKey::from_bytes(&fallback_seed);
-                    let manifest = MeshManifest::paloma_fleet_default(now, &sk);
-                    PersistedMeshState {
-                        coordinator_seed_hex: String::new(),
-                        pinned_coordinator_pubkey_hex: manifest.coordinator_pubkey_hex.clone(),
-                        manifest,
-                        peer_roam: BTreeMap::new(),
-                        heartbeat_replay: BTreeMap::new(),
-                        last_heartbeat_at: now,
-                        is_sovereign_node: true,
-                        bunker_state: MeshBunkerState::HardLockdown,
-                        active_relay_sessions: 0,
-                        max_relay_sessions: 128,
-                        corrupted_state: true,
-                    }
-                }
+                _ => PersistedMeshState::lockdown_store_without_signing_key(now),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 match generate_csprng_seed() {
@@ -203,43 +213,10 @@ impl MeshStore {
                         let _ = write_initial_private_sync(&path, &fresh);
                         fresh
                     }
-                    Err(_) => {
-                        let sk = SigningKey::from_bytes(&[0x99; 32]);
-                        let manifest = MeshManifest::paloma_fleet_default(now, &sk);
-                        PersistedMeshState {
-                            coordinator_seed_hex: String::new(),
-                            pinned_coordinator_pubkey_hex: manifest.coordinator_pubkey_hex.clone(),
-                            manifest,
-                            peer_roam: BTreeMap::new(),
-                            heartbeat_replay: BTreeMap::new(),
-                            last_heartbeat_at: now,
-                            is_sovereign_node: true,
-                            bunker_state: MeshBunkerState::HardLockdown,
-                            active_relay_sessions: 0,
-                            max_relay_sessions: 128,
-                            corrupted_state: true,
-                        }
-                    }
+                    Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
                 }
             }
-            Err(_) => {
-                let fallback_seed = generate_csprng_seed().unwrap_or([0x99; 32]);
-                let sk = SigningKey::from_bytes(&fallback_seed);
-                let manifest = MeshManifest::paloma_fleet_default(now, &sk);
-                PersistedMeshState {
-                    coordinator_seed_hex: String::new(),
-                    pinned_coordinator_pubkey_hex: manifest.coordinator_pubkey_hex.clone(),
-                    manifest,
-                    peer_roam: BTreeMap::new(),
-                    heartbeat_replay: BTreeMap::new(),
-                    last_heartbeat_at: now,
-                    is_sovereign_node: true,
-                    bunker_state: MeshBunkerState::HardLockdown,
-                    active_relay_sessions: 0,
-                    max_relay_sessions: 128,
-                    corrupted_state: true,
-                }
-            }
+            Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
         };
 
         Arc::new(Self {
@@ -505,10 +482,16 @@ async fn get_mesh_status(
 async fn get_mesh_manifest(
     State(app_state): State<Arc<AppState>>,
     Extension(_user): Extension<AuthUser>,
-) -> Json<MeshManifest> {
+) -> Result<Json<MeshManifest>, (StatusCode, Json<Value>)> {
     let store = store(&app_state);
     let guard = store.inner.lock().await;
-    Json(guard.manifest.clone())
+    if guard.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "mesh store is in fail-closed corrupted state" })),
+        ));
+    }
+    Ok(Json(guard.manifest.clone()))
 }
 
 async fn post_mesh_manifest(
@@ -575,6 +558,12 @@ async fn post_evaluate_route(
     let store = store(&app_state);
     let now = unix_now();
     let mut guard = store.inner.lock().await;
+    if guard.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "mesh store is in fail-closed corrupted state" })),
+        ));
+    }
     let bunker = effective_mesh_bunker(&app_state, &guard, now).await;
     if bunker.next_state > guard.bunker_state {
         guard.bunker_state = bunker.next_state;
@@ -844,6 +833,12 @@ async fn authorize_node_render(
     auth: &RenderNodeAuthQuery,
     now_epoch: u64,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    if mesh_state.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "mesh store is in fail-closed corrupted state" })),
+        ));
+    }
     if let (Some(seq), Some(ts), Some(sig)) = (auth.seq, auth.timestamp, auth.signature_hex.as_deref()) {
         let ts_fresh = ts <= now_epoch.saturating_add(30) && now_epoch.saturating_sub(ts) <= 120;
         if ts_fresh
@@ -1291,6 +1286,24 @@ mod tests {
             assert!(guard.corrupted_state);
             assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
             assert!(guard.signing_key().is_err());
+            assert!(guard.pinned_coordinator_pubkey_hex.is_empty());
+            assert!(guard.manifest.peers.is_empty());
+            assert!(!guard.manifest.verify_ed25519());
         });
+    }
+
+    #[test]
+    fn source_code_contains_no_deterministic_signing_key_fallbacks() {
+        let mesh_src = include_str!("mesh.rs");
+        let prod_part = mesh_src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section of mesh.rs");
+        for forbidden in ["0x42", "0x99", "unwrap_or([", "derive_default_seed"] {
+            assert!(
+                !prod_part.contains(forbidden),
+                "production mesh.rs must not contain forbidden fallback pattern `{forbidden}`"
+            );
+        }
     }
 }
