@@ -162,61 +162,119 @@ fn generate_csprng_seed() -> Result<[u8; 32], String> {
     Ok(seed)
 }
 
-fn write_initial_private_sync(path: &std::path::Path, state: &PersistedMeshState) -> Result<(), String> {
+fn ensure_secure_state_dir(dir: &std::path::Path) -> Result<(), String> {
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err("state directory path is a symlink or non-directory".into());
+        }
+    } else {
+        std::fs::create_dir_all(dir).map_err(|e| format!("failed to create state dir: {e}"))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("failed to set 0700 permissions on state dir: {e}"))?;
+    }
+    Ok(())
+}
+
+fn verify_persisted_file_on_disk(
+    path: &std::path::Path,
+    expected_pubkey_hex: Option<&str>,
+) -> Result<PersistedMeshState, String> {
+    let meta =
+        std::fs::symlink_metadata(path).map_err(|e| format!("failed to stat state file: {e}"))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err("state file is a symlink or non-regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if (meta.permissions().mode() & 0o777) != 0o600 {
+            return Err("state file permissions must be 0600".into());
+        }
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("failed to read state: {e}"))?;
+    let loaded: PersistedMeshState =
+        serde_json::from_str(&raw).map_err(|e| format!("failed to parse state JSON: {e}"))?;
+    if loaded.signing_key().is_err() || !loaded.manifest.verify_ed25519() {
+        return Err("loaded state failed signing_key() or verify_ed25519()".into());
+    }
+    if let Some(exp) = expected_pubkey_hex {
+        if loaded.pinned_coordinator_pubkey_hex != exp {
+            return Err("re-read state coordinator pubkey mismatch after write".into());
+        }
+    }
+    Ok(loaded)
+}
+
+fn write_and_verify_initial_private_sync(
+    path: &std::path::Path,
+    state: &PersistedMeshState,
+) -> Result<PersistedMeshState, String> {
     let json = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
+    if let Ok(meta) = std::fs::symlink_metadata(&tmp) {
+        if meta.file_type().is_symlink() {
+            return Err("temporary state path is a symlink".into());
+        }
+    }
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
     }
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    verify_persisted_file_on_disk(path, Some(&state.pinned_coordinator_pubkey_hex))
 }
 
 impl MeshStore {
     pub fn open(working_dir: PathBuf) -> Arc<Self> {
         let dir = working_dir.join(".sandboxed-sh");
-        let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("lean_mesh_state.json");
         let now = unix_now();
 
-        let state = match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str::<PersistedMeshState>(&raw) {
-                Ok(loaded)
-                    if loaded.signing_key().is_ok() && loaded.manifest.verify_ed25519() =>
-                {
-                    loaded
-                }
-                _ => PersistedMeshState::lockdown_store_without_signing_key(now),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                match generate_csprng_seed() {
-                    Ok(seed) => {
-                        let sk = SigningKey::from_bytes(&seed);
-                        let manifest = MeshManifest::paloma_fleet_default(now, &sk);
-                        let pubkey_hex = manifest.coordinator_pubkey_hex.clone();
-                        let fresh = PersistedMeshState {
-                            coordinator_seed_hex: hex::encode(seed),
-                            pinned_coordinator_pubkey_hex: pubkey_hex,
-                            manifest,
-                            peer_roam: BTreeMap::new(),
-                            heartbeat_replay: BTreeMap::new(),
-                            last_heartbeat_at: now,
-                            is_sovereign_node: true,
-                            bunker_state: MeshBunkerState::Normal,
-                            active_relay_sessions: 0,
-                            max_relay_sessions: 128,
-                            corrupted_state: false,
-                        };
-                        let _ = write_initial_private_sync(&path, &fresh);
-                        fresh
-                    }
-                    Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
-                }
-            }
+        let state = match ensure_secure_state_dir(&dir) {
             Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
+            Ok(()) => match std::fs::symlink_metadata(&path) {
+                Ok(_) => verify_persisted_file_on_disk(&path, None)
+                    .unwrap_or_else(|_| PersistedMeshState::lockdown_store_without_signing_key(now)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    match generate_csprng_seed() {
+                        Ok(seed) => {
+                            let sk = SigningKey::from_bytes(&seed);
+                            let manifest = MeshManifest::paloma_fleet_default(now, &sk);
+                            let pubkey_hex = manifest.coordinator_pubkey_hex.clone();
+                            let fresh = PersistedMeshState {
+                                coordinator_seed_hex: hex::encode(seed),
+                                pinned_coordinator_pubkey_hex: pubkey_hex,
+                                manifest,
+                                peer_roam: BTreeMap::new(),
+                                heartbeat_replay: BTreeMap::new(),
+                                last_heartbeat_at: now,
+                                is_sovereign_node: true,
+                                bunker_state: MeshBunkerState::Normal,
+                                active_relay_sessions: 0,
+                                max_relay_sessions: 128,
+                                corrupted_state: false,
+                            };
+                            write_and_verify_initial_private_sync(&path, &fresh).unwrap_or_else(
+                                |_| PersistedMeshState::lockdown_store_without_signing_key(now),
+                            )
+                        }
+                        Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
+                    }
+                }
+                Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
+            },
         };
 
         Arc::new(Self {
@@ -1305,5 +1363,53 @@ mod tests {
                 "production mesh.rs must not contain forbidden fallback pattern `{forbidden}`"
             );
         }
+    }
+
+    #[test]
+    fn first_init_persistence_failure_enters_non_signing_lockdown_and_valid_init_persists_0600() {
+        // 1. Place a regular file at `.sandboxed-sh` so directory creation / persistence fails on first init.
+        let blocked_tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(blocked_tmp.path().join(".sandboxed-sh"), b"blocker file").unwrap();
+        let blocked_store = MeshStore::open(blocked_tmp.path().to_path_buf());
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let guard = blocked_store.inner.lock().await;
+            assert!(guard.corrupted_state);
+            assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
+            assert!(guard.signing_key().is_err());
+            assert!(guard.pinned_coordinator_pubkey_hex.is_empty());
+        });
+
+        // 2. Two independent initializations generate distinct CSPRNG coordinator identities,
+        // persist with `0o600` permissions, and preserve the exact coordinator identity across restarts.
+        let tmp1 = tempfile::tempdir().expect("tempdir 1");
+        let tmp2 = tempfile::tempdir().expect("tempdir 2");
+        let ms1 = MeshStore::open(tmp1.path().to_path_buf());
+        let ms2 = MeshStore::open(tmp2.path().to_path_buf());
+        let ms1_reopened = MeshStore::open(tmp1.path().to_path_buf());
+        rt.block_on(async {
+            let g1 = ms1.inner.lock().await;
+            let g2 = ms2.inner.lock().await;
+            let g1_re = ms1_reopened.inner.lock().await;
+            assert!(!g1.corrupted_state);
+            assert!(!g2.corrupted_state);
+            assert_ne!(
+                g1.pinned_coordinator_pubkey_hex,
+                g2.pinned_coordinator_pubkey_hex
+            );
+            assert_eq!(
+                g1.pinned_coordinator_pubkey_hex,
+                g1_re.pinned_coordinator_pubkey_hex
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let meta = std::fs::symlink_metadata(
+                    tmp1.path().join(".sandboxed-sh/lean_mesh_state.json"),
+                )
+                .unwrap();
+                assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+            }
+        });
     }
 }
