@@ -142,7 +142,7 @@ def extract(src):
                     break
                 j += 1
             name = line.split("(")[0].split()[-1]
-            text = "\n".join(lines[i:j + 1])
+            text = "\n".join(l.rstrip() for l in lines[i:j + 1])
             # Scalar-only definitions; boxed wrappers, the module initializer
             # and object-valued (proof/IO) definitions stay in the Lean world.
             if "lean_object" not in text and not name.startswith("initialize_"):
