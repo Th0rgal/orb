@@ -1398,7 +1398,26 @@ impl PrivilegeBroker {
         let prev_bunker = data.current_bunker();
         let prev_bunker_u8 = prev_bunker as u8;
         let mut revoked_ids = Vec::new();
-        let orb_step = if req.dry_run {
+        let peer_trimmed = req.peer_name.trim();
+        let actor_trust = if matches!(req.uid, Some(u) if u != 999) {
+            crate::orb_spec::ActorTrust::UntrustedOrSystem
+        } else {
+            crate::orb_spec::classify_actor_trust(
+                req.uid,
+                req.cgroup.as_deref(),
+                req.cmdline.as_deref(),
+            )
+        };
+        let is_whitelisted_ambient = next_mesh_u8 < 2
+            && actor_trust == crate::orb_spec::ActorTrust::WhitelistedAgentWalk
+            && crate::orb_spec::classify_canary_class(&req.canary_kind)
+                == crate::orb_spec::CanaryClass::AmbientDecoy
+            && !req
+                .canary_kind
+                .trim()
+                .to_ascii_lowercase()
+                .contains("mongo");
+        let orb_step = if req.dry_run || is_whitelisted_ambient {
             BunkerStepResponse {
                 previous_state: prev_bunker_u8,
                 bunker_state: prev_bunker_u8,
@@ -1406,12 +1425,43 @@ impl PrivilegeBroker {
                 isolate_node_mesh: false,
                 revoked_grants_count: 0,
             }
+        } else if next_mesh_u8 < 2 {
+            // Node-scoped quarantine (`CanaryTripwireAction::QuarantineNodeOnly`):
+            // A single `env_honeytoken` / `vault_canary` read from a mission job quarantines
+            // ONLY `peer_name` (revoking active/pending JIT grants targeting that node) while
+            // keeping global `PrivilegeBroker` `bunker_state` unchanged (`Normal`).
+            let detail = Some(format!(
+                "canary_node_quarantine:{}:{}:{}",
+                peer_trimmed,
+                req.canary_kind.trim(),
+                req.reason.trim()
+            ));
+            for r in data.requests.iter_mut() {
+                if (r.state == ApprovalState::Approved || r.state.is_pending())
+                    && r.target_host.trim() == peer_trimmed
+                {
+                    r.state = ApprovalState::Revoked;
+                    r.revoked_at = Some(now);
+                    r.lease_token_sha256 = None;
+                    revoked_ids.push(r.clone());
+                }
+            }
+            for r in &revoked_ids {
+                data.log(r, "bunker_node_revoked", detail.clone(), now);
+            }
+            BunkerStepResponse {
+                previous_state: prev_bunker_u8,
+                bunker_state: prev_bunker_u8,
+                revoke_all_jit_grants: false,
+                isolate_node_mesh: true,
+                revoked_grants_count: revoked_ids.len(),
+            }
         } else {
             let verdict = bunker_step(prev_bunker, true, false, 2, false);
             data.bunker_state = verdict.next_state as u8;
             let detail = Some(format!(
                 "canary_tripwire:{}:{}:{}",
-                req.peer_name.trim(),
+                peer_trimmed,
                 req.canary_kind.trim(),
                 req.reason.trim()
             ));
@@ -2229,7 +2279,10 @@ async fn canary_tripwire(
             if !already_replayed {
                 super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
             }
-            if !existing.dry_run && (broker.bunker_state().await as u8) < 2 {
+            if !existing.dry_run
+                && existing.new_bunker_state >= 2
+                && (broker.bunker_state().await as u8) < 2
+            {
                 broker
                     .step_bunker(
                         true,
@@ -2294,9 +2347,23 @@ async fn canary_tripwire(
     let (_, mesh_transition, epoch) =
         super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
 
-    // 5. Dispatch redacted out-of-band alert and update incident delivery status.
+    let quarantine_scope =
+        if orb_step.revoke_all_jit_grants || (mesh_transition.next_state as u8) >= 2 {
+            "fleet_lockdown"
+        } else if orb_step.isolate_node_mesh {
+            "node_only"
+        } else {
+            "whitelisted_ignored"
+        };
+
+    // 5. Dispatch redacted out-of-band alert and update incident delivery status
+    //    (skip alert for whitelisted routine agent file walks unless `dry_run == true`).
     let (alert_delivered, alert_channels, alert_error) =
-        dispatch_bunker_alert(&state, &incident).await;
+        if quarantine_scope == "whitelisted_ignored" && !req.dry_run {
+            (false, Vec::new(), None)
+        } else {
+            dispatch_bunker_alert(&state, &incident).await
+        };
 
     Ok(Json(json!({
         "admitted": true,
@@ -2306,6 +2373,7 @@ async fn canary_tripwire(
         "canary_kind": req.canary_kind,
         "event_seq": req.event_seq,
         "epoch": epoch,
+        "quarantine_scope": quarantine_scope,
         "orb_bunker": orb_step,
         "mesh_bunker": mesh_transition,
         "alert_delivered": alert_delivered,
@@ -3001,5 +3069,106 @@ mod tests {
         let snap = privd_command_shadow_counter().snapshot("orb_privd_command_step");
         assert!(snap.total_events >= 10);
         assert_eq!(snap.total_divergences, 0);
+    }
+
+    #[tokio::test]
+    async fn node_scoped_env_honeytoken_revokes_only_target_node_grants_and_keeps_fleet_normal() {
+        let broker = temp_broker();
+        let m_nippur = Uuid::new_v4();
+        let m_ashur = Uuid::new_v4();
+
+        let req_nippur = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: m_nippur,
+                requester_title: Some("Nippur Ops".into()),
+                target_host: "nippur".into(),
+                scope: PrivilegeScope::OpsRead,
+                allowed_unit: None,
+                reason: "inspect nippur".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", req_nippur.id, None, None)
+            .await
+            .unwrap();
+
+        let req_ashur = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: m_ashur,
+                requester_title: Some("Ashur Ops".into()),
+                target_host: "ashur".into(),
+                scope: PrivilegeScope::OpsRead,
+                allowed_unit: None,
+                reason: "inspect ashur".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", req_ashur.id, None, None)
+            .await
+            .unwrap();
+
+        // 1. Whitelisted agent walk (`rg`) on `env_honeytoken` revokes 0 grants and keeps bunker at 0.
+        let walk_trip = crate::api::mesh::CanaryTripwireRequest {
+            peer_name: "nippur".into(),
+            canary_kind: "env_honeytoken".into(),
+            event_seq: 1,
+            timestamp: 1_700_000_010,
+            dry_run: false,
+            reason: "rg scan".into(),
+            pid: Some(1111),
+            uid: Some(999),
+            cgroup: Some("/system.slice/sandboxed-node.service".into()),
+            cmdline: Some("rg --hidden TOKEN /var/lib/sandboxed-node".into()),
+            detail_sha256_hex: "11".repeat(32),
+            signature_hex: "22".repeat(64),
+        };
+        let (walk_step, _) = broker
+            .escalate_and_record_canary_incident(&walk_trip, 0, 0, 1, &"33".repeat(32))
+            .await
+            .unwrap();
+        assert_eq!(walk_step.bunker_state, 0);
+        assert!(!walk_step.isolate_node_mesh);
+        assert_eq!(walk_step.revoked_grants_count, 0);
+        assert!(broker.lease_token_for(req_nippur.id).await.is_some());
+        assert!(broker.lease_token_for(req_ashur.id).await.is_some());
+
+        // 2. Single mission `env_honeytoken` read (`cat`) on `nippur` (`next_mesh_u8 == 0`)
+        //    revokes ONLY `nippur`'s JIT grant, preserves `ashur`'s grant, and keeps global `bunker_state == 0`.
+        let node_trip = crate::api::mesh::CanaryTripwireRequest {
+            peer_name: "nippur".into(),
+            canary_kind: "env_honeytoken".into(),
+            event_seq: 2,
+            timestamp: 1_700_000_020,
+            dry_run: false,
+            reason: "cat /opt/paloma-canary/.env.production.canary".into(),
+            pid: Some(2222),
+            uid: Some(999),
+            cgroup: Some("/system.slice/sandboxed-node.service".into()),
+            cmdline: Some("cat /opt/paloma-canary/.env.production.canary".into()),
+            detail_sha256_hex: "44".repeat(32),
+            signature_hex: "55".repeat(64),
+        };
+        let (node_step, node_inc) = broker
+            .escalate_and_record_canary_incident(&node_trip, 0, 0, 1, &"33".repeat(32))
+            .await
+            .unwrap();
+        assert_eq!(node_step.bunker_state, 0);
+        assert!(node_step.isolate_node_mesh);
+        assert!(!node_step.revoke_all_jit_grants);
+        assert_eq!(node_step.revoked_grants_count, 1);
+        assert_eq!(node_inc.new_bunker_state, 0);
+        assert!(broker.lease_token_for(req_nippur.id).await.is_none());
+        assert!(broker.lease_token_for(req_ashur.id).await.is_some());
+        assert_eq!(broker.bunker_state().await, BunkerState::Normal);
     }
 }
