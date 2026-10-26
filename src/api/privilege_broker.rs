@@ -796,6 +796,12 @@ fn sha256_hex(input: &str) -> String {
     hex::encode(Sha256::digest(input.as_bytes()))
 }
 
+/// A local daemon may run a lease only for its own machine: "self" and
+/// "all" go anywhere, a named host only to that host.
+fn lease_runs_on(grant_host: &str, executing_host: &str) -> bool {
+    matches!(grant_host, "self" | "all") || grant_host == executing_host
+}
+
 fn normalize_target_host(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().to_lowercase();
     if trimmed.is_empty() {
@@ -1174,6 +1180,14 @@ impl PrivilegeBroker {
                 "Grant is scoped to target_host={}, not {}",
                 grant.target_host, target_norm
             ));
+        }
+        if let Some(executing) = req.executing_host.as_deref() {
+            if !lease_runs_on(&grant.target_host, &normalize_target_host(executing)?) {
+                return Err(format!(
+                    "Lease for target_host={} cannot run on {}; use execute_privileged_command for remote hosts",
+                    grant.target_host, executing
+                ));
+            }
         }
         let verdict = grant.evaluate(now, true, requested_scope, bunker);
         if !verdict.allow_exec {
@@ -1582,6 +1596,10 @@ pub struct VerifyLeaseRequest {
     pub mission_id: Uuid,
     pub lease_token: String,
     pub target_host: String,
+    /// The machine whose `orb-privd` will run the command. A named-host
+    /// lease only executes there; `None` is Core's own audited SSH tunnel.
+    #[serde(default)]
+    pub executing_host: Option<String>,
     #[serde(default)]
     pub requested_scope: Option<PrivilegeScope>,
     pub command: String,
@@ -1875,6 +1893,7 @@ pub async fn handle_tool(
             // 1. Pre-exec formal verification & audit log via `verify_and_log_command` (`orb_privd_command_step`).
             let pre_verified = broker
                 .verify_and_log_command(VerifyLeaseRequest {
+                    executing_host: None,
                     mission_id: own,
                     lease_token: lease_token.clone(),
                     target_host: target_host.to_string(),
@@ -1948,6 +1967,7 @@ pub async fn handle_tool(
             // 3. Post-exec audit record with exit_code, duration_ms, and stdout_sha256.
             let post_verified = broker
                 .verify_and_log_command(VerifyLeaseRequest {
+                    executing_host: None,
                     mission_id: own,
                     lease_token,
                     target_host: target_host.to_string(),
@@ -2807,6 +2827,53 @@ mod tests {
         PrivilegeBroker::open(dir.join("privilege_access.json"))
     }
 
+    /// Replays mission 84adbf5f (2026-10-26): a lease for thomas-md, sent to
+    /// the root daemon on agent-core with target_host=thomas-md, ran there.
+    #[tokio::test]
+    async fn named_host_lease_never_runs_on_another_machine() {
+        let broker = temp_broker();
+        let mission_id = Uuid::new_v4();
+        let req = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: mission_id,
+                requester_title: None,
+                target_host: "thomas-md".into(),
+                scope: PrivilegeScope::RootExec,
+                allowed_unit: None,
+                reason: "Read-only check".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", req.id, Some(30), Some(true))
+            .await
+            .unwrap();
+        let token = broker.lease_token_for(req.id).await.unwrap();
+        let on = |host: Option<&str>| VerifyLeaseRequest {
+            executing_host: host.map(Into::into),
+            mission_id,
+            lease_token: token.clone(),
+            target_host: "thomas-md".into(),
+            requested_scope: Some(PrivilegeScope::RootExec),
+            command: "hostname".into(),
+            argv: vec!["hostname".into()],
+            cwd: None,
+            exit_code: None,
+            duration_ms: None,
+            stdout_sha256: None,
+        };
+        let refused = broker.verify_and_log_command(on(Some("agent-core"))).await;
+        assert!(refused.unwrap_err().contains("cannot run on agent-core"));
+        assert!(broker.verify_and_log_command(on(Some("thomas-md"))).await.is_ok());
+        // Core's own SSH tunnel (execute_privileged_command) names no daemon.
+        assert!(broker.verify_and_log_command(on(None)).await.is_ok());
+        assert!(lease_runs_on("self", "anything") && lease_runs_on("all", "x"));
+    }
+
     #[tokio::test]
     async fn grant_lifecycle_audit_log_session_reap_and_bunker_lockdown() {
         let broker = temp_broker();
@@ -2838,6 +2905,7 @@ mod tests {
         // Execute and log a root command via orb-privd
         let verified = broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id,
                 lease_token: token.clone(),
                 target_host: "self".into(),
@@ -2871,6 +2939,7 @@ mod tests {
         assert!(broker.lease_token_for(req.id).await.is_none());
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id,
                 lease_token: token,
                 target_host: "self".into(),
@@ -2931,6 +3000,7 @@ mod tests {
 
     fn verify(mission_id: Uuid, lease_token: String) -> VerifyLeaseRequest {
         VerifyLeaseRequest {
+            executing_host: None,
             mission_id,
             lease_token,
             target_host: "agent-core".into(),
@@ -3160,6 +3230,7 @@ mod tests {
         // 1. Valid OpsRead command (`journalctl -u orb-core -n 50 --no-pager`) is admitted
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -3184,6 +3255,7 @@ mod tests {
         // 2. Attack vector: OpsRead attempting privilege escalation to `systemctl restart orb-core`
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -3201,6 +3273,7 @@ mod tests {
         // 3. Attack vector: OpsRead flag bypass (`journalctl --cursor-file=/etc/shadow`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -3218,6 +3291,7 @@ mod tests {
         // 4. Attack vector: ServiceDeploy attempting wrong unit (`postgres.service` instead of `orb-core`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_deploy,
                 lease_token: deploy_token.clone(),
                 target_host: "agent-core".into(),
@@ -3249,6 +3323,7 @@ mod tests {
         // 5. Attack vector: Path traversal in `cwd` (`/var/lib/../../etc`) and `argv` (`../../etc/shadow`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_root,
                 lease_token: root_token.clone(),
                 target_host: "self".into(),
@@ -3264,6 +3339,7 @@ mod tests {
             .is_err());
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -3286,6 +3362,7 @@ mod tests {
         std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_root,
                 lease_token: root_token.clone(),
                 target_host: "self".into(),
@@ -3303,6 +3380,7 @@ mod tests {
         // 7. Attack vector: Shell metacharacter injection (`;`, `|`, `$(`) and unsafe env (`LD_PRELOAD`, `BASH_ENV`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
