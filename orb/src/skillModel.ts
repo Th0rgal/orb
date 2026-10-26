@@ -282,22 +282,3 @@ export function compactDiff(lines: DiffLine[], context = 3): Array<DiffLine | { 
 
 /** Where a skill applies, as three stackable choices (Cursor-style): this computer's harnesses,
  * every mission plus the coordinator, and an explicit list of projects. */
-export interface SkillPlaces { local: boolean; common: boolean; projects: string[] }
-export function placesOf(audience: string[], scope: string | null | undefined, projects: string[]): SkillPlaces {
-  return { local: audience.includes("local"), common: scope === "global", projects };
-}
-/** Frontmatter for the chosen places: `mission` only when missions get it (common or a project),
- * `coordinator` and `scope: global` only for common. */
-export function placesToMeta(places: SkillPlaces, keepCoordinator = false): { audience: string[]; scope: string | null } {
-  const audience: string[] = [];
-  if (places.common || places.projects.length) audience.push("mission");
-  // Common always includes the coordinator; otherwise keep an existing coordinator audience.
-  if (places.common || keepCoordinator) audience.push("coordinator");
-  if (places.local) audience.push("local");
-  return { audience, scope: places.common ? "global" : null };
-}
-export function placesLabel(places: SkillPlaces): string {
-  const parts = [places.local && "Local", places.common && "Common", ...places.projects.slice(0, 1)].filter(Boolean) as string[];
-  const extra = places.projects.length > 1 ? ` +${places.projects.length - 1}` : "";
-  return parts.length ? parts.join(" · ") + extra : "Nowhere";
-}

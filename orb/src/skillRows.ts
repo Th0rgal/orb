@@ -148,3 +148,18 @@ export function filterSkillRows(rows: SkillRow[], f: { query: string; audience: 
     return row.name.toLowerCase().includes(q) || row.description.toLowerCase().includes(q) || row.sourceKinds.some((k) => k.toLowerCase().includes(q));
   });
 }
+
+/** The one badge a row shows, only when something is unusual; healthy rows show none. */
+export type SkillBadge = "edited" | "old-folder" | "always";
+export const SKILL_BADGE_LABEL: Record<SkillBadge, string> = { edited: "Edited on this Mac", "old-folder": "Only in an old folder", always: "Always loaded" };
+export function skillBadge(row: Pick<SkillRow, "divergent" | "legacyOnly" | "scope">): SkillBadge | null {
+  if (row.divergent) return "edited";
+  if (row.legacyOnly) return "old-folder";
+  if (row.scope === "global") return "always";
+  return null;
+}
+/** "Needs attention": a row a person has to act on (Always loaded is informational). */
+export function needsAttention(row: Pick<SkillRow, "divergent" | "legacyOnly" | "scope" | "lint">): boolean {
+  const badge = skillBadge(row);
+  return badge === "edited" || badge === "old-folder" || row.lint.length > 0;
+}
