@@ -3911,17 +3911,6 @@ select.orb-select-native:disabled { cursor: default; }
 .turn-recap-actions .s-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Skill places picker (Local · Common · projects). */
-.skill-places { position: relative; }
-.skill-places-btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--stroke); font-size: 12.5px; color: var(--fg); background: var(--bg); }
-.skill-places-btn:hover { background: var(--hover-1); }
-.skill-places-menu { position: absolute; top: 34px; left: 0; z-index: 20; width: 300px; max-height: 360px; overflow: auto; padding: 6px; border-radius: 12px; border: 1px solid var(--stroke); background: var(--bg); box-shadow: 0 10px 30px rgb(0 0 0 / 14%); }
-.skill-places-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
-.skill-places-row:hover { background: var(--hover-1); }
-.skill-places-row span { display: flex; flex-direction: column; min-width: 0; }
-.skill-places-row strong { font-size: 13px; font-weight: 500; }
-.skill-places-row small { font-size: 11.5px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.skill-places-sep { margin: 6px 8px 2px; padding-top: 8px; border-top: 1px solid var(--stroke-soft); font-size: 11px; color: var(--fg-3); }
-.skill-places-empty { margin: 4px 8px; font-size: 11.5px; }
 .skills-aud.aud-project { color: var(--fg-2); }
 
 /* Shared tab row for the right-hand panel (side question / files). */
@@ -4152,3 +4141,25 @@ select.orb-select-native:disabled { cursor: default; }
 .settings-page > .s-inner:has(.usage-page) .settings-subtitle { padding-right: 260px; }
 /* Models tabs replace the routing panel's own sub-tabs. */
 .settings-page-content .routing-tabs { display: none; }
+
+/* Skills pane: one repo line, at most one badge per row. */
+.skills-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; flex-wrap: wrap; }
+.skills-repo { font-size: 13px; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skills-toolbar .skills-search { margin-left: auto; width: 200px; }
+.skills-badge { font-size: 11px; line-height: 18px; padding: 0 7px; border-radius: 999px; background: var(--hover-3); color: var(--fg-2); white-space: nowrap; }
+.skills-badge.edited, .skills-badge.old-folder, .skills-badge.lint { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--fg); }
+.skills-item { display: flex; align-items: center; }
+.skills-item > .skills-item-head { flex: 1; min-width: 0; }
+.skills-item-actions { display: flex; gap: 6px; padding-right: 12px; flex: none; }
+.skills-item.skeleton .skills-item-head { flex-direction: column; align-items: flex-start; justify-content: center; gap: 7px; min-height: 56px; cursor: default; }
+.skills-skel-name { width: 140px; height: 12px; }
+.skills-skel-desc { width: 70%; height: 10px; }
+.skills-meta-controls { flex-direction: column; align-items: stretch; gap: 8px; }
+.skills-meta-controls .skills-preview-toggle { align-self: flex-end; margin-top: -30px; }
+.skills-meta-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--fg-2); }
+.skills-meta-label { color: var(--fg-3); min-width: 84px; }
+.skills-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.skills-seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--radius-sm); background: var(--bg-btn); }
+.skills-seg button { height: 22px; padding: 0 9px; border: 0; border-radius: calc(var(--radius-sm) - 2px); background: transparent; color: var(--fg-2); font: 12px var(--sans); cursor: pointer; }
+.skills-seg button.on { background: var(--bg-active); color: var(--fg); }
+.skills-saved { margin-right: auto; color: var(--green); font-size: 12.5px; align-self: center; }

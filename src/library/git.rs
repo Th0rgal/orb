@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 
-use super::types::LibraryStatus;
+use super::types::{LibraryHistoryEntry, LibraryStatus};
 
 /// Get the GIT_SSH_COMMAND value for git operations.
 ///
@@ -194,7 +194,95 @@ pub async fn status(path: &Path) -> Result<LibraryStatus> {
         ahead,
         behind,
         modified_files,
+        last_synced_at: last_fetch_at(path),
     })
+}
+
+/// When the repository last fetched from its remote (pull and sync both fetch).
+fn last_fetch_at(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path.join(".git/FETCH_HEAD"))
+        .ok()?
+        .modified()
+        .ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    i64::try_from(secs).ok()
+}
+
+/// Commits that changed `rel`, newest first.
+pub async fn log_path(path: &Path, rel: &str, limit: usize) -> Result<Vec<LibraryHistoryEntry>> {
+    let output = Command::new("git")
+        .current_dir(path)
+        .args([
+            "log",
+            &format!("-n{limit}"),
+            "--format=%H%x1f%an%x1f%at%x1f%s",
+            "--",
+            rel,
+        ])
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(parse_log(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_log(out: &str) -> Vec<LibraryHistoryEntry> {
+    out.lines()
+        .filter_map(|line| {
+            let mut p = line.split('\x1f');
+            Some(LibraryHistoryEntry {
+                rev: p.next()?.to_string(),
+                author: p.next()?.to_string(),
+                timestamp: p.next()?.parse().ok()?,
+                subject: p.next().unwrap_or_default().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// A commit id as `git log` prints it; anything else (refs, ranges, options) is refused.
+pub fn is_commit_id(rev: &str) -> bool {
+    (7..=40).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Contents of `rel` at commit `rev`.
+pub async fn show_at(path: &Path, rev: &str, rel: &str) -> Result<String> {
+    if !is_commit_id(rev) {
+        anyhow::bail!("Revision not found: {}", rev);
+    }
+    let output = Command::new("git")
+        .current_dir(path)
+        .args(["show", &format!("{rev}:{rel}")])
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!("Revision not found: {}", rev);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn parses_log_lines_and_refuses_non_commit_revisions() {
+        let rows = parse_log("abc1234\x1fThomas\x1f1761480000\x1fskill: update deploy\nbad line\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject, "skill: update deploy");
+        assert_eq!(rows[0].timestamp, 1_761_480_000);
+        assert!(is_commit_id("abc1234"));
+        assert!(!is_commit_id("HEAD"));
+        assert!(!is_commit_id("abc1234..def5678"));
+        assert!(!is_commit_id("--output=x"));
+    }
 }
 
 /// Error type for git pull operations.
