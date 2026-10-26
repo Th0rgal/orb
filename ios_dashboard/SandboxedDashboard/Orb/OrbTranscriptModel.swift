@@ -55,14 +55,14 @@ final class OrbTranscriptModel {
             if let timing = byAnswer[row.2.trimmingCharacters(in: .whitespacesAndNewlines)] { timings[row.0] = timing }
         }
         if timings != turnTimings { turnTimings = timings }
-        let lastSeq = events.last?.sequence ?? history.count
+        let lastSeq = events.last?.sequence ?? Int64(history.count)
         let parity = OrbKernel.clientParityStep(
             clientTarget: 1,
             wireSchemaId: 1,
-            transcriptSeq: max(0, lastSeq),
-            markdownBlocksCount: history.count,
+            transcriptSeq: UInt32(clamping: max(0, lastSeq)),
+            markdownBlocksCount: UInt32(clamping: history.count),
             sendQueueDepth: optimisticPrompt == nil ? 0 : 1,
-            scrollCorrectedInEpoch: grew > 0
+            scrollCorrectedInEpoch: grew > 0 ? 1 : 0
         )
         parityAdmitted = parity.parityAdmitted
         parityDigest = parity.digest32
