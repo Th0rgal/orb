@@ -85,31 +85,37 @@ object OrbConnection {
         defaultReachable: Boolean?,
         proxy: String? = null
     ): OrbConnectionIssue? {
-        if (!isUnreachable(error)) return null
+        val unreach = isUnreachable(error)
         val url = normalize(serverURL)
-        // A system proxy that is down makes every server fail with the proxy's
-        // address in the error; switching servers would not help.
+        val usingDefault = isDefault(url)
+        val private = isPrivateAddress(url)
         val proxyHost = proxy?.substringBeforeLast(':')?.trim()?.takeIf { it.isNotEmpty() }
-        if (proxyHost != null && error.orEmpty().contains(proxyHost) && host(url) != proxyHost) {
+        val hasExternalProxy = proxyHost != null && error.orEmpty().contains(proxyHost) && host(url) != proxyHost
+        val verdict = OrbKernel.connectionIssueClassify(
+            isUnreachable = unreach,
+            isUsingDefault = usingDefault,
+            isPrivateAddr = private,
+            defaultReachable = defaultReachable == true,
+            hasExternalProxy = hasExternalProxy
+        )
+        if (!verdict.showIssue) return null
+        if (verdict.messageKind == 1) {
             return OrbConnectionIssue(
                 title = "Can't reach your Orb server",
                 message = "Your phone sends web traffic through a proxy at $proxy, and that proxy isn't answering. Remove the proxy in your Wi-Fi or network settings, then try again.",
                 serverURL = url,
-                offerUseDefault = !isDefault(url),
-                recommendDefault = false,
+                offerUseDefault = verdict.offerUseDefault,
+                recommendDefault = verdict.recommendDefault,
                 technicalDetail = error.orEmpty(),
                 proxy = proxy
             )
         }
-        val usingDefault = isDefault(url)
-        val private = isPrivateAddress(url)
-        val recommend = !usingDefault && private && defaultReachable == true
-        val message = when {
-            recommend ->
+        val message = when (verdict.messageKind) {
+            2 ->
                 "This looks like a local network address and it isn't answering, but the default Orb server is online. Switch to the default server, or change the address."
-            private ->
+            3 ->
                 "This is a local network address. Make sure your phone is on the same network and the server is running, or change the address."
-            usingDefault ->
+            4 ->
                 "Check your internet connection and try again."
             else ->
                 "Check the address and your connection, or switch to the default server."
@@ -118,13 +124,19 @@ object OrbConnection {
             title = "Can't reach your Orb server",
             message = message,
             serverURL = url,
-            offerUseDefault = !usingDefault,
-            recommendDefault = recommend,
+            offerUseDefault = verdict.offerUseDefault,
+            recommendDefault = verdict.recommendDefault,
             technicalDetail = error.orEmpty()
         )
     }
 
     /** Probe the default server only when it could change the advice. */
     fun shouldProbeDefault(serverURL: String, error: String?): Boolean =
-        isUnreachable(error) && !isDefault(serverURL) && isPrivateAddress(serverURL)
+        OrbKernel.connectionIssueClassify(
+            isUnreachable = isUnreachable(error),
+            isUsingDefault = isDefault(serverURL),
+            isPrivateAddr = isPrivateAddress(serverURL),
+            defaultReachable = false,
+            hasExternalProxy = false
+        ).shouldProbeDefault
 }

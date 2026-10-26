@@ -32,7 +32,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
 LEANSYS_REPO = "https://github.com/Th0rgal/lean-sys.git"
-LEANSYS_REV = "c51f7f331e84c96f4207b91b606ec27b423f5a98"
+LEANSYS_REV = "d81837216ebe7a22bd10a4985be25c6bf8425a74"
 
 # Only scalar primitives with obvious C semantics are allowed; anything else
 # means the kernel started depending on the Lean runtime and must fail.
@@ -54,8 +54,8 @@ BIN = {
 # Emitted unconditionally (unused macros are harmless), in this order.
 MACROS = [
     ("uint8", ["dec_eq", "dec_lt", "dec_le", "to_uint32", "to_uint64"]),
-    ("uint32", ["dec_eq", "dec_lt", "dec_le", "add", "sub", "mul", "lor", "shift_left", "to_uint64"]),
-    ("uint64", ["dec_eq", "dec_lt", "dec_le", "add", "sub", "mul", "div", "mod", "lor", "xor",
+    ("uint32", ["dec_eq", "dec_lt", "dec_le", "add", "sub", "mul", "lor", "land", "shift_left", "shift_right", "to_uint64"]),
+    ("uint64", ["dec_eq", "dec_lt", "dec_le", "add", "sub", "mul", "div", "mod", "lor", "land", "xor",
                 "shift_left", "shift_right"]),
 ]
 SUPPORTED = {(w, o) for w, ops in MACROS for o in ops}

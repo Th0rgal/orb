@@ -2,6 +2,7 @@ import XCTest
 @testable import sandboxed_sh
 
 /// Replays shared/orb-spec/fixtures/loose-pipe-tables.json (desktop: orb/tests/pipe-tables.test.tsx).
+@MainActor
 final class OrbPipeTablesTests: XCTestCase {
     private func cases() throws -> [[String: String]] {
         try XCTUnwrap(OrbSpec.json("fixtures/loose-pipe-tables.json")["cases"] as? [[String: String]])
@@ -87,5 +88,34 @@ final class OrbPipeTablesTests: XCTestCase {
         let next = OrbKernel.transcriptPatchStep(stateLen: 42, stateSeq: 9, eventKind: 3, deltaLen: 100)
         XCTAssertEqual(next.len, 42)
         XCTAssertEqual(next.seq, 9)
+    }
+
+    func testWave7NativeCAbiDomainGatesAndSteppers() {
+        XCTAssertEqual(OrbKernel.scrollMaxTop(content: 4442, viewport: 625), 3817)
+        XCTAssertEqual(OrbKernel.scrollGap(content: 4442, viewport: 625, top: 3716), 101)
+        XCTAssertFalse(OrbKernel.scrollShowsJump(pinned: false, content: 4442, viewport: 625, top: 3716, pillThreshold: 160))
+        XCTAssertTrue(OrbKernel.scrollShowsJump(pinned: false, content: 4442, viewport: 625, top: 2116, pillThreshold: 160))
+
+        let idleFrame = OrbKernel.streamCoalescerStep(opKind: 1, shownLen: 10, pendingLen: 0, deltaLen: 0)
+        XCTAssertEqual(idleFrame.shownLen, 10)
+        XCTAssertFalse(idleFrame.rendered)
+        let activeFrame = OrbKernel.streamCoalescerStep(opKind: 1, shownLen: 10, pendingLen: 4, deltaLen: 0)
+        XCTAssertEqual(activeFrame.shownLen, 14)
+        XCTAssertTrue(activeFrame.rendered)
+
+        XCTAssertEqual(OrbKernel.missionSortRank(11), 0)
+        XCTAssertEqual(OrbKernel.missionSortRank(16), 1)
+        XCTAssertEqual(OrbKernel.missionSortRank(17), 2)
+        XCTAssertEqual(OrbKernel.missionSortRank(99), 9)
+        XCTAssertEqual(OrbKernel.missionInboxSection(22), 2)
+        XCTAssertEqual(OrbKernel.missionInboxSection(23), 3)
+
+        let spanOk = OrbFileRefs.validLineSpan(startLine: 10, endLine: 15, totalLines: 20)
+        XCTAssertTrue(spanOk.admitted)
+        XCTAssertEqual(spanOk.count, 6)
+        XCTAssertFalse(OrbFileRefs.validLineSpan(startLine: 15, endLine: 10, totalLines: 20).admitted)
+
+        XCTAssertTrue(OrbKernel.verifyIosJetsamBudget(dirtyRssBytes: 100_000_000, allocBytes: 16_384, maxJetsamBytes: 1_400_000_000))
+        XCTAssertTrue(OrbKernel.verifyWorkerBudget(activeWorkers: 4, maxWorkers: 6, microChunks: 8, totalLen: 4096))
     }
 }

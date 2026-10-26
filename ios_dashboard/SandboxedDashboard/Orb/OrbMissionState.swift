@@ -31,17 +31,51 @@ enum MissionState: String, CaseIterable, Sendable {
 
     static let unknownSortRank = 9
 
-    var category: Category {
+    var stateId: UInt8 {
         switch self {
-        case .active, .running, .starting, .working, .inProgress, .processing, .streaming, .resuming, .waitingBackground: .live
-        case .pending, .queued: .queued
-        case .awaitingUser, .waitingUser, .waitingForUser, .needsInput, .awaitingApproval: .waiting
-        case .blocked: .blocked
-        case .failed, .error, .errored, .notFeasible, .timedOut: .failed
-        case .interrupted, .cancelled: .stopped
-        case .paused: .paused
-        case .completed, .succeeded: .done
-        case .acknowledged, .archived: .archived
+        case .active: 0
+        case .running: 1
+        case .starting: 2
+        case .working: 3
+        case .inProgress: 4
+        case .processing: 5
+        case .streaming: 6
+        case .resuming: 7
+        case .waitingBackground: 8
+        case .pending: 9
+        case .queued: 10
+        case .awaitingUser: 11
+        case .waitingUser: 12
+        case .waitingForUser: 13
+        case .needsInput: 14
+        case .awaitingApproval: 15
+        case .blocked: 16
+        case .failed: 17
+        case .error: 18
+        case .errored: 19
+        case .notFeasible: 20
+        case .timedOut: 21
+        case .interrupted: 22
+        case .cancelled: 23
+        case .paused: 24
+        case .completed: 25
+        case .succeeded: 26
+        case .acknowledged: 27
+        case .archived: 28
+        }
+    }
+
+    var category: Category {
+        switch OrbKernel.missionStateClassify(stateId) {
+        case 0: .waiting
+        case 1: .blocked
+        case 2: .failed
+        case 3: .live
+        case 4: .queued
+        case 5: .paused
+        case 6: .stopped
+        case 7: .done
+        default: .archived
         }
     }
 
@@ -70,53 +104,37 @@ enum MissionState: String, CaseIterable, Sendable {
     }
 
     /// Inbox urgency, lowest first (spec `sortRank`).
-    var sortRank: Int {
-        switch category {
-        case .waiting: 0
-        case .blocked: 1
-        case .failed: 2
-        case .live: 3
-        case .queued: 4
-        case .paused: 5
-        case .stopped: 6
-        case .done: 7
-        case .archived: 8
-        }
-    }
+    var sortRank: Int { OrbKernel.missionSortRank(stateId) }
 
     // MARK: Spec flags
 
+    private var flags: UInt32 { OrbKernel.missionFlags(stateId) }
+
     /// Running or about to run (spec `live`): spinners, the "Working" section, no AI digest yet.
-    var isActive: Bool { category == .live || category == .queued }
+    var isActive: Bool { (flags & 1) != 0 }
     /// The run reached an outcome (spec `terminal`).
-    var isTerminal: Bool { category == .done || category == .failed }
+    var isTerminal: Bool { (flags & 2) != 0 }
     /// Needs the operator (spec `needsAttention`): waiting, blocked or failed.
-    var needsAttention: Bool { category == .waiting || category == .blocked || category == .failed }
+    var needsAttention: Bool { (flags & 4) != 0 }
     /// A turn finished in this state can be unread / notified (spec `unreadResponse`).
-    var awaitsReview: Bool {
-        switch self {
-        case .awaitingUser, .waitingUser, .blocked, .failed, .notFeasible, .interrupted, .paused, .completed, .succeeded: true
-        default: false
-        }
-    }
+    var awaitsReview: Bool { (flags & 8) != 0 }
     /// "Retry / Resume" is offered (spec `canRetry`).
-    var canRetry: Bool { [.blocked, .failed, .notFeasible, .interrupted].contains(self) }
+    var canRetry: Bool { (flags & 16) != 0 }
 
     // MARK: iOS derived rules
 
     /// Blocked or failed: red/amber attention badges and failed-track counts (excludes waiting).
-    var isProblem: Bool { category == .blocked || category == .failed }
-    var isSuccess: Bool { category == .done }
+    var isProblem: Bool { (flags & 32) != 0 }
+    var isSuccess: Bool { (flags & 64) != 0 }
     /// The run stopped for good, so Reopen / Restore is offered.
-    var canReopen: Bool { isTerminal || category == .stopped || category == .archived }
+    var canReopen: Bool { (flags & 128) != 0 }
 
     var inboxSection: InboxSection {
-        switch category {
-        case .live, .queued: .working
-        case .waiting, .blocked, .failed: .needsYou
-        case .done, .paused: .ready
-        case .stopped: awaitsReview ? .ready : .hidden
-        case .archived: .hidden
+        switch OrbKernel.missionInboxSection(stateId) {
+        case 0: .working
+        case 1: .needsYou
+        case 2: .ready
+        default: .hidden
         }
     }
 

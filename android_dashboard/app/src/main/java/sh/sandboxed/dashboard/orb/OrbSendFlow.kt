@@ -110,13 +110,15 @@ object OrbSendFlow {
     /** How long a sent row takes to collapse out of the queue (desktop LEAVE_MS). */
     const val LEAVE_MS = 160
 
-    fun editOutcome(httpStatus: Int?): OrbEditOutcome = when {
-        httpStatus == null -> OrbEditOutcome.Failed
-        httpStatus in 200..299 -> OrbEditOutcome.Edited
-        // Older Core without the PATCH route, or a row outside the durable inbox: replace instead.
-        httpStatus == 404 || httpStatus == 405 -> OrbEditOutcome.Unsupported
-        httpStatus == 409 -> OrbEditOutcome.AlreadySent
-        else -> OrbEditOutcome.Failed
+    fun editOutcome(httpStatus: Int?): OrbEditOutcome {
+        if (httpStatus == null) return OrbEditOutcome.Failed
+        return when (OrbKernel.sendFlowStep(httpStatus = httpStatus).editOutcome) {
+            1 -> OrbEditOutcome.Edited
+            // Older Core without the PATCH route, or a row outside the durable inbox: replace instead.
+            2 -> OrbEditOutcome.Unsupported
+            3 -> OrbEditOutcome.AlreadySent
+            else -> OrbEditOutcome.Failed
+        }
     }
 
     enum class SendNow { Live, Promoted, Fallback }

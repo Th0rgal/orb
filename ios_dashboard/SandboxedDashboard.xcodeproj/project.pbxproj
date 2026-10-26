@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0185E800C657153F3FC1D91D /* OrbFileRefTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BFFBD04FCC178FC78D9FCCD /* OrbFileRefTests.swift */; };
 		01F13FF7C047C9E4F82C1CA8 /* MermaidAssets in Resources */ = {isa = PBXBuildFile; fileRef = A3CAF136E3C506E3EC83371A /* MermaidAssets */; };
+		05881B09E54B3DC08C25D2FE /* orb_kernel_unboxed.c in Sources */ = {isa = PBXBuildFile; fileRef = A68D8354BC804FA6474588A2 /* orb_kernel_unboxed.c */; };
 		05F0E03D8E059128B75C2F1B /* OrbFileViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22A90175F4CD760B4DE6F277 /* OrbFileViews.swift */; };
 		061FAD94D1FD6DB4854BC51C /* OrbFleetActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9331F1134F0091DB717302CC /* OrbFleetActivity.swift */; };
 		0693D4053A9B20410B6E92A5 /* OrbMissionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B18EE0CF61F06F5599C3DAC /* OrbMissionState.swift */; };
@@ -86,6 +87,7 @@
 		B04B56BC7949C55F31355867 /* OrbStreamTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B0BFB13CA941FF4A9188FAB /* OrbStreamTextTests.swift */; };
 		B2EFEAF4646D5BC1356CD9A8 /* OrbPipeTables.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D95E70776675125CEB54591 /* OrbPipeTables.swift */; };
 		B5EE1ADCDB8858D11427C724 /* OrbSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21640FEB52CF2B7E7E341BAA /* OrbSettingsTests.swift */; };
+		B850A735902D68D3DA9C853C /* OrbKernelGenerated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFD4EB6514ED6508583BEA3 /* OrbKernelGenerated.swift */; };
 		BB5DB1F08C030B1179CC282F /* OrbLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 056EA2099041C13447B4B6C0 /* OrbLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C565A0819B851735DAA71172 /* OrbMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD651E846151C5070BA0765 /* OrbMath.swift */; };
 		C60896D7D6FAD14C0A2C630F /* OrbMissionBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F526F4756A22E75CD4F94C2 /* OrbMissionBudgetTests.swift */; };
@@ -100,6 +102,7 @@
 		D8D9D2D84D1315634258C255 /* OrbFileService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 724E777341C65EAED74C6580 /* OrbFileService.swift */; };
 		DB1B9522AC4B5CFD49E2F0B8 /* OrbTurnSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 122884E6E640D975AC7E46F5 /* OrbTurnSummaryTests.swift */; };
 		EB1CE471D547494B3C5A01B8 /* OrbManagedMachines.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC3C9E662975DD7E0D3634C8 /* OrbManagedMachines.swift */; };
+		EBE0B1BE4B37BF2A6F690EC8 /* orb_kernel_unboxed.c in Sources */ = {isa = PBXBuildFile; fileRef = A68D8354BC804FA6474588A2 /* orb_kernel_unboxed.c */; };
 		EC78C00E9FAC162E39BD0B35 /* OrbContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12549983596F9F58C1C2A71C /* OrbContractTests.swift */; };
 		EDF59F07CB1E3E17A8E534AF /* OrbOrchestrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19DEFD6DEF4AA10F64C572BB /* OrbOrchestrationTests.swift */; };
 		F25A7DDE190D5186F9A67316 /* OrbInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56259348FCD0E21FC531D8E9 /* OrbInbox.swift */; };
@@ -207,6 +210,7 @@
 		728F8E4967094E618F0B595B /* OrbFleetActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFleetActivityController.swift; sourceTree = "<group>"; };
 		750C4C8090EAD0168794EEE4 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		778CFF752239E44DB252DB96 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		7EFD4EB6514ED6508583BEA3 /* OrbKernelGenerated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbKernelGenerated.swift; sourceTree = "<group>"; };
 		7FF9EF2372E04C65A688DF58 /* OrbForkSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbForkSheet.swift; sourceTree = "<group>"; };
 		8080D5ADF84794AFE484FE17 /* SandboxedDashboardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SandboxedDashboardApp.swift; sourceTree = "<group>"; };
 		82AA118A5010F08109573E09 /* OrbConversation+Composer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "OrbConversation+Composer.swift"; sourceTree = "<group>"; };
@@ -225,6 +229,7 @@
 		A3A9EEA92978894DB2B0A410 /* OrbNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbNotifications.swift; sourceTree = "<group>"; };
 		A3CAF136E3C506E3EC83371A /* MermaidAssets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = MermaidAssets; path = SandboxedDashboard/Orb/MermaidAssets; sourceTree = SOURCE_ROOT; };
 		A3CD1D35D37ACC8A7FC2EB5F /* OrbSvg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSvg.swift; sourceTree = "<group>"; };
+		A68D8354BC804FA6474588A2 /* orb_kernel_unboxed.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = orb_kernel_unboxed.c; sourceTree = "<group>"; };
 		AC3C9E662975DD7E0D3634C8 /* OrbManagedMachines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbManagedMachines.swift; sourceTree = "<group>"; };
 		AC6DD2AB1561B02E9E7D2A27 /* OrbNarrationFoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbNarrationFoldTests.swift; sourceTree = "<group>"; };
 		B053370536BB82FE142FF2E5 /* OrbQuestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbQuestions.swift; sourceTree = "<group>"; };
@@ -277,6 +282,15 @@
 			);
 			name = Shared;
 			path = OrbLiveActivity/Shared;
+			sourceTree = "<group>";
+		};
+		432570506AADD1D2CA8F2DD6 /* cabi */ = {
+			isa = PBXGroup;
+			children = (
+				A68D8354BC804FA6474588A2 /* orb_kernel_unboxed.c */,
+			);
+			name = cabi;
+			path = "../shared/orb-spec/cabi";
 			sourceTree = "<group>";
 		};
 		483C1FA7AD3A618854BB5B14 /* OrbLiveActivity */ = {
@@ -339,6 +353,7 @@
 				728F8E4967094E618F0B595B /* OrbFleetActivityController.swift */,
 				7FF9EF2372E04C65A688DF58 /* OrbForkSheet.swift */,
 				56259348FCD0E21FC531D8E9 /* OrbInbox.swift */,
+				7EFD4EB6514ED6508583BEA3 /* OrbKernelGenerated.swift */,
 				424CC90454DE36077DB56858 /* OrbLegacyCleanup.swift */,
 				BB4BFC16F121E10DCFD755BC /* OrbLog.swift */,
 				2D5BB808D250AF7F06FD9AC7 /* OrbMachinesSettings.swift */,
@@ -403,6 +418,7 @@
 			children = (
 				1698950E343FC7A6715F842A /* MathAssets */,
 				A3CAF136E3C506E3EC83371A /* MermaidAssets */,
+				432570506AADD1D2CA8F2DD6 /* cabi */,
 				483C1FA7AD3A618854BB5B14 /* OrbLiveActivity */,
 				6DBC9AF3F2EFD0B5057A2EB6 /* SandboxedDashboard */,
 				A5A307A24CE6E469C4A2FA0D /* SandboxedDashboardTests */,
@@ -647,6 +663,7 @@
 				AC1BFAA77BFF45A70AE7453D /* OrbFleetActivityController.swift in Sources */,
 				AA652180F4784273CC4B4BBF /* OrbForkSheet.swift in Sources */,
 				F25A7DDE190D5186F9A67316 /* OrbInbox.swift in Sources */,
+				B850A735902D68D3DA9C853C /* OrbKernelGenerated.swift in Sources */,
 				13626B5B8FB1869DC1214443 /* OrbLegacyCleanup.swift in Sources */,
 				10EE88187305C6ECFA6DD140 /* OrbLog.swift in Sources */,
 				50AD3F51FCD5F045B1715B24 /* OrbMachinesSettings.swift in Sources */,
@@ -681,6 +698,7 @@
 				6846AB79778CDF4CC216B7D1 /* SandboxedDashboardApp.swift in Sources */,
 				1DCED0C8F1420C72B5EEFC73 /* StoredEvent.swift in Sources */,
 				71559C7052796FED7EBACF3F /* Theme.swift in Sources */,
+				EBE0B1BE4B37BF2A6F690EC8 /* orb_kernel_unboxed.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -736,6 +754,7 @@
 				07E4DA4A4886502016F1ED67 /* OrbFleetActivity.swift in Sources */,
 				29584642ECAE60630F2EA849 /* OrbFleetLiveActivity.swift in Sources */,
 				3855275E2A973B28F44C1C30 /* OrbLiveActivityBundle.swift in Sources */,
+				05881B09E54B3DC08C25D2FE /* orb_kernel_unboxed.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

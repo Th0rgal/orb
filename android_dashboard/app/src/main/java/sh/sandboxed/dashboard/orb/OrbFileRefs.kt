@@ -304,6 +304,9 @@ object OrbFileRefs {
         while (value >= 1000 && unit < units.lastIndex) { value /= 1000; unit++ }
         return if (value >= 100) "${value.toLong()} ${units[unit]}" else "%.1f %s".format(java.util.Locale.US, value, units[unit])
     }
+
+    fun validLineSpan(startLine: Int, endLine: Int, totalLines: Int = 0): Pair<Boolean, Int> =
+        OrbKernel.fileRefLineSpan(startLine, endLine, totalLines)
 }
 
 /** Code highlighting (pure; the views map tokens to colours). */

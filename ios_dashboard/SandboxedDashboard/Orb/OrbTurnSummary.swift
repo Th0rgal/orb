@@ -278,12 +278,12 @@ struct OrbTurnTiming: Equatable {
 
     /// "42s", "3m 5s", "12h 6m", "2d 3h".
     static func workedFor(_ seconds: Int) -> String {
-        let s = max(0, seconds)
-        if s < 60 { return "\(s)s" }
-        let m = s / 60
-        if m < 60 { return s % 60 == 0 ? "\(m)m" : "\(m)m \(s % 60)s" }
-        let h = m / 60
-        if h < 24 { return m % 60 == 0 ? "\(h)h" : "\(h)h \(m % 60)m" }
-        return h % 24 == 0 ? "\(h / 24)d" : "\(h / 24)d \(h % 24)h"
+        let b = OrbKernel.workedDurationBucket(seconds: max(0, seconds))
+        switch b.unit {
+        case 0: return "\(b.primary)s"
+        case 1: return b.secondary == 0 ? "\(b.primary)m" : "\(b.primary)m \(b.secondary)s"
+        case 2: return b.secondary == 0 ? "\(b.primary)h" : "\(b.primary)h \(b.secondary)m"
+        default: return b.secondary == 0 ? "\(b.primary)d" : "\(b.primary)d \(b.secondary)h"
+        }
     }
 }

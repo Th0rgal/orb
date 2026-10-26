@@ -86,10 +86,23 @@ data class OrbStreamCommit(val tick: Boolean = false, val fence: Marker? = null,
     data class Marker(val backtick: Boolean, val count: Int)
 
     fun scan(line: Line): OrbStreamCommit {
-        val nextTick = if (line.tick) !tick else tick
-        val nextFence = nextFence(fence, line.marker)
-        val commits = line.blank && !nextTick && nextFence == null
-        return OrbStreamCommit(nextTick, nextFence, pos + 1, if (commits) pos + 1 else commit)
+        val openKind = fence?.let { if (it.backtick) 1 else 2 } ?: 0
+        val openCount = fence?.count ?: 0
+        val markerKind = line.marker?.let { if (it.backtick) 1 else 2 } ?: 0
+        val markerCount = line.marker?.count ?: 0
+        val res = OrbKernel.streamCommitStep(
+            tick = tick,
+            openKind = openKind,
+            openCount = openCount,
+            lineBlank = line.blank,
+            lineTick = line.tick,
+            markerKind = markerKind,
+            markerCount = markerCount,
+            pos = pos,
+            commit = commit
+        )
+        val nextFence = if (res.openKind == 0) null else Marker(res.openKind == 1, res.openCount)
+        return OrbStreamCommit(res.tick, nextFence, res.pos, res.commit)
     }
 
     companion object {
@@ -103,8 +116,12 @@ data class OrbStreamCommit(val tick: Boolean = false, val fence: Marker? = null,
         }
 
         fun nextFence(open: Marker?, m: Marker?): Marker? {
-            if (open == null) return m
-            return if (m != null && m.backtick == open.backtick && open.count <= m.count) null else open
+            val openKind = open?.let { if (it.backtick) 1 else 2 } ?: 0
+            val openCount = open?.count ?: 0
+            val markerKind = m?.let { if (it.backtick) 1 else 2 } ?: 0
+            val markerCount = m?.count ?: 0
+            val (kind, count) = OrbKernel.streamFenceStep(openKind, openCount, markerKind, markerCount)
+            return if (kind == 0) null else Marker(kind == 1, count)
         }
 
         /**
@@ -150,7 +167,7 @@ internal class OrbStreamBlocks {
             prefix += chunk
         }
         val tail = rest.substring(advance)
-        parsedBytes += utf8Length(rest)
+        parsedBytes = OrbKernel.streamTokenCostStep(parsedBytes.toLong(), advance.toLong(), utf8Length(tail).toLong()).toInt()
         return prefixBlocks + parseMdBlocks(tail)
     }
 

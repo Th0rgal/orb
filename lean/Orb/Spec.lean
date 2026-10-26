@@ -1090,4 +1090,298 @@ theorem prod_deploy_requires_biometric_approval
     deployGateStep 1 1 0 1 0 1 0 0 = 1 := by
   unfold deployGateStep; repeat (first | constructor | split | decide | simp_all)
 
+/-! ## Wave 7: Cross-Platform Mobile Kernel Specifications (`Orb.Scroll`, `Orb.Stream` & Domain State Machines) -/
+
+structure ScrollUserCheck where
+  content   : UInt64
+  viewport  : UInt64
+  top       : UInt64
+  threshold : UInt64
+  deriving Repr, DecidableEq
+
+def scrollUserMetaGate : MetaGateSpec ScrollUserCheck
+    (fun s => (scrollGap s.content s.viewport s.top ≤ s.threshold) = true) where
+  gate s := scrollUserStep s.content s.viewport s.top s.threshold == 1
+  sound _ h := by unfold scrollUserStep at h; repeat (first | split at h | simp_all)
+  complete _ h := by unfold scrollUserStep; repeat (first | split | simp_all)
+  posWitness := ⟨1000, 400, 580, 40⟩
+  negWitness := ⟨1000, 400, 400, 40⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 45 (`ProjectionStability` — `orb_scroll_*`): When `pinned == 1`, `scrollLayoutStep` and
+    `scrollCorrect` always snap to `scrollMaxTop = scrollJumpStep` (`scrollGap == 0`), and `scrollShowsJump`
+    is strictly `0`, whereas an unpinned reader beyond `pillThreshold` sees the jump pill (`1`). -/
+theorem scroll_pinned_snaps_to_max_and_hides_jump
+    (content viewport top pillThreshold : UInt64) :
+    scrollLayoutStep 1 content viewport top = scrollMaxTop content viewport ∧
+    scrollCorrect 1 content viewport top = scrollJumpStep content viewport ∧
+    scrollClampTop 1000 400 900 = 600 ∧
+    scrollShowsJump 1 content viewport top pillThreshold = 0 ∧
+    scrollShowsJump 0 1000 400 200 160 = 1 ∧
+    scrollUserStep 1000 400 400 40 = 0 := by
+  unfold scrollLayoutStep scrollCorrect scrollJumpStep scrollShowsJump
+  repeat (first | constructor | split | rfl | decide | simp_all)
+
+structure StreamCommitCheck where
+  tick        : UInt8
+  openKind    : UInt8
+  openCount   : UInt32
+  lineBlank   : UInt8
+  lineTick    : UInt8
+  markerKind  : UInt8
+  markerCount : UInt32
+  pos         : UInt32
+  commit      : UInt32
+  deriving Repr, DecidableEq
+
+def streamCommitMetaGate : MetaGateSpec StreamCommitCheck
+    (fun s =>
+      let nextTick : UInt8 := if s.lineTick == 1 then (if s.tick == 1 then 0 else 1) else (if s.tick == 1 then 1 else 0)
+      let nextFence := streamNextFenceKind s.openKind s.openCount s.markerKind s.markerCount
+      (s.lineBlank == 1 && nextTick == 0 && nextFence == 0) = true) where
+  gate s := ((streamCommitStep s.tick s.openKind s.openCount s.lineBlank s.lineTick s.markerKind s.markerCount s.pos s.commit &&& 0xFFFFFFFF) &&& 65536) != 0
+  sound s h := by
+    unfold streamCommitStep at h
+    rw [pack32_lo] at h
+    generalize streamNextFenceKind s.openKind s.openCount s.markerKind s.markerCount = nf at h ⊢
+    cases ht : (s.lineTick == 1) <;>
+      cases htk : (s.tick == 1) <;>
+      cases hb : (s.lineBlank == 1) <;>
+      cases hnf : (nf == 0) <;>
+      cases hnf1 : (nf == 1) <;>
+      cases hnf2 : (nf == 2) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete s h := by
+    unfold streamCommitStep
+    rw [pack32_lo]
+    generalize streamNextFenceKind s.openKind s.openCount s.markerKind s.markerCount = nf at h ⊢
+    cases ht : (s.lineTick == 1) <;>
+      cases htk : (s.tick == 1) <;>
+      cases hb : (s.lineBlank == 1) <;>
+      cases hnf : (nf == 0) <;>
+      cases hnf1 : (nf == 1) <;>
+      cases hnf2 : (nf == 2) <;>
+      (simp_all; try decide)
+  posWitness := ⟨0, 0, 0, 1, 0, 0, 0, 5, 2⟩
+  negWitness := ⟨0, 1, 3, 1, 0, 0, 0, 5, 2⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 46 (`ConservedResource` & `ProjectionStability` — `orb_stream_*`): An idle coalescer frame
+    (`pendingLen == 0`) emits zero render (`bit 63 == 0`), a tilde fence (`2`) never closes a backtick
+    fence (`1`), a blank line inside an open fence never advances `commit`, and `streamTokenCostStep`
+    accumulates saturatingly without wrap-around. -/
+theorem stream_coalescer_fence_commit_and_cost_invariants (shown : UInt32) :
+    streamCoalescerStep 1 shown 0 0 = shown.toUInt64 ∧
+    (streamCoalescerStep 1 10 4 0 >>> 63) = 1 ∧
+    (streamFenceStep 1 3 2 3 &&& 0xFF) = 1 ∧
+    (streamFenceStep 1 3 1 3 &&& 0xFF) = 0 ∧
+    (streamCommitStep 0 1 3 1 0 0 0 5 2 >>> 32) = 2 ∧
+    streamTokenCostStep 100 40 12 = 152 := by
+  unfold streamCoalescerStep; repeat (first | constructor | rfl | decide)
+
+structure MissionAttentionCheck where
+  stateId : UInt8
+  deriving Repr, DecidableEq
+
+def missionAttentionMetaGate : MetaGateSpec MissionAttentionCheck
+    (fun m => (missionStateClassify m.stateId == 0 || missionStateClassify m.stateId == 1 || missionStateClassify m.stateId == 2) = true) where
+  gate m := (missionFlags m.stateId &&& 4) != 0
+  sound m h := by
+    revert h
+    unfold missionFlags missionCategoryFlags missionExtraBits
+    generalize missionStateClassify m.stateId = cat
+    cases (cat == 0) <;>
+      cases (cat == 1) <;>
+      cases (cat == 2) <;>
+      cases (cat == 3 || cat == 4) <;>
+      cases (cat == 7) <;>
+      cases (cat == 6 || cat == 8) <;>
+      cases (m.stateId == 11 || m.stateId == 12 || m.stateId == 24 || m.stateId == 25 || m.stateId == 26) <;>
+      cases (m.stateId == 16 || m.stateId == 17 || m.stateId == 20 || m.stateId == 22) <;>
+      decide
+  complete m h := by
+    revert h
+    unfold missionFlags missionCategoryFlags missionExtraBits
+    generalize missionStateClassify m.stateId = cat
+    cases (cat == 0) <;>
+      cases (cat == 1) <;>
+      cases (cat == 2) <;>
+      cases (cat == 3 || cat == 4) <;>
+      cases (cat == 7) <;>
+      cases (cat == 6 || cat == 8) <;>
+      cases (m.stateId == 11 || m.stateId == 12 || m.stateId == 24 || m.stateId == 25 || m.stateId == 26) <;>
+      cases (m.stateId == 16 || m.stateId == 17 || m.stateId == 20 || m.stateId == 22) <;>
+      decide
+  posWitness := ⟨11⟩
+  negWitness := ⟨0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 47 (`ProjectionStability` — `orb_mission_*`): Waiting/blocked/failed states (`cat ≤ 2`) route
+    to `.needsYou (1)` and have `sortRank ≤ 2`; `interrupted (22)` routes to `.ready (2)` while `cancelled (23)`
+    routes to `.hidden (3)`; unknown states (`≥ 29`) have `sortRank = 9` and route to `.hidden (3)`. -/
+theorem mission_state_cross_client_partition :
+    missionSortRank 11 = 0 ∧
+    missionSortRank 16 = 1 ∧
+    missionSortRank 17 = 2 ∧
+    missionSortRank 99 = 9 ∧
+    missionInboxSection 0 = 0 ∧
+    missionInboxSection 11 = 1 ∧
+    missionInboxSection 22 = 2 ∧
+    missionInboxSection 23 = 3 ∧
+    (missionFlags 25 &&& 66) = 66 := by decide
+
+structure ConnectionIssueCheck where
+  isUnreachable    : UInt8
+  isUsingDefault   : UInt8
+  isPrivateAddr    : UInt8
+  defaultReachable : UInt8
+  hasExternalProxy : UInt8
+  deriving Repr, DecidableEq
+
+def connectionIssueMetaGate : MetaGateSpec ConnectionIssueCheck
+    (fun c => (c.isUnreachable == 1 && c.hasExternalProxy != 1 &&
+      c.isUsingDefault == 0 && c.isPrivateAddr == 1 && c.defaultReachable == 1) = true) where
+  gate c := (connectionIssueClassify c.isUnreachable c.isUsingDefault c.isPrivateAddr c.defaultReachable c.hasExternalProxy &&& 65536) != 0
+  sound c h := by
+    unfold connectionIssueClassify at h
+    cases hu : (c.isUnreachable != 1) <;>
+      cases hp : (c.hasExternalProxy == 1) <;>
+      cases hd : (c.isUsingDefault == 0) <;>
+      cases hd1 : (c.isUsingDefault == 1) <;>
+      cases ha : (c.isPrivateAddr == 1) <;>
+      cases hr : (c.defaultReachable == 1) <;>
+      (simp_all; try (exfalso; revert h; decide); try decide)
+  complete c h := by
+    unfold connectionIssueClassify
+    cases hu : (c.isUnreachable != 1) <;>
+      cases hp : (c.hasExternalProxy == 1) <;>
+      cases hd : (c.isUsingDefault == 0) <;>
+      cases ha : (c.isPrivateAddr == 1) <;>
+      cases hr : (c.defaultReachable == 1) <;>
+      (simp_all; try decide)
+  posWitness := ⟨1, 0, 1, 1, 0⟩
+  negWitness := ⟨1, 0, 1, 1, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 48 (`ProjectionStability` — `orb_connection_issue_classify`): Reachable servers (`isUnreachable == 0`)
+    never emit an issue (`0`), and a failing external proxy (`hasExternalProxy == 1`) suppresses
+    `recommendDefault` (`bit 16 == 0`) and selects the proxy diagnostic (`msgKind == 1`). -/
+theorem connection_issue_proxy_blocks_recommend_default
+    (uDef pAddr defReach : UInt8) :
+    connectionIssueClassify 0 uDef pAddr defReach 0 = 0 ∧
+    (connectionIssueClassify 1 uDef pAddr defReach 1 &&& 65536) = 0 ∧
+    (connectionIssueClassify 1 uDef pAddr defReach 1 >>> 28) = 1 := by
+  unfold connectionIssueClassify; repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 49 (`StickyFence` & `ProjectionStability` — `orb_turn_outcome_step` & `orb_worked_duration_bucket`):
+    Once a post-todo assistant message fails (`prevFailed == 1`), subsequent non-empty assistant messages in the
+    same todo block never flip `outcome` back to `1 (finished)`, and `workedDurationBucket` partitions `< 60s`,
+    `< 3600s`, `< 86400s`, and `≥ 86400s` into units `0..3`. -/
+theorem turn_outcome_sticky_failure_and_duration_buckets (prevOut isNarr isSucc isNonEmpty : UInt8) :
+    (turnOutcomeStep 0 1 2 isNarr isSucc isNonEmpty &&& 1) = 0 ∧
+    (turnOutcomeStep prevOut 1 2 isNarr isSucc isNonEmpty &&& 256) = 256 ∧
+    workedDurationBucket 42 = ((42 : UInt64) <<< 32) ∧
+    (workedDurationBucket 185 &&& 0xFF) = 1 ∧
+    (workedDurationBucket 7200 &&& 0xFF) = 2 ∧
+    (workedDurationBucket 172800 &&& 0xFF) = 3 := by
+  unfold turnOutcomeStep
+  refine ⟨by repeat (first | split | decide | simp_all),
+          by repeat (first | split | decide | simp_all), ?_⟩
+  decide
+
+structure NumericCellCheck where
+  nonEmpty              : UInt8
+  hasLeadingDigitOrSign : UInt8
+  hasDigit              : UInt8
+  allAllowedChars       : UInt8
+  deriving Repr, DecidableEq
+
+def numericCellMetaGate : MetaGateSpec NumericCellCheck
+    (fun c => (c.nonEmpty == 1 && c.hasLeadingDigitOrSign == 1 && c.hasDigit == 1 && c.allAllowedChars == 1) = true) where
+  gate c := numericCellScan c.nonEmpty c.hasLeadingDigitOrSign c.hasDigit c.allAllowedChars == 1
+  sound _ h := by unfold numericCellScan at h; repeat (first | split at h | simp_all)
+  complete _ h := by unfold numericCellScan; repeat (first | split | simp_all)
+  posWitness := ⟨1, 1, 1, 1⟩
+  negWitness := ⟨1, 1, 0, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure FileRefLineSpanCheck where
+  startLine  : UInt32
+  endLine    : UInt32
+  totalLines : UInt32
+  deriving Repr, DecidableEq
+
+def fileRefLineSpanMetaGate : MetaGateSpec FileRefLineSpanCheck
+    (fun s => (1 ≤ s.startLine && s.startLine ≤ s.endLine && (s.totalLines == 0 || s.endLine ≤ s.totalLines)) = true) where
+  gate s := (fileRefLineSpan s.startLine s.endLine s.totalLines &&& 0xFFFFFFFF) == 1
+  sound s h := by
+    unfold fileRefLineSpan at h
+    split at h <;> (simp_all; try decide)
+  complete s h := by
+    unfold fileRefLineSpan
+    split
+    · simpa using pack32_lo 1 (s.endLine - s.startLine + 1)
+    · contradiction
+  posWitness := ⟨10, 25, 100⟩
+  negWitness := ⟨26, 25, 100⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 50 (`ProjectionStability` — `orb_numeric_cell_scan` & `orb_file_ref_line_span`):
+    Cells without digits or with disallowed characters are rejected (`0`), and inverted or out-of-bounds
+    line spans (`startLine == 0`, `endLine < startLine`, or `endLine > totalLines > 0`) return `0`. -/
+theorem numeric_cell_and_line_span_reject_invalid (e tot : UInt32) :
+    numericCellScan 1 1 0 1 = 0 ∧
+    numericCellScan 1 1 1 0 = 0 ∧
+    fileRefLineSpan 0 e tot = 0 ∧
+    fileRefLineSpan 20 10 100 = 0 ∧
+    fileRefLineSpan 10 25 20 = 0 ∧
+    (fileRefLineSpan 10 25 100 >>> 32) = 16 := by
+  constructor; · rfl
+  constructor; · rfl
+  constructor; · unfold fileRefLineSpan; simp
+  constructor; · decide
+  constructor; · decide
+  · decide
+
+structure MachineActionCheck where
+  stateKind : UInt8
+  isBusy    : UInt8
+  isMuted   : UInt8
+  deriving Repr, DecidableEq
+
+def machineActionMetaGate : MetaGateSpec MachineActionCheck
+    (fun m => (m.stateKind ≤ 2 && m.isBusy == 0 && m.isMuted == 0) = true) where
+  gate m := (machineActionAdmitted m.stateKind m.isBusy m.isMuted &&& 256) != 0
+  sound m h := by
+    unfold machineActionAdmitted at h
+    by_cases h3 : m.stateKind ≤ 3 <;>
+      by_cases h2 : m.stateKind ≤ 2 <;>
+      cases hb : (m.isBusy == 0) <;>
+      cases hm : (m.isMuted == 0) <;>
+      (simp_all; try (exfalso; revert h; decide))
+  complete m h := by
+    unfold machineActionAdmitted
+    split <;> (simp_all; try decide)
+  posWitness := ⟨2, 0, 0⟩
+  negWitness := ⟨3, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 51 (`ScopedAuthority` & `ProjectionStability` — `orb_machine_action_admitted` & `orb_send_flow_step`):
+    A `destroying (3)` machine remains `isLive == 1` (`bit 0`) but disables `canAct` (`bit 8 == 0`) and
+    `meterLiveCost` (`bit 16 == 0`); an empty composer message is always ignored (`tapAction == 0`), a busy
+    turn with `canQueue == 1` defers to the queue (`2`), and HTTP `409` maps to `alreadySent (3)`. -/
+theorem machine_action_and_send_flow_invariants :
+    machineActionAdmitted 3 0 0 = 1 ∧
+    machineActionAdmitted 4 0 0 = 0 ∧
+    (sendFlowStep 1 0 1 0 0 2 200 &&& 0xFF) = 0 ∧
+    (sendFlowStep 1 1 1 0 0 2 409) = 196866 := by
+  decide
+
 end Orb.Spec

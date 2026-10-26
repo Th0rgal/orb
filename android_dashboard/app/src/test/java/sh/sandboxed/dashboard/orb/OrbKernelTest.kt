@@ -83,4 +83,70 @@ class OrbKernelTest {
         assertEquals(42L, raw and 0xFFFF_FFFFL)
         assertEquals(9L, (raw ushr 32) and 0xFFFF_FFFFL)
     }
+
+    @Test
+    fun wave7DomainGatesAndSteppersMatchLeanSpec() {
+        // Scroll policy
+        assertEquals(3817L, OrbKernel.orbScrollMaxTop(4442, 625))
+        assertEquals(101L, OrbKernel.orbScrollGap(4442, 625, 3716))
+        assertEquals(0, OrbKernel.orbScrollShowsJump(0, 4442, 625, 3716, 160))
+        assertEquals(1, OrbKernel.orbScrollShowsJump(0, 4442, 625, 2116, 160))
+        assertEquals(1, OrbKernel.orbScrollUserStep(4442, 625, 3796, 40))
+
+        // Stream coalescer, fence, commit, and token cost
+        assertEquals(10L, OrbKernel.orbStreamCoalescerStep(1, 10, 0, 0))
+        assertEquals(1L, OrbKernel.orbStreamCoalescerStep(1, 10, 4, 0) ushr 63)
+        assertEquals(1 to 3, OrbKernel.streamFenceStep(1, 3, 2, 3))
+        assertEquals(0 to 0, OrbKernel.streamFenceStep(1, 3, 1, 3))
+        val commitInFence = OrbKernel.streamCommitStep(false, 1, 3, true, false, 0, 0, 5, 2)
+        assertFalse(commitInFence.commits)
+        assertEquals(2, commitInFence.commit)
+        assertEquals(152L, OrbKernel.streamTokenCostStep(100, 40, 12))
+
+        // Mission state classification & flags
+        assertEquals(0, OrbKernel.missionSortRank(11))
+        assertEquals(1, OrbKernel.missionSortRank(16))
+        assertEquals(2, OrbKernel.missionSortRank(17))
+        assertEquals(9, OrbKernel.missionSortRank(99))
+        assertEquals(0, OrbKernel.missionInboxSection(0))
+        assertEquals(1, OrbKernel.missionInboxSection(11))
+        assertEquals(2, OrbKernel.missionInboxSection(22))
+        assertEquals(3, OrbKernel.missionInboxSection(23))
+        assertEquals(66, OrbKernel.missionFlags(25) and 66)
+
+        // Connection issue triage
+        val okConn = OrbKernel.connectionIssueClassify(false, false, true, true, true)
+        assertFalse(okConn.showIssue)
+        val proxyConn = OrbKernel.connectionIssueClassify(true, false, true, true, true)
+        assertTrue(proxyConn.showIssue)
+        assertFalse(proxyConn.recommendDefault)
+        assertEquals(1, proxyConn.messageKind)
+        val lanConn = OrbKernel.connectionIssueClassify(true, false, true, true, false)
+        assertTrue(lanConn.recommendDefault)
+        assertEquals(2, lanConn.messageKind)
+
+        // Worked duration, turn outcome, numeric cell, file ref span, machine action, send flow
+        val dur = OrbKernel.orbWorkedDurationBucket(185)
+        assertEquals(1L, dur and 0xFFL)
+        assertEquals(5L, (dur ushr 8) and 0xFFL)
+        assertEquals(3L, (dur ushr 32) and 0xFFFF_FFFFL)
+        assertEquals(1, OrbKernel.orbTurnOutcomeStep(0, 0, 2, 0, 0, 1))
+        assertEquals(256, OrbKernel.orbTurnOutcomeStep(1, 0, 2, 0, 1, 1))
+        assertTrue(OrbKernel.numericCellAdmitted(true, true, true, true))
+        assertFalse(OrbKernel.numericCellAdmitted(true, true, false, true))
+        assertEquals(true to 6, OrbKernel.fileRefLineSpan(10, 15, 20))
+        assertEquals(false to 0, OrbKernel.fileRefLineSpan(15, 10, 20))
+        val online = OrbKernel.machineActionAdmitted(2, false, false)
+        assertTrue(online.isLive && online.canAct && online.meterLiveCost)
+        val destroying = OrbKernel.machineActionAdmitted(3, false, false)
+        assertTrue(destroying.isLive && !destroying.canAct && !destroying.meterLiveCost)
+        val send = OrbKernel.sendFlowStep(true, true, true, false, false, 2, 204)
+        assertEquals(2, send.tapAction)
+        assertTrue(send.canDrain)
+        assertEquals(1, send.editOutcome)
+
+        // LeanSys mobile Jetsam and worker budgets
+        assertEquals(1, OrbKernel.leansysVerifyIosJetsamBudget(100_000_000L, 16_384L, 1_400_000_000L, 16_383L, 0))
+        assertEquals(1, OrbKernel.leansysVerifyWorkerBudget(4L, 6L, 8L, 4096L, 1))
+    }
 }

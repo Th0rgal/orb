@@ -6,7 +6,14 @@ import Foundation
 enum OrbPipeTables {
     static func isNumericCell(_ cell: String) -> Bool {
         let t = cell.trimmingCharacters(in: .whitespaces)
-        return t.range(of: "^[+\\-\u{2212}]?[$€£]?[0-9][0-9\u{00a0}\u{202f} ,.']*%?$", options: .regularExpression) != nil
+        let matches = t.range(of: "^[+\\-\u{2212}]?[$€£]?[0-9][0-9\u{00a0}\u{202f} ,.']*%?$", options: .regularExpression) != nil
+        let hasDigit = t.contains { $0 >= "0" && $0 <= "9" }
+        return OrbKernel.numericCellAdmitted(
+            nonEmpty: !t.isEmpty,
+            hasLeadingDigitOrSign: matches,
+            hasDigit: hasDigit,
+            allAllowedChars: matches
+        )
     }
 
     private static func isSpace(_ c: Character?) -> Bool { c.map { $0 == " " || $0 == "\t" } ?? false }

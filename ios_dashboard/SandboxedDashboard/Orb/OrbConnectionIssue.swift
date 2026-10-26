@@ -71,36 +71,56 @@ enum OrbConnection {
 
     static func issue(serverURL: String, error: String?, unreachable: Bool? = nil,
                       defaultReachable: Bool?, proxy: String? = nil) -> OrbConnectionIssue? {
-        guard unreachable ?? isUnreachable(error) else { return nil }
+        let isUnreach = unreachable ?? isUnreachable(error)
         let url = normalize(serverURL)
         let usingDefault = isDefault(url)
+        let isPrivate = isPrivateAddress(url)
+        let hasExternalProxy: Bool
         if let proxy, let proxyHost = proxy.split(separator: ":").first.map(String.init), !proxyHost.isEmpty,
            host(url) != proxyHost {
+            hasExternalProxy = true
+        } else {
+            hasExternalProxy = false
+        }
+        let verdict = OrbKernel.connectionIssueClassify(
+            isUnreachable: isUnreach,
+            isUsingDefault: usingDefault,
+            isPrivateAddr: isPrivate,
+            defaultReachable: defaultReachable == true,
+            hasExternalProxy: hasExternalProxy
+        )
+        guard verdict.showIssue else { return nil }
+        if verdict.messageKind == 1, let proxy {
             return OrbConnectionIssue(
                 title: "Can’t reach your Orb server",
                 message: "Your device sends web traffic through a proxy at \(proxy), and the connection failed. Check or remove the proxy in your Wi-Fi settings, then try again.",
-                serverURL: url, offerUseDefault: !usingDefault, recommendDefault: false,
+                serverURL: url, offerUseDefault: verdict.offerUseDefault, recommendDefault: verdict.recommendDefault,
                 technicalDetail: error ?? "", proxy: proxy)
         }
-        let isPrivate = isPrivateAddress(url)
-        let recommend = !usingDefault && isPrivate && defaultReachable == true
         let message: String
-        if recommend {
+        switch verdict.messageKind {
+        case 2:
             message = "This looks like a local network address and it isn’t answering, but the default Orb server is online. Switch to the default server, or change the address."
-        } else if isPrivate {
+        case 3:
             message = "This is a local network address. Make sure you’re on the same network and the server is running, or change the address."
-        } else if usingDefault {
+        case 4:
             message = "Check your internet connection and try again."
-        } else {
+        default:
             message = "Check the address and your connection, or switch to the default server."
         }
         return OrbConnectionIssue(title: "Can’t reach your Orb server", message: message, serverURL: url,
-                                  offerUseDefault: !usingDefault, recommendDefault: recommend,
+                                  offerUseDefault: verdict.offerUseDefault, recommendDefault: verdict.recommendDefault,
                                   technicalDetail: error ?? "")
     }
 
     static func shouldProbeDefault(serverURL: String, unreachable: Bool) -> Bool {
-        unreachable && !isDefault(serverURL) && isPrivateAddress(serverURL)
+        OrbKernel.connectionIssueClassify(
+            isUnreachable: unreachable,
+            isUsingDefault: isDefault(serverURL),
+            isPrivateAddr: isPrivateAddress(serverURL),
+            defaultReachable: false,
+            hasExternalProxy: false
+        ).shouldProbeDefault
     }
 
     /// GET /api/health on the default server without credentials.

@@ -96,17 +96,35 @@ struct OrbStreamCommit: Equatable {
     }
 
     static func nextFence(_ open: Marker?, _ m: Marker?) -> Marker? {
-        guard let open else { return m }
-        if let m, m.backtick == open.backtick, open.count <= m.count { return nil }
-        return open
+        let openKind = open.map { $0.backtick ? 1 : 2 } ?? 0
+        let openCount = open?.count ?? 0
+        let markerKind = m.map { $0.backtick ? 1 : 2 } ?? 0
+        let markerCount = m?.count ?? 0
+        let res = OrbKernel.streamFenceStep(openKind: openKind, openCount: openCount, markerKind: markerKind, markerCount: markerCount)
+        guard res.kind != 0 else { return nil }
+        return Marker(backtick: res.kind == 1, count: res.count)
     }
 
     mutating func scan(_ line: Line) {
-        let nextTick = line.tick ? !tick : tick
-        let nextFence = Self.nextFence(fence, line.marker)
-        let commits = line.blank && !nextTick && nextFence == nil
-        tick = nextTick; fence = nextFence; pos += 1
-        if commits { commit = pos }
+        let openKind = fence.map { $0.backtick ? 1 : 2 } ?? 0
+        let openCount = fence?.count ?? 0
+        let markerKind = line.marker.map { $0.backtick ? 1 : 2 } ?? 0
+        let markerCount = line.marker?.count ?? 0
+        let res = OrbKernel.streamCommitStep(
+            tick: tick,
+            openKind: openKind,
+            openCount: openCount,
+            lineBlank: line.blank,
+            lineTick: line.tick,
+            markerKind: markerKind,
+            markerCount: markerCount,
+            pos: pos,
+            commit: commit
+        )
+        tick = res.tick
+        fence = res.openKind == 0 ? nil : Marker(backtick: res.openKind == 1, count: res.openCount)
+        pos = res.pos
+        commit = res.commit
     }
 
     /// The UTF-8 offset in `text` where the committed prefix ends: after the newline of the
@@ -152,7 +170,7 @@ final class OrbStreamBlocks {
             prefix += chunk
         }
         let tail = String(Substring(rest.utf8[end...]))
-        parsedBytes += advance + tail.utf8.count
+        parsedBytes = OrbKernel.streamTokenCostStep(prevCost: parsedBytes, newAdvance: advance, tailBytes: tail.utf8.count)
         return prefixBlocks + OrbNativeMarkdownView.parseBlocks(tail)
     }
 }

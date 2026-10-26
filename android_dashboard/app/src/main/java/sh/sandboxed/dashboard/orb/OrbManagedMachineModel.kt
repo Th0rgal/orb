@@ -195,9 +195,22 @@ object OrbManagedMachines {
     fun revert(machines: List<ManagedMachine>, original: ManagedMachine): List<ManagedMachine> =
         machines.map { if (it.id == original.id) original else it }
 
-    fun isLive(m: ManagedMachine): Boolean = m.state != "destroyed" && m.state != "failed" && m.state != "stopped"
+    private fun stateKind(state: String): Int = when (state) {
+        "provisioning" -> 0
+        "enrolling" -> 1
+        "online" -> 2
+        "destroying" -> 3
+        "destroyed" -> 4
+        "failed" -> 5
+        "stopped" -> 6
+        else -> 2
+    }
 
-    fun canAct(m: ManagedMachine): Boolean = isLive(m) && m.state != "destroying"
+    fun isLive(m: ManagedMachine): Boolean =
+        OrbKernel.machineActionAdmitted(stateKind(m.state)).isLive
+
+    fun canAct(m: ManagedMachine): Boolean =
+        OrbKernel.machineActionAdmitted(stateKind(m.state)).canAct
 
     fun parseTime(s: String?): Long? {
         if (s.isNullOrBlank()) return null

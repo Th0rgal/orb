@@ -70,7 +70,15 @@ final class OrbTranscriptScroller {
     /// The jump pill only appears once the latest message is clearly out of view.
     static let pillThreshold: CGFloat = 160
 
-    var showsJumpToLatest: Bool { !pinned && metrics.scrollable && metrics.distanceFromBottom > Self.pillThreshold }
+    var showsJumpToLatest: Bool {
+        OrbKernel.scrollShowsJump(
+            pinned: pinned,
+            content: Int(max(0, metrics.contentHeight.rounded())),
+            viewport: Int(max(0, metrics.visibleHeight.rounded())),
+            top: Int(max(0, (metrics.offsetY + metrics.topInset).rounded())),
+            pillThreshold: Int(Self.pillThreshold)
+        )
+    }
 
     func scrollToBottom(animated: Bool = false) {
         pinned = true
@@ -114,7 +122,14 @@ final class OrbTranscriptScroller {
             interacting = true
         case .idle, .animating:
             interacting = false
-            if metrics.distanceFromBottom <= Self.pinTolerance { pinned = true }
+            if OrbKernel.scrollUserStep(
+                content: Int(max(0, metrics.contentHeight.rounded())),
+                viewport: Int(max(0, metrics.visibleHeight.rounded())),
+                top: Int(max(0, (metrics.offsetY + metrics.topInset).rounded())),
+                threshold: Int(Self.pinTolerance)
+            ) {
+                pinned = true
+            }
         @unknown default:
             interacting = false
         }

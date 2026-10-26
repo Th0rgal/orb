@@ -326,6 +326,10 @@ enum OrbFileRefs {
         guard let bytes, bytes >= 0 else { return nil }
         return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
+
+    static func validLineSpan(startLine: Int, endLine: Int, totalLines: Int = 0) -> (admitted: Bool, count: Int) {
+        OrbKernel.fileRefLineSpan(startLine: startLine, endLine: endLine, totalLines: totalLines)
+    }
 }
 
 // MARK: - Code highlighting (pure; the views map kinds to colours)

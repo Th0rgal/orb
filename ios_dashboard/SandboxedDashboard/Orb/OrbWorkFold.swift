@@ -182,10 +182,17 @@ struct OrbWorkModel: Equatable {
                 }
                 // A failure after an answer still means the turn stopped.
                 let failed = event.metadata["success"]?.value as? Bool == false
-                if failed { model.outcomeAfterTodos = .stopped; model.todosFailed = true }
-                else if !model.todosFailed, !event.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    model.outcomeAfterTodos = .finished
-                }
+                let nonEmpty = !event.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let step = OrbKernel.turnOutcomeStep(
+                    prevFinished: model.outcomeAfterTodos == .finished,
+                    prevFailed: model.todosFailed,
+                    eventKind: 2,
+                    isNarration: false,
+                    isSuccessFalse: failed,
+                    isTextNonEmpty: nonEmpty
+                )
+                model.outcomeAfterTodos = step.finished ? .finished : .stopped
+                model.todosFailed = step.todosFailed
 
             default:
                 break

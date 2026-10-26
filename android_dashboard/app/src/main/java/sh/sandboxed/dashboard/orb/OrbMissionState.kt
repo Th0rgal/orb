@@ -47,14 +47,15 @@ enum class MissionState(
     Acknowledged("acknowledged", "Archived", MissionCategory.Archived),
     Archived("archived", "Archived", MissionCategory.Archived);
 
-    val sortRank: Int get() = category.sortRank
+    private val flags: Int get() = OrbKernel.missionFlags(ordinal)
+    val sortRank: Int get() = OrbKernel.missionSortRank(ordinal)
     /** Running or queued: work may still happen without the user. */
-    val live: Boolean get() = category == MissionCategory.Live || category == MissionCategory.Queued
+    val live: Boolean get() = (flags and 1) != 0
     /** Finished for good (done or failed); no pending question can apply. */
-    val terminal: Boolean get() = category == MissionCategory.Done || category == MissionCategory.Failed
+    val terminal: Boolean get() = (flags and 2) != 0
     /** Shown under "Needs attention": waiting on the user, blocked, or failed. */
     val needsAttention: Boolean
-        get() = category == MissionCategory.Waiting || category == MissionCategory.Blocked || category == MissionCategory.Failed
+        get() = (flags and 4) != 0
 
     companion object {
         private val byWire = entries.associateBy { it.wire }

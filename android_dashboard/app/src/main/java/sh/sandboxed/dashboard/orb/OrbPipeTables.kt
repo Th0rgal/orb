@@ -10,7 +10,17 @@ object OrbPipeTables {
     private val blockStart = Regex("^(#|>|[-*+]\\s|[0-9]+[.)]\\s)")
     private val separator = Regex("^:?-+:?$")
 
-    fun isNumericCell(cell: String): Boolean = numeric.matches(cell.trim())
+    fun isNumericCell(cell: String): Boolean {
+        val t = cell.trim()
+        val matches = numeric.matches(t)
+        val hasDigit = t.any { it in '0'..'9' }
+        return OrbKernel.numericCellAdmitted(
+            nonEmpty = t.isNotEmpty(),
+            hasLeadingDigitOrSign = matches,
+            hasDigit = hasDigit,
+            allAllowedChars = matches
+        )
+    }
 
     private fun isSpace(c: Char?) = c == ' ' || c == '\t'
 

@@ -104,7 +104,22 @@ enum OrbManaged {
         if let i = copy.machines.firstIndex(where: { $0.id == id }) { copy.machines[i].state = "destroying" }
         return copy
     }
-    static func isLive(_ m: OrbManagedMachine) -> Bool { m.state != "destroyed" && m.state != "failed" && m.state != "stopped" }
+    private static func stateKind(_ state: String) -> Int {
+        switch state {
+        case "provisioning": 0
+        case "enrolling": 1
+        case "online": 2
+        case "destroying": 3
+        case "destroyed": 4
+        case "failed": 5
+        case "stopped": 6
+        default: 3
+        }
+    }
+
+    static func isLive(_ m: OrbManagedMachine) -> Bool {
+        OrbKernel.machineActionAdmitted(stateKind: stateKind(m.state), isBusy: false, isMuted: false).isLive
+    }
 
     static func date(_ value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
@@ -140,7 +155,7 @@ enum OrbManaged {
     }
     /// Cost so far, extrapolated between polls so it ticks with the countdown.
     static func liveCost(_ m: OrbManagedMachine, fetchedAt: Date, now: Date = .now) -> Double {
-        guard ["online", "enrolling", "provisioning"].contains(m.state) else { return m.cost_usd }
+        guard OrbKernel.machineActionAdmitted(stateKind: stateKind(m.state), isBusy: false, isMuted: false).meterLiveCost else { return m.cost_usd }
         let until = min(now, date(m.expires_at) ?? now)
         return m.cost_usd + max(0, until.timeIntervalSince(fetchedAt)) / 3600 * m.usd_per_hour
     }

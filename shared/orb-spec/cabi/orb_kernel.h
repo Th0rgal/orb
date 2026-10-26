@@ -45,6 +45,29 @@ uint64_t orb_stats_settle_step(uint64_t, uint64_t, uint8_t);
 uint32_t orb_privilege_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t);
 uint32_t orb_bunker_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_deploy_gate_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t);
+uint64_t orb_scroll_max_top(uint64_t, uint64_t);
+uint64_t orb_scroll_clamp_top(uint64_t, uint64_t, uint64_t);
+uint64_t orb_scroll_gap(uint64_t, uint64_t, uint64_t);
+uint64_t orb_scroll_layout_step(uint8_t, uint64_t, uint64_t, uint64_t);
+uint8_t orb_scroll_user_step(uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_scroll_jump_step(uint64_t, uint64_t);
+uint64_t orb_scroll_correct(uint8_t, uint64_t, uint64_t, uint64_t);
+uint8_t orb_scroll_shows_jump(uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_stream_coalescer_step(uint8_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_stream_fence_step(uint8_t, uint32_t, uint8_t, uint32_t);
+uint64_t orb_stream_commit_step(uint8_t, uint8_t, uint32_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_stream_token_cost_step(uint64_t, uint64_t, uint64_t);
+uint8_t orb_mission_state_classify(uint8_t);
+uint8_t orb_mission_sort_rank(uint8_t);
+uint32_t orb_mission_flags(uint8_t);
+uint8_t orb_mission_inbox_section(uint8_t);
+uint32_t orb_connection_issue_classify(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_worked_duration_bucket(uint64_t);
+uint32_t orb_turn_outcome_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint8_t orb_numeric_cell_scan(uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_file_ref_line_span(uint32_t, uint32_t, uint32_t);
+uint32_t orb_machine_action_admitted(uint8_t, uint8_t, uint8_t);
+uint32_t orb_send_flow_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t);
 uint8_t leansys_verify_slice_bounds(uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_wal_frame(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_cas_digest(uint64_t, uint64_t, uint8_t);
@@ -66,6 +89,14 @@ uint8_t leansys_sse_frame_scan(uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, u
 uint8_t leansys_gfm_pipe_scan(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint8_t);
 uint8_t leansys_tag_scan(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 uint64_t leansys_transcript_index(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t leansys_verify_par_chunk(uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t leansys_verify_arena_disjoint(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t leansys_verify_snapshot_visibility(uint64_t, uint64_t, uint8_t);
+uint8_t leansys_verify_http_route_match(uint8_t, uint8_t, uint32_t, uint32_t);
+uint8_t leansys_verify_counterexample_triage(uint8_t, uint8_t, uint8_t, uint8_t);
+uint8_t leansys_verify_dag_wave_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t leansys_verify_ios_jetsam_budget(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
+uint8_t leansys_verify_worker_budget(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 #ifdef __cplusplus
 }
 #endif

@@ -151,14 +151,34 @@ enum OrbSendFlow {
     /// A tap on send never does nothing: while a send is in flight a follow-up is
     /// accepted at once as an optimistic queued row and posted once that send settles.
     static func tapAction(busy: Bool, content: String, canQueue: Bool) -> OrbTapAction {
-        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .ignore }
-        if !busy { return .send }
-        return canQueue ? .deferToQueue : .ignore
+        let nonEmpty = !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let step = OrbKernel.sendFlowStep(
+            isBusy: busy,
+            hasNonEmptyText: nonEmpty,
+            canQueue: canQueue,
+            awaitingAck: false,
+            isDraining: false,
+            pendingCount: 0,
+            httpStatus: 0
+        )
+        switch step.tapAction {
+        case 1: return .send
+        case 2: return .deferToQueue
+        default: return .ignore
+        }
     }
 
     /// Deferred follow-ups go out once the in-flight POST returned, whatever happens after.
     static func canDrain(awaitingAck: Bool, draining: Bool, pending: Int) -> Bool {
-        pending > 0 && !awaitingAck && !draining
+        OrbKernel.sendFlowStep(
+            isBusy: false,
+            hasNonEmptyText: false,
+            canQueue: false,
+            awaitingAck: awaitingAck,
+            isDraining: draining,
+            pendingCount: pending,
+            httpStatus: 0
+        ).canDrain
     }
 
     /// Start of the running turn: Core's latest user_message, unless this device just
@@ -174,10 +194,19 @@ enum OrbSendFlow {
 
     static func editOutcome(status: Int?) -> OrbEditOutcome {
         guard let status else { return .failed }
-        switch status {
-        case 200..<300: return .edited
-        case 404, 405: return .unsupported
-        case 409: return .alreadySent
+        let step = OrbKernel.sendFlowStep(
+            isBusy: false,
+            hasNonEmptyText: false,
+            canQueue: false,
+            awaitingAck: false,
+            isDraining: false,
+            pendingCount: 0,
+            httpStatus: status
+        )
+        switch step.editOutcome {
+        case 1: return .edited
+        case 2: return .unsupported
+        case 3: return .alreadySent
         default: return .failed
         }
     }

@@ -764,4 +764,376 @@ def deployGateStep
   else
     if baseOk then 1 else 0
 
+/-! ## Wave 7: Cross-Platform Mobile Kernel (`Orb.Scroll`, `Orb.Stream` & Domain State Machines) -/
+
+/--
+  Unboxed C-ABI Scroll Maximum Top (`orb_scroll_max_top`):
+  Largest valid scroll offset (`content - viewport` saturating at `0`).
+-/
+@[inline, export orb_scroll_max_top]
+def scrollMaxTop (content viewport : UInt64) : UInt64 :=
+  if viewport ≤ content then content - viewport else 0
+
+/--
+  Unboxed C-ABI Scroll Clamp Top (`orb_scroll_clamp_top`):
+  `top` clamped to `[0, scrollMaxTop content viewport]`.
+-/
+@[inline, export orb_scroll_clamp_top]
+def scrollClampTop (content viewport top : UInt64) : UInt64 :=
+  let mx := scrollMaxTop content viewport
+  if top ≤ mx then top else mx
+
+/--
+  Unboxed C-ABI Scroll Gap From Bottom (`orb_scroll_gap`):
+  Pixels between the viewport bottom and content bottom (`scrollMaxTop - scrollClampTop`).
+-/
+@[inline, export orb_scroll_gap]
+def scrollGap (content viewport top : UInt64) : UInt64 :=
+  let mx := scrollMaxTop content viewport
+  let cl := scrollClampTop content viewport top
+  if cl ≤ mx then mx - cl else 0
+
+/--
+  Unboxed C-ABI Scroll Layout Step (`orb_scroll_layout_step`):
+  Content or viewport resize (streaming delta, tool card, keyboard):
+  never modifies `pinned`; returns `scrollMaxTop` when `pinned == 1`, else `scrollClampTop`.
+-/
+@[inline, export orb_scroll_layout_step]
+def scrollLayoutStep (pinned : UInt8) (content viewport top : UInt64) : UInt64 :=
+  if pinned == 1 then scrollMaxTop content viewport else scrollClampTop content viewport top
+
+/--
+  Unboxed C-ABI Scroll User Step (`orb_scroll_user_step`):
+  User scroll gesture: returns the new `pinned : UInt8` (`1` iff `scrollGap content viewport top ≤ threshold`).
+-/
+@[inline, export orb_scroll_user_step]
+def scrollUserStep (content viewport top threshold : UInt64) : UInt8 :=
+  if scrollGap content viewport top ≤ threshold then 1 else 0
+
+/--
+  Unboxed C-ABI Scroll Jump To Bottom Step (`orb_scroll_jump_step`):
+  Explicit jump-to-bottom or send: returns `scrollMaxTop content viewport` (and pins to `1`).
+-/
+@[inline, export orb_scroll_jump_step]
+def scrollJumpStep (content viewport : UInt64) : UInt64 :=
+  scrollMaxTop content viewport
+
+/--
+  Unboxed C-ABI Scroll Post-Render Correction (`orb_scroll_correct`):
+  One correction after DOM/layout render: pulls to `scrollMaxTop` if `pinned == 1`, else clamps `top`.
+-/
+@[inline, export orb_scroll_correct]
+def scrollCorrect (pinned : UInt8) (content viewport top : UInt64) : UInt64 :=
+  if pinned == 1 then scrollMaxTop content viewport else scrollClampTop content viewport top
+
+/--
+  Unboxed C-ABI Scroll Jump Pill Visibility (`orb_scroll_shows_jump`):
+  Returns `1` iff `pinned == 0`, content is scrollable (`viewport + 24 < content`),
+  and `pillThreshold < scrollGap content viewport top`.
+-/
+@[inline, export orb_scroll_shows_jump]
+def scrollShowsJump (pinned : UInt8) (content viewport top pillThreshold : UInt64) : UInt8 :=
+  if pinned == 0 && viewport ≤ 18446744073709551591 && viewport + 24 < content &&
+     pillThreshold < scrollGap content viewport top then 1 else 0
+
+/--
+  Unboxed C-ABI Stream Coalescer Step (`orb_stream_coalescer_step`):
+  `op`: `0 = append`, `1 = frame/flush`, `2 = clear`.
+  Packs `bits 0..31 = nextShownLen : UInt32`, `bits 32..62 = nextPendingLen : UInt32` (31-bit),
+  `bit 63 = didRender : UInt8` (`1` iff `op == 1 && pendingLen > 0`).
+-/
+@[inline, export orb_stream_coalescer_step]
+def streamCoalescerStep (op : UInt8) (shownLen pendingLen deltaLen : UInt32) : UInt64 :=
+  if op == 0 then
+    let nextP := satAdd32 pendingLen deltaLen
+    shownLen.toUInt64 ||| ((nextP.toUInt64 &&& 2147483647) <<< 32)
+  else if op == 1 then
+    if pendingLen == 0 then
+      shownLen.toUInt64
+    else
+      let nextS := satAdd32 shownLen pendingLen
+      nextS.toUInt64 ||| ((1 : UInt64) <<< 63)
+  else
+    0
+
+@[inline] def streamNextFenceKind
+    (openKind : UInt8) (openCount : UInt32) (markerKind : UInt8) (markerCount : UInt32) : UInt8 :=
+  if openKind == 0 then
+    if (markerKind == 1 || markerKind == 2) && 3 ≤ markerCount then markerKind else 0
+  else
+    if markerKind == openKind && openCount ≤ markerCount && 3 ≤ markerCount then 0 else openKind
+
+@[inline] def streamNextFenceCount
+    (openKind : UInt8) (openCount : UInt32) (markerKind : UInt8) (markerCount : UInt32) : UInt32 :=
+  if openKind == 0 then
+    if (markerKind == 1 || markerKind == 2) && 3 ≤ markerCount then markerCount else 0
+  else
+    if markerKind == openKind && openCount ≤ markerCount && 3 ≤ markerCount then 0 else openCount
+
+/--
+  Unboxed C-ABI Stream Fence Step (`orb_stream_fence_step`):
+  `openKind / markerKind`: `0 = none`, `1 = backtick`, `2 = tilde`.
+  Packs `bits 0..7 = nextFenceKind : UInt8`, `bits 32..63 = nextFenceCount : UInt32`.
+-/
+@[inline, export orb_stream_fence_step]
+def streamFenceStep
+    (openKind : UInt8) (openCount : UInt32) (markerKind : UInt8) (markerCount : UInt32) : UInt64 :=
+  let nk := streamNextFenceKind openKind openCount markerKind markerCount
+  let nc := streamNextFenceCount openKind openCount markerKind markerCount
+  nk.toUInt64 ||| (nc.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Stream Commit Prefix Scanner Step (`orb_stream_commit_step`):
+  Advances one newline-terminated line of `OrbStreamCommit`:
+  - `nextTick = if lineTick == 1 then (1 - tick) else tick`
+  - `(nextFenceKind, nextFenceCount)` via `streamNextFenceKind` / `streamNextFenceCount`
+  - `commits = lineBlank == 1 && nextTick == 0 && nextFenceKind == 0`
+  - `nextPos = satAdd32 pos 1`, `nextCommit = if commits then nextPos else commit`
+  Packs `bit 0 = nextTick`, `bits 8..15 = nextFenceKind`, `bit 16 = commits`, `bits 32..63 = nextCommit`.
+-/
+@[inline, export orb_stream_commit_step]
+def streamCommitStep
+    (tick openKind : UInt8) (openCount : UInt32)
+    (lineBlank lineTick markerKind : UInt8) (markerCount pos commit : UInt32) : UInt64 :=
+  let nextTick : UInt8 := if lineTick == 1 then (if tick == 1 then 0 else 1) else (if tick == 1 then 1 else 0)
+  let nextFenceKind := streamNextFenceKind openKind openCount markerKind markerCount
+  let nextPos := satAdd32 pos 1
+  let commits : UInt8 := if lineBlank == 1 && nextTick == 0 && nextFenceKind == 0 then 1 else 0
+  let nextCommit : UInt32 := if commits == 1 then nextPos else commit
+  let nextFenceBits : UInt32 :=
+    if nextFenceKind == 1 then 256 else if nextFenceKind == 2 then 512 else 0
+  let commitBits : UInt32 := if commits == 1 then 65536 else 0
+  let lo32 : UInt32 := nextTick.toUInt32 ||| nextFenceBits ||| commitBits
+  lo32.toUInt64 ||| (nextCommit.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Stream Incremental Token Cost Step (`orb_stream_token_cost_step`):
+  Accumulates `prevCost + newAdvance + tailBytes` with `UInt64` saturation (never wraps).
+-/
+@[inline, export orb_stream_token_cost_step]
+def streamTokenCostStep (prevCost newAdvance tailBytes : UInt64) : UInt64 :=
+  let stepCost := statsSettle newAdvance tailBytes 0
+  statsSettle prevCost stepCost 0
+
+/--
+  Unboxed C-ABI Mission State Category Classifier (`orb_mission_state_classify`):
+  Maps `stateId` (`0..28`, `≥ 29 = unknown`) to `MissionCategory` (`0..9`):
+  - `0..8 (active..waiting_background)` -> `3 (live)`
+  - `9..10 (pending, queued)` -> `4 (queued)`
+  - `11..15 (awaiting_user..awaiting_approval)` -> `0 (waiting)`
+  - `16 (blocked)` -> `1 (blocked)`
+  - `17..21 (failed..timed_out)` -> `2 (failed)`
+  - `22..23 (interrupted, cancelled)` -> `6 (stopped)`
+  - `24 (paused)` -> `5 (paused)`
+  - `25..26 (completed, succeeded)` -> `7 (done)`
+  - `27..28 (acknowledged, archived)` -> `8 (archived)`
+  - `≥ 29` -> `9 (unknown)`
+-/
+@[inline, export orb_mission_state_classify]
+def missionStateClassify (stateId : UInt8) : UInt8 :=
+  if stateId ≤ 8 then 3
+  else if stateId ≤ 10 then 4
+  else if stateId ≤ 15 then 0
+  else if stateId == 16 then 1
+  else if stateId ≤ 21 then 2
+  else if stateId ≤ 23 then 6
+  else if stateId == 24 then 5
+  else if stateId ≤ 26 then 7
+  else if stateId ≤ 28 then 8
+  else 9
+
+/--
+  Unboxed C-ABI Mission Sort Rank (`orb_mission_sort_rank`):
+  Inbox urgency rank (`0 = waiting` .. `8 = archived`, `9 = unknown`).
+-/
+@[inline, export orb_mission_sort_rank]
+def missionSortRank (stateId : UInt8) : UInt8 :=
+  missionStateClassify stateId
+
+@[inline] def missionAwaitsReview (stateId : UInt8) : Bool :=
+  stateId == 11 || stateId == 12 || stateId == 16 || stateId == 17 ||
+  stateId == 20 || stateId == 22 || stateId == 24 || stateId == 25 || stateId == 26
+
+@[inline] def missionCategoryFlags (cat : UInt8) : UInt32 :=
+  if cat == 0 then 4
+  else if cat == 1 then 36
+  else if cat == 2 then 166
+  else if cat == 3 || cat == 4 then 1
+  else if cat == 7 then 194
+  else if cat == 6 || cat == 8 then 128
+  else 0
+
+@[inline] def missionExtraBits (stateId : UInt8) : UInt32 :=
+  if stateId == 11 || stateId == 12 || stateId == 24 || stateId == 25 || stateId == 26 then 8
+  else if stateId == 16 || stateId == 17 || stateId == 20 || stateId == 22 then 24
+  else 0
+
+/--
+  Unboxed C-ABI Mission Derived Flags (`orb_mission_flags`):
+  Packs 8 flags into `UInt32`:
+  - `bit 0 (1)`: `isActive / live` (`cat == 3 || cat == 4`)
+  - `bit 1 (2)`: `isTerminal / terminal` (`cat == 7 || cat == 2`)
+  - `bit 2 (4)`: `needsAttention` (`cat ≤ 2`)
+  - `bit 3 (8)`: `awaitsReview / unreadResponse`
+  - `bit 4 (16)`: `canRetry` (`stateId ∈ {16, 17, 20, 22}`)
+  - `bit 5 (32)`: `isProblem` (`cat == 1 || cat == 2`)
+  - `bit 6 (64)`: `isSuccess` (`cat == 7`)
+  - `bit 7 (128)`: `canReopen` (`cat == 7 || cat == 2 || cat == 6 || cat == 8`)
+-/
+@[inline, export orb_mission_flags]
+def missionFlags (stateId : UInt8) : UInt32 :=
+  missionCategoryFlags (missionStateClassify stateId) ||| missionExtraBits stateId
+
+/--
+  Unboxed C-ABI Mission Inbox Section (`orb_mission_inbox_section`):
+  `0 = working`, `1 = needsYou`, `2 = ready`, `3 = hidden`.
+-/
+@[inline, export orb_mission_inbox_section]
+def missionInboxSection (stateId : UInt8) : UInt8 :=
+  let cat := missionStateClassify stateId
+  if cat == 3 || cat == 4 then 0
+  else if cat ≤ 2 then 1
+  else if cat == 7 || cat == 5 then 2
+  else if cat == 6 then (if missionAwaitsReview stateId then 2 else 3)
+  else 3
+
+/--
+  Unboxed C-ABI Connection Issue Classifier (`orb_connection_issue_classify`):
+  Packs:
+  - `bit 0`: `showIssue` (`1` iff `isUnreachable == 1`)
+  - `bit 8`: `offerUseDefault` (`1` iff `isUnreachable == 1 && isUsingDefault == 0`)
+  - `bit 16`: `recommendDefault` (`1` iff `isUnreachable == 1 && hasExternalProxy == 0 && isUsingDefault == 0 && isPrivateAddr == 1 && defaultReachable == 1`)
+  - `bit 24`: `shouldProbeDefault` (`1` iff `isUnreachable == 1 && isUsingDefault == 0 && isPrivateAddr == 1`)
+  - `bits 28..31`: `messageKind` (`0 = none`, `1 = proxy`, `2 = recommend_default`, `3 = private_lan`, `4 = default_offline`, `5 = custom_unreachable`)
+-/
+@[inline, export orb_connection_issue_classify]
+def connectionIssueClassify
+    (isUnreachable isUsingDefault isPrivateAddr defaultReachable hasExternalProxy : UInt8) : UInt32 :=
+  if isUnreachable != 1 then 0
+  else
+    let offerDef : UInt32 := if isUsingDefault == 0 then 256 else 0
+    let probeDef : UInt32 := if isUsingDefault == 0 && isPrivateAddr == 1 then 16777216 else 0
+    if hasExternalProxy == 1 then
+      (1 : UInt32) ||| offerDef ||| probeDef ||| ((1 : UInt32) <<< 28)
+    else
+      let recDef : Bool := isUsingDefault == 0 && isPrivateAddr == 1 && defaultReachable == 1
+      let recBit : UInt32 := if recDef then 65536 else 0
+      let msgKind : UInt32 :=
+        if recDef then 2
+        else if isPrivateAddr == 1 then 3
+        else if isUsingDefault == 1 then 4
+        else 5
+      (1 : UInt32) ||| offerDef ||| recBit ||| probeDef ||| (msgKind <<< 28)
+
+/--
+  Unboxed C-ABI Worked Duration Bucket (`orb_worked_duration_bucket`):
+  Mirrors `OrbTurnTiming.workedFor(seconds)`:
+  - `seconds < 60`: `unit = 0 (s)`, `primary = seconds`, `secondary = 0`
+  - `seconds < 3600`: `unit = 1 (m)`, `primary = seconds / 60`, `secondary = seconds % 60`
+  - `seconds < 86400`: `unit = 2 (h)`, `primary = (seconds / 60) / 60`, `secondary = (seconds / 60) % 60`
+  - `seconds ≥ 86400`: `unit = 3 (d)`, `primary = (seconds / 3600) / 24`, `secondary = (seconds / 3600) % 24`
+  Packs `bits 0..7 = unit`, `bits 8..15 = secondary`, `bits 32..63 = primary (clamped to UInt32)`.
+-/
+@[inline, export orb_worked_duration_bucket]
+def workedDurationBucket (seconds : UInt64) : UInt64 :=
+  if seconds < 60 then
+    seconds <<< 32
+  else if seconds < 3600 then
+    let m := seconds / 60
+    let rem := seconds % 60
+    (1 : UInt64) ||| (rem <<< 8) ||| (m <<< 32)
+  else if seconds < 86400 then
+    let totalM := seconds / 60
+    let h := totalM / 60
+    let remM := totalM % 60
+    (2 : UInt64) ||| (remM <<< 8) ||| (h <<< 32)
+  else
+    let totalH := seconds / 3600
+    let d := if totalH / 24 ≤ 4294967295 then totalH / 24 else 4294967295
+    let remH := totalH % 24
+    (3 : UInt64) ||| (remH <<< 8) ||| (d <<< 32)
+
+/--
+  Unboxed C-ABI Turn Outcome Stepper (`orb_turn_outcome_step`):
+  `eventKind`: `0 = user_message`, `1 = todo_update`, `2 = assistant_message`.
+  Packs `bit 0 = nextOutcome (0 = stopped, 1 = finished)`, `bit 8 = nextTodosFailed (0/1)`.
+-/
+@[inline, export orb_turn_outcome_step]
+def turnOutcomeStep
+    (prevOutcome prevFailed eventKind isNarration isSuccessFalse isTextNonEmpty : UInt8) : UInt32 :=
+  if eventKind == 0 || eventKind == 1 then
+    0
+  else if eventKind == 2 then
+    if isNarration == 1 then
+      (if prevOutcome == 1 then 1 else 0) ||| (if prevFailed == 1 then 256 else 0)
+    else if isSuccessFalse == 1 then
+      256
+    else if prevFailed == 0 && isTextNonEmpty == 1 then
+      1
+    else
+      (if prevOutcome == 1 then 1 else 0) ||| (if prevFailed == 1 then 256 else 0)
+  else
+    (if prevOutcome == 1 then 1 else 0) ||| (if prevFailed == 1 then 256 else 0)
+
+/--
+  Unboxed C-ABI Pipe-Table Numeric Cell Gate (`orb_numeric_cell_scan`):
+  Returns `1` iff the trimmed cell is non-empty (`nonEmpty == 1`), starts with an optional
+  sign/currency and digit (`hasLeadingDigitOrSign == 1`), contains at least one ASCII digit
+  (`hasDigit == 1`), and every character belongs to the numeric cell alphabet (`allAllowedChars == 1`).
+-/
+@[inline, export orb_numeric_cell_scan]
+def numericCellScan
+    (nonEmpty hasLeadingDigitOrSign hasDigit allAllowedChars : UInt8) : UInt8 :=
+  if nonEmpty == 1 && hasLeadingDigitOrSign == 1 && hasDigit == 1 && allAllowedChars == 1 then 1 else 0
+
+/--
+  Unboxed C-ABI File Reference Line Span Gate (`orb_file_ref_line_span`):
+  Validates a 1-based `[startLine, endLine]` span against `totalLines` (`0` = unbounded):
+  Packs `bit 0 = admitted`, `bits 32..63 = spanLineCount (endLine - startLine + 1)`.
+-/
+@[inline, export orb_file_ref_line_span]
+def fileRefLineSpan (startLine endLine totalLines : UInt32) : UInt64 :=
+  if 1 ≤ startLine && startLine ≤ endLine && (totalLines == 0 || endLine ≤ totalLines) then
+    let count : UInt32 := endLine - startLine + 1
+    (1 : UInt64) ||| (count.toUInt64 <<< 32)
+  else
+    0
+
+/--
+  Unboxed C-ABI Managed Machine Action Gate (`orb_machine_action_admitted`):
+  `stateKind`: `0 = provisioning`, `1 = enrolling`, `2 = online`, `3 = destroying`,
+  `4 = destroyed`, `5 = failed`, `6 = stopped`.
+  Packs `bit 0 = isLive`, `bit 8 = canAct`, `bit 16 = meterLiveCost`.
+-/
+@[inline, export orb_machine_action_admitted]
+def machineActionAdmitted (stateKind isBusy isMuted : UInt8) : UInt32 :=
+  let isLive : UInt32 := if stateKind ≤ 3 then 1 else 0
+  let canAct : UInt32 := if stateKind ≤ 2 && isBusy == 0 && isMuted == 0 then 256 else 0
+  let meterCost : UInt32 := if stateKind ≤ 2 then 65536 else 0
+  isLive ||| canAct ||| meterCost
+
+/--
+  Unboxed C-ABI Send Flow & Queue Edit Stepper (`orb_send_flow_step`):
+  Packs:
+  - `bits 0..7 = tapAction`: `0 = ignore`, `1 = send`, `2 = deferToQueue`
+  - `bit 8 = canDrain`: `1` iff `pendingCount > 0 && awaitingAck == 0 && isDraining == 0`
+  - `bits 16..23 = editOutcome`: `0 = failed`, `1 = edited (200..299)`, `2 = unsupported (404/405)`, `3 = alreadySent (409)`
+-/
+@[inline, export orb_send_flow_step]
+def sendFlowStep
+    (isBusy hasNonEmptyText canQueue awaitingAck isDraining pendingCount : UInt8)
+    (httpStatus : UInt32) : UInt32 :=
+  let tap : UInt32 :=
+    if hasNonEmptyText == 0 then 0
+    else if isBusy == 0 then 1
+    else if canQueue == 1 then 2
+    else 0
+  let drain : UInt32 := if 0 < pendingCount && awaitingAck == 0 && isDraining == 0 then 256 else 0
+  let editOut : UInt32 :=
+    if 200 ≤ httpStatus && httpStatus < 300 then 1
+    else if httpStatus == 404 || httpStatus == 405 then 2
+    else if httpStatus == 409 then 3
+    else 0
+  tap ||| drain ||| (editOut <<< 16)
+
 end Orb.Kernel

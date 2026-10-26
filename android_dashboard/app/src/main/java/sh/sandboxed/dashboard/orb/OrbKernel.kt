@@ -8,7 +8,12 @@ object OrbKernel {
             System.loadLibrary("orb_kernel")
             true
         } catch (_: UnsatisfiedLinkError) {
+            val isMac = System.getProperty("os.name").orEmpty().lowercase().contains("mac")
+            val ext = if (isMac) "dylib" else "so"
             val candidates = listOf(
+                File("app/src/test/resources/jni/liborb_kernel.$ext"),
+                File("src/test/resources/jni/liborb_kernel.$ext"),
+                File("../android_dashboard/app/src/test/resources/jni/liborb_kernel.$ext"),
                 File("app/src/test/resources/jni/liborb_kernel.so"),
                 File("src/test/resources/jni/liborb_kernel.so"),
                 File("../android_dashboard/app/src/test/resources/jni/liborb_kernel.so")
@@ -70,6 +75,111 @@ object OrbKernel {
     ): Long
 
     @JvmStatic
+    external fun orbScrollMaxTop(content: Long, viewport: Long): Long
+
+    @JvmStatic
+    external fun orbScrollClampTop(content: Long, viewport: Long, top: Long): Long
+
+    @JvmStatic
+    external fun orbScrollGap(content: Long, viewport: Long, top: Long): Long
+
+    @JvmStatic
+    external fun orbScrollLayoutStep(pinned: Int, content: Long, viewport: Long, top: Long): Long
+
+    @JvmStatic
+    external fun orbScrollUserStep(content: Long, viewport: Long, top: Long, threshold: Long): Int
+
+    @JvmStatic
+    external fun orbScrollJumpStep(content: Long, viewport: Long): Long
+
+    @JvmStatic
+    external fun orbScrollCorrect(pinned: Int, content: Long, viewport: Long, top: Long): Long
+
+    @JvmStatic
+    external fun orbScrollShowsJump(pinned: Int, content: Long, viewport: Long, top: Long, pillThreshold: Long): Int
+
+    @JvmStatic
+    external fun orbStreamCoalescerStep(op: Int, shownLen: Int, pendingLen: Int, deltaLen: Int): Long
+
+    @JvmStatic
+    external fun orbStreamFenceStep(openKind: Int, openCount: Int, markerKind: Int, markerCount: Int): Long
+
+    @JvmStatic
+    external fun orbStreamCommitStep(
+        tick: Int,
+        openKind: Int,
+        openCount: Int,
+        lineBlank: Int,
+        lineTick: Int,
+        markerKind: Int,
+        markerCount: Int,
+        pos: Int,
+        commit: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbStreamTokenCostStep(prevCost: Long, newAdvance: Long, tailBytes: Long): Long
+
+    @JvmStatic
+    external fun orbMissionStateClassify(stateId: Int): Int
+
+    @JvmStatic
+    external fun orbMissionSortRank(stateId: Int): Int
+
+    @JvmStatic
+    external fun orbMissionFlags(stateId: Int): Int
+
+    @JvmStatic
+    external fun orbMissionInboxSection(stateId: Int): Int
+
+    @JvmStatic
+    external fun orbConnectionIssueClassify(
+        isUnreachable: Int,
+        isUsingDefault: Int,
+        isPrivateAddr: Int,
+        defaultReachable: Int,
+        hasExternalProxy: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbWorkedDurationBucket(seconds: Long): Long
+
+    @JvmStatic
+    external fun orbTurnOutcomeStep(
+        prevOutcome: Int,
+        prevFailed: Int,
+        eventKind: Int,
+        isNarration: Int,
+        isSuccessFalse: Int,
+        isTextNonEmpty: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbNumericCellScan(
+        nonEmpty: Int,
+        hasLeadingDigitOrSign: Int,
+        hasDigit: Int,
+        allAllowedChars: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbFileRefLineSpan(startLine: Int, endLine: Int, totalLines: Int): Long
+
+    @JvmStatic
+    external fun orbMachineActionAdmitted(stateKind: Int, isBusy: Int, isMuted: Int): Int
+
+    @JvmStatic
+    external fun orbSendFlowStep(
+        isBusy: Int,
+        hasNonEmptyText: Int,
+        canQueue: Int,
+        awaitingAck: Int,
+        isDraining: Int,
+        pendingCount: Int,
+        httpStatus: Int
+    ): Int
+
+    @JvmStatic
     external fun leansysSseFrameScan(
         frameOff: Long,
         frameLen: Long,
@@ -107,6 +217,24 @@ object OrbKernel {
         prevDigest: Long,
         blockHash: Long
     ): Long
+
+    @JvmStatic
+    external fun leansysVerifyIosJetsamBudget(
+        dirtyRssBytes: Long,
+        allocBytes: Long,
+        maxJetsamBytes: Long,
+        pageAlignMask: Long,
+        isAppExtension: Int
+    ): Int
+
+    @JvmStatic
+    external fun leansysVerifyWorkerBudget(
+        activeWorkers: Long,
+        maxWorkers: Long,
+        microChunks: Long,
+        totalLen: Long,
+        isMobileHetero: Int
+    ): Int
 
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
@@ -293,4 +421,265 @@ object OrbKernel {
 
     private fun subsliceOk(off: Long, len: Long, cap: Long): Boolean =
         off >= 0 && len >= 0 && off <= cap && len <= cap - off
+
+    private fun bInt(v: Boolean): Int = if (v) 1 else 0
+
+    fun missionStateClassify(stateId: Int): Int =
+        if (nativeLoaded) orbMissionStateClassify(stateId)
+        else when {
+            stateId in 0..8 -> 3
+            stateId in 9..10 -> 4
+            stateId in 11..15 -> 0
+            stateId == 16 -> 1
+            stateId in 17..21 -> 2
+            stateId in 22..23 -> 6
+            stateId == 24 -> 5
+            stateId in 25..26 -> 7
+            stateId in 27..28 -> 8
+            else -> 9
+        }
+
+    fun missionSortRank(stateId: Int): Int =
+        if (nativeLoaded) orbMissionSortRank(stateId) else missionStateClassify(stateId)
+
+    fun missionFlags(stateId: Int): Int =
+        if (nativeLoaded) orbMissionFlags(stateId)
+        else {
+            val cat = missionStateClassify(stateId)
+            val base = when (cat) {
+                0 -> 4
+                1 -> 36
+                2 -> 166
+                3, 4 -> 1
+                7 -> 194
+                6, 8 -> 128
+                else -> 0
+            }
+            val extra = when (stateId) {
+                11, 12, 24, 25, 26 -> 8
+                16, 17, 20, 22 -> 24
+                else -> 0
+            }
+            base or extra
+        }
+
+    fun missionInboxSection(stateId: Int): Int =
+        if (nativeLoaded) orbMissionInboxSection(stateId)
+        else when (val cat = missionStateClassify(stateId)) {
+            3, 4 -> 0
+            0, 1, 2 -> 1
+            7, 5 -> 2
+            6 -> if (stateId == 22) 2 else 3
+            else -> 3
+        }
+
+    data class ConnectionIssueVerdict(
+        val showIssue: Boolean,
+        val offerUseDefault: Boolean,
+        val recommendDefault: Boolean,
+        val shouldProbeDefault: Boolean,
+        val messageKind: Int
+    )
+
+    fun connectionIssueClassify(
+        isUnreachable: Boolean,
+        isUsingDefault: Boolean,
+        isPrivateAddr: Boolean,
+        defaultReachable: Boolean,
+        hasExternalProxy: Boolean
+    ): ConnectionIssueVerdict {
+        val raw = if (nativeLoaded) {
+            orbConnectionIssueClassify(
+                bInt(isUnreachable),
+                bInt(isUsingDefault),
+                bInt(isPrivateAddr),
+                bInt(defaultReachable),
+                bInt(hasExternalProxy)
+            )
+        } else {
+            if (!isUnreachable) 0
+            else {
+                val offer = if (!isUsingDefault) 256 else 0
+                val probe = if (!isUsingDefault && isPrivateAddr) 16777216 else 0
+                if (hasExternalProxy) 1 or offer or probe or (1 shl 28)
+                else {
+                    val rec = !isUsingDefault && isPrivateAddr && defaultReachable
+                    val recBit = if (rec) 65536 else 0
+                    val kind = when {
+                        rec -> 2
+                        isPrivateAddr -> 3
+                        isUsingDefault -> 4
+                        else -> 5
+                    }
+                    1 or offer or recBit or probe or (kind shl 28)
+                }
+            }
+        }
+        return ConnectionIssueVerdict(
+            showIssue = (raw and 1) != 0,
+            offerUseDefault = ((raw ushr 8) and 1) != 0,
+            recommendDefault = ((raw ushr 16) and 1) != 0,
+            shouldProbeDefault = ((raw ushr 24) and 1) != 0,
+            messageKind = (raw ushr 28) and 0xF
+        )
+    }
+
+    fun numericCellAdmitted(
+        nonEmpty: Boolean,
+        hasLeadingDigitOrSign: Boolean,
+        hasDigit: Boolean,
+        allAllowedChars: Boolean
+    ): Boolean = if (nativeLoaded) {
+        orbNumericCellScan(
+            bInt(nonEmpty),
+            bInt(hasLeadingDigitOrSign),
+            bInt(hasDigit),
+            bInt(allAllowedChars)
+        ) != 0
+    } else {
+        nonEmpty && hasLeadingDigitOrSign && hasDigit && allAllowedChars
+    }
+
+    fun fileRefLineSpan(startLine: Int, endLine: Int, totalLines: Int = 0): Pair<Boolean, Int> {
+        if (startLine < 0 || endLine < 0 || totalLines < 0) return false to 0
+        val raw = if (nativeLoaded) {
+            orbFileRefLineSpan(startLine, endLine, totalLines)
+        } else {
+            if (startLine >= 1 && startLine <= endLine && (totalLines == 0 || endLine <= totalLines)) {
+                val count = (endLine - startLine + 1).toLong()
+                1L or (count shl 32)
+            } else 0L
+        }
+        return ((raw and 1L) != 0L) to ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+    }
+
+    data class MachineActionVerdict(val isLive: Boolean, val canAct: Boolean, val meterLiveCost: Boolean)
+
+    fun machineActionAdmitted(stateKind: Int, isBusy: Boolean = false, isMuted: Boolean = false): MachineActionVerdict {
+        val raw = if (nativeLoaded) {
+            orbMachineActionAdmitted(stateKind.coerceIn(0, 255), bInt(isBusy), bInt(isMuted))
+        } else {
+            val live = if (stateKind in 0..3) 1 else 0
+            val act = if (stateKind in 0..2 && !isBusy && !isMuted) 256 else 0
+            val meter = if (stateKind in 0..2) 65536 else 0
+            live or act or meter
+        }
+        return MachineActionVerdict(
+            isLive = (raw and 1) != 0,
+            canAct = ((raw ushr 8) and 1) != 0,
+            meterLiveCost = ((raw ushr 16) and 1) != 0
+        )
+    }
+
+    data class SendFlowVerdict(val tapAction: Int, val canDrain: Boolean, val editOutcome: Int)
+
+    fun sendFlowStep(
+        isBusy: Boolean = false,
+        hasNonEmptyText: Boolean = false,
+        canQueue: Boolean = false,
+        awaitingAck: Boolean = false,
+        isDraining: Boolean = false,
+        pendingCount: Int = 0,
+        httpStatus: Int = 0
+    ): SendFlowVerdict {
+        val raw = if (nativeLoaded) {
+            orbSendFlowStep(
+                bInt(isBusy),
+                bInt(hasNonEmptyText),
+                bInt(canQueue),
+                bInt(awaitingAck),
+                bInt(isDraining),
+                pendingCount.coerceIn(0, 255),
+                maxOf(0, httpStatus)
+            )
+        } else {
+            val tap = if (!hasNonEmptyText) 0 else if (!isBusy) 1 else if (canQueue) 2 else 0
+            val drain = if (pendingCount > 0 && !awaitingAck && !isDraining) 256 else 0
+            val edit = when {
+                httpStatus in 200..299 -> 1
+                httpStatus == 404 || httpStatus == 405 -> 2
+                httpStatus == 409 -> 3
+                else -> 0
+            }
+            tap or drain or (edit shl 16)
+        }
+        return SendFlowVerdict(
+            tapAction = raw and 0xFF,
+            canDrain = ((raw ushr 8) and 1) != 0,
+            editOutcome = (raw ushr 16) and 0xFF
+        )
+    }
+
+    data class StreamCommitVerdict(
+        val tick: Boolean,
+        val openKind: Int,
+        val openCount: Int,
+        val commits: Boolean,
+        val pos: Int,
+        val commit: Int
+    )
+
+    fun streamFenceStep(openKind: Int, openCount: Int, markerKind: Int, markerCount: Int): Pair<Int, Int> {
+        val raw = if (nativeLoaded) {
+            orbStreamFenceStep(openKind, openCount, markerKind, markerCount)
+        } else {
+            val nk = if (openKind == 0) {
+                if ((markerKind == 1 || markerKind == 2) && markerCount >= 3) markerKind else 0
+            } else {
+                if (markerKind == openKind && openCount <= markerCount && markerCount >= 3) 0 else openKind
+            }
+            val nc = if (openKind == 0) {
+                if ((markerKind == 1 || markerKind == 2) && markerCount >= 3) markerCount else 0
+            } else {
+                if (markerKind == openKind && openCount <= markerCount && markerCount >= 3) 0 else openCount
+            }
+            nk.toLong() or (nc.toLong() shl 32)
+        }
+        return (raw and 0xFFL).toInt() to ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+    }
+
+    fun streamCommitStep(
+        tick: Boolean,
+        openKind: Int,
+        openCount: Int,
+        lineBlank: Boolean,
+        lineTick: Boolean,
+        markerKind: Int,
+        markerCount: Int,
+        pos: Int,
+        commit: Int
+    ): StreamCommitVerdict {
+        val fence = streamFenceStep(openKind, openCount, markerKind, markerCount)
+        val raw = if (nativeLoaded) {
+            orbStreamCommitStep(
+                bInt(tick),
+                openKind,
+                openCount,
+                bInt(lineBlank),
+                bInt(lineTick),
+                markerKind,
+                markerCount,
+                pos,
+                commit
+            )
+        } else {
+            val nextTick = if (lineTick) !tick else tick
+            val commits = lineBlank && !nextTick && fence.first == 0
+            val nextCommit = if (commits) pos + 1 else commit
+            val lo = (if (nextTick) 1L else 0L) or ((fence.first.toLong() and 0xFFL) shl 8) or (if (commits) 65536L else 0L)
+            lo or (nextCommit.toLong() shl 32)
+        }
+        return StreamCommitVerdict(
+            tick = (raw and 1L) != 0L,
+            openKind = ((raw ushr 8) and 0xFFL).toInt(),
+            openCount = fence.second,
+            commits = ((raw ushr 16) and 1L) != 0L,
+            pos = pos + 1,
+            commit = ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+        )
+    }
+
+    fun streamTokenCostStep(prevCost: Long, newAdvance: Long, tailBytes: Long): Long =
+        if (nativeLoaded) orbStreamTokenCostStep(maxOf(0L, prevCost), maxOf(0L, newAdvance), maxOf(0L, tailBytes))
+        else prevCost + newAdvance + tailBytes
 }

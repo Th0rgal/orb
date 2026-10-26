@@ -35,6 +35,8 @@ targets:
         type: folder
         buildPhase: resources
       - path: OrbLiveActivity/Shared
+      - path: ../shared/orb-spec/cabi/orb_kernel_unboxed.c
+        createIntermediateGroups: false
     settings:
       base:
         INFOPLIST_FILE: SandboxedDashboard/Info.plist
@@ -60,6 +62,8 @@ targets:
         excludes:
           - "**/.DS_Store"
           - "Info.plist"
+      - path: ../shared/orb-spec/cabi/orb_kernel_unboxed.c
+        createIntermediateGroups: false
     settings:
       base:
         INFOPLIST_FILE: OrbLiveActivity/Info.plist
