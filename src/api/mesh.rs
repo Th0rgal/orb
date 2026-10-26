@@ -20,7 +20,6 @@
 //!   `verify_formal(0, 0, now)`.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -34,7 +33,8 @@ use axum::{
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use lean_mesh::{
-    check_endpoint_roam, select_relay_path, step_bunker_isolate, verify_frame_bounds,
+    canonical_canary_evidence_sha256_hex, check_endpoint_roam, select_relay_path,
+    step_bunker_isolate, verify_canary_trip_signature, verify_frame_bounds,
     verify_heartbeat_signature, verify_jit_lease, verify_render_auth_signature,
     verify_roam_signature, BunkerState as MeshBunkerState, BunkerTransition, MeshManifest,
     MeshProto, NodeClass, RelayPathKind, ReplayWindow64, RouteDecision, LEAN_MESH_DEFAULT_WG_PORT,
@@ -70,6 +70,8 @@ pub struct PersistedMeshState {
     pub peer_roam: BTreeMap<String, PeerRoamState>,
     #[serde(default)]
     pub heartbeat_replay: BTreeMap<String, ReplayWindow64>,
+    #[serde(default)]
+    pub canary_replay: BTreeMap<String, ReplayWindow64>,
     pub last_heartbeat_at: u64,
     pub is_sovereign_node: bool,
     #[serde(default = "default_bunker_normal")]
@@ -102,6 +104,7 @@ impl PersistedMeshState {
             },
             peer_roam: BTreeMap::new(),
             heartbeat_replay: BTreeMap::new(),
+            canary_replay: BTreeMap::new(),
             last_heartbeat_at: now_epoch,
             is_sovereign_node: true,
             bunker_state: MeshBunkerState::HardLockdown,
@@ -352,6 +355,7 @@ impl MeshStore {
                                         manifest,
                                         peer_roam: BTreeMap::new(),
                                         heartbeat_replay: BTreeMap::new(),
+                                        canary_replay: BTreeMap::new(),
                                         last_heartbeat_at: now,
                                         is_sovereign_node: true,
                                         bunker_state: MeshBunkerState::Normal,
@@ -557,6 +561,205 @@ pub fn process_heartbeat_step(
     );
     state.bunker_state = transition.next_state;
     Ok(transition)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanaryTripwireRequest {
+    pub peer_name: String,
+    pub canary_kind: String,
+    pub event_seq: u64,
+    pub timestamp: u64,
+    #[serde(default)]
+    pub dry_run: bool,
+    pub reason: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub cgroup: Option<String>,
+    #[serde(default)]
+    pub cmdline: Option<String>,
+    pub detail_sha256_hex: String,
+    pub signature_hex: String,
+}
+
+/// Pure server-side canary tripwire verification & mesh bunker escalation step.
+///
+/// Enforces:
+/// 1. `state` must not be in fail-closed `corrupted_state`.
+/// 2. `peer_name` must exist in the signed `MeshManifest`, not be revoked, and not be expired.
+/// 3. `detail_sha256_hex` must match `canonical_canary_evidence_sha256_hex(reason, pid, uid, cgroup, cmdline)`.
+/// 4. `timestamp` must be within `[-LEAN_MESH_SOVEREIGN_DEADMAN_SECS, +30s]` of `now_epoch`.
+/// 5. Ed25519 `signature_hex` over `("lean-mesh-canary-v1", peer_name, canary_kind, event_seq, timestamp, dry_run, detail_sha256_hex)`
+///    must verify against the peer's manifest-pinned `peer.sign_pubkey_hex`.
+/// 6. Only after all cryptographic checks succeed does `canary_replay` (`ReplayWindow64`)
+///    check and advance `event_seq` (preventing unauthenticated packets from shifting the window).
+/// 7. When `dry_run == false`, transitions `state.bunker_state` via `step_bunker_isolate`
+///    with `canary_tripped = true, manual_trigger = 2` (`HardLockdown` or `SovereignDeadManTripped`).
+///    When `dry_run == true`, returns the simulated transition without mutating `state.bunker_state`.
+pub fn process_canary_tripwire_step(
+    state: &mut PersistedMeshState,
+    req: &CanaryTripwireRequest,
+    now_epoch: u64,
+) -> Result<(MeshBunkerState, BunkerTransition), (StatusCode, String)> {
+    if state.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mesh store is in fail-closed corrupted state".into(),
+        ));
+    }
+    let peer_name = req.peer_name.trim();
+    let canary_kind = req.canary_kind.trim();
+    let reason = req.reason.trim();
+    if peer_name.is_empty() || canary_kind.is_empty() || reason.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "peer_name, canary_kind, and reason must be non-empty".into(),
+        ));
+    }
+    let peer = state
+        .manifest
+        .find_peer(peer_name)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    if peer.revoked || now_epoch >= peer.expires_at {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "reporting peer is revoked or expired in manifest".into(),
+        ));
+    }
+    let peer_pubkey_hex = peer.sign_pubkey_hex.clone();
+
+    let expected_evidence_sha256 = canonical_canary_evidence_sha256_hex(
+        &req.reason,
+        req.pid,
+        req.uid,
+        req.cgroup.as_deref(),
+        req.cmdline.as_deref(),
+    );
+    if !expected_evidence_sha256.eq_ignore_ascii_case(req.detail_sha256_hex.trim()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "detail_sha256_hex does not match canonical forensic evidence digest".into(),
+        ));
+    }
+
+    let ts_fresh = req.timestamp <= now_epoch.saturating_add(30)
+        && now_epoch.saturating_sub(req.timestamp) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    if !ts_fresh {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "stale or future canary tripwire timestamp".into(),
+        ));
+    }
+
+    let sig_ok = verify_canary_trip_signature(
+        &peer_pubkey_hex,
+        peer_name,
+        canary_kind,
+        req.event_seq,
+        req.timestamp,
+        req.dry_run,
+        &expected_evidence_sha256,
+        req.signature_hex.trim(),
+    );
+    if !sig_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid Ed25519 canary tripwire signature".into(),
+        ));
+    }
+
+    let replay_ok = state
+        .canary_replay
+        .entry(peer_name.to_string())
+        .or_default()
+        .check_and_advance(req.event_seq);
+    if !replay_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "replayed or zero event_seq rejected by ReplayWindow64".into(),
+        ));
+    }
+
+    let previous = state.bunker_state;
+    let hb_fresh = state.last_heartbeat_at <= now_epoch
+        && now_epoch.saturating_sub(state.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let transition = step_bunker_isolate(
+        previous,
+        state.is_sovereign_node,
+        true,
+        false,
+        2,
+        false,
+        hb_fresh,
+        now_epoch,
+        state.last_heartbeat_at,
+        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    );
+    if !req.dry_run {
+        state.bunker_state = transition.next_state;
+    }
+    Ok((previous, transition))
+}
+
+/// Synchronizes `MeshStore.bunker_state` when an operator triggers or clears Bunker Mode
+/// via `PrivilegeBroker` (`POST /api/privilege-access/bunker` or `/unbunker`).
+pub async fn sync_orb_bunker_transition(
+    app_state: &AppState,
+    canary_tripped: bool,
+    auth_failure_burst: bool,
+    manual_trigger: u8,
+    biometric_unbunker: bool,
+) -> Option<(MeshBunkerState, BunkerTransition)> {
+    let store = store(app_state);
+    let now = unix_now();
+    let mut guard = store.inner.lock().await;
+    if guard.corrupted_state {
+        return None;
+    }
+    let prev = guard.bunker_state;
+    if biometric_unbunker {
+        // Refresh `last_heartbeat_at` if within normal grace or reset to `now` on operator
+        // biometric unbunker so the mesh exits sticky state 2/3 cleanly.
+        if now.saturating_sub(guard.last_heartbeat_at) > LEAN_MESH_SOVEREIGN_DEADMAN_SECS {
+            guard.last_heartbeat_at = now;
+        }
+    }
+    let hb_fresh = guard.last_heartbeat_at <= now
+        && now.saturating_sub(guard.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let transition = step_bunker_isolate(
+        prev,
+        guard.is_sovereign_node,
+        canary_tripped,
+        auth_failure_burst,
+        manual_trigger,
+        biometric_unbunker,
+        hb_fresh,
+        now,
+        guard.last_heartbeat_at,
+        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    );
+    guard.bunker_state = transition.next_state;
+    let _ = store.save(&guard).await;
+    Some((prev, transition))
+}
+
+/// Verifies a signed `CanaryTripwireRequest` against `MeshStore` and persists the updated
+/// anti-replay window and (when `dry_run == false`) the escalated `MeshBunkerState`.
+pub async fn verify_and_apply_canary_tripwire(
+    app_state: &AppState,
+    req: &CanaryTripwireRequest,
+) -> Result<(MeshBunkerState, BunkerTransition), (StatusCode, String)> {
+    let store = store(app_state);
+    let now = unix_now();
+    let mut guard = store.inner.lock().await;
+    let (prev, transition) = process_canary_tripwire_step(&mut guard, req, now)?;
+    store
+        .save(&guard)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok((prev, transition))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1150,6 +1353,7 @@ async fn post_heartbeat(
     };
 
     let mut guard = store.inner.lock().await;
+    let prev_bunker = guard.bunker_state;
     match process_heartbeat_step(
         &mut guard,
         &req,
@@ -1164,11 +1368,26 @@ async fn post_heartbeat(
                     Json(json!({ "error": e })),
                 )
             })?;
+            let last_hb = guard.last_heartbeat_at;
+            drop(guard);
+            if transition.next_state != prev_bunker {
+                super::privilege_broker::record_and_alert_mesh_transition(
+                    &app_state,
+                    &req.peer_name,
+                    prev_bunker as u8,
+                    transition.next_state as u8,
+                    &format!(
+                        "Mesh heartbeat transition on {}: {:?} -> {:?}",
+                        req.peer_name, prev_bunker, transition.next_state
+                    ),
+                )
+                .await;
+            }
             Ok(Json(json!({
                 "admitted": true,
                 "peer": req.peer_name,
                 "heartbeat_seq": req.heartbeat_seq,
-                "last_heartbeat_at": guard.last_heartbeat_at,
+                "last_heartbeat_at": last_hb,
                 "bunker": transition,
             })))
         }
@@ -1176,12 +1395,29 @@ async fn post_heartbeat(
             if maybe_transition.is_some() && !guard.corrupted_state {
                 let _ = store.save(&guard).await;
             }
+            let last_hb = guard.last_heartbeat_at;
+            drop(guard);
+            if let Some(ref transition) = maybe_transition {
+                if transition.next_state > prev_bunker {
+                    super::privilege_broker::record_and_alert_mesh_transition(
+                        &app_state,
+                        &req.peer_name,
+                        prev_bunker as u8,
+                        transition.next_state as u8,
+                        &format!(
+                            "Sovereign dead-man or heartbeat failure on {} ({reason}): {:?} -> {:?}",
+                            req.peer_name, prev_bunker, transition.next_state
+                        ),
+                    )
+                    .await;
+                }
+            }
             Err((
                 status,
                 Json(json!({
                     "admitted": false,
                     "error": reason,
-                    "last_heartbeat_at": guard.last_heartbeat_at,
+                    "last_heartbeat_at": last_hb,
                     "bunker": maybe_transition,
                 })),
             ))
@@ -1200,10 +1436,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/heartbeat", post(post_heartbeat))
 }
 
-#[cfg(test)]
+    #[cfg(test)]
 mod tests {
     use super::*;
-    use lean_mesh::{is_name_derived_peer_signing_pubkey, sign_heartbeat, sign_render_auth};
+    use lean_mesh::{
+        is_name_derived_peer_signing_pubkey, sign_canary_trip, sign_heartbeat, sign_render_auth,
+    };
     use sha2::{Digest, Sha256};
 
     fn enroll_test_peer_key(
@@ -1762,6 +2000,82 @@ mod tests {
         check_reopen_lockdown(&|ks_path, map| {
             map.insert("dgx-spark".into(), "ff".repeat(32));
             write_private_test_helper(ks_path, &serde_json::to_string(map).unwrap());
+        });
+    }
+
+    #[test]
+    fn canary_tripwire_verifies_ed25519_enforces_replay_and_respects_dry_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ms = MeshStore::open(tmp.path().to_path_buf());
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let mut guard = ms.inner.lock().await;
+            let ashur_sk = enroll_test_peer_key(&mut guard, "ashur", 0x71);
+            let now = guard.manifest.issued_at + 10;
+
+            let reason = "CRITICAL: local port 27017 canary triggered on ashur";
+            let ev_hash = canonical_canary_evidence_sha256_hex(
+                reason,
+                Some(12345),
+                Some(998),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("nc 127.0.0.1 27017"),
+            );
+
+            // 1. Dry-run canary trip verifies signature, advances replay window, and does NOT mutate bunker_state.
+            let dry_sig = sign_canary_trip(
+                &ashur_sk,
+                "ashur",
+                "mongo_socket_27017",
+                1,
+                now,
+                true,
+                &ev_hash,
+            );
+            let dry_req = CanaryTripwireRequest {
+                peer_name: "ashur".into(),
+                canary_kind: "mongo_socket_27017".into(),
+                event_seq: 1,
+                timestamp: now,
+                dry_run: true,
+                reason: reason.into(),
+                pid: Some(12345),
+                uid: Some(998),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("nc 127.0.0.1 27017".into()),
+                detail_sha256_hex: ev_hash.clone(),
+                signature_hex: dry_sig.clone(),
+            };
+            let (prev, trans) = process_canary_tripwire_step(&mut guard, &dry_req, now).unwrap();
+            assert_eq!(prev, MeshBunkerState::Normal);
+            assert_eq!(trans.next_state, MeshBunkerState::HardLockdown);
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+
+            // 2. Replaying seq 1 must be rejected.
+            assert!(process_canary_tripwire_step(&mut guard, &dry_req, now).is_err());
+
+            // 3. Forged signature at seq 2 must be rejected and MUST NOT consume seq 2 in replay window.
+            let mut bad_req = dry_req.clone();
+            bad_req.event_seq = 2;
+            bad_req.dry_run = false;
+            assert!(process_canary_tripwire_step(&mut guard, &bad_req, now).is_err());
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+
+            // 4. Legitimate live canary trip at seq 2 escalates persisted `bunker_state` to `HardLockdown`.
+            let live_sig = sign_canary_trip(
+                &ashur_sk,
+                "ashur",
+                "mongo_socket_27017",
+                2,
+                now,
+                false,
+                &ev_hash,
+            );
+            let mut live_req = bad_req;
+            live_req.signature_hex = live_sig;
+            let (_, live_trans) = process_canary_tripwire_step(&mut guard, &live_req, now).unwrap();
+            assert_eq!(live_trans.next_state, MeshBunkerState::HardLockdown);
+            assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
         });
     }
 

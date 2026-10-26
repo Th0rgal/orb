@@ -215,6 +215,11 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var grants by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var access by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var privilege by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var privilegeCommands by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var bunkerIncidents by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var bunkerState by remember { mutableStateOf(0) }
+    var meshEpoch by remember { mutableStateOf<Int?>(null) }
+    var meshVerified by remember { mutableStateOf(false) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var mode by remember { mutableStateOf("") }
     var projects by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -230,7 +235,16 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         } catch (_: Throwable) {
         }
         try {
-            privilege = OrbJSON.dictList(dictOf(core.request("/api/privilege-access"))["requests"])
+            val privSnap = dictOf(core.request("/api/privilege-access"))
+            privilege = OrbJSON.dictList(privSnap["requests"])
+            privilegeCommands = OrbJSON.dictList(privSnap["command_audit"])
+            bunkerIncidents = OrbJSON.dictList(privSnap["bunker_incidents"])
+            val snapBunker = (privSnap["bunker_state"] as? Number)?.toInt() ?: 0
+            val meshSnap = runCatching { dictOf(core.request("/api/mesh/status")) }.getOrDefault(emptyMap())
+            val mBunker = (meshSnap["bunker_state"] as? Number)?.toInt() ?: 0
+            bunkerState = maxOf(snapBunker, mBunker)
+            meshEpoch = (meshSnap["epoch"] as? Number)?.toInt()
+            meshVerified = meshSnap["formal_verified"] == true
         } catch (_: Throwable) {
         }
         try {
@@ -365,6 +379,49 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     "Root, service deploy or read-only ops on a host. A grant lasts at most the mission session; Core checks and logs every command. Approving needs your fingerprint or face.",
                     color = OrbStyle.textMuted, fontSize = 12.sp
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Fleet posture: ${OrbPrivilegeAccess.bunkerLabel(bunkerState)}" +
+                                (meshEpoch?.let { " · lean-mesh epoch $it (${if (meshVerified) "Lean 4 verified" else "unverified"})" } ?: ""),
+                            color = if (bunkerState > 0) Color(0xFFFF6B6B) else Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            if (bunkerState > 0) "Bunker Mode is on: new privileged requests are locked and active grants are revoked."
+                            else "Canary tripwires and dead-man heartbeat switches are armed across all workers.",
+                            color = OrbStyle.textMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                    if (bunkerState > 0) {
+                        TextButton(enabled = !busy, onClick = {
+                            act {
+                                OrbApprovalKey.signedRequest(
+                                    core, activity, "POST",
+                                    "/api/privilege-access/unbunker",
+                                    null,
+                                    "exit Fleet Bunker Mode"
+                                )
+                            }
+                        }) { Text("Exit Bunker") }
+                    } else {
+                        TextButton(enabled = !busy, onClick = {
+                            act {
+                                OrbApprovalKey.signedRequest(
+                                    core, activity, "POST",
+                                    "/api/privilege-access/bunker",
+                                    OrbPrivilegeAccess.bunkerBody(),
+                                    "enter Hard Bunker Lockdown across the fleet"
+                                )
+                            }
+                        }) { Text("Lock Down", color = Color(0xFFFF6B6B)) }
+                    }
+                }
                 if (pendingPrivilege.isEmpty() && livePrivilege.isEmpty()) Text("No requests or grants.", color = OrbStyle.textMuted, fontSize = 13.sp)
                 pendingPrivilege.forEach { r ->
                     val id = r["id"] as String
@@ -413,6 +470,25 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                             act { core.request("/api/privilege-access/${core.encodeComponent(g["id"] as String)}", "DELETE") }
                         }) { Text("Revoke") }
                     }
+                }
+                bunkerIncidents.take(10).forEach { inc ->
+                    val dry = inc["dry_run"] == true
+                    val nextState = (inc["new_bunker_state"] as? Number)?.toInt() ?: 0
+                    val peer = (inc["peer_name"] as? String)?.takeIf { it.isNotBlank() }?.let { "$it · " } ?: ""
+                    val epoch = (inc["epoch"] as? Number)?.toInt() ?: 0
+                    Text(
+                        "${if (dry) "CANARY TEST" else OrbPrivilegeAccess.bunkerLabel(nextState).uppercase()}: $peer${inc["reason"]} (epoch $epoch)",
+                        color = if (!dry && nextState > 0) Color(0xFFFF6B6B) else OrbStyle.textMuted,
+                        fontSize = 11.sp
+                    )
+                }
+                privilegeCommands.take(15).forEach { c ->
+                    val exitCode = (c["exit_code"] as? Number)?.toInt()
+                    Text(
+                        "${exitCode?.let { "EXIT $it" } ?: "RUN"} · ${c["target_host"]} · ${c["command"]}",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.sp
+                    )
                 }
             }
 

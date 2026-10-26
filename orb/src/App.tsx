@@ -818,7 +818,7 @@ export default function App() {
               .then((snap) => {
                 const pending = snap.requests.filter((r) => r.state === "pending");
                 setPrivilegeRequests(pending.length);
-                syncPrivilegeAccessNotices(pending, () => open("bitwarden-settings"));
+                syncPrivilegeAccessNotices(pending, () => open("bitwarden-settings"), snap.bunker_state);
               })
               .catch(swallow("app.privilegeRequests"))
           : undefined;

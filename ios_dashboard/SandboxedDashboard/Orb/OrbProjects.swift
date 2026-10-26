@@ -461,7 +461,11 @@ struct OrbHome: View {
         VStack(spacing: 0) {
             OrbSecretRequestBanner(count: secretRequests.pending.count) { secretSheet = true }
             OrbMissionAccessBanner(count: accessRequests.pending.count) { accessSheet = true }
-            OrbPrivilegeAccessBanner(count: privilegeRequests.pending.count) { privilegeSheet = true }
+            OrbPrivilegeAccessBanner(
+                count: privilegeRequests.pending.count,
+                bunkered: privilegeRequests.bunkered,
+                bunkerState: privilegeRequests.bunkerState
+            ) { privilegeSheet = true }
         }
     }
 
