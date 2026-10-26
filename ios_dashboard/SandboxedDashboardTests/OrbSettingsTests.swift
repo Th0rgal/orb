@@ -59,6 +59,10 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertEqual(OrbUsageSettings.days(s).map(\.label), ["10-25", "10-26"])
         XCTAssertEqual(OrbUsageSettings.topMissions(s).map(\.name), ["Pricey", "Cheap"])
     }
+    func testSkillDeleteFailureIsInPlainWords() {
+        XCTAssertEqual(OrbSkillsSettings.deleteMessage("agent-browser", "500 git commit failed: gpg failed to sign the data"), "Core couldn’t sign the Library commit, so agent-browser is still there.")
+        XCTAssertEqual(OrbSkillsSettings.deleteMessage("x", "503 Service Unavailable"), "Couldn’t delete x: Service Unavailable")
+    }
     func testQuotaExhaustedLabelMatchesSharedSpec() throws {
         let spec = try OrbSpec.json("fixtures/quota-exhausted.json")
         let cases = try XCTUnwrap(spec["cases"] as? [[String: Any]])
