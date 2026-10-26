@@ -2347,13 +2347,14 @@ async fn canary_tripwire(
     let (_, mesh_transition, epoch) =
         super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
 
-    let quarantine_scope = if orb_step.revoke_all_jit_grants || (mesh_transition.next_state as u8) >= 2 {
-        "fleet_lockdown"
-    } else if orb_step.isolate_node_mesh {
-        "node_only"
-    } else {
-        "whitelisted_ignored"
-    };
+    let quarantine_scope =
+        if orb_step.revoke_all_jit_grants || (mesh_transition.next_state as u8) >= 2 {
+            "fleet_lockdown"
+        } else if orb_step.isolate_node_mesh {
+            "node_only"
+        } else {
+            "whitelisted_ignored"
+        };
 
     // 5. Dispatch redacted out-of-band alert and update incident delivery status
     //    (skip alert for whitelisted routine agent file walks unless `dry_run == true`).
