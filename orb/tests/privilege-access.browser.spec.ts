@@ -59,3 +59,16 @@ test('approve all: summary per tier, root left out until ticked, one signed batc
  expect(body.items.map((i:any)=>[i.id,i.scope,i.target_host])).toEqual([['p1','service_deploy','agent-core'],['p2','root_exec','self'],['p4','ops_read','ashur']]);
  await expect(card).toHaveCount(0);
 });
+test('approval card is centred on the conversation composer and as wide',async({page})=>{
+ for(const width of [1400,900]){
+  await page.setViewportSize({width,height:900});
+  await page.goto('/tests/privilege-access.html');
+  await page.evaluate(()=>{(window as any).addDock();(window as any).showBatch();});
+  const card=page.getByTestId('privilege-access-card');
+  await expect(card).toBeVisible();
+  await expect.poll(async()=>{
+   const c=await page.locator('.toast').filter({has:card}).boundingBox();const k=await page.locator('.dock .composer').boundingBox();
+   return Math.abs((c!.x+c!.width/2)-(k!.x+k!.width/2))<=1&&Math.abs(c!.width-k!.width)<=1;
+  }).toBe(true);
+ }
+});
