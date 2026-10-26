@@ -297,3 +297,13 @@ class MissingRolloutTests(unittest.TestCase):
             session.run()
         goal = next(params for method, params in calls if method == 'thread/goal/set')
         self.assertEqual(goal, {'objective': 'ship it', 'status': 'active', 'threadId': 'fresh-thread'})
+
+    def test_orb_ssh_identity_step_rejects_invalid_cyber_program_and_exhausted_goal_budget(self):
+        from scripts.remote_codex_app_server import orb_ssh_identity_step
+        self.assertEqual(orb_ssh_identity_step(1, 0, 0, 1, 1, 1, 0), 1793)
+        bad_prog = orb_ssh_identity_step(1, 0, 0, 1, 1, 0, 0)
+        self.assertEqual(bad_prog & 256, 0)
+        self.assertEqual(bad_prog >> 32, 78)
+        exhausted = orb_ssh_identity_step(1, 0, 0, 1, 1, 1, 1)
+        self.assertEqual(exhausted & 256, 0)
+        self.assertEqual(exhausted >> 32, 78)

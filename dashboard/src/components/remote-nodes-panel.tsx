@@ -12,8 +12,14 @@
 
 import { useState } from 'react';
 import useSWR from 'swr';
-import { Network, ShieldOff, ShieldCheck } from 'lucide-react';
-import { getRemoteNodes, setNodeCordon } from '@/lib/api/nodes';
+import { Network, ShieldOff, ShieldCheck, ShieldAlert } from 'lucide-react';
+import {
+  bunkerStateLabel,
+  getMeshStatus,
+  getPrivilegeSummary,
+  getRemoteNodes,
+  setNodeCordon,
+} from '@/lib/api/nodes';
 import { cn } from '@/lib/utils';
 
 export function RemoteNodesPanel() {
@@ -21,11 +27,21 @@ export function RemoteNodesPanel() {
     refreshInterval: 15000,
     revalidateOnFocus: false,
   });
+  const { data: mesh } = useSWR('mesh-status', getMeshStatus, {
+    refreshInterval: 15000,
+    revalidateOnFocus: false,
+  });
+  const { data: priv } = useSWR('privilege-summary', getPrivilegeSummary, {
+    refreshInterval: 15000,
+    revalidateOnFocus: false,
+  });
   const [busyNode, setBusyNode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const nodes = data?.nodes ?? [];
-  if (nodes.length === 0) return null;
+  const bunkerState = Math.max(priv?.bunker_state ?? 0, mesh?.bunker_state ?? 0);
+  const latestIncident = priv?.bunker_incidents?.[0];
+  if (nodes.length === 0 && !mesh) return null;
 
   const toggle = async (name: string, cordoned: boolean) => {
     setBusyNode(name);
@@ -42,13 +58,38 @@ export function RemoteNodesPanel() {
 
   return (
     <div className="rounded-lg bg-white/[0.02] border border-white/[0.05] p-3">
-      <p className="text-xs text-white/60 font-medium flex items-center gap-1.5">
-        <Network className="h-3.5 w-3.5 text-white/40" />
-        Remote Nodes
-      </p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-white/60 font-medium flex items-center gap-1.5">
+          <Network className="h-3.5 w-3.5 text-white/40" />
+          Remote Nodes &amp; lean-mesh
+        </p>
+        <span
+          className={cn(
+            'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium border',
+            bunkerState > 0
+              ? 'bg-red-500/15 text-red-300 border-red-500/30'
+              : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+          )}
+        >
+          {bunkerState > 0 ? (
+            <ShieldAlert className="h-3 w-3" />
+          ) : (
+            <ShieldCheck className="h-3 w-3" />
+          )}
+          Bunker: {bunkerStateLabel(bunkerState)}
+          {mesh ? ` · epoch ${mesh.epoch}${mesh.formal_verified ? ' (Lean 4)' : ''}` : ''}
+        </span>
+      </div>
       <p className="text-[10px] text-white/30 mt-0.5">
-        Cordoned nodes stay listed but are excluded from automatic placement.
+        Cordoned nodes stay listed but are excluded from automatic placement. Use Orb Desktop, iOS, or Android (Touch ID / Face ID / StrongBox) to lock down or exit Bunker Mode.
       </p>
+      {latestIncident && (
+        <p className="text-[10px] text-amber-300/80 mt-1 font-mono truncate" title={latestIncident.reason}>
+          Latest incident: {latestIncident.dry_run ? '[DRY-RUN] ' : ''}
+          {latestIncident.peer_name ? `${latestIncident.peer_name} · ` : ''}
+          {latestIncident.reason} (epoch {latestIncident.epoch})
+        </p>
+      )}
 
       <div className="mt-2 space-y-1.5">
         {nodes.map((node) => (

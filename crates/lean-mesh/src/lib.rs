@@ -1128,6 +1128,14 @@ impl MeshManifest {
                 "    # Sovereign Dead-Man Switch tripped: drop all wg-leanmesh0 traffic\n",
             );
             out.push_str("    counter drop\n");
+            out.push_str("  }\n\n");
+            out.push_str("  chain mesh_output {\n");
+            out.push_str("    type filter hook output priority -5; policy accept;\n");
+            out.push_str(&format!(
+                "    oifname != \"{}\" accept\n",
+                LEAN_MESH_INTERFACE_NAME
+            ));
+            out.push_str("    counter drop\n");
             out.push_str("  }\n}\n");
             return Ok(out);
         }
@@ -1182,6 +1190,73 @@ impl MeshManifest {
                     out.push_str(&format!(
                         "    ip saddr {} ip daddr {} {} dport {} accept # {}\n",
                         src_peer.overlay_ip, self_peer.overlay_ip, l4, port_expr, rule.description
+                    ));
+                }
+            }
+        }
+
+        out.push_str("    counter drop\n");
+        out.push_str("  }\n\n");
+
+        out.push_str("  chain mesh_output {\n");
+        out.push_str("    type filter hook output priority -5; policy accept;\n");
+        out.push_str(&format!(
+            "    oifname != \"{}\" accept\n",
+            LEAN_MESH_INTERFACE_NAME
+        ));
+        out.push_str("    meta nfproto ipv6 counter drop\n");
+        out.push_str("    ct state established,related accept\n");
+
+        for rule in &self.rules {
+            if rule.src_peer != node_name {
+                continue;
+            }
+            let Some(dst_peer) = peer_by_name.get(rule.dst_peer.as_str()) else {
+                continue;
+            };
+            let decision = evaluate_route_kernel(
+                self_peer.id,
+                dst_peer.id,
+                self_peer.node_class,
+                dst_peer.node_class,
+                self_peer.revoked,
+                dst_peer.revoked,
+                true,
+                rule.proto,
+                rule.port_min,
+                rule.port_min,
+                rule.port_max,
+                false,
+                bunker_state,
+                now_epoch,
+                self_peer.expires_at,
+                dst_peer.expires_at,
+                0,
+            );
+            if !decision.allowed {
+                continue;
+            }
+            match rule.proto {
+                MeshProto::Icmp => {
+                    out.push_str(&format!(
+                        "    ip saddr {} ip daddr {} ip protocol icmp accept # {}\n",
+                        self_peer.overlay_ip, dst_peer.overlay_ip, rule.description
+                    ));
+                }
+                MeshProto::Tcp | MeshProto::Udp => {
+                    let l4 = if rule.proto == MeshProto::Tcp {
+                        "tcp"
+                    } else {
+                        "udp"
+                    };
+                    let port_expr = if rule.port_min == rule.port_max {
+                        format!("{}", rule.port_min)
+                    } else {
+                        format!("{}-{}", rule.port_min, rule.port_max)
+                    };
+                    out.push_str(&format!(
+                        "    ip saddr {} ip daddr {} {} dport {} accept # {}\n",
+                        self_peer.overlay_ip, dst_peer.overlay_ip, l4, port_expr, rule.description
                     ));
                 }
             }
@@ -1372,6 +1447,9 @@ impl MeshManifest {
             "nippur",
             "old-agent",
             "watchtower",
+            "rpc-starknet-id",
+            "utu-lfglabs",
+            "agent-starknet-id",
             "api-starknet-id",
             "sepolia-starknet-id",
             "macbook-air",
@@ -1565,6 +1643,45 @@ impl MeshManifest {
                 expires_at,
             },
             MeshPeer {
+                id: 16,
+                name: "rpc-starknet-id".into(),
+                node_class: NodeClass::FreeCompute,
+                overlay_ip: "10.88.0.16".into(),
+                prefix_len: 32,
+                wg_pubkey: det_wg_pub("rpc-starknet-id"),
+                sign_pubkey_hex: req_sign_pub("rpc-starknet-id")?,
+                endpoint: Some("135.181.75.104:51888".into()),
+                pinned_static: true,
+                revoked: false,
+                expires_at,
+            },
+            MeshPeer {
+                id: 17,
+                name: "utu-lfglabs".into(),
+                node_class: NodeClass::FreeCompute,
+                overlay_ip: "10.88.0.17".into(),
+                prefix_len: 32,
+                wg_pubkey: det_wg_pub("utu-lfglabs"),
+                sign_pubkey_hex: req_sign_pub("utu-lfglabs")?,
+                endpoint: Some("88.99.67.234:51888".into()),
+                pinned_static: true,
+                revoked: false,
+                expires_at,
+            },
+            MeshPeer {
+                id: 18,
+                name: "agent-starknet-id".into(),
+                node_class: NodeClass::FreeCompute,
+                overlay_ip: "10.88.0.18".into(),
+                prefix_len: 32,
+                wg_pubkey: det_wg_pub("agent-starknet-id"),
+                sign_pubkey_hex: req_sign_pub("agent-starknet-id")?,
+                endpoint: Some("51.195.100.33:51888".into()),
+                pinned_static: true,
+                revoked: false,
+                expires_at,
+            },
+            MeshPeer {
                 id: 21,
                 name: "api-starknet-id".into(),
                 node_class: NodeClass::RetiredFree,
@@ -1606,7 +1723,18 @@ impl MeshManifest {
         ];
 
         let mut rules = Vec::new();
-        for worker in ["ashur", "babylon", "nippur", "old-agent", "watchtower"] {
+        // 1. Orb Remote Compute Nodes (`sandboxed-node` `:3088`): only compute workers + dgx-spark.
+        // (`polymath`, `thomas-md`, `maven-repo`, and `watchtower` are RESERVED/SHARED_PROTECTED
+        // non-compute hosts and do not run `sandboxed-node` `:3088`.)
+        for worker in [
+            "ashur",
+            "babylon",
+            "nippur",
+            "old-agent",
+            "rpc-starknet-id",
+            "utu-lfglabs",
+            "agent-starknet-id",
+        ] {
             rules.push(CapabilityRule {
                 src_peer: "agent-core".into(),
                 dst_peer: worker.into(),
@@ -1620,10 +1748,60 @@ impl MeshManifest {
                 dst_peer: "agent-core".into(),
                 proto: MeshProto::Tcp,
                 port_min: 3000,
-                port_max: 3000,
-                description: format!("Worker telemetry & LLM proxy {worker} -> agent-core:3000"),
+                port_max: 3002,
+                description: format!(
+                    "Worker telemetry, LLM proxy & bunker status {worker} -> agent-core:3000-3002"
+                ),
+            });
+            rules.push(CapabilityRule {
+                src_peer: worker.into(),
+                dst_peer: "dgx-spark".into(),
+                proto: MeshProto::Tcp,
+                port_min: 8888,
+                port_max: 8890,
+                description: format!(
+                    "Worker mission Hindsight & spark-memory access {worker} -> dgx-spark:8888-8890"
+                ),
             });
         }
+        rules.push(CapabilityRule {
+            src_peer: "agent-core".into(),
+            dst_peer: "dgx-spark".into(),
+            proto: MeshProto::Tcp,
+            port_min: 3088,
+            port_max: 3089,
+            description: "Orb control-plane dispatch & admin agent-core -> dgx-spark:3088-3089"
+                .into(),
+        });
+        // 2. Full-Fleet Orb Security Enrollment (`lean-mesh`, Canary tripwires, Bunker status, Sovereign heartbeat):
+        for peer_to_core in [
+            "dgx-spark",
+            "thomas-md",
+            "polymath",
+            "maven-repo",
+            "watchtower",
+            "macbook-air",
+        ] {
+            rules.push(CapabilityRule {
+                src_peer: peer_to_core.into(),
+                dst_peer: "agent-core".into(),
+                proto: MeshProto::Tcp,
+                port_min: 3000,
+                port_max: 3002,
+                description: format!(
+                    "Fleet security, heartbeat & bunker status {peer_to_core} -> agent-core:3000-3002"
+                ),
+            });
+        }
+        rules.push(CapabilityRule {
+            src_peer: "agent-core".into(),
+            dst_peer: "dgx-spark".into(),
+            proto: MeshProto::Tcp,
+            port_min: 8000,
+            port_max: 8000,
+            description: "Orb control-plane -> dgx-spark inference & voice transcription router"
+                .into(),
+        });
         rules.push(CapabilityRule {
             src_peer: "agent-core".into(),
             dst_peer: "dgx-spark".into(),
@@ -1632,7 +1810,21 @@ impl MeshManifest {
             port_max: 8890,
             description: "Orb control-plane -> dgx-spark Hindsight memory & remarkablesync".into(),
         });
+        // 3. Control-Plane JIT Privileged Broker SSH (`agent-core -> <peer>:22`) & Operator Breakglass SSH (`macbook-air -> <peer>:22`):
         for peer in &peers {
+            if peer.name != "agent-core" {
+                rules.push(CapabilityRule {
+                    src_peer: "agent-core".into(),
+                    dst_peer: peer.name.clone(),
+                    proto: MeshProto::Tcp,
+                    port_min: 22,
+                    port_max: 22,
+                    description: format!(
+                        "Orb JIT privilege broker & sentinel SSH agent-core -> {}:22",
+                        peer.name
+                    ),
+                });
+            }
             if peer.name != "macbook-air" {
                 rules.push(CapabilityRule {
                     src_peer: "macbook-air".into(),
@@ -1811,6 +2003,129 @@ pub fn verify_heartbeat_signature(
     verifying_key.verify(&digest, &signature).is_ok()
 }
 
+/// Computes the canonical SHA-256 hex digest over a canary tripwire's evidence fields.
+pub fn canonical_canary_evidence_sha256_hex(
+    reason: &str,
+    pid: Option<u32>,
+    uid: Option<u32>,
+    cgroup: Option<&str>,
+    cmdline: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lean-mesh-canary-evidence-v1:");
+    hasher.update(reason.as_bytes());
+    hasher.update(b":");
+    hasher.update(pid.unwrap_or(0).to_be_bytes());
+    hasher.update(b":");
+    hasher.update([pid.is_some() as u8]);
+    hasher.update(b":");
+    hasher.update(uid.unwrap_or(0).to_be_bytes());
+    hasher.update(b":");
+    hasher.update([uid.is_some() as u8]);
+    hasher.update(b":");
+    hasher.update(cgroup.unwrap_or("").as_bytes());
+    hasher.update(b":");
+    hasher.update(cmdline.unwrap_or("").as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Canonical domain-separated SHA-256 digest for authenticated canary tripwire alerts.
+/// Binds `(peer_name, canary_kind, event_seq, timestamp, dry_run, detail_sha256_hex)` so
+/// a signature cannot be replayed across peers, downgraded from a real trip to `dry_run`,
+/// or stripped of its forensic evidence hash.
+pub fn canonical_canary_trip_bytes(
+    peer_name: &str,
+    canary_kind: &str,
+    event_seq: u64,
+    timestamp: u64,
+    dry_run: bool,
+    detail_sha256_hex: &str,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lean-mesh-canary-v1:");
+    hasher.update(peer_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(canary_kind.as_bytes());
+    hasher.update(b":");
+    hasher.update(event_seq.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(timestamp.to_be_bytes());
+    hasher.update(b":");
+    hasher.update([dry_run as u8]);
+    hasher.update(b":");
+    hasher.update(detail_sha256_hex.as_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Signs a canonical canary tripwire alert with the reporting node's Ed25519 `signing_key`.
+pub fn sign_canary_trip(
+    signing_key: &SigningKey,
+    peer_name: &str,
+    canary_kind: &str,
+    event_seq: u64,
+    timestamp: u64,
+    dry_run: bool,
+    detail_sha256_hex: &str,
+) -> String {
+    let digest = canonical_canary_trip_bytes(
+        peer_name,
+        canary_kind,
+        event_seq,
+        timestamp,
+        dry_run,
+        detail_sha256_hex,
+    );
+    let sig: Signature = signing_key.sign(&digest);
+    hex::encode(sig.to_bytes())
+}
+
+/// Verifies an Ed25519 signature over a canonical canary tripwire alert against the
+/// reporting node's manifest-pinned `pubkey_hex`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_canary_trip_signature(
+    pubkey_hex: &str,
+    peer_name: &str,
+    canary_kind: &str,
+    event_seq: u64,
+    timestamp: u64,
+    dry_run: bool,
+    detail_sha256_hex: &str,
+    signature_hex: &str,
+) -> bool {
+    if peer_name.trim().is_empty()
+        || canary_kind.trim().is_empty()
+        || detail_sha256_hex.len() != 64
+        || hex::decode(detail_sha256_hex).is_err()
+    {
+        return false;
+    }
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(pk_arr): Result<[u8; 32], _> = pk_bytes.try_into() else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    let digest = canonical_canary_trip_bytes(
+        peer_name,
+        canary_kind,
+        event_seq,
+        timestamp,
+        dry_run,
+        detail_sha256_hex,
+    );
+    verifying_key.verify(&digest, &signature).is_ok()
+}
+
 /// Canonical domain-separated SHA-256 digest for authenticated endpoint roam control frames.
 pub fn canonical_roam_bytes(
     peer_name: &str,
@@ -1906,7 +2221,7 @@ mod tests {
         assert!(
             MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut short_rng).is_err()
         );
-        let mut zero_rng = std::io::Cursor::new(vec![0u8; 32 * 13]);
+        let mut zero_rng = std::io::Cursor::new(vec![0u8; 32 * 16]);
         assert!(
             MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut zero_rng).is_err()
         );
@@ -2114,9 +2429,14 @@ mod tests {
             .render_nftables_policy("ashur", BunkerState::Normal, now + 10)
             .unwrap();
         assert!(nft_normal.contains("chain mesh_forward"));
+        assert!(nft_normal.contains("chain mesh_output"));
+        assert!(nft_normal.contains("oifname != \"wg-leanmesh0\" accept"));
         assert!(nft_normal.contains("meta nfproto ipv6 counter drop"));
         assert!(nft_normal.contains("ip saddr 10.88.0.1 ip daddr 10.88.0.11 tcp dport 3088 accept"));
         assert!(nft_normal.contains("ip saddr 10.88.0.100 ip daddr 10.88.0.11 tcp dport 22 accept"));
+        assert!(
+            !nft_normal.contains("ip saddr 10.88.0.11 ip daddr 10.88.0.100 tcp dport 22 accept")
+        );
 
         let nft_lockdown = manifest
             .render_nftables_policy("ashur", BunkerState::HardLockdown, now + 10)
@@ -2276,6 +2596,65 @@ mod tests {
             1,
             now + 5,
             &render_sig_hex
+        ));
+
+        let ev_hash = canonical_canary_evidence_sha256_hex(
+            "CRITICAL: local port 27017 canary triggered on ashur",
+            Some(4242),
+            Some(998),
+            Some("/system.slice/sandboxed-node.service"),
+            Some("nc 127.0.0.1 27017"),
+        );
+        let canary_sig = sign_canary_trip(
+            &peer_sk,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &ev_hash,
+        );
+        assert!(verify_canary_trip_signature(
+            &pub_hex,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &ev_hash,
+            &canary_sig
+        ));
+        // Downgrading `dry_run` from false -> true must fail signature verification.
+        assert!(!verify_canary_trip_signature(
+            &pub_hex,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            true,
+            &ev_hash,
+            &canary_sig
+        ));
+        // Cross-peer replay or modified evidence hash must fail.
+        assert!(!verify_canary_trip_signature(
+            &pub_hex,
+            "babylon",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &ev_hash,
+            &canary_sig
+        ));
+        assert!(!verify_canary_trip_signature(
+            &pub_hex,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &"00".repeat(32),
+            &canary_sig
         ));
 
         // 4. Authenticated roam frame signature + bounds check.

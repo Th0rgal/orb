@@ -582,6 +582,80 @@ pub fn store(root: &Path, upload: Upload) -> Result<Receipt, String> {
     result
 }
 
+/// Removes any upload directories (`<root>/<uuid>`) referenced in `prompt`
+/// once the session completes, so temporary attachments do not accumulate.
+pub fn cleanup_prompt_uploads(root: &Path, prompt: &str) {
+    if prompt.is_empty() {
+        return;
+    }
+    let mut roots = Vec::new();
+    if let Ok(canon) = root.canonicalize() {
+        roots.push(canon);
+    }
+    if !roots.iter().any(|r| r == root) {
+        roots.push(root.to_path_buf());
+    }
+    for base in &roots {
+        let prefix = format!("{}/", base.to_string_lossy().trim_end_matches('/'));
+        let mut cursor = 0usize;
+        while let Some(idx) = prompt[cursor..].find(&prefix) {
+            let after = cursor + idx + prefix.len();
+            let rest = &prompt[after..];
+            let seg_len = rest
+                .find(['/', '"', '\'', ']', ')', ' ', '\n', '\r', '\t'])
+                .unwrap_or(rest.len());
+            let segment = &rest[..seg_len];
+            if let Ok(id) = uuid::Uuid::parse_str(segment) {
+                let id_str = id.hyphenated().to_string();
+                let target = base.join(&id_str);
+                let _ = fs::remove_dir_all(&target);
+                let _ = fs::remove_file(base.join(".batches").join(&id_str));
+            }
+            cursor = after + seg_len.max(1);
+        }
+    }
+}
+
+/// Sweeps `<root>`, `<root>/.sessions`, and `<root>/.batches` and removes
+/// temporary upload directories older than `max_age`.
+pub fn prune_expired_uploads(root: &Path, max_age: std::time::Duration) {
+    let is_expired = |path: &Path| -> bool {
+        fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age)
+    };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == ".sessions" || name == ".batches" {
+            if let Ok(sub) = fs::read_dir(&path) {
+                for item in sub.flatten() {
+                    let sub_path = item.path();
+                    if is_expired(&sub_path) {
+                        if sub_path.is_dir() {
+                            let _ = fs::remove_dir_all(&sub_path);
+                        } else {
+                            let _ = fs::remove_file(&sub_path);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if uuid::Uuid::parse_str(name).is_ok() && is_expired(&path) {
+            let _ = fs::remove_dir_all(&path);
+            let _ = fs::remove_file(root.join(".batches").join(name));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,5 +946,46 @@ mod tests {
         // Idempotent complete returns same receipt
         let again = complete_session(root.path(), "sess_12345").unwrap();
         assert_eq!(again, receipt);
+    }
+
+    #[test]
+    fn cleanup_prompt_uploads_removes_session_attachments_and_preserves_unreferenced() {
+        let root = tempfile::tempdir().unwrap();
+        let a = store(
+            root.path(),
+            Upload {
+                name: "report (1).pdf".into(),
+                data_base64: "YQ==".into(),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        let b = store(
+            root.path(),
+            Upload {
+                name: "keep.txt".into(),
+                data_base64: "Yg==".into(),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        let c = store(
+            root.path(),
+            Upload {
+                name: "photo.png".into(),
+                data_base64: "Yw==".into(),
+                placement: Placement::default(),
+            },
+        )
+        .unwrap();
+        assert!(Path::new(&a.path).exists());
+        assert!(Path::new(&b.path).exists());
+        assert!(Path::new(&c.path).exists());
+
+        let prompt = format!("Inspect @\"{}\" and [Uploaded: {}] please", a.path, c.path);
+        cleanup_prompt_uploads(root.path(), &prompt);
+        assert!(!Path::new(&a.path).exists());
+        assert!(Path::new(&b.path).exists());
+        assert!(!Path::new(&c.path).exists());
     }
 }

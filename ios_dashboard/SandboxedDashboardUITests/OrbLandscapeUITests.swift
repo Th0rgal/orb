@@ -132,8 +132,10 @@ final class OrbLandscapeUITests: XCTestCase {
     @MainActor func testSettingsAndFilesFillLandscapeSafeAreas() throws {
         let app = launch()
         tapInPortrait(app, "Settings")
-        XCTAssertTrue(app.buttons["settings.providers"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["settings.models"].waitForExistence(timeout: 5))
         checkLandscape(app, "settings")
+        tapInPortrait(app, "settings.models")
+        XCTAssertTrue(app.buttons["settings.providers"].waitForExistence(timeout: 5))
         tapInPortrait(app, "settings.providers")
         XCTAssertTrue(app.staticTexts["Fixture provider"].waitForExistence(timeout: 10))
         checkLandscape(app, "providers")

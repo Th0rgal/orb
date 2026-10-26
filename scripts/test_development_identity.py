@@ -335,6 +335,119 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 identity.export_bundle({"bitwarden_command": ["bws"], "ssh_hosts": []})
 
+    def test_orb_ssh_identity_step_enforces_worker_secret_stripping_and_symlink_rejection(self):
+        # Worker coding_only bundle without control-plane keys -> admitted (1793)
+        self.assertEqual(identity.orb_ssh_identity_step(1, 0, 0, 1, 1), 1793)
+        # Worker bundle with control-plane keys -> rejected (exit 78 in hi32, admitBit=0)
+        leak = identity.orb_ssh_identity_step(1, 1, 0, 1, 1)
+        self.assertEqual(leak & 256, 0)
+        self.assertEqual(leak >> 32, 78)
+        # Symlink parent directory -> rejected
+        sym = identity.orb_ssh_identity_step(1, 0, 1, 1, 1)
+        self.assertEqual(sym & 256, 0)
+        self.assertEqual(sym >> 32, 78)
+
+    def test_orb_privd_command_confinement_rejects_attack_vectors(self):
+        import importlib.util
+        privd_path = Path(__file__).with_name("orb-privd.py")
+        spec = importlib.util.spec_from_file_location("orb_privd", privd_path)
+        privd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(privd)
+
+        # Valid ops_read command
+        packed = privd.check_scope_restrictions(
+            "ops_read", None, ["journalctl", "-u", "orb-core", "-n", "20", "--no-pager"], cwd="/var/log"
+        )
+        self.assertEqual(packed, 1793)
+
+        # Valid service_deploy command for matching unit
+        packed_deploy = privd.check_scope_restrictions(
+            "service_deploy", "orb-core", ["systemctl", "restart", "orb-core.service"], cwd="/root"
+        )
+        self.assertEqual(packed_deploy, 1794)
+
+        # Attack vectors: shell metacharacters, path traversal, unsafe env, wrong unit, escalation
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions("ops_read", None, ["ps; id"], cwd="/root")
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions("root_exec", None, ["id"], cwd="/var/lib/../../etc")
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "root_exec", None, ["id"], cwd="/root", env={"LD_PRELOAD": "/tmp/evil.so"}
+            )
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "service_deploy", "orb-core", ["systemctl", "restart", "postgres.service"], cwd="/root"
+            )
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "ops_read", None, ["systemctl", "restart", "orb-core"], cwd="/root"
+            )
+        # Path-qualified executable bypass vectors must be rejected fail-closed
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions("ops_read", None, ["/attacker-controlled/ps"], cwd="/root")
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "service_deploy", "orb-core", ["/attacker-controlled/systemctl", "restart", "orb-core"], cwd="/root"
+            )
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "service_deploy", "orb-core", ["./systemctl", "restart", "orb-core"], cwd="/root"
+            )
+
+    def test_exhaustive_ctypes_equivalence_against_liborb_kernel_so(self):
+        import ctypes
+        import importlib.util
+        import itertools
+
+        repo_root = Path(__file__).resolve().parent.parent
+        so_path = repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"
+        if not so_path.is_file():
+            so_path = repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"
+        self.assertTrue(so_path.is_file(), f"Missing committed liborb_kernel.so at {so_path}")
+        lib = ctypes.CDLL(str(so_path))
+        lib.orb_privd_command_step.argtypes = [ctypes.c_uint8] * 8
+        lib.orb_privd_command_step.restype = ctypes.c_uint64
+        lib.orb_ssh_identity_step.argtypes = [ctypes.c_uint8] * 7
+        lib.orb_ssh_identity_step.restype = ctypes.c_uint64
+
+        privd_path = Path(__file__).with_name("orb-privd.py")
+        spec = importlib.util.spec_from_file_location("orb_privd", privd_path)
+        privd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(privd)
+
+        codex_path = Path(__file__).with_name("remote_codex_app_server.py")
+        codex_spec = importlib.util.spec_from_file_location("remote_codex_app_server", codex_path)
+        codex_mod = importlib.util.module_from_spec(codex_spec)
+        codex_spec.loader.exec_module(codex_mod)
+
+        # Exhaustively test all 1,536 inputs of orb_privd_command_step:
+        # lease in {0,1} x scope in 0..3 x class in 0..5 x {0,1}^5 = 2 * 4 * 6 * 32 = 1,536
+        privd_cases = 0
+        for lease, scope, cmd_class, unit_ok, metachar, traversal, unsafe_env, force_cmd in itertools.product(
+            (0, 1), (0, 1, 2, 3), (0, 1, 2, 3, 4, 5), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1)
+        ):
+            expected = int(
+                lib.orb_privd_command_step(
+                    lease, scope, cmd_class, unit_ok, metachar, traversal, unsafe_env, force_cmd
+                )
+            )
+            actual = privd.orb_privd_command_step(
+                lease, scope, cmd_class, unit_ok, metachar, traversal, unsafe_env, force_cmd
+            )
+            self.assertEqual(actual, expected)
+            privd_cases += 1
+        self.assertEqual(privd_cases, 1536)
+
+        # Exhaustively test all 128 inputs of orb_ssh_identity_step: {0,1}^7 = 128
+        ssh_cases = 0
+        for args in itertools.product((0, 1), repeat=7):
+            expected = int(lib.orb_ssh_identity_step(*args))
+            self.assertEqual(identity.orb_ssh_identity_step(*args), expected)
+            self.assertEqual(codex_mod.orb_ssh_identity_step(*args), expected)
+            ssh_cases += 1
+        self.assertEqual(ssh_cases, 128)
+
 
 if __name__ == "__main__":
     unittest.main()
