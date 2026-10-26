@@ -3,7 +3,7 @@ import { swallow } from "./log";
 import { AntigravityProvider } from "./AntigravityProvider";
 import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
-import {ProviderUsageMeter} from './ProviderUsageMeter';
+import {ProviderUsageChip, ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
 import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows } from "./providerUsage";
 import { PopupMenu } from "./Menu";
@@ -767,6 +767,7 @@ function fmtResetEpoch(sec: number): string {
 }
 
 const DetailBar = ProviderUsageMeter;
+const Chip = ProviderUsageChip;
 
 /** "Gemini · 5h" windows share one heading per model group; plain labels stay ungrouped. */
 function windowGroups<W extends { label: string }>(windows: W[]) {
@@ -797,30 +798,32 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
         </Show>
       </div>
 
-      <Show when={type() === "anthropic" && u().unified_5h_utilization != null}>
-        <DetailBar label="5h" usedPct={(u().unified_5h_utilization ?? 0) * 100} reset={u().unified_5h_reset ? `reset ${fmtReset(u().unified_5h_reset!)}` : undefined} />
-      </Show>
-      <Show when={type() === "anthropic" && u().unified_7d_utilization != null}>
-        <DetailBar label="Weekly" usedPct={(u().unified_7d_utilization ?? 0) * 100} reset={u().unified_7d_reset ? `reset ${fmtReset(u().unified_7d_reset!)}` : undefined} />
+      <Show when={type() === "anthropic" && (u().unified_5h_utilization != null || u().unified_7d_utilization != null)}>
+        <div class="provider-usage-row">
+          <Show when={u().unified_5h_utilization != null}><Chip label="5h" usedPct={(u().unified_5h_utilization ?? 0) * 100} reset={u().unified_5h_reset ? `reset ${fmtReset(u().unified_5h_reset!)}` : undefined} /></Show>
+          <Show when={u().unified_7d_utilization != null}><Chip label="Weekly" usedPct={(u().unified_7d_utilization ?? 0) * 100} reset={u().unified_7d_reset ? `reset ${fmtReset(u().unified_7d_reset!)}` : undefined} /></Show>
+        </div>
       </Show>
 
       <Show when={type() === "openai" && u().codex_primary_used_percent != null && u().codex_primary_window_minutes !== 0}>
         <Show when={u().codex_plan_type && !p.planInHeader}>
           <div class="p-detail-meta"><span>plan: {u().codex_plan_type}</span></div>
         </Show>
-        <DetailBar label={codexWindowLabel(u().codex_primary_window_minutes, "Primary window")} usedPct={u().codex_primary_used_percent ?? 0} reset={u().codex_primary_reset_at ? `reset ${fmtResetEpoch(u().codex_primary_reset_at!)}` : undefined} />
-        <Show when={u().codex_secondary_used_percent != null && u().codex_secondary_window_minutes !== 0}>
-          <DetailBar label={codexWindowLabel(u().codex_secondary_window_minutes, "Secondary window")} usedPct={u().codex_secondary_used_percent ?? 0} reset={u().codex_secondary_reset_at ? `reset ${fmtResetEpoch(u().codex_secondary_reset_at!)}` : undefined} />
-        </Show>
+        <div class="provider-usage-row">
+          <Chip label={codexWindowLabel(u().codex_primary_window_minutes, "Primary window")} usedPct={u().codex_primary_used_percent ?? 0} reset={u().codex_primary_reset_at ? `reset ${fmtResetEpoch(u().codex_primary_reset_at!)}` : undefined} />
+          <Show when={u().codex_secondary_used_percent != null && u().codex_secondary_window_minutes !== 0}>
+            <Chip label={codexWindowLabel(u().codex_secondary_window_minutes, "Secondary window")} usedPct={u().codex_secondary_used_percent ?? 0} reset={u().codex_secondary_reset_at ? `reset ${fmtResetEpoch(u().codex_secondary_reset_at!)}` : undefined} />
+          </Show>
+        </div>
       </Show>
       <Show when={type() === "openai" && u().requests_limit != null}>
         <DetailBar label="Requests" usedPct={100 - ((u().requests_remaining ?? 0) / (u().requests_limit ?? 1)) * 100} reset={u().requests_reset ? `reset ${fmtReset(u().requests_reset!)}` : undefined} />
       </Show>
 
       <Show when={type() === "kimi"}>
-        <For each={kimiWindows(u())}>{window =>
-          <DetailBar label={window.label} usedPct={window.used_percent ?? 0} reset={window.reset_at ? `reset ${fmtResetEpoch(window.reset_at)}` : undefined} />
-        }</For>
+        <div class="provider-usage-row"><For each={kimiWindows(u())}>{window =>
+          <Chip label={window.label} usedPct={window.used_percent ?? 0} reset={window.reset_at ? `reset ${fmtResetEpoch(window.reset_at)}` : undefined} />
+        }</For></div>
       </Show>
 
       <Show when={type() === "xai"}>
@@ -847,14 +850,12 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
         <Show when={u().zai_plan && !p.planInHeader}>
           <div class="p-detail-meta"><span>plan: {u().zai_plan}</span></div>
         </Show>
-        <For each={windowGroups(codingPlanWindows(u()))}>{g => g.name
-          ? <div class="provider-usage-group">
-              <div class="provider-usage-group-title">{g.name}</div>
-              <div class="provider-usage-group-bars">
-                <For each={g.windows}>{w => <DetailBar label={w.label} usedPct={w.used * 100} reset={w.reset ? `reset ${fmtResetEpoch(w.reset)}` : undefined} />}</For>
-              </div>
-            </div>
-          : <For each={g.windows}>{w => <DetailBar label={w.label} usedPct={w.used * 100} reset={w.reset ? `reset ${fmtResetEpoch(w.reset)}` : undefined} />}</For>}</For>
+        {/* One row per pool with every window the API returns for it. */}
+        <For each={windowGroups(codingPlanWindows(u()))}>{g =>
+          <div class="provider-usage-row" classList={{ "provider-usage-group": !!g.name }}>
+            <Show when={g.name}><span class="provider-usage-group-title">{g.name}</span></Show>
+            <For each={g.windows}>{w => <Chip label={w.label} usedPct={w.used * 100} reset={w.reset ? `reset ${fmtResetEpoch(w.reset)}` : undefined} />}</For>
+          </div>}</For>
         <Show when={u().zai_mcp_percentage != null}>
           <DetailBar label="MCP" usedPct={u().zai_mcp_percentage ?? 0} reset={u().zai_mcp_reset ? `reset ${fmtResetEpoch(u().zai_mcp_reset!)}` : undefined} />
         </Show>
@@ -933,7 +934,7 @@ function RankControls(p: { rank: AccountRank; name: string; title: string }) {
   const r = () => p.rank;
   return (
     <div class="p-rank-row">
-      <span class="s-row-desc">Tried {ordinal(r().index + 1)} of {r().count} {p.title} accounts</span>
+      <span class="s-row-desc" title={`Tried ${ordinal(r().index + 1)} of ${r().count} ${p.title} accounts`}>Tried {ordinal(r().index + 1)} of {r().count}</span>
       <div class="p-rank-actions">
       <span class="p-rank-grip" draggable="true" title="Drag onto another account to change the order" aria-hidden="true"
         onDragStart={e => { e.dataTransfer?.setData(RANK_DRAG_TYPE, String(r().index)); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}>⠿</span>
@@ -1009,8 +1010,9 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
-          <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
-          <Show when={a.provider_type === "antigravity"}><AntigravityProvider /></Show>
+          <Show when={a.provider_type === "antigravity"} fallback={<Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>}>
+            <AntigravityProvider lead={p.rank ? <RankControls rank={p.rank} name={email() ?? a.name} title={title()} /> : undefined} />
+          </Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
           </Show>
