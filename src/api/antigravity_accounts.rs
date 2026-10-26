@@ -227,9 +227,7 @@ pub(crate) fn choose<'a>(
             .then_with(|| a.file.cmp(&b.file))
     });
     let now_epoch = now.max(0) as u64;
-    let any_has_quota = eligible
-        .iter()
-        .any(|c| has_quota(health.get(&c.file), now));
+    let any_has_quota = eligible.iter().any(|c| has_quota(health.get(&c.file), now));
     let route_candidates: Vec<crate::orb_spec::RouteCandidate> = eligible
         .iter()
         .enumerate()
@@ -250,9 +248,7 @@ pub(crate) fn choose<'a>(
             } else {
                 crate::orb_spec::RouteCandidate {
                     account_id: (rank + 1) as u32,
-                    score: reset_at
-                        .saturating_mul(1000)
-                        .saturating_add(rank as u64),
+                    score: reset_at.saturating_mul(1000).saturating_add(rank as u64),
                     is_rejected: false,
                     reset_epoch: 0,
                 }

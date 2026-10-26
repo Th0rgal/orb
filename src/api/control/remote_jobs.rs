@@ -376,15 +376,15 @@ pub(super) async fn submit_leased_remote_job(
         && match resume_sid_opt {
             Some(req_sid) => {
                 let lineage_ok = stored_sid.is_some_and(|sid| {
-                    req_sid == sid
-                        || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
+                    req_sid == sid || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
                 });
                 let rollout_ok = resume_events.iter().any(|event| {
                     event.event_type == "assistant_message"
                         && !event.content.trim().is_empty()
                         && event.metadata["success"] != serde_json::json!(false)
                 });
-                lineage_ok && (rollout_ok || fallback_prompt_opt.is_some_and(|p| !p.trim().is_empty()))
+                lineage_ok
+                    && (rollout_ok || fallback_prompt_opt.is_some_and(|p| !p.trim().is_empty()))
             }
             None => true,
         };

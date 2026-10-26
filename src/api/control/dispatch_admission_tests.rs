@@ -13363,6 +13363,13 @@ async fn retired_chatgpt_ui_backend_is_rejected_with_the_opencode_alternative() 
 /// wait, and the mission must still start once the slot frees.
 #[tokio::test]
 async fn pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs() {
+    // Creates a local mission over HTTP: keep it independent of the host's free
+    // disk (CI runners have less than the production 150 GiB floor).
+    if isolated_track_http_test(
+        "pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs",
+    ) {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let h = Harness::with_capacity(
         FixtureDir {

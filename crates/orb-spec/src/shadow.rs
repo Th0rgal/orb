@@ -180,7 +180,8 @@ impl OrbWireFrame {
             return Err(OrbWireStatus::TruncatedOrOutOfBounds);
         }
 
-        let payload = &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
+        let payload =
+            &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
         let records_slice = &payload[..arena_off];
         let arena_slice = &payload[arena_off..arena_off + arena_len];
 
@@ -606,7 +607,10 @@ mod tests {
             now_epoch: 1_000,
             reset_epoch: 0,
         });
-        assert_eq!(initial_dispatch.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert_eq!(
+            initial_dispatch.action,
+            ProviderPoolAction::DispatchPoolCandidate
+        );
         assert!(initial_dispatch.emit_dispatch_effect);
         assert!(!initial_dispatch.first_byte_locked_next);
 
@@ -621,7 +625,10 @@ mod tests {
             now_epoch: 1_000,
             reset_epoch: 0,
         });
-        assert_eq!(pre_byte_retry.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert_eq!(
+            pre_byte_retry.action,
+            ProviderPoolAction::DispatchPoolCandidate
+        );
         assert!(pre_byte_retry.emit_dispatch_effect);
         assert!(!pre_byte_retry.first_byte_locked_next);
         assert_eq!(pre_byte_retry.dispatched_account_id, 303);
