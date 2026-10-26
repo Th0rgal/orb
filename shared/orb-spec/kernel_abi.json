@@ -2122,6 +2122,302 @@
       }
     },
     {
+      "name": "orb_privd_command_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "leaseValid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "grantScope",
+          "type": "uint8_t"
+        },
+        {
+          "name": "commandClass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "unitMatchesAllowed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasShellMetacharOrFlagBypass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasPathTraversalOrSymlink",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasUnsafeEnvVar",
+          "type": "uint8_t"
+        },
+        {
+          "name": "requireForceCmd",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbPrivdCommandStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_ssh_identity_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "isWorkerOrContainerTarget",
+          "type": "uint8_t"
+        },
+        {
+          "name": "bundleHasControlPlaneKey",
+          "type": "uint8_t"
+        },
+        {
+          "name": "parentDirIsSymlink",
+          "type": "uint8_t"
+        },
+        {
+          "name": "pubKeyIsEd25519WithoutPrivate",
+          "type": "uint8_t"
+        },
+        {
+          "name": "proxyJumpValid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "codexCyberProgramValid",
+          "type": "uint8_t"
+        },
+        {
+          "name": "codexGoalBudgetExhausted",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbSshIdentityStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_agent_event_normalize_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "harnessKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "rawEventKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isCompleted",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasNonEmptyText",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sessionMatchesExpected",
+          "type": "uint32_t"
+        },
+        {
+          "name": "isDuplicateTurnOrTool",
+          "type": "uint32_t"
+        },
+        {
+          "name": "payloadBytes",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxPayloadBytes",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbAgentEventNormalizeStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_transcript_reduce_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "lastAppliedSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "incomingSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "thinkingOpen",
+          "type": "uint8_t"
+        },
+        {
+          "name": "normalizedAction",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isReplayFromLog",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbTranscriptReduceStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_cursor_page_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "sinceSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "beforeSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "itemSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hasSinceCursor",
+          "type": "uint32_t"
+        },
+        {
+          "name": "hasBeforeCursor",
+          "type": "uint32_t"
+        },
+        {
+          "name": "isPartialResponse",
+          "type": "uint32_t"
+        },
+        {
+          "name": "existingCount",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbCursorPageStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_sidebar_merge_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "existingIdOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "incomingIdOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "existingUpdatedAtMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "incomingUpdatedAtMs",
+          "type": "uint64_t"
+        },
+        {
+          "name": "incomingSupersededOrArchived",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isPartialPage",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbSidebarMergeStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_scroll_epoch_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "layoutEpoch",
+          "type": "uint32_t"
+        },
+        {
+          "name": "lastCorrectedEpoch",
+          "type": "uint32_t"
+        },
+        {
+          "name": "correctionsInEpoch",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isPinnedToBottom",
+          "type": "uint8_t"
+        },
+        {
+          "name": "userIsDragging",
+          "type": "uint8_t"
+        },
+        {
+          "name": "targetScrollTopPx",
+          "type": "uint32_t"
+        },
+        {
+          "name": "currentScrollTopPx",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbScrollEpochStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_client_parity_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "clientTarget",
+          "type": "uint8_t"
+        },
+        {
+          "name": "wireSchemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "transcriptSeq",
+          "type": "uint32_t"
+        },
+        {
+          "name": "markdownBlocksCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "sendQueueDepth",
+          "type": "uint32_t"
+        },
+        {
+          "name": "scrollCorrectedInEpoch",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbClientParityStep",
+        "ret": "jlong"
+      }
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [

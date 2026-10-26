@@ -274,6 +274,92 @@ object OrbKernel {
     ): Long
 
     @JvmStatic
+    external fun orbPrivdCommandStep(
+        leaseValid: Int,
+        grantScope: Int,
+        commandClass: Int,
+        unitMatchesAllowed: Int,
+        hasShellMetacharOrFlagBypass: Int,
+        hasPathTraversalOrSymlink: Int,
+        hasUnsafeEnvVar: Int,
+        requireForceCmd: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbSshIdentityStep(
+        isWorkerOrContainerTarget: Int,
+        bundleHasControlPlaneKey: Int,
+        parentDirIsSymlink: Int,
+        pubKeyIsEd25519WithoutPrivate: Int,
+        proxyJumpValid: Int,
+        codexCyberProgramValid: Int,
+        codexGoalBudgetExhausted: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbAgentEventNormalizeStep(
+        harnessKind: Int,
+        rawEventKind: Int,
+        isCompleted: Int,
+        hasNonEmptyText: Int,
+        sessionMatchesExpected: Int,
+        isDuplicateTurnOrTool: Int,
+        payloadBytes: Int,
+        maxPayloadBytes: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbTranscriptReduceStep(
+        lastAppliedSeq: Long,
+        incomingSeq: Long,
+        thinkingOpen: Int,
+        normalizedAction: Int,
+        isReplayFromLog: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbCursorPageStep(
+        sinceSeq: Long,
+        beforeSeq: Long,
+        itemSeq: Long,
+        hasSinceCursor: Int,
+        hasBeforeCursor: Int,
+        isPartialResponse: Int,
+        existingCount: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbSidebarMergeStep(
+        existingIdOrd: Int,
+        incomingIdOrd: Int,
+        existingUpdatedAtMs: Long,
+        incomingUpdatedAtMs: Long,
+        incomingSupersededOrArchived: Int,
+        isPartialPage: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbScrollEpochStep(
+        layoutEpoch: Int,
+        lastCorrectedEpoch: Int,
+        correctionsInEpoch: Int,
+        isPinnedToBottom: Int,
+        userIsDragging: Int,
+        targetScrollTopPx: Int,
+        currentScrollTopPx: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbClientParityStep(
+        clientTarget: Int,
+        wireSchemaId: Int,
+        transcriptSeq: Int,
+        markdownBlocksCount: Int,
+        sendQueueDepth: Int,
+        scrollCorrectedInEpoch: Int
+    ): Long
+
+    @JvmStatic
     external fun leansysSseFrameScan(
         frameOff: Long,
         frameLen: Long,

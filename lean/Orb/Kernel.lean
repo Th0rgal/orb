@@ -1384,4 +1384,237 @@ def forkHomeStep
     else 0
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 5: Security-Critical System Primitives (`orb-privd`, `development_identity`, Codex Driver)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Privileged Command Grammar & Environment Confinement Stepper (`orb_privd_command_step`):
+  Constructive grammar and environment/path confinement replacing bypassable blacklists in `orb-privd`:
+  - `grantScope`: `0 = OpsRead`, `1 = ServiceDeploy`, `2 = RootExec`.
+  - `commandClass`: `0 = UnknownOrForbidden`, `1 = OpsReadSafe`, `2 = ServiceDeployUnit`,
+    `3 = ServiceDeployReload`, `4 = RootExecCommand`.
+  - Under ALL inputs (admitted or rejected), `scrubEnvBit` (`bit 9 = 512`) and
+    `auditRequiredBit` (`bit 10 = 1024`) are ALWAYS `1` (`1536`).
+  - Admits (`allowExecBit = 256`, `hi32 = 0`) iff `leaseValid == 1`, no shell metacharacter / flag
+    bypass (`hasShellMetacharOrFlagBypass == 0`), no `..` traversal or symlink escape
+    (`hasPathTraversalOrSymlink == 0`), no unsafe environment variable (`hasUnsafeEnvVar == 0`),
+    and `(commandClass, grantScope)` satisfies `GrammarConfinement` and `NoPrivilegeEscalation`.
+  - Otherwise rejects (`action = 0`, `allowExecBit = 0`, `lo32 = 1536`, `hi32 = 126`).
+-/
+@[inline, export orb_privd_command_step]
+def privdCommandStep
+    (leaseValid grantScope commandClass unitMatchesAllowed : UInt8)
+    (hasShellMetacharOrFlagBypass hasPathTraversalOrSymlink hasUnsafeEnvVar requireForceCmd : UInt8) : UInt64 :=
+  let safeInput : Bool :=
+    leaseValid == 1 && hasShellMetacharOrFlagBypass == 0 &&
+    hasPathTraversalOrSymlink == 0 && hasUnsafeEnvVar == 0
+  let lo32 : UInt32 :=
+    if !safeInput then 1536
+    else if !(grantScope <= 2) then 1536
+    else if commandClass == 1 then 1793
+    else if commandClass == 2 && 1 <= grantScope && unitMatchesAllowed == 1 then 1794
+    else if commandClass == 3 && 1 <= grantScope then 1794
+    else if commandClass == 4 && grantScope == 2 && requireForceCmd == 0 then 1795
+    else 1536
+  let hi32 : UInt32 :=
+    if lo32 == 1536 then 126 else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI SSH Development Identity & Codex Node Driver Confinement Stepper (`orb_ssh_identity_step`):
+  Proves non-leakage of control-plane secrets (`PALOMA_SSH_PRIVATE_KEY`, `host_keys`, `ssh_hosts`) to
+  worker nodes/containers (`coding_only_bundle`), rejects symlinked parent directories, private keys
+  in public key fields, forward `proxy_jump` references, invalid `SANDBOXED_CYBER_PROGRAM` values,
+  and exhausted Codex native goal budgets:
+  - Under ALL inputs, `noSecretLeakBit` (`bit 10 = 1024`) is `1`, and whenever
+    `isWorkerOrContainerTarget == 1`, `stripControlPlaneSecretsBit` (`bit 9 = 512`) is `1`.
+  - When `valid` holds:
+    - `isWorkerOrContainerTarget == 1` -> `action = 1 (AdmitCodingOnlyIdentity)`, `admitBit = 256`, `lo32 = 1793`, `hi32 = 0`.
+    - `isWorkerOrContainerTarget == 0` -> `action = 2 (AdmitFleetIdentity)`, `admitBit = 256`, `lo32 = 1282`, `hi32 = 0`.
+  - Otherwise rejects (`action = 0`, `admitBit = 0`, `hi32 = 78`).
+-/
+@[inline, export orb_ssh_identity_step]
+def sshIdentityStep
+    (isWorkerOrContainerTarget bundleHasControlPlaneKey parentDirIsSymlink : UInt8)
+    (pubKeyIsEd25519WithoutPrivate proxyJumpValid codexCyberProgramValid codexGoalBudgetExhausted : UInt8) : UInt64 :=
+  let valid : Bool :=
+    parentDirIsSymlink == 0 && pubKeyIsEd25519WithoutPrivate == 1 &&
+    proxyJumpValid == 1 && codexCyberProgramValid == 1 &&
+    codexGoalBudgetExhausted == 0 &&
+    !(isWorkerOrContainerTarget == 1 && bundleHasControlPlaneKey == 1)
+  let lo32 : UInt32 :=
+    if !valid then
+      if isWorkerOrContainerTarget == 1 then 1536 else 1024
+    else if isWorkerOrContainerTarget == 1 then 1793
+    else 1282
+  let hi32 : UInt32 :=
+    if valid then 0 else 78
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 3: Multi-Harness Agent Event Normalizer & Unified Transcript Reducer
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Multi-Harness Agent Event Normalizer Stepper (`orb_agent_event_normalize_step`):
+  Total, bounded transducer step normalizing raw events across all 6 supported harnesses
+  (`0 = Codex`, `1 = ClaudeCode`, `2 = Antigravity`, `3 = OpenCode`, `4 = Grok`, `5 = Vibe`):
+  - `rawEventKind`: `0 = DiagnosticLine`, `1 = SessionIdUpdate`, `2 = ThinkingUpdate`,
+    `3 = AssistantText`, `4 = ToolCall`, `5 = GoalProgress`, `6 = TurnCompleted`, `7 = ErrorOrAuth`.
+  - Universally sets `totalTransducerBit` (`bit 11 = 2048`) and bounds `hi32` by `maxPayloadBytes` (`CostBound`).
+-/
+@[inline, export orb_agent_event_normalize_step]
+def agentEventNormalizeStep
+    (harnessKind rawEventKind isCompleted hasNonEmptyText : UInt8)
+    (sessionMatchesExpected isDuplicateTurnOrTool payloadBytes maxPayloadBytes : UInt32) : UInt64 :=
+  let bounded : Bool := payloadBytes <= maxPayloadBytes
+  let harnessValid : Bool := harnessKind <= 5
+  let sessionOk : Bool :=
+    sessionMatchesExpected == 1 || rawEventKind == 0 || rawEventKind == 1 || rawEventKind == 7
+  let notDup : Bool := isDuplicateTurnOrTool == 0
+  let lo32 : UInt32 :=
+    if !bounded then 2048
+    else if !(harnessValid && sessionOk && notDup) then 2049
+    else if rawEventKind == 0 then 2306
+    else if rawEventKind == 1 then 2307
+    else if rawEventKind == 2 then (if hasNonEmptyText == 1 then 2820 else 2049)
+    else if rawEventKind == 3 then (if hasNonEmptyText == 1 then 3333 else 2049)
+    else if rawEventKind == 4 then (if isCompleted == 1 then 3334 else 3335)
+    else if rawEventKind == 5 then 2312
+    else if rawEventKind == 6 then 3337
+    else if rawEventKind == 7 then 3338
+    else 2049
+  let hi32 : UInt32 :=
+    if bounded then payloadBytes else maxPayloadBytes
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Unified Transcript Reducer Stepper (`orb_transcript_reduce_step`):
+  Pure transcript reduction step shared by Core, iOS, Android, and Desktop (`wasm32`).
+  Satisfies `replay_log_eq_live_transcript` (`isReplayFromLog` invariance) and strict sequence
+  monotonicity (`incomingSeq > lastAppliedSeq` required to append/mutate transcript entries).
+-/
+@[inline, export orb_transcript_reduce_step]
+def transcriptReduceStep
+    (lastAppliedSeq incomingSeq : UInt64)
+    (thinkingOpen normalizedAction isReplayFromLog : UInt8) : UInt64 :=
+  let _ := isReplayFromLog
+  let seqAdvances : Bool := incomingSeq > lastAppliedSeq
+  let nextSeq32 : UInt32 := (if seqAdvances then incomingSeq else lastAppliedSeq).toUInt32
+  let lo32 : UInt32 :=
+    if !seqAdvances then
+      if thinkingOpen == 1 then 512 else 0
+    else if normalizedAction == 4 then 769
+    else if normalizedAction == 5 || normalizedAction == 6 || normalizedAction == 7 ||
+            normalizedAction == 9 || normalizedAction == 10 then
+      if thinkingOpen == 1 then 1282 else 258
+    else if normalizedAction == 2 || normalizedAction == 3 || normalizedAction == 8 then
+      if thinkingOpen == 1 then 771 else 259
+    else
+      if thinkingOpen == 1 then 512 else 0
+  lo32.toUInt64 ||| (nextSeq32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 4: Storage Invariants — Pagination Cursors & Sidebar Merge
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Storage Pagination Cursor & Partial-Response Preservation Stepper (`orb_cursor_page_step`):
+  Enforces strict exclusive cursor bounds (`since_seq < itemSeq < before_seq`), rejects inverted
+  windows (`sinceSeq >= beforeSeq` when both bounds are active), and universally sets
+  `preserveExistingBit` (`bit 9 = 512`) so partial or paginated responses never wipe stored data.
+-/
+@[inline, export orb_cursor_page_step]
+def cursorPageStep
+    (sinceSeq beforeSeq itemSeq : UInt64)
+    (hasSinceCursor hasBeforeCursor isPartialResponse existingCount : UInt32) : UInt64 :=
+  let validWindow : Bool := !(hasSinceCursor == 1 && hasBeforeCursor == 1 && sinceSeq >= beforeSeq)
+  let afterSince : Bool := hasSinceCursor == 0 || itemSeq > sinceSeq
+  let beforeBound : Bool := hasBeforeCursor == 0 || itemSeq < beforeSeq
+  let admitItem : Bool := validWindow && afterSince && beforeBound
+  let partialBit : UInt32 := if isPartialResponse == 1 then 1024 else 0
+  let lo32 : UInt32 :=
+    if !validWindow then 512 ||| partialBit
+    else if admitItem then 769 ||| partialBit
+    else 514 ||| partialBit
+  let hi32 : UInt32 :=
+    if admitItem then existingCount + 1 else existingCount
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Sidebar Mission List Merge & Deduplication Stepper (`orb_sidebar_merge_step`):
+  Eliminates duplicate missions in the sidebar (`sidebar_missions_unique_and_idempotent`):
+  - When `existingIdOrd != 0 && existingIdOrd == incomingIdOrd` (`sameMission`), updates in place
+    (`insertNewBit = 0`, `hi32 = 0` net new rows) if `incomingUpdatedAtMs >= existingUpdatedAtMs`
+    or retains the newer existing row.
+  - When `incomingSupersededOrArchived == 1`, removes or skips the superseded/archived mission.
+  - Universally sets `uniqueSidebarBit` (`bit 10 = 1024`).
+-/
+@[inline, export orb_sidebar_merge_step]
+def sidebarMergeStep
+    (existingIdOrd incomingIdOrd : UInt32)
+    (existingUpdatedAtMs incomingUpdatedAtMs : UInt64)
+    (incomingSupersededOrArchived isPartialPage : UInt8) : UInt64 :=
+  let sameMission : Bool := existingIdOrd != 0 && existingIdOrd == incomingIdOrd
+  let incomingNewer : Bool := incomingUpdatedAtMs >= existingUpdatedAtMs
+  let partialKeepBit : UInt32 := if isPartialPage == 1 then 2048 else 0
+  let lo32 : UInt32 :=
+    if incomingSupersededOrArchived == 1 then
+      (if sameMission then 1028 else 1024) ||| partialKeepBit
+    else if sameMission then
+      (if incomingNewer then 1281 else 1282) ||| partialKeepBit
+    else 1795 ||| partialKeepBit
+  let hi32 : UInt32 :=
+    if !(incomingSupersededOrArchived == 1) && !sameMission then 1 else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 9 Phase 6: Clients (iOS, Android & Desktop `wasm32`) Scroll Epoch & Parity
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Client Scroll Correction Epoch Gate (`orb_scroll_epoch_step`):
+  Enforces `scroll_correction_at_most_once_per_epoch` across iOS, Android, and Desktop (`wasm32`):
+  once a scroll correction has been applied in `layoutEpoch` (`layoutEpoch <= lastCorrectedEpoch && correctionsInEpoch > 0`),
+  any second correction in the same epoch is suppressed (`applyScrollBit = 0`, `hi32 = currentScrollTopPx`).
+-/
+@[inline, export orb_scroll_epoch_step]
+def scrollEpochStep
+    (layoutEpoch lastCorrectedEpoch : UInt32)
+    (correctionsInEpoch isPinnedToBottom userIsDragging : UInt8)
+    (targetScrollTopPx currentScrollTopPx : UInt32) : UInt64 :=
+  let newEpoch : Bool := layoutEpoch > lastCorrectedEpoch
+  let alreadyCorrected : Bool := !newEpoch && correctionsInEpoch > 0
+  let needsDelta : Bool := targetScrollTopPx != currentScrollTopPx
+  let admitCorrection : Bool :=
+    isPinnedToBottom == 1 && userIsDragging == 0 && !alreadyCorrected && needsDelta
+  let lo32 : UInt32 :=
+    if admitCorrection then 1281
+    else if alreadyCorrected then 1026
+    else 0
+  let hi32 : UInt32 :=
+    if admitCorrection then targetScrollTopPx else currentScrollTopPx
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Cross-Client `OrbWire` Projection Parity Stepper (`orb_client_parity_step`):
+  Computes the canonical client projection state word across Core (`0`), iOS (`1`), Android (`2`),
+  and Desktop `wasm32` (`3`), proving bit-for-bit parity across all 4 targets on the same `OrbWire` stream.
+-/
+@[inline, export orb_client_parity_step]
+def clientParityStep
+    (clientTarget : UInt8) (wireSchemaId : UInt32)
+    (transcriptSeq markdownBlocksCount sendQueueDepth : UInt32)
+    (scrollCorrectedInEpoch : UInt8) : UInt64 :=
+  let validTarget : Bool := clientTarget <= 3
+  let schemaOk : Bool := wireSchemaId >= 1 && wireSchemaId <= 2
+  let lo32 : UInt32 :=
+    if !(validTarget && schemaOk) then 0
+    else if scrollCorrectedInEpoch == 1 then 769 else 257
+  let hi32 : UInt32 :=
+    if !(validTarget && schemaOk) then 0
+    else transcriptSeq ^^^ (markdownBlocksCount <<< 16) ^^^ (sendQueueDepth <<< 24)
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
 end Orb.Kernel

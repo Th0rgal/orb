@@ -904,6 +904,76 @@ unsafe extern "C" {
         has_committed_transfer: u8,
         requested_override_home: u8,
     ) -> u64;
+    fn orb_privd_command_step(
+        lease_valid: u8,
+        grant_scope: u8,
+        command_class: u8,
+        unit_matches_allowed: u8,
+        has_shell_metachar_or_flag_bypass: u8,
+        has_path_traversal_or_symlink: u8,
+        has_unsafe_env_var: u8,
+        require_force_cmd: u8,
+    ) -> u64;
+    fn orb_ssh_identity_step(
+        is_worker_or_container_target: u8,
+        bundle_has_control_plane_key: u8,
+        parent_dir_is_symlink: u8,
+        pub_key_is_ed25519_without_private: u8,
+        proxy_jump_valid: u8,
+        codex_cyber_program_valid: u8,
+        codex_goal_budget_exhausted: u8,
+    ) -> u64;
+    fn orb_agent_event_normalize_step(
+        harness_kind: u8,
+        raw_event_kind: u8,
+        is_completed: u8,
+        has_non_empty_text: u8,
+        session_matches_exp: u32,
+        is_duplicate_turn_tool: u32,
+        payload_bytes: u32,
+        max_payload_bytes: u32,
+    ) -> u64;
+    fn orb_transcript_reduce_step(
+        last_applied_seq: u64,
+        incoming_seq: u64,
+        thinking_open: u8,
+        normalized_action: u8,
+        is_replay_from_log: u8,
+    ) -> u64;
+    fn orb_cursor_page_step(
+        since_seq: u64,
+        before_seq: u64,
+        item_seq: u64,
+        has_since_cursor: u32,
+        has_before_cursor: u32,
+        is_partial_response: u32,
+        existing_count: u32,
+    ) -> u64;
+    fn orb_sidebar_merge_step(
+        existing_id_ord: u32,
+        incoming_id_ord: u32,
+        existing_updated_at_ms: u64,
+        incoming_updated_at_ms: u64,
+        incoming_superseded_or_archived: u8,
+        is_partial_page: u8,
+    ) -> u64;
+    fn orb_scroll_epoch_step(
+        layout_epoch: u32,
+        last_corrected_epoch: u32,
+        corrections_in_epoch: u8,
+        is_pinned_to_bottom: u8,
+        user_is_dragging: u8,
+        target_scroll_top_px: u32,
+        current_scroll_top_px: u32,
+    ) -> u64;
+    fn orb_client_parity_step(
+        client_target: u8,
+        wire_schema_id: u32,
+        transcript_seq: u32,
+        markdown_blocks_count: u32,
+        send_queue_depth: u32,
+        scroll_corrected_in_epoch: u8,
+    ) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2666,6 +2736,837 @@ pub fn fork_home_step(input: ForkHomeStepInput) -> ForkHomeStepVerdict {
         job_home_preserved: ((raw >> 17) & 1) != 0,
         exit_code: (raw >> 32) as u32,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrivdGrantScope {
+    OpsRead = 0,
+    ServiceDeploy = 1,
+    RootExec = 2,
+}
+
+impl From<u8> for PrivdGrantScope {
+    #[inline]
+    fn from(raw: u8) -> Self {
+        match raw {
+            0 => Self::OpsRead,
+            1 => Self::ServiceDeploy,
+            _ => Self::RootExec,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrivdCommandClass {
+    UnknownOrForbidden = 0,
+    OpsReadSafe = 1,
+    ServiceDeployUnit = 2,
+    ServiceDeployReload = 3,
+    RootExecCommand = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrivdCommandAction {
+    Reject = 0,
+    AdmitOpsRead = 1,
+    AdmitServiceDeploy = 2,
+    AdmitRootExec = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivdCommandStepInput {
+    pub lease_valid: bool,
+    pub grant_scope: PrivdGrantScope,
+    pub command_class: PrivdCommandClass,
+    pub unit_matches_allowed: bool,
+    pub has_shell_metachar_or_flag_bypass: bool,
+    pub has_path_traversal_or_symlink: bool,
+    pub has_unsafe_env_var: bool,
+    pub require_force_cmd: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivdCommandStepVerdict {
+    pub action: PrivdCommandAction,
+    pub allow_exec: bool,
+    pub scrub_env: bool,
+    pub audit_required: bool,
+    pub exit_code: u32,
+    pub exit_code_on_reject: u32,
+}
+
+pub type PrivdCommandVerdict = PrivdCommandStepVerdict;
+
+#[inline]
+pub fn privd_command_step(input: PrivdCommandStepInput) -> PrivdCommandStepVerdict {
+    let raw = unsafe {
+        orb_privd_command_step(
+            u8::from(input.lease_valid),
+            input.grant_scope as u8,
+            input.command_class as u8,
+            u8::from(input.unit_matches_allowed),
+            u8::from(input.has_shell_metachar_or_flag_bypass),
+            u8::from(input.has_path_traversal_or_symlink),
+            u8::from(input.has_unsafe_env_var),
+            u8::from(input.require_force_cmd),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => PrivdCommandAction::AdmitOpsRead,
+        2 => PrivdCommandAction::AdmitServiceDeploy,
+        3 => PrivdCommandAction::AdmitRootExec,
+        _ => PrivdCommandAction::Reject,
+    };
+    let exit_code = (raw >> 32) as u32;
+    PrivdCommandStepVerdict {
+        action,
+        allow_exec: ((raw >> 8) & 1) != 0,
+        scrub_env: ((raw >> 9) & 1) != 0,
+        audit_required: ((raw >> 10) & 1) != 0,
+        exit_code,
+        exit_code_on_reject: exit_code,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SshIdentityAction {
+    Reject = 0,
+    AdmitCodingOnlyIdentity = 1,
+    AdmitFleetIdentity = 2,
+}
+
+impl SshIdentityAction {
+    #[allow(non_upper_case_globals)]
+    pub const RejectSshOrCodexConfig: Self = Self::Reject;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SshIdentityStepInput {
+    pub is_worker_or_container_target: bool,
+    pub bundle_has_control_plane_key: bool,
+    pub parent_dir_is_symlink: bool,
+    pub pub_key_is_ed25519_without_private: bool,
+    pub proxy_jump_valid: bool,
+    pub codex_cyber_program_valid: bool,
+    pub codex_goal_budget_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SshIdentityStepVerdict {
+    pub action: SshIdentityAction,
+    pub admit: bool,
+    pub strip_control_plane_secrets: bool,
+    pub no_secret_leak: bool,
+    pub exit_code: u32,
+    pub exit_code_on_reject: u32,
+}
+
+pub type SshIdentityVerdict = SshIdentityStepVerdict;
+
+#[inline]
+pub fn ssh_identity_step(input: SshIdentityStepInput) -> SshIdentityStepVerdict {
+    let raw = unsafe {
+        orb_ssh_identity_step(
+            u8::from(input.is_worker_or_container_target),
+            u8::from(input.bundle_has_control_plane_key),
+            u8::from(input.parent_dir_is_symlink),
+            u8::from(input.pub_key_is_ed25519_without_private),
+            u8::from(input.proxy_jump_valid),
+            u8::from(input.codex_cyber_program_valid),
+            u8::from(input.codex_goal_budget_exhausted),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => SshIdentityAction::AdmitCodingOnlyIdentity,
+        2 => SshIdentityAction::AdmitFleetIdentity,
+        _ => SshIdentityAction::Reject,
+    };
+    let exit_code = (raw >> 32) as u32;
+    SshIdentityStepVerdict {
+        action,
+        admit: ((raw >> 8) & 1) != 0,
+        strip_control_plane_secrets: ((raw >> 9) & 1) != 0,
+        no_secret_leak: ((raw >> 10) & 1) != 0,
+        exit_code,
+        exit_code_on_reject: exit_code,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AgentHarnessKind {
+    Codex = 0,
+    ClaudeCode = 1,
+    Antigravity = 2,
+    OpenCode = 3,
+    Grok = 4,
+    Vibe = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RawAgentEventKind {
+    DiagnosticLine = 0,
+    SessionIdUpdate = 1,
+    ThinkingUpdate = 2,
+    AssistantText = 3,
+    ToolCall = 4,
+    GoalProgress = 5,
+    TurnCompleted = 6,
+    ErrorOrAuth = 7,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AgentEventNormalizeAction {
+    RejectOverBudget = 0,
+    SkipDuplicateOrEmpty = 1,
+    EmitDiagnostic = 2,
+    EmitSessionId = 3,
+    EmitThinking = 4,
+    EmitAssistantText = 5,
+    EmitToolCompleted = 6,
+    EmitToolRunning = 7,
+    EmitGoalProgress = 8,
+    EmitTurnCompleted = 9,
+    EmitErrorOrAuth = 10,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentEventNormalizeStepInput {
+    pub harness_kind: AgentHarnessKind,
+    pub raw_event_kind: RawAgentEventKind,
+    pub is_completed: bool,
+    pub has_non_empty_text: bool,
+    pub session_matches_expected: bool,
+    pub is_duplicate_turn_or_tool: bool,
+    pub payload_bytes: u32,
+    pub max_payload_bytes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentEventNormalizeStepVerdict {
+    pub action: AgentEventNormalizeAction,
+    pub emit_event: bool,
+    pub thinking_open_next: bool,
+    pub close_thinking: bool,
+    pub total_transducer: bool,
+    pub bounded_bytes: u32,
+}
+
+#[inline]
+pub fn agent_event_normalize_step(
+    input: AgentEventNormalizeStepInput,
+) -> AgentEventNormalizeStepVerdict {
+    let raw = unsafe {
+        orb_agent_event_normalize_step(
+            input.harness_kind as u8,
+            input.raw_event_kind as u8,
+            u8::from(input.is_completed),
+            u8::from(input.has_non_empty_text),
+            u32::from(input.session_matches_expected),
+            u32::from(input.is_duplicate_turn_or_tool),
+            input.payload_bytes,
+            input.max_payload_bytes,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => AgentEventNormalizeAction::SkipDuplicateOrEmpty,
+        2 => AgentEventNormalizeAction::EmitDiagnostic,
+        3 => AgentEventNormalizeAction::EmitSessionId,
+        4 => AgentEventNormalizeAction::EmitThinking,
+        5 => AgentEventNormalizeAction::EmitAssistantText,
+        6 => AgentEventNormalizeAction::EmitToolCompleted,
+        7 => AgentEventNormalizeAction::EmitToolRunning,
+        8 => AgentEventNormalizeAction::EmitGoalProgress,
+        9 => AgentEventNormalizeAction::EmitTurnCompleted,
+        10 => AgentEventNormalizeAction::EmitErrorOrAuth,
+        _ => AgentEventNormalizeAction::RejectOverBudget,
+    };
+    AgentEventNormalizeStepVerdict {
+        action,
+        emit_event: ((raw >> 8) & 1) != 0,
+        thinking_open_next: ((raw >> 9) & 1) != 0,
+        close_thinking: ((raw >> 10) & 1) != 0,
+        total_transducer: ((raw >> 11) & 1) != 0,
+        bounded_bytes: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TranscriptReduceAction {
+    DedupeOrSkip = 0,
+    AppendOrUpdateThinking = 1,
+    AppendTranscriptEntry = 2,
+    UpdateMetadata = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptReduceStepInput {
+    pub last_applied_seq: u64,
+    pub incoming_seq: u64,
+    pub thinking_open: bool,
+    pub normalized_action: AgentEventNormalizeAction,
+    pub is_replay_from_log: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptReduceStepVerdict {
+    pub action: TranscriptReduceAction,
+    pub emit_entry: bool,
+    pub thinking_open_next: bool,
+    pub closed_previous_thinking: bool,
+    pub next_applied_seq_lo32: u32,
+}
+
+#[inline]
+pub fn transcript_reduce_step(input: TranscriptReduceStepInput) -> TranscriptReduceStepVerdict {
+    let raw = unsafe {
+        orb_transcript_reduce_step(
+            input.last_applied_seq,
+            input.incoming_seq,
+            u8::from(input.thinking_open),
+            input.normalized_action as u8,
+            u8::from(input.is_replay_from_log),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => TranscriptReduceAction::AppendOrUpdateThinking,
+        2 => TranscriptReduceAction::AppendTranscriptEntry,
+        3 => TranscriptReduceAction::UpdateMetadata,
+        _ => TranscriptReduceAction::DedupeOrSkip,
+    };
+    TranscriptReduceStepVerdict {
+        action,
+        emit_entry: ((raw >> 8) & 1) != 0,
+        thinking_open_next: ((raw >> 9) & 1) != 0,
+        closed_previous_thinking: ((raw >> 10) & 1) != 0,
+        next_applied_seq_lo32: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CursorPageAction {
+    RejectInvalidWindow = 0,
+    IncludeItem = 1,
+    ExcludeOutOfWindow = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPageStepInput {
+    pub since_seq: Option<u64>,
+    pub before_seq: Option<u64>,
+    pub item_seq: u64,
+    pub is_partial_response: bool,
+    pub existing_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPageStepVerdict {
+    pub action: CursorPageAction,
+    pub include_item: bool,
+    pub preserve_existing: bool,
+    pub partial_safe: bool,
+    pub next_count: u32,
+}
+
+#[inline]
+pub fn cursor_page_step(input: CursorPageStepInput) -> CursorPageStepVerdict {
+    let raw = unsafe {
+        orb_cursor_page_step(
+            input.since_seq.unwrap_or(0),
+            input.before_seq.unwrap_or(0),
+            input.item_seq,
+            u32::from(input.since_seq.is_some()),
+            u32::from(input.before_seq.is_some()),
+            u32::from(input.is_partial_response),
+            input.existing_count,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => CursorPageAction::IncludeItem,
+        2 => CursorPageAction::ExcludeOutOfWindow,
+        _ => CursorPageAction::RejectInvalidWindow,
+    };
+    CursorPageStepVerdict {
+        action,
+        include_item: ((raw >> 8) & 1) != 0,
+        preserve_existing: ((raw >> 9) & 1) != 0,
+        partial_safe: ((raw >> 10) & 1) != 0,
+        next_count: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SidebarMergeAction {
+    SkipArchivedOrSuperseded = 0,
+    UpdateExistingInPlace = 1,
+    RetainExistingNewer = 2,
+    InsertNewUnique = 3,
+    RemoveSuperseded = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarMergeStepInput {
+    pub existing_id_ord: u32,
+    pub incoming_id_ord: u32,
+    pub existing_updated_at_ms: u64,
+    pub incoming_updated_at_ms: u64,
+    pub incoming_superseded_or_archived: bool,
+    pub is_partial_page: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarMergeStepVerdict {
+    pub action: SidebarMergeAction,
+    pub retain_or_upsert: bool,
+    pub insert_new: bool,
+    pub unique_sidebar: bool,
+    pub preserve_unmentioned: bool,
+    pub net_new_rows: u32,
+}
+
+#[inline]
+pub fn sidebar_merge_step(input: SidebarMergeStepInput) -> SidebarMergeStepVerdict {
+    let raw = unsafe {
+        orb_sidebar_merge_step(
+            input.existing_id_ord,
+            input.incoming_id_ord,
+            input.existing_updated_at_ms,
+            input.incoming_updated_at_ms,
+            u8::from(input.incoming_superseded_or_archived),
+            u8::from(input.is_partial_page),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => SidebarMergeAction::UpdateExistingInPlace,
+        2 => SidebarMergeAction::RetainExistingNewer,
+        3 => SidebarMergeAction::InsertNewUnique,
+        4 => SidebarMergeAction::RemoveSuperseded,
+        _ => SidebarMergeAction::SkipArchivedOrSuperseded,
+    };
+    SidebarMergeStepVerdict {
+        action,
+        retain_or_upsert: ((raw >> 8) & 1) != 0,
+        insert_new: ((raw >> 9) & 1) != 0,
+        unique_sidebar: ((raw >> 10) & 1) != 0,
+        preserve_unmentioned: ((raw >> 11) & 1) != 0,
+        net_new_rows: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScrollEpochAction {
+    KeepCurrentScroll = 0,
+    ApplyEpochCorrection = 1,
+    SuppressDuplicateEpochCorrection = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollEpochStepInput {
+    pub layout_epoch: u32,
+    pub last_corrected_epoch: u32,
+    pub corrections_in_epoch: u8,
+    pub is_pinned_to_bottom: bool,
+    pub user_is_dragging: bool,
+    pub target_scroll_top_px: u32,
+    pub current_scroll_top_px: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollEpochStepVerdict {
+    pub action: ScrollEpochAction,
+    pub apply_scroll: bool,
+    pub epoch_fence_set: bool,
+    pub effective_scroll_top_px: u32,
+}
+
+#[inline]
+pub fn scroll_epoch_step(input: ScrollEpochStepInput) -> ScrollEpochStepVerdict {
+    let raw = unsafe {
+        orb_scroll_epoch_step(
+            input.layout_epoch,
+            input.last_corrected_epoch,
+            input.corrections_in_epoch,
+            u8::from(input.is_pinned_to_bottom),
+            u8::from(input.user_is_dragging),
+            input.target_scroll_top_px,
+            input.current_scroll_top_px,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => ScrollEpochAction::ApplyEpochCorrection,
+        2 => ScrollEpochAction::SuppressDuplicateEpochCorrection,
+        _ => ScrollEpochAction::KeepCurrentScroll,
+    };
+    ScrollEpochStepVerdict {
+        action,
+        apply_scroll: ((raw >> 8) & 1) != 0,
+        epoch_fence_set: ((raw >> 10) & 1) != 0,
+        effective_scroll_top_px: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ClientProjectionTarget {
+    Core = 0,
+    Ios = 1,
+    Android = 2,
+    DesktopWasm32 = 3,
+}
+
+#[inline]
+pub fn client_parity_step(
+    target: ClientProjectionTarget,
+    wire_schema_id: u32,
+    transcript_seq: u32,
+    markdown_blocks_count: u32,
+    send_queue_depth: u32,
+    scroll_corrected_in_epoch: bool,
+) -> u64 {
+    unsafe {
+        orb_client_parity_step(
+            target as u8,
+            wire_schema_id,
+            transcript_seq,
+            markdown_blocks_count,
+            send_queue_depth,
+            u8::from(scroll_corrected_in_epoch),
+        )
+    }
+}
+
+/// Snapshot of a subsystem's bounded shadow divergence counter (`ShadowDivergenceRing<256>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowSnapshot {
+    pub subsystem: &'static str,
+    pub total_events: u64,
+    pub total_divergences: u64,
+    pub recent_divergences: usize,
+}
+
+/// Thread-safe bounded shadow counter backed by [`shadow::ShadowDivergenceRing<256>`] and
+/// [`shadow::RefinementSimulation::observe_step`].
+pub struct ShadowCounter {
+    ring: std::sync::Mutex<shadow::ShadowDivergenceRing<256>>,
+}
+
+impl Default for ShadowCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShadowCounter {
+    pub fn new() -> Self {
+        Self {
+            ring: std::sync::Mutex::new(shadow::ShadowDivergenceRing::<256>::new()),
+        }
+    }
+
+    pub fn snapshot(&self, subsystem: &'static str) -> ShadowSnapshot {
+        let ring = self
+            .ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ShadowSnapshot {
+            subsystem,
+            total_events: ring.total_events,
+            total_divergences: ring.unexpected_divergences,
+            recent_divergences: ring.entries().len(),
+        }
+    }
+}
+
+/// Observe `privd_command_step` (`orb_privd_command_step`) against the host admission decision.
+pub fn observe_privd_command_shadow(
+    input: PrivdCommandStepInput,
+    host_allow_exec: bool,
+    counter: &ShadowCounter,
+) -> PrivdCommandStepVerdict {
+    let verdict = privd_command_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, PrivdCommandStepInput, u8, u8> {
+        subsystem: "orb_privd_command_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = privd_command_step(*ev);
+            let effs = if v.allow_exec {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.allow_exec, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_allow_exec {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.grant_scope as u8),
+        idempotency_key: u64::from(input.command_class as u8),
+        boot_id_matches: true,
+        schema_id: 5,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.lease_valid,
+            &host_allow_exec,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `ssh_identity_step` (`orb_ssh_identity_step`) against the host admission decision.
+pub fn observe_ssh_identity_shadow(
+    input: SshIdentityStepInput,
+    host_admits: bool,
+    counter: &ShadowCounter,
+) -> SshIdentityStepVerdict {
+    let verdict = ssh_identity_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, SshIdentityStepInput, u8, u8> {
+        subsystem: "orb_ssh_identity_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = ssh_identity_step(*ev);
+            let effs = if v.admit {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.admit, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.is_worker_or_container_target),
+        idempotency_key: u64::from(input.bundle_has_control_plane_key),
+        boot_id_matches: true,
+        schema_id: 5,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_worker_or_container_target,
+            &host_admits,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `agent_event_normalize_step` (`orb_agent_event_normalize_step`) against the host transducer.
+pub fn observe_agent_event_normalize_shadow(
+    input: AgentEventNormalizeStepInput,
+    host_emits: bool,
+    counter: &ShadowCounter,
+) -> AgentEventNormalizeStepVerdict {
+    let verdict = agent_event_normalize_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, AgentEventNormalizeStepInput, u8, u8> {
+        subsystem: "orb_agent_event_normalize_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = agent_event_normalize_step(*ev);
+            let effs = if v.emit_event {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.emit_event, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_emits {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.harness_kind as u8),
+        idempotency_key: u64::from(input.raw_event_kind as u8),
+        boot_id_matches: true,
+        schema_id: 3,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_completed,
+            &host_emits,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `transcript_reduce_step` (`orb_transcript_reduce_step`) against the host reducer.
+pub fn observe_transcript_reduce_shadow(
+    input: TranscriptReduceStepInput,
+    host_emits: bool,
+    counter: &ShadowCounter,
+) -> TranscriptReduceStepVerdict {
+    let verdict = transcript_reduce_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, TranscriptReduceStepInput, u8, u8> {
+        subsystem: "orb_transcript_reduce_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = transcript_reduce_step(*ev);
+            let effs = if v.emit_entry {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.emit_entry, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_emits {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: input.last_applied_seq,
+        idempotency_key: input.incoming_seq,
+        boot_id_matches: true,
+        schema_id: 3,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.thinking_open,
+            &host_emits,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `cursor_page_step` (`orb_cursor_page_step`) against the host pagination filter.
+pub fn observe_cursor_page_shadow(
+    input: CursorPageStepInput,
+    host_includes: bool,
+    counter: &ShadowCounter,
+) -> CursorPageStepVerdict {
+    let verdict = cursor_page_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, CursorPageStepInput, u8, u8> {
+        subsystem: "orb_cursor_page_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = cursor_page_step(*ev);
+            let effs = if v.include_item {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.include_item, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_includes {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: input.item_seq,
+        idempotency_key: u64::from(input.existing_count),
+        boot_id_matches: true,
+        schema_id: 4,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_partial_response,
+            &host_includes,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `sidebar_merge_step` (`orb_sidebar_merge_step`) against the host sidebar reconciliation.
+pub fn observe_sidebar_merge_shadow(
+    input: SidebarMergeStepInput,
+    host_retains_or_upserts: bool,
+    counter: &ShadowCounter,
+) -> SidebarMergeStepVerdict {
+    let verdict = sidebar_merge_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, SidebarMergeStepInput, u8, u8> {
+        subsystem: "orb_sidebar_merge_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = sidebar_merge_step(*ev);
+            let effs = if v.retain_or_upsert {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.retain_or_upsert, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_retains_or_upserts {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: input.incoming_updated_at_ms,
+        fresh_nonce: u64::from(input.existing_id_ord),
+        idempotency_key: u64::from(input.incoming_id_ord),
+        boot_id_matches: true,
+        schema_id: 4,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_partial_page,
+            &host_retains_or_upserts,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
 }
 
 #[cfg(test)]
