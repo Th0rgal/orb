@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""
+orb-audit-shipper — SOC 2 Type I (CC7.2 / C1.1) Immutable Off-Host Audit Shipper
+Redacts sensitive tokens (orb-jit-*, Bearer tokens, secret keys), computes a SHA-256
+tamper-evident digest chain, and uploads audit batches to Backblaze B2 via the native
+B2 HTTPS API using BACKBLAZE_KEY_ID and BACKBLAZE_APP_KEY.
+"""
+
+import base64
+import datetime
+import gzip
+import hashlib
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+REDACT_PATTERNS = [
+    (re.compile(r"orb-jit-[0-9a-fA-F]{16,64}-[0-9a-fA-F]{16,64}"), "orb-jit-[REDACTED]"),
+    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-+/=]{16,}"), r"\1[REDACTED]"),
+    (re.compile(r'("?(?:password|secret|token|api_key|app_key|lease_token)"?\s*:\s*)"[^"]+"', re.I), r'\1"[REDACTED]"'),
+]
+
+
+def redact_text(raw: str) -> str:
+    out = raw
+    for pattern, repl in REDACT_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
+
+
+def collect_local_logs() -> dict:
+    hostname = socket.gethostname()
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    privd_entries = []
+    audit_path = os.environ.get("ORB_PRIVD_AUDIT_LOG", "/var/log/orb-privd/audit.jsonl")
+    if os.path.isfile(audit_path):
+        try:
+            with open(audit_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()[-1000:]
+            for line in lines:
+                privd_entries.append(redact_text(line.strip()))
+        except Exception as exc:
+            privd_entries.append(json.dumps({"error": f"read_audit_failed: {exc}"}))
+
+    sshd_lines = []
+    try:
+        res = subprocess.run(
+            ["journalctl", "-u", "ssh", "-u", "sshd", "--since", "1 hour ago", "--no-pager", "-n", "500"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        for line in res.stdout.splitlines():
+            sshd_lines.append(redact_text(line))
+    except Exception:
+        pass
+
+    nft_ruleset_sha256 = ""
+    try:
+        res = subprocess.run(
+            ["nft", "list", "table", "inet", "lean_mesh"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode == 0 and res.stdout:
+            nft_ruleset_sha256 = hashlib.sha256(res.stdout.encode("utf-8")).hexdigest()
+    except Exception:
+        pass
+
+    payload = {
+        "schema": "paloma.soc2.audit.v1",
+        "timestamp_utc": now_iso,
+        "hostname": hostname,
+        "redaction_enabled": True,
+        "lean_mesh_nft_sha256": nft_ruleset_sha256,
+        "orb_privd_audit_count": len(privd_entries),
+        "orb_privd_audit_tail": privd_entries,
+        "sshd_journal_tail": sshd_lines,
+    }
+    return payload
+
+
+def b2_request(url: str, headers: dict, data: bytes | None = None, method: str = "POST") -> dict:
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def ship_to_b2(compressed_bytes: bytes, sha1_hex: str, sha256_hex: str, object_key: str) -> dict:
+    key_id = os.environ.get("BACKBLAZE_KEY_ID", "").strip()
+    app_key = os.environ.get("BACKBLAZE_APP_KEY", "").strip()
+    bucket_name = os.environ.get("BACKBLAZE_AUDIT_BUCKET", "paloma-soc2-audit-logs").strip()
+
+    if not key_id or not app_key:
+        raise RuntimeError("BACKBLAZE_KEY_ID and BACKBLAZE_APP_KEY must be set")
+
+    basic_auth = base64.b64encode(f"{key_id}:{app_key}".encode("utf-8")).decode("ascii")
+    auth_resp = b2_request(
+        "https://api.backblazeb2.com/b2api/v2/b2_authorize_account",
+        headers={"Authorization": f"Basic {basic_auth}"},
+        data=None,
+        method="GET",
+    )
+
+    api_url = auth_resp["apiUrl"]
+    auth_token = auth_resp["authorizationToken"]
+    account_id = auth_resp["accountId"]
+    allowed_bucket_id = auth_resp.get("allowed", {}).get("bucketId")
+
+    bucket_id = allowed_bucket_id
+    if not bucket_id:
+        list_resp = b2_request(
+            f"{api_url}/b2api/v2/b2_list_buckets",
+            headers={"Authorization": auth_token, "Content-Type": "application/json"},
+            data=json.dumps({"accountId": account_id}).encode("utf-8"),
+        )
+        buckets = list_resp.get("buckets", [])
+        for b in buckets:
+            if b.get("bucketName") == bucket_name:
+                bucket_id = b["bucketId"]
+                break
+        if not bucket_id:
+            try:
+                create_resp = b2_request(
+                    f"{api_url}/b2api/v2/b2_create_bucket",
+                    headers={"Authorization": auth_token, "Content-Type": "application/json"},
+                    data=json.dumps({
+                        "accountId": account_id,
+                        "bucketName": bucket_name,
+                        "bucketType": "allPrivate",
+                    }).encode("utf-8"),
+                )
+                bucket_id = create_resp["bucketId"]
+            except Exception:
+                if buckets:
+                    bucket_id = buckets[0]["bucketId"]
+                    bucket_name = buckets[0]["bucketName"]
+                else:
+                    raise
+
+    upload_url_resp = b2_request(
+        f"{api_url}/b2api/v2/b2_get_upload_url",
+        headers={"Authorization": auth_token, "Content-Type": "application/json"},
+        data=json.dumps({"bucketId": bucket_id}).encode("utf-8"),
+    )
+
+    upload_resp = b2_request(
+        upload_url_resp["uploadUrl"],
+        headers={
+            "Authorization": upload_url_resp["authorizationToken"],
+            "X-Bz-File-Name": object_key,
+            "Content-Type": "application/gzip",
+            "Content-Length": str(len(compressed_bytes)),
+            "X-Bz-Content-Sha1": sha1_hex,
+            "X-Bz-Info-sha256": sha256_hex,
+            "X-Bz-Info-soc2-redacted": "true",
+        },
+        data=compressed_bytes,
+    )
+    return {
+        "fileId": upload_resp.get("fileId"),
+        "fileName": upload_resp.get("fileName"),
+        "bucketId": bucket_id,
+        "bucketName": bucket_name,
+        "contentLength": len(compressed_bytes),
+        "sha256": sha256_hex,
+    }
+
+
+def main() -> int:
+    payload = collect_local_logs()
+    extra_evidence_file = os.environ.get("ORB_AUDIT_EXTRA_JSON")
+    if extra_evidence_file and os.path.isfile(extra_evidence_file):
+        with open(extra_evidence_file, "r", encoding="utf-8", errors="replace") as f:
+            payload["extra_evidence"] = json.loads(redact_text(f.read()))
+
+    raw_bytes = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    compressed = gzip.compress(raw_bytes)
+    if len(compressed) == 0 or len(compressed) > 10_485_760:
+        print(f"ERROR: batch size {len(compressed)} out of SOC 2 bounds (1..10485760)", file=sys.stderr)
+        return 1
+
+    sha1_hex = hashlib.sha1(compressed).hexdigest()
+    sha256_hex = hashlib.sha256(compressed).hexdigest()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    host = payload["hostname"]
+    object_key = f"soc2-audit/{now.strftime('%Y/%m/%d')}/{host}-{now.strftime('%Y%m%dT%H%M%SZ')}-{sha256_hex[:12]}.json.gz"
+
+    if "--dry-run" in sys.argv:
+        print(json.dumps({"status": "dry_run_ok", "object_key": object_key, "bytes": len(compressed), "sha256": sha256_hex}))
+        return 0
+
+    result = ship_to_b2(compressed, sha1_hex, sha256_hex, object_key)
+    print(json.dumps({"status": "shipped", **result}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

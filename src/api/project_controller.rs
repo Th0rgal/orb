@@ -1253,7 +1253,7 @@ mod tests {
     #[test]
     fn settings_come_from_the_job_record() {
         let job: serde_json::Value = serde_json::from_str(
-            r#"{"id":"j1","name":"c","prompt":"Do the thing.","skills":["controllers-policy","github-workflow"],
+            r#"{"id":"j1","name":"c","prompt":"Do the thing.","skills":["orb-control","github-workflow"],
                 "deliver":"project:verity-lido","repeat":{"times":null,"completed":12},
                 "model":"builtin/assistant","provider":"sandboxed","context_from":["j1"],
                 "enabled_toolsets":["mcp"],"controller":{"project":"verity-lido","mode":"operator"}}"#,
@@ -1262,17 +1262,16 @@ mod tests {
         let s = settings_view(&job, None);
         assert_eq!(s.prompt, "Do the thing.");
         assert_eq!(s.prompt_chars, 13);
-        assert_eq!(s.skills, vec!["controllers-policy", "github-workflow"]);
+        assert_eq!(s.skills, vec!["orb-control", "github-workflow"]);
         assert_eq!(s.repeat_times, None);
         assert_eq!(s.repeat_completed, 12);
         assert!(s.continuity);
         assert_eq!(s.prompt_budget, Some(BOUND_CONTROLLER_PROMPT_BUDGET));
         // No binding → no budget; legacy single `skill` still listed.
         let plain: serde_json::Value =
-            serde_json::from_str(r#"{"id":"j2","prompt":"x","skill":"controllers-policy"}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"id":"j2","prompt":"x","skill":"orb-control"}"#).unwrap();
         let s = settings_view(&plain, None);
-        assert_eq!(s.skills, vec!["controllers-policy"]);
+        assert_eq!(s.skills, vec!["orb-control"]);
         assert_eq!(s.prompt_budget, None);
         assert!(!s.continuity);
 

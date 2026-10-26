@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Paloma / Orb Node Canary Quarantine Enforcer (Wave 10 — Fleet-Wide including dgx-spark)
+# Applies or releases `table inet paloma_canary_quarantine` while ALWAYS preserving:
+# 1. Breakglass SSH (`tcp dport 22` / `tcp sport 22`) so Thomas can always SSH in with his
+#    breakglass key from an enrolled device (`macbook-air` / `10.88.0.100`, Tailscale, or WAN).
+# 2. Control-plane convergence polling to `agent-core` (`10.88.0.1:3000,3001` and WireGuard `:51888`)
+#    so `orb-bunker-enforcer` can poll `/api/bunker/status` and converge back to `Normal (0)`.
+set -euo pipefail
+
+ACTION="${1:-status}"
+MARKER="/run/paloma-canary-tripped"
+TABLE="paloma_canary_quarantine"
+
+case "$ACTION" in
+  apply)
+    nft -f - <<'EOF'
+table inet paloma_canary_quarantine
+delete table inet paloma_canary_quarantine
+table inet paloma_canary_quarantine {
+  chain input {
+    type filter hook input priority -10; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    ip protocol icmp accept
+    ip6 nexthdr icmpv6 accept
+    tcp dport 22 accept
+    udp sport 51888 accept
+    udp dport 51888 accept
+    ip saddr 10.88.0.1 tcp dport { 22, 3088 } accept
+    ip saddr 10.88.0.100 tcp dport 22 accept
+  }
+  chain output {
+    type filter hook output priority -10; policy drop;
+    oifname "lo" accept
+    ct state established,related accept
+    ip protocol icmp accept
+    ip6 nexthdr icmpv6 accept
+    tcp sport 22 accept
+    udp sport 51888 accept
+    udp dport 51888 accept
+    ip daddr 10.88.0.1 tcp dport { 22, 3000, 3001 } accept
+    ip daddr 10.88.0.100 tcp sport 22 accept
+  }
+}
+EOF
+    logger -t orb-canary-quarantine "Applied node quarantine (breakglass SSH :22 and agent-core :3000/:3001 convergence preserved)"
+    ;;
+  release)
+    if nft list table inet "$TABLE" >/dev/null 2>&1; then
+      nft delete table inet "$TABLE" || true
+    fi
+    rm -f "$MARKER"
+    logger -t orb-canary-quarantine "Released node quarantine and cleared $MARKER"
+    ;;
+  status)
+    if nft list table inet "$TABLE" >/dev/null 2>&1; then
+      echo "quarantine=active"
+    else
+      echo "quarantine=inactive"
+    fi
+    if [[ -f "$MARKER" ]]; then
+      echo "tripped_marker=$(stat -c %Y "$MARKER" 2>/dev/null || echo present)"
+    else
+      echo "tripped_marker=none"
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {apply|release|status}" >&2
+    exit 2
+    ;;
+esac

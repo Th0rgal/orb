@@ -113,7 +113,7 @@ export function HermesSettings() {
   return (
     <div class="s-body settings-body" aria-label="Hermes settings">
       <div class="s-inner">
-        <h2>Coordinator</h2>
+        <h2>Assistant</h2>
         <Show
           when={isConnected()}
           fallback={
@@ -135,8 +135,8 @@ export function HermesSettings() {
               <div class="s-card">
                 <div class="s-row">
                   <div class="s-row-text">
-                    <div class="s-row-title">Coordinator not set up on this Core</div>
-                    <div class="s-row-desc">{unavailable()}. The Coordinator runs on a Hermes gateway that Core proxies for the user named in HERMES_CLOUD_OWNER. Missions and local agents work without it.</div>
+                    <div class="s-row-title">Assistant not set up on this Core</div>
+                    <div class="s-row-desc">{unavailable()}. The Assistant runs on a Hermes gateway that Core proxies for the user named in HERMES_CLOUD_OWNER. Missions and local agents work without it.</div>
                   </div>
                   <div class="s-row-ctrl"><button class="s-btn" onClick={() => void load()}>Check again</button></div>
                 </div>

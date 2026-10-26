@@ -31,7 +31,7 @@ it('inserts all native local paths while the agent runs and deduplicates the rel
   expect(handlers.has('orb-upload-drop')).toBe(false);
 });
 
-it('uploads Finder files to shared project context before sending context references', async () => {
+it('uploads Finder files to the target machine temp uploads directory without polluting project context', async () => {
   vi.spyOn(navigator,'platform','get').mockReturnValue('MacIntel');
   vi.stubGlobal('devicePixelRatio',2);
   const invoke = vi.fn(async (cmd: string) => cmd === 'stat_upload_file' ? { size: 17, modified: 0 } : btoa('DROP_TEST_CONTENT'));
@@ -39,8 +39,10 @@ it('uploads Finder files to shared project context before sending context refere
   const requests: {url:string; init:any}[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     requests.push({url:String(url),init});
-    if (String(url).endsWith('/blobs')) return new Response(JSON.stringify({hash:'abc'}));
-    if (String(url).endsWith('/operations')) return new Response(JSON.stringify({conflict:false}));
+    if (String(url).endsWith('/api/uploads')) {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      return new Response(JSON.stringify({ name: body.name, path: `/tmp/orb-uploads/u1/${body.name}`, size: 17, sha256: 'abc' }));
+    }
     return new Response(JSON.stringify([]));
   }));
   const send = vi.fn(), attachments = vi.fn();
@@ -52,19 +54,20 @@ it('uploads Finder files to shared project context before sending context refere
   handlers.get('orb-upload-drop')!({payload:{paths:['/Users/test/a file.txt','/Users/test/image.png'],x:100,y:100}});
   const input=screen.getByPlaceholderText('Remote drop') as HTMLTextAreaElement;
   await waitFor(()=>expect(input.value).toContain('image.png'));
-  expect(input.value).toContain('@"attachments/');
+  expect(input.value).toContain('@"/tmp/orb-uploads/u1/a file.txt"');
+  expect(input.value).not.toContain('attachments/');
   expect(input.value).not.toContain('/Users/');
-  expect(requests.filter(r=>r.url.endsWith('/blobs'))).toHaveLength(2);
-  expect(requests.some(r=>r.url.endsWith('/api/uploads'))).toBe(false);
+  expect(requests.filter(r=>r.url.endsWith('/api/uploads'))).toHaveLength(2);
+  expect(requests.some(r=>r.url.endsWith('/blobs'))).toBe(false);
   expect(invoke.mock.calls.every(call=>call[0]==='read_upload_file'||call[0]==='stat_upload_file')).toBe(true);
   fireEvent.click(screen.getByTitle('Send'));
   await waitFor(()=>expect(send).toHaveBeenCalledOnce());
-  expect(attachments).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({kind:'context',project:'drop-test',path:expect.stringMatching(/^attachments\//)})]));
+  expect(attachments).toHaveBeenLastCalledWith([]);
 });
 
-it('keeps typed text and reports a failed shared-context upload without sending', async () => {
+it('keeps typed text and reports a failed upload without sending', async () => {
   (window as any).__TAURI__ = {core:{invoke:vi.fn(async()=>btoa('data'))},event:{listen:vi.fn(async(name,handler)=>{handlers.set(name,handler);return ()=>handlers.delete(name);})}};
-  vi.stubGlobal('fetch',vi.fn(async(url)=>String(url).endsWith('/blobs')?new Response('Upload unavailable',{status:503}):new Response('[]')));
+  vi.stubGlobal('fetch',vi.fn(async(url)=>String(url).endsWith('/api/uploads')?new Response('Upload unavailable',{status:503}):new Response('[]')));
   const send=vi.fn();
   const view=render(()=><Composer placeholder="Failure drop" projectSlug="test" uploadTarget="core" busy={false} onSend={send} onStop={()=>{}}/>);
   const el=view.container.querySelector('.composer') as HTMLElement;
