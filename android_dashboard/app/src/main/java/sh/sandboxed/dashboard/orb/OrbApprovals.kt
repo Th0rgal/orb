@@ -600,9 +600,13 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 if (!enrolledHere) {
                     Text(
                         "Enroll this phone: its Keystore key signs approvals after a fingerprint or face check. " +
-                            "Enter the one-time code created on the Core host.",
+                            "Enter the one-time code created on the Core host; Core deletes it once a device uses it:",
                         color = OrbStyle.textMuted, fontSize = 12.sp
                     )
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(OrbPrivilegeAccess.ENROLLMENT_CODE_COMMAND, color = Color.White, fontSize = 11.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    }
                     OutlinedTextField(value = code, onValueChange = { code = it }, singleLine = true,
                         label = { Text("One-time code") }, modifier = Modifier.fillMaxWidth())
                     TextButton(enabled = !busy && code.trim().length >= 8, onClick = {
