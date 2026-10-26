@@ -5,7 +5,9 @@ import { api, connectionVersion, type Mission } from "./api";
 import "./cyberAccess.css";
 export type CyberMode = "standard" | "daybreak" | "automatic";
 export interface CyberSelection { mode: CyberMode; status: "requested" | "confirmed"; confirmed_program?: string | null; confirmed_model?: string | null; revision: string }
-export const [draftCyber, setDraftCyber] = createSignal<CyberMode>("standard");
+/** New launches start on Automatic, Core's default: an explicit program fails on
+ * routes that cannot verify it (e.g. a native Codex sign-in on a remote machine). */
+export const [draftCyber, setDraftCyber] = createSignal<CyberMode>("automatic");
 export const cyberLabels: Record<CyberMode,string> = {standard:"Standard",daybreak:"Daybreak",automatic:"Automatic"};
 export function cyberCompatibility(mode:CyberMode, model:string):string|undefined {
  const id=model.split('/').at(-1)??model;
