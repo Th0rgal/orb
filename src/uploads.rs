@@ -982,10 +982,7 @@ mod tests {
         assert!(Path::new(&b.path).exists());
         assert!(Path::new(&c.path).exists());
 
-        let prompt = format!(
-            "Inspect @\"{}\" and [Uploaded: {}] please",
-            a.path, c.path
-        );
+        let prompt = format!("Inspect @\"{}\" and [Uploaded: {}] please", a.path, c.path);
         cleanup_prompt_uploads(root.path(), &prompt);
         assert!(!Path::new(&a.path).exists());
         assert!(Path::new(&b.path).exists());

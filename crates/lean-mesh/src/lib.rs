@@ -2434,7 +2434,9 @@ mod tests {
         assert!(nft_normal.contains("meta nfproto ipv6 counter drop"));
         assert!(nft_normal.contains("ip saddr 10.88.0.1 ip daddr 10.88.0.11 tcp dport 3088 accept"));
         assert!(nft_normal.contains("ip saddr 10.88.0.100 ip daddr 10.88.0.11 tcp dport 22 accept"));
-        assert!(!nft_normal.contains("ip saddr 10.88.0.11 ip daddr 10.88.0.100 tcp dport 22 accept"));
+        assert!(
+            !nft_normal.contains("ip saddr 10.88.0.11 ip daddr 10.88.0.100 tcp dport 22 accept")
+        );
 
         let nft_lockdown = manifest
             .render_nftables_policy("ashur", BunkerState::HardLockdown, now + 10)
