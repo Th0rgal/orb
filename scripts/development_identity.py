@@ -49,15 +49,20 @@ def run(argv, *, data=None, env=None, cwd=None, timeout=60):
 
 
 def _load_orb_kernel_so():
-    repo_root = Path(__file__).resolve().parent.parent
     candidates = [
         os.environ.get("ORB_KERNEL_SO_PATH", "").strip(),
         "/usr/lib/orb/liborb_kernel.so",
         "/usr/local/lib/liborb_kernel.so",
-        str(repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"),
-        str(repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"),
-        str(repo_root / "android_dashboard/app/build/host-jni/liborb_kernel.so"),
     ]
+    # Core embeds some of these scripts and runs them with `python3 -c`,
+    # where `__file__` does not exist: the repo copies only apply on disk.
+    if "__file__" in globals():
+        repo_root = Path(__file__).resolve().parent.parent
+        candidates += [
+            str(repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"),
+            str(repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"),
+            str(repo_root / "android_dashboard/app/build/host-jni/liborb_kernel.so"),
+        ]
     for cand in candidates:
         if not cand:
             continue
