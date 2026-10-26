@@ -90,6 +90,10 @@ pub async fn upload(
     let root = super::mission_payload::storage_root(&state.config.working_dir).join("uploads");
     tokio::task::spawn_blocking(move || {
         let _slot = slot;
+        crate::uploads::prune_expired_uploads(
+            &root,
+            std::time::Duration::from_secs(crate::uploads::BATCH_OPEN_SECS),
+        );
         crate::uploads::store(&root, request.file)
     })
     .await
@@ -103,16 +107,80 @@ pub async fn upload(
     .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
+async fn forward_one_core_upload(
+    state: &AppState,
+    node_id: &str,
+    canon_root: &std::path::Path,
+    raw_path: &str,
+) -> Result<Option<String>, Error> {
+    let candidate = std::path::Path::new(raw_path.trim());
+    let Ok(canon_file) = std::fs::canonicalize(candidate) else {
+        return Ok(None);
+    };
+    if !canon_file.starts_with(canon_root) || !canon_file.is_file() {
+        return Ok(None);
+    }
+    let Some(name) = canon_file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let Ok(bytes) = tokio::fs::read(&canon_file).await else {
+        return Ok(None);
+    };
+    let (base_url, token) = remote_node_auth(state, node_id)?;
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    let payload = serde_json::json!({
+        "name": name,
+        "data_base64": b64,
+    });
+    let response = state
+        .http_client
+        .post(format!("{base_url}/uploads"))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(120))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "Could not transfer the file to the selected machine".into(),
+            )
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("File transfer refused by the selected machine ({status})"),
+        ));
+    }
+    let receipt: crate::uploads::Receipt = response.json().await.map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "Invalid upload receipt from selected machine".into(),
+        )
+    })?;
+    crate::uploads::cleanup_prompt_uploads(canon_root, raw_path);
+    Ok(Some(receipt.path))
+}
+
 /// If a client uploaded a file to Core (`node_id: "core"`) before discovering
 /// that the target mission runs on a remote worker node (`node_id != "core"`),
-/// forwards any `[Uploaded: <core_uploads_path>]` reference to the worker node
-/// and rewrites the prompt reference to the remote receipt path.
+/// forwards any `[Uploaded: <core_uploads_path>]` or `@"<core_uploads_path>"` /
+/// `@<core_uploads_path>` reference to the worker node and rewrites the prompt
+/// reference to the remote receipt path.
 pub(crate) async fn forward_core_uploads_in_prompt(
     state: &AppState,
     node_id: &str,
     content: &str,
 ) -> Result<String, Error> {
-    if node_id.is_empty() || node_id == "core" || !content.contains("[Uploaded: ") {
+    if node_id.is_empty()
+        || node_id == "core"
+        || (!content.contains("[Uploaded: ") && !content.contains('@'))
+    {
         return Ok(content.to_string());
     }
     let root = super::mission_payload::storage_root(&state.config.working_dir).join("uploads");
@@ -130,60 +198,55 @@ pub(crate) async fn forward_core_uploads_in_prompt(
         let path_end = path_start + rel_end;
         let raw_path = updated[path_start..path_end].trim().to_string();
         cursor = path_end + 1;
-        let candidate = std::path::Path::new(&raw_path);
-        let Ok(canon_file) = std::fs::canonicalize(candidate) else {
-            continue;
-        };
-        if !canon_file.starts_with(&canon_root) || !canon_file.is_file() {
-            continue;
-        }
-        let Some(name) = canon_file
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_string)
+        let Some(remote_path) =
+            forward_one_core_upload(state, node_id, &canon_root, &raw_path).await?
         else {
             continue;
         };
-        let Ok(bytes) = tokio::fs::read(&canon_file).await else {
-            continue;
-        };
-        let (base_url, token) = remote_node_auth(state, node_id)?;
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-        let payload = serde_json::json!({
-            "name": name,
-            "data_base64": b64,
-        });
-        let response = state
-            .http_client
-            .post(format!("{base_url}/uploads"))
-            .bearer_auth(token)
-            .timeout(std::time::Duration::from_secs(120))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "Could not transfer the file to the selected machine".into(),
-                )
-            })?;
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                format!("File transfer refused by the selected machine ({status})"),
-            ));
-        }
-        let receipt: crate::uploads::Receipt = response.json().await.map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Invalid upload receipt from selected machine".into(),
-            )
-        })?;
         let old_tag = format!("[Uploaded: {raw_path}]");
-        let new_tag = format!("[Uploaded: {}]", receipt.path);
+        let new_tag = format!("[Uploaded: {remote_path}]");
         updated = updated.replacen(&old_tag, &new_tag, 1);
         cursor = start + new_tag.len();
+    }
+    // Also forward `@"<core_upload_path>"` and `@<core_upload_path>` mentions
+    // from Desktop/Web Composer when Core routes the prompt to a remote node.
+    let mention_re =
+        regex::Regex::new(r#"(^|[\s(\[{])@(?:"((?:[^"\\]|\\.)*)"|([^\s)\]},;]+))"#).unwrap();
+    let mut matches: Vec<(usize, usize, bool, String)> = Vec::new();
+    for cap in mention_re.captures_iter(&updated) {
+        let whole = cap.get(0).unwrap();
+        let prefix_len = cap.get(1).map_or(0, |m| m.len());
+        let at_start = whole.start() + prefix_len;
+        let at_end = whole.end();
+        let quoted = cap.get(2).is_some();
+        let raw_path = if let Some(q) = cap.get(2) {
+            q.as_str().replace("\\\"", "\"").replace("\\\\", "\\")
+        } else {
+            cap.get(3)
+                .unwrap()
+                .as_str()
+                .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+                .to_string()
+        };
+        matches.push((at_start, at_end, quoted, raw_path));
+    }
+    for (at_start, at_end, quoted, raw_path) in matches.into_iter().rev() {
+        let Some(remote_path) =
+            forward_one_core_upload(state, node_id, &canon_root, &raw_path).await?
+        else {
+            continue;
+        };
+        let replacement = if quoted || remote_path.contains([' ', '"']) {
+            format!(
+                "@\"{}\"",
+                remote_path.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        } else {
+            let token_len = 1 + raw_path.len();
+            let trailing = &updated[at_start + token_len..at_end];
+            format!("@{remote_path}{trailing}")
+        };
+        updated.replace_range(at_start..at_end, &replacement);
     }
     Ok(updated)
 }

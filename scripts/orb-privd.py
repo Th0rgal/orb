@@ -105,15 +105,20 @@ TRUSTED_EXEC_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def _load_orb_kernel_so():
-    repo_root = Path(__file__).resolve().parent.parent
     candidates = [
         os.environ.get("ORB_KERNEL_SO_PATH", "").strip(),
         "/usr/lib/orb/liborb_kernel.so",
         "/usr/local/lib/liborb_kernel.so",
-        str(repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"),
-        str(repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"),
-        str(repo_root / "android_dashboard/app/build/host-jni/liborb_kernel.so"),
     ]
+    # Core embeds some of these scripts and runs them with `python3 -c`,
+    # where `__file__` does not exist: the repo copies only apply on disk.
+    if "__file__" in globals():
+        repo_root = Path(__file__).resolve().parent.parent
+        candidates += [
+            str(repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"),
+            str(repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"),
+            str(repo_root / "android_dashboard/app/build/host-jni/liborb_kernel.so"),
+        ]
     for cand in candidates:
         if not cand:
             continue
@@ -399,6 +404,14 @@ def handle_exec(req: dict) -> dict:
 
     if not mission_id or not lease_token or not argv:
         return {"ok": False, "exit_code": 2, "stderr": "mission_id, lease_token, and argv are required"}
+    # This daemon only runs commands on its own machine; the caller's
+    # target_host is not trusted to send them anywhere else.
+    if target_host.strip().lower() not in ("self", "local", "localhost", HOST_LABEL.strip().lower()):
+        return {
+            "ok": False,
+            "exit_code": 2,
+            "stderr": f"orb-sudo runs only on this machine ({HOST_LABEL}); for {target_host} use the execute_privileged_command tool",
+        }
 
     command_str = " ".join(argv)
     # 1. Pre-execution admission check via Core's pinned `orb_privilege_step` endpoint
@@ -407,6 +420,7 @@ def handle_exec(req: dict) -> dict:
             "mission_id": mission_id,
             "lease_token": lease_token,
             "target_host": target_host,
+            "executing_host": HOST_LABEL,
             "command": f"[pre-exec] {command_str}",
             "argv": argv,
             "cwd": cwd,
@@ -459,6 +473,7 @@ def handle_exec(req: dict) -> dict:
                 "mission_id": mission_id,
                 "lease_token": lease_token,
                 "target_host": target_host,
+            "executing_host": HOST_LABEL,
                 "command": command_str,
                 "argv": argv,
                 "cwd": cwd,

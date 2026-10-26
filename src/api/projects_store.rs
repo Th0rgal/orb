@@ -1640,7 +1640,7 @@ impl ProjectsStore {
 
     /// Record a `[SILENT]` (or headline-less) delivery for `slug` at `at`.
     ///
-    /// `[SILENT]` is the controllers-policy convention for "nothing to
+    /// `[SILENT]` is the controllers policy (orb-control) convention for "nothing to
     /// report": the observation must advance freshness (so the controller is
     /// not flagged silent — that is the point of emitting it), but it must
     /// never become the headline the board shows. So instead of opening a new

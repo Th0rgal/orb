@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     routing::{delete, get, post},
     Extension, Json, Router,
@@ -419,10 +419,11 @@ const COMMAND_AUDIT_LIMIT: usize = 5000;
 const BUNKER_INCIDENT_LIMIT: usize = 500;
 const HISTORY_LIMIT: usize = 500;
 
-pub const TOOL_NAMES: [&str; 3] = [
+pub const TOOL_NAMES: [&str; 4] = [
     "request_privileged_access",
     "list_privileged_access",
     "revoke_privileged_access",
+    "execute_privileged_command",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,7 +488,7 @@ pub struct PrivilegeRequest {
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
     /// SHA-256 of the ephemeral lease token issued to the mission on approval.
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub lease_token_sha256: Option<String>,
 }
 
@@ -796,6 +797,12 @@ fn sha256_hex(input: &str) -> String {
     hex::encode(Sha256::digest(input.as_bytes()))
 }
 
+/// A local daemon may run a lease only for its own machine: "self" and
+/// "all" go anywhere, a named host only to that host.
+fn lease_runs_on(grant_host: &str, executing_host: &str) -> bool {
+    matches!(grant_host, "self" | "all") || grant_host == executing_host
+}
+
 fn normalize_target_host(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().to_lowercase();
     if trimmed.is_empty() {
@@ -922,7 +929,30 @@ impl PrivilegeBroker {
     }
 
     pub async fn lease_token_for(&self, request_id: Uuid) -> Option<String> {
-        self.live_tokens.lock().await.get(&request_id).cloned()
+        if let Some(tok) = self.live_tokens.lock().await.get(&request_id).cloned() {
+            return Some(tok);
+        }
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        data.prune(now);
+        let bunker = data.current_bunker();
+        let idx = data.requests.iter().position(|r| r.id == request_id)?;
+        if !data.requests[idx].live_grant(now, bunker) {
+            return None;
+        }
+        let token = format!(
+            "orb-jit-{}-{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        data.requests[idx].lease_token_sha256 = Some(sha256_hex(&token));
+        self.save(&data).await;
+        drop(data);
+        self.live_tokens
+            .lock()
+            .await
+            .insert(request_id, token.clone());
+        Some(token)
     }
 
     async fn transition(
@@ -1175,6 +1205,14 @@ impl PrivilegeBroker {
                 grant.target_host, target_norm
             ));
         }
+        if let Some(executing) = req.executing_host.as_deref() {
+            if !lease_runs_on(&grant.target_host, &normalize_target_host(executing)?) {
+                return Err(format!(
+                    "Lease for target_host={} cannot run on {}; use execute_privileged_command for remote hosts",
+                    grant.target_host, executing
+                ));
+            }
+        }
         let verdict = grant.evaluate(now, true, requested_scope, bunker);
         if !verdict.allow_exec {
             return Err("Privilege grant is expired, revoked, or blocked by Bunker Mode".into());
@@ -1398,7 +1436,26 @@ impl PrivilegeBroker {
         let prev_bunker = data.current_bunker();
         let prev_bunker_u8 = prev_bunker as u8;
         let mut revoked_ids = Vec::new();
-        let orb_step = if req.dry_run {
+        let peer_trimmed = req.peer_name.trim();
+        let actor_trust = if matches!(req.uid, Some(u) if u != 999) {
+            crate::orb_spec::ActorTrust::UntrustedOrSystem
+        } else {
+            crate::orb_spec::classify_actor_trust(
+                req.uid,
+                req.cgroup.as_deref(),
+                req.cmdline.as_deref(),
+            )
+        };
+        let is_whitelisted_ambient = next_mesh_u8 < 2
+            && actor_trust == crate::orb_spec::ActorTrust::WhitelistedAgentWalk
+            && crate::orb_spec::classify_canary_class(&req.canary_kind)
+                == crate::orb_spec::CanaryClass::AmbientDecoy
+            && !req
+                .canary_kind
+                .trim()
+                .to_ascii_lowercase()
+                .contains("mongo");
+        let orb_step = if req.dry_run || is_whitelisted_ambient {
             BunkerStepResponse {
                 previous_state: prev_bunker_u8,
                 bunker_state: prev_bunker_u8,
@@ -1406,12 +1463,43 @@ impl PrivilegeBroker {
                 isolate_node_mesh: false,
                 revoked_grants_count: 0,
             }
+        } else if next_mesh_u8 < 2 {
+            // Node-scoped quarantine (`CanaryTripwireAction::QuarantineNodeOnly`):
+            // A single `env_honeytoken` / `vault_canary` read from a mission job quarantines
+            // ONLY `peer_name` (revoking active/pending JIT grants targeting that node) while
+            // keeping global `PrivilegeBroker` `bunker_state` unchanged (`Normal`).
+            let detail = Some(format!(
+                "canary_node_quarantine:{}:{}:{}",
+                peer_trimmed,
+                req.canary_kind.trim(),
+                req.reason.trim()
+            ));
+            for r in data.requests.iter_mut() {
+                if (r.state == ApprovalState::Approved || r.state.is_pending())
+                    && r.target_host.trim() == peer_trimmed
+                {
+                    r.state = ApprovalState::Revoked;
+                    r.revoked_at = Some(now);
+                    r.lease_token_sha256 = None;
+                    revoked_ids.push(r.clone());
+                }
+            }
+            for r in &revoked_ids {
+                data.log(r, "bunker_node_revoked", detail.clone(), now);
+            }
+            BunkerStepResponse {
+                previous_state: prev_bunker_u8,
+                bunker_state: prev_bunker_u8,
+                revoke_all_jit_grants: false,
+                isolate_node_mesh: true,
+                revoked_grants_count: revoked_ids.len(),
+            }
         } else {
             let verdict = bunker_step(prev_bunker, true, false, 2, false);
             data.bunker_state = verdict.next_state as u8;
             let detail = Some(format!(
                 "canary_tripwire:{}:{}:{}",
-                req.peer_name.trim(),
+                peer_trimmed,
                 req.canary_kind.trim(),
                 req.reason.trim()
             ));
@@ -1532,6 +1620,10 @@ pub struct VerifyLeaseRequest {
     pub mission_id: Uuid,
     pub lease_token: String,
     pub target_host: String,
+    /// The machine whose `orb-privd` will run the command. A named-host
+    /// lease only executes there; `None` is Core's own audited SSH tunnel.
+    #[serde(default)]
+    pub executing_host: Option<String>,
     #[serde(default)]
     pub requested_scope: Option<PrivilegeScope>,
     pub command: String,
@@ -1582,14 +1674,53 @@ async fn agent_view(broker: &PrivilegeBroker, r: &PrivilegeRequest) -> Value {
         "lease_token": lease_token,
         "usage_hint": if verdict.allow_exec {
             if r.target_host == "self" {
-                json!("Use `ORB_JIT_LEASE=<lease_token> orb-sudo <command>` to execute as root on this node (every command is JSON-audited in Core).")
+                json!("Use `ORB_JIT_LEASE=<lease_token> orb-sudo <command>` on this node, or call `execute_privileged_command` with `target_host: \"self\"` (every command is JSON-audited in Core).")
             } else {
-                json!(format!("Approved for {} on {} until session end / expiry.", r.scope.as_str(), r.target_host))
+                json!(format!(
+                    "Approved for {} on {} until session end / expiry. Call `execute_privileged_command` with `target_host: \"{}\"` and `argv: [\"...\"]` (and optional `cwd`) to run commands on {} through Core's audited JIT tunnel without needing local SSH keys.",
+                    r.scope.as_str(),
+                    r.target_host,
+                    r.target_host,
+                    r.target_host
+                ))
             }
         } else {
             Value::Null
         }
     })
+}
+
+/// Maps a canonical Paloma fleet host name to its `lean-mesh` (or public fleet) SSH destination (`None` for local execution on `agent-core` / `self`).
+pub fn resolve_fleet_ssh_target(target_host: &str) -> Result<Option<&'static str>, String> {
+    match target_host.trim() {
+        "self" | "agent-core" => Ok(None),
+        "dgx-spark" | "spark" | "spark-de79" => Ok(Some("root@10.88.0.2")),
+        "thomas-md" | "thomas.md" => Ok(Some("root@10.88.0.3")),
+        "polymath" => Ok(Some("ubuntu@10.88.0.4")),
+        "maven-repo" => Ok(Some("ubuntu@10.88.0.5")),
+        "ashur" => Ok(Some("root@10.88.0.11")),
+        "babylon" => Ok(Some("ubuntu@10.88.0.12")),
+        "nippur" => Ok(Some("ubuntu@10.88.0.13")),
+        "old-agent" => Ok(Some("root@10.88.0.14")),
+        "watchtower" => Ok(Some("ubuntu@10.88.0.15")),
+        "macbook-air" | "mac" | "thomas-air" => Ok(Some("thomas@10.88.0.100")),
+        "rpc-starknet-id" | "rpc.starknet.id" => Ok(Some("root@135.181.75.104")),
+        "utu-lfglabs" | "utu.lfglabs.dev" => Ok(Some("root@88.99.67.234")),
+        "agent-starknet-id" | "agent.starknet.id" => Ok(Some("ubuntu@10.88.0.18")),
+        "signer-starknet-id" | "signer.starknet.id" => Ok(Some("ubuntu@141.94.26.62")),
+        "api-starknet-id" | "api.starknet.id" => Ok(Some("ubuntu@5.39.72.91")),
+        "sepolia-starknet-id" | "sepolia.api.starknet.id" => Ok(Some("ubuntu@5.39.73.3")),
+        "api-federation" | "api.federation.lfg.rs" | "utu_backend" => {
+            Ok(Some("root@141.94.207.48"))
+        }
+        other => Err(format!(
+            "unsupported or unknown fleet target_host `{other}`"
+        )),
+    }
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
 fn decision_note(r: &PrivilegeRequest) -> String {
@@ -1720,6 +1851,177 @@ pub async fn handle_tool(
             out["message"] = json!(decision_note(&r));
             Ok(out)
         }
+        "execute_privileged_command" => {
+            let target_host = args
+                .get("target_host")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("dgx-spark");
+            let ssh_dest = resolve_fleet_ssh_target(target_host)?;
+            let cwd = args
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+
+            let argv: Vec<String> = if let Some(arr) = args.get("argv").and_then(Value::as_array) {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.to_string())
+                    .collect()
+            } else if let Some(cmd_str) = args.get("command").and_then(Value::as_str) {
+                cmd_str.split_whitespace().map(|s| s.to_string()).collect()
+            } else {
+                Vec::new()
+            };
+            if argv.is_empty() {
+                return Err(
+                    "argv (non-empty array of command tokens) or command is required".into(),
+                );
+            }
+            let command_str = argv.join(" ");
+
+            // Resolve lease token from explicit `lease_token`, `request_id`, or active mission grant for `target_host`.
+            let lease_token = if let Some(tok) = args
+                .get("lease_token")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                tok.to_string()
+            } else if let Some(req_id_str) = args.get("request_id").and_then(Value::as_str) {
+                let req_id = Uuid::parse_str(req_id_str.trim())
+                    .map_err(|_| "request_id must be a valid UUID".to_string())?;
+                broker
+                    .lease_token_for(req_id)
+                    .await
+                    .ok_or_else(|| "No active lease token for request_id (expired, revoked, or pending approval)".to_string())?
+            } else {
+                let list = broker.by_requester(&p.sub, own).await;
+                let mut found_tok = None;
+                for r in &list {
+                    if r.target_host.trim() == target_host && r.state == ApprovalState::Approved {
+                        if let Some(tok) = broker.lease_token_for(r.id).await {
+                            found_tok = Some(tok);
+                            break;
+                        }
+                    }
+                }
+                found_tok.ok_or_else(|| {
+                    format!(
+                        "No active approved privilege grant found for target_host `{target_host}`. Call `request_privileged_access` with `target_host: \"{target_host}\"` first."
+                    )
+                })?
+            };
+
+            // 1. Pre-exec formal verification & audit log via `verify_and_log_command` (`orb_privd_command_step`).
+            let pre_verified = broker
+                .verify_and_log_command(VerifyLeaseRequest {
+                    executing_host: None,
+                    mission_id: own,
+                    lease_token: lease_token.clone(),
+                    target_host: target_host.to_string(),
+                    requested_scope: None,
+                    command: format!("[pre-exec] {command_str}"),
+                    argv: argv.clone(),
+                    cwd: cwd.clone(),
+                    exit_code: None,
+                    duration_ms: None,
+                    stdout_sha256: None,
+                })
+                .await?;
+
+            // 2. Execute confined argv on the target host (local on `agent-core`/`self`, or via Core's SSH tunnel to `dgx-spark`/fleet host).
+            let t0 = std::time::Instant::now();
+            let output_res = if let Some(dest) = ssh_dest {
+                let mut remote_cmd = String::new();
+                if let Some(ref dir) = cwd {
+                    remote_cmd.push_str("cd ");
+                    remote_cmd.push_str(&shell_single_quote(dir));
+                    remote_cmd.push_str(" && ");
+                }
+                if dest.starts_with("ubuntu@")
+                    && matches!(
+                        pre_verified.scope,
+                        PrivilegeScope::RootExec | PrivilegeScope::ServiceDeploy
+                    )
+                    && argv.first().map(String::as_str) != Some("sudo")
+                {
+                    remote_cmd.push_str("exec sudo -n --");
+                } else {
+                    remote_cmd.push_str("exec");
+                }
+                for arg in &argv {
+                    remote_cmd.push(' ');
+                    remote_cmd.push_str(&shell_single_quote(arg));
+                }
+                let mut cmd = tokio::process::Command::new("ssh");
+                cmd.args([
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    dest,
+                    &remote_cmd,
+                ]);
+                tokio::time::timeout(Duration::from_secs(120), cmd.output()).await
+            } else {
+                let mut cmd = tokio::process::Command::new(&argv[0]);
+                cmd.args(&argv[1..]);
+                if let Some(ref dir) = cwd {
+                    cmd.current_dir(dir);
+                }
+                tokio::time::timeout(Duration::from_secs(120), cmd.output()).await
+            };
+            let duration_ms = t0.elapsed().as_millis() as u64;
+
+            let output = output_res
+                .map_err(|_| format!("Privileged command on `{target_host}` timed out after 120s"))?
+                .map_err(|e| {
+                    format!("Failed to spawn privileged command on `{target_host}`: {e}")
+                })?;
+
+            let exit_code = output.status.code().unwrap_or(-1);
+            let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr_str = String::from_utf8_lossy(&output.stderr).into_owned();
+            let stdout_hash = sha256_hex(&stdout_str);
+
+            // 3. Post-exec audit record with exit_code, duration_ms, and stdout_sha256.
+            let post_verified = broker
+                .verify_and_log_command(VerifyLeaseRequest {
+                    executing_host: None,
+                    mission_id: own,
+                    lease_token,
+                    target_host: target_host.to_string(),
+                    requested_scope: Some(pre_verified.scope),
+                    command: command_str.clone(),
+                    argv,
+                    cwd,
+                    exit_code: Some(exit_code),
+                    duration_ms: Some(duration_ms),
+                    stdout_sha256: Some(stdout_hash.clone()),
+                })
+                .await
+                .unwrap_or(pre_verified);
+
+            Ok(json!({
+                "allow_exec": true,
+                "grant_id": post_verified.grant_id,
+                "target_host": target_host,
+                "scope": post_verified.scope,
+                "command": command_str,
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+                "stdout_sha256": stdout_hash,
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+                "audit_entry_id": post_verified.audit_entry_id,
+            }))
+        }
         _ => Err("Unknown privilege tool".into()),
     }
 }
@@ -1793,6 +2095,40 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        ToolDefinition {
+            name: "execute_privileged_command".into(),
+            description: "Execute a command on a fleet host (e.g. `\"dgx-spark\"`, `\"thomas-md\"`, `\"ashur\"`, `\"babylon\"`, `\"nippur\"`, `\"old-agent\"`, `\"agent-core\"`, or `\"self\"`) using an active Touch ID / Face ID privilege grant (`request_privileged_access`). Enables missions on leaf workers to run audited commands on `dgx-spark` or other fleet nodes without storing SSH private keys on the worker. Every invocation is formally checked by `orb_privd_command_step` (`OpsRead` / `ServiceDeploy` / `RootExec`) and logged in Core's JSON command audit log.".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["target_host", "argv"],
+                "properties": {
+                    "target_host": {
+                        "type": "string",
+                        "description": "Target fleet machine matching the approved grant (e.g. \"dgx-spark\", \"thomas-md\", \"agent-core\", \"ashur\", \"babylon\", \"nippur\", \"old-agent\", \"self\")."
+                    },
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Discrete command argument vector (e.g. [\"git\", \"pull\", \"origin\", \"main\"] or [\"systemctl\", \"restart\", \"spark-memory\"]). Shell metacharacters (`;`, `|`, `&`, `$(`) and path traversal (`..`) are rejected by `orb_privd_command_step`."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional absolute working directory on the target host (e.g. \"/opt/spark/memory\")."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Optional UUID of the approved privilege request (if omitted, automatically uses this mission's active grant for `target_host`)."
+                    },
+                    "lease_token": {
+                        "type": "string",
+                        "description": "Optional explicit `orb-jit-...` lease token."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
@@ -1856,14 +2192,39 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/unbunker", post(unbunker))
 }
 
-/// Lease-authenticated endpoint called by `orb-privd` on worker nodes, and
+#[derive(Debug, Default, Deserialize)]
+pub struct BunkerStatusQuery {
+    pub node: Option<String>,
+    pub trip_epoch: Option<u64>,
+}
+
+async fn get_bunker_status_public(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<BunkerStatusQuery>,
+) -> Json<Value> {
+    Json(super::mesh::bunker_convergence_snapshot(&state, q.node.as_deref(), q.trip_epoch).await)
+}
+
+async fn get_bunker_status_for_node(
+    State(state): State<Arc<AppState>>,
+    AxumPath(node): AxumPath<String>,
+    Query(q): Query<BunkerStatusQuery>,
+) -> Json<Value> {
+    Json(super::mesh::bunker_convergence_snapshot(&state, Some(&node), q.trip_epoch).await)
+}
+
+/// Lease-authenticated endpoint called by `orb-privd` on worker nodes,
 /// node-Ed25519-authenticated canary tripwire endpoints called by worker
-/// canary units (`orb-canary-mongo@.service`, `paloma-canary-audit-watch`).
+/// canary units (`orb-canary-mongo@.service`, `paloma-canary-audit-watch`), and
+/// public read-only bunker convergence status polled by `orb-bunker-enforcer`
+/// across all fleet nodes (`ashur`, `babylon`, `nippur`, `old-agent`, `dgx-spark`, etc.).
 pub fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/privilege-access/verify-and-log", post(verify_and_log))
         .route("/api/bunker/tripwire", post(canary_tripwire))
         .route("/api/privilege-access/canary-trip", post(canary_tripwire))
+        .route("/api/bunker/status", get(get_bunker_status_public))
+        .route("/api/bunker/status/:node", get(get_bunker_status_for_node))
 }
 
 fn parse_id(raw: &str) -> Result<Uuid, ApiError> {
@@ -2129,6 +2490,34 @@ pub async fn dispatch_bunker_alert(
         errors.push("telegram: no TELEGRAM_BOT_TOKEN configured".into());
     }
 
+    let signal_url = std::env::var("ORB_BUNKER_SIGNAL_API_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://10.88.0.2:8890/api/signal/send".to_string());
+    let signal_recipient = std::env::var("ORB_BUNKER_SIGNAL_RECIPIENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "+33644632603".to_string());
+    match state
+        .http_client
+        .post(&signal_url)
+        .timeout(Duration::from_secs(5))
+        .json(&json!({
+            "recipient": signal_recipient,
+            "message": text,
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            channels.push(format!("signal:{signal_recipient}"))
+        }
+        Ok(resp) => errors.push(format!("signal HTTP {}", resp.status())),
+        Err(e) => errors.push(format!("signal: {}", sanitize_alert_error(&e.to_string()))),
+    }
+
     if let Ok(webhook_url) = std::env::var("ORB_BUNKER_ALERT_WEBHOOK_URL") {
         let webhook_url = webhook_url.trim();
         if !webhook_url.is_empty() {
@@ -2229,7 +2618,10 @@ async fn canary_tripwire(
             if !already_replayed {
                 super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
             }
-            if !existing.dry_run && (broker.bunker_state().await as u8) < 2 {
+            if !existing.dry_run
+                && existing.new_bunker_state >= 2
+                && (broker.bunker_state().await as u8) < 2
+            {
                 broker
                     .step_bunker(
                         true,
@@ -2294,9 +2686,23 @@ async fn canary_tripwire(
     let (_, mesh_transition, epoch) =
         super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
 
-    // 5. Dispatch redacted out-of-band alert and update incident delivery status.
+    let quarantine_scope =
+        if orb_step.revoke_all_jit_grants || (mesh_transition.next_state as u8) >= 2 {
+            "fleet_lockdown"
+        } else if orb_step.isolate_node_mesh {
+            "node_only"
+        } else {
+            "whitelisted_ignored"
+        };
+
+    // 5. Dispatch redacted out-of-band alert and update incident delivery status
+    //    (skip alert for whitelisted routine agent file walks unless `dry_run == true`).
     let (alert_delivered, alert_channels, alert_error) =
-        dispatch_bunker_alert(&state, &incident).await;
+        if quarantine_scope == "whitelisted_ignored" && !req.dry_run {
+            (false, Vec::new(), None)
+        } else {
+            dispatch_bunker_alert(&state, &incident).await
+        };
 
     Ok(Json(json!({
         "admitted": true,
@@ -2306,6 +2712,7 @@ async fn canary_tripwire(
         "canary_kind": req.canary_kind,
         "event_seq": req.event_seq,
         "epoch": epoch,
+        "quarantine_scope": quarantine_scope,
         "orb_bunker": orb_step,
         "mesh_bunker": mesh_transition,
         "alert_delivered": alert_delivered,
@@ -2474,6 +2881,56 @@ mod tests {
         PrivilegeBroker::open(dir.join("privilege_access.json"))
     }
 
+    /// Replays mission 84adbf5f (2026-10-26): a lease for thomas-md, sent to
+    /// the root daemon on agent-core with target_host=thomas-md, ran there.
+    #[tokio::test]
+    async fn named_host_lease_never_runs_on_another_machine() {
+        let broker = temp_broker();
+        let mission_id = Uuid::new_v4();
+        let req = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: mission_id,
+                requester_title: None,
+                target_host: "thomas-md".into(),
+                scope: PrivilegeScope::RootExec,
+                allowed_unit: None,
+                reason: "Read-only check".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", req.id, Some(30), Some(true))
+            .await
+            .unwrap();
+        let token = broker.lease_token_for(req.id).await.unwrap();
+        let on = |host: Option<&str>| VerifyLeaseRequest {
+            executing_host: host.map(Into::into),
+            mission_id,
+            lease_token: token.clone(),
+            target_host: "thomas-md".into(),
+            requested_scope: Some(PrivilegeScope::RootExec),
+            command: "hostname".into(),
+            argv: vec!["hostname".into()],
+            cwd: None,
+            exit_code: None,
+            duration_ms: None,
+            stdout_sha256: None,
+        };
+        let refused = broker.verify_and_log_command(on(Some("agent-core"))).await;
+        assert!(refused.unwrap_err().contains("cannot run on agent-core"));
+        assert!(broker
+            .verify_and_log_command(on(Some("thomas-md")))
+            .await
+            .is_ok());
+        // Core's own SSH tunnel (execute_privileged_command) names no daemon.
+        assert!(broker.verify_and_log_command(on(None)).await.is_ok());
+        assert!(lease_runs_on("self", "anything") && lease_runs_on("all", "x"));
+    }
+
     #[tokio::test]
     async fn grant_lifecycle_audit_log_session_reap_and_bunker_lockdown() {
         let broker = temp_broker();
@@ -2505,6 +2962,7 @@ mod tests {
         // Execute and log a root command via orb-privd
         let verified = broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id,
                 lease_token: token.clone(),
                 target_host: "self".into(),
@@ -2538,6 +2996,7 @@ mod tests {
         assert!(broker.lease_token_for(req.id).await.is_none());
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id,
                 lease_token: token,
                 target_host: "self".into(),
@@ -2598,6 +3057,7 @@ mod tests {
 
     fn verify(mission_id: Uuid, lease_token: String) -> VerifyLeaseRequest {
         VerifyLeaseRequest {
+            executing_host: None,
             mission_id,
             lease_token,
             target_host: "agent-core".into(),
@@ -2827,6 +3287,7 @@ mod tests {
         // 1. Valid OpsRead command (`journalctl -u orb-core -n 50 --no-pager`) is admitted
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -2851,6 +3312,7 @@ mod tests {
         // 2. Attack vector: OpsRead attempting privilege escalation to `systemctl restart orb-core`
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -2868,6 +3330,7 @@ mod tests {
         // 3. Attack vector: OpsRead flag bypass (`journalctl --cursor-file=/etc/shadow`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -2885,6 +3348,7 @@ mod tests {
         // 4. Attack vector: ServiceDeploy attempting wrong unit (`postgres.service` instead of `orb-core`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_deploy,
                 lease_token: deploy_token.clone(),
                 target_host: "agent-core".into(),
@@ -2916,6 +3380,7 @@ mod tests {
         // 5. Attack vector: Path traversal in `cwd` (`/var/lib/../../etc`) and `argv` (`../../etc/shadow`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_root,
                 lease_token: root_token.clone(),
                 target_host: "self".into(),
@@ -2931,6 +3396,7 @@ mod tests {
             .is_err());
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -2953,6 +3419,7 @@ mod tests {
         std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_root,
                 lease_token: root_token.clone(),
                 target_host: "self".into(),
@@ -2970,6 +3437,7 @@ mod tests {
         // 7. Attack vector: Shell metacharacter injection (`;`, `|`, `$(`) and unsafe env (`LD_PRELOAD`, `BASH_ENV`)
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
+                executing_host: None,
                 mission_id: mission_ro,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
@@ -3001,5 +3469,106 @@ mod tests {
         let snap = privd_command_shadow_counter().snapshot("orb_privd_command_step");
         assert!(snap.total_events >= 10);
         assert_eq!(snap.total_divergences, 0);
+    }
+
+    #[tokio::test]
+    async fn node_scoped_env_honeytoken_revokes_only_target_node_grants_and_keeps_fleet_normal() {
+        let broker = temp_broker();
+        let m_nippur = Uuid::new_v4();
+        let m_ashur = Uuid::new_v4();
+
+        let req_nippur = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: m_nippur,
+                requester_title: Some("Nippur Ops".into()),
+                target_host: "nippur".into(),
+                scope: PrivilegeScope::OpsRead,
+                allowed_unit: None,
+                reason: "inspect nippur".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", req_nippur.id, None, None)
+            .await
+            .unwrap();
+
+        let req_ashur = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: m_ashur,
+                requester_title: Some("Ashur Ops".into()),
+                target_host: "ashur".into(),
+                scope: PrivilegeScope::OpsRead,
+                allowed_unit: None,
+                reason: "inspect ashur".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", req_ashur.id, None, None)
+            .await
+            .unwrap();
+
+        // 1. Whitelisted agent walk (`rg`) on `env_honeytoken` revokes 0 grants and keeps bunker at 0.
+        let walk_trip = crate::api::mesh::CanaryTripwireRequest {
+            peer_name: "nippur".into(),
+            canary_kind: "env_honeytoken".into(),
+            event_seq: 1,
+            timestamp: 1_700_000_010,
+            dry_run: false,
+            reason: "rg scan".into(),
+            pid: Some(1111),
+            uid: Some(999),
+            cgroup: Some("/system.slice/sandboxed-node.service".into()),
+            cmdline: Some("rg --hidden TOKEN /var/lib/sandboxed-node".into()),
+            detail_sha256_hex: "11".repeat(32),
+            signature_hex: "22".repeat(64),
+        };
+        let (walk_step, _) = broker
+            .escalate_and_record_canary_incident(&walk_trip, 0, 0, 1, &"33".repeat(32))
+            .await
+            .unwrap();
+        assert_eq!(walk_step.bunker_state, 0);
+        assert!(!walk_step.isolate_node_mesh);
+        assert_eq!(walk_step.revoked_grants_count, 0);
+        assert!(broker.lease_token_for(req_nippur.id).await.is_some());
+        assert!(broker.lease_token_for(req_ashur.id).await.is_some());
+
+        // 2. Single mission `env_honeytoken` read (`cat`) on `nippur` (`next_mesh_u8 == 0`)
+        //    revokes ONLY `nippur`'s JIT grant, preserves `ashur`'s grant, and keeps global `bunker_state == 0`.
+        let node_trip = crate::api::mesh::CanaryTripwireRequest {
+            peer_name: "nippur".into(),
+            canary_kind: "env_honeytoken".into(),
+            event_seq: 2,
+            timestamp: 1_700_000_020,
+            dry_run: false,
+            reason: "cat /opt/paloma-canary/.env.production.canary".into(),
+            pid: Some(2222),
+            uid: Some(999),
+            cgroup: Some("/system.slice/sandboxed-node.service".into()),
+            cmdline: Some("cat /opt/paloma-canary/.env.production.canary".into()),
+            detail_sha256_hex: "44".repeat(32),
+            signature_hex: "55".repeat(64),
+        };
+        let (node_step, node_inc) = broker
+            .escalate_and_record_canary_incident(&node_trip, 0, 0, 1, &"33".repeat(32))
+            .await
+            .unwrap();
+        assert_eq!(node_step.bunker_state, 0);
+        assert!(node_step.isolate_node_mesh);
+        assert!(!node_step.revoke_all_jit_grants);
+        assert_eq!(node_step.revoked_grants_count, 1);
+        assert_eq!(node_inc.new_bunker_state, 0);
+        assert!(broker.lease_token_for(req_nippur.id).await.is_none());
+        assert!(broker.lease_token_for(req_ashur.id).await.is_some());
+        assert_eq!(broker.bunker_state().await, BunkerState::Normal);
     }
 }

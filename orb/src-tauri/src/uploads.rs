@@ -315,6 +315,41 @@ pub fn allow_drop(paths: &[PathBuf]) -> (Vec<String>, FolderOffer) {
     )
 }
 
+fn session_staging_dir() -> Result<PathBuf, String> {
+    static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
+    let dir = SESSION_DIR.get_or_init(|| {
+        let base = std::env::temp_dir().join("orb-session-uploads");
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(6 * 3600))
+                {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            }
+        }
+        base.join(uuid::Uuid::new_v4().to_string())
+    });
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    Ok(dir.clone())
+}
+
+pub fn cleanup_session_staging(app: Option<&tauri::AppHandle>) {
+    if let Some(app) = app {
+        use tauri::Manager;
+        if let Ok(local_data) = app.path().app_local_data_dir() {
+            let _ = std::fs::remove_dir_all(local_data.join("attachments"));
+        }
+    }
+    if let Ok(dir) = session_staging_dir() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 #[tauri::command]
 pub async fn stage_upload_file(
     app: tauri::AppHandle,
@@ -322,6 +357,9 @@ pub async fn stage_upload_file(
     data_base64: String,
 ) -> Result<String, String> {
     use tauri::Manager;
+    if let Ok(local_data) = app.path().app_local_data_dir() {
+        let _ = std::fs::remove_dir_all(local_data.join("attachments"));
+    }
     if name.is_empty()
         || name.contains(['/', '\\'])
         || name == "."
@@ -339,12 +377,7 @@ pub async fn stage_upload_file(
     if bytes.len() > 20 * 1024 * 1024 {
         return Err("Files must be 20 MiB or smaller".into());
     }
-    let directory = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("attachments")
-        .join(uuid::Uuid::new_v4().to_string());
+    let directory = session_staging_dir()?.join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let path = directory.join(name);
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
@@ -432,6 +465,9 @@ pub async fn stage_upload_file_from_path(
     name: String,
 ) -> Result<String, String> {
     use tauri::Manager;
+    if let Ok(local_data) = app.path().app_local_data_dir() {
+        let _ = std::fs::remove_dir_all(local_data.join("attachments"));
+    }
     if name.is_empty()
         || name.contains(['/', '\\'])
         || name == "."
@@ -440,12 +476,7 @@ pub async fn stage_upload_file_from_path(
     {
         return Err("Invalid filename".into());
     }
-    let directory = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("attachments")
-        .join(uuid::Uuid::new_v4().to_string());
+    let directory = session_staging_dir()?.join(uuid::Uuid::new_v4().to_string());
     tauri::async_runtime::spawn_blocking(move || {
         let canonical = verify_allowed_file(&path)?;
         let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;

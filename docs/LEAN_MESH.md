@@ -2,8 +2,8 @@
 
 `lean-mesh` ([`Th0rgal/lean-mesh`](https://github.com/Th0rgal/lean-mesh), integrated in `crates/lean-mesh` and `src/api/mesh.rs`) is Paloma's zero-trust WireGuard + `nftables` overlay network (`10.88.0.0/16` on `wg-leanmesh0`, default UDP port `51888`). It replaces Tailscale (`tailscaled` / Headscale) with a tiny, self-sovereign Rust + Lean 4 verified mesh that operates in two modes simultaneously:
 
-- **Mode A (Orb-Integrated)**: `agent-core` (`10.88.0.1`) serves `/api/mesh/*`, enforces `LeanMesh.Kernel` C-ABI transitions, and worker nodes (`sandboxed-node`) + `dgx-spark` route all node dispatch (`:3088`), Hindsight memory (`:8888-:8890`), telemetry (`:3000`), and Biometric JIT SSH grants over `wg-leanmesh0`.
-- **Mode B (Standalone CLI without Orb)**: Any machine that does **not** run Orb or `sandboxed-node` (`thomas-md`, `polymath`, `maven-repo`, `watchtower`, workstations, or any new VPS/NAS) runs only the standalone `/usr/local/bin/lean-mesh` binary (`Th0rgal/lean-mesh`) + kernel `wireguard-tools` + `nftables`.
+- **Orb Compute Enrollment (`sandboxed-node` `:3088`)**: `agent-core` (`10.88.0.1`), `dgx-spark` (`10.88.0.2`), and the compute worker nodes (`ashur` `10.88.0.11`, `babylon` `10.88.0.12`, `nippur` `10.88.0.13`, `old-agent` `10.88.0.14`) run `sandboxed-node` on `:3088` to execute coding/Lean missions.
+- **Full-Fleet Orb Security Enrollment (`lean-mesh` + Biometric JIT Privilege Broker + Canary/Bunker)**: Every machine in the fleet — including `RESERVED` / `SHARED_PROTECTED` production & storage boxes that do **not** run `sandboxed-node` `:3088` (`thomas-md` `10.88.0.3`, `polymath` `10.88.0.4`, `maven-repo` `10.88.0.5`, `watchtower` `10.88.0.15`) — is enrolled in the signed `MeshManifest`, protected from lateral worker access by `table inet lean_mesh` (`nftables`), reachable from `agent-core` (`10.88.0.1:22`) for Touch ID / Face ID–approved `request_privileged_access` + `execute_privileged_command`, and authorized to report Canary tripwires and poll Bunker convergence on `agent-core` (`10.88.0.1:3000-3002`).
 
 ---
 
@@ -24,19 +24,19 @@ Every manifest update, peer roaming frame, route evaluation, WireGuard/nftables 
 
 ## 2. Fleet Overlay Address Map (`10.88.0.0/16`, UDP `51888`)
 
-| Node ID (`id`) | Node Class (`node_class`) | Mesh IP (`overlay_ip/prefix_len`) | Default Endpoint (`:51888`) | Mode |
-| :--- | :--- | :--- | :--- | :--- |
-| `agent-core` | `ControlPlane` | `10.88.0.1/32` | `65.109.98.246:51888` | Mode A (Orb Control Plane) |
-| `dgx-spark` | `SovereignVault` | `10.88.0.2/32` | Dynamic (hub-relayed via `agent-core`) | Mode A (Sovereign Brain & Node) |
-| `thomas-md` | `ReservedProd` | `10.88.0.3/32` | `95.216.244.60:51888` | Mode B (Standalone — no Orb) |
-| `polymath` | `ReservedProd` | `10.88.0.4/32` | `5.135.152.216:51888` | Mode B (Standalone — no Orb) |
-| `maven-repo` | `ReservedProd` | `10.88.0.5/32` | `141.94.78.32:51888` | Mode B (Standalone — no Orb) |
-| `ashur` | `ComputeWorker` | `10.88.0.11/32` | `188.40.69.160:51888` | Mode A (`sandboxed-node` `:3088`) |
-| `babylon` | `ComputeWorker` | `10.88.0.12/32` | `54.36.175.109:51888` | Mode A (`sandboxed-node` `:3088`) |
-| `nippur` | `ComputeWorker` | `10.88.0.13/32` | `37.187.92.183:51888` | Mode A (`sandboxed-node` `:3088`) |
-| `old-agent` | `ComputeWorker` | `10.88.0.14/32` | `95.216.112.253:51888` | Mode A (`sandboxed-node` `:3088`) |
-| `watchtower` | `MediaGateway` | `10.88.0.15/32` | `147.135.137.133:51888` | Mode B (Standalone — no Orb) |
-| `macbook-air` | `OperatorAdmin` | `10.88.0.100/32` | Dynamic roaming | Operator (`Touch ID` authority) |
+| Node ID (`id`) | Node Class (`node_class`) | Mesh IP (`overlay_ip/prefix_len`) | Default Endpoint (`:51888`) | Orb Compute (`:3088`) | Orb Security (`lean-mesh` + JIT + Bunker) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `agent-core` | `ControlPlane` | `10.88.0.1/32` | `65.109.98.246:51888` | Yes (`:3088` colocated) | Control Plane (`:3000/:3002`) |
+| `dgx-spark` | `SovereignVault` | `10.88.0.2/32` | Dynamic (hub-relayed via `agent-core`) | Yes (`:3088` + `:3089`) | Enrolled (30s signed heartbeat + JIT + Bunker) |
+| `thomas-md` | `ReservedProd` | `10.88.0.3/32` | `95.216.244.60:51888` | **No** (no mission scheduling) | Enrolled (`lean-mesh` + JIT + Bunker) |
+| `polymath` | `ReservedProd` | `10.88.0.4/32` | `5.135.152.216:51888` | **No** (no mission scheduling) | Enrolled (`lean-mesh` + JIT + Bunker) |
+| `maven-repo` | `ReservedProd` | `10.88.0.5/32` | `141.94.78.32:51888` | **No** (no mission scheduling) | Enrolled (`lean-mesh` + JIT + Bunker) |
+| `ashur` | `ComputeWorker` | `10.88.0.11/32` | `188.40.69.160:51888` | Yes (`sandboxed-node` `:3088`) | Enrolled (`lean-mesh` + JIT + Canary/Bunker) |
+| `babylon` | `ComputeWorker` | `10.88.0.12/32` | `54.36.175.109:51888` | Yes (`sandboxed-node` `:3088`) | Enrolled (`lean-mesh` + JIT + Canary/Bunker) |
+| `nippur` | `ComputeWorker` | `10.88.0.13/32` | `37.187.92.183:51888` | Yes (`sandboxed-node` `:3088`) | Enrolled (`lean-mesh` + JIT + Canary/Bunker) |
+| `old-agent` | `ComputeWorker` | `10.88.0.14/32` | `95.216.112.253:51888` | Yes (`sandboxed-node` `:3088`) | Enrolled (`lean-mesh` + JIT + Canary/Bunker) |
+| `watchtower` | `MediaGateway` | `10.88.0.15/32` | `147.135.137.133:51888` | **No** (no mission scheduling) | Enrolled (`lean-mesh` + JIT + Bunker) |
+| `macbook-air` | `OperatorAdmin` | `10.88.0.100/32` | Dynamic roaming | Operator Client | Enrolled (`Touch ID` + breakglass `:22`) |
 
 *(Retiring hosts `utu-deposit-signer` `10.88.0.21/32` and `api-federation` `10.88.0.22/32` are classified as `RetiredReadOnly`.)*
 

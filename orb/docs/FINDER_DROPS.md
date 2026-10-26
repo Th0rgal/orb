@@ -3,8 +3,9 @@
 Drop files onto the composer in New Agent or an existing conversation.
 On This computer, the draft receives quoted original paths, without copying or
 uploading file contents. On Core/remote machines, the files are uploaded to the
-selected project's shared context under attachments/<UUID>/<original name>.
-A project is required for remote uploads. Clipboard image paste is unchanged.
+selected machine's temporary session upload directory (`/api/uploads`) and
+cleaned up automatically at the end of the session instead of creating a visible
+`attachments/` folder inside the project. Clipboard image paste is unchanged.
 
 Native macOS drag positions are window points even though Tauri labels them
 PhysicalPosition; do not divide them by Retina devicePixelRatio. Other platforms
