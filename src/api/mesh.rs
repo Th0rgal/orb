@@ -150,18 +150,6 @@ fn unix_now() -> u64 {
     Utc::now().timestamp().max(1) as u64
 }
 
-fn generate_csprng_seed() -> Result<[u8; 32], String> {
-    let mut f = std::fs::File::open("/dev/urandom")
-        .map_err(|e| format!("failed to open /dev/urandom: {e}"))?;
-    let mut seed = [0u8; 32];
-    f.read_exact(&mut seed)
-        .map_err(|e| format!("failed to read 32 bytes from /dev/urandom: {e}"))?;
-    if seed == [0u8; 32] {
-        return Err("CSPRNG returned all-zero seed".into());
-    }
-    Ok(seed)
-}
-
 fn ensure_secure_state_dir(dir: &std::path::Path) -> Result<(), String> {
     if let Ok(meta) = std::fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() || !meta.is_dir() {
@@ -236,10 +224,57 @@ fn write_and_verify_initial_private_sync(
     verify_persisted_file_on_disk(path, Some(&state.pinned_coordinator_pubkey_hex))
 }
 
+fn write_and_verify_peer_keystore_sync(
+    keystore_path: &std::path::Path,
+    peer_seeds_hex: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(peer_seeds_hex).map_err(|e| e.to_string())?;
+    let tmp = keystore_path.with_extension("json.tmp");
+    if let Ok(meta) = std::fs::symlink_metadata(&tmp) {
+        if meta.file_type().is_symlink() {
+            return Err("temporary peer keystore path is a symlink".into());
+        }
+    }
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, keystore_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    let meta = std::fs::symlink_metadata(keystore_path)
+        .map_err(|e| format!("failed to stat peer keystore: {e}"))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err("peer keystore is a symlink or non-regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if (meta.permissions().mode() & 0o777) != 0o600 {
+            return Err("peer keystore permissions must be 0600".into());
+        }
+    }
+    let raw = std::fs::read_to_string(keystore_path)
+        .map_err(|e| format!("failed to re-read peer keystore: {e}"))?;
+    let loaded: BTreeMap<String, String> =
+        serde_json::from_str(&raw).map_err(|e| format!("failed to parse peer keystore: {e}"))?;
+    if loaded != *peer_seeds_hex {
+        return Err("re-read peer keystore mismatch after write".into());
+    }
+    Ok(())
+}
+
 impl MeshStore {
-    pub fn open(working_dir: PathBuf) -> Arc<Self> {
+    pub fn open_with_rng<R: std::io::Read>(working_dir: PathBuf, rng: &mut R) -> Arc<Self> {
         let dir = working_dir.join(".sandboxed-sh");
         let path = dir.join("lean_mesh_state.json");
+        let keystore_path = dir.join("lean_mesh_peer_keys.json");
         let now = unix_now();
 
         let state = match ensure_secure_state_dir(&dir) {
@@ -248,29 +283,43 @@ impl MeshStore {
                 Ok(_) => verify_persisted_file_on_disk(&path, None)
                     .unwrap_or_else(|_| PersistedMeshState::lockdown_store_without_signing_key(now)),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    match generate_csprng_seed() {
-                        Ok(seed) => {
-                            let sk = SigningKey::from_bytes(&seed);
-                            let manifest = MeshManifest::paloma_fleet_default(now, &sk);
-                            let pubkey_hex = manifest.coordinator_pubkey_hex.clone();
-                            let fresh = PersistedMeshState {
-                                coordinator_seed_hex: hex::encode(seed),
-                                pinned_coordinator_pubkey_hex: pubkey_hex,
-                                manifest,
-                                peer_roam: BTreeMap::new(),
-                                heartbeat_replay: BTreeMap::new(),
-                                last_heartbeat_at: now,
-                                is_sovereign_node: true,
-                                bunker_state: MeshBunkerState::Normal,
-                                active_relay_sessions: 0,
-                                max_relay_sessions: 128,
-                                corrupted_state: false,
-                            };
-                            write_and_verify_initial_private_sync(&path, &fresh).unwrap_or_else(
-                                |_| PersistedMeshState::lockdown_store_without_signing_key(now),
-                            )
+                    let mut coord_seed = [0u8; 32];
+                    let coord_ok = rng.read_exact(&mut coord_seed).is_ok() && coord_seed != [0u8; 32];
+                    if !coord_ok {
+                        PersistedMeshState::lockdown_store_without_signing_key(now)
+                    } else {
+                        let sk = SigningKey::from_bytes(&coord_seed);
+                        match MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, rng) {
+                            Ok((manifest, peer_seeds_hex)) => {
+                                if write_and_verify_peer_keystore_sync(&keystore_path, &peer_seeds_hex)
+                                    .is_err()
+                                {
+                                    PersistedMeshState::lockdown_store_without_signing_key(now)
+                                } else {
+                                    let pubkey_hex = manifest.coordinator_pubkey_hex.clone();
+                                    let fresh = PersistedMeshState {
+                                        coordinator_seed_hex: hex::encode(coord_seed),
+                                        pinned_coordinator_pubkey_hex: pubkey_hex,
+                                        manifest,
+                                        peer_roam: BTreeMap::new(),
+                                        heartbeat_replay: BTreeMap::new(),
+                                        last_heartbeat_at: now,
+                                        is_sovereign_node: true,
+                                        bunker_state: MeshBunkerState::Normal,
+                                        active_relay_sessions: 0,
+                                        max_relay_sessions: 128,
+                                        corrupted_state: false,
+                                    };
+                                    write_and_verify_initial_private_sync(&path, &fresh)
+                                        .unwrap_or_else(|_| {
+                                            PersistedMeshState::lockdown_store_without_signing_key(
+                                                now,
+                                            )
+                                        })
+                                }
+                            }
+                            Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
                         }
-                        Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
                     }
                 }
                 Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
@@ -281,6 +330,18 @@ impl MeshStore {
             path,
             inner: Mutex::new(state),
         })
+    }
+
+    pub fn open(working_dir: PathBuf) -> Arc<Self> {
+        let now = unix_now();
+        let Ok(mut urandom) = std::fs::File::open("/dev/urandom") else {
+            let path = working_dir.join(".sandboxed-sh/lean_mesh_state.json");
+            return Arc::new(Self {
+                path,
+                inner: Mutex::new(PersistedMeshState::lockdown_store_without_signing_key(now)),
+            });
+        };
+        Self::open_with_rng(working_dir, &mut urandom)
     }
 
     async fn save(&self, state: &PersistedMeshState) -> Result<(), String> {
@@ -1541,8 +1602,23 @@ mod tests {
             assert!(guard.pinned_coordinator_pubkey_hex.is_empty());
         });
 
+        // 1b. Per-peer CSPRNG failure injection: coordinator seed (32 bytes) succeeds, but per-peer
+        // CSPRNG runs out of bytes mid-fleet -> `open_with_rng` enters non-signing `HardLockdown` without panicking!
+        let partial_rng_tmp = tempfile::tempdir().expect("tempdir");
+        let mut partial_rng = std::io::Cursor::new(vec![0x5Au8; 48]); // 32-byte coord seed + only 16 bytes for first peer
+        let partial_store =
+            MeshStore::open_with_rng(partial_rng_tmp.path().to_path_buf(), &mut partial_rng);
+        rt.block_on(async {
+            let guard = partial_store.inner.lock().await;
+            assert!(guard.corrupted_state);
+            assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
+            assert!(guard.signing_key().is_err());
+            assert!(guard.pinned_coordinator_pubkey_hex.is_empty());
+        });
+
         // 2. Two independent initializations generate distinct CSPRNG coordinator identities,
-        // persist with `0o600` permissions, and preserve the exact coordinator identity across restarts.
+        // persist both `lean_mesh_state.json` and `lean_mesh_peer_keys.json` with `0o600` permissions,
+        // and preserve the exact coordinator identity across restarts.
         let tmp1 = tempfile::tempdir().expect("tempdir 1");
         let tmp2 = tempfile::tempdir().expect("tempdir 2");
         let ms1 = MeshStore::open(tmp1.path().to_path_buf());
@@ -1562,6 +1638,20 @@ mod tests {
                 g1.pinned_coordinator_pubkey_hex,
                 g1_re.pinned_coordinator_pubkey_hex
             );
+            let keystore_raw = std::fs::read_to_string(
+                tmp1.path().join(".sandboxed-sh/lean_mesh_peer_keys.json"),
+            )
+            .expect("peer keystore must be persisted");
+            let peer_keys: BTreeMap<String, String> =
+                serde_json::from_str(&keystore_raw).expect("valid peer keystore JSON");
+            assert_eq!(peer_keys.len(), g1.manifest.peers.len());
+            for peer in &g1.manifest.peers {
+                let seed_hex = peer_keys.get(&peer.name).expect("peer seed present");
+                let seed_bytes: [u8; 32] = hex::decode(seed_hex).unwrap().try_into().unwrap();
+                let derived_pub =
+                    hex::encode(SigningKey::from_bytes(&seed_bytes).verifying_key().to_bytes());
+                assert_eq!(derived_pub, peer.sign_pubkey_hex);
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1570,6 +1660,11 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+                let ks_meta = std::fs::symlink_metadata(
+                    tmp1.path().join(".sandboxed-sh/lean_mesh_peer_keys.json"),
+                )
+                .unwrap();
+                assert_eq!(ks_meta.permissions().mode() & 0o777, 0o600);
             }
         });
     }

@@ -1346,16 +1346,13 @@ impl MeshManifest {
     }
 
     /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`,
-    /// returning `(MeshManifest, BTreeMap<peer_name, peer_seed_hex>)` with independent `/dev/urandom`
-    /// CSPRNG Ed25519 signing keys for every node.
-    pub fn paloma_fleet_with_csprng_peers(
+    /// returning `(MeshManifest, BTreeMap<peer_name, peer_seed_hex>)` with independent CSPRNG
+    /// Ed25519 signing keys for every node drawn from `rng`.
+    pub fn paloma_fleet_with_csprng_peers_from<R: std::io::Read>(
         now_epoch: u64,
         signing_key: &SigningKey,
+        rng: &mut R,
     ) -> Result<(Self, BTreeMap<String, String>), MeshError> {
-        use std::io::Read;
-        let mut urandom = std::fs::File::open("/dev/urandom").map_err(|e| {
-            MeshError::InvalidPeerMetadata(format!("failed to open /dev/urandom: {e}"))
-        })?;
         let mut peer_seeds_hex = BTreeMap::new();
         let mut peer_pubkeys_hex = BTreeMap::new();
         for name in [
@@ -1374,7 +1371,7 @@ impl MeshManifest {
             "macbook-air",
         ] {
             let mut seed = [0u8; 32];
-            urandom.read_exact(&mut seed).map_err(|e| {
+            rng.read_exact(&mut seed).map_err(|e| {
                 MeshError::InvalidPeerMetadata(format!(
                     "failed to read 32 CSPRNG bytes for peer `{name}`: {e}"
                 ))
@@ -1389,8 +1386,22 @@ impl MeshManifest {
             peer_seeds_hex.insert(name.to_string(), hex::encode(seed));
             peer_pubkeys_hex.insert(name.to_string(), pub_hex);
         }
-        let manifest = Self::paloma_fleet_with_peer_pubkeys(now_epoch, signing_key, &peer_pubkeys_hex)?;
+        let manifest =
+            Self::paloma_fleet_with_peer_pubkeys(now_epoch, signing_key, &peer_pubkeys_hex)?;
         Ok((manifest, peer_seeds_hex))
+    }
+
+    /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`,
+    /// returning `(MeshManifest, BTreeMap<peer_name, peer_seed_hex>)` with independent `/dev/urandom`
+    /// CSPRNG Ed25519 signing keys for every node.
+    pub fn paloma_fleet_with_csprng_peers(
+        now_epoch: u64,
+        signing_key: &SigningKey,
+    ) -> Result<(Self, BTreeMap<String, String>), MeshError> {
+        let mut urandom = std::fs::File::open("/dev/urandom").map_err(|e| {
+            MeshError::InvalidPeerMetadata(format!("failed to open /dev/urandom: {e}"))
+        })?;
+        Self::paloma_fleet_with_csprng_peers_from(now_epoch, signing_key, &mut urandom)
     }
 
     /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`,
@@ -1647,11 +1658,9 @@ impl MeshManifest {
     }
 
     /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`
-    /// with fresh CSPRNG per-peer Ed25519 identities.
-    pub fn paloma_fleet_default(now_epoch: u64, signing_key: &SigningKey) -> Self {
-        Self::paloma_fleet_with_csprng_peers(now_epoch, signing_key)
-            .expect("CSPRNG peer key generation must succeed")
-            .0
+    /// with fresh CSPRNG per-peer Ed25519 identities. Fails closed (`Err`) on any CSPRNG failure.
+    pub fn paloma_fleet_default(now_epoch: u64, signing_key: &SigningKey) -> Result<Self, MeshError> {
+        Ok(Self::paloma_fleet_with_csprng_peers(now_epoch, signing_key)?.0)
     }
 }
 
@@ -1878,7 +1887,13 @@ mod tests {
     fn paloma_fleet_manifest_verifies_and_enforces_invariants() {
         let sk = test_signing_key();
         let now = 1_760_000_000;
-        let manifest = MeshManifest::paloma_fleet_default(now, &sk);
+        let manifest = MeshManifest::paloma_fleet_default(now, &sk).expect("CSPRNG fleet");
+
+        // Failure injection on per-peer CSPRNG: short/empty RNG or all-zero RNG fails closed (`Err`) without panicking.
+        let mut short_rng = std::io::Cursor::new(vec![0x11u8; 16]);
+        assert!(MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut short_rng).is_err());
+        let mut zero_rng = std::io::Cursor::new(vec![0u8; 32 * 13]);
+        assert!(MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut zero_rng).is_err());
 
         let ratchet = manifest
             .verify_formal(0, 0, now + 10)
@@ -2068,7 +2083,7 @@ mod tests {
     fn single_peer_manifest_and_nft_wg_rendering_enforce_kernel_specs() {
         let sk = test_signing_key();
         let now = 1_760_000_000;
-        let mut manifest = MeshManifest::paloma_fleet_default(now, &sk);
+        let mut manifest = MeshManifest::paloma_fleet_default(now, &sk).expect("CSPRNG fleet");
 
         // 1. Render nftables and WireGuard in HardLockdown: only `macbook-air` (OperatorAdmin) remains in WG,
         // and nftables includes `chain mesh_forward` drop + `meta nfproto ipv6 counter drop`.
@@ -2105,7 +2120,7 @@ mod tests {
     fn render_refuses_invalid_manifest_and_nftables_matches_eval_route() {
         let sk = test_signing_key();
         let now = 1_760_000_000;
-        let manifest = MeshManifest::paloma_fleet_default(now, &sk);
+        let manifest = MeshManifest::paloma_fleet_default(now, &sk).expect("CSPRNG fleet");
 
         // 1. Forged signature or expired manifest is rejected by both `render_wireguard_config`
         // and `render_nftables_policy` (no "render-anyway").

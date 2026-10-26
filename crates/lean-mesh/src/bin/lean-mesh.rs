@@ -69,6 +69,8 @@ enum Commands {
         #[arg(long)]
         seed_out: Option<PathBuf>,
         #[arg(long)]
+        peer_seeds_out: Option<PathBuf>,
+        #[arg(long)]
         now: Option<u64>,
     },
     /// Cryptographically and formally verify a signed mesh manifest via `LeanMesh.Kernel`
@@ -196,6 +198,7 @@ fn main() -> Result<()> {
             out,
             seed_hex,
             seed_out,
+            peer_seeds_out,
             now,
         } => {
             let now_epoch = now.unwrap_or_else(unix_now);
@@ -213,12 +216,18 @@ fn main() -> Result<()> {
                 write_private_file(seed_path, &format!("{}\n", hex::encode(seed)))?;
             }
             let sk = SigningKey::from_bytes(&seed);
-            let manifest = MeshManifest::paloma_fleet_default(now_epoch, &sk);
+            let (manifest, peer_seeds_hex) =
+                MeshManifest::paloma_fleet_with_csprng_peers(now_epoch, &sk)?;
+            let peer_keystore_path =
+                peer_seeds_out.unwrap_or_else(|| out.with_extension("peer-keys.json"));
+            let peer_keystore_json = serde_json::to_string_pretty(&peer_seeds_hex)?;
+            write_private_file(&peer_keystore_path, &peer_keystore_json)?;
             let json = serde_json::to_string_pretty(&manifest)?;
             write_private_file(&out, &json)?;
             println!(
-                "Generated signed Paloma fleet manifest at {} (epoch={}, coordinator_pubkey={}, peers={}, rules={})",
+                "Generated signed Paloma fleet manifest at {} and 0600 peer keystore at {} (epoch={}, coordinator_pubkey={}, peers={}, rules={})",
                 out.display(),
+                peer_keystore_path.display(),
                 manifest.epoch,
                 manifest.coordinator_pubkey_hex,
                 manifest.peers.len(),
