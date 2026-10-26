@@ -40,11 +40,12 @@ export function nextReminder(rows: Wakeup[]): number | undefined {
     .map(row => Date.parse(row.last_triggered_at ?? row.created_at) + (row.trigger.seconds ?? NaN) * 1000).filter(Number.isFinite);
   return dates.length ? Math.min(...dates) : undefined;
 }
-export function NextReminder(p: {mission: string; busy: boolean}) {
+/** Archiving cancels a mission's reminders in Core, so an archived mission shows none. */
+export function NextReminder(p: {mission: string; busy: boolean; archived?: boolean}) {
   const [due, setDue] = createSignal<number>(); const now = useNow(10000);
   createEffect(() => {
     const mission = p.mission; connectionVersion(); setDue(undefined);
-    if (!mission || !isConnected()) return;
+    if (!mission || p.archived || !isConnected()) return;
     let alive = true, timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
       try { const rows = await api<Wakeup[]>(`/api/control/missions/${encodeURIComponent(mission)}/automations`); if (alive) setDue(nextReminder(rows)); }
@@ -55,5 +56,5 @@ export function NextReminder(p: {mission: string; busy: boolean}) {
     onCleanup(() => {alive = false; clearTimeout(timer);});
   });
   const remaining = createMemo(() => due() === undefined ? 0 : Math.max(0, Math.ceil((due()! - now()) / 60000)));
-  return <Show when={due() !== undefined && !p.busy}><div class="next-reminder"><span aria-hidden="true">◷</span> Next reminder at {new Date(due()!).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · {remaining() ? `in ${remaining()} min` : 'waiting to run'}</div></Show>;
+  return <Show when={due() !== undefined && !p.busy && !p.archived}><div class="next-reminder"><span aria-hidden="true">◷</span> Next reminder at {new Date(due()!).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · {remaining() ? `in ${remaining()} min` : 'waiting to run'}</div></Show>;
 }

@@ -3037,6 +3037,9 @@ pub(super) async fn control_actor_loop(
                                         new_status,
                                     );
                                     if new_status == MissionStatus::Acknowledged {
+                                        if let Err(error) = continuations::drop_for_archived(&mission_store, id, None).await {
+                                            tracing::error!(mission = %id, %error, "Could not cancel reminders of an archived mission");
+                                        }
                                         if let Ok(child_ids) =
                                             collect_child_mission_ids(&mission_store, id).await
                                         {
